@@ -20,34 +20,37 @@ default = [
   "imap",
   "maildir",
   # "notmuch",
-  "smtp",
-  "sendmail",
 
-  "account-discovery",
-  "account-sync",
-
-  # "pgp-commands",
-  # "pgp-gpg",
-  # "pgp-native",
+  "discovery",
 ]
 
 imap = ["email-lib/imap"]
 maildir = ["email-lib/maildir"]
 notmuch = ["email-lib/notmuch"]
-smtp = ["email-lib/smtp"]
-sendmail = ["email-lib/sendmail"]
 
-account-discovery = ["email-lib/account-discovery"]
-account-sync = ["email-lib/account-sync", "maildir"]
-
-pgp = []
-pgp-commands = ["email-lib/pgp-commands", "mml-lib/pgp-commands", "pgp"]
-pgp-gpg = ["email-lib/pgp-gpg", "mml-lib/pgp-gpg", "pgp"]
-pgp-native = ["email-lib/pgp-native", "mml-lib/pgp-native", "pgp"]
+discovery = ["email-lib/account-discovery"]
 
 [dependencies]
-email-lib = { version = "=0.22.3", default-features = false }
+anyhow = "1"
+clap = { version = "4.4", features = ["derive"] }
+clap_complete = "4.4"
+clap_mangen = "0.2"
+dirs = "4"
+email-lib = { version = "=0.22.3", default-features = false, features = ["account-sync", "derive"] }
+env_logger = "0.8"
+erased-serde = "0.3"
+log = "0.4"
 mml-lib = { version = "=1.0.8", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde-toml-merge = "0.3"
+serde_json = "1"
+shellexpand-utils = "=0.2.0"
+termcolor = "1"
+tokio = { version = "1.23", default-features = false, features = ["macros", "rt-multi-thread"] }
+toml = "0.8"
+
+[target.'cfg(not(windows))'.dependencies]
+coredump = "0.1"
 
 [patch.crates-io]
 # email-lib = { git = "https://git.sr.ht/~soywod/pimalaya" }

@@ -1,8 +1,13 @@
-# 📫 Neverest CLI [![GitHub release](https://img.shields.io/github/v/release/soywod/neverest?color=success)](https://github.com/soywod/neverest/releases/latest) [![Matrix](https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat)](https://matrix.to/#/#pimalaya.neverest:matrix.org)
-
-Welcome to [**Neverest CLI**](https://pimalaya.org/neverest/cli/latest/), the Read/Evaluate/Print/Loop interface to manage emails based on [email-lib](https://crates.io/crates/email-lib).
-
-*🚧 Work In Progress, stay tuned!*
+<div align="center">
+<!-- <img src="./logo.png" width="192" height="192"> -->
+<h1>📫 Neverest</h1>
+<p>CLI to synchronize emails, based on <a href="https://crates.io/crates/email-lib">email-lib</a></p>
+<p>
+<a href="https://github.com/soywod/neverest/releases/latest"><img src="https://img.shields.io/github/v/release/soywod/neverest?color=success"/></a>
+<a href="https://matrix.to/#/#pimalaya.neverest:matrix.org"><img src="https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat"/></a>
+</p>
+<p><em>🚧 <strong>Work In Progress</strong>, stay tuned! 🚧</em></p>
+</div>
 
 ## Contributing
 

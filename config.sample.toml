@@ -1,0 +1,98 @@
+# The account name.
+[accounts.example]
+
+# The current account will be used by default for all other commands.
+default = true
+
+# The display-name and the email are used to build the full email
+# address: "My example account" <example@localhost>
+display-name = "My example account"
+email = "example@localhost"
+
+# The signature can be a string or a path to a file.
+signature = "Regards,"
+signature-delim = "-- \n"
+
+# Enable the synchronization for this account. Running the command
+# `account sync example` will synchronize all folders and all emails
+# to a local Maildir at `$XDG_DATA_HOME/himalaya/example`.
+sync.enable = false
+
+# Override the default Maildir path for synchronization.
+sync.dir = "/tmp/himalaya-sync-example"
+
+# Filter folders to sync
+folder.sync.filter.include = ["INBOX"]
+# folder.sync.filter.exclude = ["All mails"]
+# folder.sync.filter = "all"
+
+# Define main folder aliases
+folder.alias.inbox = "INBOX"
+folder.alias.sent = "Sent"
+folder.alias.drafts = "Drafts"
+folder.alias.trash = "Trash"
+
+# Also define custom folder aliases
+folder.alias.prev-year = "Archives/2023"
+
+# Default backend used for all the features like adding folders,
+# listing envelopes or copying messages.
+backend = "imap"
+
+envelope.list.page-size = 10
+envelope.list.datetime-fmt = "%F %R%:z"
+
+# Date are converted to the user's local timezone.
+envelope.list.datetime-local-tz = true
+
+# Override the backend used for listing envelopes.
+# envelope.list.backend = "imap"
+
+# Send notification on receiving new envelopes
+envelope.watch.received.notify.summary = "📬 New message from {sender}"
+
+# Available placeholders: id, subject, sender, sender.name,
+# sender.address, recipient, recipient.name, recipient.address.
+envelope.watch.received.notify.body = "{subject}"
+
+# Shell commands can also be executed when envelopes change
+# envelope.watch.any.cmd = "mbsync -a"
+
+# Override the backend used for sending messages.
+message.send.backend = "smtp"
+
+# Save a copy of sent messages to the sent folder.
+message.send.save-copy = false
+
+# IMAP config
+imap.host = "localhost"
+imap.port = 3143
+imap.login = "example@localhost"
+
+# Encryption can be either "tls" (or true), "start-tls" or "none" (or false).
+imap.encryption = "none"
+
+# Get password from a raw string (not safe)
+imap.passwd.raw = "password"
+
+# Get password from a shell command
+# imap.passwd.cmd = "echo password"
+
+# Get password from your global system keyring using secret service
+# Keyring secrets can be (re)set with the command `account configure example`
+# imap.passwd.keyring = "example-imap-password"
+
+# Customize at which period, in seconds, the IMAP IDLE mode should refresh.
+# Defaults to 1740 (29 min), as defined in the RFC.
+# imap.watch.timeout = 25
+
+# SMTP config
+smtp.host = "localhost"
+smtp.port = 3025
+smtp.login = "example@localhost"
+smtp.encryption = false
+smtp.passwd.raw = "password"
+
+# PGP needs to be enabled with one of those cargo feature:
+# pgp-commands, pgp-gpg or pgp-native
+# pgp.backend = "gpg"

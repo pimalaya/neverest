@@ -1,0 +1,55 @@
+[package]
+name = "neverest"
+description = "CLI to synchronize emails"
+version = "0.1.0"
+authors = ["soywod <clement.douin@posteo.net>"]
+edition = "2021"
+license = "MIT"
+categories = ["command-line-utilities", "email"]
+keywords = ["cli", "email", "imap", "backup", "sync"]
+homepage = "https://pimalaya.org/"
+documentation = "https://pimalaya.org/neverest/cli/latest/"
+repository = "https://github.com/soywod/neverest/"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs", "--document-private-items"]
+
+[features]
+default = [
+  "imap",
+  "maildir",
+  # "notmuch",
+  "smtp",
+  "sendmail",
+
+  "account-discovery",
+  "account-sync",
+
+  # "pgp-commands",
+  # "pgp-gpg",
+  # "pgp-native",
+]
+
+imap = ["email-lib/imap"]
+maildir = ["email-lib/maildir"]
+notmuch = ["email-lib/notmuch"]
+smtp = ["email-lib/smtp"]
+sendmail = ["email-lib/sendmail"]
+
+account-discovery = ["email-lib/account-discovery"]
+account-sync = ["email-lib/account-sync", "maildir"]
+
+pgp = []
+pgp-commands = ["email-lib/pgp-commands", "mml-lib/pgp-commands", "pgp"]
+pgp-gpg = ["email-lib/pgp-gpg", "mml-lib/pgp-gpg", "pgp"]
+pgp-native = ["email-lib/pgp-native", "mml-lib/pgp-native", "pgp"]
+
+[dependencies]
+email-lib = { version = "=0.22.3", default-features = false }
+mml-lib = { version = "=1.0.8", default-features = false }
+
+[patch.crates-io]
+# email-lib = { git = "https://git.sr.ht/~soywod/pimalaya" }
+email-lib = { path = "/home/soywod/sourcehut/pimalaya/email" }
+chumsky = { git = "https://github.com/zesterer/chumsky.git", rev = "6837537" }

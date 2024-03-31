@@ -591,6 +591,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "console"
+version = "0.15.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e1f83fc076bd6dd27517eacdf25fef6c4dfe5f1d7448bafaaf3a26f13b5e4eb"
+dependencies = [
+ "encode_unicode",
+ "lazy_static",
+ "libc",
+ "unicode-width",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "convert_case"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -856,8 +869,6 @@ dependencies = [
 [[package]]
 name = "email-macros"
 version = "0.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f24a09fd651027f8764f8a12c12358715cb9bab622ab3125ede3dd6ae047c95"
 dependencies = [
  "quote",
  "syn 2.0.52",
@@ -868,6 +879,12 @@ name = "email_address"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2153bd83ebc09db15bcbdc3e2194d901804952e3dc96967e1cd3b0c5c32d112"
+
+[[package]]
+name = "encode_unicode"
+version = "0.3.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a357d28ed41a50f9c765dbfe56cbc04a64e53e5fc58ba79fbc34c10ef3df831f"
 
 [[package]]
 name = "encoding_rs"
@@ -1540,6 +1557,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "indicatif"
+version = "0.17.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "763a5a8f45087d6bcea4222e7b72c291a054edf80e4ef6efd2a4979878c7bea3"
+dependencies = [
+ "console",
+ "instant",
+ "number_prefix",
+ "portable-atomic",
+ "unicode-width",
+]
+
+[[package]]
 name = "inotify"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1626,8 +1656,6 @@ dependencies = [
 [[package]]
 name = "keyring-lib"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d37d9f9c382d8e5ff28aaf5bcdf4089ab37df00293b9a1f627cebe2d2afa1b30"
 dependencies = [
  "keyring",
  "log",
@@ -1856,8 +1884,6 @@ dependencies = [
 [[package]]
 name = "mml-lib"
 version = "1.0.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ea6b41b088feea6843803447481bac4d70f1ce09ede1b77f553584cb372806f"
 dependencies = [
  "async-recursion",
  "chumsky",
@@ -1892,8 +1918,10 @@ dependencies = [
  "email-lib",
  "env_logger",
  "erased-serde",
+ "indicatif",
  "log",
  "mml-lib",
+ "once_cell",
  "serde",
  "serde-toml-merge",
  "serde_json",
@@ -2057,10 +2085,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "number_prefix"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
+
+[[package]]
 name = "oauth-lib"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e1484d9864dbf6b55b3785380631a253fa0ff7f8e1bbb078bfd7effd11283d61"
 dependencies = [
  "log",
  "oauth2",
@@ -2323,6 +2355,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "portable-atomic"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7170ef9988bc169ba16dd36a7fa041e5c4cbeb6a35b76d4c03daded371eae7c0"
+
+[[package]]
 name = "powerfmt"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2380,8 +2418,6 @@ dependencies = [
 [[package]]
 name = "process-lib"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8d69f9662cdd81d5c41481dfd9698ffea1a78e7f01a9b876c9a003cf41f3a089"
 dependencies = [
  "log",
  "serde",
@@ -2772,8 +2808,6 @@ dependencies = [
 [[package]]
 name = "secret-lib"
 version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "636dfacdd779e9b77b8155ae702f0941a9c467e64a413a4afb84590ae7d1ba9d"
 dependencies = [
  "keyring-lib",
  "log",
@@ -2954,8 +2988,6 @@ dependencies = [
 [[package]]
 name = "shellexpand-utils"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab3789fb50c0dc67a1171515bc5709c30a8938ee210e19c02be1e8c1f6f881bc"
 dependencies = [
  "log",
  "shellexpand",
@@ -3387,6 +3419,12 @@ checksum = "a56d1686db2308d901306f92a263857ef59ea39678a5458e7cb17f01415101f5"
 dependencies = [
  "tinyvec",
 ]
+
+[[package]]
+name = "unicode-width"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e51733f11c9c4f72aa0c160008246859e340b00807569a0da0e7a1079b27ba85"
 
 [[package]]
 name = "untrusted"

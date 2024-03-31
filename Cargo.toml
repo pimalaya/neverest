@@ -39,8 +39,10 @@ dirs = "4"
 email-lib = { version = "=0.22.3", default-features = false, features = ["account-sync", "derive"] }
 env_logger = "0.8"
 erased-serde = "0.3"
+indicatif = "0.17"
 log = "0.4"
 mml-lib = { version = "=1.0.8", default-features = false }
+once_cell = "1.16"
 serde = { version = "1", features = ["derive"] }
 serde-toml-merge = "0.3"
 serde_json = "1"
@@ -53,6 +55,13 @@ toml = "0.8"
 coredump = "0.1"
 
 [patch.crates-io]
-# email-lib = { git = "https://git.sr.ht/~soywod/pimalaya" }
-email-lib = { path = "/home/soywod/sourcehut/pimalaya/email" }
+# waiting for alpha 7
 chumsky = { git = "https://github.com/zesterer/chumsky.git", rev = "6837537" }
+email-lib = { path = "/home/soywod/sourcehut/pimalaya/email" }
+email-macros = { path = "/home/soywod/sourcehut/pimalaya/email-macros" }
+keyring-lib = { path = "/home/soywod/sourcehut/pimalaya/keyring" }
+mml-lib = { path = "/home/soywod/sourcehut/pimalaya/mml" }
+oauth-lib = { path = "/home/soywod/sourcehut/pimalaya/oauth" }
+process-lib = { path = "/home/soywod/sourcehut/pimalaya/process" }
+secret-lib = { path = "/home/soywod/sourcehut/pimalaya/secret" }
+shellexpand-utils = { path = "/home/soywod/sourcehut/pimalaya/shellexpand-utils" }

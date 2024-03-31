@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use crate::{
     completion::command::GenerateCompletionCommand,
-    config::{self, TomlConfig},
+    config::{self, Config},
     manual::command::GenerateManualCommand,
     output::{ColorFmt, OutputFmt},
     printer::Printer,
@@ -88,7 +88,7 @@ impl NeverestCommand {
     pub async fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
         match self {
             Self::Synchronize(cmd) => {
-                let config = TomlConfig::from_paths_or_default(config_paths).await?;
+                let config = Config::from_paths_or_default(config_paths).await?;
                 cmd.execute(printer, &config).await
             }
             Self::Manual(cmd) => cmd.execute(printer).await,

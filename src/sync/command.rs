@@ -29,8 +29,8 @@ use std::{
 };
 
 use crate::{
-    config::TomlConfig,
-    preset::{arg::name::OptionalPresetNameArg, config::TomlBackend},
+    account::{arg::name::OptionalAccountNameArg, config::BackendConfig},
+    config::Config,
     printer::Printer,
 };
 
@@ -53,7 +53,7 @@ static SUB_PROGRESS_DONE_STYLE: Lazy<ProgressStyle> = Lazy::new(|| {
 #[derive(Debug, Parser)]
 pub struct SynchronizeBackendsCommand {
     #[command(flatten)]
-    pub preset: OptionalPresetNameArg,
+    pub account: OptionalAccountNameArg,
 
     /// Run the synchronization without applying any changes.
     ///
@@ -92,27 +92,27 @@ pub struct SynchronizeBackendsCommand {
 }
 
 impl SynchronizeBackendsCommand {
-    pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
+    pub async fn execute(self, printer: &mut impl Printer, config: &Config) -> Result<()> {
         info!("executing synchronize backends command");
 
-        let (name, preset) = config.into_toml_preset_config(self.preset.name.as_deref())?;
+        let (name, config) = config.into_account_config(self.account.name.as_deref())?;
 
         let left_config = Arc::new(AccountConfig {
             name: name.clone(),
             folder: Some(FolderConfig {
-                sync: preset.left.folder,
+                sync: config.left.folder,
                 ..Default::default()
             }),
             envelope: Some(EnvelopeConfig {
-                sync: preset.left.envelope,
+                sync: config.left.envelope,
                 ..Default::default()
             }),
             flag: Some(FlagConfig {
-                sync: preset.left.flag,
+                sync: config.left.flag,
                 ..Default::default()
             }),
             message: Some(MessageConfig {
-                sync: preset.left.message,
+                sync: config.left.message,
                 ..Default::default()
             }),
             ..Default::default()
@@ -121,27 +121,27 @@ impl SynchronizeBackendsCommand {
         let right_config = Arc::new(AccountConfig {
             name: name.clone(),
             folder: Some(FolderConfig {
-                sync: preset.right.folder,
+                sync: config.right.folder,
                 ..Default::default()
             }),
             envelope: Some(EnvelopeConfig {
-                sync: preset.right.envelope,
+                sync: config.right.envelope,
                 ..Default::default()
             }),
             flag: Some(FlagConfig {
-                sync: preset.right.flag,
+                sync: config.right.flag,
                 ..Default::default()
             }),
             message: Some(MessageConfig {
-                sync: preset.right.message,
+                sync: config.right.message,
                 ..Default::default()
             }),
             ..Default::default()
         });
 
-        match preset.left.backend {
+        match config.left.backend {
             #[cfg(feature = "imap")]
-            TomlBackend::Imap(imap_config) => {
+            BackendConfig::Imap(imap_config) => {
                 let left_ctx = ImapContextBuilder::new(left_config.clone(), Arc::new(imap_config))
                     .with_prebuilt_credentials()
                     .await?;
@@ -151,12 +151,12 @@ impl SynchronizeBackendsCommand {
                     name.as_str(),
                     left,
                     right_config,
-                    preset.right.backend,
+                    config.right.backend,
                 )
                 .await
             }
             #[cfg(feature = "maildir")]
-            TomlBackend::Maildir(maildir_config) => {
+            BackendConfig::Maildir(maildir_config) => {
                 let left_ctx =
                     MaildirContextBuilder::new(left_config.clone(), Arc::new(maildir_config));
                 let left = BackendBuilder::new(left_config.clone(), left_ctx);
@@ -165,12 +165,12 @@ impl SynchronizeBackendsCommand {
                     name.as_str(),
                     left,
                     right_config,
-                    preset.right.backend,
+                    config.right.backend,
                 )
                 .await
             }
             #[cfg(feature = "notmuch")]
-            TomlBackend::Notmuch(notmuch_config) => {
+            BackendConfig::Notmuch(notmuch_config) => {
                 let left_ctx =
                     NotmuchContextBuilder::new(left_config.clone(), Arc::new(notmuch_config));
                 let left = BackendBuilder::new(left_config.clone(), left_ctx);
@@ -179,7 +179,7 @@ impl SynchronizeBackendsCommand {
                     name.as_str(),
                     left,
                     right_config,
-                    preset.right.backend,
+                    config.right.backend,
                 )
                 .await
             }
@@ -192,11 +192,11 @@ impl SynchronizeBackendsCommand {
         account_name: &str,
         left: BackendBuilder<impl BackendContextBuilder + 'static>,
         right_config: Arc<AccountConfig>,
-        right_backend: TomlBackend,
+        right_backend: BackendConfig,
     ) -> Result<()> {
         match right_backend {
             #[cfg(feature = "imap")]
-            TomlBackend::Imap(imap_config) => {
+            BackendConfig::Imap(imap_config) => {
                 let right_ctx =
                     ImapContextBuilder::new(right_config.clone(), Arc::new(imap_config))
                         .with_prebuilt_credentials()
@@ -205,14 +205,14 @@ impl SynchronizeBackendsCommand {
                 self.sync(printer, account_name, left, right).await
             }
             #[cfg(feature = "maildir")]
-            TomlBackend::Maildir(maildir_config) => {
+            BackendConfig::Maildir(maildir_config) => {
                 let right_ctx =
                     MaildirContextBuilder::new(right_config.clone(), Arc::new(maildir_config));
                 let right = BackendBuilder::new(right_config.clone(), right_ctx);
                 self.sync(printer, account_name, left, right).await
             }
             #[cfg(feature = "notmuch")]
-            TomlBackend::Notmuch(notmuch_config) => {
+            BackendConfig::Notmuch(notmuch_config) => {
                 let right_ctx =
                     NotmuchContextBuilder::new(right_config.clone(), Arc::new(notmuch_config));
                 let right = BackendBuilder::new(right_config.clone(), right_ctx);
@@ -224,7 +224,7 @@ impl SynchronizeBackendsCommand {
     async fn sync(
         self,
         printer: &mut impl Printer,
-        preset_name: &str,
+        account_name: &str,
         left: BackendBuilder<impl BackendContextBuilder + 'static>,
         right: BackendBuilder<impl BackendContextBuilder + 'static>,
     ) -> Result<()> {
@@ -265,13 +265,11 @@ impl SynchronizeBackendsCommand {
             }
 
             printer.print(format!(
-                "Estimated patch length for {preset_name} backends to be synchronized: {hunks_count}"
+                "Estimated patch length for account {account_name} to be synchronized: {hunks_count}"
             ))?;
         } else if printer.is_json() {
             sync_builder.sync().await?;
-            printer.print(format!(
-                "Backends from {preset_name} preset successfully synchronized!"
-            ))?;
+            printer.print(format!("Account {account_name} successfully synchronized!"))?;
         } else {
             let multi = MultiProgress::new();
             let sub_progresses = Mutex::new(HashMap::new());
@@ -372,12 +370,9 @@ impl SynchronizeBackendsCommand {
                 }
             }
 
-            printer.print(format!(
-                "Backends from preset {preset_name} successfully synchronized!"
-            ))?;
+            printer.print(format!("Account {account_name} successfully synchronized!"))?;
         }
 
-        // TODO
         Ok(())
     }
 }

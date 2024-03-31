@@ -1,17 +1,20 @@
-# The preset name.
-[presets.example]
+# The account name.
+[accounts.example]
 
-# The current preset will be used by default.
+# The current account will be used by default.
 default = true
 
 # The left backend configuration
 left.backend.type = "maildir"
-left.backend.root-dir = "/tmp/maildir"
+left.backend.root-dir = "/tmp/example"
+left.message.permissions.create = false
+left.message.permissions.delete = false
 
 # The right backend configuration
 right.backend.type = "imap"
 right.backend.host = "localhost"
 right.backend.port = 3143
 right.backend.login = "alice@localhost"
-right.backend.encryption = false
 right.backend.passwd.raw = "password"
+right.message.permissions.create = false
+right.message.permissions.delete = false

@@ -1,6 +1,6 @@
-//! # TOML config
+//! # Configuration
 //!
-//! Module dedicated to the user TOML configuration.
+//! Module dedicated to the main configuration of Neverest CLI.
 
 // pub mod wizard;
 
@@ -13,17 +13,17 @@ use shellexpand_utils::{canonicalize, expand};
 use std::{collections::HashMap, fs, path::PathBuf};
 use toml::Value;
 
-use crate::preset::config::TomlPresetConfig;
+use crate::account::config::AccountConfig;
 
-/// The full user TOML configuration.
+/// The main configuration.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct TomlConfig {
-    /// The configuration of all the presets.
-    pub presets: HashMap<String, TomlPresetConfig>,
+pub struct Config {
+    /// The configuration of all the accounts.
+    pub accounts: HashMap<String, AccountConfig>,
 }
 
-impl TomlConfig {
+impl Config {
     /// Read and parse the TOML configuration at the given paths.
     ///
     /// Returns an error if a configuration file cannot be read or if
@@ -155,106 +155,33 @@ impl TomlConfig {
             .filter(|p| p.exists())
     }
 
-    pub fn into_toml_preset_config(
+    pub fn into_account_config(
         &self,
-        preset_name: Option<&str>,
-    ) -> Result<(String, TomlPresetConfig)> {
+        account_name: Option<&str>,
+    ) -> Result<(String, AccountConfig)> {
         #[allow(unused_mut)]
-        let (preset_name, mut toml_preset_config) = match preset_name {
+        let (account_name, mut account_config) = match account_name {
             Some("default") | Some("") | None => self
-                .presets
+                .accounts
                 .iter()
-                .find_map(|(name, preset)| {
-                    preset
+                .find_map(|(name, config)| {
+                    config
                         .default
                         .filter(|default| *default)
-                        .map(|_| (name.to_owned(), preset.clone()))
+                        .map(|_| (name.to_owned(), config.clone()))
                 })
-                .ok_or_else(|| anyhow!("cannot find default preset")),
+                .ok_or_else(|| anyhow!("cannot find default account")),
             Some(name) => self
-                .presets
+                .accounts
                 .get(name)
-                .map(|preset| (name.to_owned(), preset.clone()))
-                .ok_or_else(|| anyhow!("cannot find preset {name}")),
+                .map(|config| (name.to_owned(), config.clone()))
+                .ok_or_else(|| anyhow!("cannot find account {name}")),
         }?;
 
-        toml_preset_config.configure(preset_name.as_str())?;
+        account_config.configure(account_name.as_str())?;
 
-        Ok((preset_name, toml_preset_config))
+        Ok((account_name, account_config))
     }
-
-    // /// Build account configurations from a given account name.
-    // pub fn into_account_configs(
-    //     self,
-    //     account_name: Option<&str>,
-    //     #[cfg(feature = "account-sync")] disable_cache: bool,
-    // ) -> Result<(Arc<TomlAccountConfig>, Arc<AccountConfig>)> {
-    //     #[cfg_attr(not(feature = "account-sync"), allow(unused_mut))]
-    //     let (account_name, mut toml_account_config) = self.into_toml_preset_config(account_name)?;
-
-    //     #[cfg(feature = "account-sync")]
-    //     if let Some(true) = toml_account_config.sync.as_ref().and_then(|c| c.enable) {
-    //         if !disable_cache {
-    //             toml_account_config.backend = Some(BackendKind::MaildirForSync);
-    //         }
-    //     }
-
-    //     let config = Config {
-    //         display_name: self.display_name,
-    //         signature: self.signature,
-    //         signature_delim: self.signature_delim,
-    //         downloads_dir: self.downloads_dir,
-
-    //         accounts: HashMap::from_iter(self.accounts.clone().into_iter().map(
-    //             |(name, config)| {
-    //                 (
-    //                     name.clone(),
-    //                     AccountConfig {
-    //                         name,
-    //                         email: config.email,
-    //                         display_name: config.display_name,
-    //                         signature: config.signature,
-    //                         signature_delim: config.signature_delim,
-    //                         downloads_dir: config.downloads_dir,
-    //                         folder: config.folder.map(|c| FolderConfig {
-    //                             aliases: c.alias,
-    //                             list: c.list.map(|c| c.remote),
-    //                             #[cfg(feature = "account-sync")]
-    //                             sync: c.sync,
-    //                         }),
-    //                         envelope: config.envelope.map(|c| EnvelopeConfig {
-    //                             list: c.list.map(|c| c.remote),
-    //                             watch: c.watch.map(|c| c.remote),
-    //                             #[cfg(feature = "account-sync")]
-    //                             sync: c.sync,
-    //                         }),
-    //                         flag: config.flag.map(|c| FlagConfig {
-    //                             #[cfg(feature = "account-sync")]
-    //                             sync: c.sync,
-    //                         }),
-    //                         message: config.message.map(|c| MessageConfig {
-    //                             read: c.read.map(|c| c.remote),
-    //                             write: c.write.map(|c| c.remote),
-    //                             send: c.send.map(|c| c.remote),
-    //                             delete: c.delete.map(Into::into),
-    //                             #[cfg(feature = "account-sync")]
-    //                             sync: c.sync,
-    //                         }),
-    //                         template: config.template,
-    //                         #[cfg(feature = "account-sync")]
-    //                         sync: config.sync,
-    //                         #[cfg(feature = "pgp")]
-    //                         pgp: config.pgp,
-    //                     },
-    //                 )
-    //             },
-    //         )),
-    //     };
-
-    //     let account_config = config.account(account_name)?;
-
-    //     Ok((Arc::new(toml_account_config), Arc::new(account_config)))
-    // }
 }
 
 /// Parse a configuration file path as [`PathBuf`].

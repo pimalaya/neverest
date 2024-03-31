@@ -1,6 +1,6 @@
-//! # Preset configuration
+//! # Account configuration
 //!
-//! Module dedicated to the TOML representation of a preset.
+//! Module dedicated to account configuration.
 
 use anyhow::Result;
 #[cfg(feature = "imap")]
@@ -15,14 +15,14 @@ use email::{
 };
 use serde::{Deserialize, Serialize};
 
-/// The TOML configuration of a preset.
+/// The account configuration.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct TomlPresetConfig {
-    /// The defaultness of the current preset.
+pub struct AccountConfig {
+    /// The defaultness of the current account.
     ///
-    /// When synchronizing, if no preset is explicitly given, this one
-    /// will be used by default.
+    /// When synchronizing, if no account name is explicitly given,
+    /// this one will be used by default.
     pub default: Option<bool>,
 
     /// The configuration of the left backend.
@@ -30,34 +30,38 @@ pub struct TomlPresetConfig {
     /// The left backend can be seen as the source backend, except
     /// that there is not implicit difference between source and
     /// target. Hence left and right are used instead.
-    pub left: TomlBackendConfig,
+    pub left: BackendGlobalConfig,
 
     /// The configuration of the right backend.
     ///
     /// The right backend can be seen as the target backend, except
     /// that there is not implicit difference between source and
     /// target. Hence left and right are used instead.
-    pub right: TomlBackendConfig,
+    pub right: BackendGlobalConfig,
 }
 
-impl TomlPresetConfig {
-    pub fn configure(&mut self, preset_name: &str) -> Result<()> {
+impl AccountConfig {
+    /// Configure the current account configuration.
+    ///
+    /// This function is mostly used to replace undefined keyring
+    /// entries by default ones, based on the given account name.
+    pub fn configure(&mut self, account_name: &str) -> Result<()> {
         match &mut self.left.backend {
             #[cfg(feature = "imap")]
-            TomlBackend::Imap(config) => {
+            BackendConfig::Imap(config) => {
                 config
                     .auth
-                    .replace_undefined_keyring_entries(&preset_name)?;
+                    .replace_undefined_keyring_entries(&account_name)?;
             }
             _ => (),
         }
 
         match &mut self.right.backend {
             #[cfg(feature = "imap")]
-            TomlBackend::Imap(config) => {
+            BackendConfig::Imap(config) => {
                 config
                     .auth
-                    .replace_undefined_keyring_entries(&preset_name)?;
+                    .replace_undefined_keyring_entries(&account_name)?;
             }
             _ => (),
         }
@@ -66,12 +70,12 @@ impl TomlPresetConfig {
     }
 }
 
-/// The TOML configuration of a preset backend.
+/// The global backend configuration (left or right).
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct TomlBackendConfig {
-    /// The backend kind and configuration.
-    pub backend: TomlBackend,
+pub struct BackendGlobalConfig {
+    /// The backend-specific configuration.
+    pub backend: BackendConfig,
 
     /// The backend configuration dedicated to folders.
     pub folder: Option<FolderSyncConfig>,
@@ -86,18 +90,22 @@ pub struct TomlBackendConfig {
     pub message: Option<MessageSyncConfig>,
 }
 
+/// The backend-specific configuration.
+///
+/// Represents all valid backends managed by Neverest with their
+/// specific configuration.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", tag = "type")]
-pub enum TomlBackend {
-    /// The IMAP backend TOML configuration.
+pub enum BackendConfig {
+    /// The IMAP backend configuration.
     #[cfg(feature = "imap")]
     Imap(ImapConfig),
 
-    /// The Maildir backend TOML configuration.
+    /// The Maildir backend configuration.
     #[cfg(feature = "maildir")]
     Maildir(MaildirConfig),
 
-    /// The Notmuch backend TOML configuration.
+    /// The Notmuch backend configuration.
     #[cfg(feature = "notmuch")]
     Notmuch(NotmuchConfig),
 }

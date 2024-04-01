@@ -1,20 +1,57 @@
-# The account name.
 [accounts.example]
 
-# The current account will be used by default.
+# The current `example` account will be used by default.
 default = true
 
-# The left backend configuration
+# Filter folders according to the given rules.
+#
+# folder.filter.include = ["INBOX", "Sent"]
+# folder.filter.exclude = ["All Mails"]
+folder.filter = "all"
+
+# Filter envelopes according to the given rules.
+#
+# envelope.filter.before = "1990-12-31T23:59:60Z"
+# envelope.filter.after = "1990-12-31T23:59:60Z"
+
+# The left backend configuration.
+#
+# In this example, the left side acts as our local cache.
 left.backend.type = "maildir"
 left.backend.root-dir = "/tmp/example"
-left.message.permissions.create = false
-left.message.permissions.delete = false
 
-# The right backend configuration
+# The left backend permissions.
+#
+# Example of a full permissive backend (default behaviour):
+left.folder.permissions.create = true
+left.folder.permissions.delete = true
+left.flag.permissions.update = true
+left.message.permissions.create = true
+left.message.permissions.delete = true
+
+# The right backend configuration.
+#
+# In this example, the right side acts as our remote.
 right.backend.type = "imap"
 right.backend.host = "localhost"
 right.backend.port = 3143
 right.backend.login = "alice@localhost"
+
+# The right backend password.
+#
+# right.backend.passwd.cmd = "echo password"
+# right.backend.passwd.keyring = "password-keyring-entry"
 right.backend.passwd.raw = "password"
-right.message.permissions.create = false
+
+# The right backend encryption.
+#
+# right.backend.encryption = "tls" # or true
+# right.backend.encryption = "start-tls"
+right.backend.encryption = "none" # or false
+
+# The right backend permissions.
+#
+# In this example, we set up safe permissions by denying deletions
+# remote side.
+right.folder.permissions.delete = false
 right.message.permissions.delete = false

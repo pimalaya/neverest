@@ -10,8 +10,10 @@ use email::maildir::config::MaildirConfig;
 #[cfg(feature = "notmuch")]
 use email::notmuch::config::NotmuchConfig;
 use email::{
-    envelope::sync::config::EnvelopeSyncConfig, flag::sync::config::FlagSyncConfig,
-    folder::sync::config::FolderSyncConfig, message::sync::config::MessageSyncConfig,
+    envelope::sync::config::{EnvelopeSyncConfig, EnvelopeSyncFilters},
+    flag::sync::config::{FlagSyncConfig, FlagSyncPermissions},
+    folder::sync::config::{FolderSyncConfig, FolderSyncPermissions, FolderSyncStrategy},
+    message::sync::config::{MessageSyncConfig, MessageSyncPermissions},
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,6 +26,12 @@ pub struct AccountConfig {
     /// When synchronizing, if no account name is explicitly given,
     /// this one will be used by default.
     pub default: Option<bool>,
+
+    /// The account configuration dedicated to folders.
+    pub folder: Option<FolderConfig>,
+
+    /// The account configuration dedicated to envelopes.
+    pub envelope: Option<EnvelopeConfig>,
 
     /// The configuration of the left backend.
     ///
@@ -70,6 +78,20 @@ impl AccountConfig {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct FolderConfig {
+    #[serde(default)]
+    pub filter: FolderSyncStrategy,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct EnvelopeConfig {
+    #[serde(default)]
+    pub filter: EnvelopeSyncFilters,
+}
+
 /// The global backend configuration (left or right).
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -78,16 +100,13 @@ pub struct BackendGlobalConfig {
     pub backend: BackendConfig,
 
     /// The backend configuration dedicated to folders.
-    pub folder: Option<FolderSyncConfig>,
-
-    /// The backend configuration dedicated to envelopes.
-    pub envelope: Option<EnvelopeSyncConfig>,
+    pub folder: Option<FolderBackendConfig>,
 
     /// The backend configuration dedicated to flags.
-    pub flag: Option<FlagSyncConfig>,
+    pub flag: Option<FlagBackendConfig>,
 
     /// The backend configuration dedicated to messages.
-    pub message: Option<MessageSyncConfig>,
+    pub message: Option<MessageBackendConfig>,
 }
 
 /// The backend-specific configuration.
@@ -108,4 +127,25 @@ pub enum BackendConfig {
     /// The Notmuch backend configuration.
     #[cfg(feature = "notmuch")]
     Notmuch(NotmuchConfig),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct FolderBackendConfig {
+    #[serde(default)]
+    pub permissions: FolderSyncPermissions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct FlagBackendConfig {
+    #[serde(default)]
+    pub permissions: FlagSyncPermissions,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct MessageBackendConfig {
+    #[serde(default)]
+    pub permissions: MessageSyncPermissions,
 }

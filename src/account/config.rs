@@ -2,6 +2,8 @@
 //!
 //! Module dedicated to account configuration.
 
+use std::sync::Arc;
+
 use anyhow::Result;
 #[cfg(feature = "imap")]
 use email::imap::config::ImapConfig;
@@ -10,10 +12,10 @@ use email::maildir::config::MaildirConfig;
 #[cfg(feature = "notmuch")]
 use email::notmuch::config::NotmuchConfig;
 use email::{
-    envelope::sync::config::{EnvelopeSyncConfig, EnvelopeSyncFilters},
-    flag::sync::config::{FlagSyncConfig, FlagSyncPermissions},
-    folder::sync::config::{FolderSyncConfig, FolderSyncPermissions, FolderSyncStrategy},
-    message::sync::config::{MessageSyncConfig, MessageSyncPermissions},
+    envelope::sync::config::EnvelopeSyncFilters,
+    flag::sync::config::FlagSyncPermissions,
+    folder::sync::config::{FolderSyncPermissions, FolderSyncStrategy},
+    message::sync::config::MessageSyncPermissions,
 };
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +109,48 @@ pub struct BackendGlobalConfig {
 
     /// The backend configuration dedicated to messages.
     pub message: Option<MessageBackendConfig>,
+}
+
+impl BackendGlobalConfig {
+    pub fn into_account_config(
+        self,
+        name: String,
+        folder_filter: FolderSyncStrategy,
+        envelope_filter: EnvelopeSyncFilters,
+    ) -> (BackendConfig, Arc<email::account::config::AccountConfig>) {
+        (
+            self.backend,
+            Arc::new(email::account::config::AccountConfig {
+                name,
+                folder: Some(email::folder::config::FolderConfig {
+                    sync: Some(email::folder::sync::config::FolderSyncConfig {
+                        filter: folder_filter,
+                        permissions: self.folder.map(|c| c.permissions).unwrap_or_default(),
+                    }),
+                    ..Default::default()
+                }),
+                envelope: Some(email::envelope::config::EnvelopeConfig {
+                    sync: Some(email::envelope::sync::config::EnvelopeSyncConfig {
+                        filter: envelope_filter.clone(),
+                    }),
+                    ..Default::default()
+                }),
+                flag: Some(email::flag::config::FlagConfig {
+                    sync: Some(email::flag::sync::config::FlagSyncConfig {
+                        permissions: self.flag.map(|c| c.permissions).unwrap_or_default(),
+                    }),
+                    ..Default::default()
+                }),
+                message: Some(email::message::config::MessageConfig {
+                    sync: Some(email::message::sync::config::MessageSyncConfig {
+                        permissions: self.message.map(|c| c.permissions).unwrap_or_default(),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        )
+    }
 }
 
 /// The backend-specific configuration.

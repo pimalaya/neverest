@@ -1,7 +1,7 @@
-//! # Synchronize backends command
+//! # Synchronize account command
 //!
 //! This module contains the [`clap`] command for synchronizing two
-//! backends.
+//! backends of a given account.
 
 use anyhow::Result;
 use clap::{ArgAction, Parser};
@@ -14,10 +14,7 @@ use email::notmuch::NotmuchContextBuilder;
 use email::{
     account::config::AccountConfig,
     backend::{context::BackendContextBuilder, BackendBuilder},
-    envelope::config::EnvelopeConfig,
-    flag::config::FlagConfig,
-    folder::{config::FolderConfig, sync::config::FolderSyncStrategy},
-    message::config::MessageConfig,
+    folder::sync::config::FolderSyncStrategy,
     sync::{SyncBuilder, SyncEvent},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
@@ -51,7 +48,7 @@ static SUB_PROGRESS_DONE_STYLE: Lazy<ProgressStyle> = Lazy::new(|| {
 
 /// Synchronize folders and emails of two different backend sources.
 #[derive(Debug, Parser)]
-pub struct SynchronizeBackendsCommand {
+pub struct SynchronizeAccountCommand {
     #[command(flatten)]
     pub account: OptionalAccountNameArg,
 
@@ -91,97 +88,51 @@ pub struct SynchronizeBackendsCommand {
     pub all_folders: bool,
 }
 
-impl SynchronizeBackendsCommand {
+impl SynchronizeAccountCommand {
     pub async fn execute(self, printer: &mut impl Printer, config: &Config) -> Result<()> {
         info!("executing synchronize backends command");
 
         let (name, config) = config.into_account_config(self.account.name.as_deref())?;
 
-        let left_config = Arc::new(AccountConfig {
-            name: name.clone(),
-            folder: Some(FolderConfig {
-                sync: config.left.folder,
-                ..Default::default()
-            }),
-            envelope: Some(EnvelopeConfig {
-                sync: config.left.envelope,
-                ..Default::default()
-            }),
-            flag: Some(FlagConfig {
-                sync: config.left.flag,
-                ..Default::default()
-            }),
-            message: Some(MessageConfig {
-                sync: config.left.message,
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
+        let folder_filter = config.folder.map(|c| c.filter).unwrap_or_default();
+        let envelope_filter = config.envelope.map(|c| c.filter).unwrap_or_default();
 
-        let right_config = Arc::new(AccountConfig {
-            name: name.clone(),
-            folder: Some(FolderConfig {
-                sync: config.right.folder,
-                ..Default::default()
-            }),
-            envelope: Some(EnvelopeConfig {
-                sync: config.right.envelope,
-                ..Default::default()
-            }),
-            flag: Some(FlagConfig {
-                sync: config.right.flag,
-                ..Default::default()
-            }),
-            message: Some(MessageConfig {
-                sync: config.right.message,
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
+        let (left_backend, left_config) = config.left.into_account_config(
+            name.clone(),
+            folder_filter.clone(),
+            envelope_filter.clone(),
+        );
 
-        match config.left.backend {
+        let (right_backend, right_config) =
+            config
+                .right
+                .into_account_config(name.clone(), folder_filter, envelope_filter);
+
+        match left_backend {
             #[cfg(feature = "imap")]
             BackendConfig::Imap(imap_config) => {
                 let left_ctx = ImapContextBuilder::new(left_config.clone(), Arc::new(imap_config))
                     .with_prebuilt_credentials()
                     .await?;
                 let left = BackendBuilder::new(left_config.clone(), left_ctx);
-                self.pre_sync(
-                    printer,
-                    name.as_str(),
-                    left,
-                    right_config,
-                    config.right.backend,
-                )
-                .await
+                self.pre_sync(printer, name.as_str(), left, right_config, right_backend)
+                    .await
             }
             #[cfg(feature = "maildir")]
             BackendConfig::Maildir(maildir_config) => {
                 let left_ctx =
                     MaildirContextBuilder::new(left_config.clone(), Arc::new(maildir_config));
                 let left = BackendBuilder::new(left_config.clone(), left_ctx);
-                self.pre_sync(
-                    printer,
-                    name.as_str(),
-                    left,
-                    right_config,
-                    config.right.backend,
-                )
-                .await
+                self.pre_sync(printer, name.as_str(), left, right_config, right_backend)
+                    .await
             }
             #[cfg(feature = "notmuch")]
             BackendConfig::Notmuch(notmuch_config) => {
                 let left_ctx =
                     NotmuchContextBuilder::new(left_config.clone(), Arc::new(notmuch_config));
                 let left = BackendBuilder::new(left_config.clone(), left_ctx);
-                self.pre_sync(
-                    printer,
-                    name.as_str(),
-                    left,
-                    right_config,
-                    config.right.backend,
-                )
-                .await
+                self.pre_sync(printer, name.as_str(), left, right_config, right_backend)
+                    .await
             }
         }
     }

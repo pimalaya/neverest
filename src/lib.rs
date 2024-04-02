@@ -7,4 +7,4 @@ pub mod config;
 pub mod manual;
 pub mod output;
 pub mod printer;
-pub mod sync;
+pub mod ui;

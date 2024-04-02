@@ -1,4 +1,4 @@
-//! # Account name arg
+//! # Account name argument
 //!
 //! Module dedicated to the account name CLI argument.
 

@@ -35,6 +35,7 @@ anyhow = "1"
 clap = { version = "4.4", features = ["derive"] }
 clap_complete = "4.4"
 clap_mangen = "0.2"
+dialoguer = "0.10.2"
 dirs = "4"
 email-lib = { version = "=0.22.3", default-features = false, features = ["account-sync", "derive"] }
 env_logger = "0.8"

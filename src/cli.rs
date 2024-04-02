@@ -3,12 +3,15 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 use crate::{
+    account::command::{
+        check_up::CheckUpAccountCommand, configure::ConfigureAccountCommand,
+        sync::SynchronizeAccountCommand,
+    },
     completion::command::GenerateCompletionCommand,
     config::{self, Config},
     manual::command::GenerateManualCommand,
     output::{ColorFmt, OutputFmt},
     printer::Printer,
-    sync::command::SynchronizeBackendsCommand,
 };
 
 #[derive(Parser, Debug)]
@@ -47,13 +50,13 @@ pub struct Cli {
 
     /// Control when to use colors
     ///
-    /// The default setting is 'auto', which means himalaya will try
-    /// to guess when to use colors. For example, if himalaya is
+    /// The default setting is 'auto', which means neverest will try
+    /// to guess when to use colors. For example, if neverest is
     /// printing to a terminal, then it will use colors, but if it is
     /// redirected to a file or a pipe, then it will suppress color
-    /// output. himalaya will suppress color output in some other
+    /// output. neverest will suppress color output in some other
     /// circumstances as well. For example, if the TERM environment
-    /// variable is not set or set to 'dumb', then himalaya will not
+    /// variable is not set or set to 'dumb', then neverest will not
     /// use colors.
     ///
     /// The possible values are:
@@ -64,7 +67,7 @@ pub struct Cli {
     ///
     ///  - ansi: like 'always', but emits ANSI escapes (even in a Windows console)
     ///
-    ///  - auto: himalaya tries to be smart
+    ///  - auto: neverest tries to be smart
     #[arg(long, short = 'C', global = true)]
     #[arg(value_name = "MODE", value_enum, default_value_t = Default::default())]
     pub color: ColorFmt,
@@ -72,8 +75,14 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum NeverestCommand {
+    #[command(alias = "checkup")]
+    CheckUp(CheckUpAccountCommand),
+
+    #[command(alias = "cfg")]
+    Configure(ConfigureAccountCommand),
+
     #[command(alias = "synchronise")]
-    Synchronize(SynchronizeBackendsCommand),
+    Synchronize(SynchronizeAccountCommand),
 
     #[command(arg_required_else_help = true)]
     #[command(alias = "manuals", alias = "mans")]
@@ -87,6 +96,14 @@ pub enum NeverestCommand {
 impl NeverestCommand {
     pub async fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
         match self {
+            Self::CheckUp(cmd) => {
+                let config = Config::from_paths_or_default(config_paths).await?;
+                cmd.execute(printer, &config).await
+            }
+            Self::Configure(cmd) => {
+                let config = Config::from_paths_or_default(config_paths).await?;
+                cmd.execute(printer, &config).await
+            }
             Self::Synchronize(cmd) => {
                 let config = Config::from_paths_or_default(config_paths).await?;
                 cmd.execute(printer, &config).await

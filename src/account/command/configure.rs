@@ -7,10 +7,8 @@ use email::smtp::config::SmtpAuthConfig;
 use log::{debug, info, warn};
 
 use crate::{
-    account::{arg::name::OptionalAccountNameArg, config::BackendConfig},
-    config::Config,
-    printer::Printer,
-    ui::prompt,
+    account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
+    printer::Printer, ui::prompt,
 };
 
 /// Configure an account.

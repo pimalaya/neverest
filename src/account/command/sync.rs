@@ -26,8 +26,7 @@ use std::{
 };
 
 use crate::{
-    account::{arg::name::OptionalAccountNameArg, config::BackendConfig},
-    config::Config,
+    account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
     printer::Printer,
 };
 

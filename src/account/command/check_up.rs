@@ -16,8 +16,7 @@ use log::info;
 use std::sync::Arc;
 
 use crate::{
-    account::{arg::name::OptionalAccountNameArg, config::BackendConfig},
-    config::Config,
+    account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
     printer::Printer,
 };
 

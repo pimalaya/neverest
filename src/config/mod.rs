@@ -2,7 +2,8 @@
 //!
 //! Module dedicated to the main configuration of Neverest CLI.
 
-// pub mod wizard;
+#[cfg(feature = "wizard")]
+pub mod wizard;
 
 use anyhow::{anyhow, bail, Context, Result};
 use dirs::{config_dir, home_dir};
@@ -75,33 +76,38 @@ impl Config {
     /// program stops.
     ///
     /// NOTE: the wizard can only be used with interactive shells.
-    async fn from_wizard(_path: &PathBuf) -> Result<Self> {
-        unimplemented!("wizard not yet implemented");
-        // use dialoguer::Confirm;
-        // use std::process;
+    #[cfg(feature = "wizard")]
+    async fn from_wizard(path: &PathBuf) -> Result<Self> {
+        use dialoguer::Confirm;
+        use std::process;
 
-        // wizard_warn!("Cannot find existing configuration at {path:?}.");
+        use crate::{wizard_prompt, wizard_warn};
 
-        // let confirm = Confirm::new()
-        //     .with_prompt(wizard_prompt!(
-        //         "Would you like to create one with the wizard?"
-        //     ))
-        //     .default(true)
-        //     .interact_opt()?
-        //     .unwrap_or_default();
+        wizard_warn!("Cannot find existing configuration at {path:?}.");
 
-        // if !confirm {
-        //     process::exit(0);
-        // }
+        let confirm = Confirm::new()
+            .with_prompt(wizard_prompt!(
+                "Would you like to create one with the wizard?"
+            ))
+            .default(true)
+            .interact_opt()?
+            .unwrap_or_default();
 
-        // wizard::configure(path).await
+        if !confirm {
+            process::exit(0);
+        }
+
+        wizard::configure(path).await
     }
 
     /// Read and parse the TOML configuration from default paths.
     pub async fn from_default_paths() -> Result<Self> {
         match Self::first_valid_default_path() {
             Some(path) => Self::from_paths(&[path]),
+            #[cfg(feature = "wizard")]
             None => Self::from_wizard(&Self::default_path()?).await,
+            #[cfg(not(feature = "wizard"))]
+            None => anyhow::bail!("cannot find config file from default paths"),
         }
     }
 
@@ -121,7 +127,10 @@ impl Config {
         match paths.len() {
             0 => Self::from_default_paths().await,
             _ if paths[0].exists() => Self::from_paths(paths),
+            #[cfg(feature = "wizard")]
             _ => Self::from_wizard(&paths[0]).await,
+            #[cfg(not(feature = "wizard"))]
+            _ => anyhow::bail!("cannot find config file from default paths"),
         }
     }
 

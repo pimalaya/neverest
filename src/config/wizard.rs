@@ -1,12 +1,12 @@
 use anyhow::Result;
-use dialoguer::{Confirm, Input, Select};
+use dialoguer::Input;
 use shellexpand_utils::expand;
-use std::{fs, path::PathBuf, process};
+use std::{fs, path::PathBuf};
 use toml_edit::{DocumentMut, Item};
 
 use crate::{account, ui::THEME};
 
-use super::TomlConfig;
+use super::Config;
 
 #[macro_export]
 macro_rules! wizard_warn {
@@ -31,59 +31,13 @@ macro_rules! wizard_log {
     };
 }
 
-pub(crate) async fn configure(path: &PathBuf) -> Result<TomlConfig> {
-    wizard_log!("Configuring your first account:");
+pub async fn configure(path: &PathBuf) -> Result<Config> {
+    wizard_log!("Configuring your default account");
 
-    let mut config = TomlConfig::default();
+    let mut config = Config::default();
 
-    while let Some((name, account_config)) = account::wizard::configure().await? {
-        config.accounts.insert(name, account_config);
-
-        if !Confirm::new()
-            .with_prompt(wizard_prompt!(
-                "Would you like to configure another account?"
-            ))
-            .default(false)
-            .interact_opt()?
-            .unwrap_or_default()
-        {
-            break;
-        }
-
-        wizard_log!("Configuring another account:");
-    }
-
-    // If one account is setup, make it the default. If multiple
-    // accounts are setup, decide which will be the default. If no
-    // accounts are setup, exit the process.
-    let default_account = match config.accounts.len() {
-        0 => {
-            wizard_warn!("No account configured, exiting.");
-            process::exit(0);
-        }
-        1 => Some(config.accounts.values_mut().next().unwrap()),
-        _ => {
-            let accounts = config.accounts.clone();
-            let accounts: Vec<&String> = accounts.keys().collect();
-
-            println!("{} accounts have been configured.", accounts.len());
-
-            Select::with_theme(&*THEME)
-                .with_prompt(wizard_prompt!(
-                    "Which account would you like to set as your default?"
-                ))
-                .items(&accounts)
-                .default(0)
-                .interact_opt()?
-                .and_then(|idx| config.accounts.get_mut(accounts[idx]))
-        }
-    };
-
-    if let Some(account) = default_account {
-        account.default = Some(true);
-    } else {
-        process::exit(0)
-    }
+    let (account_name, account_config) = account::wizard::configure().await?;
+    config.accounts.insert(account_name, account_config);
 
     let path = Input::with_theme(&*THEME)
         .with_prompt(wizard_prompt!(
@@ -102,68 +56,37 @@ pub(crate) async fn configure(path: &PathBuf) -> Result<TomlConfig> {
     Ok(config)
 }
 
-fn pretty_serialize(config: &TomlConfig) -> Result<String> {
+fn pretty_serialize(config: &Config) -> Result<String> {
     let mut doc: DocumentMut = toml::to_string(&config)?.parse()?;
 
     doc.iter_mut().for_each(|(_, item)| {
         if let Some(item) = item.as_table_mut() {
             item.iter_mut().for_each(|(_, item)| {
-                set_table_dotted(item, "folder");
-                if let Some(item) = get_table_mut(item, "folder") {
-                    let keys = ["alias", "add", "list", "expunge", "purge", "delete", "sync"];
-                    set_tables_dotted(item, keys);
-
-                    if let Some(item) = get_table_mut(item, "sync") {
-                        set_tables_dotted(item, ["filter", "permissions"]);
+                let keys = ["folder", "envelope"];
+                set_tables_dotted(item, keys);
+                for key in keys {
+                    if let Some(item) = get_table_mut(item, key) {
+                        set_table_dotted(item, "filter");
                     }
                 }
 
-                set_table_dotted(item, "envelope");
-                if let Some(item) = get_table_mut(item, "envelope") {
-                    set_tables_dotted(item, ["list", "get"]);
-                }
+                for source in ["left", "right"] {
+                    set_table_dotted(item, source);
+                    if let Some(item) = get_table_mut(item, source) {
+                        set_table_dotted(item, "backend");
+                        if let Some(item) = get_table_mut(item, "backend") {
+                            set_tables_dotted(item, ["passwd", "oauth2"]);
+                        }
 
-                set_table_dotted(item, "flag");
-                if let Some(item) = get_table_mut(item, "flag") {
-                    set_tables_dotted(item, ["add", "set", "remove"]);
-                }
-
-                set_table_dotted(item, "message");
-                if let Some(item) = get_table_mut(item, "message") {
-                    let keys = ["add", "send", "peek", "get", "copy", "move", "delete"];
-                    set_tables_dotted(item, keys);
-                }
-
-                #[cfg(feature = "maildir")]
-                set_table_dotted(item, "maildir");
-
-                #[cfg(feature = "imap")]
-                {
-                    set_table_dotted(item, "imap");
-                    if let Some(item) = get_table_mut(item, "imap") {
-                        set_tables_dotted(item, ["passwd", "oauth2"]);
+                        let keys = ["folder", "flag", "message"];
+                        set_tables_dotted(item, keys);
+                        for key in keys {
+                            if let Some(item) = get_table_mut(item, key) {
+                                set_table_dotted(item, "permissions");
+                            }
+                        }
                     }
                 }
-
-                #[cfg(feature = "notmuch")]
-                set_table_dotted(item, "notmuch");
-
-                #[cfg(feature = "smtp")]
-                {
-                    set_table_dotted(item, "smtp");
-                    if let Some(item) = get_table_mut(item, "smtp") {
-                        set_tables_dotted(item, ["passwd", "oauth2"]);
-                    }
-                }
-
-                #[cfg(feature = "sendmail")]
-                set_table_dotted(item, "sendmail");
-
-                #[cfg(feature = "account-sync")]
-                set_table_dotted(item, "sync");
-
-                #[cfg(feature = "pgp")]
-                set_table_dotted(item, "pgp");
             })
         }
     });
@@ -191,12 +114,12 @@ fn set_tables_dotted<'a>(item: &'a mut Item, keys: impl IntoIterator<Item = &'a 
 mod test {
     use std::collections::HashMap;
 
-    use crate::{account::config::TomlAccountConfig, config::TomlConfig};
+    use crate::{account::config::AccountConfig, config::Config};
 
     use super::pretty_serialize;
 
-    fn assert_eq(config: TomlAccountConfig, expected_toml: &str) {
-        let config = TomlConfig {
+    fn assert_eq(config: AccountConfig, expected_toml: &str) {
+        let config = Config {
             accounts: HashMap::from_iter([("test".into(), config)]),
             ..Default::default()
         };
@@ -211,7 +134,7 @@ mod test {
     #[test]
     fn pretty_serialize_default() {
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 ..Default::default()
             },
@@ -227,7 +150,7 @@ email = "test@localhost"
         use email::account::sync::config::SyncConfig;
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 sync: Some(SyncConfig {
                     enable: Some(false),
@@ -256,7 +179,7 @@ sync.dir = "/tmp/test"
         use crate::folder::config::FolderConfig;
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 sync: Some(SyncConfig {
                     enable: Some(true),
@@ -293,7 +216,7 @@ folder.sync.permissions.delete = true
         use secret::Secret;
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 imap: Some(ImapConfig {
                     host: "localhost".into(),
@@ -326,7 +249,7 @@ imap.passwd.command = "pass show test"
         use secret::Secret;
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 imap: Some(ImapConfig {
                     host: "localhost".into(),
@@ -359,7 +282,7 @@ imap.passwd.command = ["pass show test", "tr -d '[:blank:]'"]
         };
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 imap: Some(ImapConfig {
                     host: "localhost".into(),
@@ -396,7 +319,7 @@ imap.oauth2.scopes = []
         use email::maildir::config::MaildirConfig;
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 maildir: Some(MaildirConfig {
                     root_dir: "/tmp/test".into(),
@@ -420,7 +343,7 @@ maildir.root-dir = "/tmp/test"
         use secret::Secret;
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 smtp: Some(SmtpConfig {
                     host: "localhost".into(),
@@ -453,7 +376,7 @@ smtp.passwd.command = "pass show test"
         use secret::Secret;
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 smtp: Some(SmtpConfig {
                     host: "localhost".into(),
@@ -486,7 +409,7 @@ smtp.passwd.command = ["pass show test", "tr -d '[:blank:]'"]
         };
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 smtp: Some(SmtpConfig {
                     host: "localhost".into(),
@@ -523,7 +446,7 @@ smtp.oauth2.scopes = []
         use email::account::config::pgp::PgpConfig;
 
         assert_eq(
-            TomlAccountConfig {
+            AccountConfig {
                 email: "test@localhost".into(),
                 pgp: Some(PgpConfig::Cmds(Default::default())),
                 ..Default::default()

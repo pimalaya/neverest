@@ -164,7 +164,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f28243a43d821d11341ab73c80bed182dc015c514b951616cf79bd4af39af0c3"
 dependencies = [
  "concurrent-queue",
- "event-listener 5.2.0",
+ "event-listener 5.3.0",
  "event-listener-strategy 0.5.1",
  "futures-core",
  "pin-project-lite",
@@ -497,8 +497,9 @@ dependencies = [
 
 [[package]]
 name = "chumsky"
-version = "1.0.0-alpha.6"
-source = "git+https://github.com/zesterer/chumsky.git?rev=6837537#68375371a5fde6ee14f190c14e9a9cee0697f022"
+version = "1.0.0-alpha.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7b80276986f86789dc56ca6542d53bba9cda3c66091ebbe7bd96fc1bdf20f1f"
 dependencies = [
  "hashbrown",
  "regex-automata 0.3.9",
@@ -833,9 +834,9 @@ checksum = "11157ac094ffbdde99aa67b23417ebdd801842852b500e395a45a9c0aac03e4a"
 [[package]]
 name = "email-lib"
 version = "0.22.3"
+source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
 dependencies = [
  "advisory-lock",
- "anyhow",
  "async-trait",
  "chrono",
  "chumsky",
@@ -854,7 +855,6 @@ dependencies = [
  "mail-builder",
  "mail-parser",
  "maildirpp",
- "md5",
  "mml-lib",
  "notify",
  "notify-rust",
@@ -881,6 +881,7 @@ dependencies = [
 [[package]]
 name = "email-macros"
 version = "0.0.2"
+source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
 dependencies = [
  "quote",
  "syn 2.0.58",
@@ -1011,9 +1012,9 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.2.0"
+version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b5fb89194fa3cad959b833185b3063ba881dbfc7030680b314250779fb4cc91"
+checksum = "6d9944b8ca13534cdfb2800775f8dd4902ff3fc75a50101466decadfdf322a24"
 dependencies = [
  "concurrent-queue",
  "parking",
@@ -1036,7 +1037,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "332f51cb23d20b0de8458b86580878211da09bcd4503cb579c225b3d124cabb3"
 dependencies = [
- "event-listener 5.2.0",
+ "event-listener 5.3.0",
  "pin-project-lite",
 ]
 
@@ -1248,9 +1249,9 @@ dependencies = [
 
 [[package]]
 name = "getrandom"
-version = "0.2.12"
+version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "190092ea657667030ac6a35e305e62fc4dd69fd98ac98631e5d3a2b1575a12b5"
+checksum = "a06fddc2749e0528d2813f95e050e87e52c8cbbae56223b9babf73b3e53b0cc6"
 dependencies = [
  "cfg-if",
  "js-sys",
@@ -1267,9 +1268,9 @@ checksum = "4271d37baee1b8c7e4b708028c57d816cf9d2434acb33a549475f78c181f6253"
 
 [[package]]
 name = "h2"
-version = "0.3.25"
+version = "0.3.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fbd2820c5e49886948654ab546d0688ff24530286bdcf8fca3cefb16d4618eb"
+checksum = "81fe527a889e1532da5c525686d96d4c2e74cdd345badf8dfef9f6b39dd5f5e8"
 dependencies = [
  "bytes",
  "fnv",
@@ -1688,7 +1689,8 @@ dependencies = [
 
 [[package]]
 name = "keyring-lib"
-version = "0.4.0"
+version = "0.4.1"
+source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
 dependencies = [
  "keyring",
  "log",
@@ -1851,12 +1853,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ffbee8634e0d45d258acb448e7eaab3fce7a0a467395d4d9f228e3c1f01fb2e4"
 
 [[package]]
-name = "md5"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
-
-[[package]]
 name = "memchr"
 version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1915,7 +1911,8 @@ dependencies = [
 
 [[package]]
 name = "mml-lib"
-version = "1.0.8"
+version = "1.0.10"
+source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
 dependencies = [
  "async-recursion",
  "chumsky",
@@ -2130,7 +2127,8 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 
 [[package]]
 name = "oauth-lib"
-version = "0.1.0"
+version = "0.1.1"
+source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
 dependencies = [
  "log",
  "oauth2",
@@ -2470,7 +2468,8 @@ dependencies = [
 
 [[package]]
 name = "process-lib"
-version = "0.4.1"
+version = "0.4.2"
+source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
 dependencies = [
  "log",
  "serde",
@@ -2790,7 +2789,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f1fb85efa936c42c6d5fc28d2629bb51e4b2f4b8a5211e297d599cc5a093792"
 dependencies = [
  "openssl-probe",
- "rustls-pemfile 2.1.1",
+ "rustls-pemfile 2.1.2",
  "rustls-pki-types",
  "schannel",
  "security-framework",
@@ -2807,11 +2806,11 @@ dependencies = [
 
 [[package]]
 name = "rustls-pemfile"
-version = "2.1.1"
+version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f48172685e6ff52a556baa527774f61fcaa884f59daf3375c62a3f1cd2549dab"
+checksum = "29993a25686778eb88d4189742cd713c9bce943bc54251a33509dc63cbacf73d"
 dependencies = [
- "base64 0.21.7",
+ "base64 0.22.0",
  "rustls-pki-types",
 ]
 
@@ -2884,7 +2883,8 @@ dependencies = [
 
 [[package]]
 name = "secret-lib"
-version = "0.4.1"
+version = "0.4.3"
+source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
 dependencies = [
  "keyring-lib",
  "log",
@@ -3070,7 +3070,8 @@ dependencies = [
 
 [[package]]
 name = "shellexpand-utils"
-version = "0.2.0"
+version = "0.2.1"
+source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
 dependencies = [
  "log",
  "shellexpand",
@@ -3671,9 +3672,9 @@ checksum = "5f20c57d8d7db6d3b86154206ae5d8fba62dd39573114de97c2cb0578251f8e1"
 
 [[package]]
 name = "widestring"
-version = "1.0.2"
+version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "653f141f39ec16bba3c5abe400a0c60da7468261cc2cbf36805022876bc721a8"
+checksum = "7219d36b6eac893fa81e84ebe06485e7dcbb616177469b142df14f1f4deb1311"
 
 [[package]]
 name = "winapi"

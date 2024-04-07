@@ -45,7 +45,7 @@ pub async fn configure(account_name: &str) -> Result<BackendConfig> {
             if EmailAddress::is_valid(email) {
                 Ok(())
             } else {
-                bail!("Invalid email address: {email}")
+                bail!("invalid email address: {email}")
             }
         })
         .interact()?;

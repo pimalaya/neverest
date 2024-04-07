@@ -15,7 +15,7 @@ use email::{
     account::config::AccountConfig,
     backend::{context::BackendContextBuilder, BackendBuilder},
     folder::sync::config::FolderSyncStrategy,
-    sync::{SyncBuilder, SyncEvent},
+    sync::{hash::SyncHash, SyncBuilder, SyncEvent},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
 use log::info;
@@ -140,7 +140,7 @@ impl SynchronizeAccountCommand {
         self,
         printer: &mut impl Printer,
         account_name: &str,
-        left: BackendBuilder<impl BackendContextBuilder + 'static>,
+        left: BackendBuilder<impl BackendContextBuilder + SyncHash + 'static>,
         right_config: Arc<AccountConfig>,
         right_backend: BackendConfig,
     ) -> Result<()> {
@@ -175,8 +175,8 @@ impl SynchronizeAccountCommand {
         self,
         printer: &mut impl Printer,
         account_name: &str,
-        left: BackendBuilder<impl BackendContextBuilder + 'static>,
-        right: BackendBuilder<impl BackendContextBuilder + 'static>,
+        left: BackendBuilder<impl BackendContextBuilder + SyncHash + 'static>,
+        right: BackendBuilder<impl BackendContextBuilder + SyncHash + 'static>,
     ) -> Result<()> {
         let included_folders = BTreeSet::from_iter(self.include_folder);
         let excluded_folders = BTreeSet::from_iter(self.exclude_folder);

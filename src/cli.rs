@@ -75,8 +75,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum NeverestCommand {
-    #[command(alias = "checkup")]
-    CheckUp(CheckUpAccountCommand),
+    #[command(alias = "check-up", alias = "checkup")]
+    Check(CheckUpAccountCommand),
 
     #[command(alias = "cfg")]
     Configure(ConfigureAccountCommand),
@@ -96,7 +96,7 @@ pub enum NeverestCommand {
 impl NeverestCommand {
     pub async fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
         match self {
-            Self::CheckUp(cmd) => {
+            Self::Check(cmd) => {
                 let config = Config::from_paths_or_default(config_paths).await?;
                 cmd.execute(printer, &config).await
             }

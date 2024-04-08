@@ -1,7 +1,7 @@
 <div align="center">
 <!-- <img src="./logo.png" width="192" height="192"> -->
 <h1>📫 Neverest</h1>
-<p>CLI to synchronize emails, based on <a href="https://crates.io/crates/email-lib">email-lib</a></p>
+<p>CLI to synchronize and backup emails, based on <a href="https://crates.io/crates/email-lib">email-lib</a></p>
 <p>
 <a href="https://github.com/soywod/neverest/releases/latest"><img src="https://img.shields.io/github/v/release/soywod/neverest?color=success"/></a>
 <a href="https://matrix.to/#/#pimalaya.neverest:matrix.org"><img src="https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat"/></a>

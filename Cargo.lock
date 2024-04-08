@@ -537,6 +537,7 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim 0.11.1",
+ "terminal_size",
 ]
 
 [[package]]
@@ -833,8 +834,9 @@ checksum = "11157ac094ffbdde99aa67b23417ebdd801842852b500e395a45a9c0aac03e4a"
 
 [[package]]
 name = "email-lib"
-version = "0.22.3"
-source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f4177206cdae365e311b0a97a95764e9fe86c8c791d89b4f057de8d741d1b8c8"
 dependencies = [
  "advisory-lock",
  "async-trait",
@@ -881,7 +883,8 @@ dependencies = [
 [[package]]
 name = "email-macros"
 version = "0.0.2"
-source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0f24a09fd651027f8764f8a12c12358715cb9bab622ab3125ede3dd6ae047c95"
 dependencies = [
  "quote",
  "syn 2.0.58",
@@ -1690,7 +1693,8 @@ dependencies = [
 [[package]]
 name = "keyring-lib"
 version = "0.4.1"
-source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d181ffce2036da938d84a22f0e64a48cda3e72d7ba6398efae13fe43c694b788"
 dependencies = [
  "keyring",
  "log",
@@ -1912,7 +1916,8 @@ dependencies = [
 [[package]]
 name = "mml-lib"
 version = "1.0.10"
-source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "251ed73fdc4a16a256055cd5a6999c1cd2e37a944f0ffcb7544dbc0ac9dca37a"
 dependencies = [
  "async-recursion",
  "chumsky",
@@ -2128,7 +2133,8 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 [[package]]
 name = "oauth-lib"
 version = "0.1.1"
-source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2fd81f50b3bdf9656f511a776e5a76c249e00d7ce5c0c9071d0b923177d9248d"
 dependencies = [
  "log",
  "oauth2",
@@ -2469,7 +2475,8 @@ dependencies = [
 [[package]]
 name = "process-lib"
 version = "0.4.2"
-source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0600893efc62c84ded38fec2b022ada4d4d80e48a8df5bceb070c865bf8a33a9"
 dependencies = [
  "log",
  "serde",
@@ -2884,7 +2891,8 @@ dependencies = [
 [[package]]
 name = "secret-lib"
 version = "0.4.3"
-source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20c272cb9ac9d989d0f398926bbf75c03c8b2242196420403df6568a0eaf083d"
 dependencies = [
  "keyring-lib",
  "log",
@@ -3071,7 +3079,8 @@ dependencies = [
 [[package]]
 name = "shellexpand-utils"
 version = "0.2.1"
-source = "git+https://git.sr.ht/~soywod/pimalaya#ac7af0ccc2a42a64885654286048c74b9d9c800f"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c15a8f3693529b38d1be40ec6016bb6317ebee4a0208a813a75e3538f3e439f5"
 dependencies = [
  "log",
  "shellexpand",
@@ -3243,6 +3252,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "21bebf2b7c9e0a515f6e0f8c51dc0f8e4696391e6f1ff30379559f8365fb0df7"
+dependencies = [
+ "rustix 0.38.32",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 {
-  description = "CLI to synchronize emails";
+  description = "CLI to synchronize and backup emails";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-23.11";

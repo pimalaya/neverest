@@ -2,7 +2,7 @@ use anyhow::Result;
 use dialoguer::Input;
 use shellexpand_utils::expand;
 use std::{fs, path::PathBuf};
-use toml_edit::{DocumentMut, Item};
+use toml_edit::{DocumentMut, Table};
 
 use crate::{account, ui::THEME};
 
@@ -60,32 +60,10 @@ fn pretty_serialize(config: &Config) -> Result<String> {
     let mut doc: DocumentMut = toml::to_string(&config)?.parse()?;
 
     doc.iter_mut().for_each(|(_, item)| {
-        if let Some(item) = item.as_table_mut() {
-            item.iter_mut().for_each(|(_, item)| {
-                let keys = ["folder", "envelope"];
-                set_tables_dotted(item, keys);
-                for key in keys {
-                    if let Some(item) = get_table_mut(item, key) {
-                        set_table_dotted(item, "filter");
-                    }
-                }
-
-                for source in ["left", "right"] {
-                    set_table_dotted(item, source);
-                    if let Some(item) = get_table_mut(item, source) {
-                        set_table_dotted(item, "backend");
-                        if let Some(item) = get_table_mut(item, "backend") {
-                            set_tables_dotted(item, ["passwd", "oauth2"]);
-                        }
-
-                        let keys = ["folder", "flag", "message"];
-                        set_tables_dotted(item, keys);
-                        for key in keys {
-                            if let Some(item) = get_table_mut(item, key) {
-                                set_table_dotted(item, "permissions");
-                            }
-                        }
-                    }
+        if let Some(table) = item.as_table_mut() {
+            table.iter_mut().for_each(|(_, item)| {
+                if let Some(table) = item.as_table_mut() {
+                    set_table_dotted(table);
                 }
             })
         }
@@ -94,29 +72,37 @@ fn pretty_serialize(config: &Config) -> Result<String> {
     Ok(doc.to_string())
 }
 
-fn get_table_mut<'a>(item: &'a mut Item, key: &'a str) -> Option<&'a mut Item> {
-    item.get_mut(key).filter(|item| item.is_table())
-}
-
-fn set_table_dotted(item: &mut Item, key: &str) {
-    if let Some(table) = get_table_mut(item, key).and_then(|item| item.as_table_mut()) {
-        table.set_dotted(true)
-    }
-}
-
-fn set_tables_dotted<'a>(item: &'a mut Item, keys: impl IntoIterator<Item = &'a str>) {
-    for key in keys {
-        set_table_dotted(item, key)
+fn set_table_dotted(table: &mut Table) {
+    let keys: Vec<String> = table.iter().map(|(key, _)| key.to_string()).collect();
+    for ref key in keys {
+        if let Some(table) = table.get_mut(key).unwrap().as_table_mut() {
+            table.set_dotted(true);
+            set_table_dotted(table)
+        }
     }
 }
 
 #[cfg(test)]
 mod test {
-    use std::collections::HashMap;
+    use email::{
+        account::config::passwd::PasswdConfig,
+        flag::sync::config::FlagSyncPermissions,
+        folder::sync::config::{FolderSyncPermissions, FolderSyncStrategy},
+        imap::config::{ImapAuthConfig, ImapConfig},
+        maildir::config::MaildirConfig,
+        message::sync::config::MessageSyncPermissions,
+    };
+    use secret::Secret;
+    use std::collections::{BTreeSet, HashMap};
 
-    use crate::{account::config::AccountConfig, config::Config};
-
-    use super::pretty_serialize;
+    use crate::{
+        account::config::{AccountConfig, FolderConfig},
+        backend::config::{
+            BackendConfig, BackendGlobalConfig, FlagBackendConfig, FolderBackendConfig,
+            MessageBackendConfig,
+        },
+        config::Config,
+    };
 
     fn assert_eq(config: AccountConfig, expected_toml: &str) {
         let config = Config {
@@ -124,7 +110,7 @@ mod test {
             ..Default::default()
         };
 
-        let toml = pretty_serialize(&config).expect("serialize error");
+        let toml = super::pretty_serialize(&config).expect("serialize error");
         assert_eq!(toml, expected_toml);
 
         let expected_config = toml::from_str(&toml).expect("deserialize error");
@@ -132,329 +118,64 @@ mod test {
     }
 
     #[test]
-    fn pretty_serialize_default() {
+    fn pretty_serialize() {
         assert_eq(
             AccountConfig {
-                email: "test@localhost".into(),
-                ..Default::default()
+                default: Some(true),
+                folder: Some(FolderConfig {
+                    filter: FolderSyncStrategy::Include(BTreeSet::from_iter(["INBOX".into()])),
+                }),
+                // TODO: test me
+                envelope: None,
+                left: BackendGlobalConfig {
+                    backend: BackendConfig::Imap(ImapConfig {
+                        host: "localhost".into(),
+                        port: 143,
+                        login: "test".into(),
+                        auth: ImapAuthConfig::Passwd(PasswdConfig(Secret::Raw("password".into()))),
+                        ..Default::default()
+                    }),
+                    folder: Some(FolderBackendConfig {
+                        permissions: FolderSyncPermissions {
+                            create: true,
+                            delete: false,
+                        },
+                    }),
+                    flag: Some(FlagBackendConfig {
+                        permissions: FlagSyncPermissions { update: true },
+                    }),
+                    message: Some(MessageBackendConfig {
+                        permissions: MessageSyncPermissions {
+                            create: true,
+                            delete: false,
+                        },
+                    }),
+                },
+                right: BackendGlobalConfig {
+                    backend: BackendConfig::Maildir(MaildirConfig {
+                        root_dir: "/tmp/test".into(),
+                    }),
+                    folder: None,
+                    flag: None,
+                    message: None,
+                },
             },
             r#"[accounts.test]
-email = "test@localhost"
+default = true
+folder.filter.include = ["INBOX"]
+left.backend.type = "imap"
+left.backend.host = "localhost"
+left.backend.port = 143
+left.backend.login = "test"
+left.backend.passwd.raw = "password"
+left.folder.permissions.create = true
+left.folder.permissions.delete = false
+left.flag.permissions.update = true
+left.message.permissions.create = true
+left.message.permissions.delete = false
+right.backend.type = "maildir"
+right.backend.root-dir = "/tmp/test"
 "#,
         )
-    }
-
-    #[cfg(feature = "account-sync")]
-    #[test]
-    fn pretty_serialize_sync_all() {
-        use email::account::sync::config::SyncConfig;
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                sync: Some(SyncConfig {
-                    enable: Some(false),
-                    dir: Some("/tmp/test".into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-sync.enable = false
-sync.dir = "/tmp/test"
-"#,
-        );
-    }
-
-    #[cfg(feature = "account-sync")]
-    #[test]
-    fn pretty_serialize_sync_include() {
-        use email::{
-            account::sync::config::SyncConfig,
-            folder::sync::config::{FolderSyncConfig, FolderSyncStrategy},
-        };
-        use std::collections::BTreeSet;
-
-        use crate::folder::config::FolderConfig;
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                sync: Some(SyncConfig {
-                    enable: Some(true),
-                    dir: Some("/tmp/test".into()),
-                    ..Default::default()
-                }),
-                folder: Some(FolderConfig {
-                    sync: Some(FolderSyncConfig {
-                        filter: FolderSyncStrategy::Include(BTreeSet::from_iter(["test".into()])),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-sync.enable = true
-sync.dir = "/tmp/test"
-folder.sync.filter.include = ["test"]
-folder.sync.permissions.create = true
-folder.sync.permissions.delete = true
-"#,
-        );
-    }
-
-    #[cfg(feature = "imap")]
-    #[test]
-    fn pretty_serialize_imap_passwd_cmd() {
-        use email::{
-            account::config::passwd::PasswdConfig,
-            imap::config::{ImapAuthConfig, ImapConfig},
-        };
-        use secret::Secret;
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                imap: Some(ImapConfig {
-                    host: "localhost".into(),
-                    port: 143,
-                    login: "test@localhost".into(),
-                    auth: ImapAuthConfig::Passwd(PasswdConfig(Secret::new_command(
-                        "pass show test",
-                    ))),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-imap.host = "localhost"
-imap.port = 143
-imap.login = "test@localhost"
-imap.passwd.command = "pass show test"
-"#,
-        );
-    }
-
-    #[cfg(feature = "imap")]
-    #[test]
-    fn pretty_serialize_imap_passwd_cmds() {
-        use email::{
-            account::config::passwd::PasswdConfig,
-            imap::config::{ImapAuthConfig, ImapConfig},
-        };
-        use secret::Secret;
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                imap: Some(ImapConfig {
-                    host: "localhost".into(),
-                    port: 143,
-                    login: "test@localhost".into(),
-                    auth: ImapAuthConfig::Passwd(PasswdConfig(Secret::new_command(vec![
-                        "pass show test",
-                        "tr -d '[:blank:]'",
-                    ]))),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-imap.host = "localhost"
-imap.port = 143
-imap.login = "test@localhost"
-imap.passwd.command = ["pass show test", "tr -d '[:blank:]'"]
-"#,
-        );
-    }
-
-    #[cfg(feature = "imap")]
-    #[test]
-    fn pretty_serialize_imap_oauth2() {
-        use email::{
-            account::config::oauth2::OAuth2Config,
-            imap::config::{ImapAuthConfig, ImapConfig},
-        };
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                imap: Some(ImapConfig {
-                    host: "localhost".into(),
-                    port: 143,
-                    login: "test@localhost".into(),
-                    auth: ImapAuthConfig::OAuth2(OAuth2Config {
-                        client_id: "client-id".into(),
-                        auth_url: "auth-url".into(),
-                        token_url: "token-url".into(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-imap.host = "localhost"
-imap.port = 143
-imap.login = "test@localhost"
-imap.oauth2.method = "xoauth2"
-imap.oauth2.client-id = "client-id"
-imap.oauth2.auth-url = "auth-url"
-imap.oauth2.token-url = "token-url"
-imap.oauth2.pkce = false
-imap.oauth2.scopes = []
-"#,
-        );
-    }
-
-    #[cfg(feature = "maildir")]
-    #[test]
-    fn pretty_serialize_maildir() {
-        use email::maildir::config::MaildirConfig;
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                maildir: Some(MaildirConfig {
-                    root_dir: "/tmp/test".into(),
-                }),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-maildir.root-dir = "/tmp/test"
-"#,
-        );
-    }
-
-    #[cfg(feature = "smtp")]
-    #[test]
-    fn pretty_serialize_smtp_passwd_cmd() {
-        use email::{
-            account::config::passwd::PasswdConfig,
-            smtp::config::{SmtpAuthConfig, SmtpConfig},
-        };
-        use secret::Secret;
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                smtp: Some(SmtpConfig {
-                    host: "localhost".into(),
-                    port: 143,
-                    login: "test@localhost".into(),
-                    auth: SmtpAuthConfig::Passwd(PasswdConfig(Secret::new_command(
-                        "pass show test",
-                    ))),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-smtp.host = "localhost"
-smtp.port = 143
-smtp.login = "test@localhost"
-smtp.passwd.command = "pass show test"
-"#,
-        );
-    }
-
-    #[cfg(feature = "smtp")]
-    #[test]
-    fn pretty_serialize_smtp_passwd_cmds() {
-        use email::{
-            account::config::passwd::PasswdConfig,
-            smtp::config::{SmtpAuthConfig, SmtpConfig},
-        };
-        use secret::Secret;
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                smtp: Some(SmtpConfig {
-                    host: "localhost".into(),
-                    port: 143,
-                    login: "test@localhost".into(),
-                    auth: SmtpAuthConfig::Passwd(PasswdConfig(Secret::new_command(vec![
-                        "pass show test",
-                        "tr -d '[:blank:]'",
-                    ]))),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-smtp.host = "localhost"
-smtp.port = 143
-smtp.login = "test@localhost"
-smtp.passwd.command = ["pass show test", "tr -d '[:blank:]'"]
-"#,
-        );
-    }
-
-    #[cfg(feature = "smtp")]
-    #[test]
-    fn pretty_serialize_smtp_oauth2() {
-        use email::{
-            account::config::oauth2::OAuth2Config,
-            smtp::config::{SmtpAuthConfig, SmtpConfig},
-        };
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                smtp: Some(SmtpConfig {
-                    host: "localhost".into(),
-                    port: 143,
-                    login: "test@localhost".into(),
-                    auth: SmtpAuthConfig::OAuth2(OAuth2Config {
-                        client_id: "client-id".into(),
-                        auth_url: "auth-url".into(),
-                        token_url: "token-url".into(),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-smtp.host = "localhost"
-smtp.port = 143
-smtp.login = "test@localhost"
-smtp.oauth2.method = "xoauth2"
-smtp.oauth2.client-id = "client-id"
-smtp.oauth2.auth-url = "auth-url"
-smtp.oauth2.token-url = "token-url"
-smtp.oauth2.pkce = false
-smtp.oauth2.scopes = []
-"#,
-        );
-    }
-
-    #[cfg(feature = "pgp-cmds")]
-    #[test]
-    fn pretty_serialize_pgp_cmds() {
-        use email::account::config::pgp::PgpConfig;
-
-        assert_eq(
-            AccountConfig {
-                email: "test@localhost".into(),
-                pgp: Some(PgpConfig::Cmds(Default::default())),
-                ..Default::default()
-            },
-            r#"[accounts.test]
-email = "test@localhost"
-pgp.backend = "cmds"
-"#,
-        );
     }
 }

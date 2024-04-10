@@ -1,13 +1,49 @@
 <div align="center">
 <!-- <img src="./logo.png" width="192" height="192"> -->
-<h1>📫 Neverest</h1>
-<p>CLI to synchronize and backup emails, based on <a href="https://crates.io/crates/email-lib">email-lib</a></p>
+<h1>📫<br/>Neverest CLI</h1>
 <p>
 <a href="https://github.com/soywod/neverest/releases/latest"><img src="https://img.shields.io/github/v/release/soywod/neverest?color=success"/></a>
 <a href="https://matrix.to/#/#pimalaya.neverest:matrix.org"><img src="https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat"/></a>
 </p>
-<p><em>🚧 <strong>Work In Progress</strong>, stay tuned! 🚧</em></p>
+<p>CLI to synchronize and backup emails,<br/>based on <a href="https://crates.io/crates/email-lib">email-lib</a></p>
 </div>
+
+## Features
+
+- [IMAP](https://pimalaya.org/neverest/cli/latest/configuration/imap.html) support
+- [Maildir](https://pimalaya.org/neverest/cli/latest/configuration/maildir.html) and [Notmuch](https://pimalaya.org/neverest/cli/latest/configuration/notmuch.html) support
+- Synchronization of two backends together (folders and emails)
+- Partial sync based on filters (folders name and envelopes date)
+- Restricted sync based on permissions (folder/flag/message create/update/delete)
+
+## Installation
+
+<table align="center">
+<tr>
+<td width="50%">
+<a href="https://repology.org/project/neverest/versions">
+<img src="https://repology.org/badge/vertical-allrepos/neverest.svg" alt="Packaging status" />
+</a>
+</td>
+<td width="50%">
+
+```bash
+# Cargo
+$ cargo install neverest
+
+# Nix
+$ nix-env -i neverest
+```
+
+*See the [documentation](https://pimalaya.org/neverest/cli/latest/installation.html) for other installation methods.*
+
+</td>
+</tr>
+</table>
+
+## Configuration
+
+*Please read the [documentation](https://pimalaya.org/neverest/cli/latest/configuration/).*
 
 ## Contributing
 

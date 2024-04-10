@@ -504,7 +504,6 @@ dependencies = [
  "hashbrown",
  "regex-automata 0.3.9",
  "serde",
- "stacker",
  "unicode-ident",
 ]
 
@@ -834,9 +833,9 @@ checksum = "11157ac094ffbdde99aa67b23417ebdd801842852b500e395a45a9c0aac03e4a"
 
 [[package]]
 name = "email-lib"
-version = "0.23.0"
+version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4177206cdae365e311b0a97a95764e9fe86c8c791d89b4f057de8d741d1b8c8"
+checksum = "7ff90d8f6e61f1b7e17845072d193984a9f34f6d5722925c8042a1dac12a4529"
 dependencies = [
  "advisory-lock",
  "async-trait",
@@ -1692,9 +1691,9 @@ dependencies = [
 
 [[package]]
 name = "keyring-lib"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d181ffce2036da938d84a22f0e64a48cda3e72d7ba6398efae13fe43c694b788"
+checksum = "a2e6d01e57f1b382ba5a1c40ef866855e8bab15f7caa4033480db80a5b9b9aff"
 dependencies = [
  "keyring",
  "log",
@@ -1915,9 +1914,9 @@ dependencies = [
 
 [[package]]
 name = "mml-lib"
-version = "1.0.10"
+version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "251ed73fdc4a16a256055cd5a6999c1cd2e37a944f0ffcb7544dbc0ac9dca37a"
+checksum = "e3c6ac41c419e7857fdf7104a2f750c0d575969fa32f50a9d370ea3a3bcab1bf"
 dependencies = [
  "async-recursion",
  "chumsky",
@@ -1957,7 +1956,6 @@ dependencies = [
  "erased-serde",
  "indicatif",
  "log",
- "mml-lib",
  "oauth-lib",
  "once_cell",
  "secret-lib",
@@ -2485,15 +2483,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "psm"
-version = "0.1.21"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5787f7cda34e3033a72192c018bc5883100330f362ef279a8cbccfce8bb4e874"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2890,9 +2879,9 @@ dependencies = [
 
 [[package]]
 name = "secret-lib"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20c272cb9ac9d989d0f398926bbf75c03c8b2242196420403df6568a0eaf083d"
+checksum = "d99d0df4b8cb27c13c953abaf74bd089922a783fad99cd2b08b369cf7fabcbc9"
 dependencies = [
  "keyring-lib",
  "log",
@@ -3136,19 +3125,6 @@ name = "spin"
 version = "0.9.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
-
-[[package]]
-name = "stacker"
-version = "0.1.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c886bd4480155fd3ef527d45e9ac8dd7118a898a46530b7b94c3e21866259fce"
-dependencies = [
- "cc",
- "cfg-if",
- "libc",
- "psm",
- "winapi",
-]
 
 [[package]]
 name = "static_assertions"

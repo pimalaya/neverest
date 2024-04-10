@@ -25,7 +25,90 @@
     let
       inherit (gitignore.lib) gitignoreSource;
 
+      staticRustFlags = [ "-Ctarget-feature=+crt-static" ];
+
+      # Map of map matching supported Nix build systems with Rust
+      # cross target systems.
+      crossBuildTargets = {
+        x86_64-linux = {
+          x86_64-linux = {
+            rustTarget = "x86_64-unknown-linux-musl";
+            override = { ... }: { };
+          };
+
+          arm64-linux = rec {
+            rustTarget = "aarch64-unknown-linux-musl";
+            override = { system, pkgs }:
+              let
+                inherit (mkPkgsCross system rustTarget) stdenv;
+                cc = "${stdenv.cc}/bin/${stdenv.cc.targetPrefix}cc"; in
+              rec {
+                TARGET_CC = cc;
+                CARGO_BUILD_RUSTFLAGS = staticRustFlags ++ [ "-Clinker=${cc}" ];
+                postInstall = mkPostInstall {
+                  inherit pkgs;
+                  bin = "${pkgs.qemu}/bin/qemu-aarch64 ./neverest";
+                };
+              };
+          };
+
+          x86_64-windows = {
+            rustTarget = "x86_64-pc-windows-gnu";
+            override = { system, pkgs }:
+              let
+                inherit (pkgs) pkgsCross zip;
+                inherit (pkgsCross.mingwW64) stdenv windows;
+                cc = "${stdenv.cc}/bin/${stdenv.cc.targetPrefix}cc";
+                wine = pkgs.wine.override { wineBuild = "wine64"; };
+                postInstall = mkPostInstall {
+                  inherit pkgs;
+                  bin = "${wine}/bin/wine64 ./neverest.exe";
+                };
+              in
+              {
+                depsBuildBuild = [ stdenv.cc windows.pthreads ];
+                TARGET_CC = cc;
+                CARGO_BUILD_RUSTFLAGS = staticRustFlags ++ [ "-Clinker=${cc}" ];
+                postInstall = ''
+                  export WINEPREFIX="$(mktemp -d)"
+                  ${postInstall}
+                '';
+              };
+          };
+        };
+
+        x86_64-darwin = {
+          x86_64-macos = {
+            rustTarget = "x86_64-apple-darwin";
+            override = { pkgs, ... }:
+              let inherit (pkgs.darwin.apple_sdk.frameworks) AppKit Cocoa; in
+              {
+                buildInputs = [ Cocoa ];
+                NIX_LDFLAGS = "-F${AppKit}/Library/Frameworks -framework AppKit";
+              };
+          };
+        };
+      };
+
       mkToolchain = import ./rust-toolchain.nix fenix;
+
+      mkPkgsCross = buildSystem: crossSystem: import nixpkgs {
+        system = buildSystem;
+        crossSystem.config = crossSystem;
+      };
+
+      mkPostInstall = { pkgs, bin ? "./neverest" }: with pkgs; ''
+        cd $out/bin
+        mkdir -p {man,completions}
+        ${bin} man ./man
+        ${bin} completion bash > ./completions/neverest.bash
+        ${bin} completion elvish > ./completions/neverest.elvish
+        ${bin} completion fish > ./completions/neverest.fish
+        ${bin} completion powershell > ./completions/neverest.powershell
+        ${bin} completion zsh > ./completions/neverest.zsh
+        tar -czf neverest.tgz neverest* man completions
+        ${zip}/bin/zip -r neverest.zip neverest* man completions
+      '';
 
       mkDevShells = buildPlatform:
         let
@@ -34,27 +117,18 @@
         in
         {
           default = pkgs.mkShell {
-            nativeBuildInputs = with pkgs; [
-              pkg-config
-            ];
+            nativeBuildInputs = with pkgs; [ pkg-config ];
             buildInputs = with pkgs; [
               # Nix
-              rnix-lsp
+              # rnix-lsp
               nixpkgs-fmt
 
               # Rust
               rust-toolchain
               cargo-watch
 
-              # OpenSSL
-              openssl.dev
-
               # Notmuch
               notmuch
-
-              # GPG
-              gnupg
-              gpgme
             ];
           };
         };
@@ -71,53 +145,25 @@
           package' = {
             name = "neverest";
             src = gitignoreSource ./.;
-            overrideMain = _: {
-              postInstall = ''
-                mkdir -p $out/share/applications/
-                cp assets/neverest.desktop $out/share/applications/
-              '';
-            };
-            doCheck = true;
-            cargoTestOptions = opts: opts ++ [ "--lib" ];
-          } // pkgs.lib.optionalAttrs (!isNull targetPlatform) {
+            doCheck = false;
+            auditable = false;
+            strictDeps = true;
             CARGO_BUILD_TARGET = targetPlatform;
+            CARGO_BUILD_RUSTFLAGS = staticRustFlags;
+            postInstall = mkPostInstall { inherit pkgs; };
           } // package;
         in
         naersk'.buildPackage package';
 
-      mkPackages = buildPlatform:
+      mkPackages = system:
         let
-          pkgs = import nixpkgs { system = buildPlatform; };
-          mkPackage' = mkPackage pkgs buildPlatform;
+          pkgs = import nixpkgs { inherit system; };
+          mkPackage' = target: package: mkPackage pkgs system package.rustTarget (package.override { inherit system pkgs; });
         in
-        rec {
-          default = if pkgs.stdenv.isDarwin then macos else linux;
-          linux = mkPackage' null { };
-          linux-musl = mkPackage' "x86_64-unknown-linux-musl" (with pkgs.pkgsStatic; {
-            CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
-            hardeningDisable = [ "all" ];
-          });
-          macos = mkPackage' null (with pkgs.darwin.apple_sdk.frameworks; {
-            # NOTE: needed to prevent error Undefined symbols
-            # "_OBJC_CLASS_$_NSImage" and
-            # "_LSCopyApplicationURLsForBundleIdentifier"
-            NIX_LDFLAGS = "-F${AppKit}/Library/Frameworks -framework AppKit";
-            buildInputs = [ Cocoa ];
-          });
-          # FIXME: bzlip: fatal error: windows.h: No such file or directory
-          # May be related to SQLite.
-          windows = mkPackage' "x86_64-pc-windows-gnu" {
-            strictDeps = true;
-            depsBuildBuild = with pkgs.pkgsCross.mingwW64; [
-              stdenv.cc
-              windows.pthreads
-            ];
-          };
-        };
+        builtins.mapAttrs mkPackage' crossBuildTargets.${system};
 
       mkApp = drv:
-        let exePath = drv.passthru.exePath or "/bin/neverest";
-        in
+        let exePath = drv.passthru.exePath or "/bin/neverest"; in
         {
           type = "app";
           program = "${drv}${exePath}";
@@ -126,29 +172,16 @@
       mkApps = buildPlatform:
         let
           pkgs = import nixpkgs { system = buildPlatform; };
+          mkApp' = target: package: mkApp self.packages.${buildPlatform}.${target};
         in
-        rec {
-          default = if pkgs.stdenv.isDarwin then macos else linux;
-          linux = mkApp self.packages.${buildPlatform}.linux;
-          linux-musl = mkApp self.packages.${buildPlatform}.linux-musl;
-          macos = mkApp self.packages.${buildPlatform}.macos;
-          windows =
-            let
-              wine = pkgs.wine.override { wineBuild = "wine64"; };
-              neverest = self.packages.${buildPlatform}.windows;
-              app = pkgs.writeShellScriptBin "neverest" ''
-                export WINEPREFIX="$(mktemp -d)"
-                ${wine}/bin/wine64 ${neverest}/bin/neverest.exe $@
-              '';
-            in
-            mkApp app;
-        };
-      supportedSystems = [ "aarch64-linux" "aarch64-darwin" "x86_64-darwin" "x86_64-linux" ];
-      forEachSupportedSystem = f: nixpkgs.lib.genAttrs supportedSystems f;
+        builtins.mapAttrs mkApp' crossBuildTargets.${buildPlatform};
+
+      supportedSystems = builtins.attrNames crossBuildTargets;
+      mapSupportedSystem = nixpkgs.lib.genAttrs supportedSystems;
     in
     {
-      apps = forEachSupportedSystem mkApps;
-      packages = forEachSupportedSystem mkPackages;
-      devShells = forEachSupportedSystem mkDevShells;
+      apps = mapSupportedSystem mkApps;
+      packages = mapSupportedSystem mkPackages;
+      devShells = mapSupportedSystem mkDevShells;
     };
 }

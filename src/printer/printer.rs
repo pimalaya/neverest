@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use color_eyre::eyre::{Context, Result};
 use std::fmt::{self, Debug};
 use termcolor::StandardStream;
 

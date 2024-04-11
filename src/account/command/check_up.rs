@@ -3,8 +3,8 @@
 //! This module contains the [`clap`] command for checking up left and
 //! right backends integrity of a given account.
 
-use anyhow::Result;
 use clap::Parser;
+use color_eyre::eyre::Result;
 use email::backend::{Backend, BackendBuilder};
 #[cfg(feature = "imap")]
 use email::imap::{ImapContextBuilder, ImapContextSync};
@@ -12,8 +12,8 @@ use email::imap::{ImapContextBuilder, ImapContextSync};
 use email::maildir::{MaildirContextBuilder, MaildirContextSync};
 #[cfg(feature = "notmuch")]
 use email::notmuch::{NotmuchContextBuilder, NotmuchContextSync};
-use log::info;
 use std::sync::Arc;
+use tracing::{info, instrument};
 
 use crate::{
     account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
@@ -32,6 +32,7 @@ pub struct CheckUpAccountCommand {
 }
 
 impl CheckUpAccountCommand {
+    #[instrument(skip_all)]
     pub async fn execute(self, printer: &mut impl Printer, config: &Config) -> Result<()> {
         info!("executing check up account command");
 

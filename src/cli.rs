@@ -1,5 +1,5 @@
-use anyhow::Result;
 use clap::{Parser, Subcommand};
+use color_eyre::eyre::Result;
 use std::path::PathBuf;
 
 use crate::{

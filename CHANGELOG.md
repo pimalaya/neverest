@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced `anyhow` by [`color-eyre`](https://crates.io/crates/color-eyre) for better error management.
+- Replaced `log` by [`tracing`](https://crates.io/crates/tracing) for better log management.
+
 ## [0.1.0] - 2024-04-10
 
 ### Added

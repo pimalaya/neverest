@@ -3,11 +3,11 @@
 //! This module contains the [`clap`] command for generating
 //! completion scripts to the standard output.
 
-use anyhow::Result;
 use clap::{value_parser, CommandFactory, Parser};
 use clap_complete::Shell;
-use log::info;
+use color_eyre::eyre::Result;
 use std::io;
+use tracing::{info, instrument};
 
 use crate::cli::Cli;
 
@@ -24,6 +24,7 @@ pub struct GenerateCompletionCommand {
 }
 
 impl GenerateCompletionCommand {
+    #[instrument(skip_all)]
     pub async fn execute(self) -> Result<()> {
         info!("executing generate completion command");
 

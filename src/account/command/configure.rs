@@ -1,10 +1,10 @@
-use anyhow::Result;
 use clap::Parser;
+use color_eyre::eyre::Result;
 #[cfg(feature = "imap")]
 use email::imap::config::ImapAuthConfig;
 #[cfg(feature = "smtp")]
 use email::smtp::config::SmtpAuthConfig;
-use log::{debug, info, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::{
     account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
@@ -30,6 +30,7 @@ pub struct ConfigureAccountCommand {
 }
 
 impl ConfigureAccountCommand {
+    #[instrument(skip_all)]
     pub async fn execute(self, printer: &mut impl Printer, config: &Config) -> Result<()> {
         info!("executing configure account command");
 

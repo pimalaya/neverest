@@ -3,8 +3,8 @@
 //! This module contains the [`clap`] command for synchronizing two
 //! backends of a given account.
 
-use anyhow::Result;
 use clap::{ArgAction, Parser};
+use color_eyre::eyre::Result;
 #[cfg(feature = "imap")]
 use email::imap::ImapContextBuilder;
 #[cfg(feature = "maildir")]
@@ -18,12 +18,12 @@ use email::{
     sync::{hash::SyncHash, SyncBuilder, SyncEvent},
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
-use log::info;
 use once_cell::sync::Lazy;
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
 };
+use tracing::{info, instrument};
 
 use crate::{
     account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
@@ -88,6 +88,7 @@ pub struct SynchronizeAccountCommand {
 }
 
 impl SynchronizeAccountCommand {
+    #[instrument(skip_all)]
     pub async fn execute(self, printer: &mut impl Printer, config: &Config) -> Result<()> {
         info!("executing synchronize backends command");
 

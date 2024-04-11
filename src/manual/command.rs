@@ -1,9 +1,9 @@
-use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_mangen::Man;
-use log::info;
+use color_eyre::eyre::Result;
 use shellexpand_utils::{canonicalize, expand};
 use std::{fs, path::PathBuf};
+use tracing::{info, instrument};
 
 use crate::{cli::Cli, printer::Printer};
 
@@ -21,6 +21,7 @@ pub struct GenerateManualCommand {
 }
 
 impl GenerateManualCommand {
+    #[instrument(skip_all)]
     pub async fn execute(self, printer: &mut impl Printer) -> Result<()> {
         info!("executing generate manuals command");
 

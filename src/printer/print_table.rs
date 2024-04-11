@@ -1,4 +1,4 @@
-use anyhow::Result;
+use color_eyre::eyre::Result;
 use email::email::config::EmailTextPlainFormat;
 use std::io;
 use termcolor::{self, StandardStream};

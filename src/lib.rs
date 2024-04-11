@@ -14,4 +14,5 @@ pub mod manual;
 pub mod notmuch;
 pub mod output;
 pub mod printer;
+pub mod tracing;
 pub mod ui;

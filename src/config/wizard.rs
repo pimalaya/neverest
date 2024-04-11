@@ -1,4 +1,4 @@
-use anyhow::Result;
+use color_eyre::eyre::Result;
 use dialoguer::Input;
 use shellexpand_utils::expand;
 use std::{fs, path::PathBuf};

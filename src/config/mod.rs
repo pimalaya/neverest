@@ -5,14 +5,14 @@
 #[cfg(feature = "wizard")]
 pub mod wizard;
 
-use anyhow::{anyhow, bail, Context, Result};
+use color_eyre::eyre::{anyhow, bail, Context, Result};
 use dirs::{config_dir, home_dir};
-use log::debug;
 use serde::{Deserialize, Serialize};
 use serde_toml_merge::merge;
 use shellexpand_utils::{canonicalize, expand};
 use std::{collections::HashMap, fs, path::PathBuf};
 use toml::Value;
+use tracing::debug;
 
 use crate::account::config::AccountConfig;
 
@@ -107,7 +107,7 @@ impl Config {
             #[cfg(feature = "wizard")]
             None => Self::from_wizard(&Self::default_path()?).await,
             #[cfg(not(feature = "wizard"))]
-            None => anyhow::bail!("cannot find config file from default paths"),
+            None => color_eyre::eyre::bail!("cannot find config file from default paths"),
         }
     }
 
@@ -130,7 +130,7 @@ impl Config {
             #[cfg(feature = "wizard")]
             _ => Self::from_wizard(&paths[0]).await,
             #[cfg(not(feature = "wizard"))]
-            _ => anyhow::bail!("cannot find config file from default paths"),
+            _ => color_eyre::eyre::bail!("cannot find config file from default paths"),
         }
     }
 

@@ -2,7 +2,7 @@
 //!
 //! Module dedicated to account configuration.
 
-use anyhow::Result;
+use color_eyre::eyre::Result;
 use email::{
     envelope::sync::config::EnvelopeSyncFilters, folder::sync::config::FolderSyncStrategy,
 };

@@ -1,5 +1,5 @@
-use anyhow::{anyhow, Error, Result};
 use clap::ValueEnum;
+use color_eyre::eyre::{anyhow, Error, Result};
 use serde::Serialize;
 use std::{
     fmt,

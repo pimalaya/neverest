@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
-use color_eyre::eyre::Result;
-use std::path::PathBuf;
+use color_eyre::{eyre::Result, Section};
+use std::{env, path::PathBuf};
+use tracing_subscriber::filter::LevelFilter;
 
 use crate::{
     account::command::{
@@ -11,7 +12,7 @@ use crate::{
     config::{self, Config},
     manual::command::GenerateManualCommand,
     output::{ColorFmt, OutputFmt},
-    printer::Printer,
+    printer::{Printer, StdoutPrinter},
 };
 
 #[derive(Parser, Debug)]
@@ -71,6 +72,51 @@ pub struct Cli {
     #[arg(long, short = 'C', global = true)]
     #[arg(value_name = "MODE", value_enum, default_value_t = Default::default())]
     pub color: ColorFmt,
+
+    /// Enable logs with spantrace.
+    ///
+    /// This is the same as running the command with `RUST_LOG=debug`
+    /// environment variable.
+    #[arg(long, global = true, conflicts_with = "trace")]
+    pub debug: bool,
+
+    /// Enable verbose logs with backtrace.
+    ///
+    /// This is the same as running the command with `RUST_LOG=trace`
+    /// and `RUST_BACKTRACE=1` environment variables.
+    #[arg(long, global = true, conflicts_with = "debug")]
+    pub trace: bool,
+}
+
+impl Cli {
+    pub async fn execute(self) -> Result<()> {
+        if env::var("RUST_LOG").is_err() {
+            if self.debug {
+                env::set_var("RUST_LOG", "debug");
+            } else if self.trace {
+                env::set_var("RUST_LOG", "trace");
+            }
+        }
+
+        let filter = crate::tracing::install()?;
+
+        let mut printer = StdoutPrinter::new(self.output, self.color);
+
+        let mut res = self
+            .command
+            .execute(&mut printer, self.config_paths.as_ref())
+            .await;
+
+        if filter < LevelFilter::DEBUG {
+            res = res.note("Run with --debug to enable logs with spantrace.");
+        }
+
+        if filter < LevelFilter::TRACE {
+            res = res.note("Run with --trace to enable verbose logs with backtrace.")
+        }
+
+        res
+    }
 }
 
 #[derive(Subcommand, Debug)]

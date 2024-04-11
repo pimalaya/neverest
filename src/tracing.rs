@@ -3,7 +3,7 @@ use std::env;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{filter::LevelFilter, fmt, prelude::*, EnvFilter};
 
-pub fn install() -> Result<()> {
+pub fn install() -> Result<LevelFilter> {
     let fmt_layer = fmt::layer().with_target(false);
 
     let (filter_layer, current_filter) = match EnvFilter::try_from_default_env() {
@@ -28,10 +28,13 @@ pub fn install() -> Result<()> {
         env::set_var("RUST_BACKTRACE", "1");
     }
 
+    let debug = current_filter >= LevelFilter::DEBUG;
+
     color_eyre::config::HookBuilder::new()
-        .capture_span_trace_by_default(current_filter >= LevelFilter::DEBUG)
+        .capture_span_trace_by_default(debug)
+        .display_location_section(debug)
         .display_env_section(false)
         .install()?;
 
-    Ok(())
+    Ok(current_filter)
 }

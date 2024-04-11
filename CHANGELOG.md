@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Added `--debug` as an alias for `RUST_LOG=debug`.
+- Added `--trace` as an alias for `RUST_LOG=trace`.
+- Added notes about `--debug` and `--trace` when error occurs.
+
 ### Changed
 
 - Replaced `anyhow` by [`color-eyre`](https://crates.io/crates/color-eyre) for better error management.

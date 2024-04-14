@@ -192,7 +192,7 @@ impl SynchronizeAccountCommand {
             None
         };
 
-        let sync_builder = SyncBuilder::new(left, right).with_some_folders_filter(folders_filter);
+        let sync_builder = SyncBuilder::new(left, right).with_some_folder_filters(folders_filter);
 
         if self.dry_run {
             let report = sync_builder.with_dry_run(true).sync().await?;

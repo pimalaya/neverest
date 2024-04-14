@@ -68,7 +68,7 @@ color-eyre = "0.6"
 console = { version = "0.15.2", optional = true }
 dialoguer = "0.10.2"
 dirs = "4"
-email-lib = { version = "=0.23.2", default-features = false, features = ["account-sync", "derive"] }
+email-lib = { version = "=0.24.0", default-features = false, features = ["account-sync", "derive"] }
 email_address = { version = "0.2.4", optional = true }
 erased-serde = "0.3"
 indicatif = "0.17"

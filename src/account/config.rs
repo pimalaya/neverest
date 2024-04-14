@@ -75,12 +75,12 @@ impl AccountConfig {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct FolderConfig {
     #[serde(default)]
-    pub filter: FolderSyncStrategy,
+    pub filters: FolderSyncStrategy,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct EnvelopeConfig {
     #[serde(default)]
-    pub filter: EnvelopeSyncFilters,
+    pub filters: EnvelopeSyncFilters,
 }

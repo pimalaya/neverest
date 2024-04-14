@@ -1,9 +1,10 @@
-# 📫 Neverest CLI
+# 📫 Neverest CLI [![release](https://img.shields.io/github/v/release/soywod/neverest?color=success)](https://github.com/soywod/neverest/releases/latest) [![chat](https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat)](https://matrix.to/#/#pimalaya.neverest:matrix.org)
 
-[![release](https://img.shields.io/github/v/release/soywod/neverest?color=success)](https://github.com/soywod/neverest/releases/latest)
-[![chat](https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat)](https://matrix.to/#/#pimalaya.neverest:matrix.org)
+CLI to synchronize, backup and restore emails, based on [`email-lib`](https://crates.io/crates/email-lib).
 
-CLI to synchronize and backup emails, based on [`email-lib`](https://crates.io/crates/email-lib).
+![screenshot](https://pimalaya.org/neverest/cli/latest/screenshot.jpeg)
+
+*Disclaimer: the project is under active development, do not use in production before the final `v1.0.0`.*
 
 ## Features
 
@@ -44,15 +45,11 @@ $ nix-env -i neverest
 
 ## Contributing
 
-A **bug tracker** is available on [SourceHut](https://todo.sr.ht/~soywod/pimalaya). <sup>[[send an email](mailto:~soywod/pimalaya@todo.sr.ht)]</sup>
+If you want to **report a bug**, please send an email to the [bug tracker](https://todo.sr.ht/~soywod/pimalaya) at [~soywod/pimalaya@todo.sr.ht](mailto:~soywod/pimalaya@todo.sr.ht).
 
-A **mailing list** is available on [SourceHut](https://lists.sr.ht/~soywod/pimalaya). <sup>[[send an email](mailto:~soywod/pimalaya@lists.sr.ht)] [[subscribe](mailto:~soywod/pimalaya+subscribe@lists.sr.ht)] [[unsubscribe](mailto:~soywod/pimalaya+unsubscribe@lists.sr.ht)]</sup>
+If you want to **propose a feature** or **fix a bug**, please send a patch to the [mailing list](https://lists.sr.ht/~soywod/pimalaya) at [~soywod/pimalaya@lists.sr.ht](mailto:~soywod/pimalaya@lists.sr.ht). The simplest way to send a patch is to use [git send-email](https://git-scm.com/docs/git-send-email), follow [this guide](https://git-send-email.io/) to configure git properly.
 
-If you want to **report a bug**, please send an email at [~soywod/pimalaya@todo.sr.ht](mailto:~soywod/pimalaya@todo.sr.ht).
-
-If you want to **propose a feature** or **fix a bug**, please send a patch at [~soywod/pimalaya@lists.sr.ht](mailto:~soywod/pimalaya@lists.sr.ht). The simplest way to send a patch is to use [git send-email](https://git-scm.com/docs/git-send-email), follow [this guide](https://git-send-email.io/) to configure git properly.
-
-If you just want to **discuss** about the project, feel free to join the [Matrix](https://matrix.org/) workspace [#pimalaya.neverest](https://matrix.to/#/#pimalaya.neverest:matrix.org) or contact me directly [@soywod](https://matrix.to/#/@soywod:matrix.org). You can also use the mailing list.
+If you just want to **discuss** about the project, feel free to join the [Matrix](https://matrix.org/) workspace [#pimalaya.neverest](https://matrix.to/#/#pimalaya.neverest:matrix.org) or contact me directly [@soywod](https://matrix.to/#/@soywod:matrix.org). You can also [subscribe](mailto:~soywod/pimalaya+subscribe@lists.sr.ht) or [unsubscribe](mailto:~soywod/pimalaya+unsubscribe@lists.sr.ht) to the [mailing list](https://lists.sr.ht/~soywod/pimalaya).
 
 ## Sponsoring
 

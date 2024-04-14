@@ -94,8 +94,8 @@ impl SynchronizeAccountCommand {
 
         let (name, config) = config.into_account_config(self.account.name.as_deref())?;
 
-        let folder_filter = config.folder.map(|c| c.filter).unwrap_or_default();
-        let envelope_filter = config.envelope.map(|c| c.filter).unwrap_or_default();
+        let folder_filter = config.folder.map(|c| c.filters).unwrap_or_default();
+        let envelope_filter = config.envelope.map(|c| c.filters).unwrap_or_default();
 
         let (left_backend, left_config) = config.left.into_account_config(
             name.clone(),

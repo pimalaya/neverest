@@ -15,7 +15,7 @@ use email::{
     message::sync::config::MessageSyncPermissions,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 /// The global backend configuration (left or right).
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -46,6 +46,7 @@ impl BackendGlobalConfig {
             Arc::new(email::account::config::AccountConfig {
                 name,
                 folder: Some(email::folder::config::FolderConfig {
+                    aliases: self.folder.clone().map(|c| c.aliases),
                     sync: Some(email::folder::sync::config::FolderSyncConfig {
                         filter: folder_filter,
                         permissions: self.folder.map(|c| c.permissions).unwrap_or_default(),
@@ -101,6 +102,8 @@ pub enum BackendConfig {
 pub struct FolderBackendConfig {
     #[serde(default)]
     pub permissions: FolderSyncPermissions,
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

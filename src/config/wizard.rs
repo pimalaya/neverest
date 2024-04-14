@@ -123,7 +123,7 @@ mod test {
             AccountConfig {
                 default: Some(true),
                 folder: Some(FolderConfig {
-                    filter: FolderSyncStrategy::Include(BTreeSet::from_iter(["INBOX".into()])),
+                    filters: FolderSyncStrategy::Include(BTreeSet::from_iter(["INBOX".into()])),
                 }),
                 // TODO: test me
                 envelope: None,

@@ -1,5 +1,5 @@
 {
-  description = "CLI to synchronize and backup emails";
+  description = "CLI to synchronize, backup and restore emails";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-23.11";
@@ -8,7 +8,9 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     fenix = {
-      url = "github:nix-community/fenix";
+      # https://github.com/nix-community/fenix/pull/145
+      # url = "github:nix-community/fenix";
+      url = "github:soywod/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     naersk = {
@@ -120,7 +122,7 @@
             nativeBuildInputs = with pkgs; [ pkg-config ];
             buildInputs = with pkgs; [
               # Nix
-              # rnix-lsp
+              nil
               nixpkgs-fmt
 
               # Rust

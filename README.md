@@ -1,12 +1,9 @@
-<div align="center">
-<!-- <img src="./logo.png" width="192" height="192"> -->
-<h1>📫<br/>Neverest CLI</h1>
-<p>
-<a href="https://github.com/soywod/neverest/releases/latest"><img src="https://img.shields.io/github/v/release/soywod/neverest?color=success"/></a>
-<a href="https://matrix.to/#/#pimalaya.neverest:matrix.org"><img src="https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat"/></a>
-</p>
-<p>CLI to synchronize and backup emails,<br/>based on <a href="https://crates.io/crates/email-lib">email-lib</a></p>
-</div>
+# 📫 Neverest CLI
+
+[![release](https://img.shields.io/github/v/release/soywod/neverest?color=success)](https://github.com/soywod/neverest/releases/latest)
+[![chat](https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat)](https://matrix.to/#/#pimalaya.neverest:matrix.org)
+
+CLI to synchronize and backup emails, based on [`email-lib`](https://crates.io/crates/email-lib).
 
 ## Features
 
@@ -18,7 +15,7 @@
 
 ## Installation
 
-<table align="center">
+<table>
 <tr>
 <td width="50%">
 <a href="https://repology.org/project/neverest/versions">
@@ -46,8 +43,6 @@ $ nix-env -i neverest
 *Please read the [documentation](https://pimalaya.org/neverest/cli/latest/configuration/).*
 
 ## Contributing
-
-*Please read the [contributing guide](https://github.com/soywod/neverest/blob/master/CONTRIBUTING.md) for more detailed information.*
 
 A **bug tracker** is available on [SourceHut](https://todo.sr.ht/~soywod/pimalaya). <sup>[[send an email](mailto:~soywod/pimalaya@todo.sr.ht)]</sup>
 

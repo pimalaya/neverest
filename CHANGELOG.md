@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Replaced `log` by [`tracing`](https://crates.io/crates/tracing) for better log management.
 - Renamed `folder.filter` to `folder.filters` in order to match lib types.
 - Renamed `envelope.filter` to `envelope.filters` in order to match lib types.
+- Renamed `check` command to `doctor`.
 
 ## [0.1.0] - 2024-04-10
 

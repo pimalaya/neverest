@@ -1,6 +1,6 @@
 [package]
 name = "neverest"
-description = "CLI to synchronize and backup emails"
+description = "CLI to synchronize, backup and restore emails"
 version = "0.1.0"
 authors = ["soywod <clement.douin@posteo.net>"]
 edition = "2021"

@@ -1,4 +1,4 @@
-//! # Check up account command
+//! # Doctor account command
 //!
 //! This module contains the [`clap`] command for checking up left and
 //! right backends integrity of a given account.
@@ -26,15 +26,15 @@ use crate::{
 /// the configuration is valid, if backend can be created and if
 /// sessions work as expected.
 #[derive(Debug, Parser)]
-pub struct CheckUpAccountCommand {
+pub struct DoctorAccountCommand {
     #[command(flatten)]
     pub account: OptionalAccountNameArg,
 }
 
-impl CheckUpAccountCommand {
+impl DoctorAccountCommand {
     #[instrument(skip_all)]
     pub async fn execute(self, printer: &mut impl Printer, config: &Config) -> Result<()> {
-        info!("executing check up account command");
+        info!("executing doctor account command");
 
         let (name, config) = config.into_account_config(self.account.name.as_deref())?;
         printer.print_log(format!("Checking `{name}` account integrity…"))?;

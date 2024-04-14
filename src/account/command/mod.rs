@@ -5,6 +5,6 @@
 //! [`configure`] to configure secrets of a given account, and
 //! [`sync`] to synchronize two backends of a given account.
 
-pub mod check_up;
 pub mod configure;
+pub mod doctor;
 pub mod sync;

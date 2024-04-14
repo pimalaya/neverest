@@ -5,7 +5,7 @@ use tracing_subscriber::filter::LevelFilter;
 
 use crate::{
     account::command::{
-        check_up::CheckUpAccountCommand, configure::ConfigureAccountCommand,
+        configure::ConfigureAccountCommand, doctor::DoctorAccountCommand,
         sync::SynchronizeAccountCommand,
     },
     completion::command::GenerateCompletionCommand,
@@ -121,8 +121,8 @@ impl Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum NeverestCommand {
-    #[command(alias = "check-up", alias = "checkup")]
-    Check(CheckUpAccountCommand),
+    #[command(alias = "check-up", alias = "checkup", visible_alias = "check")]
+    Doctor(DoctorAccountCommand),
 
     #[command(alias = "cfg")]
     Configure(ConfigureAccountCommand),
@@ -142,7 +142,7 @@ pub enum NeverestCommand {
 impl NeverestCommand {
     pub async fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
         match self {
-            Self::Check(cmd) => {
+            Self::Doctor(cmd) => {
                 let config = Config::from_paths_or_default(config_paths).await?;
                 cmd.execute(printer, &config).await
             }

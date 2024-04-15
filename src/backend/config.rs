@@ -46,7 +46,7 @@ impl BackendGlobalConfig {
             Arc::new(email::account::config::AccountConfig {
                 name,
                 folder: Some(email::folder::config::FolderConfig {
-                    aliases: self.folder.clone().map(|c| c.aliases),
+                    aliases: self.folder.clone().and_then(|c| c.aliases),
                     sync: Some(email::folder::sync::config::FolderSyncConfig {
                         filter: folder_filter,
                         permissions: self.folder.map(|c| c.permissions).unwrap_or_default(),
@@ -102,8 +102,7 @@ pub enum BackendConfig {
 pub struct FolderBackendConfig {
     #[serde(default)]
     pub permissions: FolderSyncPermissions,
-    #[serde(default)]
-    pub aliases: HashMap<String, String>,
+    pub aliases: Option<HashMap<String, String>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]

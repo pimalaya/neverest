@@ -55,3 +55,11 @@ right.backend.encryption = "none" # or false
 # remote side.
 right.folder.permissions.delete = false
 right.message.permissions.delete = false
+
+# The right folder aliases
+#
+# In this example, we define custom folder aliases for the right
+# side. They are useful when you need to map left and right folders
+# together.
+right.folder.aliases.inbox = "Inbox"
+right.folder.aliases.sent = "Sent Mails"

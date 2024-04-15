@@ -83,7 +83,7 @@ impl Config {
 
         use crate::{wizard_prompt, wizard_warn};
 
-        wizard_warn!("Cannot find existing configuration at {path:?}.");
+        wizard_warn!("Cannot find configuration at {}", path.display());
 
         let confirm = Confirm::new()
             .with_prompt(wizard_prompt!(

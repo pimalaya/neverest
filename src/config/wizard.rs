@@ -136,6 +136,7 @@ mod test {
                         ..Default::default()
                     }),
                     folder: Some(FolderBackendConfig {
+                        aliases: Default::default(),
                         permissions: FolderSyncPermissions {
                             create: true,
                             delete: false,

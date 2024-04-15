@@ -1,7 +1,7 @@
 [package]
 name = "neverest"
 description = "CLI to synchronize, backup and restore emails"
-version = "0.1.0"
+version = "1.0.0-beta"
 authors = ["soywod <clement.douin@posteo.net>"]
 edition = "2021"
 license = "MIT"

@@ -12,7 +12,7 @@ CLI to synchronize, backup and restore emails, based on [`email-lib`](https://cr
 - Sync pairs of backend together ([IMAP](https://pimalaya.org/neverest/cli/latest/configuration/imap.html), [Maildir](https://pimalaya.org/neverest/cli/latest/configuration/maildir.html) and [Notmuch](https://pimalaya.org/neverest/cli/latest/configuration/notmuch.html) supported).
 - Partial sync based on [filters](https://pimalaya.org/neverest/cli/latest/configuration/index.html#folderfilter) (folder name, envelope date).
 - Restricted sync based on [permissions](https://pimalaya.org/neverest/cli/latest/configuration/index.html#leftrightfolderpermissions) (create/delete folder, update flag, create/update message).
-- Backup and restore using the [Maildir](https://pimalaya.org/neverest/cli/latest/configuration/maildir.html) backend.
+- [Backup and restore](https://pimalaya.org/neverest/cli/latest/usage/backup-and-restore.html) emails using the [Maildir](https://pimalaya.org/neverest/cli/latest/configuration/maildir.html) backend.
 
 *Coming soon:*
 

@@ -1,6 +1,28 @@
-# 📫 Neverest CLI [![release](https://img.shields.io/github/v/release/soywod/neverest?color=success)](https://github.com/soywod/neverest/releases/latest) [![chat](https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat)](https://matrix.to/#/#pimalaya.neverest:matrix.org)
-
-CLI to synchronize, backup and restore emails, based on [`email-lib`](https://crates.io/crates/email-lib).
+<table>
+  <tbody>
+    <tr>
+      <td align="center" rowspan="2">
+	    <br/>
+        <img src="https://git.sr.ht/~soywod/neverest-cli/blob/master/logo.svg" alt="Neverest Logo" width="164" height="164" />
+	    <br/>
+	    <br/>
+      </td>
+      <td>
+        <h1>Neverest CLI</h1>
+		<p>
+		  CLI to synchronize, backup and restore emails, based on
+          <a href="https://crates.io/crates/email-lib"><code>email-lib</code></a>.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td>
+        <a href="https://github.com/soywod/neverest/releases/latest"><img src="https://img.shields.io/github/v/release/soywod/neverest?color=success" alt="release"/></a>
+        <a href="https://matrix.to/#/#pimalaya.neverest:matrix.org"><img src="https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat" alt="chat"/></a>
+      </td>
+    </tr>
+  </tbody>
+</table>
 
 ![screenshot](https://pimalaya.org/neverest/cli/latest/screenshot.jpeg)
 

@@ -1,32 +1,17 @@
-<table>
-  <tbody>
-    <tr>
-      <td align="center" rowspan="2">
-	    <br/>
-        <img src="https://git.sr.ht/~soywod/neverest-cli/blob/master/logo.svg" alt="Neverest Logo" width="164" height="164" />
-	    <br/>
-	    <br/>
-      </td>
-      <td>
-        <h1>Neverest CLI</h1>
-		<p>
-		  CLI to synchronize, backup and restore emails, based on
-          <a href="https://crates.io/crates/email-lib"><code>email-lib</code></a>.
-        </p>
-      </td>
-    </tr>
-    <tr>
-      <td>
-        <a href="https://github.com/soywod/neverest/releases/latest"><img src="https://img.shields.io/github/v/release/soywod/neverest?color=success" alt="release"/></a>
-        <a href="https://matrix.to/#/#pimalaya.neverest:matrix.org"><img src="https://img.shields.io/matrix/pimalaya.neverest:matrix.org?color=success&label=chat" alt="chat"/></a>
-      </td>
-    </tr>
-  </tbody>
-</table>
+<div align="center">
+  <img src="https://git.sr.ht/~soywod/neverest-cli/blob/master/logo.svg" alt="Neverest Logo" width="164" height="164" />
+  <h1>📫 Neverest</h1>
+  <p>CLI to synchronize, backup and restore emails,<br>based on <a href="https://crates.io/crates/email-lib"><code>email-lib</code></a>.</p>
+  <p>
+    <a href="https://github.com/soywod/neverest/releases/latest"><img src="https://img.shields.io/github/v/release/soywod/neverest?color=success"/></a>
+    <a href="https://matrix.to/#/#pimalaya:matrix.org"><img src="https://img.shields.io/matrix/pimalaya:matrix.org?color=success&label=chat"/></a>
+  </p>
+  <!-- <p><em>🚧 <strong>Work In Progress</strong>, stay tuned! 🚧</em></p> -->
+</div>
 
-![screenshot](https://pimalaya.org/neverest/cli/latest/screenshot.jpeg)
+![screenshot](./screenshot.jpeg)
 
-*The project is under active development, do not use in production before the final `v1.0.0` (or at least do some backups).*
+*The project is under active development, do not use in production before the final `v1.0.0` (or at least do some manual backups).*
 
 ## Features
 
@@ -145,21 +130,11 @@ Just run `neverest`, the wizard will help you to configure your default account.
 
 *Please read the [documentation](https://pimalaya.org/neverest/cli/latest/configuration/) for more detailed information.*
 
-## Contributing
-
-If you want to **report a bug**, please send an email to the [bug tracker](https://todo.sr.ht/~soywod/pimalaya) at [~soywod/pimalaya@todo.sr.ht](mailto:~soywod/pimalaya@todo.sr.ht).
-
-If you want to **propose a feature** or **fix a bug**, please send a patch to the [mailing list](https://lists.sr.ht/~soywod/pimalaya) at [~soywod/pimalaya@lists.sr.ht](mailto:~soywod/pimalaya@lists.sr.ht). The simplest way to send a patch is to use [git send-email](https://git-scm.com/docs/git-send-email), follow [this guide](https://git-send-email.io/) to configure git properly.
-
-If you just want to **discuss** about the project, feel free to join the [Matrix](https://matrix.org/) workspace [#pimalaya.neverest](https://matrix.to/#/#pimalaya.neverest:matrix.org) or contact me directly [@soywod](https://matrix.to/#/@soywod:matrix.org). You can also [subscribe](mailto:~soywod/pimalaya+subscribe@lists.sr.ht) or [unsubscribe](mailto:~soywod/pimalaya+unsubscribe@lists.sr.ht) to the [mailing list](https://lists.sr.ht/~soywod/pimalaya).
-
-*Please read the [contributing guide](https://pimalaya.org/neverest/cli/latest/contributing.html) for more detailed information.*
-
 ## Sponsoring
 
-[![nlnet](https://nlnet.nl/logo/banner-160x60.png)](https://nlnet.nl/project/Neverest/index.html)
+[![nlnet](https://nlnet.nl/logo/banner-160x60.png)](https://nlnet.nl/project/Pimalaya/index.html)
 
-Special thanks to the [NLnet foundation](https://nlnet.nl/project/Neverest/index.html) and the [European Commission](https://www.ngi.eu/) that helped the project to receive financial support from:
+Special thanks to the [NLnet foundation](https://nlnet.nl/project/Pimalaya/index.html) and the [European Commission](https://www.ngi.eu/) that helped the project to receive financial support from:
 
 - [NGI Assure](https://nlnet.nl/assure/) in 2022
 - [NGI Zero Entrust](https://nlnet.nl/entrust/) in 2023

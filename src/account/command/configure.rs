@@ -4,11 +4,11 @@ use color_eyre::eyre::Result;
 use email::imap::config::ImapAuthConfig;
 #[cfg(feature = "smtp")]
 use email::smtp::config::SmtpAuthConfig;
+use pimalaya_tui::{cli::printer::Printer, prompt};
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
     account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
-    printer::Printer, ui::prompt,
 };
 
 /// Configure an account.
@@ -65,12 +65,12 @@ impl ConfigureAccountCommand {
             BackendConfig::Imap(config) => match &config.auth {
                 ImapAuthConfig::Passwd(config) => {
                     config
-                        .configure(|| prompt::passwd("Left IMAP password"))
+                        .configure(|| Ok(prompt::password("Left IMAP password")?))
                         .await?;
                 }
                 ImapAuthConfig::OAuth2(config) => {
                     config
-                        .configure(|| prompt::secret("Left IMAP OAuth 2.0 client secret"))
+                        .configure(|| Ok(prompt::secret("Left IMAP OAuth 2.0 client secret")?))
                         .await?;
                 }
             },
@@ -82,12 +82,12 @@ impl ConfigureAccountCommand {
             BackendConfig::Imap(config) => match &config.auth {
                 ImapAuthConfig::Passwd(config) => {
                     config
-                        .configure(|| prompt::passwd("Right IMAP password"))
+                        .configure(|| Ok(prompt::password("Right IMAP password")?))
                         .await?;
                 }
                 ImapAuthConfig::OAuth2(config) => {
                     config
-                        .configure(|| prompt::secret("Right IMAP OAuth 2.0 client secret"))
+                        .configure(|| Ok(prompt::secret("Right IMAP OAuth 2.0 client secret")?))
                         .await?;
                 }
             },
@@ -95,6 +95,6 @@ impl ConfigureAccountCommand {
         };
 
         let re = if self.reset { "re" } else { "" };
-        printer.print(format!("Account {name} successfully {re}configured!"))
+        printer.out(format!("Account {name} successfully {re}configured!"))
     }
 }

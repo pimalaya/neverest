@@ -1,18 +1,12 @@
 use color_eyre::eyre::Result;
-use dialoguer::Input;
+use pimalaya_tui::prompt;
 
-use crate::{
-    backend::{self, BackendSource},
-    ui::THEME,
-};
+use crate::backend::{self, BackendSource};
 
 use super::config::AccountConfig;
 
 pub async fn configure() -> Result<(String, AccountConfig)> {
-    let name = Input::with_theme(&*THEME)
-        .with_prompt("Account name")
-        .default(String::from("personal"))
-        .interact()?;
+    let name = prompt::text("Account name:", Some("personal"))?;
 
     let config = AccountConfig {
         default: Some(true),

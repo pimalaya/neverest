@@ -3,6 +3,8 @@
 //! This module contains the [`clap`] command for checking up left and
 //! right backends integrity of a given account.
 
+use std::sync::Arc;
+
 use clap::Parser;
 use color_eyre::eyre::Result;
 use email::backend::{Backend, BackendBuilder};
@@ -12,12 +14,11 @@ use email::imap::{ImapContextBuilder, ImapContextSync};
 use email::maildir::{MaildirContextBuilder, MaildirContextSync};
 #[cfg(feature = "notmuch")]
 use email::notmuch::{NotmuchContextBuilder, NotmuchContextSync};
-use std::sync::Arc;
+use pimalaya_tui::cli::printer::Printer;
 use tracing::{info, instrument};
 
 use crate::{
     account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
-    printer::Printer,
 };
 
 /// Check up the given account.
@@ -37,7 +38,7 @@ impl DoctorAccountCommand {
         info!("executing doctor account command");
 
         let (name, config) = config.into_account_config(self.account.name.as_deref())?;
-        printer.print_log(format!("Checking `{name}` account integrity…"))?;
+        printer.log(format!("Checking `{name}` account integrity…"))?;
 
         let folder_filter = config.folder.map(|c| c.filters).unwrap_or_default();
         let envelope_filter = config.envelope.map(|c| c.filters).unwrap_or_default();
@@ -51,7 +52,7 @@ impl DoctorAccountCommand {
         match left_backend {
             #[cfg(feature = "imap")]
             BackendConfig::Imap(imap_config) => {
-                printer.print_log("Checking left IMAP integrity…")?;
+                printer.log("Checking left IMAP integrity…")?;
                 let ctx = ImapContextBuilder::new(left_config.clone(), Arc::new(imap_config));
                 BackendBuilder::new(left_config.clone(), ctx)
                     .check_up::<Backend<ImapContextSync>>()
@@ -59,7 +60,7 @@ impl DoctorAccountCommand {
             }
             #[cfg(feature = "maildir")]
             BackendConfig::Maildir(maildir_config) => {
-                printer.print_log("Checking left Maildir integrity…")?;
+                printer.log("Checking left Maildir integrity…")?;
                 let ctx = MaildirContextBuilder::new(left_config.clone(), Arc::new(maildir_config));
                 BackendBuilder::new(left_config.clone(), ctx)
                     .check_up::<Backend<MaildirContextSync>>()
@@ -67,7 +68,7 @@ impl DoctorAccountCommand {
             }
             #[cfg(feature = "notmuch")]
             BackendConfig::Notmuch(notmuch_config) => {
-                printer.print_log("Checking left Notmuch integrity…")?;
+                printer.log("Checking left Notmuch integrity…")?;
                 let ctx = NotmuchContextBuilder::new(left_config.clone(), Arc::new(notmuch_config));
                 BackendBuilder::new(left_config.clone(), ctx)
                     .check_up::<Backend<NotmuchContextSync>>()
@@ -83,7 +84,7 @@ impl DoctorAccountCommand {
         match right_backend {
             #[cfg(feature = "imap")]
             BackendConfig::Imap(imap_config) => {
-                printer.print_log("Checking right IMAP integrity…")?;
+                printer.log("Checking right IMAP integrity…")?;
                 let ctx = ImapContextBuilder::new(right_config.clone(), Arc::new(imap_config));
                 BackendBuilder::new(right_config.clone(), ctx)
                     .check_up::<Backend<ImapContextSync>>()
@@ -91,7 +92,7 @@ impl DoctorAccountCommand {
             }
             #[cfg(feature = "maildir")]
             BackendConfig::Maildir(maildir_config) => {
-                printer.print_log("Checking right Maildir integrity…")?;
+                printer.log("Checking right Maildir integrity…")?;
                 let ctx =
                     MaildirContextBuilder::new(right_config.clone(), Arc::new(maildir_config));
                 BackendBuilder::new(right_config.clone(), ctx)
@@ -100,7 +101,7 @@ impl DoctorAccountCommand {
             }
             #[cfg(feature = "notmuch")]
             BackendConfig::Notmuch(notmuch_config) => {
-                printer.print_log("Checking right Notmuch integrity…")?;
+                printer.log("Checking right Notmuch integrity…")?;
                 let ctx =
                     NotmuchContextBuilder::new(right_config.clone(), Arc::new(notmuch_config));
                 BackendBuilder::new(right_config.clone(), ctx)
@@ -109,6 +110,6 @@ impl DoctorAccountCommand {
             }
         };
 
-        printer.print("Checkup successfully completed!")
+        printer.out("Checkup successfully completed!")
     }
 }

@@ -1,7 +1,7 @@
 [package]
 name = "neverest"
 description = "CLI to synchronize, backup and restore emails"
-version = "1.0.0-beta"
+version = "1.0.0"
 authors = ["soywod <clement.douin@posteo.net>"]
 edition = "2021"
 license = "MIT"
@@ -17,72 +17,50 @@ rustdoc-args = ["--cfg", "docsrs", "--document-private-items"]
 
 [features]
 default = [
-  # Enables the IMAP backend, which allows the synchronizer to connect
-  # to remote IMAP servers.
-  #
-  # doc: <https://pimalaya.org/neverest/cli/latest/configuration/imap.html>
   "imap",
-
-  # Enables the Maildir backend, which allows the synchronizer to
-  # access your emails locally, using the file system.
-  #
-  # spec: <https://cr.yp.to/proto/maildir.html>
-  # doc: <https://pimalaya.org/neverest/cli/latest/configuration/maildir.html>
   "maildir",
+  "notmuch",
 
-  # Enables the Notmuch backend, which allows the synchronizer to
-  # access your emails locally, using the Notmuch email system. This
-  # feature turns on the maildir feature, since Notmuch requires a
-  # Maildir folder to operate. This feature also requires the
-  # libnotmuch to be installed and available on your system.
-  #
-  # site: <https://notmuchmail.org/>
-  # doc: <https://pimalaya.org/neverest/cli/latest/configuration/notmuch.html>
-  # "notmuch",
-
-  # Enables the wizard configurator, which interactively helps you to
-  # configure your default account. It also automatically discovers
-  # remote IMAP settings from your email address.
-  #
-  # doc: <https://pimalaya.org/neverest/cli/latest/configuration/index.html#automatically-using-the-wizard>
+  "keyring",
+  "oauth2",
   "wizard",
 ]
 
-imap = ["email-lib/imap"]
-maildir = ["email-lib/maildir"]
-notmuch = ["email-lib/notmuch"]
-wizard = [
-  "dep:console",
-  "dep:email_address",
-  "dep:oauth-lib",
-  "dep:secret-lib",
-  "dep:toml_edit",
-  "email-lib/account-discovery",
-]
+imap = ["email-lib/imap", "pimalaya-tui/imap"]
+maildir = ["email-lib/maildir", "pimalaya-tui/maildir"]
+notmuch = ["email-lib/notmuch", "pimalaya-tui/notmuch"]
+
+keyring = ["email-lib/keyring", "pimalaya-tui/keyring", "secret-lib?/keyring-tokio"]
+oauth2 = ["dep:oauth-lib", "email-lib/oauth2", "pimalaya-tui/oauth2", "keyring"]
+wizard = ["dep:console", "dep:secret-lib", "email-lib/autoconfig"]
 
 [dependencies]
 clap = { version = "4.4", features = ["derive", "wrap_help"] }
 clap_complete = "4.4"
 clap_mangen = "0.2"
 color-eyre = "0.6"
-console = { version = "0.15.2", optional = true }
-dialoguer = "0.10.2"
-dirs = "4"
-email-lib = { version = "=0.24.0", default-features = false, features = ["account-sync", "derive"] }
-email_address = { version = "0.2.4", optional = true }
-erased-serde = "0.3"
-indicatif = "0.17"
+email-lib = { version = "=0.25.0", default-features = false, features = ["pool", "sync", "derive"] }
 oauth-lib = { version = "=0.1.1", optional = true }
 once_cell = "1.16"
-secret-lib = { version = "=0.4.4", optional = true, features = ["derive"] }
+pimalaya-tui = { version = "=0.1.0", default-features = false, features = ["cli", "config", "tracing"] }
+secret-lib = { version = "=0.4.6", optional = true, features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
-serde-toml-merge = "0.3"
 serde_json = "1"
-shellexpand-utils = "=0.2.1"
-termcolor = "1"
 tokio = { version = "1.23", default-features = false, features = ["macros", "rt-multi-thread"] }
 toml = "0.8"
-toml_edit = { version = "0.22", optional = true }
 tracing = "0.1"
 tracing-error = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# TODO: delete console as soon as we can replace them with a crossterm
+# alternative
+console = { version = "0.15.2", optional = true }
+indicatif = "0.17"
+
+[patch.crates-io]
+imap-codec = { git = "https://github.com/duesee/imap-codec" }
+imap-next = { git = "https://github.com/duesee/imap-next", branch = "jakoschiko_poison-message-with-fragmentizer" }
+imap-client = { git = "https://github.com/pimalaya/imap-client" }
+oauth-lib = { git = "https://github.com/pimalaya/core" }
+email-lib = { git = "https://github.com/pimalaya/core" }
+pimalaya-tui = { git = "https://github.com/pimalaya/tui" }

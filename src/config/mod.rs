@@ -5,14 +5,11 @@
 #[cfg(feature = "wizard")]
 pub mod wizard;
 
-use color_eyre::eyre::{anyhow, bail, Context, Result};
-use dirs::{config_dir, home_dir};
+use color_eyre::eyre::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use serde_toml_merge::merge;
-use shellexpand_utils::{canonicalize, expand};
-use std::{collections::HashMap, fs, path::PathBuf};
-use toml::Value;
-use tracing::debug;
+use std::{collections::HashMap, path::PathBuf};
+
+use pimalaya_tui::config::TomlConfig;
 
 use crate::account::config::AccountConfig;
 
@@ -24,51 +21,9 @@ pub struct Config {
     pub accounts: HashMap<String, AccountConfig>,
 }
 
+impl TomlConfig<AccountConfig> for Config {}
+
 impl Config {
-    /// Read and parse the TOML configuration at the given paths.
-    ///
-    /// Returns an error if a configuration file cannot be read or if
-    /// a content cannot be parsed.
-    fn from_paths(paths: &[PathBuf]) -> Result<Self> {
-        match paths.len() {
-            0 => {
-                // should never happen
-                bail!("cannot read config file from empty paths");
-            }
-            1 => {
-                let path = &paths[0];
-
-                let ref content = fs::read_to_string(path)
-                    .context(format!("cannot read config file at {path:?}"))?;
-
-                toml::from_str(content).context(format!("cannot parse config file at {path:?}"))
-            }
-            _ => {
-                let path = &paths[0];
-
-                let mut merged_content = fs::read_to_string(path)
-                    .context(format!("cannot read config file at {path:?}"))?
-                    .parse::<Value>()?;
-
-                for path in &paths[1..] {
-                    match fs::read_to_string(path) {
-                        Ok(content) => {
-                            merged_content = merge(merged_content, content.parse()?).unwrap();
-                        }
-                        Err(err) => {
-                            debug!("skipping subconfig file at {path:?}: {err}");
-                            continue;
-                        }
-                    }
-                }
-
-                merged_content
-                    .try_into()
-                    .context(format!("cannot parse merged config file at {path:?}"))
-            }
-        }
-    }
-
     /// Create and save a TOML configuration using the wizard.
     ///
     /// If the user accepts the confirmation, the wizard starts and
@@ -78,25 +33,7 @@ impl Config {
     /// NOTE: the wizard can only be used with interactive shells.
     #[cfg(feature = "wizard")]
     async fn from_wizard(path: &PathBuf) -> Result<Self> {
-        use dialoguer::Confirm;
-        use std::process;
-
-        use crate::{wizard_prompt, wizard_warn};
-
-        wizard_warn!("Cannot find configuration at {}", path.display());
-
-        let confirm = Confirm::new()
-            .with_prompt(wizard_prompt!(
-                "Would you like to create one with the wizard?"
-            ))
-            .default(true)
-            .interact_opt()?
-            .unwrap_or_default();
-
-        if !confirm {
-            process::exit(0);
-        }
-
+        Self::confirm_from_wizard(path)?;
         wizard::configure(path).await
     }
 
@@ -134,36 +71,6 @@ impl Config {
         }
     }
 
-    /// Get the default configuration path.
-    ///
-    /// Returns an error if the XDG configuration directory cannot be
-    /// found.
-    pub fn default_path() -> Result<PathBuf> {
-        Ok(config_dir()
-            .ok_or(anyhow!("cannot get XDG config directory"))?
-            .join("neverest")
-            .join("config.toml"))
-    }
-
-    /// Get the first default configuration path that points to a
-    /// valid file.
-    ///
-    /// Tries paths in this order:
-    ///
-    /// - `$XDG_CONFIG_DIR/neverest/config.toml` (or equivalent to
-    ///   `$XDG_CONFIG_DIR` in other OSes.)
-    /// - `$HOME/.config/neverest/config.toml`
-    /// - `$HOME/.neverestrc`
-    pub fn first_valid_default_path() -> Option<PathBuf> {
-        Self::default_path()
-            .ok()
-            .filter(|p| p.exists())
-            .or_else(|| home_dir().map(|p| p.join(".config").join("neverest").join("config.toml")))
-            .filter(|p| p.exists())
-            .or_else(|| home_dir().map(|p| p.join(".neverestrc")))
-            .filter(|p| p.exists())
-    }
-
     pub fn into_account_config(
         &self,
         account_name: Option<&str>,
@@ -191,13 +98,4 @@ impl Config {
 
         Ok((account_name, account_config))
     }
-}
-
-/// Parse a configuration file path as [`PathBuf`].
-///
-/// The path is shell-expanded then canonicalized (if applicable).
-pub fn path_parser(path: &str) -> Result<PathBuf, String> {
-    expand::try_path(path)
-        .map(canonicalize::path)
-        .map_err(|err| err.to_string())
 }

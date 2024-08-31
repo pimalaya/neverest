@@ -8,7 +8,9 @@ use email::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::backend::config::{BackendConfig, BackendGlobalConfig};
+#[cfg(all(feature = "imap", feature = "keyring"))]
+use crate::backend::config::BackendConfig;
+use crate::backend::config::BackendGlobalConfig;
 
 /// The account configuration.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
@@ -48,7 +50,7 @@ impl AccountConfig {
     /// entries by default ones, based on the given account name.
     pub fn configure(&mut self, account_name: &str) -> Result<()> {
         match &mut self.left.backend {
-            #[cfg(feature = "imap")]
+            #[cfg(all(feature = "imap", feature = "keyring"))]
             BackendConfig::Imap(config) => {
                 config
                     .auth
@@ -58,7 +60,7 @@ impl AccountConfig {
         }
 
         match &mut self.right.backend {
-            #[cfg(feature = "imap")]
+            #[cfg(all(feature = "imap", feature = "keyring"))]
             BackendConfig::Imap(config) => {
                 config
                     .auth

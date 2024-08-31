@@ -1,3 +1,5 @@
+use std::fmt;
+
 pub mod config;
 #[cfg(feature = "wizard")]
 pub mod wizard;
@@ -18,11 +20,11 @@ impl BackendSource {
     }
 }
 
-impl From<BackendSource> for String {
-    fn from(source: BackendSource) -> Self {
-        match source {
-            BackendSource::Left => String::from("Left backend source"),
-            BackendSource::Right => String::from("Right backend source"),
+impl fmt::Display for BackendSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Left => write!(f, "Left backend source"),
+            Self::Right => write!(f, "Right backend source"),
         }
     }
 }
@@ -37,15 +39,15 @@ pub enum BackendKind {
     Notmuch,
 }
 
-impl ToString for BackendKind {
-    fn to_string(&self) -> String {
+impl fmt::Display for BackendKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             #[cfg(feature = "imap")]
-            Self::Imap => String::from("IMAP"),
+            Self::Imap => write!(f, "IMAP"),
             #[cfg(feature = "maildir")]
-            Self::Maildir => String::from("Maildir"),
+            Self::Maildir => write!(f, "Maildir"),
             #[cfg(feature = "notmuch")]
-            Self::Notmuch => String::from("Notmuch"),
+            Self::Notmuch => write!(f, "Notmuch"),
         }
     }
 }

@@ -1,11 +1,12 @@
+use std::{fs, path::PathBuf};
+
 use clap::{CommandFactory, Parser};
 use clap_mangen::Man;
 use color_eyre::eyre::Result;
-use shellexpand_utils::{canonicalize, expand};
-use std::{fs, path::PathBuf};
+use pimalaya_tui::cli::{arg::path_parser, printer::Printer};
 use tracing::{info, instrument};
 
-use crate::{cli::Cli, printer::Printer};
+use crate::cli::Cli;
 
 /// Generate manual pages to a directory.
 ///
@@ -16,7 +17,7 @@ use crate::{cli::Cli, printer::Printer};
 #[derive(Debug, Parser)]
 pub struct GenerateManualCommand {
     /// Directory where man files should be generated in.
-    #[arg(value_parser = dir_parser)]
+    #[arg(value_parser = path_parser)]
     pub dir: PathBuf,
 }
 
@@ -34,7 +35,7 @@ impl GenerateManualCommand {
         Man::new(cmd).render(&mut buffer)?;
 
         fs::create_dir_all(&self.dir)?;
-        printer.print_log(format!("Generating man page for command {cmd_name}…"))?;
+        printer.log(format!("Generating man page for command {cmd_name}…"))?;
         fs::write(self.dir.join(format!("{}.1", cmd_name)), buffer)?;
 
         for subcmd in subcmds {
@@ -43,28 +44,18 @@ impl GenerateManualCommand {
             let mut buffer = Vec::new();
             Man::new(subcmd).render(&mut buffer)?;
 
-            printer.print_log(format!("Generating man page for subcommand {subcmd_name}…"))?;
+            printer.log(format!("Generating man page for subcommand {subcmd_name}…"))?;
             fs::write(
                 self.dir.join(format!("{}-{}.1", cmd_name, subcmd_name)),
                 buffer,
             )?;
         }
 
-        printer.print(format!(
+        printer.out(format!(
             "{subcmds_len} man page(s) successfully generated in {:?}!",
             self.dir
         ))?;
 
         Ok(())
     }
-}
-
-/// Parse the given [`str`] as [`PathBuf`].
-///
-/// The path is first shell expanded, then canonicalized (if
-/// applicable).
-fn dir_parser(path: &str) -> Result<PathBuf, String> {
-    expand::try_path(path)
-        .map(canonicalize::path)
-        .map_err(|err| err.to_string())
 }

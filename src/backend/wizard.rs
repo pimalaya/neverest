@@ -1,13 +1,8 @@
 use color_eyre::eyre::Result;
-use dialoguer::Select;
+use email::autoconfig;
+use pimalaya_tui::{prompt, wizard};
 
-#[cfg(feature = "imap")]
-use crate::imap;
-#[cfg(feature = "maildir")]
-use crate::maildir;
-#[cfg(feature = "notmuch")]
-use crate::notmuch;
-use crate::ui::THEME;
+use crate::backend::config::BackendConfig;
 
 use super::{config::BackendGlobalConfig, BackendKind, BackendSource};
 
@@ -21,23 +16,31 @@ static DEFAULT_BACKEND_KINDS: &[BackendKind] = &[
 ];
 
 pub async fn configure(account_name: &str, source: BackendSource) -> Result<BackendGlobalConfig> {
-    let default_kind = if source.is_left() { 0 } else { 1 };
+    let backend = prompt::item(format!("{source}:"), &*DEFAULT_BACKEND_KINDS, None)?;
 
-    let kind = Select::with_theme(&*THEME)
-        .with_prompt(source)
-        .items(DEFAULT_BACKEND_KINDS)
-        .default(default_kind)
-        .interact_opt()?
-        .unwrap();
-
-    let backend = match &DEFAULT_BACKEND_KINDS[kind] {
+    let backend = match backend {
         #[cfg(feature = "imap")]
-        BackendKind::Imap => imap::wizard::configure(account_name).await,
+        BackendKind::Imap => {
+            let email = prompt::email("Email address:", None)?;
+
+            println!("Discovering IMAP config…");
+            let autoconfig = autoconfig::from_addr(&email).await.ok();
+
+            let config = wizard::imap::start(account_name, &email, autoconfig.as_ref()).await?;
+
+            BackendConfig::Imap(config)
+        }
         #[cfg(feature = "maildir")]
-        BackendKind::Maildir => maildir::wizard::configure(account_name),
+        BackendKind::Maildir => {
+            let config = wizard::maildir::start(account_name)?;
+            BackendConfig::Maildir(config)
+        }
         #[cfg(feature = "notmuch")]
-        BackendKind::Notmuch => notmuch::wizard::configure(),
-    }?;
+        BackendKind::Notmuch => {
+            let config = wizard::notmuch::start()?;
+            BackendConfig::Notmuch(config)
+        }
+    };
 
     Ok(BackendGlobalConfig {
         backend,

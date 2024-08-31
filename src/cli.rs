@@ -1,7 +1,11 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
-use color_eyre::{eyre::Result, Section};
-use std::{env, path::PathBuf};
-use tracing_subscriber::filter::LevelFilter;
+use color_eyre::eyre::Result;
+use pimalaya_tui::cli::{
+    arg::path_parser,
+    printer::{OutputFmt, Printer},
+};
 
 use crate::{
     account::command::{
@@ -9,10 +13,8 @@ use crate::{
         sync::SynchronizeAccountCommand,
     },
     completion::command::GenerateCompletionCommand,
-    config::{self, Config},
+    config::Config,
     manual::command::GenerateManualCommand,
-    output::{ColorFmt, OutputFmt},
-    printer::{Printer, StdoutPrinter},
 };
 
 #[derive(Parser, Debug)]
@@ -30,8 +32,8 @@ pub struct Cli {
     /// configuration file. Other paths are merged with the first one,
     /// which allows you to separate your public config from your
     /// private(s) one(s).
-    #[arg(short, long = "config", global = true)]
-    #[arg(value_name = "PATH", value_parser = config::path_parser)]
+    #[arg(short, long = "config", global = true, env = "NEVEREST_CONFIG")]
+    #[arg(value_name = "PATH", value_parser = path_parser)]
     pub config_paths: Vec<PathBuf>,
 
     /// Customize the output format.
@@ -49,30 +51,6 @@ pub struct Cli {
     #[arg(value_name = "FORMAT", value_enum, default_value_t = Default::default())]
     pub output: OutputFmt,
 
-    /// Control when to use colors
-    ///
-    /// The default setting is 'auto', which means neverest will try
-    /// to guess when to use colors. For example, if neverest is
-    /// printing to a terminal, then it will use colors, but if it is
-    /// redirected to a file or a pipe, then it will suppress color
-    /// output. neverest will suppress color output in some other
-    /// circumstances as well. For example, if the TERM environment
-    /// variable is not set or set to 'dumb', then neverest will not
-    /// use colors.
-    ///
-    /// The possible values are:
-    ///
-    ///  - never: colors will never be used
-    ///
-    ///  - always: colors will always be used regardless of where output is sent
-    ///
-    ///  - ansi: like 'always', but emits ANSI escapes (even in a Windows console)
-    ///
-    ///  - auto: neverest tries to be smart
-    #[arg(long, short = 'C', global = true)]
-    #[arg(value_name = "MODE", value_enum, default_value_t = Default::default())]
-    pub color: ColorFmt,
-
     /// Enable logs with spantrace.
     ///
     /// This is the same as running the command with `RUST_LOG=debug`
@@ -86,37 +64,6 @@ pub struct Cli {
     /// and `RUST_BACKTRACE=1` environment variables.
     #[arg(long, global = true, conflicts_with = "debug")]
     pub trace: bool,
-}
-
-impl Cli {
-    pub async fn execute(self) -> Result<()> {
-        if env::var("RUST_LOG").is_err() {
-            if self.debug {
-                env::set_var("RUST_LOG", "debug");
-            } else if self.trace {
-                env::set_var("RUST_LOG", "trace");
-            }
-        }
-
-        let filter = crate::tracing::install()?;
-
-        let mut printer = StdoutPrinter::new(self.output, self.color);
-
-        let mut res = self
-            .command
-            .execute(&mut printer, self.config_paths.as_ref())
-            .await;
-
-        if filter < LevelFilter::DEBUG {
-            res = res.note("Run with --debug to enable logs with spantrace.");
-        }
-
-        if filter < LevelFilter::TRACE {
-            res = res.note("Run with --trace to enable verbose logs with backtrace.")
-        }
-
-        res
-    }
 }
 
 #[derive(Subcommand, Debug)]

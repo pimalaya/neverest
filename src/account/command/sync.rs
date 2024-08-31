@@ -3,6 +3,11 @@
 //! This module contains the [`clap`] command for synchronizing two
 //! backends of a given account.
 
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::{Arc, Mutex},
+};
+
 use clap::{ArgAction, Parser};
 use color_eyre::eyre::Result;
 #[cfg(feature = "imap")]
@@ -19,15 +24,11 @@ use email::{
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
 use once_cell::sync::Lazy;
-use std::{
-    collections::{BTreeSet, HashMap},
-    sync::{Arc, Mutex},
-};
+use pimalaya_tui::cli::printer::Printer;
 use tracing::{info, instrument};
 
 use crate::{
     account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
-    printer::Printer,
 };
 
 static MAIN_PROGRESS_STYLE: Lazy<ProgressStyle> = Lazy::new(|| {
@@ -199,28 +200,28 @@ impl SynchronizeAccountCommand {
             let mut hunks_count = report.folder.patch.len();
 
             if !report.folder.patch.is_empty() {
-                printer.print_log("Folders patch:")?;
+                printer.log("Folders patch:")?;
                 for (hunk, _) in report.folder.patch {
-                    printer.print_log(format!(" - {hunk}"))?;
+                    printer.log(format!(" - {hunk}"))?;
                 }
-                printer.print_log("")?;
+                printer.log("")?;
             }
 
             if !report.email.patch.is_empty() {
-                printer.print_log("Envelopes patch:")?;
+                printer.log("Envelopes patch:")?;
                 for (hunk, _) in report.email.patch {
                     hunks_count += 1;
-                    printer.print_log(format!(" - {hunk}"))?;
+                    printer.log(format!(" - {hunk}"))?;
                 }
-                printer.print_log("")?;
+                printer.log("")?;
             }
 
-            printer.print(format!(
+            printer.out(format!(
                 "Estimated patch length for account {account_name} to be synchronized: {hunks_count}"
             ))?;
         } else if printer.is_json() {
             sync_builder.sync().await?;
-            printer.print(format!("Account {account_name} successfully synchronized!"))?;
+            printer.out(format!("Account {account_name} successfully synchronized!"))?;
         } else {
             let multi = MultiProgress::new();
             let sub_progresses = Mutex::new(HashMap::new());
@@ -300,11 +301,11 @@ impl SynchronizeAccountCommand {
                 .filter_map(|(hunk, err)| err.as_ref().map(|err| (hunk, err)))
                 .collect::<Vec<_>>();
             if !folders_patch_err.is_empty() {
-                printer.print_log("")?;
-                printer.print_log("Errors occurred while applying the folders patch:")?;
+                printer.log("")?;
+                printer.log("Errors occurred while applying the folders patch:")?;
                 folders_patch_err
                     .iter()
-                    .try_for_each(|(hunk, err)| printer.print_log(format!(" - {hunk}: {err}")))?;
+                    .try_for_each(|(hunk, err)| printer.log(format!(" - {hunk}: {err}")))?;
             }
 
             let envelopes_patch_err = report
@@ -314,14 +315,14 @@ impl SynchronizeAccountCommand {
                 .filter_map(|(hunk, err)| err.as_ref().map(|err| (hunk, err)))
                 .collect::<Vec<_>>();
             if !envelopes_patch_err.is_empty() {
-                printer.print_log("")?;
-                printer.print_log("Errors occurred while applying the envelopes patch:")?;
+                printer.log("")?;
+                printer.log("Errors occurred while applying the envelopes patch:")?;
                 for (hunk, err) in envelopes_patch_err {
-                    printer.print_log(format!(" - {hunk}: {err}"))?;
+                    printer.log(format!(" - {hunk}: {err}"))?;
                 }
             }
 
-            printer.print(format!("Account {account_name} successfully synchronized!"))?;
+            printer.out(format!("Account {account_name} successfully synchronized!"))?;
         }
 
         Ok(())

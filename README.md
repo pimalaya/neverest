@@ -1,12 +1,12 @@
 <div align="center">
-  <img src="https://git.sr.ht/~soywod/neverest-cli/blob/master/logo.svg" alt="Neverest Logo" width="164" height="164" />
+  <img src="./logo.svg" alt="Logo" width="128" height="128" />
   <h1>📫 Neverest</h1>
-  <p>CLI to synchronize, backup and restore emails,<br>based on <a href="https://crates.io/crates/email-lib"><code>email-lib</code></a>.</p>
+  <p>CLI to synchronize, backup and restore emails,<br>based on <a href="https://crates.io/crates/email-lib"><code>email-lib</code></a></p>
   <p>
-    <a href="https://github.com/soywod/neverest/releases/latest"><img src="https://img.shields.io/github/v/release/soywod/neverest?color=success"/></a>
-    <a href="https://matrix.to/#/#pimalaya:matrix.org"><img src="https://img.shields.io/matrix/pimalaya:matrix.org?color=success&label=chat"/></a>
+    <a href="https://github.com/pimalaya/neverest/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/pimalaya/neverest?color=success"/></a>
+	<a href="https://repology.org/project/neverest/versions"><img alt="Repology" src="https://img.shields.io/repology/repositories/neverest?color=success"></a>
+    <a href="https://matrix.to/#/#pimalaya:matrix.org"><img alt="Matrix" src="https://img.shields.io/matrix/pimalaya:matrix.org?color=success&label=chat"/></a>
   </p>
-  <!-- <p><em>🚧 <strong>Work In Progress</strong>, stay tuned! 🚧</em></p> -->
 </div>
 
 ![screenshot](./screenshot.jpeg)
@@ -15,120 +15,403 @@
 
 ## Features
 
-- Backends configuration via interactive [wizard](https://pimalaya.org/neverest/cli/latest/configuration/index.html#automatically-using-the-wizard).
-- Sync pairs of backend together ([IMAP](https://pimalaya.org/neverest/cli/latest/configuration/imap.html), [Maildir](https://pimalaya.org/neverest/cli/latest/configuration/maildir.html) and [Notmuch](https://pimalaya.org/neverest/cli/latest/configuration/notmuch.html) supported).
-- Partial sync based on [filters](https://pimalaya.org/neverest/cli/latest/configuration/index.html#folderfilter) (folder name, envelope date).
-- Restricted sync based on [permissions](https://pimalaya.org/neverest/cli/latest/configuration/index.html#leftrightfolderpermissions) (create/delete folder, update flag, create/update message).
-- [Backup and restore](https://pimalaya.org/neverest/cli/latest/usage/backup-and-restore.html) emails using the [Maildir](https://pimalaya.org/neverest/cli/latest/configuration/maildir.html) backend.
+- Multi-accounting
+- Interactive configuration via **wizard** (requires `wizard` feature)
+- **IMAP** backend (requires `imap` feature)
+- **Maildir** backend (requires `maildir` feature)
+- **Notmuch** backend (requires `notmuch` feature)
+- **Partial** synchronization based on **filters**
+- **Restrictive** synchronization based on **permissions**
+- **Backup** and **restore** using the Maildir backend
 
 *Coming soon:*
 
-- *POP, JMAP and mbox support.*
-- *Editing configuration via wizard.*
+- *POP, JMAP and mbox support*
+- *Editing configuration via wizard*
 - *Native backup and restore support.*
 
 ## Installation
 
-<table>
-<tr>
-<td width="50%">
-<a href="https://repology.org/project/neverest/versions">
-<img src="https://repology.org/badge/vertical-allrepos/neverest.svg" alt="Packaging status" />
-</a>
-</td>
-<td width="50%">
+Neverest CLI can be installed with a prebuilt binary:
 
 ```bash
-# Cargo
-$ cargo install neverest
+# As root:
+$ curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | sudo sh
 
-# Nix
-$ nix-env -i neverest
+# As a regular user:
+$ curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | PREFIX=~/.local sh
 ```
 
-*Please read the [documentation](https://pimalaya.org/neverest/cli/latest/installation.html) for other installation methods.*
+These commands install the latest binary from the GitHub [releases](https://github.com/pimalaya/neverest/releases) section.
 
-</td>
-</tr>
-</table>
-
-## Configuration
-
-Just run `neverest`, the wizard will help you to configure your default account. You can also manually edit your configuration at `~/.config/neverest/config.toml`:
+*Binaries are built with [default](https://github.com/pimalaya/neverest/blob/master/Cargo.toml#L18) cargo features. If you want to enable or disable a feature, please use another installation method.*
 
 <details>
-  <summary>config.sample.toml</summary>
+  <summary>Cargo</summary>
 
-  ```toml
-  [accounts.example]
+  Neverest CLI can be installed with [cargo](https://doc.rust-lang.org/cargo/):
 
-  # The current `example` account will be used by default.
-  default = true
-  
-  # Filter folders according to the given rules.
-  #
-  # folder.filter.include = ["INBOX", "Sent"]
-  # folder.filter.exclude = ["All Mails"]
-  folder.filter = "all"
-  
-  # Filter envelopes according to the given rules.
-  #
-  # envelope.filter.before = "1990-12-31T23:59:60Z"
-  # envelope.filter.after = "1990-12-31T23:59:60Z"
-  
-  # The left backend configuration.
-  #
-  # In this example, the left side acts as our local cache.
-  left.backend.type = "maildir"
-  left.backend.root-dir = "/tmp/example"
-  
-  # The left backend permissions.
-  #
-  # Example of a full permissive backend (default behaviour):
-  left.folder.permissions.create = true
-  left.folder.permissions.delete = true
-  left.flag.permissions.update = true
-  left.message.permissions.create = true
-  left.message.permissions.delete = true
-  
-  # The right backend configuration.
-  #
-  # In this example, the right side acts as our remote.
-  right.backend.type = "imap"
-  right.backend.host = "localhost"
-  right.backend.port = 3143
-  right.backend.login = "alice@localhost"
-  
-  # The right backend password.
-  #
-  # right.backend.passwd.cmd = "echo password"
-  # right.backend.passwd.keyring = "password-keyring-entry"
-  right.backend.passwd.raw = "password"
-  
-  # The right backend encryption.
-  #
-  # right.backend.encryption = "tls" # or true
-  # right.backend.encryption = "start-tls"
-  right.backend.encryption = "none" # or false
-  
-  # The right backend permissions.
-  #
-  # In this example, we set up safe permissions by denying deletions
-  # remote side.
-  right.folder.permissions.delete = false
-  right.message.permissions.delete = false
+  ```bash
+  $ cargo install neverest
 
-  # The right folder aliases
-  #
-  # In this example, we define custom folder aliases for the right
-  # side. They are useful when you need to map left and right folders
-  # together.
-  right.folder.aliases.inbox = "Inbox"
-  right.folder.aliases.sent = "Sent Mails"
+  # With only IMAP support:
+  $ cargo install neverest --no-default-features --features imap
+  ```
+
+  You can also use the git repository for a more up-to-date (but less stable) version:
+
+  ```bash
+  $ cargo install --git https://github.com/pimalaya/neverest.git neverest
   ```
 </details>
 
-*Please read the [documentation](https://pimalaya.org/neverest/cli/latest/configuration/) for more detailed information.*
+<details>
+  <summary>Nix</summary>
+
+  Neverest CLI can be installed with [Nix](https://serokell.io/blog/what-is-nix):
+
+  ```bash
+  $ nix-env -i neverest
+  ```
+
+  You can also use the git repository for a more up-to-date (but less stable) version:
+
+  ```bash
+  $ nix-env -if https://github.com/pimalaya/neverest/archive/master.tar.gz
+
+  # or, from within the source tree checkout
+  $ nix-env -if .
+  ```
+
+  If you have the [Flakes](https://nixos.wiki/wiki/Flakes) feature enabled:
+
+  ```bash
+  $ nix profile install neverest
+
+  # or, from within the source tree checkout
+  $ nix profile install
+
+  # you can also run Neverest directly without installing it:
+  $ nix run neverest
+  ```
+</details>
+
+<details>
+  <summary>Sources</summary>
+
+  Neverest CLI can be installed from sources.
+
+  First you need to install the Rust development environment (see the [rust installation documentation](https://doc.rust-lang.org/cargo/getting-started/installation.html)):
+
+  ```bash
+  $ curl https://sh.rustup.rs -sSf | sh
+  ```
+
+  Then, you need to clone the repository and install dependencies:
+
+  ```bash
+  $ git clone https://github.com/pimalaya/neverest.git
+  $ cd neverest
+  $ cargo check
+  ```
+
+  Now, you can build Neverest:
+
+  ```bash
+  $ cargo build --release
+  ```
+
+  *Binaries are available under the `target/release` folder.*
+</details>
+
+## Configuration
+
+Just run `neverest`, the wizard will help you to configure your default account.
+
+You can also manually edit your own configuration, from scratch:
+
+- Copy the content of the documented [`./config.sample.toml`](./config.sample.toml)
+- Paste it in a new file `~/.config/neverest/config.toml`
+- Edit, then comment or uncomment the options you want
+
+<details>
+  <summary>Proton Mail (Bridge)</summary>
+
+  When using Proton Bridge, emails are synchronized locally and exposed via a local IMAP/SMTP server. This implies 2 things:
+
+  - Id order may be reversed or shuffled, but envelopes will still be sorted by date.
+  - SSL/TLS needs to be deactivated manually.
+  - The password to use is the one generated by Proton Bridge, not the one from your Proton Mail account.
+
+  ```toml
+  [accounts.proton]
+  email = "example@proton.me"
+
+  backend = "imap"
+  imap.host = "127.0.0.1"
+  imap.port = 1143
+  imap.encryption = false
+  imap.login = "example@proton.me"
+  imap.passwd.raw = "<bridge-imap-p@ssw0rd>"
+
+  message.send.backend = "smtp"
+  smtp.host = "127.0.0.1"
+  smtp.port = 1025
+  smtp.encryption = false
+  smtp.login = "example@proton.me"
+  smtp.passwd.raw = "<bridge-smtp-p@ssw0rd>"
+  ```
+
+  Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
+
+  - Save your password in any password manager that can be queried via the CLI:
+
+    ```toml
+    imap.passwd.cmd = "pass show proton"
+    ```
+
+  - Use the global keyring of your system (requires the `keyring` cargo feature):
+
+    ```toml
+    imap.passwd.keyring = "proton-example"
+    ```
+
+    Running `neverest configure -a proton` will ask for your IMAP password, just paste the one generated previously.
+</details>
+
+<details>
+  <summary>Gmail</summary>
+
+  Google passwords cannot be used directly. There is two ways to authenticate yourself:
+
+  ### Using [App Passwords](https://support.google.com/mail/answer/185833)
+
+  This option is the simplest and the fastest. First, be sure that:
+
+  - IMAP is enabled
+  - Two-step authentication is enabled
+  - Less secure app access is enabled
+
+  First create a [dedicated password](https://myaccount.google.com/apppasswords) for Neverest.
+
+  ```toml
+  [accounts.gmail]
+  email = "example@gmail.com"
+
+  folder.alias.inbox = "INBOX"
+  folder.alias.sent = "[Gmail]/Sent Mail"
+  folder.alias.drafts = "[Gmail]/Drafts"
+  folder.alias.trash = "[Gmail]/Trash"
+
+  backend = "imap"
+  imap.host = "imap.gmail.com"
+  imap.port = 993
+  imap.login = "example@gmail.com"
+  imap.passwd.cmd = "pass show gmail"
+
+  message.send.backend = "smtp"
+  smtp.host = "smtp.gmail.com"
+  smtp.port = 465
+  smtp.login = "example@gmail.com"
+  smtp.passwd.cmd = "pass show gmail"
+  ```
+
+  Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
+
+  - Save your password in any password manager that can be queried via the CLI:
+
+    ```toml
+    imap.passwd.cmd = "pass show gmail"
+    ```
+
+  - Use the global keyring of your system (requires the `keyring` cargo feature):
+
+    ```toml
+    imap.passwd.keyring = "gmail-example"
+    ```
+
+    Running `neverest configure -a gmail` will ask for your IMAP password, just paste the one generated previously.
+
+  ### Using OAuth 2.0
+
+  This option is the most secure but the hardest to configure. It requires the `oauth2` and `keyring` cargo features.
+
+  First, you need to get your OAuth 2.0 credentials by following [this guide](https://developers.google.com/identity/protocols/oauth2#1.-obtain-oauth-2.0-credentials-from-the-dynamic_data.setvar.console_name-.). Once you get your client id and your client secret, you can configure your Neverest account this way:
+
+  ```toml
+  [accounts.gmail]
+  email = "example@gmail.com"
+
+  folder.alias.inbox = "INBOX"
+  folder.alias.sent = "[Gmail]/Sent Mail"
+  folder.alias.drafts = "[Gmail]/Drafts"
+  folder.alias.trash = "[Gmail]/Trash"
+
+  backend = "imap"
+  imap.host = "imap.gmail.com"
+  imap.port = 993
+  imap.login = "example@gmail.com"
+  imap.oauth2.client-id = "<imap-client-id>"
+  imap.oauth2.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
+  imap.oauth2.token-url = "https://www.googleapis.com/oauth2/v3/token"
+  imap.oauth2.pkce = true
+  imap.oauth2.scope = "https://mail.google.com/"
+
+  message.send.backend = "smtp"
+  smtp.host = "smtp.gmail.com"
+  smtp.port = 465
+  smtp.login = "example@gmail.com"
+  smtp.oauth2.client-id = "<smtp-client-id>"
+  smtp.oauth2.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
+  smtp.oauth2.token-url = "https://www.googleapis.com/oauth2/v3/token"
+  smtp.oauth2.pkce = true
+  smtp.oauth2.scope = "https://mail.google.com/"
+
+  # If you want your SMTP to share the same client id (and so the same access token)
+  # as your IMAP config, you can add the following:
+  #
+  # imap.oauth2.client-id = "<client-id>"
+  # imap.oauth2.client-secret.keyring = "gmail-oauth2-client-secret"
+  # imap.oauth2.access-token.keyring = "gmail-oauth2-access-token"
+  # imap.oauth2.refresh-token.keyring = "gmail-oauth2-refresh-token"
+  #
+  # imap.oauth2.client-id = "<client-id>"
+  # imap.oauth2.client-secret.keyring = "gmail-oauth2-client-secret"
+  # imap.oauth2.access-token.keyring = "gmail-oauth2-access-token"
+  # smtp.oauth2.refresh-token.keyring = "gmail-oauth2-refresh-token"
+  ```
+
+  Running `neverest configure -a gmail` will complete your OAuth 2.0 setup and ask for your client secret.
+</details>
+
+<details>
+  <summary>Outlook</summary>
+
+  ```toml
+  [accounts.outlook]
+  email = "example@outlook.com"
+
+  backend = "imap"
+  imap.host = "outlook.office365.com"
+  imap.port = 993
+  imap.login = "example@outlook.com"
+  imap.passwd.cmd = "pass show outlook"
+
+  message.send.backend = "smtp"
+  smtp.host = "smtp.mail.outlook.com"
+  smtp.port = 587
+  smtp.encryption = "start-tls"
+  smtp.login = "example@outlook.com"
+  smtp.passwd.cmd = "pass show outlook"
+  ```
+
+  ### Using OAuth 2.0
+
+  This option is the most secure but the hardest to configure. First, you need to get your OAuth 2.0 credentials by following [this guide](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth). Once you get your client id and your client secret, you can configure your Neverest account this way:
+
+  ```toml
+  [accounts.outlook]
+  email = "example@outlook.com"
+
+  backend = "imap"
+  imap.host = "outlook.office365.com"
+  imap.port = 993
+  imap.login = "example@outlook.com"
+  imap.oauth2.client-id = "<imap-client-id>"
+  imap.oauth2.auth-url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+  imap.oauth2.token-url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+  imap.oauth2.pkce = true
+  imap.oauth2.scope = "https://outlook.office.com/IMAP.AccessAsUser.All"
+
+  message.send.backend = "smtp"
+  smtp.host = "smtp.mail.outlook.com"
+  smtp.port = 587
+  smtp.starttls = true
+  smtp.login = "example@outlook.com"
+  smtp.oauth2.client-id = "<smtp-client-id>"
+  smtp.oauth2.auth-url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+  smtp.oauth2.token-url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+  smtp.oauth2.pkce = true
+  smtp.oauth2.scope = "https://outlook.office.com/SMTP.Send"
+
+  # If you want your SMTP to share the same client id (and so the same access token)
+  # as your IMAP config, you can add the following:
+  #
+  # imap.oauth2.client-id = "<client-id>"
+  # imap.oauth2.client-secret.keyring = "outlook-oauth2-client-secret"
+  # imap.oauth2.access-token.keyring = "outlook-oauth2-access-token"
+  # imap.oauth2.refresh-token.keyring = "outlook-oauth2-refresh-token"
+  #
+  # imap.oauth2.client-id = "<client-id>"
+  # imap.oauth2.client-secret.keyring = "outlook-oauth2-client-secret"
+  # imap.oauth2.access-token.keyring = "outlook-oauth2-access-token"
+  # smtp.oauth2.refresh-token.keyring = "outlook-oauth2-refresh-token"
+  ```
+
+  Running `neverest configure -a outlook` will complete your OAuth 2.0 setup and ask for your client secret.
+</details>
+
+<details>
+  <summary>iCloud Mail</summary>
+
+  From the [iCloud Mail](https://support.apple.com/en-us/HT202304) support page:
+
+  - IMAP port = `993`.
+  - IMAP login = name of your iCloud Mail email address (for example, `johnappleseed`, not `johnappleseed@icloud.com`)
+  - SMTP port = `587` with `STARTTLS`
+  - SMTP login = full iCloud Mail email address (for example, `johnappleseed@icloud.com`, not `johnappleseed`)
+
+  ```toml
+  [accounts.icloud]
+  email = "johnappleseed@icloud.com"
+
+  backend = "imap"
+  imap.host = "imap.mail.me.com"
+  imap.port = 993
+  imap.login = "johnappleseed"
+  imap.passwd.cmd = "pass show icloud"
+
+  message.send.backend = "smtp"
+  smtp.host = "smtp.mail.me.com"
+  smtp.port = 587
+  smtp.encryption = "start-tls"
+  smtp.login = "johnappleseed@icloud.com"
+  smtp.passwd.cmd = "pass show icloud"
+  ```
+</details>
+
+## FAQ
+
+<details>
+  <summary>How to debug Neverest CLI?</summary>
+
+  The simplest way is to use `--debug` and `--trace` arguments.
+
+  The advanced way is based on environment variables:
+
+  - `RUST_LOG=<level>`: determines the log level filter, can be one of `off`, `error`, `warn`, `info`, `debug` and `trace`.
+  - `RUST_SPANTRACE=1`: enables the spantrace (a span represent periods of time in which a program was executing in a particular context).
+  - `RUST_BACKTRACE=1`: enables the error backtrace.
+  - `RUST_BACKTRACE=full`: enables the full error backtrace, which include source lines where the error originated from.
+
+  Logs are written to the `stderr`, which means that you can redirect them easily to a file:
+
+  ```
+  RUST_LOG=debug neverest 2>/tmp/neverest.log
+  ```
+</details>
+
+<details>
+  <summary>How the wizard discovers IMAP/SMTP configs?</summary>
+
+  All the lookup mechanisms use the email address domain as base for the lookup. It is heavily inspired from the Thunderbird [Autoconfiguration](https://udn.realityripple.com/docs/Mozilla/Thunderbird/Autoconfiguration) protocol. For example, for the email address `test@example.com`, the lookup is performed as (in this order):
+
+  1. check for `autoconfig.example.com`
+  2. look up of `example.com` in the ISPDB (the Thunderbird central database)
+  3. look up `MX example.com` in DNS, and for `mx1.mail.hoster.com`, look up `hoster.com` in the ISPDB
+  4. look up `SRV example.com` in DNS
+  5. try to guess (`imap.example.com`, `smtp.example.com`…)
+</details>
 
 ## Sponsoring
 
@@ -142,7 +425,8 @@ Special thanks to the [NLnet foundation](https://nlnet.nl/project/Pimalaya/index
 If you appreciate the project, feel free to donate using one of the following providers:
 
 [![GitHub](https://img.shields.io/badge/-GitHub%20Sponsors-fafbfc?logo=GitHub%20Sponsors)](https://github.com/sponsors/soywod)
-[![PayPal](https://img.shields.io/badge/-PayPal-0079c1?logo=PayPal&logoColor=ffffff)](https://www.paypal.com/paypalme/soywod)
 [![Ko-fi](https://img.shields.io/badge/-Ko--fi-ff5e5a?logo=Ko-fi&logoColor=ffffff)](https://ko-fi.com/soywod)
 [![Buy Me a Coffee](https://img.shields.io/badge/-Buy%20Me%20a%20Coffee-ffdd00?logo=Buy%20Me%20A%20Coffee&logoColor=000000)](https://www.buymeacoffee.com/soywod)
 [![Liberapay](https://img.shields.io/badge/-Liberapay-f6c915?logo=Liberapay&logoColor=222222)](https://liberapay.com/soywod)
+[![thanks.dev](https://img.shields.io/badge/-thanks.dev-000000?logo=data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMjQuMDk3IiBoZWlnaHQ9IjE3LjU5NyIgY2xhc3M9InctMzYgbWwtMiBsZzpteC0wIHByaW50Om14LTAgcHJpbnQ6aW52ZXJ0IiB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciPjxwYXRoIGQ9Ik05Ljc4MyAxNy41OTdINy4zOThjLTEuMTY4IDAtMi4wOTItLjI5Ny0yLjc3My0uODktLjY4LS41OTMtMS4wMi0xLjQ2Mi0xLjAyLTIuNjA2di0xLjM0NmMwLTEuMDE4LS4yMjctMS43NS0uNjc4LTIuMTk1LS40NTItLjQ0Ni0xLjIzMi0uNjY5LTIuMzQtLjY2OUgwVjcuNzA1aC41ODdjMS4xMDggMCAxLjg4OC0uMjIyIDIuMzQtLjY2OC40NTEtLjQ0Ni42NzctMS4xNzcuNjc3LTIuMTk1VjMuNDk2YzAtMS4xNDQuMzQtMi4wMTMgMS4wMjEtMi42MDZDNS4zMDUuMjk3IDYuMjMgMCA3LjM5OCAwaDIuMzg1djEuOTg3aC0uOTg1Yy0uMzYxIDAtLjY4OC4wMjctLjk4LjA4MmExLjcxOSAxLjcxOSAwIDAgMC0uNzM2LjMwN2MtLjIwNS4xNTYtLjM1OC4zODQtLjQ2LjY4Mi0uMTAzLjI5OC0uMTU0LjY4Mi0uMTU0IDEuMTUxVjUuMjNjMCAuODY3LS4yNDkgMS41ODYtLjc0NSAyLjE1NS0uNDk3LjU2OS0xLjE1OCAxLjAwNC0xLjk4MyAxLjMwNXYuMjE3Yy44MjUuMyAxLjQ4Ni43MzYgMS45ODMgMS4zMDUuNDk2LjU3Ljc0NSAxLjI4Ny43NDUgMi4xNTR2MS4wMjFjMCAuNDcuMDUxLjg1NC4xNTMgMS4xNTIuMTAzLjI5OC4yNTYuNTI1LjQ2MS42ODIuMTkzLjE1Ny40MzcuMjYuNzMyLjMxMi4yOTUuMDUuNjIzLjA3Ni45ODQuMDc2aC45ODVabTE0LjMxNC03LjcwNmgtLjU4OGMtMS4xMDggMC0xLjg4OC4yMjMtMi4zNC42NjktLjQ1LjQ0NS0uNjc3IDEuMTc3LS42NzcgMi4xOTVWMTQuMWMwIDEuMTQ0LS4zNCAyLjAxMy0xLjAyIDIuNjA2LS42OC41OTMtMS42MDUuODktMi43NzQuODloLTIuMzg0di0xLjk4OGguOTg0Yy4zNjIgMCAuNjg4LS4wMjcuOTgtLjA4LjI5Mi0uMDU1LjUzOC0uMTU3LjczNy0uMzA4LjIwNC0uMTU3LjM1OC0uMzg0LjQ2LS42ODIuMTAzLS4yOTguMTU0LS42ODIuMTU0LTEuMTUydi0xLjAyYzAtLjg2OC4yNDgtMS41ODYuNzQ1LTIuMTU1LjQ5Ny0uNTcgMS4xNTgtMS4wMDQgMS45ODMtMS4zMDV2LS4yMTdjLS44MjUtLjMwMS0xLjQ4Ni0uNzM2LTEuOTgzLTEuMzA1LS40OTctLjU3LS43NDUtMS4yODgtLjc0NS0yLjE1NXYtMS4wMmMwLS40Ny0uMDUxLS44NTQtLjE1NC0xLjE1Mi0uMTAyLS4yOTgtLjI1Ni0uNTI2LS40Ni0uNjgyYTEuNzE5IDEuNzE5IDAgMCAwLS43MzctLjMwNyA1LjM5NSA1LjM5NSAwIDAgMC0uOTgtLjA4MmgtLjk4NFYwaDIuMzg0YzEuMTY5IDAgMi4wOTMuMjk3IDIuNzc0Ljg5LjY4LjU5MyAxLjAyIDEuNDYyIDEuMDIgMi42MDZ2MS4zNDZjMCAxLjAxOC4yMjYgMS43NS42NzggMi4xOTUuNDUxLjQ0NiAxLjIzMS42NjggMi4zNC42NjhoLjU4N3oiIGZpbGw9IiNmZmYiLz48L3N2Zz4=)](https://thanks.dev/soywod)
+[![PayPal](https://img.shields.io/badge/-PayPal-0079c1?logo=PayPal&logoColor=ffffff)](https://www.paypal.com/paypalme/soywod)

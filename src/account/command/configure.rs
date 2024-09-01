@@ -68,6 +68,7 @@ impl ConfigureAccountCommand {
                         .configure(|| Ok(prompt::password("Left IMAP password")?))
                         .await?;
                 }
+                #[cfg(feature = "oauth2")]
                 ImapAuthConfig::OAuth2(config) => {
                     config
                         .configure(|| Ok(prompt::secret("Left IMAP OAuth 2.0 client secret")?))
@@ -85,6 +86,7 @@ impl ConfigureAccountCommand {
                         .configure(|| Ok(prompt::password("Right IMAP password")?))
                         .await?;
                 }
+                #[cfg(feature = "oauth2")]
                 ImapAuthConfig::OAuth2(config) => {
                     config
                         .configure(|| Ok(prompt::secret("Right IMAP OAuth 2.0 client secret")?))

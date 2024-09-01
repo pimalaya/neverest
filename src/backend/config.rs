@@ -81,9 +81,13 @@ impl BackendGlobalConfig {
 ///
 /// Represents all valid backends managed by Neverest with their
 /// specific configuration.
-#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", tag = "type")]
 pub enum BackendConfig {
+    #[default]
+    #[serde(skip)]
+    None,
+
     /// The IMAP backend configuration.
     #[cfg(feature = "imap")]
     Imap(ImapConfig),

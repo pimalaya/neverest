@@ -7,6 +7,7 @@ use email::{
     envelope::sync::config::EnvelopeSyncFilters, folder::sync::config::FolderSyncStrategy,
 };
 use serde::{Deserialize, Serialize};
+use tracing::instrument;
 
 #[cfg(all(feature = "imap", feature = "keyring"))]
 use crate::backend::config::BackendConfig;
@@ -48,6 +49,7 @@ impl AccountConfig {
     ///
     /// This function is mostly used to replace undefined keyring
     /// entries by default ones, based on the given account name.
+    #[instrument(skip(self))]
     pub fn configure(&mut self, account_name: &str) -> Result<()> {
         match &mut self.left.backend {
             #[cfg(all(feature = "imap", feature = "keyring"))]

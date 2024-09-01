@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use clap::Parser;
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{bail, Result};
 use email::backend::{Backend, BackendBuilder};
 #[cfg(feature = "imap")]
 use email::imap::{ImapContextBuilder, ImapContextSync};
@@ -50,6 +50,9 @@ impl DoctorAccountCommand {
         );
 
         match left_backend {
+            BackendConfig::None => {
+                bail!("no left backend configured");
+            }
             #[cfg(feature = "imap")]
             BackendConfig::Imap(imap_config) => {
                 printer.log("Checking left IMAP integrity…")?;
@@ -82,6 +85,9 @@ impl DoctorAccountCommand {
                 .into_account_config(name.clone(), folder_filter, envelope_filter);
 
         match right_backend {
+            BackendConfig::None => {
+                bail!("no right backend configured");
+            }
             #[cfg(feature = "imap")]
             BackendConfig::Imap(imap_config) => {
                 printer.log("Checking right IMAP integrity…")?;

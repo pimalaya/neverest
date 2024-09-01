@@ -9,7 +9,7 @@ use std::{
 };
 
 use clap::{ArgAction, Parser};
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{bail, Result};
 #[cfg(feature = "imap")]
 use email::imap::ImapContextBuilder;
 #[cfg(feature = "maildir")]
@@ -110,6 +110,9 @@ impl SynchronizeAccountCommand {
                 .into_account_config(name.clone(), folder_filter, envelope_filter);
 
         match left_backend {
+            BackendConfig::None => {
+                bail!("no left backend configured");
+            }
             #[cfg(feature = "imap")]
             BackendConfig::Imap(imap_config) => {
                 let left_ctx = ImapContextBuilder::new(left_config.clone(), Arc::new(imap_config))
@@ -147,6 +150,9 @@ impl SynchronizeAccountCommand {
         right_backend: BackendConfig,
     ) -> Result<()> {
         match right_backend {
+            BackendConfig::None => {
+                bail!("no right backend configured");
+            }
             #[cfg(feature = "imap")]
             BackendConfig::Imap(imap_config) => {
                 let right_ctx =
@@ -196,31 +202,35 @@ impl SynchronizeAccountCommand {
         let sync_builder = SyncBuilder::new(left, right).with_some_folder_filters(folders_filter);
 
         if self.dry_run {
-            let report = sync_builder.with_dry_run(true).sync().await?;
+            let report = sync_builder
+                .with_dry_run(true)
+                .with_pool_size(1)
+                .sync()
+                .await?;
             let mut hunks_count = report.folder.patch.len();
 
             if !report.folder.patch.is_empty() {
-                printer.log("Folders patch:")?;
+                printer.log("Folders patch:\n")?;
                 for (hunk, _) in report.folder.patch {
-                    printer.log(format!(" - {hunk}"))?;
+                    printer.log(format!(" - {hunk}\n"))?;
                 }
-                printer.log("")?;
+                printer.log("\n")?;
             }
 
             if !report.email.patch.is_empty() {
-                printer.log("Envelopes patch:")?;
+                printer.log("Envelopes patch:\n")?;
                 for (hunk, _) in report.email.patch {
                     hunks_count += 1;
-                    printer.log(format!(" - {hunk}"))?;
+                    printer.log(format!(" - {hunk}\n"))?;
                 }
-                printer.log("")?;
+                printer.log("\n")?;
             }
 
             printer.out(format!(
-                "Estimated patch length for account {account_name} to be synchronized: {hunks_count}"
+                "Estimated patch length for account {account_name} to be synchronized: {hunks_count}\n"
             ))?;
         } else if printer.is_json() {
-            sync_builder.sync().await?;
+            sync_builder.with_pool_size(1).sync().await?;
             printer.out(format!("Account {account_name} successfully synchronized!"))?;
         } else {
             let multi = MultiProgress::new();
@@ -234,6 +244,7 @@ impl SynchronizeAccountCommand {
             main_progress.tick();
 
             let report = sync_builder
+                .with_pool_size(1)
                 .with_handler(move |evt| {
                     match evt {
                         SyncEvent::ListedAllFolders => {

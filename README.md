@@ -17,18 +17,19 @@
 
 - Multi-accounting
 - Interactive configuration via **wizard** (requires `wizard` feature)
+- Synchronize pair of backends together (namely `left` and `right`)
+- **Partial** synchronization based on **filters**
+- **Restrictive** synchronization based on **permissions**
 - **IMAP** backend (requires `imap` feature)
 - **Maildir** backend (requires `maildir` feature)
 - **Notmuch** backend (requires `notmuch` feature)
-- **Partial** synchronization based on **filters**
-- **Restrictive** synchronization based on **permissions**
-- **Backup** and **restore** using the Maildir backend
+- **Backup** and **restore** emails using the Maildir backend
 
 *Coming soon:*
 
 - *POP, JMAP and mbox support*
 - *Editing configuration via wizard*
-- *Native backup and restore support.*
+- *Native backup and restore support*
 
 ## Installation
 

@@ -1,65 +1,223 @@
+################################################################################
+#### Account configuration #####################################################
+################################################################################
+
 [accounts.example]
 
-# The current `example` account will be used by default.
+# Defaultness of the account. The current account will be used by
+# default in all commands.
+#
 default = true
 
-# Filter folders according to the given rules.
+# Synchronize folders according to the given rules
 #
 # folder.filter.include = ["INBOX", "Sent"]
 # folder.filter.exclude = ["All Mails"]
 folder.filter = "all"
 
-# Filter envelopes according to the given rules.
+# Synchronize envelopes according to the given rules
+#
+# Only before and after date filters are available.
 #
 # envelope.filter.before = "1990-12-31T23:59:60Z"
 # envelope.filter.after = "1990-12-31T23:59:60Z"
 
-# The left backend configuration.
+########################################
+#### Left/right backend configuration ##
+########################################
 #
-# In this example, the left side acts as our local cache.
-left.backend.type = "maildir"
-left.backend.root-dir = "/tmp/example"
+# There is no distinction between left and right. There is no
+# "direction" from left to right, backend can be configured in any
+# order.
 
-# The left backend permissions.
+# Left Maildir configuration
 #
-# Example of a full permissive backend (default behaviour):
+left.backend.type = "maildir"
+
+# The Maildir root directory. The path should point to the root level
+# of the Maildir directory.
+#
+left.backend.root-dir = "~/.Mail/example"
+
+# Does the Maildir folder follows the Maildir++ standard?
+#
+# See <https://en.wikipedia.org/wiki/Maildir#Maildir++>.
+#
+#left.backend.maildirpp = false
+
+# Left Notmuch configuration
+#
+#left.backend.type = "notmuch"
+
+# The path to the Notmuch database. The path should point to the root
+# directory containing the Notmuch database (usually the root Maildir
+# directory).
+#
+#left.backend.db-path = "~/.Mail/example"
+
+# Overrides the default path to the Maildir folder.
+#
+#left.backend.maildir-path = "~/.Mail/example"
+
+# Overrides the default Notmuch configuration file path.
+#
+#left.backend.config-path = "~/.notmuchrc"
+
+# Override the default Notmuch profile name.
+#
+#left.backend.profile = "example"
+
+# Left backend folder aliases
+#
+# These 4 special folders need an alias, in order to map themselves
+# correctly between left and left backend. If your left backend trash
+# folder is called "Trash", and your left one "Deleted", you need to
+# set up aliases to prevent having both at the same time.
+# 
+left.folder.aliases.inbox = "INBOX"
+left.folder.aliases.drafts = "Drafts"
+left.folder.aliases.sent = "Sent"
+left.folder.aliases.trash = "Trash"
+
+# Left backend permissions
+#
+# In this example, we set up a full permissive backend (default
+# behaviour):
+#
 left.folder.permissions.create = true
 left.folder.permissions.delete = true
 left.flag.permissions.update = true
 left.message.permissions.create = true
 left.message.permissions.delete = true
 
-# The right backend configuration.
+# Right IMAP configuration
 #
-# In this example, the right side acts as our remote.
 right.backend.type = "imap"
+
+# IMAP server host name
+#
 right.backend.host = "localhost"
-right.backend.port = 3143
-right.backend.login = "alice@localhost"
 
-# The right backend password.
+# IMAP server port
 #
-# right.backend.passwd.cmd = "echo password"
-# right.backend.passwd.keyring = "password-keyring-entry"
-right.backend.passwd.raw = "password"
+#right.backend.port = 143
+right.backend.port = 993
 
-# The right backend encryption.
+# IMAP server encryption
 #
-# right.backend.encryption = "tls" # or true
-# right.backend.encryption = "start-tls"
-right.backend.encryption = "none" # or false
+#right.backend.encryption = "none" # or false
+#right.backend.encryption = "start-tls"
+right.backend.encryption = "tls" # or true
 
-# The right backend permissions.
+# IMAP server login
 #
-# In this example, we set up safe permissions by denying deletions
-# remote side.
+right.backend.login = "example@localhost"
+
+# IMAP server password authentication configuration
+#
+# Password can be inlined (not recommended).
+#
+#right.backend.passwd.raw = "p@assw0rd"
+#
+# Password can be stored inside your system global keyring (requires
+# the keyring cargo feature). You must run at least once `himalaya
+# account configure` to set up the password.
+#
+#right.backend.passwd.keyring = "example-imap"
+#
+# Password can be retrieved from a shell command.
+#
+right.backend.passwd.cmd = "pass show example-imap"
+
+# IMAP server OAuth 2.0 authorization configuration
+#
+# Client identifier issued to the client during the registration
+# process described in RFC6749.
+# See <https://datatracker.ietf.org/doc/html/rfc6749#section-2.2>.
+#
+#right.backend.oauth2.client-id = "client-id"
+#
+# Client password issued to the client during the registration process
+# described in RFC6749.
+#
+# Defaults to keyring "<account-name>-imap-client-secret".
+# See <https://datatracker.ietf.org/doc/html/rfc6749#section-2.2>.
+#
+#right.backend.oauth2.client-secret.raw = "<raw-client-secret>"
+#right.backend.oauth2.client-secret.keyring = "example-imap-client-secret"
+#right.backend.oauth2.client-secret.cmd = "pass show example-imap-client-secret"
+#
+# Method for presenting an OAuth 2.0 bearer token to a service for
+# authentication
+#
+#right.backend.oauth2.method = "oauthbearer"
+#right.backend.oauth2.method = "xoauth2"
+#
+# URL of the authorization server's authorization endpoint
+#
+#right.backend.oauth2.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
+#
+# URL of the authorization server's token endpoint
+#
+#right.backend.oauth2.token-url = "https://www.googleapis.com/oauth2/v3/token"
+#
+# Access token returned by the token endpoint and used to access
+# protected resources. It is recommended to use the keyring variant,
+# as it will refresh automatically.
+#
+# Defaults to keyring "<account-name>-imap-access-token".
+#
+#right.backend.oauth2.access-token.raw = "<raw-access-token>"
+#right.backend.oauth2.access-token.keyring = "example-imap-access-token"
+#right.backend.oauth2.access-token.cmd = "pass show example-imap-access-token"
+#
+# Refresh token used to obtain a new access token (if supported by the
+# authorization server). It is recommended to use the keyring variant,
+# as it will refresh automatically.
+#
+# Defaults to keyring "<account-name>-imap-refresh-token".
+#
+#right.backend.oauth2.refresh-token.raw = "<raw-refresh-token>"
+#right.backend.oauth2.refresh-token.keyring = "example-imap-refresh-token"
+#right.backend.oauth2.refresh-token.cmd = "pass show example-imap-refresh-token"
+#
+# Enable the protection, as defined in RFC7636.
+#
+# See <https://datatracker.ietf.org/doc/html/rfc7636>.
+#
+#right.backend.oauth2.pkce = true
+#
+# Access token scope(s), as defined by the authorization server.
+#
+#right.backend.oauth2.scope = "unique scope"
+#right.backend.oauth2.scopes = ["multiple", "scopes"]
+#
+# Host name of the redirect server.
+# Defaults to localhost.
+#
+#right.backend.oauth2.redirect-host = "localhost"
+#
+# Port of the redirect server.
+# Defaults to the first available one.
+#
+#right.backend.oauth2.redirect-port = 9999
+
+# Right backend folder aliases
+#
+# These 4 special folders need an alias, in order to map themselves
+# correctly between left and right backend. If your left backend trash
+# folder is called "Trash", and your right one "Deleted", you need to
+# set up aliases to prevent having both at the same time.
+# 
+right.folder.aliases.inbox = "INBOX"
+right.folder.aliases.drafts = "Drafts"
+right.folder.aliases.sent = "Sent"
+right.folder.aliases.trash = "Trash"
+
+# Right backend permissions
+#
+# In this example, we set up safer permissions by denying deletions
+# right IMAP side.
+#
 right.folder.permissions.delete = false
 right.message.permissions.delete = false
-
-# The right folder aliases
-#
-# In this example, we define custom folder aliases for the right
-# side. They are useful when you need to map left and right folders
-# together.
-right.folder.aliases.inbox = "Inbox"
-right.folder.aliases.sent = "Sent Mails"

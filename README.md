@@ -31,6 +31,8 @@
 - *Editing configuration via wizard*
 - *Native backup and restore support*
 
+*Neverest CLI is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/neverest/blob/master/Cargo.toml#L18).*
+
 ## Installation
 
 Neverest CLI can be installed with a prebuilt binary:

@@ -3,9 +3,8 @@ use std::{fs, path::PathBuf};
 use color_eyre::eyre::Result;
 use pimalaya_tui::{config::TomlConfig, print, prompt};
 
-use crate::account;
-
 use super::Config;
+use crate::account;
 
 pub async fn configure(path: &PathBuf) -> Result<Config> {
     print::section("Configuring your default account");

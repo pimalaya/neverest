@@ -115,27 +115,32 @@ right.backend.login = "example@localhost"
 
 # IMAP server password authentication configuration
 #
+#right.backend.auth.type = "password"
+#
 # Password can be inlined (not recommended).
 #
-#right.backend.passwd.raw = "p@assw0rd"
+#right.backend.auth.raw = "p@assw0rd"
 #
 # Password can be stored inside your system global keyring (requires
 # the keyring cargo feature). You must run at least once `himalaya
 # account configure` to set up the password.
 #
-#right.backend.passwd.keyring = "example-imap"
+#right.backend.auth.keyring = "example-imap"
 #
 # Password can be retrieved from a shell command.
 #
-right.backend.passwd.cmd = "pass show example-imap"
+right.backend.auth.cmd = "pass show example-imap"
 
-# IMAP server OAuth 2.0 authorization configuration
+# IMAP server OAuth 2.0 authorization configuration (requires the
+# oauth2 cargo feature)
+#
+#right.backend.auth.type = "oauth2"
 #
 # Client identifier issued to the client during the registration
 # process described in RFC6749.
 # See <https://datatracker.ietf.org/doc/html/rfc6749#section-2.2>.
 #
-#right.backend.oauth2.client-id = "client-id"
+#right.backend.auth.client-id = "client-id"
 #
 # Client password issued to the client during the registration process
 # described in RFC6749.
@@ -143,23 +148,23 @@ right.backend.passwd.cmd = "pass show example-imap"
 # Defaults to keyring "<account-name>-imap-client-secret".
 # See <https://datatracker.ietf.org/doc/html/rfc6749#section-2.2>.
 #
-#right.backend.oauth2.client-secret.raw = "<raw-client-secret>"
-#right.backend.oauth2.client-secret.keyring = "example-imap-client-secret"
-#right.backend.oauth2.client-secret.cmd = "pass show example-imap-client-secret"
+#right.backend.auth.client-secret.raw = "<raw-client-secret>"
+#right.backend.auth.client-secret.keyring = "example-imap-client-secret"
+#right.backend.auth.client-secret.cmd = "pass show example-imap-client-secret"
 #
 # Method for presenting an OAuth 2.0 bearer token to a service for
 # authentication
 #
-#right.backend.oauth2.method = "oauthbearer"
-#right.backend.oauth2.method = "xoauth2"
+#right.backend.auth.method = "oauthbearer"
+#right.backend.auth.method = "xoauth2"
 #
 # URL of the authorization server's authorization endpoint
 #
-#right.backend.oauth2.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
+#right.backend.auth.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
 #
 # URL of the authorization server's token endpoint
 #
-#right.backend.oauth2.token-url = "https://www.googleapis.com/oauth2/v3/token"
+#right.backend.auth.token-url = "https://www.googleapis.com/oauth2/v3/token"
 #
 # Access token returned by the token endpoint and used to access
 # protected resources. It is recommended to use the keyring variant,
@@ -167,9 +172,9 @@ right.backend.passwd.cmd = "pass show example-imap"
 #
 # Defaults to keyring "<account-name>-imap-access-token".
 #
-#right.backend.oauth2.access-token.raw = "<raw-access-token>"
-#right.backend.oauth2.access-token.keyring = "example-imap-access-token"
-#right.backend.oauth2.access-token.cmd = "pass show example-imap-access-token"
+#right.backend.auth.access-token.raw = "<raw-access-token>"
+#right.backend.auth.access-token.keyring = "example-imap-access-token"
+#right.backend.auth.access-token.cmd = "pass show example-imap-access-token"
 #
 # Refresh token used to obtain a new access token (if supported by the
 # authorization server). It is recommended to use the keyring variant,
@@ -177,30 +182,30 @@ right.backend.passwd.cmd = "pass show example-imap"
 #
 # Defaults to keyring "<account-name>-imap-refresh-token".
 #
-#right.backend.oauth2.refresh-token.raw = "<raw-refresh-token>"
-#right.backend.oauth2.refresh-token.keyring = "example-imap-refresh-token"
-#right.backend.oauth2.refresh-token.cmd = "pass show example-imap-refresh-token"
+#right.backend.auth.refresh-token.raw = "<raw-refresh-token>"
+#right.backend.auth.refresh-token.keyring = "example-imap-refresh-token"
+#right.backend.auth.refresh-token.cmd = "pass show example-imap-refresh-token"
 #
 # Enable the protection, as defined in RFC7636.
 #
 # See <https://datatracker.ietf.org/doc/html/rfc7636>.
 #
-#right.backend.oauth2.pkce = true
+#right.backend.auth.pkce = true
 #
 # Access token scope(s), as defined by the authorization server.
 #
-#right.backend.oauth2.scope = "unique scope"
-#right.backend.oauth2.scopes = ["multiple", "scopes"]
+#right.backend.auth.scope = "unique scope"
+#right.backend.auth.scopes = ["multiple", "scopes"]
 #
 # Host name of the redirect server.
 # Defaults to localhost.
 #
-#right.backend.oauth2.redirect-host = "localhost"
+#right.backend.auth.redirect-host = "localhost"
 #
 # Port of the redirect server.
 # Defaults to the first available one.
 #
-#right.backend.oauth2.redirect-port = 9999
+#right.backend.auth.redirect-port = 9999
 
 # Right backend folder aliases
 #

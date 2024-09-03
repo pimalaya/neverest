@@ -7,6 +7,9 @@ use pimalaya_tui::cli::{printer::StdoutPrinter, tracing};
 async fn main() -> Result<()> {
     let tracing = tracing::install()?;
 
+    #[cfg(feature = "keyring")]
+    secret::keyring::set_global_service_name("neverest-cli");
+
     let cli = Cli::parse();
     let mut printer = StdoutPrinter::new(cli.output);
     let res = cli

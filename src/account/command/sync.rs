@@ -230,7 +230,7 @@ impl SynchronizeAccountCommand {
                 "Estimated patch length for account {account_name} to be synchronized: {hunks_count}\n"
             ))?;
         } else if printer.is_json() {
-            sync_builder.with_pool_size(1).sync().await?;
+            sync_builder.sync().await?;
             printer.out(format!("Account {account_name} successfully synchronized!"))?;
         } else {
             let multi = MultiProgress::new();
@@ -244,7 +244,6 @@ impl SynchronizeAccountCommand {
             main_progress.tick();
 
             let report = sync_builder
-                .with_pool_size(1)
                 .with_handler(move |evt| {
                     match evt {
                         SyncEvent::ListedAllFolders => {

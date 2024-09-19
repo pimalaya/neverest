@@ -808,7 +808,7 @@ checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
 [[package]]
 name = "email-lib"
 version = "0.25.0"
-source = "git+https://github.com/pimalaya/core#e14c66c29d1ef0fccd3f42ccee0746cdda0b093a"
+source = "git+https://github.com/pimalaya/core#2767c389b4ad3fb738c6d2d6348304f937643cee"
 dependencies = [
  "advisory-lock",
  "async-trait",
@@ -1596,7 +1596,7 @@ dependencies = [
 [[package]]
 name = "imap-client"
 version = "0.1.4"
-source = "git+https://github.com/pimalaya/imap-client#0524bb4ba80bfcee831899c819d6456b91f4b370"
+source = "git+https://github.com/pimalaya/imap-client#51963c174644859b72aacf7f2577ef6d93ccede6"
 dependencies = [
  "imap-next",
  "once_cell",
@@ -2214,7 +2214,7 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 [[package]]
 name = "oauth-lib"
 version = "0.1.1"
-source = "git+https://github.com/pimalaya/core#e14c66c29d1ef0fccd3f42ccee0746cdda0b093a"
+source = "git+https://github.com/pimalaya/core#2767c389b4ad3fb738c6d2d6348304f937643cee"
 dependencies = [
  "log",
  "oauth2",

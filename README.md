@@ -25,12 +25,6 @@
 - **Notmuch** backend (requires `notmuch` feature)
 - **Backup** and **restore** emails using the Maildir backend
 
-*Coming soon:*
-
-- *POP, JMAP and mbox support*
-- *Editing configuration via wizard*
-- *Native backup and restore support*
-
 *Neverest CLI is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/neverest/blob/master/Cargo.toml#L18).*
 
 ## Installation

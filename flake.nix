@@ -168,9 +168,7 @@
             postInstall = ''
               export WINEPREFIX="$(mktemp -d)"
 
-              mkdir -p $out/bin/share/{applications,completions,man,services}
-              cp assets/neverest.desktop $out/bin/share/applications/
-              cp assets/neverest-watch@.service $out/bin/share/services/
+              mkdir -p $out/bin/share/{completions,man}
 
               cd $out/bin
               ${runner} man ./share/man

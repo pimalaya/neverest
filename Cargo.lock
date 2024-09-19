@@ -1596,7 +1596,7 @@ dependencies = [
 [[package]]
 name = "imap-client"
 version = "0.1.4"
-source = "git+https://github.com/pimalaya/imap-client#51963c174644859b72aacf7f2577ef6d93ccede6"
+source = "git+https://github.com/pimalaya/imap-client#c1f0dfcfb3e5f22763324d6d2497e195d44c9ec8"
 dependencies = [
  "imap-next",
  "once_cell",

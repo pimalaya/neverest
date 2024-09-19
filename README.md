@@ -35,19 +35,41 @@
 
 ## Installation
 
-Neverest CLI can be installed with a prebuilt binary:
+*The `v1.0.0` is currently being tested on the `master` branch, and is the prefered version to use. Previous versions (including GitHub beta releases and repositories published versions) are not recommended.*
+
+### Pre-built binary
+
+Neverest CLI `v1.0.0` can be installed with a pre-built binary. Find the latest [`pre-release`](https://github.com/pimalaya/neverest/actions/workflows/pre-release.yml) GitHub workflow and look for the *Artifacts* section. You should find a pre-built binary matching your OS.
+
+### Cargo (git)
+
+Neverest CLI `v1.0.0` can also be installed with [cargo](https://doc.rust-lang.org/cargo/):
 
 ```bash
-# As root:
-$ curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | sudo sh
-
-# As a regular user:
-$ curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | PREFIX=~/.local sh
+$ cargo install --git https://github.com/pimalaya/neverest.git --force neverest
 ```
 
-These commands install the latest binary from the GitHub [releases](https://github.com/pimalaya/neverest/releases) section.
+### Other outdated methods
 
-*Binaries are built with [default](https://github.com/pimalaya/neverest/blob/master/Cargo.toml#L18) cargo features. If you want to enable or disable a feature, please use another installation method.*
+These installation methods should not be used until the `v1.0.0` is finally released, as they are all (temporarily) outdated:
+
+<details>
+  <summary>Pre-built binary</summary>
+
+  Neverest CLI can be installed with a prebuilt binary:
+
+  ```bash
+  # As root:
+  $ curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | sudo sh
+
+  # As a regular user:
+  $ curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | PREFIX=~/.local sh
+  ```
+
+  These commands install the latest binary from the GitHub [releases](https://github.com/pimalaya/neverest/releases) section.
+
+  *Binaries are built with [default](https://github.com/pimalaya/neverest/blob/master/Cargo.toml#L18) cargo features. If you want to enable or disable a feature, please use another installation method.*
+</details>
 
 <details>
   <summary>Cargo</summary>

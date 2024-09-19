@@ -11,16 +11,16 @@ default = true
 
 # Synchronize folders according to the given rules
 #
-# folder.filter.include = ["INBOX", "Sent"]
-# folder.filter.exclude = ["All Mails"]
-folder.filter = "all"
+#folder.filters = "all"
+#folder.filters.exclude = ["All Mails"]
+folder.filters.include = ["INBOX"]
 
 # Synchronize envelopes according to the given rules
 #
 # Only before and after date filters are available.
 #
-# envelope.filter.before = "1990-12-31T23:59:60Z"
-# envelope.filter.after = "1990-12-31T23:59:60Z"
+#envelope.filter.before = "1990-12-31T23:59:60Z"
+#envelope.filter.after = "1990-12-31T23:59:60Z"
 
 ########################################
 #### Left/right backend configuration ##

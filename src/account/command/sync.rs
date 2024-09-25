@@ -119,24 +119,45 @@ impl SynchronizeAccountCommand {
                     .with_prebuilt_credentials()
                     .await?;
                 let left = BackendBuilder::new(left_config.clone(), left_ctx);
-                self.pre_sync(printer, name.as_str(), left, right_config, right_backend)
-                    .await
+                self.pre_sync(
+                    printer,
+                    name.as_str(),
+                    config.pool_size,
+                    left,
+                    right_config,
+                    right_backend,
+                )
+                .await
             }
             #[cfg(feature = "maildir")]
             BackendConfig::Maildir(maildir_config) => {
                 let left_ctx =
                     MaildirContextBuilder::new(left_config.clone(), Arc::new(maildir_config));
                 let left = BackendBuilder::new(left_config.clone(), left_ctx);
-                self.pre_sync(printer, name.as_str(), left, right_config, right_backend)
-                    .await
+                self.pre_sync(
+                    printer,
+                    name.as_str(),
+                    config.pool_size,
+                    left,
+                    right_config,
+                    right_backend,
+                )
+                .await
             }
             #[cfg(feature = "notmuch")]
             BackendConfig::Notmuch(notmuch_config) => {
                 let left_ctx =
                     NotmuchContextBuilder::new(left_config.clone(), Arc::new(notmuch_config));
                 let left = BackendBuilder::new(left_config.clone(), left_ctx);
-                self.pre_sync(printer, name.as_str(), left, right_config, right_backend)
-                    .await
+                self.pre_sync(
+                    printer,
+                    name.as_str(),
+                    config.pool_size,
+                    left,
+                    right_config,
+                    right_backend,
+                )
+                .await
             }
         }
     }
@@ -145,6 +166,7 @@ impl SynchronizeAccountCommand {
         self,
         printer: &mut impl Printer,
         account_name: &str,
+        pool_size: Option<usize>,
         left: BackendBuilder<impl BackendContextBuilder + SyncHash + 'static>,
         right_config: Arc<AccountConfig>,
         right_backend: BackendConfig,
@@ -160,21 +182,24 @@ impl SynchronizeAccountCommand {
                         .with_prebuilt_credentials()
                         .await?;
                 let right = BackendBuilder::new(right_config.clone(), right_ctx);
-                self.sync(printer, account_name, left, right).await
+                self.sync(printer, account_name, pool_size, left, right)
+                    .await
             }
             #[cfg(feature = "maildir")]
             BackendConfig::Maildir(maildir_config) => {
                 let right_ctx =
                     MaildirContextBuilder::new(right_config.clone(), Arc::new(maildir_config));
                 let right = BackendBuilder::new(right_config.clone(), right_ctx);
-                self.sync(printer, account_name, left, right).await
+                self.sync(printer, account_name, pool_size, left, right)
+                    .await
             }
             #[cfg(feature = "notmuch")]
             BackendConfig::Notmuch(notmuch_config) => {
                 let right_ctx =
                     NotmuchContextBuilder::new(right_config.clone(), Arc::new(notmuch_config));
                 let right = BackendBuilder::new(right_config.clone(), right_ctx);
-                self.sync(printer, account_name, left, right).await
+                self.sync(printer, account_name, pool_size, left, right)
+                    .await
             }
         }
     }
@@ -183,6 +208,7 @@ impl SynchronizeAccountCommand {
         self,
         printer: &mut impl Printer,
         account_name: &str,
+        pool_size: Option<usize>,
         left: BackendBuilder<impl BackendContextBuilder + SyncHash + 'static>,
         right: BackendBuilder<impl BackendContextBuilder + SyncHash + 'static>,
     ) -> Result<()> {
@@ -199,14 +225,12 @@ impl SynchronizeAccountCommand {
             None
         };
 
-        let sync_builder = SyncBuilder::new(left, right).with_some_folder_filters(folders_filter);
+        let sync_builder = SyncBuilder::new(left, right)
+            .with_some_pool_size(pool_size)
+            .with_some_folder_filters(folders_filter);
 
         if self.dry_run {
-            let report = sync_builder
-                .with_dry_run(true)
-                .with_pool_size(1)
-                .sync()
-                .await?;
+            let report = sync_builder.with_dry_run(true).sync().await?;
             let mut hunks_count = report.folder.patch.len();
 
             if !report.folder.patch.is_empty() {

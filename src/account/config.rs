@@ -42,6 +42,12 @@ pub struct AccountConfig {
     /// that there is not implicit difference between source and
     /// target. Hence left and right are used instead.
     pub right: BackendGlobalConfig,
+
+    /// The size of the connection pool.
+    ///
+    /// Mostly used by the IMAP backend, but may be used by other
+    /// backends in the future.
+    pub pool_size: Option<usize>,
 }
 
 impl AccountConfig {

@@ -59,9 +59,6 @@ indicatif = "0.17"
 imap-next = { git = "https://github.com/duesee/imap-next" }
 imap-client = { git = "https://github.com/pimalaya/imap-client" }
 
-# Maildir
-maildirs = { git = "https://github.com/pimalaya/maildirs" }
-
 # Pimalaya core
 email-lib = { git = "https://github.com/pimalaya/core" }
 keyring-lib = { git = "https://github.com/pimalaya/core" }

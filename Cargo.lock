@@ -808,7 +808,7 @@ checksum = "60b1af1c220855b6ceac025d3f6ecdd2b7c4894bfe9cd9bda4fbb4bc7c0d4cf0"
 [[package]]
 name = "email-lib"
 version = "0.25.0"
-source = "git+https://github.com/pimalaya/core#bac5911f5a7a6f46d0d997d66961d788a1310d5c"
+source = "git+https://github.com/pimalaya/core#b20d7de07775d093e63639bc11acd0ad42152c5c"
 dependencies = [
  "advisory-lock",
  "async-trait",
@@ -832,7 +832,6 @@ dependencies = [
  "mml-lib",
  "notify",
  "notmuch",
- "num_cpus",
  "oauth-lib",
  "once_cell",
  "ouroboros",
@@ -1797,7 +1796,7 @@ dependencies = [
 [[package]]
 name = "keyring-lib"
 version = "0.4.3"
-source = "git+https://github.com/pimalaya/core#bac5911f5a7a6f46d0d997d66961d788a1310d5c"
+source = "git+https://github.com/pimalaya/core#b20d7de07775d093e63639bc11acd0ad42152c5c"
 dependencies = [
  "keyring",
  "log",
@@ -2205,16 +2204,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num_cpus"
-version = "1.16.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4161fcb6d602d4d2081af7c3a45852d875a03dd337a6bfdd6e06407b61342a43"
-dependencies = [
- "hermit-abi 0.3.9",
- "libc",
-]
-
-[[package]]
 name = "number_prefix"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2223,7 +2212,7 @@ checksum = "830b246a0e5f20af87141b25c173cd1b609bd7779a4617d6ec582abaf90870f3"
 [[package]]
 name = "oauth-lib"
 version = "0.1.1"
-source = "git+https://github.com/pimalaya/core#bac5911f5a7a6f46d0d997d66961d788a1310d5c"
+source = "git+https://github.com/pimalaya/core#b20d7de07775d093e63639bc11acd0ad42152c5c"
 dependencies = [
  "log",
  "oauth2",
@@ -2526,7 +2515,7 @@ dependencies = [
 [[package]]
 name = "process-lib"
 version = "0.4.2"
-source = "git+https://github.com/pimalaya/core#bac5911f5a7a6f46d0d997d66961d788a1310d5c"
+source = "git+https://github.com/pimalaya/core#b20d7de07775d093e63639bc11acd0ad42152c5c"
 dependencies = [
  "log",
  "serde",
@@ -2914,7 +2903,7 @@ dependencies = [
 [[package]]
 name = "secret-lib"
 version = "0.4.6"
-source = "git+https://github.com/pimalaya/core#bac5911f5a7a6f46d0d997d66961d788a1310d5c"
+source = "git+https://github.com/pimalaya/core#b20d7de07775d093e63639bc11acd0ad42152c5c"
 dependencies = [
  "keyring-lib",
  "log",

@@ -39,7 +39,7 @@ clap = { version = "4.4", features = ["derive", "wrap_help"] }
 clap_complete = "4.4"
 clap_mangen = "0.2"
 color-eyre = "0.6"
-email-lib = { version = "=0.25.0", default-features = false, features = ["pool", "sync", "derive"] }
+email-lib = { version = "=0.25.0", default-features = false, features = ["sync", "derive"] }
 oauth-lib = { version = "=0.1.1", optional = true }
 once_cell = "1.16"
 pimalaya-tui = { version = "=0.1.0", default-features = false, features = ["path", "cli", "config", "tracing"] }

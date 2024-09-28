@@ -14,7 +14,6 @@ pub async fn configure() -> Result<(String, AccountConfig)> {
         envelope: None,
         left: backend::wizard::configure(&name, BackendSource::Left).await?,
         right: backend::wizard::configure(&name, BackendSource::Right).await?,
-        pool_size: None,
     };
 
     Ok((name, config))

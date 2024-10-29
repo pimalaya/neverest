@@ -2,9 +2,12 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
-use pimalaya_tui::cli::{
-    arg::path_parser,
-    printer::{OutputFmt, Printer},
+use pimalaya_tui::{
+    terminal::cli::{
+        arg::path_parser,
+        printer::{OutputFmt, Printer},
+    },
+    terminal::config::TomlConfig as _,
 };
 
 use crate::{
@@ -13,7 +16,7 @@ use crate::{
         sync::SynchronizeAccountCommand,
     },
     completion::command::GenerateCompletionCommand,
-    config::Config,
+    config::TomlConfig,
     manual::command::GenerateManualCommand,
 };
 
@@ -90,15 +93,15 @@ impl NeverestCommand {
     pub async fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
         match self {
             Self::Doctor(cmd) => {
-                let config = Config::from_paths_or_default(config_paths).await?;
+                let config = TomlConfig::from_paths_or_default(config_paths).await?;
                 cmd.execute(printer, &config).await
             }
             Self::Configure(cmd) => {
-                let config = Config::from_paths_or_default(config_paths).await?;
+                let config = TomlConfig::from_paths_or_default(config_paths).await?;
                 cmd.execute(printer, &config).await
             }
             Self::Synchronize(cmd) => {
-                let config = Config::from_paths_or_default(config_paths).await?;
+                let config = TomlConfig::from_paths_or_default(config_paths).await?;
                 cmd.execute(printer, &config).await
             }
             Self::Manual(cmd) => cmd.execute(printer).await,

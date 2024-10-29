@@ -3,7 +3,7 @@ use std::{fs, path::PathBuf};
 use clap::{CommandFactory, Parser};
 use clap_mangen::Man;
 use color_eyre::eyre::Result;
-use pimalaya_tui::cli::{arg::path_parser, printer::Printer};
+use pimalaya_tui::terminal::cli::{arg::path_parser, printer::Printer};
 use tracing::{info, instrument};
 
 use crate::cli::Cli;

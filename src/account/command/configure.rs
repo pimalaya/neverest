@@ -4,11 +4,11 @@ use color_eyre::eyre::Result;
 use email::imap::config::ImapAuthConfig;
 #[cfg(feature = "smtp")]
 use email::smtp::config::SmtpAuthConfig;
-use pimalaya_tui::{cli::printer::Printer, prompt};
+use pimalaya_tui::terminal::{cli::printer::Printer, config::TomlConfig as _, prompt};
 use tracing::{debug, info, instrument, warn};
 
 use crate::{
-    account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
+    account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::TomlConfig,
 };
 
 /// Configure an account.
@@ -31,10 +31,10 @@ pub struct ConfigureAccountCommand {
 
 impl ConfigureAccountCommand {
     #[instrument(skip_all)]
-    pub async fn execute(self, printer: &mut impl Printer, config: &Config) -> Result<()> {
+    pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
         info!("executing configure account command");
 
-        let (name, config) = config.into_account_config(self.account.name.as_deref())?;
+        let (name, config) = config.to_toml_account_config(self.account.name.as_deref())?;
 
         if self.reset {
             let reset = match &config.left.backend {
@@ -63,7 +63,7 @@ impl ConfigureAccountCommand {
         match &config.left.backend {
             #[cfg(feature = "imap")]
             BackendConfig::Imap(config) => match &config.auth {
-                ImapAuthConfig::Passwd(config) => {
+                ImapAuthConfig::Password(config) => {
                     config
                         .configure(|| Ok(prompt::password("Left IMAP password")?))
                         .await?;
@@ -81,7 +81,7 @@ impl ConfigureAccountCommand {
         match &config.right.backend {
             #[cfg(feature = "imap")]
             BackendConfig::Imap(config) => match &config.auth {
-                ImapAuthConfig::Passwd(config) => {
+                ImapAuthConfig::Password(config) => {
                     config
                         .configure(|| Ok(prompt::password("Right IMAP password")?))
                         .await?;

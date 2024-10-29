@@ -14,11 +14,11 @@ use email::imap::ImapContextBuilder;
 use email::maildir::MaildirContextBuilder;
 #[cfg(feature = "notmuch")]
 use email::notmuch::NotmuchContextBuilder;
-use pimalaya_tui::cli::printer::Printer;
+use pimalaya_tui::terminal::{cli::printer::Printer, config::TomlConfig as _};
 use tracing::{info, instrument};
 
 use crate::{
-    account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
+    account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::TomlConfig,
 };
 
 /// Check up the given account.
@@ -34,10 +34,10 @@ pub struct DoctorAccountCommand {
 
 impl DoctorAccountCommand {
     #[instrument(skip_all)]
-    pub async fn execute(self, printer: &mut impl Printer, config: &Config) -> Result<()> {
+    pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
         info!("executing doctor account command");
 
-        let (name, config) = config.into_account_config(self.account.name.as_deref())?;
+        let (name, config) = config.to_toml_account_config(self.account.name.as_deref())?;
         printer.log(format!("Checking `{name}` account integrity…"))?;
 
         let folder_filter = config.folder.map(|c| c.filters).unwrap_or_default();

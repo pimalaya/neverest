@@ -103,6 +103,11 @@ right.backend.host = "localhost"
 #right.backend.port = 143
 right.backend.port = 993
 
+# Defines the number of active IMAP clients during sync. A higher
+# number consumes more resource but makes the sync faster.
+#
+right.backend.clients-pool-size = 4
+
 # IMAP server encryption
 #
 #right.backend.encryption = "none" # or false

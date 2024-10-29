@@ -24,11 +24,11 @@ use email::{
 };
 use indicatif::{MultiProgress, ProgressBar, ProgressFinish, ProgressStyle};
 use once_cell::sync::Lazy;
-use pimalaya_tui::cli::printer::Printer;
+use pimalaya_tui::terminal::{cli::printer::Printer, config::TomlConfig as _};
 use tracing::{info, instrument};
 
 use crate::{
-    account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::Config,
+    account::arg::name::OptionalAccountNameArg, backend::config::BackendConfig, config::TomlConfig,
 };
 
 static MAIN_PROGRESS_STYLE: Lazy<ProgressStyle> = Lazy::new(|| {
@@ -90,24 +90,32 @@ pub struct SynchronizeAccountCommand {
 
 impl SynchronizeAccountCommand {
     #[instrument(skip_all)]
-    pub async fn execute(self, printer: &mut impl Printer, config: &Config) -> Result<()> {
+    pub async fn execute(self, printer: &mut impl Printer, config: &TomlConfig) -> Result<()> {
         info!("executing synchronize backends command");
 
-        let (name, config) = config.into_account_config(self.account.name.as_deref())?;
+        let (name, toml_account_config) =
+            config.to_toml_account_config(self.account.name.as_deref())?;
 
-        let folder_filter = config.folder.map(|c| c.filters).unwrap_or_default();
-        let envelope_filter = config.envelope.map(|c| c.filters).unwrap_or_default();
+        let folder_filter = toml_account_config
+            .folder
+            .map(|c| c.filters)
+            .unwrap_or_default();
+        let envelope_filter = toml_account_config
+            .envelope
+            .map(|c| c.filters)
+            .unwrap_or_default();
 
-        let (left_backend, left_config) = config.left.into_account_config(
+        let (left_backend, left_config) = toml_account_config.left.into_account_config(
             name.clone(),
             folder_filter.clone(),
             envelope_filter.clone(),
         );
 
-        let (right_backend, right_config) =
-            config
-                .right
-                .into_account_config(name.clone(), folder_filter, envelope_filter);
+        let (right_backend, right_config) = toml_account_config.right.into_account_config(
+            name.clone(),
+            folder_filter,
+            envelope_filter,
+        );
 
         match left_backend {
             BackendConfig::None => {

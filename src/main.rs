@@ -1,7 +1,7 @@
 use clap::Parser;
 use color_eyre::eyre::Result;
 use neverest::cli::Cli;
-use pimalaya_tui::cli::{printer::StdoutPrinter, tracing};
+use pimalaya_tui::terminal::cli::{printer::StdoutPrinter, tracing};
 
 #[tokio::main]
 async fn main() -> Result<()> {

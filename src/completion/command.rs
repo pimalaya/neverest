@@ -3,10 +3,11 @@
 //! This module contains the [`clap`] command for generating
 //! completion scripts to the standard output.
 
+use std::io;
+
 use clap::{value_parser, CommandFactory, Parser};
 use clap_complete::Shell;
 use color_eyre::eyre::Result;
-use std::io;
 use tracing::{info, instrument};
 
 use crate::cli::Cli;

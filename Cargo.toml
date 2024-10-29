@@ -13,16 +13,15 @@ repository = "https://github.com/soywod/neverest/"
 
 [package.metadata.docs.rs]
 all-features = true
-rustdoc-args = ["--cfg", "docsrs", "--document-private-items"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = [
   "imap",
   "maildir",
-  # "notmuch",
-
-  # "keyring",
-  # "oauth2",
+  #"notmuch",
+  #"keyring",
+  #"oauth2",
   "wizard",
 ]
 
@@ -30,20 +29,21 @@ imap = ["email-lib/imap", "pimalaya-tui/imap"]
 maildir = ["email-lib/maildir", "pimalaya-tui/maildir"]
 notmuch = ["email-lib/notmuch", "pimalaya-tui/notmuch"]
 
-keyring = ["email-lib/keyring", "pimalaya-tui/keyring", "secret-lib?/keyring-tokio"]
+keyring = ["email-lib/keyring", "pimalaya-tui/keyring", "secret-lib?/keyring"]
 oauth2 = ["dep:oauth-lib", "email-lib/oauth2", "pimalaya-tui/oauth2", "keyring"]
-wizard = ["dep:console", "dep:secret-lib", "email-lib/autoconfig"]
+wizard = ["dep:console", "dep:secret-lib", "email-lib/autoconfig", "pimalaya-tui/wizard"]
 
 [dependencies]
+async-trait = "0.1"
 clap = { version = "4.4", features = ["derive", "wrap_help"] }
 clap_complete = "4.4"
 clap_mangen = "0.2"
 color-eyre = "0.6"
-email-lib = { version = "=0.25.0", default-features = false, features = ["sync", "derive"] }
-oauth-lib = { version = "=0.1.1", optional = true }
+email-lib = { version = "=0.26.0", default-features = false, features = ["tokio-rustls", "sync", "derive"] }
+oauth-lib = { version = "1", optional = true }
 once_cell = "1.16"
-pimalaya-tui = { version = "=0.1.0", default-features = false, features = ["path", "cli", "config", "tracing"] }
-secret-lib = { version = "=0.4.6", optional = true, features = ["derive"] }
+pimalaya-tui = { version = "=0.1", default-features = false, features = ["path", "cli", "config", "tracing"] }
+secret-lib = { version = "1", optional = true, features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1.23", default-features = false, features = ["macros", "rt-multi-thread"] }
@@ -55,16 +55,9 @@ console = { version = "0.15.2", optional = true }
 indicatif = "0.17"
 
 [patch.crates-io]
-# IMAP
-imap-next = { git = "https://github.com/duesee/imap-next" }
 imap-client = { git = "https://github.com/pimalaya/imap-client" }
-
-# Pimalaya core
 email-lib = { git = "https://github.com/pimalaya/core" }
-keyring-lib = { git = "https://github.com/pimalaya/core" }
-oauth-lib = { git = "https://github.com/pimalaya/core" }
 process-lib = { git = "https://github.com/pimalaya/core" }
 secret-lib = { git = "https://github.com/pimalaya/core" }
-
-# Pimalaya TUI
+mml-lib = { git = "https://github.com/pimalaya/core" }
 pimalaya-tui = { git = "https://github.com/pimalaya/tui" }

@@ -16,7 +16,7 @@ use crate::backend::config::BackendGlobalConfig;
 /// The account configuration.
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct AccountConfig {
+pub struct TomlAccountConfig {
     /// The defaultness of the current account.
     ///
     /// When synchronizing, if no account name is explicitly given,
@@ -44,7 +44,7 @@ pub struct AccountConfig {
     pub right: BackendGlobalConfig,
 }
 
-impl AccountConfig {
+impl TomlAccountConfig {
     /// Configure the current account configuration.
     ///
     /// This function is mostly used to replace undefined keyring

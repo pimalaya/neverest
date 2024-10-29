@@ -37,7 +37,7 @@
           aarch64-linux = rec {
             rustTarget = "aarch64-unknown-linux-musl";
             runner = { pkgs, neverest }: "${pkgs.qemu}/bin/qemu-aarch64 ${neverest}";
-            mkPackage = { system, pkgs }: package:
+            mkPackage = { system, ... }: package:
               let
                 inherit (mkPkgsCross system rustTarget) stdenv;
                 cc = "${stdenv.cc}/bin/${stdenv.cc.targetPrefix}cc";
@@ -53,7 +53,7 @@
             runner = { pkgs, neverest }:
               let wine = pkgs.wine.override { wineBuild = "wine64"; };
               in "${wine}/bin/wine64 ${neverest}.exe";
-            mkPackage = { system, pkgs }: package:
+            mkPackage = { pkgs, ... }: package:
               let
                 inherit (pkgs.pkgsCross.mingwW64) stdenv windows;
                 cc = "${stdenv.cc}/bin/${stdenv.cc.targetPrefix}cc";
@@ -66,52 +66,21 @@
           };
         };
 
-        aarch64-linux = {
-          aarch64-linux = {
-            rustTarget = "aarch64-unknown-linux-musl";
-          };
+        aarch64-linux.aarch64-linux = {
+          rustTarget = "aarch64-unknown-linux-musl";
         };
 
-        x86_64-darwin = {
-          x86_64-darwin = {
-            rustTarget = "x86_64-apple-darwin";
-            mkPackage = { pkgs, ... }: package:
-              let inherit (pkgs.darwin.apple_sdk.frameworks) AppKit Cocoa;
-              in package // {
-                buildInputs = [ Cocoa ];
-                NIX_LDFLAGS = "-F${AppKit}/Library/Frameworks -framework AppKit";
-              };
-          };
-
-          # FIXME: https://github.com/NixOS/nixpkgs/issues/273442
-          aarch64-darwin = {
-            rustTarget = "aarch64-apple-darwin";
-            runner = { pkgs, neverest }: "${pkgs.qemu}/bin/qemu-aarch64 ${neverest}";
-            mkPackage = { system, pkgs }: package:
-              let
-                inherit ((mkPkgsCross system "aarch64-darwin").pkgsStatic) stdenv darwin;
-                inherit (darwin.apple_sdk.frameworks) AppKit Cocoa;
-                cc = "${stdenv.cc}/bin/${stdenv.cc.targetPrefix}cc";
-              in
-              package // {
-                buildInputs = [ Cocoa ];
-                NIX_LDFLAGS = "-F${AppKit}/Library/Frameworks -framework AppKit";
-                TARGET_CC = cc;
-                CARGO_BUILD_RUSTFLAGS = package.CARGO_BUILD_RUSTFLAGS ++ [ "-Clinker=${cc}" ];
-              };
-          };
+        x86_64-darwin.x86_64-darwin = {
+          rustTarget = "x86_64-apple-darwin";
+          mkPackage = { pkgs, ... }: package:
+            let inherit (pkgs.darwin.apple_sdk_11_0.frameworks) Security;
+            in package // {
+              NIX_LDFLAGS = "-F${Security}/Library/Frameworks -framework Security";
+            };
         };
 
-        aarch64-darwin = {
-          aarch64-darwin = {
-            rustTarget = "aarch64-apple-darwin";
-            mkPackage = { pkgs, ... }: package:
-              let inherit (pkgs.darwin.apple_sdk.frameworks) AppKit Cocoa;
-              in package // {
-                buildInputs = [ Cocoa ];
-                NIX_LDFLAGS = "-F${AppKit}/Library/Frameworks -framework AppKit";
-              };
-          };
+        aarch64-darwin.aarch64-darwin = {
+          rustTarget = "aarch64-apple-darwin";
         };
       };
 

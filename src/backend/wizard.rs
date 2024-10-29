@@ -1,6 +1,6 @@
 use color_eyre::eyre::Result;
 use email::autoconfig;
-use pimalaya_tui::{prompt, wizard};
+use pimalaya_tui::terminal::{prompt, wizard};
 
 use crate::backend::config::BackendConfig;
 

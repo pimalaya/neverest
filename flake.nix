@@ -137,13 +137,13 @@
             postInstall = ''
               export WINEPREFIX="$(mktemp -d)"
 
-              mkdir -p $out/bin/share/{completions,man}
+              mkdir -p $out/bin/share/{completions,man,fish/vendor_completions.d}
 
               cd $out/bin
               ${runner} man ./share/man
               ${runner} completion bash > ./share/completions/neverest.bash
               ${runner} completion elvish > ./share/completions/neverest.elvish
-              ${runner} completion fish > ./share/completions/neverest.fish
+              ${runner} completion fish > ./share/fish/vendor_completions.d/neverest.fish
               ${runner} completion powershell > ./share/completions/neverest.powershell
               ${runner} completion zsh > ./share/completions/neverest.zsh
               tar -czf neverest.tgz neverest* share

@@ -39,13 +39,10 @@ jobs:
         run: |
           nix build -L .#${{ matrix.target }}
           nix run -L .#${{ matrix.target }} -- --version
-      - name: Upload release artifact (tarball)
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: "neverest.${{ matrix.target }}.tgz"
-          path: result/neverest.tgz
-      - name: Upload release artifact (zip)
-        uses: actions/upload-artifact@v4
-        with:
-          name: "neverest.${{ matrix.target }}.zip"
-          path: result/neverest.zip
+          name: "neverest.${{ matrix.target }}"
+          path: |
+            result/bin/neverest*
+            result/bin/share

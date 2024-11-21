@@ -33,6 +33,9 @@ keyring = ["email-lib/keyring", "pimalaya-tui/keyring", "secret-lib?/keyring"]
 oauth2 = ["dep:oauth-lib", "email-lib/oauth2", "pimalaya-tui/oauth2", "keyring"]
 wizard = ["dep:console", "dep:secret-lib", "email-lib/autoconfig", "pimalaya-tui/wizard"]
 
+[build-dependencies]
+git2 = { version = "0.19", default-features = false }
+
 [dependencies]
 async-trait = "0.1"
 clap = { version = "4.4", features = ["derive", "wrap_help"] }

@@ -19,13 +19,13 @@ pub struct TomlConfig {
 
 #[async_trait]
 impl pimalaya_tui::terminal::config::TomlConfig for TomlConfig {
-    type AccountConfig = TomlAccountConfig;
+    type TomlAccountConfig = TomlAccountConfig;
 
     fn project_name() -> &'static str {
-        "neverest"
+        env!("CARGO_PKG_NAME")
     }
 
-    fn get_default_account_config(&self) -> Option<(String, Self::AccountConfig)> {
+    fn get_default_account_config(&self) -> Option<(String, Self::TomlAccountConfig)> {
         self.accounts.iter().find_map(|(name, account)| {
             account
                 .default
@@ -34,7 +34,7 @@ impl pimalaya_tui::terminal::config::TomlConfig for TomlConfig {
         })
     }
 
-    fn get_account_config(&self, name: &str) -> Option<(String, Self::AccountConfig)> {
+    fn get_account_config(&self, name: &str) -> Option<(String, Self::TomlAccountConfig)> {
         self.accounts
             .get(name)
             .map(|account| (name.to_owned(), account.clone()))
@@ -42,7 +42,7 @@ impl pimalaya_tui::terminal::config::TomlConfig for TomlConfig {
 
     #[cfg(feature = "wizard")]
     async fn from_wizard(path: &std::path::Path) -> color_eyre::Result<Self> {
-        use std::{fs, process::exit};
+        use std::process::exit;
 
         use pimalaya_tui::terminal::{print, prompt};
 
@@ -60,15 +60,7 @@ impl pimalaya_tui::terminal::config::TomlConfig for TomlConfig {
 
         let (account_name, account_config) = account::wizard::configure().await?;
         config.accounts.insert(account_name, account_config);
-
-        let path = prompt::path("Where to save the configuration?", Some(path))?;
-        println!("Writing the configuration to {}…", path.display());
-
-        let toml = config.pretty_serialize()?;
-        fs::create_dir_all(path.parent().unwrap_or(&path))?;
-        fs::write(path, toml)?;
-
-        println!("Done! Exiting the wizard…");
+        config.write(path)?;
 
         Ok(config)
     }
@@ -76,7 +68,7 @@ impl pimalaya_tui::terminal::config::TomlConfig for TomlConfig {
     fn to_toml_account_config(
         &self,
         account_name: Option<&str>,
-    ) -> pimalaya_tui::Result<(String, Self::AccountConfig)> {
+    ) -> pimalaya_tui::Result<(String, Self::TomlAccountConfig)> {
         #[allow(unused_mut)]
         let (name, mut config) = match account_name {
             Some("default") | Some("") | None => self

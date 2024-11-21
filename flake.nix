@@ -134,6 +134,7 @@
             nativeBuildInputs = with pkgs; [ pkg-config ];
             CARGO_BUILD_TARGET = targetConfig.rustTarget;
             CARGO_BUILD_RUSTFLAGS = [ "-Ctarget-feature=+crt-static" ];
+            GIT_REV = self.rev or self.dirtyRev or "dirty";
             postInstall = ''
               export WINEPREFIX="$(mktemp -d)"
 
@@ -146,11 +147,12 @@
               ${runner} completion fish > ./share/completions/neverest.fish
               ${runner} completion powershell > ./share/completions/neverest.powershell
               ${runner} completion zsh > ./share/completions/neverest.zsh
-              tar -czf neverest.tgz neverest* share
-              ${pkgs.zip}/bin/zip -r neverest.zip neverest* share
 
-              mv share ../
-              mv neverest.tgz neverest.zip ../
+              tar -czf neverest.tgz neverest* share
+              mv neverest.tgz ../
+
+              ${pkgs.zip}/bin/zip -r neverest.zip neverest* share
+              mv neverest.zip ../
             '';
           };
         in

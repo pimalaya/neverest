@@ -21,11 +21,13 @@ use crate::{
 };
 
 #[derive(Parser, Debug)]
-#[command(name = "neverest", author, version, about)]
+#[command(name = env!("CARGO_PKG_NAME"))]
+#[command(author, version, about)]
+#[command(long_version = Cli::LONG_VERSION)]
 #[command(propagate_version = true, infer_subcommands = true)]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: NeverestCommand,
+    pub command: Option<NeverestCommand>,
 
     /// Override the default configuration file path.
     ///
@@ -67,6 +69,21 @@ pub struct Cli {
     /// and `RUST_BACKTRACE=1` environment variables.
     #[arg(long, global = true, conflicts_with = "debug")]
     pub trace: bool,
+}
+
+impl Cli {
+    pub const LONG_VERSION: &'static str = concat!(
+        "v",
+        env!("CARGO_PKG_VERSION"),
+        " on ",
+        env!("TARGET_OS"),
+        " ",
+        env!("TARGET_ENV"),
+        " ",
+        env!("TARGET_ARCH"),
+        ", git rev ",
+        env!("GIT_REV"),
+    );
 }
 
 #[derive(Subcommand, Debug)]

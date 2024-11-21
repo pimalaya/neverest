@@ -40,7 +40,7 @@ Neverest CLI `v1.0.0` can be installed with a pre-built binary. Find the latest 
 Neverest CLI `v1.0.0` can also be installed with [cargo](https://doc.rust-lang.org/cargo/):
 
 ```bash
-$ cargo install --git https://github.com/pimalaya/neverest.git --force neverest
+$ cargo install --frozen --force --git https://github.com/pimalaya/neverest.git
 ```
 
 ### Other outdated methods
@@ -164,21 +164,16 @@ You can also manually edit your own configuration, from scratch:
 
   ```toml
   [accounts.proton]
-  email = "example@proton.me"
+  left.backend.type = "maildir"
+  left.backend.root-dir = "~/.Mail/proton"
 
-  backend = "imap"
-  imap.host = "127.0.0.1"
-  imap.port = 1143
-  imap.encryption = false
-  imap.login = "example@proton.me"
-  imap.passwd.raw = "<bridge-imap-p@ssw0rd>"
-
-  message.send.backend = "smtp"
-  smtp.host = "127.0.0.1"
-  smtp.port = 1025
-  smtp.encryption = false
-  smtp.login = "example@proton.me"
-  smtp.passwd.raw = "<bridge-smtp-p@ssw0rd>"
+  right.backend.type = "imap"
+  right.backend.host = "127.0.0.1"
+  right.backend.port = 1143
+  right.backend.encryption = false
+  right.backend.login = "example@proton.me"
+  right.backend.auth.type = "password"
+  right.backend.auth.raw = "*****"
   ```
 
   Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
@@ -186,16 +181,16 @@ You can also manually edit your own configuration, from scratch:
   - Save your password in any password manager that can be queried via the CLI:
 
     ```toml
-    imap.passwd.cmd = "pass show proton"
+    right.backend.auth.cmd = "pass show proton"
     ```
 
   - Use the global keyring of your system (requires the `keyring` cargo feature):
 
     ```toml
-    imap.passwd.keyring = "proton-example"
+    right.backend.auth.keyring = "proton-example"
     ```
 
-    Running `neverest configure -a proton` will ask for your IMAP password, just paste the one generated previously.
+    Running `neverest configure proton` will ask for your IMAP password, just paste the one generated previously.
 </details>
 
 <details>
@@ -215,24 +210,20 @@ You can also manually edit your own configuration, from scratch:
 
   ```toml
   [accounts.gmail]
-  email = "example@gmail.com"
+  left.backend.type = "maildir"
+  left.backend.root-dir = "~/.Mail/gmail"
 
-  folder.alias.inbox = "INBOX"
-  folder.alias.sent = "[Gmail]/Sent Mail"
-  folder.alias.drafts = "[Gmail]/Drafts"
-  folder.alias.trash = "[Gmail]/Trash"
+  right.backend.type = "imap"
+  right.backend.host = "imap.gmail.com"
+  right.backend.port = 993
+  right.backend.login = "example@gmail.com"
+  right.backend.auth.type = "password"
+  right.backend.auth.raw = "*****"
 
-  backend = "imap"
-  imap.host = "imap.gmail.com"
-  imap.port = 993
-  imap.login = "example@gmail.com"
-  imap.passwd.cmd = "pass show gmail"
-
-  message.send.backend = "smtp"
-  smtp.host = "smtp.gmail.com"
-  smtp.port = 465
-  smtp.login = "example@gmail.com"
-  smtp.passwd.cmd = "pass show gmail"
+  right.folder.aliases.inbox = "INBOX"
+  right.folder.aliases.sent = "[Gmail]/Sent Mail"
+  right.folder.aliases.drafts = "[Gmail]/Drafts"
+  right.folder.aliases.trash = "[Gmail]/Trash"
   ```
 
   Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
@@ -240,16 +231,16 @@ You can also manually edit your own configuration, from scratch:
   - Save your password in any password manager that can be queried via the CLI:
 
     ```toml
-    imap.passwd.cmd = "pass show gmail"
+    right.backend.auth.cmd = "pass show gmail"
     ```
 
   - Use the global keyring of your system (requires the `keyring` cargo feature):
 
     ```toml
-    imap.passwd.keyring = "gmail-example"
+    right.backend.auth.keyring = "gmail-example"
     ```
 
-    Running `neverest configure -a gmail` will ask for your IMAP password, just paste the one generated previously.
+    Running `neverest configure gmail` will ask for your IMAP password, just paste the one generated previously.
 
   ### Using OAuth 2.0
 
@@ -259,48 +250,27 @@ You can also manually edit your own configuration, from scratch:
 
   ```toml
   [accounts.gmail]
-  email = "example@gmail.com"
+  left.backend.type = "maildir"
+  left.backend.root-dir = "~/.Mail/gmail"
 
-  folder.alias.inbox = "INBOX"
-  folder.alias.sent = "[Gmail]/Sent Mail"
-  folder.alias.drafts = "[Gmail]/Drafts"
-  folder.alias.trash = "[Gmail]/Trash"
+  right.backend.type = "imap"
+  right.backend.host = "imap.gmail.com"
+  right.backend.port = 993
+  right.backend.login = "example@gmail.com"
+  right.backend.auth.type = "oauth2"
+  right.backend.auth.client-id = "*****"
+  right.backend.auth.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
+  right.backend.auth.token-url = "https://www.googleapis.com/oauth2/v3/token"
+  right.backend.auth.pkce = true
+  right.backend.auth.scope = "https://mail.google.com/"
 
-  backend = "imap"
-  imap.host = "imap.gmail.com"
-  imap.port = 993
-  imap.login = "example@gmail.com"
-  imap.oauth2.client-id = "<imap-client-id>"
-  imap.oauth2.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
-  imap.oauth2.token-url = "https://www.googleapis.com/oauth2/v3/token"
-  imap.oauth2.pkce = true
-  imap.oauth2.scope = "https://mail.google.com/"
-
-  message.send.backend = "smtp"
-  smtp.host = "smtp.gmail.com"
-  smtp.port = 465
-  smtp.login = "example@gmail.com"
-  smtp.oauth2.client-id = "<smtp-client-id>"
-  smtp.oauth2.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
-  smtp.oauth2.token-url = "https://www.googleapis.com/oauth2/v3/token"
-  smtp.oauth2.pkce = true
-  smtp.oauth2.scope = "https://mail.google.com/"
-
-  # If you want your SMTP to share the same client id (and so the same access token)
-  # as your IMAP config, you can add the following:
-  #
-  # imap.oauth2.client-id = "<client-id>"
-  # imap.oauth2.client-secret.keyring = "gmail-oauth2-client-secret"
-  # imap.oauth2.access-token.keyring = "gmail-oauth2-access-token"
-  # imap.oauth2.refresh-token.keyring = "gmail-oauth2-refresh-token"
-  #
-  # imap.oauth2.client-id = "<client-id>"
-  # imap.oauth2.client-secret.keyring = "gmail-oauth2-client-secret"
-  # imap.oauth2.access-token.keyring = "gmail-oauth2-access-token"
-  # smtp.oauth2.refresh-token.keyring = "gmail-oauth2-refresh-token"
+  right.folder.aliases.inbox = "INBOX"
+  right.folder.aliases.sent = "[Gmail]/Sent Mail"
+  right.folder.aliases.drafts = "[Gmail]/Drafts"
+  right.folder.aliases.trash = "[Gmail]/Trash"
   ```
 
-  Running `neverest configure -a gmail` will complete your OAuth 2.0 setup and ask for your client secret.
+  Running `neverest configure gmail` will complete your OAuth 2.0 setup and ask for your client secret.
 </details>
 
 <details>
@@ -308,21 +278,32 @@ You can also manually edit your own configuration, from scratch:
 
   ```toml
   [accounts.outlook]
-  email = "example@outlook.com"
+  left.backend.type = "maildir"
+  left.backend.root-dir = "~/.Mail/outlook"
 
-  backend = "imap"
-  imap.host = "outlook.office365.com"
-  imap.port = 993
-  imap.login = "example@outlook.com"
-  imap.passwd.cmd = "pass show outlook"
-
-  message.send.backend = "smtp"
-  smtp.host = "smtp.mail.outlook.com"
-  smtp.port = 587
-  smtp.encryption = "start-tls"
-  smtp.login = "example@outlook.com"
-  smtp.passwd.cmd = "pass show outlook"
+  right.backend.type = "imap"
+  right.backend.host = "outlook.office365.com"
+  right.backend.port = 993
+  right.backend.login = "example@outlook.com"
+  right.backend.auth.type = "password"
+  right.backend.auth.raw = "*****"
   ```
+
+  Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
+
+  - Save your password in any password manager that can be queried via the CLI:
+
+    ```toml
+    right.backend.auth.cmd = "pass show outlook"
+    ```
+
+  - Use the global keyring of your system (requires the `keyring` cargo feature):
+
+    ```toml
+    right.backend.auth.keyring = "outlook-example"
+    ```
+
+    Running `neverest configure outlook` will ask for your IMAP password, just paste the one generated previously.
 
   ### Using OAuth 2.0
 
@@ -330,44 +311,22 @@ You can also manually edit your own configuration, from scratch:
 
   ```toml
   [accounts.outlook]
-  email = "example@outlook.com"
+  left.backend.type = "maildir"
+  left.backend.root-dir = "~/.Mail/outlook"
 
-  backend = "imap"
-  imap.host = "outlook.office365.com"
-  imap.port = 993
-  imap.login = "example@outlook.com"
-  imap.oauth2.client-id = "<imap-client-id>"
-  imap.oauth2.auth-url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-  imap.oauth2.token-url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-  imap.oauth2.pkce = true
-  imap.oauth2.scope = "https://outlook.office.com/IMAP.AccessAsUser.All"
-
-  message.send.backend = "smtp"
-  smtp.host = "smtp.mail.outlook.com"
-  smtp.port = 587
-  smtp.starttls = true
-  smtp.login = "example@outlook.com"
-  smtp.oauth2.client-id = "<smtp-client-id>"
-  smtp.oauth2.auth-url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-  smtp.oauth2.token-url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-  smtp.oauth2.pkce = true
-  smtp.oauth2.scope = "https://outlook.office.com/SMTP.Send"
-
-  # If you want your SMTP to share the same client id (and so the same access token)
-  # as your IMAP config, you can add the following:
-  #
-  # imap.oauth2.client-id = "<client-id>"
-  # imap.oauth2.client-secret.keyring = "outlook-oauth2-client-secret"
-  # imap.oauth2.access-token.keyring = "outlook-oauth2-access-token"
-  # imap.oauth2.refresh-token.keyring = "outlook-oauth2-refresh-token"
-  #
-  # imap.oauth2.client-id = "<client-id>"
-  # imap.oauth2.client-secret.keyring = "outlook-oauth2-client-secret"
-  # imap.oauth2.access-token.keyring = "outlook-oauth2-access-token"
-  # smtp.oauth2.refresh-token.keyring = "outlook-oauth2-refresh-token"
+  right.backend.type = "imap"
+  right.backend.host = "outlook.office365.com"
+  right.backend.port = 993
+  right.backend.login = "example@outlook.com"
+  right.backend.auth.type = "oauth2"
+  right.backend.auth.client-id = "*****"
+  right.backend.auth.auth-url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+  right.backend.auth.token-url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+  right.backend.auth.pkce = true
+  right.backend.auth.scope = "https://outlook.office.com/IMAP.AccessAsUser.All"
   ```
 
-  Running `neverest configure -a outlook` will complete your OAuth 2.0 setup and ask for your client secret.
+  Running `neverest configure outlook` will complete your OAuth 2.0 setup and ask for your client secret.
 </details>
 
 <details>
@@ -377,26 +336,36 @@ You can also manually edit your own configuration, from scratch:
 
   - IMAP port = `993`.
   - IMAP login = name of your iCloud Mail email address (for example, `johnappleseed`, not `johnappleseed@icloud.com`)
-  - SMTP port = `587` with `STARTTLS`
-  - SMTP login = full iCloud Mail email address (for example, `johnappleseed@icloud.com`, not `johnappleseed`)
 
   ```toml
   [accounts.icloud]
-  email = "johnappleseed@icloud.com"
+  left.backend.type = "maildir"
+  left.backend.root-dir = "~/.Mail/icloud"
 
-  backend = "imap"
-  imap.host = "imap.mail.me.com"
-  imap.port = 993
-  imap.login = "johnappleseed"
-  imap.passwd.cmd = "pass show icloud"
-
-  message.send.backend = "smtp"
-  smtp.host = "smtp.mail.me.com"
-  smtp.port = 587
-  smtp.encryption = "start-tls"
-  smtp.login = "johnappleseed@icloud.com"
-  smtp.passwd.cmd = "pass show icloud"
+  right.backend.type = "imap"
+  right.backend.host = "imap.mail.me.com"
+  right.backend.port = 993
+  right.backend.login = "johnappleseed"
+  right.backend.auth.type = "password"
+  right.backend.auth.raw = "*****"
   ```
+
+  Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
+
+  - Save your password in any password manager that can be queried via the CLI:
+
+    ```toml
+    right.backend.auth.cmd = "pass show icloud"
+    ```
+
+  - Use the global keyring of your system (requires the `keyring` cargo feature):
+
+    ```toml
+    right.backend.auth.keyring = "icloud-example"
+    ```
+
+    Running `neverest configure icloud` will ask for your IMAP password, just paste the one generated previously.
+
 </details>
 
 ## FAQ
@@ -429,7 +398,7 @@ You can also manually edit your own configuration, from scratch:
   2. look up of `example.com` in the ISPDB (the Thunderbird central database)
   3. look up `MX example.com` in DNS, and for `mx1.mail.hoster.com`, look up `hoster.com` in the ISPDB
   4. look up `SRV example.com` in DNS
-  5. try to guess (`imap.example.com`, `smtp.example.com`…)
+  5. try to guess (`imap.example.com`…)
 </details>
 
 ## Sponsoring

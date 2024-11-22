@@ -79,16 +79,6 @@ impl pimalaya_tui::terminal::config::TomlConfig for TomlConfig {
                 .ok_or_else(|| pimalaya_tui::Error::GetAccountConfigError(name.to_owned())),
         }?;
 
-        #[cfg(all(feature = "imap", feature = "keyring"))]
-        if let Some(Backend::Imap(imap_config)) = config.backend.as_mut() {
-            imap_config.auth.replace_empty_secrets(&name)?;
-        }
-
-        #[cfg(all(feature = "smtp", feature = "keyring"))]
-        if let Some(SendingBackend::Smtp(smtp_config)) = config.message_send_backend_mut() {
-            smtp_config.auth.replace_empty_secrets(&name)?;
-        }
-
         Ok((name, config))
     }
 }

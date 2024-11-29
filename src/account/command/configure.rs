@@ -2,8 +2,6 @@ use clap::Parser;
 use color_eyre::eyre::Result;
 #[cfg(feature = "imap")]
 use email::imap::config::ImapAuthConfig;
-#[cfg(feature = "smtp")]
-use email::smtp::config::SmtpAuthConfig;
 use pimalaya_tui::terminal::{cli::printer::Printer, config::TomlConfig as _, prompt};
 use tracing::{debug, info, instrument, warn};
 

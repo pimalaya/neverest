@@ -54,9 +54,7 @@ impl TomlAccountConfig {
         match &mut self.left.backend {
             #[cfg(all(feature = "imap", feature = "keyring"))]
             BackendConfig::Imap(config) => {
-                config
-                    .auth
-                    .replace_undefined_keyring_entries(&account_name)?;
+                config.auth.replace_empty_secrets(&account_name)?;
             }
             _ => (),
         }
@@ -64,9 +62,7 @@ impl TomlAccountConfig {
         match &mut self.right.backend {
             #[cfg(all(feature = "imap", feature = "keyring"))]
             BackendConfig::Imap(config) => {
-                config
-                    .auth
-                    .replace_undefined_keyring_entries(&account_name)?;
+                config.auth.replace_empty_secrets(&account_name)?;
             }
             _ => (),
         }

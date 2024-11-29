@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::account::config::TomlAccountConfig;
+use crate::{account::config::TomlAccountConfig, backend::config::BackendConfig};
 
 /// The main configuration.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
@@ -80,13 +80,13 @@ impl pimalaya_tui::terminal::config::TomlConfig for TomlConfig {
         }?;
 
         #[cfg(all(feature = "imap", feature = "keyring"))]
-        if let Some(Backend::Imap(imap_config)) = config.backend.as_mut() {
+        if let BackendConfig::Imap(imap_config) = &mut config.left.backend {
             imap_config.auth.replace_empty_secrets(&name)?;
         }
 
-        #[cfg(all(feature = "smtp", feature = "keyring"))]
-        if let Some(SendingBackend::Smtp(smtp_config)) = config.message_send_backend_mut() {
-            smtp_config.auth.replace_empty_secrets(&name)?;
+        #[cfg(all(feature = "imap", feature = "keyring"))]
+        if let BackendConfig::Imap(imap_config) = &mut config.right.backend {
+            imap_config.auth.replace_empty_secrets(&name)?;
         }
 
         Ok((name, config))

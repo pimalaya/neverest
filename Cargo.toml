@@ -16,25 +16,19 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = [
-  "imap",
-  "maildir",
-  #"notmuch",
-  #"keyring",
-  #"oauth2",
-  "wizard",
-]
-
+default = ["imap", "maildir", "wizard"]
 imap = ["email-lib/imap", "pimalaya-tui/imap"]
 maildir = ["email-lib/maildir", "pimalaya-tui/maildir"]
 notmuch = ["email-lib/notmuch", "pimalaya-tui/notmuch"]
-
 keyring = ["email-lib/keyring", "pimalaya-tui/keyring", "secret-lib?/keyring"]
 oauth2 = ["dep:oauth-lib", "email-lib/oauth2", "pimalaya-tui/oauth2", "keyring"]
 wizard = ["dep:console", "dep:secret-lib", "email-lib/autoconfig", "pimalaya-tui/wizard"]
 
 [build-dependencies]
-git2 = { version = "0.19", default-features = false }
+pimalaya-tui = { version = "=0.1", default-features = false, features = ["build-envs"] }
+
+[dev-dependencies]
+neverest = { path = ".", features = ["notmuch", "keyring", "oauth2"] }
 
 [dependencies]
 async-trait = "0.1"
@@ -58,9 +52,9 @@ console = { version = "0.15.2", optional = true }
 indicatif = "0.17"
 
 [patch.crates-io]
-imap-client = { git = "https://github.com/pimalaya/imap-client" }
 email-lib = { git = "https://github.com/pimalaya/core" }
+keyring-lib = { git = "https://github.com/pimalaya/core" }
+oauth-lib = { git = "https://github.com/pimalaya/core" }
+pimalaya-tui = { git = "https://github.com/pimalaya/tui" }
 process-lib = { git = "https://github.com/pimalaya/core" }
 secret-lib = { git = "https://github.com/pimalaya/core" }
-mml-lib = { git = "https://github.com/pimalaya/core" }
-pimalaya-tui = { git = "https://github.com/pimalaya/tui" }

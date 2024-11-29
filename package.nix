@@ -47,7 +47,9 @@ rustPlatform.buildRustPackage {
   # unit tests only
   cargoTestFlags = [ "--lib" ];
 
-  postInstall = lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
+  postInstall = ''
+    mkdir -p $out/share/{completions,man}
+  '' + lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
     "$out"/bin/neverest man "$out"/share/man
   '' + lib.optionalString installManPages ''
     installManPage "$out"/share/man/*

@@ -210,6 +210,9 @@ You can also manually edit your own configuration, from scratch:
 
   ```toml
   [accounts.gmail]
+  # this is important in order not to sync twice your account
+  folder.filters.exclude = ["[Gmail]/All Mail"]
+
   left.backend.type = "maildir"
   left.backend.root-dir = "~/.Mail/gmail"
 
@@ -250,6 +253,9 @@ You can also manually edit your own configuration, from scratch:
 
   ```toml
   [accounts.gmail]
+  # this is important in order not to sync twice your account
+  folder.filters.exclude = ["[Gmail]/All Mail"]
+
   left.backend.type = "maildir"
   left.backend.root-dir = "~/.Mail/gmail"
 

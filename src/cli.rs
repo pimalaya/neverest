@@ -1,114 +1,95 @@
+//! CLI entry point.
+//!
+//! Mirrors [`himalaya::cli::HimalayaCli`] in shape: global args
+//! (`--config`, `--account`, `--json`, `--log-*`) flatten into the
+//! `clap::Parser`; a [`NeverestCommand`] subcommand carries the
+//! per-subcommand state and is dispatched by [`NeverestCommand::execute`].
+
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
-use color_eyre::eyre::Result;
-use pimalaya_tui::{
+use anyhow::Result;
+use clap::{CommandFactory, Parser, Subcommand};
+use pimalaya_cli::{
+    clap::{
+        args::{JsonFlag, LogFlags},
+        commands::{CompletionCommand, ManualCommand},
+        parsers::path_parser,
+    },
     long_version,
-    terminal::cli::{
-        arg::path_parser,
-        printer::{OutputFmt, Printer},
-    },
-    terminal::config::TomlConfig as _,
+    printer::Printer,
 };
+use pimalaya_config::toml::TomlConfig;
 
-use crate::{
-    account::command::{
-        configure::ConfigureAccountCommand, doctor::DoctorAccountCommand,
-        sync::SynchronizeAccountCommand,
-    },
-    completion::command::GenerateCompletionCommand,
-    config::TomlConfig,
-    manual::command::GenerateManualCommand,
+use crate::account::{
+    configure::ConfigureAccountCommand, doctor::DoctorAccountCommand,
+    synchronize::SynchronizeAccountCommand,
 };
+use crate::config::Config;
+use crate::wizard;
 
 #[derive(Parser, Debug)]
 #[command(name = env!("CARGO_PKG_NAME"))]
 #[command(author, version, about)]
 #[command(long_version = long_version!())]
 #[command(propagate_version = true, infer_subcommands = true)]
-pub struct Cli {
+pub struct NeverestCli {
     #[command(subcommand)]
-    pub command: Option<NeverestCommand>,
+    pub command: NeverestCommand,
 
     /// Override the default configuration file path.
     ///
     /// The given paths are shell-expanded then canonicalized (if
-    /// applicable). If the first path does not point to a valid file,
-    /// the wizard will propose to assist you in the creation of the
-    /// configuration file. Other paths are merged with the first one,
-    /// which allows you to separate your public config from your
-    /// private(s) one(s).
+    /// applicable). Multiple paths can be supplied delimited by `:`
+    /// and are merged left-to-right (later paths override earlier
+    /// ones). When no path resolves to an existing file, the
+    /// configuration wizard runs against the first one.
     #[arg(short, long = "config", global = true, env = "NEVEREST_CONFIG")]
-    #[arg(value_name = "PATH", value_parser = path_parser)]
+    #[arg(value_name = "PATH", value_parser = path_parser, value_delimiter = ':')]
     pub config_paths: Vec<PathBuf>,
 
-    /// Customize the output format.
-    ///
-    /// The output format determine how to display commands output to
-    /// the terminal.
-    ///
-    /// The possible values are:
-    ///
-    ///  - json: output will be in a form of a JSON-compatible object
-    ///
-    ///  - plain: output will be in a form of either a plain text or
-    ///    table, depending on the command
-    #[arg(long, short, global = true)]
-    #[arg(value_name = "FORMAT", value_enum, default_value_t = Default::default())]
-    pub output: OutputFmt,
+    #[command(flatten)]
+    pub json: JsonFlag,
 
-    /// Enable logs with spantrace.
-    ///
-    /// This is the same as running the command with `RUST_LOG=debug`
-    /// environment variable.
-    #[arg(long, global = true, conflicts_with = "trace")]
-    pub debug: bool,
-
-    /// Enable verbose logs with backtrace.
-    ///
-    /// This is the same as running the command with `RUST_LOG=trace`
-    /// and `RUST_BACKTRACE=1` environment variables.
-    #[arg(long, global = true, conflicts_with = "debug")]
-    pub trace: bool,
+    #[command(flatten)]
+    pub log: LogFlags,
 }
 
-#[derive(Subcommand, Debug)]
+#[derive(Debug, Subcommand)]
 pub enum NeverestCommand {
+    #[command(visible_alias = "sync", alias = "synchronise")]
+    Synchronize(SynchronizeAccountCommand),
+
     #[command(alias = "check-up", alias = "checkup", visible_alias = "check")]
     Doctor(DoctorAccountCommand),
 
     #[command(alias = "cfg")]
     Configure(ConfigureAccountCommand),
 
-    #[command(alias = "synchronise")]
-    Synchronize(SynchronizeAccountCommand),
+    #[command(arg_required_else_help = true)]
+    Manuals(ManualCommand),
 
     #[command(arg_required_else_help = true)]
-    #[command(alias = "manuals", alias = "mans")]
-    Manual(GenerateManualCommand),
-
-    #[command(arg_required_else_help = true)]
-    #[command(alias = "completions")]
-    Completion(GenerateCompletionCommand),
+    Completions(CompletionCommand),
 }
 
 impl NeverestCommand {
-    pub async fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
+    pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
         match self {
-            Self::Doctor(cmd) => {
-                let config = TomlConfig::from_paths_or_default(config_paths).await?;
-                cmd.execute(printer, &config).await
-            }
-            Self::Configure(cmd) => {
-                let config = TomlConfig::from_paths_or_default(config_paths).await?;
-                cmd.execute(printer, &config).await
-            }
-            Self::Synchronize(cmd) => {
-                let config = TomlConfig::from_paths_or_default(config_paths).await?;
-                cmd.execute(printer, &config).await
-            }
-            Self::Manual(cmd) => cmd.execute(printer).await,
-            Self::Completion(cmd) => cmd.execute().await,
+            Self::Synchronize(cmd) => cmd.execute(printer, config_paths),
+            Self::Doctor(cmd) => cmd.execute(printer, config_paths),
+            Self::Configure(cmd) => cmd.execute(printer, config_paths),
+            Self::Manuals(cmd) => cmd.execute(printer, NeverestCli::command()),
+            Self::Completions(cmd) => cmd.execute(printer, NeverestCli::command()),
         }
+    }
+}
+
+/// Loads `Config` from the merged `config_paths` or, when no file
+/// exists, runs the wizard against the target path. Called by every
+/// command that needs config (sync, doctor, configure).
+pub fn load_or_wizard(config_paths: &[PathBuf]) -> Result<Config> {
+    match Config::from_paths_or_default(config_paths)? {
+        Some(config) => Ok(config),
+        None => wizard::account::run_or_exit(&Config::target_path(config_paths)?),
     }
 }

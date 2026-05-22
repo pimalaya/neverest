@@ -4,230 +4,78 @@
 
 [accounts.example]
 
-# Defaultness of the account. The current account will be used by
-# default in all commands.
-#
+# The default account is used when `--account` is omitted on the
+# command line.
 default = true
 
-# Synchronize folders according to the given rules
-#
-#folder.filters = "all"
-#folder.filters.exclude = ["All Mails"]
-folder.filters.include = ["INBOX"]
+# Mailbox-level sync settings. Filters apply symmetrically to both
+# sides; aliases are friendly-name -> backend-id mappings.
+#mailbox.filters = "all"
+#mailbox.filters.exclude = ["All Mails"]
+mailbox.filters.include = ["INBOX"]
 
-# Synchronize envelopes according to the given rules
-#
-# Only before and after date filters are available.
-#
-#envelope.filter.before = "1990-12-31T23:59:60Z"
-#envelope.filter.after = "1990-12-31T23:59:60Z"
+#mailbox.alias.inbox = "INBOX"
+#mailbox.alias.drafts = "Drafts"
+#mailbox.alias.sent = "Sent"
+#mailbox.alias.trash = "Trash"
+
+# Envelope-level sync filters (placeholder; no fields are wired yet).
+#envelope = {}
 
 ########################################
 #### Left/right backend configuration ##
 ########################################
 #
-# There is no distinction between left and right. There is no
-# "direction" from left to right, backend can be configured in any
-# order.
+# There is no implicit direction from left to right; sides are
+# equivalent labels. Each side declares exactly one of `imap`, `jmap`
+# or `maildir`.
 
-# Left Maildir configuration
-#
-left.backend.type = "maildir"
+# ----- Left side: local Maildir -----
 
-# The Maildir root directory. The path should point to the root level
-# of the Maildir directory.
-#
-left.backend.root-dir = "~/.Mail/example"
+left.maildir.root = "~/.Mail/example"
 
-# Does the Maildir folder follows the Maildir++ standard?
-#
-# See <https://en.wikipedia.org/wiki/Maildir#Maildir++>.
-#
-#left.backend.maildirpp = false
+# Per-side permissions. Defaults are all true; declare a subset to
+# tighten what neverest is allowed to do.
+#left.mailbox.create = true
+#left.mailbox.delete = true
+#left.flag.update = true
+#left.message.create = true
+#left.message.delete = true
 
-# Left Notmuch configuration
-#
-#left.backend.type = "notmuch"
+# ----- Right side: IMAP -----
 
-# The path to the Notmuch database. The path should point to the root
-# directory containing the Notmuch database (usually the root Maildir
-# directory).
-#
-#left.backend.db-path = "~/.Mail/example"
+# Server address. Accepts a bare authority (treated as
+# `imaps://<authority>`) or a full `imap://` / `imaps://` URL.
+right.imap.server = "imap.example.com:993"
 
-# Overrides the default path to the Maildir folder.
-#
-#left.backend.maildir-path = "~/.Mail/example"
+# Set `true` for cleartext + STARTTLS upgrade. Defaults to false
+# (implicit TLS).
+#right.imap.starttls = false
 
-# Overrides the default Notmuch configuration file path.
-#
-#left.backend.config-path = "~/.notmuchrc"
+# Optional TLS knobs.
+#right.imap.tls.provider = "rustls"
+#right.imap.tls.rustls.crypto = "ring"
+#right.imap.tls.cert = "/path/to/ca.pem"
 
-# Override the default Notmuch profile name.
-#
-#left.backend.profile = "example"
+# SASL credentials. Exactly one variant per `[*.sasl]` block.
+right.imap.sasl.plain.authcid = "example@example.com"
+right.imap.sasl.plain.passwd = { keyring = "example-right-imap" }
+#right.imap.sasl.plain.passwd = { cmd = "pass show example-right-imap" }
+#right.imap.sasl.plain.passwd = { raw = "p@ssw0rd" }
 
-# Left backend folder aliases
-#
-# These 4 special folders need an alias, in order to map themselves
-# correctly between left and left backend. If your left backend trash
-# folder is called "Trash", and your left one "Deleted", you need to
-# set up aliases to prevent having both at the same time.
-# 
-left.folder.aliases.inbox = "INBOX"
-left.folder.aliases.drafts = "Drafts"
-left.folder.aliases.sent = "Sent"
-left.folder.aliases.trash = "Trash"
+#right.imap.sasl.login = { username = "example", password = { cmd = "..." } }
+#right.imap.sasl.anonymous = { message = "anonymous@example.com" }
+#right.imap.sasl.oauthbearer = { username = "example", host = "imap.example.com", port = 993, token = { keyring = "example-oauth" } }
+#right.imap.sasl.xoauth2 = { username = "example", token = { keyring = "example-oauth" } }
+#right.imap.sasl.scram-sha-256 = { username = "example", password = { cmd = "..." } }
 
-# Left backend permissions
-#
-# In this example, we set up a full permissive backend (default
-# behaviour):
-#
-left.folder.permissions.create = true
-left.folder.permissions.delete = true
-left.flag.permissions.update = true
-left.message.permissions.create = true
-left.message.permissions.delete = true
+# Lock the right side down — keep it read-mostly for the IMAP server.
+right.mailbox.create = false
+right.mailbox.delete = false
+right.message.delete = false
 
-# Right IMAP configuration
-#
-right.backend.type = "imap"
-
-# IMAP server host name
-#
-right.backend.host = "localhost"
-
-# IMAP server port
-#
-#right.backend.port = 143
-right.backend.port = 993
-
-# Defines the number of active IMAP clients during sync. A higher
-# number consumes more resource but makes the sync faster.
-#
-right.backend.clients-pool-size = 4
-
-# IMAP server encryption
-#
-#right.backend.encryption = "none" # or false
-#right.backend.encryption = "start-tls"
-right.backend.encryption = "tls" # or true
-
-# IMAP server login
-#
-right.backend.login = "example@localhost"
-
-# IMAP server password authentication configuration
-#
-right.backend.auth.type = "password"
-#
-# Password can be inlined (not recommended).
-#
-#right.backend.auth.raw = "p@assw0rd"
-#
-# Password can be stored inside your system global keyring (requires
-# the keyring cargo feature). You must run at least once `himalaya
-# account configure` to set up the password.
-#
-#right.backend.auth.keyring = "example-imap"
-#
-# Password can be retrieved from a shell command.
-#
-right.backend.auth.cmd = "pass show example-imap"
-
-# IMAP server OAuth 2.0 authorization configuration (requires the
-# oauth2 cargo feature)
-#
-#right.backend.auth.type = "oauth2"
-#
-# Client identifier issued to the client during the registration
-# process described in RFC6749.
-# See <https://datatracker.ietf.org/doc/html/rfc6749#section-2.2>.
-#
-#right.backend.auth.client-id = "client-id"
-#
-# Client password issued to the client during the registration process
-# described in RFC6749.
-#
-# Defaults to keyring "<account-name>-imap-client-secret".
-# See <https://datatracker.ietf.org/doc/html/rfc6749#section-2.2>.
-#
-#right.backend.auth.client-secret.raw = "<raw-client-secret>"
-#right.backend.auth.client-secret.keyring = "example-imap-client-secret"
-#right.backend.auth.client-secret.cmd = "pass show example-imap-client-secret"
-#
-# Method for presenting an OAuth 2.0 bearer token to a service for
-# authentication
-#
-#right.backend.auth.method = "oauthbearer"
-#right.backend.auth.method = "xoauth2"
-#
-# URL of the authorization server's authorization endpoint
-#
-#right.backend.auth.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
-#
-# URL of the authorization server's token endpoint
-#
-#right.backend.auth.token-url = "https://www.googleapis.com/oauth2/v3/token"
-#
-# Access token returned by the token endpoint and used to access
-# protected resources. It is recommended to use the keyring variant,
-# as it will refresh automatically.
-#
-# Defaults to keyring "<account-name>-imap-access-token".
-#
-#right.backend.auth.access-token.raw = "<raw-access-token>"
-#right.backend.auth.access-token.keyring = "example-imap-access-token"
-#right.backend.auth.access-token.cmd = "pass show example-imap-access-token"
-#
-# Refresh token used to obtain a new access token (if supported by the
-# authorization server). It is recommended to use the keyring variant,
-# as it will refresh automatically.
-#
-# Defaults to keyring "<account-name>-imap-refresh-token".
-#
-#right.backend.auth.refresh-token.raw = "<raw-refresh-token>"
-#right.backend.auth.refresh-token.keyring = "example-imap-refresh-token"
-#right.backend.auth.refresh-token.cmd = "pass show example-imap-refresh-token"
-#
-# Enable the protection, as defined in RFC7636.
-#
-# See <https://datatracker.ietf.org/doc/html/rfc7636>.
-#
-#right.backend.auth.pkce = true
-#
-# Access token scope(s), as defined by the authorization server.
-#
-#right.backend.auth.scope = "unique scope"
-#right.backend.auth.scopes = ["multiple", "scopes"]
-#
-# Host name of the redirect server.
-# Defaults to localhost.
-#
-#right.backend.auth.redirect-host = "localhost"
-#
-# Port of the redirect server.
-# Defaults to the first available one.
-#
-#right.backend.auth.redirect-port = 9999
-
-# Right backend folder aliases
-#
-# These 4 special folders need an alias, in order to map themselves
-# correctly between left and right backend. If your left backend trash
-# folder is called "Trash", and your right one "Deleted", you need to
-# set up aliases to prevent having both at the same time.
-# 
-right.folder.aliases.inbox = "INBOX"
-right.folder.aliases.drafts = "Drafts"
-right.folder.aliases.sent = "Sent"
-right.folder.aliases.trash = "Trash"
-
-# Right backend permissions
-#
-# In this example, we set up safer permissions by denying deletions
-# right IMAP side.
-#
-right.folder.permissions.delete = false
-right.message.permissions.delete = false
+# ----- Right side: JMAP (alternative example) -----
+#right.jmap.server = "fastmail.com"
+#right.jmap.auth.bearer.token = { keyring = "example-jmap-bearer" }
+#right.jmap.auth.basic.username = "example@fastmail.com"
+#right.jmap.auth.basic.password = { keyring = "example-jmap-basic" }

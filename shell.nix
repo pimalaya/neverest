@@ -1,6 +1,31 @@
-{ pimalaya ? import (fetchTarball "https://github.com/pimalaya/nix/archive/master.tar.gz")
-, ...
-} @args:
+{
+  nixpkgs ? <nixpkgs>,
+  system ? builtins.currentSystem,
+  pkgs ? import nixpkgs { inherit system; },
+  pimalaya ? import (fetchTarball "https://github.com/pimalaya/nix/archive/master.tar.gz"),
+  fenix ? import (fetchTarball "https://github.com/nix-community/fenix/archive/monthly.tar.gz") { },
+}:
 
-pimalaya.mkShell ({ rustToolchainFile = ./rust-toolchain.toml; }
-  // removeAttrs args [ "pimalaya" ])
+let
+  inherit (pkgs) cargo-deny openssl pkg-config;
+
+  shell = pimalaya.mkShell {
+    inherit
+      nixpkgs
+      system
+      pkgs
+      fenix
+      ;
+  };
+
+in
+shell.overrideAttrs (prev: {
+  nativeBuildInputs = (prev.nativeBuildInputs or [ ]) ++ [
+    pkg-config
+  ];
+
+  buildInputs = (prev.buildInputs or [ ]) ++ [
+    cargo-deny
+    openssl
+  ];
+})

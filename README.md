@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./logo.svg" alt="Logo" width="128" height="128" />
   <h1>📫 Neverest</h1>
-  <p>CLI to synchronize, backup and restore emails,<br>based on <a href="https://crates.io/crates/email-lib"><code>email-lib</code></a></p>
+  <p>CLI to synchronize, backup and restore emails,<br>built on the Pimalaya <code>io-*</code> ecosystem</p>
   <p>
     <a href="https://github.com/pimalaya/neverest/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/pimalaya/neverest?color=success"/></a>
 	<a href="https://repology.org/project/neverest/versions"><img alt="Repology" src="https://img.shields.io/repology/repositories/neverest?color=success"></a>
@@ -16,13 +16,12 @@
 ## Features
 
 - Multi-accounting
-- Interactive configuration via **wizard** (requires `wizard` feature)
-- Synchronize pair of backends together (namely `left` and `right`)
-- **Partial** synchronization based on **filters**
-- **Restrictive** synchronization based on **permissions**
-- **IMAP** backend (requires `imap` feature)
-- **Maildir** backend (requires `maildir` feature)
-- **Notmuch** backend (requires `notmuch` feature)
+- Synchronize a pair of backends together (namely `left` and `right`)
+- **Partial** synchronization based on mailbox **filters**
+- **Restrictive** synchronization based on per-side **permissions**
+- **IMAP** backend (requires the `imap` feature)
+- **JMAP** backend (requires the `jmap` feature)
+- **Maildir** backend (requires the `maildir` feature)
 - **Backup** and **restore** emails using the Maildir backend
 
 *Neverest CLI is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/neverest/blob/master/Cargo.toml#L18).*

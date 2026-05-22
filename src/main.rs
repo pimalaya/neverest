@@ -1,28 +1,31 @@
-use clap::{CommandFactory, Parser};
-use color_eyre::eyre::Result;
-use neverest::{cli::Cli, config::TomlConfig};
-use pimalaya_tui::terminal::{
-    cli::{printer::StdoutPrinter, tracing},
-    config::TomlConfig as _,
-};
+mod account;
+mod cli;
+mod config;
+#[cfg(feature = "imap")]
+mod imap;
+#[cfg(feature = "jmap")]
+mod jmap;
+#[cfg(feature = "maildir")]
+mod maildir;
+mod side;
+mod sync;
+mod wizard;
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    let tracing = tracing::install()?;
+use anyhow::Result;
+use clap::Parser;
+use pimalaya_cli::{error::ErrorReport, log::Logger, printer::StdoutPrinter};
 
-    #[cfg(feature = "keyring")]
-    secret::keyring::set_global_service_name("neverest-cli");
+use crate::cli::NeverestCli;
 
-    let cli = Cli::parse();
-    let mut printer = StdoutPrinter::new(cli.output);
-    let res = match cli.command {
-        Some(cmd) => cmd.execute(&mut printer, cli.config_paths.as_ref()).await,
-        None => {
-            TomlConfig::from_paths_or_default(cli.config_paths.as_ref()).await?;
-            println!("{}", Cli::command().render_help());
-            Ok(())
-        }
-    };
+fn main() {
+    let cli = NeverestCli::parse();
+    let mut printer = StdoutPrinter::new(&cli.json);
+    let result = execute(cli, &mut printer);
+    ErrorReport::eval(&mut printer, result);
+}
 
-    tracing.with_debug_and_trace_notes(res)
+fn execute(cli: NeverestCli, printer: &mut StdoutPrinter) -> Result<()> {
+    Logger::try_init(&cli.log)?;
+    let config_paths = cli.config_paths.as_ref();
+    cli.command.execute(printer, config_paths)
 }

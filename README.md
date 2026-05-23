@@ -9,8 +9,6 @@
   </p>
 </div>
 
-![screenshot](./screenshot.jpeg)
-
 *The project is under active development, do not use in production before the final `v1.0.0` (or at least do some manual backups).*
 
 ## Features
@@ -21,8 +19,8 @@
 - **Restrictive** synchronization based on per-side **permissions**
 - **IMAP** backend (requires the `imap` feature)
 - **JMAP** backend (requires the `jmap` feature)
-- **Maildir** backend (requires the `maildir` feature)
-- **Backup** and **restore** emails using the Maildir backend
+- **m2dir** backend for local storage (requires the `m2dir` feature)
+- **Backup** and **restore** emails using the m2dir backend; users coming from mbsync or OfflineIMAP can convert an existing Maildir tree with `neverest migrate-maildir <src> <dst>`
 
 *Neverest CLI is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/neverest/blob/master/Cargo.toml#L18).*
 

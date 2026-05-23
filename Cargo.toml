@@ -7,7 +7,7 @@ rust-version = "1.87"
 edition = "2024"
 license = "MIT"
 categories = ["command-line-utilities", "email"]
-keywords = ["cli", "email", "imap", "jmap", "backup", "sync"]
+keywords = ["cli", "email", "imap", "backup", "sync"]
 homepage = "https://pimalaya.org/"
 documentation = "https://pimalaya.org/neverest/cli/latest/"
 repository = "https://github.com/soywod/neverest/"
@@ -17,10 +17,10 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["imap", "jmap", "maildir", "rustls-ring"]
+default = ["imap", "jmap", "m2dir", "rustls-ring"]
 imap = ["dep:io-imap", "io-email/imap", "io-imap/client", "pimalaya-cli/imap"]
 jmap = ["dep:base64", "dep:io-jmap", "io-email/jmap", "io-jmap/client", "pimalaya-cli/jmap"]
-maildir = ["dep:io-maildir", "io-email/maildir", "io-maildir/client"]
+m2dir = ["dep:io-m2dir", "io-email/m2dir", "io-m2dir/client"]
 native-tls = ["pimalaya-stream/native-tls", "io-discovery/native-tls", "io-imap?/native-tls", "io-jmap?/native-tls"]
 rustls-aws = ["pimalaya-stream/rustls-aws", "io-discovery/rustls-aws", "io-imap?/rustls-aws", "io-jmap?/rustls-aws"]
 rustls-ring = ["pimalaya-stream/rustls-ring", "io-discovery/rustls-ring", "io-imap?/rustls-ring", "io-jmap?/rustls-ring"]
@@ -42,12 +42,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4.4", features = ["derive", "env", "wrap_help"] }
 crossterm = { version = "0.29", default-features = false, features = ["serde"] }
 dirs = "6"
-indicatif = "0.17"
 io-discovery = { version = "0.0.1", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "client"] }
 io-email = { version = "0.0.1", default-features = false, features = ["serde", "client", "search"] }
 io-imap = { version = "0.0.1", default-features = false, optional = true }
 io-jmap = { version = "0.0.1", default-features = false, optional = true }
-io-maildir = { version = "0.0.1", default-features = false, optional = true }
+io-m2dir = { version = "0.0.1", default-features = false, optional = true }
 log = "0.4"
 mail-parser = { version = "0.11", features = ["serde"] }
 percent-encoding = "2"
@@ -60,16 +59,21 @@ serde_json = "1"
 shellexpand = "3.1"
 toml = "0.8"
 url = { version = "2.2", features = ["serde"] }
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
 
 [patch.crates-io]
 domain = { git = "https://github.com/soywod/domain", branch = "new-srv" }
-io-discovery.path = "../io-discovery"
-io-email.path = "../io-email"
-io-http.path = "../io-http"
-io-imap.path = "../io-imap"
-io-jmap.path = "../io-jmap"
-io-maildir.path = "../io-maildir"
-io-smtp.path = "../io-smtp"
-pimalaya-cli.path = "../cli"
-pimalaya-config.path = "../config"
-pimalaya-stream.path = "../stream"
+io-discovery.git = "https://github.com/pimalaya/io-discovery"
+io-email.git = "https://github.com/pimalaya/io-email"
+io-http.git = "https://github.com/pimalaya/io-http"
+io-imap.git = "https://github.com/pimalaya/io-imap"
+io-jmap.git = "https://github.com/pimalaya/io-jmap"
+io-m2dir.git = "https://github.com/pimalaya/io-m2dir"
+io-maildir.git = "https://github.com/pimalaya/io-maildir"
+io-smtp.git = "https://github.com/pimalaya/io-smtp"
+pimalaya-cli.git = "https://github.com/pimalaya/cli"
+pimalaya-config.git = "https://github.com/pimalaya/config"
+pimalaya-stream.git = "https://github.com/pimalaya/stream"

@@ -1,21 +1,94 @@
-//! Account-creation wizard.
-//!
-//! Placeholder for the new pimalaya-cli + io-discovery flow. The
-//! production wizard will prompt for an account name, then walk
-//! through left + right backend selection (IMAP / JMAP / Maildir),
-//! seed IMAP/JMAP defaults via [`io_discovery::autoconfig`], and
-//! persist the [`Config`] via [`Config::write`].
+//! Shared converters that turn wizard answers
+//! ([`WizardImapConfig`] / [`WizardJmapConfig`]) into the on-disk
+//! config types ([`ImapConfig`] / [`JmapConfig`]). Used by both
+//! [`super::discover`] and [`super::edit`]. m2dir has no wizard answer
+//! type: its only field is a filesystem path, so [`super::discover`]
+//! prompts for it inline.
 
-use std::path::Path;
+use std::process::Command;
 
 use anyhow::{Result, bail};
+use pimalaya_cli::wizard::{
+    imap::{Encryption as ImapEncryption, ImapAuth, ImapSecret, WizardImapConfig},
+    jmap::{JmapAuth, JmapSecret, WizardJmapConfig},
+};
+use pimalaya_config::{command::shell, secret::Secret};
 
-use crate::config::Config;
+use crate::config::{
+    FlagSidePermissions, ImapConfig, JmapAuthConfig, JmapConfig, MailboxSidePermissions,
+    MessageSidePermissions, SaslConfig, SaslPlainConfig,
+};
 
-pub fn run_or_exit(_target: &Path) -> Result<Config> {
-    bail!(
-        "no config file found and the wizard is not yet wired against \
-         pimalaya-cli; create one manually and re-run, or wait for the \
-         wizard rewrite"
-    )
+pub fn imap_to_config(w: WizardImapConfig) -> Result<ImapConfig> {
+    let scheme = match w.encryption {
+        ImapEncryption::Tls => "imaps",
+        ImapEncryption::StartTls | ImapEncryption::None => "imap",
+    };
+    let server = format!("{scheme}://{}:{}", w.host, w.port);
+    let starttls = matches!(w.encryption, ImapEncryption::StartTls);
+    let sasl = Some(build_sasl_imap(&w.login, w.auth)?);
+
+    Ok(ImapConfig {
+        server,
+        tls: Default::default(),
+        starttls,
+        sasl,
+        mailbox: MailboxSidePermissions::default(),
+        flag: FlagSidePermissions::default(),
+        message: MessageSidePermissions::default(),
+        pool_size: None,
+    })
+}
+
+pub fn jmap_to_config(w: WizardJmapConfig) -> Result<JmapConfig> {
+    let auth = match w.auth {
+        JmapAuth::Basic { login, secret } => JmapAuthConfig::Basic {
+            username: login,
+            password: jmap_secret_to_secret(secret)?,
+        },
+        JmapAuth::Bearer { secret } => JmapAuthConfig::Bearer {
+            token: jmap_secret_to_secret(secret)?,
+        },
+    };
+
+    Ok(JmapConfig {
+        server: w.server,
+        tls: Default::default(),
+        auth,
+        identity_id: None,
+        drafts_mailbox_id: None,
+        mailbox: MailboxSidePermissions::default(),
+        flag: FlagSidePermissions::default(),
+        message: MessageSidePermissions::default(),
+        pool_size: None,
+    })
+}
+
+fn build_sasl_imap(login: &str, auth: ImapAuth) -> Result<SaslConfig> {
+    let ImapAuth::Password(secret) = auth;
+    let passwd = match secret {
+        ImapSecret::Raw(s) => Secret::Raw(s),
+        ImapSecret::Command(cmd) => Secret::Command(parse_cmd(&cmd)?),
+    };
+
+    Ok(SaslConfig::Plain(SaslPlainConfig {
+        authzid: None,
+        authcid: login.to_owned(),
+        passwd,
+    }))
+}
+
+fn jmap_secret_to_secret(secret: JmapSecret) -> Result<Secret> {
+    Ok(match secret {
+        JmapSecret::Raw(s) => Secret::Raw(s),
+        JmapSecret::Command(cmd) => Secret::Command(parse_cmd(&cmd)?),
+    })
+}
+
+fn parse_cmd(cmd: &str) -> Result<Command> {
+    let line = cmd.trim();
+    if line.is_empty() {
+        bail!("Empty shell command for secret");
+    }
+    Ok(shell(line))
 }

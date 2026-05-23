@@ -18,14 +18,12 @@ use pimalaya_cli::{
     long_version,
     printer::Printer,
 };
-use pimalaya_config::toml::TomlConfig;
 
-use crate::account::{
-    configure::ConfigureAccountCommand, doctor::DoctorAccountCommand,
-    synchronize::SynchronizeAccountCommand,
+use crate::{
+    cli::{check::CheckCommand, configure::ConfigureCommand, init::InitCommand},
+    convert::cli::ConvertCommand,
+    sync::cli::SyncCommand,
 };
-use crate::config::Config;
-use crate::wizard;
 
 #[derive(Parser, Debug)]
 #[command(name = env!("CARGO_PKG_NAME"))]
@@ -46,28 +44,25 @@ pub struct NeverestCli {
     #[arg(short, long = "config", global = true, env = "NEVEREST_CONFIG")]
     #[arg(value_name = "PATH", value_parser = path_parser, value_delimiter = ':')]
     pub config_paths: Vec<PathBuf>,
-
     #[command(flatten)]
     pub json: JsonFlag,
-
     #[command(flatten)]
     pub log: LogFlags,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum NeverestCommand {
-    #[command(visible_alias = "sync", alias = "synchronise")]
-    Synchronize(SynchronizeAccountCommand),
-
-    #[command(alias = "check-up", alias = "checkup", visible_alias = "check")]
-    Doctor(DoctorAccountCommand),
-
+    Check(CheckCommand),
+    Init(InitCommand),
+    Sync(SyncCommand),
     #[command(alias = "cfg")]
-    Configure(ConfigureAccountCommand),
+    Configure(ConfigureCommand),
+
+    #[command(subcommand)]
+    Convert(ConvertCommand),
 
     #[command(arg_required_else_help = true)]
     Manuals(ManualCommand),
-
     #[command(arg_required_else_help = true)]
     Completions(CompletionCommand),
 }
@@ -75,21 +70,13 @@ pub enum NeverestCommand {
 impl NeverestCommand {
     pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
         match self {
-            Self::Synchronize(cmd) => cmd.execute(printer, config_paths),
-            Self::Doctor(cmd) => cmd.execute(printer, config_paths),
+            Self::Init(cmd) => cmd.execute(printer, config_paths),
+            Self::Sync(cmd) => cmd.execute(printer, config_paths),
+            Self::Check(cmd) => cmd.execute(printer, config_paths),
             Self::Configure(cmd) => cmd.execute(printer, config_paths),
+            Self::Convert(cmd) => cmd.execute(printer),
             Self::Manuals(cmd) => cmd.execute(printer, NeverestCli::command()),
             Self::Completions(cmd) => cmd.execute(printer, NeverestCli::command()),
         }
-    }
-}
-
-/// Loads `Config` from the merged `config_paths` or, when no file
-/// exists, runs the wizard against the target path. Called by every
-/// command that needs config (sync, doctor, configure).
-pub fn load_or_wizard(config_paths: &[PathBuf]) -> Result<Config> {
-    match Config::from_paths_or_default(config_paths)? {
-        Some(config) => Ok(config),
-        None => wizard::account::run_or_exit(&Config::target_path(config_paths)?),
     }
 }

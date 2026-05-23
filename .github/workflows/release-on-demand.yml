@@ -1,0 +1,42 @@
+name: Release on demand
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: Operating system
+        type: choice
+        required: true
+        default: ubuntu-latest
+        options:
+          - ubuntu-24.04
+          - macos-13
+          - macos-14
+      target:
+        description: Architecture
+        type: choice
+        required: true
+        options:
+          - aarch64-apple-darwin
+          - aarch64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+          - armv6l-unknown-linux-musleabihf
+          - armv7l-unknown-linux-musleabihf
+          - i686-unknown-linux-musl
+          - x86_64-apple-darwin
+          - x86_64-unknown-linux-musl
+          - x86_64-w64-mingw32
+      features:
+        description: Cargo features
+        type: string
+        required: true
+
+jobs:
+  release-on-demand:
+    uses: pimalaya/nix/.github/workflows/release-on-demand.yml@master
+    secrets: inherit
+    with:
+      project: neverest
+      os: ${{ inputs.os }}
+      target: ${{ inputs.target }}
+      features: ${{ inputs.features }}

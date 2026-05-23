@@ -10,7 +10,7 @@ use std::{collections::HashMap, fs, path::Path, path::PathBuf};
 use anyhow::{Context, Result};
 use pimalaya_config::{
     secret::Secret,
-    toml::{TomlConfig, shell_expanded_string},
+    toml::{TomlConfig, shell_expanded_path, shell_expanded_string},
 };
 use pimalaya_stream::{
     sasl::{
@@ -19,6 +19,62 @@ use pimalaya_stream::{
     tls::{Rustls, RustlsCrypto, Tls, TlsProvider},
 };
 use serde::{Deserialize, Serialize};
+
+use crate::wizard;
+
+/// Wraps a `pub struct $Name { ... }` declaration and splices in the
+/// per-side shared fields (`mailbox`, `flag`, `message`, `pool_size`)
+/// at the end. Used by every protocol-specific config so each variant
+/// of [`SideConfig`] carries the same permission and pool-size knobs
+/// without copy-pasting the four fields.
+macro_rules! side_config {
+    (
+        $(#[$struct_meta:meta])*
+        pub struct $Name:ident {
+            $(
+                $(#[$field_meta:meta])*
+                pub $field_name:ident: $field_ty:ty,
+            )*
+        }
+    ) => {
+        $(#[$struct_meta])*
+        pub struct $Name {
+            $(
+                $(#[$field_meta])*
+                pub $field_name: $field_ty,
+            )*
+            #[serde(default)]
+            pub mailbox: MailboxSidePermissions,
+            #[serde(default)]
+            pub flag: FlagSidePermissions,
+            #[serde(default)]
+            pub message: MessageSidePermissions,
+            /// Optional override for the per-side connection pool
+            /// size. When unset, defaults are picked per backend
+            /// (IMAP 8, JMAP 4, m2dir 8); see
+            /// [`crate::sync::pool::SidePool::open`].
+            #[serde(default)]
+            pub pool_size: Option<usize>,
+        }
+    };
+}
+
+/// Generates an accessor on [`SideConfig`] that forwards to the
+/// matching shared field on the active variant's protocol config. The
+/// shared fields (`mailbox`, `flag`, `message`, `pool_size`) are
+/// appended to every protocol config by [`side_config!`], so all three
+/// arms have the same field by construction.
+macro_rules! side_accessor {
+    ($name:ident, $ty:ty) => {
+        pub fn $name(&self) -> $ty {
+            match self {
+                Self::Imap(c) => c.$name,
+                Self::Jmap(c) => c.$name,
+                Self::M2dir(c) => c.$name,
+            }
+        }
+    };
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -48,10 +104,19 @@ impl TomlConfig for Config {
 }
 
 impl Config {
+    /// Loads `Config` from the merged `config_paths` or, when no file
+    /// exists, runs the wizard against the target path. Called by every
+    /// command that needs config (sync, doctor, configure).
+    pub fn load_or_wizard(config_paths: &[PathBuf]) -> Result<Config> {
+        match Config::from_paths_or_default(config_paths)? {
+            Some(config) => Ok(config),
+            None => wizard::discover::run(&Config::target_path(config_paths)?),
+        }
+    }
+
     /// Serializes `self` to TOML and writes it to `path`, creating
     /// any missing parent directories. Used by the wizard to persist
     /// a freshly-built configuration.
-    #[allow(dead_code)]
     pub fn write(&self, path: &Path) -> Result<()> {
         let toml = toml::to_string_pretty(self).context("Serialize TOML config error")?;
 
@@ -69,7 +134,7 @@ impl Config {
 }
 
 /// Per-account configuration: two sides plus optional sync filters.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct AccountConfig {
     #[serde(default)]
@@ -83,28 +148,56 @@ pub struct AccountConfig {
     #[serde(default)]
     pub mailbox: MailboxSyncConfig,
 
-    /// Reserved for envelope-level sync filters (date range, sender,
+    /// Reserved for message-level sync filters (date range, sender,
     /// subject). Currently a placeholder so future fields don't break
     /// existing config files.
     #[serde(default)]
-    pub envelope: EnvelopeSyncConfig,
+    pub message: MessageSyncConfig,
 }
 
-/// One side of the bidirectional sync. Exactly one of `imap`, `jmap`,
-/// or `maildir` must be set; this is checked at client-construction
-/// time (not by serde) so the error message names the side.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct SideConfig {
-    pub imap: Option<ImapConfig>,
-    pub jmap: Option<JmapConfig>,
-    pub maildir: Option<MaildirConfig>,
+/// One side of the bidirectional sync. Exactly one variant is set
+/// (serde rejects multiples and `deny_unknown_fields` rejects none),
+/// so client construction never has to check "how many backends".
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase", deny_unknown_fields)]
+pub enum SideConfig {
+    Imap(ImapConfig),
+    Jmap(JmapConfig),
+    M2dir(M2dirConfig),
+}
 
-    #[serde(default)]
+impl SideConfig {
+    side_accessor!(mailbox, MailboxSidePermissions);
+    side_accessor!(flag, FlagSidePermissions);
+    side_accessor!(message, MessageSidePermissions);
+    side_accessor!(pool_size, Option<usize>);
+
+    pub fn is_imap(&self) -> bool {
+        matches!(self, Self::Imap(_))
+    }
+
+    pub fn is_jmap(&self) -> bool {
+        matches!(self, Self::Jmap(_))
+    }
+
+    /// Bundles the three permission accessors so the sync engine can
+    /// snapshot the gating policy once per side instead of re-walking
+    /// the config inside its inner loops.
+    pub fn permissions(&self) -> SidePermissions {
+        SidePermissions {
+            mailbox: self.mailbox(),
+            flag: self.flag(),
+            message: self.message(),
+        }
+    }
+}
+
+/// Per-side permission triple consulted by the sync engine to decide
+/// whether a planned hunk is allowed to materialize.
+#[derive(Clone, Copy, Debug)]
+pub struct SidePermissions {
     pub mailbox: MailboxSidePermissions,
-    #[serde(default)]
     pub flag: FlagSidePermissions,
-    #[serde(default)]
     pub message: MessageSidePermissions,
 }
 
@@ -123,7 +216,7 @@ pub struct MailboxSyncConfig {
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct EnvelopeSyncConfig {}
+pub struct MessageSyncConfig {}
 
 /// Mailbox-name filter: `Include` keeps only the listed names,
 /// `Exclude` drops them, `All` keeps everything.
@@ -183,38 +276,46 @@ impl Default for MessageSidePermissions {
 }
 
 // ── Protocol configs (mirrored from himalaya v2) ─────────────────────
+//
+// Each protocol-specific struct carries its own settings plus the
+// shared per-side knobs (mailbox/flag/message/pool_size) appended by
+// the `side_config!` macro. Accessors on [`SideConfig`] forward to the
+// active variant's shared fields so callers never have to match on the
+// variant just to read a permission.
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ImapConfig {
-    pub server: String,
-
-    #[serde(default)]
-    pub tls: TlsConfig,
-    #[serde(default)]
-    pub starttls: bool,
-
-    pub sasl: Option<SaslConfig>,
+side_config! {
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    pub struct ImapConfig {
+        pub server: String,
+        #[serde(default)]
+        pub tls: TlsConfig,
+        #[serde(default)]
+        pub starttls: bool,
+        pub sasl: Option<SaslConfig>,
+    }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct MaildirConfig {
-    pub root: PathBuf,
+side_config! {
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    pub struct M2dirConfig {
+        #[serde(deserialize_with = "shell_expanded_path")]
+        pub root: PathBuf,
+    }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct JmapConfig {
-    pub server: String,
-
-    #[serde(default)]
-    pub tls: TlsConfig,
-
-    pub auth: JmapAuthConfig,
-
-    pub identity_id: Option<String>,
-    pub drafts_mailbox_id: Option<String>,
+side_config! {
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    pub struct JmapConfig {
+        pub server: String,
+        #[serde(default)]
+        pub tls: TlsConfig,
+        pub auth: JmapAuthConfig,
+        pub identity_id: Option<String>,
+        pub drafts_mailbox_id: Option<String>,
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

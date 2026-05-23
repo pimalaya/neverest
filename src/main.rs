@@ -1,12 +1,6 @@
-mod account;
 mod cli;
 mod config;
-#[cfg(feature = "imap")]
-mod imap;
-#[cfg(feature = "jmap")]
-mod jmap;
-#[cfg(feature = "maildir")]
-mod maildir;
+mod convert;
 mod side;
 mod sync;
 mod wizard;
@@ -15,7 +9,7 @@ use anyhow::Result;
 use clap::Parser;
 use pimalaya_cli::{error::ErrorReport, log::Logger, printer::StdoutPrinter};
 
-use crate::cli::NeverestCli;
+use crate::cli::neverest::NeverestCli;
 
 fn main() {
     let cli = NeverestCli::parse();

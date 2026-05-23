@@ -1,6 +1,11 @@
-pub mod builder;
+pub mod apply;
 pub mod cache;
-pub mod event;
+pub mod cli;
+pub mod diff;
+pub mod engine;
 pub mod hunk;
 pub mod key;
+#[cfg(feature = "m2dir")]
+pub mod m2dir_diff;
+pub mod pool;
 pub mod report;

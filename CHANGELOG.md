@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING**: rewrote neverest on top of the new `io-*` ecosystem (`io-email`, `io-imap`, `io-jmap`, `io-maildir`) and `pimalaya-cli` / `pimalaya-config` / `pimalaya-stream`. The old `email-lib` (pimalaya/core) dependency is gone; the sync engine now lives inside `neverest::sync` and drives both sides through `io_email::client::EmailClientStd`.
+- **BREAKING**: Maildir is no longer a sync target. Local sync now uses **m2dir** (https://man.sr.ht/~bitfehler/m2dir/), a maildir-shaped format whose `.meta/<id>.flags` sidecar carries canonical IANA keywords plus arbitrary UTF-8 custom keywords with zero ambiguity. The `maildir` cargo feature is now `m2dir`; the `left.maildir.root` config key becomes `left.m2dir.root` (likewise `right`). Existing Maildir setups should run the new `neverest migrate-maildir <src-maildir-root> <dst-m2dir-root>` subcommand to convert their tree before pointing the side at it.
+- **BREAKING**: rewrote neverest on top of the new `io-*` ecosystem (`io-email`, `io-imap`, `io-jmap`, `io-m2dir`) and `pimalaya-cli` / `pimalaya-config` / `pimalaya-stream`. The old `email-lib` (pimalaya/core) dependency is gone; the sync engine now lives inside `neverest::sync` and drives both sides through `io_email::client::EmailClientStd`.
 - **BREAKING**: renamed `folder` to `mailbox` everywhere (config keys, CLI flags). `--include-folder` becomes `--include-mailbox` / `-m`; `mailbox.filters` replaces `folder.filters`; the per-side `mailbox`/`flag`/`message` permission tables now live directly under each side instead of under `left.folder.permissions`.
 - **BREAKING**: side configuration moved from `left.backend.type = "imap"` to `left.imap.server = "..."` (likewise for `jmap`, `maildir`). Exactly one of the three sub-tables must be set per side.
 - Tokio runtime removed — neverest is now synchronous (io-* clients use `std::net`).

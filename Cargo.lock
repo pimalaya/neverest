@@ -1488,7 +1488,7 @@ dependencies = [
 [[package]]
 name = "pimalaya-config"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/config#5df70410bfecb5e046346b80864273f101bed473"
+source = "git+https://github.com/pimalaya/config#f8c344a34d9e86eaf1d51041c3c6daec3d12510a"
 dependencies = [
  "anyhow",
  "dirs",

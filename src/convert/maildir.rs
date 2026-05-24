@@ -16,7 +16,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use io_email::flag::{Flag, IanaFlag};
-use io_m2dir::{client::M2dirClient, entry::write_checksum, flag::Flags as M2Flags};
+use io_m2dir::{client::M2dirClient, entry::write_checksum, flag::M2dirFlags as M2Flags};
 use log::{debug, info, warn};
 use pimalaya_cli::printer::Printer;
 use walkdir::WalkDir;
@@ -200,7 +200,7 @@ fn convert_folder(
     // List existing destination checksums once so per-message
     // idempotency is O(1).
     let existing = client
-        .list_messages(m2dir.clone())
+        .list_entries(m2dir.clone())
         .with_context(|| format!("list existing entries in mailbox {mailbox}"))?;
     let existing_checksums: BTreeSet<String> = existing
         .into_iter()
@@ -332,7 +332,7 @@ fn locate_entry_by_checksum(
     checksum: &str,
 ) -> Result<Option<String>> {
     let entries = client
-        .list_messages(m2dir.clone())
+        .list_entries(m2dir.clone())
         .context("list entries for checksum lookup")?;
 
     for entry in entries {

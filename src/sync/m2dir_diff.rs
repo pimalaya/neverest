@@ -50,7 +50,7 @@ pub fn diff_envelopes(
         .as_m2dir_mut()
         .context("m2dir client not registered on this side")?;
     let m2dir = open_m2dir(m2dir_client, mailbox)?;
-    let entries = m2dir_client.list_messages(m2dir.clone())?;
+    let entries = m2dir_client.list_entries(m2dir.clone())?;
 
     let parser = MessageParser::default();
     let mut current_ids: HashSet<String> = HashSet::with_capacity(entries.len());

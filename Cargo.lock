@@ -949,7 +949,7 @@ dependencies = [
 [[package]]
 name = "io-email"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/io-email#6c898bbc8faced492e974fff27dd4da0f46f4827"
+source = "git+https://github.com/pimalaya/io-email#6cfb80f0b694bff3334678893724e1a763c20cb8"
 dependencies = [
  "chrono",
  "chumsky",
@@ -972,7 +972,7 @@ dependencies = [
 [[package]]
 name = "io-http"
 version = "0.0.3"
-source = "git+https://github.com/pimalaya/io-http#812d8a30891631e49c70722555eefecaa0033458"
+source = "git+https://github.com/pimalaya/io-http#1e71383b97e823f9440ea2d7c2af378bcd3b5933"
 dependencies = [
  "anyhow",
  "base64",
@@ -1019,7 +1019,7 @@ dependencies = [
 [[package]]
 name = "io-m2dir"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/io-m2dir#69541e3b50bde6bdcc00135d5ec2bb388471ee5c"
+source = "git+https://github.com/pimalaya/io-m2dir#5573017a05ca45cc369a5a83e1fc9e264c60d3c9"
 dependencies = [
  "log",
  "thiserror",
@@ -1504,7 +1504,7 @@ dependencies = [
 [[package]]
 name = "pimalaya-stream"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/stream#4a28a3c051bdc31e65a3fbbeb7f33b8aaebaca7b"
+source = "git+https://github.com/pimalaya/stream#55bbb1cbf929effdc131573724017b86450a6ddd"
 dependencies = [
  "anyhow",
  "log",

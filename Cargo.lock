@@ -1019,7 +1019,7 @@ dependencies = [
 [[package]]
 name = "io-m2dir"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/io-m2dir#5573017a05ca45cc369a5a83e1fc9e264c60d3c9"
+source = "git+https://github.com/pimalaya/io-m2dir#0f36832cf074eae35d3b9959c7c98076fc0da57b"
 dependencies = [
  "log",
  "thiserror",

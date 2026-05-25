@@ -1,8 +1,22 @@
-//! Interactive configuration wizard for editing (or creating) an
-//! existing account. Skips provider discovery entirely: this is meant
-//! for accounts the user already configured. Pre-fills the wizard
-//! prompts with the account's current values; the auth secret is
-//! never reused, the user is re-prompted for it.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Re-runs the wizard over an existing account, pre-filling prompts
+//! with current values; auth secrets are always re-prompted.
 
 use std::path::{Path, PathBuf};
 
@@ -27,11 +41,7 @@ use crate::{
     wizard::account::{imap_to_config, jmap_to_config},
 };
 
-/// Edits (or creates) the account named `account_name`. Uses the
-/// account's current `left` and `right` blocks as defaults; an
-/// existing JMAP variant routes to the JMAP wizard, an IMAP variant
-/// routes to the IMAP wizard, and m2dir re-prompts for the store
-/// root. Writes the updated config to `target` before returning.
+/// Edits (or creates) `account_name`, then writes `config` to `target`.
 pub fn edit_account(target: &Path, mut config: Config, account_name: &str) -> Result<Config> {
     let existing = config.accounts.remove(account_name);
 
@@ -81,9 +91,7 @@ pub fn edit_account(target: &Path, mut config: Config, account_name: &str) -> Re
     Ok(config)
 }
 
-/// Re-runs the wizard for one side. The default backend kind (and the
-/// pre-filled values for IMAP/JMAP host/port/login or the m2dir root)
-/// come from the existing config when present.
+/// Re-runs the wizard for one side; pre-fills from `existing` when set.
 fn prompt_side(
     label: &str,
     local_part: &str,
@@ -131,8 +139,7 @@ fn prompt_side(
     }
 }
 
-/// Returns the user-facing email for a side, if extractable. Used to
-/// default the "Email address:" prompt when editing.
+/// User-facing email for a side, when extractable.
 fn side_email(side: &SideConfig) -> Option<String> {
     match side {
         SideConfig::Imap(c) => Some(sasl_login(c.sasl.as_ref())).filter(|s| !s.is_empty()),
@@ -146,9 +153,8 @@ fn side_email(side: &SideConfig) -> Option<String> {
     }
 }
 
-/// Derives default [`WizardImapConfig`] values from an existing
-/// [`ImapConfig`]. The auth secret is never reused; the wizard
-/// re-prompts the user for it.
+/// Default [`WizardImapConfig`] derived from an existing
+/// [`ImapConfig`]; the auth secret is reset.
 pub fn imap_to_wizard(c: &ImapConfig) -> WizardImapConfig {
     let (scheme, host, port_from_url) = parse_server(&c.server, "imaps");
     let encryption = match scheme.as_str() {
@@ -171,8 +177,7 @@ pub fn imap_to_wizard(c: &ImapConfig) -> WizardImapConfig {
     }
 }
 
-/// Same as [`imap_to_wizard`] but for JMAP. Auth is reset to a
-/// placeholder; the wizard re-prompts the user for it.
+/// JMAP counterpart of [`imap_to_wizard`].
 pub fn jmap_to_wizard(c: &JmapConfig) -> WizardJmapConfig {
     let auth = match &c.auth {
         JmapAuthConfig::Basic { username, .. } => JmapAuth::Basic {
@@ -190,11 +195,7 @@ pub fn jmap_to_wizard(c: &JmapConfig) -> WizardJmapConfig {
     }
 }
 
-/// Extracts the user-facing login (PLAIN authcid, LOGIN username,
-/// XOAUTH2/OAUTHBEARER/SCRAM username) from a SASL block so the
-/// wizard can pre-fill the prompt when editing an existing account.
-/// Returns an empty string when the block is absent or carries no
-/// username (e.g. ANONYMOUS).
+/// Extracts the user-facing login from a SASL block, or "" when none.
 fn sasl_login(sasl: Option<&SaslConfig>) -> String {
     match sasl {
         Some(SaslConfig::Plain(p)) => p.authcid.clone(),
@@ -206,8 +207,8 @@ fn sasl_login(sasl: Option<&SaslConfig>) -> String {
     }
 }
 
-/// Best-effort URL split into `(scheme, host, port?)`. Tolerates
-/// bare authorities by defaulting the scheme.
+/// Best-effort URL split into `(scheme, host, port?)`; tolerates bare
+/// authorities by defaulting the scheme.
 fn parse_server(server: &str, default_scheme: &'static str) -> (String, String, Option<u16>) {
     if let Ok(url) = url::Url::parse(server) {
         let scheme = url.scheme().to_owned();

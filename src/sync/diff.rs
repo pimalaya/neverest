@@ -1,15 +1,27 @@
-//! Pure diff math.
-//!
-//! Functions in this module take snapshots and live listings, never
-//! clients. Hunks emitted here are still ungated by the apply stage
-//! and may fail at runtime; semantics gating (permissions) happens
-//! up-front in each function via the [`SidePermissions`] arguments,
-//! so the engine never re-walks the policy in its inner loops.
-//!
-//! See [`crate::sync::engine`] for the five-stage orchestration that
-//! consumes these.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-use std::collections::{BTreeSet, HashMap, HashSet, hash_map::Entry};
+//! Pure diff math: takes snapshots and live listings, emits hunks
+//! pre-gated by [`SidePermissions`].
+
+use std::{
+    collections::{BTreeSet, HashMap, HashSet, hash_map::DefaultHasher, hash_map::Entry},
+    hash::{Hash, Hasher},
+};
 
 use io_email::{
     envelope::{Envelope, FlagUpdate},
@@ -22,38 +34,47 @@ use crate::{
     sync::{
         cache::{MessageEntry, MessageSnapshots},
         hunk::{EmailHunk, MailboxHunk},
-        key::message_key,
         report::MessageCollision,
     },
 };
 
-/// Map keyed by content hash from [`message_key`] so a `Copy` from one
-/// side to the other lines up with the freshly added envelope on the
-/// target side at the next sync.
+/// 64-bit cross-side message identifier: hashed `Message-ID:` when
+/// present, falling back to `(subject, date, from)`.
+pub fn message_key(env: &Envelope) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    if let Some(message_id) = env.message_id.as_deref() {
+        // NOTE: tag so a Message-ID hash cannot collide with a
+        // fallback hash for a different message.
+        b"mid".hash(&mut hasher);
+        message_id.hash(&mut hasher);
+        return hasher.finish();
+    }
+    b"legacy".hash(&mut hasher);
+    env.subject.hash(&mut hasher);
+    if let Some(date) = env.date {
+        date.timestamp().hash(&mut hasher);
+    } else {
+        0_i64.hash(&mut hasher);
+    }
+    for addr in &env.from {
+        addr.email.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// Live envelopes keyed by [`message_key`] content hash.
 pub type MessageMap<'a> = HashMap<u64, &'a Envelope>;
 
-/// Owned `(content_key, Envelope)` pair list. The pair list is owned
-/// by the per-mailbox scope in [`crate::sync::engine`]; the
-/// [`message_map`] helper borrows from it to build a [`MessageMap`].
+/// Owned `(content_key, Envelope)` pair list backing a [`MessageMap`].
 pub type EnvelopePairs = Vec<(u64, Envelope)>;
 
-/// Re-keys a live envelope listing by content hash. Used on the
-/// `FullListRequired` / `UnsupportedOperation` fall-back path; the
-/// incremental path constructs pairs through
-/// [`pairs_from_delta`] which preserves the per-message key already
-/// stored in the cache.
+/// Re-keys a live envelope listing by content hash.
 pub fn pairs_from_envelopes(messages: Vec<Envelope>) -> EnvelopePairs {
     messages.into_iter().map(|m| (message_key(&m), m)).collect()
 }
 
-/// Borrows an [`EnvelopePairs`] view into a [`MessageMap`] without
-/// re-computing keys. On a content-key collision the first envelope
-/// wins (so the diff still applies to it normally); duplicates are
-/// appended to `collisions` and skipped for this sync. Aborting the
-/// whole mailbox on collision would be too aggressive: with
-/// Message-ID-first keying a clash usually means a single RFC 5322
-/// violation on one message, which should not stop the rest of the
-/// mailbox from syncing.
+/// Views an [`EnvelopePairs`] as a [`MessageMap`]; on a content-key
+/// collision the first envelope wins and duplicates are reported.
 pub fn message_map<'a>(
     side: Side,
     mailbox: &str,
@@ -61,8 +82,6 @@ pub fn message_map<'a>(
     collisions: &mut Vec<MessageCollision>,
 ) -> MessageMap<'a> {
     let mut out: MessageMap<'a> = HashMap::with_capacity(pairs.len());
-    // Group dups by key so a triple-collision surfaces as one report
-    // entry listing all three ids instead of two entries.
     let mut groups: HashMap<u64, usize> = HashMap::new();
     for (key, env) in pairs {
         match out.entry(*key) {
@@ -91,12 +110,8 @@ pub fn message_map<'a>(
     out
 }
 
-/// Projects an [`EnvelopePairs`] view into the per-mailbox snapshot
-/// shape persisted by the cache. Used to capture the current sync's
-/// pre-apply state inline (no follow-up `list_envelopes`); the next
-/// sync's three-way diff consumes it as `prev_*`. The pairs already
-/// match the snapshot's keying (content hash) so this is a pure
-/// re-shape.
+/// Re-shapes an [`EnvelopePairs`] into the cache's
+/// [`MessageSnapshots`] layout.
 pub fn pairs_to_snapshot(pairs: &EnvelopePairs) -> MessageSnapshots {
     pairs
         .iter()
@@ -112,14 +127,8 @@ pub fn pairs_to_snapshot(pairs: &EnvelopePairs) -> MessageSnapshots {
         .collect()
 }
 
-/// Synthesizes an [`EnvelopePairs`] for a side that returned
-/// [`io_email::envelope::EnvelopeDiff::Incremental`]. The prior
-/// snapshot supplies the still-present messages (keyed by content
-/// hash); `vanished_ids` removes them, `flag_updates` overrides their
-/// flags, and `new_envelopes` adds the messages added since the
-/// cached checkpoint. The surviving snapshot entries get stub
-/// envelopes (empty subject/from/date/size); the diff/apply paths
-/// only consult `id` and `flags`, so the elision is safe.
+/// Synthesizes an [`EnvelopePairs`] from a prior snapshot plus the
+/// incremental delta (flag updates, new envelopes, vanished ids).
 pub fn pairs_from_delta(
     prev: &MessageSnapshots,
     flag_updates: Vec<FlagUpdate>,
@@ -151,10 +160,8 @@ pub fn pairs_from_delta(
     out
 }
 
-/// An envelope shell with just `id` + `flags` populated; the rest is
-/// default-empty. Used to bridge snapshot-only entries (the cache
-/// does not store subject/from/date/size) into [`MessageMap`] so the
-/// diff/apply paths can address them.
+/// Envelope shell with only `id` and `flags`; everything the
+/// diff/apply paths don't consult is left default.
 fn stub_envelope(id: String, flags: BTreeSet<Flag>) -> Envelope {
     Envelope {
         id,
@@ -186,20 +193,8 @@ pub fn filter_mailboxes(all: &HashSet<String>, filter: &MailboxFilter) -> HashSe
     }
 }
 
-/// Mailbox-level three-way diff.
-///
-/// A name that appears on one side and not the other is classified by
-/// consulting the cached snapshot's last-known mailbox set per side:
-///   * absent from the other side AND absent from the other side's
-///     snapshot: this side just added it, create on the other side
-///     (gated by the other side's `mailbox.create` permission);
-///   * absent from the other side BUT present in the other side's
-///     snapshot: the other side deleted it, propagate the deletion
-///     to this side (gated by this side's `mailbox.delete` permission).
-///
-/// Without a snapshot (first sync) the diff degenerates to "every
-/// asymmetry is an add", matching what neverest did before three-way
-/// merge landed.
+/// Mailbox-level three-way diff: classifies asymmetries via the
+/// cached snapshot's last-known mailbox set per side.
 pub fn diff_mailboxes(
     left: &HashSet<String>,
     right: &HashSet<String>,
@@ -242,11 +237,9 @@ pub fn diff_mailboxes(
     hunks
 }
 
-/// Message-level three-way diff for one mailbox.
-///
-/// Emits `Copy`/`Delete` based on presence in left × right × snapshot
-/// per side. Flag-only divergences (message present on both sides)
-/// delegate to [`diff_flags`].
+/// Message-level three-way diff for one mailbox; emits
+/// `Copy`/`Delete` and delegates flag-only divergences to
+/// [`diff_flags`].
 pub fn diff_messages(
     mailbox: &str,
     left: &MessageMap<'_>,
@@ -326,20 +319,8 @@ pub fn diff_messages(
     hunks
 }
 
-/// Flag-level diff for a pair of messages that exist on both sides.
-///
-/// Three-way against the cached snapshot when available: a flag
-/// present on one side and absent on the other is interpreted as an
-/// *add* on the side that has it when neither snapshot recorded it,
-/// and as a *remove* on the side that lacks it when the snapshot
-/// recorded it on the side that no longer has it. Without snapshot
-/// entries the diff reverts to union-add semantics (matches first-sync
-/// behaviour).
-///
-/// `\Deleted` is treated as a sync verb (per the architecture
-/// decisions): when one side carries it and the other does not, the
-/// engine emits a `delete_message` on the side that does NOT carry it
-/// rather than propagating the flag across.
+/// Flag-level diff for a pair of messages present on both sides;
+/// `\Deleted` is treated as a delete-message verb rather than a flag.
 pub fn diff_flags(
     mailbox: &str,
     content_key: u64,
@@ -536,8 +517,6 @@ mod tests {
         }
     }
 
-    // ── filter_mailboxes ────────────────────────────────────────────
-
     #[test]
     fn filter_all_keeps_everything() {
         let all = name_set(["INBOX", "Sent", "Drafts"]);
@@ -558,8 +537,6 @@ mod tests {
         assert_eq!(filter_mailboxes(&all, &filter), name_set(["INBOX"]));
     }
 
-    // ── diff_mailboxes ──────────────────────────────────────────────
-
     #[test]
     fn diff_mailboxes_no_change_no_hunks() {
         let left = name_set(["INBOX"]);
@@ -579,8 +556,6 @@ mod tests {
 
     #[test]
     fn diff_mailboxes_right_deleted_propagates_delete_on_left() {
-        // Left still has INBOX; right no longer has it but did at
-        // last sync. Delete on left.
         let left = name_set(["INBOX"]);
         let right = HashSet::new();
         let prev_left = name_set(["INBOX"]);
@@ -665,7 +640,6 @@ mod tests {
 
     #[test]
     fn diff_mailboxes_blocked_by_permissions() {
-        // Right wants left to delete but left.mailbox.delete = false.
         let left = name_set(["INBOX"]);
         let right = HashSet::new();
         let prev_left = name_set(["INBOX"]);
@@ -691,8 +665,6 @@ mod tests {
         );
         assert!(hunks.is_empty());
     }
-
-    // ── diff_messages ───────────────────────────────────────────────
 
     #[test]
     fn diff_messages_no_change_no_hunks() {
@@ -817,7 +789,6 @@ mod tests {
 
     #[test]
     fn diff_messages_blocked_by_create_permission() {
-        // Left has message X, right lacks it, right.message.create = false.
         let left_pairs = vec![(1u64, envelope("L1", Some("<a>"), &[]))];
         let right_pairs: EnvelopePairs = Vec::new();
         let mut collisions = Vec::new();
@@ -856,8 +827,6 @@ mod tests {
         let mut collisions = Vec::new();
         let map = message_map(Side::Left, "INBOX", &pairs, &mut collisions);
 
-        // First-seen survives in the map so the diff still has
-        // something to reconcile.
         assert_eq!(map.len(), 1);
         assert_eq!(map[&42u64].id, "L1");
 
@@ -871,8 +840,6 @@ mod tests {
 
     #[test]
     fn message_map_collision_without_message_id_uses_legacy_marker() {
-        // Two envelopes that share a legacy key (no Message-ID); the
-        // recorded collision's `message_id` field is `None`.
         let pairs = vec![
             (7u64, envelope("A", None, &[])),
             (7u64, envelope("B", None, &[])),
@@ -886,9 +853,6 @@ mod tests {
 
     #[test]
     fn diff_messages_continues_past_collision() {
-        // Two colliding envelopes on left plus one unrelated envelope
-        // on left and right; the engine should still emit a hunk for
-        // the unrelated message even though L1/L2 collide.
         let left_pairs = vec![
             (42u64, envelope("L1", Some("<dup>"), &[])),
             (42u64, envelope("L2", Some("<dup>"), &[])),
@@ -909,8 +873,6 @@ mod tests {
             perms_all(),
             perms_all(),
         );
-        // Two Copy hunks: one for L1 (kept first-seen at key 42) and
-        // one for L3. L2 is parked in the collisions list.
         assert_eq!(hunks.len(), 2);
         assert_eq!(collisions.len(), 1);
         let copied_ids: BTreeSet<String> = hunks
@@ -924,8 +886,6 @@ mod tests {
         assert!(copied_ids.contains("L3"));
         assert!(!copied_ids.contains("L2"));
     }
-
-    // ── diff_flags ──────────────────────────────────────────────────
 
     #[test]
     fn diff_flags_left_has_new_seen_emits_add_on_right() {
@@ -957,9 +917,6 @@ mod tests {
         let left = envelope("L1", Some("<a>"), &[seen.clone()]);
         let right = envelope("R1", Some("<a>"), &[]);
 
-        // Both sides previously had seen; the right snapshot still
-        // records seen, so the divergence resolves to "right removed
-        // seen → mirror the removal on left".
         let hunks = diff_flags(
             "INBOX",
             42,

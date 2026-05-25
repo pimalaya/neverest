@@ -1,9 +1,21 @@
-//! Shared converters that turn wizard answers
-//! ([`WizardImapConfig`] / [`WizardJmapConfig`]) into the on-disk
-//! config types ([`ImapConfig`] / [`JmapConfig`]). Used by both
-//! [`super::discover`] and [`super::edit`]. m2dir has no wizard answer
-//! type: its only field is a filesystem path, so [`super::discover`]
-//! prompts for it inline.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Converters from wizard answers to on-disk IMAP / JMAP configs.
 
 use std::process::Command;
 
@@ -19,6 +31,7 @@ use crate::config::{
     MessageSidePermissions, SaslConfig, SaslPlainConfig,
 };
 
+/// Converts wizard IMAP answers into an on-disk [`ImapConfig`].
 pub fn imap_to_config(w: WizardImapConfig) -> Result<ImapConfig> {
     let scheme = match w.encryption {
         ImapEncryption::Tls => "imaps",
@@ -40,6 +53,7 @@ pub fn imap_to_config(w: WizardImapConfig) -> Result<ImapConfig> {
     })
 }
 
+/// Converts wizard JMAP answers into an on-disk [`JmapConfig`].
 pub fn jmap_to_config(w: WizardJmapConfig) -> Result<JmapConfig> {
     let auth = match w.auth {
         JmapAuth::Basic { login, secret } => JmapAuthConfig::Basic {

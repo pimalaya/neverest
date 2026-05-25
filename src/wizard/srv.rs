@@ -1,6 +1,22 @@
-//! RFC 6186 SRV step of the wizard's discovery chain. neverest only
-//! consumes the IMAP records (`_imap._tcp` / `_imaps._tcp`); the
-//! `_submission._tcp` SRV is ignored because sync does not send.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! RFC 6186 SRV probe (`_imap._tcp` / `_imaps._tcp`) feeding the
+//! wizard's discovery chain.
 
 use io_discovery::rfc6186::{
     client::DiscoverySrvClientStd,
@@ -14,9 +30,10 @@ use pimalaya_cli::{
 
 use crate::wizard::discover::{DiscoveryResult, discovery_resolver};
 
+/// Runs SRV discovery for `domain`.
 pub fn run(domain: &str) -> Option<SrvReport> {
     let spinner = Spinner::start(format!("Probing SRV records for {domain}\u{2026}"));
-    let mut client = DiscoverySrvClientStd::new(discovery_resolver());
+    let mut client = DiscoverySrvClientStd::new(discovery_resolver().ok()?);
 
     match client.discover(domain) {
         Ok(report) if !is_empty(&report) => {
@@ -28,13 +45,14 @@ pub fn run(domain: &str) -> Option<SrvReport> {
             None
         }
         Err(err) => {
-            debug!("SRV discovery for {domain} failed: {err}");
+            debug!("srv discovery for {domain} failed: {err}");
             spinner.failure(format!("SRV: no records for {domain}"));
             None
         }
     }
 }
 
+/// Extracts the preferred IMAP server (TLS first) from a [`SrvReport`].
 pub fn defaults(report: &SrvReport) -> DiscoveryResult {
     let imap = report
         .imaps

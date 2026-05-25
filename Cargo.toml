@@ -1,11 +1,11 @@
 [package]
 name = "neverest"
-description = "CLI to synchronize, backup and restore emails"
-version = "2.0.0-alpha.1"
+description = "CLI to synchronize emails"
+version = "1.0.0-rc"
 authors = ["soywod <clement.douin@posteo.net>"]
 rust-version = "1.87"
 edition = "2024"
-license = "MIT"
+license = "AGPL-3.0-only"
 categories = ["command-line-utilities", "email"]
 keywords = ["cli", "email", "imap", "backup", "sync"]
 homepage = "https://pimalaya.org/"
@@ -40,6 +40,7 @@ anyhow = "1"
 base64 = { version = "0.22", optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.4", features = ["derive", "env", "wrap_help"] }
+crossbeam-queue = "0.3"
 crossterm = { version = "0.29", default-features = false, features = ["serde"] }
 dirs = "6"
 io-discovery = { version = "0.0.1", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "client"] }

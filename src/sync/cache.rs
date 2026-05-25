@@ -1,14 +1,22 @@
-//! Per-account post-sync snapshot.
-//!
-//! The cache stores, per side, per mailbox, the set of messages the
-//! engine last saw, keyed by content hash so a copy on one side
-//! resolves to the same entry as the original on the other side. The
-//! diff at the next run combines the two live message lists with this
-//! snapshot to tell genuine additions/deletions from no-op re-listings.
-//!
-//! Format is JSON for simplicity; sqlite is overkill for the
-//! per-account scale neverest targets and would pull a build-time C
-//! dependency. Escalate only when a real perf problem shows up.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Per-account JSON snapshot persisting, per side and mailbox, the
+//! content-keyed message set and the LCD checkpoints.
 
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
@@ -26,52 +34,146 @@ use crate::{
     sync::{hunk::MailboxHunk, report::PatchEntry},
 };
 
-/// Resolves `<cache_dir>/neverest/<account>/state.json`. Bails when
-/// the OS reports no cache dir (very rare; usually means a missing
-/// `HOME` or `XDG_CACHE_HOME`).
-pub fn cache_path(account: &str) -> Result<PathBuf> {
-    let base = dirs::cache_dir().context("Cannot resolve XDG cache directory")?;
-    Ok(base.join("neverest").join(account).join("state.json"))
-}
+pub type MailboxSnapshots = HashMap<String, MessageSnapshots>;
 
-/// Full snapshot serialized as JSON. Loaded once at sync start, saved
-/// once at sync end. Live message lists are NOT included; only the
-/// minimum needed to detect changes against the next live list, plus
-/// the opaque per-`(side, mailbox)` state blob the LCD dispatcher
-/// produced on the last call.
+/// Map keyed by the stringified content hash from
+/// [`crate::sync::key::message_key`].
+pub type MessageSnapshots = HashMap<String, MessageEntry>;
+
+/// Full snapshot loaded at sync start and saved at sync end.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct CacheSnapshot {
-    /// `(side → mailbox → content-key → flag set)`. The id stored
-    /// alongside is the backend-native id observed on that side; it
-    /// lets the next-run diff issue flag updates without re-listing
-    /// the mailbox just to recover the id.
+    /// `(side → mailbox → content-key → MessageEntry)`.
     #[serde(default)]
     pub sides: HashMap<Side, MailboxSnapshots>,
 
-    /// Opaque per-`(side, mailbox)` checkpoint produced by
-    /// [`io_email::client::EmailClientStd::diff_envelopes`].
-    /// Bytes are private to the backend impl (IMAP packs
-    /// `(uid_validity, highest_mod_seq, highest_uid)`; JMAP stores
-    /// the raw `Email/state` string bytes); neverest treats them as
-    /// `Vec<u8>` and persists them verbatim. JMAP's account-global
-    /// state is redundantly stored per-mailbox for uniform shape;
-    /// storage cost is negligible.
+    /// Opaque per-`(side, mailbox)` envelope-diff checkpoint, kept as
+    /// raw bytes (IMAP QRESYNC pack, JMAP `Email/state` string).
     #[serde(default, with = "states_serde")]
     pub states: HashMap<Side, HashMap<String, Vec<u8>>>,
 
-    /// Opaque per-`side` checkpoint produced by
-    /// [`io_email::client::EmailClientStd::diff_mailboxes`]; JMAP
-    /// stores `Mailbox/state` bytes. Backends without an
-    /// account-global mailbox-set token leave this absent.
+    /// Opaque per-`side` mailbox-set checkpoint (JMAP `Mailbox/state`);
+    /// absent on backends without an account-global token.
     #[serde(default, with = "mailbox_states_serde")]
     pub mailbox_states: HashMap<Side, Vec<u8>>,
 }
 
-pub type MailboxSnapshots = HashMap<String, MessageSnapshots>;
+impl CacheSnapshot {
+    /// Resolves `<cache_dir>/neverest/<account>/state.json`.
+    pub fn path(account: &str) -> Result<PathBuf> {
+        let base = dirs::cache_dir().context("Cannot resolve XDG cache directory")?;
+        Ok(base.join("neverest").join(account).join("state.json"))
+    }
 
-/// Map keyed by the content hash from [`crate::sync::key::message_key`]
-/// (serialized as a string because JSON object keys must be strings).
-pub type MessageSnapshots = HashMap<String, MessageEntry>;
+    pub fn load(path: &Path) -> Result<Self> {
+        match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .context(format!("Parse cache `{}` error", path.display())),
+            Err(err) if err.kind() == ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) => {
+                bail!("Read cache `{}` error: {err}", path.display());
+            }
+        }
+    }
+
+    pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .context(format!("Create cache dir `{}` error", parent.display()))?;
+        }
+        let bytes = serde_json::to_vec_pretty(self).context("Serialize cache snapshot error")?;
+        fs::write(path, bytes).context(format!("Write cache `{}` error", path.display()))?;
+        Ok(())
+    }
+
+    pub fn messages(&self, side: Side, mailbox: &str) -> Option<&MessageSnapshots> {
+        self.sides.get(&side)?.get(mailbox)
+    }
+
+    pub fn set_messages(&mut self, side: Side, mailbox: String, entries: MessageSnapshots) {
+        self.sides.entry(side).or_default().insert(mailbox, entries);
+    }
+
+    /// Mutably borrows the per-`(side, mailbox)` snapshot, creating it
+    /// on demand.
+    pub fn messages_mut(&mut self, side: Side, mailbox: &str) -> &mut MessageSnapshots {
+        self.sides
+            .entry(side)
+            .or_default()
+            .entry(mailbox.to_string())
+            .or_default()
+    }
+
+    /// Last-known mailbox name set on `side`.
+    pub fn mailbox_names(&self, side: Side) -> HashSet<String> {
+        self.sides
+            .get(&side)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Drops `mailbox` from both sides' message snapshots and the
+    /// matching per-`(side, mailbox)` checkpoint; account-level
+    /// `mailbox_states` are preserved.
+    pub fn clear_mailbox(&mut self, mailbox: &str) {
+        for side_map in self.sides.values_mut() {
+            side_map.remove(mailbox);
+        }
+        for state_map in self.states.values_mut() {
+            state_map.remove(mailbox);
+        }
+    }
+
+    /// Opaque envelope-diff checkpoint for `(side, mailbox)`, or `None`
+    /// if a baseline still needs to be captured.
+    pub fn state(&self, side: Side, mailbox: &str) -> Option<&[u8]> {
+        self.states.get(&side)?.get(mailbox).map(Vec::as_slice)
+    }
+
+    pub fn set_state(&mut self, side: Side, mailbox: String, state: Vec<u8>) {
+        self.states.entry(side).or_default().insert(mailbox, state);
+    }
+
+    /// Opaque mailbox-set checkpoint for `side`, or `None` if a
+    /// baseline still needs to be captured.
+    pub fn mailbox_state(&self, side: Side) -> Option<&[u8]> {
+        self.mailbox_states.get(&side).map(Vec::as_slice)
+    }
+
+    pub fn set_mailbox_state(&mut self, side: Side, state: Vec<u8>) {
+        self.mailbox_states.insert(side, state);
+    }
+
+    /// Drops every per-mailbox snapshot + checkpoint, restricted to
+    /// `mailboxes` when non-empty.
+    pub fn resync(&mut self, mailboxes: &[String]) {
+        if mailboxes.is_empty() {
+            self.sides.clear();
+            self.states.clear();
+            self.mailbox_states.clear();
+            return;
+        }
+        for mailbox in mailboxes {
+            self.clear_mailbox(mailbox);
+        }
+    }
+
+    /// Drops entries for mailboxes deleted in `mailbox_patch` then
+    /// persists the snapshot.
+    pub fn record(&mut self, mailbox_patch: &[PatchEntry<MailboxHunk>], path: &Path) -> Result<()> {
+        for entry in mailbox_patch {
+            if entry.error.is_some() {
+                continue;
+            }
+            let MailboxHunk::Delete { mailbox, .. } = &entry.hunk else {
+                continue;
+            };
+            self.clear_mailbox(mailbox);
+        }
+
+        self.save(path)
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct MessageEntry {
@@ -80,9 +182,8 @@ pub struct MessageEntry {
     pub flags: BTreeSet<Flag>,
 }
 
-/// Helper module so `Vec<u8>` state blobs round-trip through JSON as
-/// base64 strings instead of arrays-of-numbers. Keeps the cache file
-/// human-readable enough for `jq` / `cat`.
+/// Serde adapter encoding `Vec<u8>` state blobs as base64 strings
+/// rather than arrays-of-numbers.
 mod states_serde {
     use std::collections::HashMap;
 
@@ -130,9 +231,7 @@ mod states_serde {
     }
 }
 
-/// Sister adapter for the per-side mailbox-set checkpoint
-/// ([`CacheSnapshot::mailbox_states`]); same base64 trick at one less
-/// level of nesting.
+/// Sister of [`states_serde`] for the flat per-side mailbox-set token.
 mod mailbox_states_serde {
     use std::collections::HashMap;
 
@@ -168,144 +267,12 @@ mod mailbox_states_serde {
     }
 }
 
-impl CacheSnapshot {
-    pub fn load(path: &Path) -> Result<Self> {
-        match fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .context(format!("Parse cache `{}` error", path.display())),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(Self::default()),
-            Err(err) => {
-                bail!("Read cache `{}` error: {err}", path.display());
-            }
-        }
-    }
-
-    pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .context(format!("Create cache dir `{}` error", parent.display()))?;
-        }
-        let bytes = serde_json::to_vec_pretty(self).context("Serialize cache snapshot error")?;
-        fs::write(path, bytes).context(format!("Write cache `{}` error", path.display()))?;
-        Ok(())
-    }
-
-    pub fn messages(&self, side: Side, mailbox: &str) -> Option<&MessageSnapshots> {
-        self.sides.get(&side)?.get(mailbox)
-    }
-
-    pub fn set_messages(&mut self, side: Side, mailbox: String, entries: MessageSnapshots) {
-        self.sides.entry(side).or_default().insert(mailbox, entries);
-    }
-
-    /// Borrows the per-`(side, mailbox)` [`MessageSnapshots`] mutably,
-    /// creating it on demand. The engine uses this to mutate the
-    /// baseline written by [`Self::set_messages`] post-apply: each
-    /// successful hunk inserts / removes / updates the entry at its
-    /// `content_key`, so the next sync's diff sees the just-applied
-    /// state without a re-list / re-parse pass.
-    pub fn messages_mut(&mut self, side: Side, mailbox: &str) -> &mut MessageSnapshots {
-        self.sides
-            .entry(side)
-            .or_default()
-            .entry(mailbox.to_string())
-            .or_default()
-    }
-
-    /// Snapshot's last-known mailbox set on `side`. Used by the
-    /// mailbox-level diff to tell "added on the other side" from
-    /// "deleted on this side" when one side has a mailbox the other
-    /// lacks.
-    pub fn mailbox_names(&self, side: Side) -> HashSet<String> {
-        self.sides
-            .get(&side)
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
-    }
-
-    /// Drops `mailbox` from both sides' message snapshots and the
-    /// matching per-`(side, mailbox)` LCD checkpoint. Called after a
-    /// successful mailbox-delete hunk so the next sync does not see
-    /// the deleted mailbox in `prev_*` and re-classify the deletion as
-    /// an add on the surviving side. Account-level mailbox-set
-    /// checkpoints in `mailbox_states` are intentionally preserved:
-    /// the server has already advanced its `Mailbox/state`, and the
-    /// next mailbox-set probe needs the prior token to detect that
-    /// advance.
-    pub fn clear_mailbox(&mut self, mailbox: &str) {
-        for side_map in self.sides.values_mut() {
-            side_map.remove(mailbox);
-        }
-        for state_map in self.states.values_mut() {
-            state_map.remove(mailbox);
-        }
-    }
-
-    /// Returns the opaque LCD checkpoint persisted for
-    /// `(side, mailbox)`, or `None` if the next sync needs to capture
-    /// a baseline.
-    pub fn state(&self, side: Side, mailbox: &str) -> Option<&[u8]> {
-        self.states.get(&side)?.get(mailbox).map(Vec::as_slice)
-    }
-
-    pub fn set_state(&mut self, side: Side, mailbox: String, state: Vec<u8>) {
-        self.states.entry(side).or_default().insert(mailbox, state);
-    }
-
-    /// Returns the opaque mailbox-set checkpoint persisted for `side`,
-    /// or `None` if the next sync needs to capture a baseline.
-    pub fn mailbox_state(&self, side: Side) -> Option<&[u8]> {
-        self.mailbox_states.get(&side).map(Vec::as_slice)
-    }
-
-    pub fn set_mailbox_state(&mut self, side: Side, state: Vec<u8>) {
-        self.mailbox_states.insert(side, state);
-    }
-
-    /// Drops every per-mailbox snapshot + checkpoint for the account,
-    /// scoped optionally to the given mailbox names. Empty
-    /// `mailboxes` clears everything; otherwise only the listed names
-    /// are wiped. Backs the user-facing `neverest sync --resync`
-    /// flag (Phase F).
-    pub fn resync(&mut self, mailboxes: &[String]) {
-        if mailboxes.is_empty() {
-            self.sides.clear();
-            self.states.clear();
-            self.mailbox_states.clear();
-            return;
-        }
-        for mailbox in mailboxes {
-            self.clear_mailbox(mailbox);
-        }
-    }
-
-    /// Stage 5 of the sync: drop entries for any mailbox deleted in
-    /// the mailbox patch (so the next sync does not see the dropped
-    /// name in `prev_*`) and persist the snapshot. Per-mailbox
-    /// `set_messages` updates happen inline during the engine's
-    /// per-mailbox loop; this method no longer re-lists envelopes.
-    pub fn record(&mut self, mailbox_patch: &[PatchEntry<MailboxHunk>], path: &Path) -> Result<()> {
-        for entry in mailbox_patch {
-            if entry.error.is_some() {
-                continue;
-            }
-            let MailboxHunk::Delete { mailbox, .. } = &entry.hunk else {
-                continue;
-            };
-            self.clear_mailbox(mailbox);
-        }
-
-        self.save(path)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn snapshot_with_states() -> CacheSnapshot {
         let mut s = CacheSnapshot::default();
-        // tricky bytes: zero, high-bit, len not a multiple of 3.
         let bytes = vec![0x00, 0xff, 0x42, 0x80, 0x01];
         s.set_state(Side::Left, "INBOX".into(), bytes.clone());
         s.set_state(Side::Right, "Sent".into(), vec![0xfe, 0xed]);
@@ -347,8 +314,6 @@ mod tests {
     #[test]
     fn clear_mailbox_preserves_account_global_mailbox_states() {
         let mut s = snapshot_with_states();
-        // also add a second mailbox under sides + states so we can
-        // assert it survives.
         s.set_state(Side::Left, "Archive".into(), vec![1, 2, 3]);
         s.set_messages(Side::Left, "Archive".into(), MessageSnapshots::new());
 
@@ -356,9 +321,7 @@ mod tests {
 
         assert!(s.messages(Side::Left, "INBOX").is_none());
         assert!(s.state(Side::Left, "INBOX").is_none());
-        // Account-global mailbox-set token survives the per-mailbox drop.
         assert!(s.mailbox_state(Side::Left).is_some());
-        // Other mailbox untouched.
         assert!(s.state(Side::Left, "Archive").is_some());
         assert!(s.messages(Side::Left, "Archive").is_some());
     }
@@ -383,9 +346,6 @@ mod tests {
 
         assert!(s.state(Side::Left, "INBOX").is_none());
         assert!(s.state(Side::Left, "Archive").is_some());
-        // Account-level mailbox tokens survive (per A.5 documented
-        // semantics): they're owned by the mailbox-set probe, not the
-        // per-mailbox loop.
         assert!(s.mailbox_state(Side::Left).is_some());
     }
 
@@ -407,7 +367,7 @@ mod tests {
 
     #[test]
     fn load_legacy_cache_without_new_fields() {
-        // Old cache file that only had `sides`; the new optional
+        // NOTE: legacy cache files only had `sides`; the optional
         // `states` / `mailbox_states` fields must default to empty
         // maps instead of erroring out.
         let legacy = serde_json::json!({

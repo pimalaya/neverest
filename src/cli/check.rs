@@ -1,9 +1,22 @@
-//! `neverest check` command.
-//!
-//! Opens both sides and asks each one to `list_mailboxes`. The
-//! operation itself is cheap; the value is in surfacing the
-//! credential / network / config errors that would otherwise only
-//! show up during a real sync.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! `neverest check` command: opens both sides and lists their mailboxes
+//! to surface credential, network or config errors before a real sync.
 
 use std::path::PathBuf;
 
@@ -18,8 +31,8 @@ use pimalaya_cli::{
 use pimalaya_config::toml::TomlConfig;
 
 use crate::{
+    client,
     config::{Config, SideConfig},
-    side::Side,
 };
 
 #[derive(Debug, Parser)]
@@ -38,19 +51,18 @@ impl CheckCommand {
         };
 
         info!("checking account `{name}`");
-        check_side("left", account_config.left, Side::Left)?;
-        check_side("right", account_config.right, Side::Right)?;
+        check_side("left", account_config.left)?;
+        check_side("right", account_config.right)?;
 
         printer.out(Message::new(format!("Account `{name}` looks healthy")))
     }
 }
 
-fn check_side(label: &str, side_config: SideConfig, side: Side) -> Result<()> {
+/// Opens the side and probes it with a `list_mailboxes` call.
+fn check_side(label: &str, config: SideConfig) -> Result<()> {
     let s = Spinner::start(format!("Checking {label} side…"));
-    info!("checking {label} side: opening client");
-    let mut client = side.open(side_config)?;
+    let mut client = client::open(config)?;
     let mailboxes = client.list_mailboxes(false)?;
-    info!("checking {label} side: OK ({} mailboxes)", mailboxes.len());
     s.success(format!(
         "Checked {label} side ({} mailboxes)",
         mailboxes.len()

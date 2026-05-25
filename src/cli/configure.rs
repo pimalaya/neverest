@@ -1,10 +1,22 @@
-//! `neverest configure` command.
-//!
-//! Re-runs the wizard against an existing account: re-prompts for the
-//! left and right sides (IMAP/JMAP credentials, m2dir store root)
-//! using the current values as defaults, then writes the updated
-//! [`Config`] back to disk. Account selection follows the standard
-//! `--account` flag with the `default = true` fallback.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! `neverest configure` command: re-runs the wizard against an existing
+//! account, using current values as defaults, and saves the result.
 
 use std::path::PathBuf;
 
@@ -28,10 +40,6 @@ impl ConfigureCommand {
     pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
         let config = Config::load_or_wizard(config_paths)?;
 
-        // Resolve the account name up-front (either the `--account` flag or the
-        // entry flagged `default = true`) before handing off to `edit_account`,
-        // which expects an existing name and re-uses the matching account's
-        // values as wizard defaults.
         let name = match self.account.name.as_deref() {
             Some(name) => name.to_owned(),
             None => {

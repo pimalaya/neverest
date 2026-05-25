@@ -1,10 +1,22 @@
-//! Atomic units of sync work.
-//!
-//! Hunks are the smallest reversible operation the engine knows how
-//! to apply: a single mailbox create/delete, a single message
-//! copy/delete, or a flag mutation on one side. The diff produces a
-//! flat list; the engine applies them in order and stamps any error
-//! on the matching [`crate::sync::report::PatchOutcome`] entry.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Atomic sync work units: mailbox / message / flag hunks emitted by
+//! the diff and applied by the worker pool.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -15,11 +27,7 @@ use serde::Serialize;
 
 use crate::side::Side;
 
-/// Mailbox-level patch hunk. `Create` materializes a missing mailbox
-/// on `side`; `Delete` removes one. The diff classifies a missing
-/// mailbox as either add or delete by three-way against the cached
-/// snapshot; per-side permissions (`mailbox.create` / `mailbox.delete`)
-/// gate emission.
+/// Mailbox-level patch hunk: create or delete a mailbox on one side.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum MailboxHunk {
@@ -28,9 +36,7 @@ pub enum MailboxHunk {
 }
 
 impl MailboxHunk {
-    /// Applies this hunk against the per-worker client pair. `Create`
-    /// and `Delete` route to the side carried by the hunk variant via
-    /// [`Side::client_mut`].
+    /// Applies the hunk via the side's client.
     pub fn apply(&self, left: &mut EmailClientStd, right: &mut EmailClientStd) -> Result<()> {
         match self {
             Self::Create { side, mailbox } => {
@@ -53,22 +59,13 @@ impl fmt::Display for MailboxHunk {
     }
 }
 
-/// Envelope/message-level patch hunk.
-///
-/// Every variant carries `content_key`: the cross-side identifier the
-/// diff used to align messages. The engine reuses it post-apply to
-/// mutate the per-mailbox snapshot in place (insert on Copy, remove
-/// on Delete, update flags on AddFlags/RemoveFlags) so the next sync's
-/// diff sees the just-applied state as the baseline. `content_key`
-/// is `#[serde(skip)]` to keep the JSON report shape stable.
+/// Message-level patch hunk; `content_key` is the cross-side alignment
+/// key, skipped from JSON to keep the report shape stable.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum EmailHunk {
-    /// Copy the message identified by `source_id` on `source_side`
-    /// over to `target_side`. The engine fetches the raw RFC 5322
-    /// bytes via `get_message` then re-appends them via `add_message`
-    /// preserving the source flags. `apply` returns the backend-
-    /// assigned id of the new message on the target side.
+    /// Copy a message from `source_side` to `target_side`; `apply`
+    /// returns the new backend-assigned id on the target side.
     Copy {
         source_side: Side,
         target_side: Side,
@@ -78,10 +75,7 @@ pub enum EmailHunk {
         #[serde(skip)]
         content_key: u64,
     },
-    /// Add the given flags on `side`'s copy of the message. Emitted
-    /// when a flag is present on the opposite side and absent both on
-    /// `side`'s current envelope and on `side`'s prior snapshot
-    /// (i.e. the opposite side added it).
+    /// Add `flags` on `side`'s copy of the message.
     AddFlags {
         side: Side,
         mailbox: String,
@@ -90,12 +84,7 @@ pub enum EmailHunk {
         #[serde(skip)]
         content_key: u64,
     },
-    /// Remove the given flags from `side`'s copy of the message.
-    /// Emitted when a flag is absent on the opposite side and present
-    /// both on `side`'s current envelope and on the opposite side's
-    /// prior snapshot (i.e. the opposite side removed it). Without a
-    /// prior snapshot the diff treats the divergence as an add on the
-    /// side that has it; removal only fires once a baseline exists.
+    /// Remove `flags` from `side`'s copy of the message.
     RemoveFlags {
         side: Side,
         mailbox: String,
@@ -104,10 +93,7 @@ pub enum EmailHunk {
         #[serde(skip)]
         content_key: u64,
     },
-    /// Delete `side`'s copy of the message. The engine marks `\Deleted`
-    /// via `delete_flags` and relies on the backend's own expunge
-    /// semantics (IMAP needs an explicit `EXPUNGE`; Maildir removes
-    /// the file on flag flip; JMAP applies on the next `Email/set`).
+    /// Delete `side`'s copy of the message via `delete_message`.
     Delete {
         side: Side,
         mailbox: String,
@@ -118,10 +104,8 @@ pub enum EmailHunk {
 }
 
 impl EmailHunk {
-    /// Applies this hunk against the per-worker client pair. Returns
-    /// the backend-assigned id of the newly-stored message for `Copy`
-    /// (so the engine can record it in the snapshot at `content_key`);
-    /// `None` for the other variants.
+    /// Applies the hunk; returns `Some(new_id)` for a successful
+    /// `Copy` and `None` for the other variants.
     pub fn apply(
         &self,
         left: &mut EmailClientStd,
@@ -136,7 +120,7 @@ impl EmailHunk {
                 flags,
                 ..
             } => {
-                let (source, target) = Side::pair_mut(*source_side, *target_side, left, right);
+                let (source, target) = Side::pair_mut(*source_side, *target_side, left, right)?;
                 let raw = source.get_message(mailbox, source_id)?;
                 let flag_list: Vec<Flag> = flags.iter().cloned().collect();
                 let target_id = target.add_message(mailbox, &flag_list, raw)?;
@@ -221,9 +205,7 @@ impl fmt::Display for EmailHunk {
 }
 
 /// Lowercase comma-joined flag list wrapped in brackets, e.g.
-/// `[\seen, \flagged]`. Used by [`EmailHunk`]'s `Display` so terminal
-/// output stays readable instead of leaking the derived `Debug` shape
-/// of the underlying `BTreeSet`.
+/// `[\seen, \flagged]`.
 fn format_flag_list(flags: &BTreeSet<Flag>) -> String {
     let mut out = String::from("[");
     let mut first = true;

@@ -1,418 +1,196 @@
 <div align="center">
   <img src="./logo.svg" alt="Logo" width="128" height="128" />
   <h1>📫 Neverest</h1>
-  <p>CLI to synchronize, backup and restore emails,<br>built on the Pimalaya <code>io-*</code> ecosystem</p>
+  <p>CLI to synchronize, backup and restore emails</p>
   <p>
-    <a href="https://github.com/pimalaya/neverest/releases/latest"><img alt="Release" src="https://img.shields.io/github/v/release/pimalaya/neverest?color=success"/></a>
-	<a href="https://repology.org/project/neverest/versions"><img alt="Repology" src="https://img.shields.io/repology/repositories/neverest?color=success"></a>
-    <a href="https://matrix.to/#/#pimalaya:matrix.org"><img alt="Matrix" src="https://img.shields.io/matrix/pimalaya:matrix.org?color=success&label=chat"/></a>
+    <a href="https://matrix.to/#/#pimalaya:matrix.org"><img alt="Matrix" src="https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white"/></a>
+    <a href="https://fosstodon.org/@pimalaya"><img alt="Mastodon" src="https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white"/></a>
   </p>
 </div>
 
-*The project is under active development, do not use in production before the final `v1.0.0` (or at least do some manual backups).*
+> [!CAUTION]
+> Neverest is in active development and currently shipped as `v1.0.0-rc`. Expect breaking changes between releases until stabilization.
+
+## Table of contents
+
+- [Features](#features)
+- [Installation](#installation)
+  - [Pre-built binary](#pre-built-binary)
+  - [Cargo](#cargo)
+  - [Nix](#nix)
+  - [Sources](#sources)
+- [Configuration](#configuration)
+- [Usage](#usage)
+  - [Initializing an account](#initializing-an-account)
+  - [Running a sync](#running-a-sync)
+  - [Mailbox filters and per-side permissions](#mailbox-filters-and-per-side-permissions)
+  - [Migrating from Maildir](#migrating-from-maildir)
+  - [Checking a configuration](#checking-a-configuration)
+- [Social](#social)
+- [Sponsoring](#sponsoring)
 
 ## Features
 
-- Multi-accounting
-- Synchronize a pair of backends together (namely `left` and `right`)
-- **Partial** synchronization based on mailbox **filters**
-- **Restrictive** synchronization based on per-side **permissions**
-- **IMAP** backend (requires the `imap` feature)
-- **JMAP** backend (requires the `jmap` feature)
-- **m2dir** backend for local storage (requires the `m2dir` feature)
-- **Backup** and **restore** emails using the m2dir backend; users coming from mbsync or OfflineIMAP can convert an existing Maildir tree with `neverest migrate-maildir <src> <dst>`
+- Remote backend support: **IMAP**, **JMAP**
+- Local (filesystem) backend support: **m2dir** <sup>[specs](https://man.sr.ht/~bitfehler/m2dir/)</sup>
+- Bidirectional sync between any two backends (`left` and `right`); the labels are symmetric, neither side is privileged
+- **Simple auth** support for IMAP: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256
+- **HTTP auth** support for JMAP: basic, bearer, raw header
+- **TLS** support:
+  - [Rustls](https://crates.io/crates/rustls) with ring crypto
+  - [Rustls](https://crates.io/crates/rustls) with aws crypto (requires `rustls-aws` feature)
+  - [Native TLS](https://crates.io/crates/native-tls) (requires `native-tls` feature)
+- **Discovery** support (wizard only):
+  - PACC <sup>[specs](https://datatracker.ietf.org/doc/html/draft-ietf-mailmaint-pacc)</sup>
+  - Autoconfiguration (Thunderbird) <sup>[specs](https://wiki.mozilla.org/Thunderbird:Autoconfiguration)</sup>
+  - SRV DNS lookups <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup>
+- **Mailbox filters** (include / exclude / all), applied symmetrically to both sides
+- **Per-side permissions** gating `create` / `delete` on mailboxes and messages, plus `update` on flags
+- **Per-side connection pools** (defaults: IMAP 8, JMAP 4, m2dir 8) with one client per worker
+- **Incremental cache** at `$XDG_CACHE_HOME/neverest/<account>/state.json`; `--resync` rebuilds it
+- **Dry-run** mode (`-d`) prints the patch the sync would apply without touching either side
+- **Maildir migration** via `neverest convert maildir <src> <dst>` for users coming from mbsync, OfflineIMAP or a Dovecot tree
+- **JSON** output via `--json`
 
-*Neverest CLI is written in [Rust](https://www.rust-lang.org/), and relies on [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to enable or disable functionalities. Default features can be found in the `features` section of the [`Cargo.toml`](https://github.com/pimalaya/neverest/blob/master/Cargo.toml#L18).*
+> [!TIP]
+> Neverest is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support. The default feature set is declared in [Cargo.toml](./Cargo.toml).
 
 ## Installation
 
-*The `v1.0.0` is currently being tested on the `master` branch, and is the prefered version to use. Previous versions (including GitHub beta releases and repositories published versions) are not recommended.*
-
 ### Pre-built binary
 
-Neverest CLI `v1.0.0` can be installed with a pre-built binary. Find the latest [`pre-releases`](https://github.com/pimalaya/neverest/actions/workflows/pre-releases.yml) GitHub workflow and look for the *Artifacts* section. You should find a pre-built binary matching your OS.
+Neverest is not yet released, therefore the only way to get a pre-built binary is to check out the [releases](https://github.com/pimalaya/neverest/actions/workflows/releases.yml) GitHub workflow and look for the *Artifacts* section.
 
-### Cargo (git)
+> [!NOTE]
+> Such binaries are built with the default cargo features. If you need specific features, please use another installation method.
 
-Neverest CLI `v1.0.0` can also be installed with [cargo](https://doc.rust-lang.org/cargo/):
+### Cargo
 
-```bash
-$ cargo install --frozen --force --git https://github.com/pimalaya/neverest.git
+```
+cargo install --locked --git https://github.com/pimalaya/neverest.git
 ```
 
-### Other outdated methods
+With only IMAP + m2dir support:
 
-These installation methods should not be used until the `v1.0.0` is finally released, as they are all (temporarily) outdated:
+```
+cargo install --locked --git https://github.com/pimalaya/neverest.git \
+  --no-default-features \
+  --features imap,m2dir,rustls-ring
+```
 
-<details>
-  <summary>Pre-built binary</summary>
+### Nix
 
-  Neverest CLI can be installed with a prebuilt binary:
+If you have the [Flakes](https://nixos.wiki/wiki/Flakes) feature enabled:
 
-  ```bash
-  # As root:
-  $ curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | sudo sh
+```
+nix profile install github:pimalaya/neverest
+```
 
-  # As a regular user:
-  $ curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | PREFIX=~/.local sh
-  ```
+Or run without installing:
 
-  These commands install the latest binary from the GitHub [releases](https://github.com/pimalaya/neverest/releases) section.
+```
+nix run github:pimalaya/neverest
+```
 
-  *Binaries are built with [default](https://github.com/pimalaya/neverest/blob/master/Cargo.toml#L18) cargo features. If you want to enable or disable a feature, please use another installation method.*
-</details>
+### Sources
 
-<details>
-  <summary>Cargo</summary>
-
-  Neverest CLI can be installed with [cargo](https://doc.rust-lang.org/cargo/):
-
-  ```bash
-  $ cargo install neverest
-
-  # With only IMAP support:
-  $ cargo install neverest --no-default-features --features imap
-  ```
-
-  You can also use the git repository for a more up-to-date (but less stable) version:
-
-  ```bash
-  $ cargo install --git https://github.com/pimalaya/neverest.git neverest
-  ```
-</details>
-
-<details>
-  <summary>Nix</summary>
-
-  Neverest CLI can be installed with [Nix](https://serokell.io/blog/what-is-nix):
-
-  ```bash
-  $ nix-env -i neverest
-  ```
-
-  You can also use the git repository for a more up-to-date (but less stable) version:
-
-  ```bash
-  $ nix-env -if https://github.com/pimalaya/neverest/archive/master.tar.gz
-
-  # or, from within the source tree checkout
-  $ nix-env -if .
-  ```
-
-  If you have the [Flakes](https://nixos.wiki/wiki/Flakes) feature enabled:
-
-  ```bash
-  $ nix profile install neverest
-
-  # or, from within the source tree checkout
-  $ nix profile install
-
-  # you can also run Neverest directly without installing it:
-  $ nix run neverest
-  ```
-</details>
-
-<details>
-  <summary>Sources</summary>
-
-  Neverest CLI can be installed from sources.
-
-  First you need to install the Rust development environment (see the [rust installation documentation](https://doc.rust-lang.org/cargo/getting-started/installation.html)):
-
-  ```bash
-  $ curl https://sh.rustup.rs -sSf | sh
-  ```
-
-  Then, you need to clone the repository and install dependencies:
-
-  ```bash
-  $ git clone https://github.com/pimalaya/neverest.git
-  $ cd neverest
-  $ cargo check
-  ```
-
-  Now, you can build Neverest:
-
-  ```bash
-  $ cargo build --release
-  ```
-
-  *Binaries are available under the `target/release` folder.*
-</details>
+```
+git clone https://github.com/pimalaya/neverest
+cd neverest
+nix run
+```
 
 ## Configuration
 
-Just run `neverest`, the wizard will help you to configure your default account.
+Run `neverest`. With no configuration file on disk the wizard asks for an account name and an email address, runs provider discovery (PACC, then Thunderbird Autoconfiguration, then RFC 6186 SRV), prompts for IMAP or JMAP credentials based on what discovery returned, asks for a local m2dir store root for the other side, then writes the result to disk.
 
-You can also manually edit your own configuration, from scratch:
+A persistent configuration is loaded from the first valid path among:
 
-- Copy the content of the documented [`./config.sample.toml`](./config.sample.toml)
-- Paste it in a new file `~/.config/neverest/config.toml`
-- Edit, then comment or uncomment the options you want
+- `$XDG_CONFIG_HOME/neverest/config.toml`
+- `$HOME/.config/neverest/config.toml`
+- `$HOME/.neverestrc`
 
-<details>
-  <summary>Proton Mail (Bridge)</summary>
+Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths can be passed at once, separated by `:`. The first one is the base and the rest are deep-merged on top.
 
-  When using Proton Bridge, emails are synchronized locally and exposed via a local IMAP/SMTP server. This implies 2 things:
+See [config.sample.toml](./config.sample.toml) for a documented template covering every supported field. An existing account can be re-prompted later with `neverest configure <account>`: the wizard reuses the current values as defaults instead of re-running discovery.
 
-  - Id order may be reversed or shuffled, but envelopes will still be sorted by date.
-  - SSL/TLS needs to be deactivated manually.
-  - The password to use is the one generated by Proton Bridge, not the one from your Proton Mail account.
+## Usage
 
-  ```toml
-  [accounts.proton]
-  left.backend.type = "maildir"
-  left.backend.root-dir = "~/.Mail/proton"
+### Initializing an account
 
-  right.backend.type = "imap"
-  right.backend.host = "127.0.0.1"
-  right.backend.port = 1143
-  right.backend.encryption = false
-  right.backend.login = "example@proton.me"
-  right.backend.auth.type = "password"
-  right.backend.auth.raw = "*****"
-  ```
+Before the first sync each account must be initialized once:
 
-  Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
+```
+neverest init <account>
+```
 
-  - Save your password in any password manager that can be queried via the CLI:
+This opens both sides (IMAP CAPABILITY / JMAP session GET / m2dir store creation) so credential and network errors surface up front, then writes an empty cache snapshot at `$XDG_CACHE_HOME/neverest/<account>/state.json`. The presence of that file is the single source of truth for "this account is initialized"; `sync` refuses to run when it is missing and `init` refuses to run when it is present.
 
-    ```toml
-    right.backend.auth.cmd = "pass show proton"
-    ```
+### Running a sync
 
-  - Use the global keyring of your system (requires the `keyring` cargo feature):
+```
+neverest sync <account>
+```
 
-    ```toml
-    right.backend.auth.keyring = "proton-example"
-    ```
+Sync walks every mailbox surviving the filter, diffs the two sides against the cached snapshot, applies the resulting hunks through per-side connection pools, then prints a report covering created / updated / deleted mailboxes, flags and messages. Pass `-d` / `--dry-run` to print the patch without applying it.
 
-    Running `neverest configure proton` will ask for your IMAP password, just paste the one generated previously.
-</details>
+Pass `--resync` to drop the cached state before running. Without `--include-mailbox`, the entire snapshot plus every IMAP / JMAP state token is cleared; with `--include-mailbox`, only the listed mailboxes are wiped. The first post-resync sync rebuilds the snapshot via a full re-list, equivalent to first-sync semantics.
 
-<details>
-  <summary>Gmail</summary>
+### Mailbox filters and per-side permissions
 
-  Google passwords cannot be used directly. There is two ways to authenticate yourself:
+Mailbox filters declared in the configuration (`mailbox.filters = "all" | { include = [...] } | { exclude = [...] }`) apply symmetrically to both sides. They can be overridden per invocation with `-m / --include-mailbox`, `-x / --exclude-mailbox`, or `-A / --all-mailboxes` (the three flags are mutually exclusive). Matching is ASCII case-insensitive: `INBOX` matches `inbox`, but non-ASCII characters (umlauts, Cyrillic, accents) must be spelled exactly as the server reports them.
 
-  ### Using [App Passwords](https://support.google.com/mail/answer/185833)
+Per-side permissions live under each side's backend table and gate what the sync engine is allowed to mutate on that side:
 
-  This option is the simplest and the fastest. First, be sure that:
+```toml
+[accounts.example]
+left.m2dir.root = "~/.Mail/example"
+left.m2dir.mailbox.create = false
+left.m2dir.mailbox.delete = false
+left.m2dir.flag.update = true
+left.m2dir.message.create = true
+left.m2dir.message.delete = false
 
-  - IMAP is enabled
-  - Two-step authentication is enabled
-  - Less secure app access is enabled
+right.imap.server = "imap.example.com"
+right.imap.message.delete = false
+```
 
-  First create a [dedicated password](https://myaccount.google.com/apppasswords) for Neverest.
+All five permissions default to `true`. Setting any of them to `false` makes the engine treat the side as read-only for that operation; planned hunks that would violate the policy are dropped from the patch and surfaced in the report.
 
-  ```toml
-  [accounts.gmail]
-  # this is important in order not to sync twice your account
-  folder.filters.exclude = ["[Gmail]/All Mail"]
+### Migrating from Maildir
 
-  left.backend.type = "maildir"
-  left.backend.root-dir = "~/.Mail/gmail"
+```
+neverest convert maildir <SOURCE> <DEST>
+```
 
-  right.backend.type = "imap"
-  right.backend.host = "imap.gmail.com"
-  right.backend.port = 993
-  right.backend.login = "example@gmail.com"
-  right.backend.auth.type = "password"
-  right.backend.auth.raw = "*****"
+One-shot converter: walks a Maildir(++) tree, translates folder names (`.Work.Foo` becomes `Work/Foo`; root `cur/new/tmp` becomes `INBOX`), and copies every message into the destination m2store with its flag sidecar reconstructed from the info-section letters, an optional per-folder `dovecot-keywords` table, and an optional named header. Idempotent on re-run: messages whose checksum already exists at the destination are skipped (their flags are still re-applied).
 
-  right.folder.aliases.inbox = "INBOX"
-  right.folder.aliases.sent = "[Gmail]/Sent Mail"
-  right.folder.aliases.drafts = "[Gmail]/Drafts"
-  right.folder.aliases.trash = "[Gmail]/Trash"
-  ```
+Pass `--read-headers x-keywords` (OfflineIMAP-style, comma-separated) or `--read-headers x-label` (mutt / notmuch-style, space-separated) to also recover keywords from a per-message header. The named header is stripped from the bytes written to the destination so byte fidelity is preserved against the original folded encoding.
 
-  Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
+### Checking a configuration
 
-  - Save your password in any password manager that can be queried via the CLI:
+```
+neverest check <account>
+```
 
-    ```toml
-    right.backend.auth.cmd = "pass show gmail"
-    ```
+Opens both sides and asks each one to list mailboxes. The operation itself is cheap; the value is in surfacing the credential, network or config errors that would otherwise only show up during a real sync.
 
-  - Use the global keyring of your system (requires the `keyring` cargo feature):
+## Social
 
-    ```toml
-    right.backend.auth.keyring = "gmail-example"
-    ```
-
-    Running `neverest configure gmail` will ask for your IMAP password, just paste the one generated previously.
-
-  ### Using OAuth 2.0
-
-  This option is the most secure but the hardest to configure. It requires the `oauth2` and `keyring` cargo features.
-
-  First, you need to get your OAuth 2.0 credentials by following [this guide](https://developers.google.com/identity/protocols/oauth2#1.-obtain-oauth-2.0-credentials-from-the-dynamic_data.setvar.console_name-.). Once you get your client id and your client secret, you can configure your Neverest account this way:
-
-  ```toml
-  [accounts.gmail]
-  # this is important in order not to sync twice your account
-  folder.filters.exclude = ["[Gmail]/All Mail"]
-
-  left.backend.type = "maildir"
-  left.backend.root-dir = "~/.Mail/gmail"
-
-  right.backend.type = "imap"
-  right.backend.host = "imap.gmail.com"
-  right.backend.port = 993
-  right.backend.login = "example@gmail.com"
-  right.backend.auth.type = "oauth2"
-  right.backend.auth.client-id = "*****"
-  right.backend.auth.auth-url = "https://accounts.google.com/o/oauth2/v2/auth"
-  right.backend.auth.token-url = "https://www.googleapis.com/oauth2/v3/token"
-  right.backend.auth.pkce = true
-  right.backend.auth.scope = "https://mail.google.com/"
-
-  right.folder.aliases.inbox = "INBOX"
-  right.folder.aliases.sent = "[Gmail]/Sent Mail"
-  right.folder.aliases.drafts = "[Gmail]/Drafts"
-  right.folder.aliases.trash = "[Gmail]/Trash"
-  ```
-
-  Running `neverest configure gmail` will complete your OAuth 2.0 setup and ask for your client secret.
-</details>
-
-<details>
-  <summary>Outlook</summary>
-
-  ```toml
-  [accounts.outlook]
-  left.backend.type = "maildir"
-  left.backend.root-dir = "~/.Mail/outlook"
-
-  right.backend.type = "imap"
-  right.backend.host = "outlook.office365.com"
-  right.backend.port = 993
-  right.backend.login = "example@outlook.com"
-  right.backend.auth.type = "password"
-  right.backend.auth.raw = "*****"
-  ```
-
-  Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
-
-  - Save your password in any password manager that can be queried via the CLI:
-
-    ```toml
-    right.backend.auth.cmd = "pass show outlook"
-    ```
-
-  - Use the global keyring of your system (requires the `keyring` cargo feature):
-
-    ```toml
-    right.backend.auth.keyring = "outlook-example"
-    ```
-
-    Running `neverest configure outlook` will ask for your IMAP password, just paste the one generated previously.
-
-  ### Using OAuth 2.0
-
-  This option is the most secure but the hardest to configure. First, you need to get your OAuth 2.0 credentials by following [this guide](https://learn.microsoft.com/en-us/exchange/client-developer/legacy-protocols/how-to-authenticate-an-imap-pop-smtp-application-by-using-oauth). Once you get your client id and your client secret, you can configure your Neverest account this way:
-
-  ```toml
-  [accounts.outlook]
-  left.backend.type = "maildir"
-  left.backend.root-dir = "~/.Mail/outlook"
-
-  right.backend.type = "imap"
-  right.backend.host = "outlook.office365.com"
-  right.backend.port = 993
-  right.backend.login = "example@outlook.com"
-  right.backend.auth.type = "oauth2"
-  right.backend.auth.client-id = "*****"
-  right.backend.auth.auth-url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-  right.backend.auth.token-url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-  right.backend.auth.pkce = true
-  right.backend.auth.scope = "https://outlook.office.com/IMAP.AccessAsUser.All"
-  ```
-
-  Running `neverest configure outlook` will complete your OAuth 2.0 setup and ask for your client secret.
-</details>
-
-<details>
-  <summary>iCloud Mail</summary>
-
-  From the [iCloud Mail](https://support.apple.com/en-us/HT202304) support page:
-
-  - IMAP port = `993`.
-  - IMAP login = name of your iCloud Mail email address (for example, `johnappleseed`, not `johnappleseed@icloud.com`)
-
-  ```toml
-  [accounts.icloud]
-  left.backend.type = "maildir"
-  left.backend.root-dir = "~/.Mail/icloud"
-
-  right.backend.type = "imap"
-  right.backend.host = "imap.mail.me.com"
-  right.backend.port = 993
-  right.backend.login = "johnappleseed"
-  right.backend.auth.type = "password"
-  right.backend.auth.raw = "*****"
-  ```
-
-  Keeping your password inside the configuration file is good for testing purpose, but it is not safe. You have 2 better alternatives:
-
-  - Save your password in any password manager that can be queried via the CLI:
-
-    ```toml
-    right.backend.auth.cmd = "pass show icloud"
-    ```
-
-  - Use the global keyring of your system (requires the `keyring` cargo feature):
-
-    ```toml
-    right.backend.auth.keyring = "icloud-example"
-    ```
-
-    Running `neverest configure icloud` will ask for your IMAP password, just paste the one generated previously.
-
-</details>
-
-## FAQ
-
-<details>
-  <summary>How to debug Neverest CLI?</summary>
-
-  The simplest way is to use `--debug` and `--trace` arguments.
-
-  The advanced way is based on environment variables:
-
-  - `RUST_LOG=<level>`: determines the log level filter, can be one of `off`, `error`, `warn`, `info`, `debug` and `trace`.
-  - `RUST_SPANTRACE=1`: enables the spantrace (a span represent periods of time in which a program was executing in a particular context).
-  - `RUST_BACKTRACE=1`: enables the error backtrace.
-  - `RUST_BACKTRACE=full`: enables the full error backtrace, which include source lines where the error originated from.
-
-  Logs are written to the `stderr`, which means that you can redirect them easily to a file:
-
-  ```
-  RUST_LOG=debug neverest 2>/tmp/neverest.log
-  ```
-</details>
-
-<details>
-  <summary>How the wizard discovers IMAP configs?</summary>
-
-  All the lookup mechanisms use the email address domain as base for the lookup. It is heavily inspired from the Thunderbird [Autoconfiguration](https://udn.realityripple.com/docs/Mozilla/Thunderbird/Autoconfiguration) protocol. For example, for the email address `test@example.com`, the lookup is performed as (in this order):
-
-  1. check for `autoconfig.example.com`
-  2. look up of `example.com` in the ISPDB (the Thunderbird central database)
-  3. look up `MX example.com` in DNS, and for `mx1.mail.hoster.com`, look up `hoster.com` in the ISPDB
-  4. look up `SRV example.com` in DNS
-  5. try to guess (`imap.example.com`…)
-</details>
+- Chat on [Matrix](https://matrix.to/#/#pimalaya:matrix.org)
+- News on [Mastodon](https://fosstodon.org/@pimalaya) or [RSS](https://fosstodon.org/@pimalaya.rss)
+- Mail at [pimalaya.org@posteo.net](mailto:pimalaya.org@posteo.net)
 
 ## Sponsoring
 
 [![nlnet](https://nlnet.nl/logo/banner-160x60.png)](https://nlnet.nl/)
 
-Special thanks to the [NLnet foundation](https://nlnet.nl/) and the [European Commission](https://www.ngi.eu/) that helped the project to receive financial support from various programs:
+Special thanks to the [NLnet foundation](https://nlnet.nl/) and the [European Commission](https://www.ngi.eu/) that have been financially supporting the project for years:
 
-- [NGI Assure](https://nlnet.nl/project/Himalaya/) in 2022
-- [NGI Zero Entrust](https://nlnet.nl/project/Pimalaya/) in 2023
-- [NGI Zero Core](https://nlnet.nl/project/Pimalaya-PIM/) in 2024 *(still ongoing)*
+- 2022 → 2023: [NGI Assure](https://nlnet.nl/project/Himalaya/)
+- 2023 → 2024: [NGI Zero Entrust](https://nlnet.nl/project/Pimalaya/)
+- 2024 → 2026: [NGI Zero Core](https://nlnet.nl/project/Pimalaya-PIM/)
+- *2027 in preparation…*
 
 If you appreciate the project, feel free to donate using one of the following providers:
 

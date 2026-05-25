@@ -1,7 +1,22 @@
-//! Mozilla Thunderbird Autoconfiguration step of the wizard's
-//! discovery chain. Tries ISP main, ISP fallback, and Thunderbird
-//! ISPDB in series (secure variants only); each probe owns its own
-//! spinner. neverest only cares about IMAP servers.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Mozilla Thunderbird Autoconfiguration probe (ISP main / fallback /
+//! ISPDB, IMAP only) feeding the wizard's discovery chain.
 
 use io_discovery::autoconfig::{
     client::DiscoveryAutoconfigClientStd,
@@ -15,9 +30,10 @@ use pimalaya_cli::{
 
 use crate::wizard::discover::{DiscoveryResult, discovery_resolver, discovery_tls};
 
+/// Tries ISP main, ISP fallback, then ISPDB in series; first hit wins.
 pub fn run(local_part: &str, domain: &str) -> Option<Autoconfig> {
     let mut client =
-        DiscoveryAutoconfigClientStd::new(discovery_resolver()).with_tls(discovery_tls());
+        DiscoveryAutoconfigClientStd::new(discovery_resolver().ok()?).with_tls(discovery_tls());
 
     let attempts: [(&str, &dyn Fn(&mut DiscoveryAutoconfigClientStd) -> _); 3] = [
         ("Autoconfig ISP main URL", &|c| {
@@ -47,6 +63,7 @@ pub fn run(local_part: &str, domain: &str) -> Option<Autoconfig> {
     None
 }
 
+/// Extracts the IMAP server (if any) from an [`Autoconfig`] result.
 pub fn defaults(ac: &Autoconfig) -> DiscoveryResult {
     let imap = ac
         .email_provider

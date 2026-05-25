@@ -1,21 +1,22 @@
-//! Interactive configuration wizard with discovery-based defaults.
-//!
-//! Triggered by `cli::load_or_wizard` when no config file is found
-//! ([`pimalaya_config::toml::TomlConfig::from_paths_or_default`]
-//! returned `Ok(None)`).
-//!
-//! Flow:
-//!
-//! 1. Confirm with the user. Exit if they decline.
-//! 2. Ask for an account name and email address.
-//! 3. Try PACC, then Autoconfig (ISP main / fallback / ISPDB, secure
-//!    variants only), then RFC 6186 SRV; each probe owns its own
-//!    spinner and first hit wins.
-//! 4. If PACC returned a JMAP endpoint, ask the user whether to use
-//!    it instead of IMAP and run the matching protocol wizard.
-//! 5. Ask for the local m2dir store root; the result is the `left`
-//!    side and the remote backend is the `right` side.
-//! 6. Build a [`Config`], write it to `target`, return it.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Interactive configuration wizard with PACC / Autoconfig / SRV
+//! discovery-based defaults.
 
 use std::{
     collections::HashMap,
@@ -23,7 +24,7 @@ use std::{
     process::exit,
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use log::info;
 use pimalaya_cli::{
     prompt,
@@ -46,22 +47,15 @@ use crate::{
     },
 };
 
-/// DNS resolver used by PACC, Autoconfig, and SRV discovery.
-/// Cloudflare's `1.1.1.1` is a reasonable default; we'll make this
-/// configurable later.
+// TODO: make the discovery DNS resolver configurable.
 const DEFAULT_RESOLVER: &str = "tcp://1.1.1.1:53";
 
-/// Parses [`DEFAULT_RESOLVER`] into a [`Url`]. The const is fixed at
-/// build time, so a parse failure is a static bug.
-pub fn discovery_resolver() -> Url {
-    DEFAULT_RESOLVER
-        .parse()
-        .expect("DEFAULT_RESOLVER must be a valid URL")
+/// Parses [`DEFAULT_RESOLVER`] into a [`Url`].
+pub fn discovery_resolver() -> Result<Url> {
+    Url::parse(DEFAULT_RESOLVER).context("Parse DEFAULT_RESOLVER")
 }
 
-/// Builds the [`Tls`] profile passed to the per-mechanism discovery
-/// clients via `with_tls`. Discovery only speaks HTTPS to `_well-known`
-/// endpoints, so `http/1.1` is the only ALPN protocol we offer.
+/// HTTPS-only [`Tls`] profile shared by every discovery mechanism.
 pub fn discovery_tls() -> Tls {
     let mut tls = Tls::default();
     tls.rustls.alpn = vec!["http/1.1".into()];
@@ -80,6 +74,7 @@ impl DiscoveryResult {
     }
 }
 
+/// Runs the wizard, writes the result to `target`, and returns it.
 pub fn run(target: &Path) -> Result<Config> {
     let prompt = format!(
         "No configuration found, create one at {}?",
@@ -110,10 +105,8 @@ pub fn run(target: &Path) -> Result<Config> {
     Ok(config)
 }
 
-/// Runs PACC, then Autoconfig, then SRV in series; first non-empty
-/// `DiscoveryResult` wins. Each mechanism reports its own spinner
-/// line. Returns an empty `DiscoveryResult` when every mechanism
-/// failed; the caller falls back to pure manual entry in that case.
+/// Runs PACC, Autoconfig and SRV in series; first non-empty result
+/// wins, otherwise returns an empty [`DiscoveryResult`].
 fn discover(local_part: &str, domain: &str) -> DiscoveryResult {
     if let Some(result) = pacc::run(domain)
         .map(|c| pacc::defaults(&c))
@@ -139,10 +132,8 @@ fn discover(local_part: &str, domain: &str) -> DiscoveryResult {
     DiscoveryResult::default()
 }
 
-/// Picks the remote backend (JMAP when offered and accepted, else
-/// IMAP), runs its credential wizard, then prompts for the local
-/// m2dir root and assembles the [`AccountConfig`] with the local side
-/// as `left` and the remote side as `right`.
+/// Picks JMAP or IMAP for the remote side, prompts for the local
+/// m2dir root, then assembles the [`AccountConfig`].
 fn build_account_from_discovery(
     account_name: &str,
     local_part: &str,

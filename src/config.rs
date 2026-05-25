@@ -1,9 +1,22 @@
-//! Global configuration for neverest.
-//!
-//! Each account declares a `left` and a `right` [`SideConfig`]. Sync
-//! orchestration walks both sides through [`io_email::client::EmailClientStd`]
-//! and applies the per-side [`MailboxSidePermissions`] /
-//! [`FlagSidePermissions`] / [`MessageSidePermissions`].
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Account configuration: each account pairs a `left` and a `right`
+//! [`SideConfig`] plus mailbox/message sync settings.
 
 use std::{collections::HashMap, fs, path::Path, path::PathBuf};
 
@@ -22,11 +35,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::wizard;
 
-/// Wraps a `pub struct $Name { ... }` declaration and splices in the
-/// per-side shared fields (`mailbox`, `flag`, `message`, `pool_size`)
-/// at the end. Used by every protocol-specific config so each variant
-/// of [`SideConfig`] carries the same permission and pool-size knobs
-/// without copy-pasting the four fields.
+/// Splices the per-side shared fields (`mailbox`, `flag`, `message`,
+/// `pool_size`) onto every protocol-specific config struct.
 macro_rules! side_config {
     (
         $(#[$struct_meta:meta])*
@@ -49,21 +59,16 @@ macro_rules! side_config {
             pub flag: FlagSidePermissions,
             #[serde(default)]
             pub message: MessageSidePermissions,
-            /// Optional override for the per-side connection pool
-            /// size. When unset, defaults are picked per backend
-            /// (IMAP 8, JMAP 4, m2dir 8); see
-            /// [`crate::sync::pool::SidePool::open`].
+            /// Per-side connection pool size override; defaults are
+            /// picked per backend.
             #[serde(default)]
             pub pool_size: Option<usize>,
         }
     };
 }
 
-/// Generates an accessor on [`SideConfig`] that forwards to the
-/// matching shared field on the active variant's protocol config. The
-/// shared fields (`mailbox`, `flag`, `message`, `pool_size`) are
-/// appended to every protocol config by [`side_config!`], so all three
-/// arms have the same field by construction.
+/// Generates a [`SideConfig`] accessor that forwards to the matching
+/// shared field on the active variant.
 macro_rules! side_accessor {
     ($name:ident, $ty:ty) => {
         pub fn $name(&self) -> $ty {
@@ -104,9 +109,8 @@ impl TomlConfig for Config {
 }
 
 impl Config {
-    /// Loads `Config` from the merged `config_paths` or, when no file
-    /// exists, runs the wizard against the target path. Called by every
-    /// command that needs config (sync, doctor, configure).
+    /// Loads `Config` from `config_paths`, or runs the wizard when no
+    /// file exists.
     pub fn load_or_wizard(config_paths: &[PathBuf]) -> Result<Config> {
         match Config::from_paths_or_default(config_paths)? {
             Some(config) => Ok(config),
@@ -114,9 +118,8 @@ impl Config {
         }
     }
 
-    /// Serializes `self` to TOML and writes it to `path`, creating
-    /// any missing parent directories. Used by the wizard to persist
-    /// a freshly-built configuration.
+    /// Serializes `self` to TOML at `path`, creating missing parent
+    /// directories.
     pub fn write(&self, path: &Path) -> Result<()> {
         let toml = toml::to_string_pretty(self).context("Serialize TOML config error")?;
 
@@ -143,21 +146,16 @@ pub struct AccountConfig {
     pub left: SideConfig,
     pub right: SideConfig,
 
-    /// Mailbox-level sync settings shared by both sides (filters +
-    /// aliases). Per-side permissions live on each [`SideConfig`].
+    /// Mailbox-level sync settings shared by both sides.
     #[serde(default)]
     pub mailbox: MailboxSyncConfig,
 
-    /// Reserved for message-level sync filters (date range, sender,
-    /// subject). Currently a placeholder so future fields don't break
-    /// existing config files.
+    // TODO: message-level sync filters (date range, sender, subject).
     #[serde(default)]
     pub message: MessageSyncConfig,
 }
 
-/// One side of the bidirectional sync. Exactly one variant is set
-/// (serde rejects multiples and `deny_unknown_fields` rejects none),
-/// so client construction never has to check "how many backends".
+/// One side of the bidirectional sync; exactly one variant per side.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum SideConfig {
@@ -180,9 +178,7 @@ impl SideConfig {
         matches!(self, Self::Jmap(_))
     }
 
-    /// Bundles the three permission accessors so the sync engine can
-    /// snapshot the gating policy once per side instead of re-walking
-    /// the config inside its inner loops.
+    /// Snapshots the per-side mailbox/flag/message permissions.
     pub fn permissions(&self) -> SidePermissions {
         SidePermissions {
             mailbox: self.mailbox(),
@@ -192,8 +188,7 @@ impl SideConfig {
     }
 }
 
-/// Per-side permission triple consulted by the sync engine to decide
-/// whether a planned hunk is allowed to materialize.
+/// Per-side permission triple gating which sync hunks may materialize.
 #[derive(Clone, Copy, Debug)]
 pub struct SidePermissions {
     pub mailbox: MailboxSidePermissions,
@@ -208,8 +203,8 @@ pub struct MailboxSyncConfig {
     #[serde(default)]
     pub filters: MailboxFilter,
 
-    /// Friendly-name → backend-id map (e.g. `inbox = "INBOX"`).
-    /// Currently consumed only at display time; sync ignores aliases.
+    /// Friendly-name → backend-id map (e.g. `inbox = "INBOX"`); used
+    /// for display only, sync ignores aliases.
     #[serde(default)]
     pub alias: HashMap<String, String>,
 }
@@ -218,8 +213,7 @@ pub struct MailboxSyncConfig {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct MessageSyncConfig {}
 
-/// Mailbox-name filter: `Include` keeps only the listed names,
-/// `Exclude` drops them, `All` keeps everything.
+/// Mailbox-name filter: include-list, exclude-list, or keep all.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum MailboxFilter {
@@ -229,8 +223,7 @@ pub enum MailboxFilter {
     Exclude(Vec<String>),
 }
 
-/// Per-side mailbox permissions. `create`/`delete` flags gate whether
-/// the sync engine is allowed to mutate the mailbox set on that side.
+/// Per-side mailbox permissions gating mailbox-set mutations.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct MailboxSidePermissions {
@@ -274,14 +267,6 @@ impl Default for MessageSidePermissions {
         }
     }
 }
-
-// ── Protocol configs (mirrored from himalaya v2) ─────────────────────
-//
-// Each protocol-specific struct carries its own settings plus the
-// shared per-side knobs (mailbox/flag/message/pool_size) appended by
-// the `side_config!` macro. Accessors on [`SideConfig`] forward to the
-// active variant's shared fields so callers never have to match on the
-// variant just to read a permission.
 
 side_config! {
     #[derive(Clone, Debug, Deserialize, Serialize)]

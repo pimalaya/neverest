@@ -1,12 +1,22 @@
-//! End-of-run summary returned by [`crate::sync::engine::run`].
-//!
-//! Each hunk is paired with its application error (`None` on success)
-//! so the caller can render a single "what happened" block at the end.
-//! The report implements both [`fmt::Display`] (for the terminal
-//! transcript) and [`serde::Serialize`] (for `--json`), so the
-//! `synchronize` command path just forwards the value to
-//! [`pimalaya_cli::printer::Printer::out`] and lets the printer pick
-//! the encoding.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! End-of-run summary returned by the sync engine; implements `Display`
+//! for the terminal and `Serialize` for `--json`.
 
 use std::fmt;
 
@@ -23,25 +33,20 @@ pub struct SyncReport {
     pub dry_run: bool,
     pub mailbox: PatchOutcome<MailboxHunk>,
     pub email: PatchOutcome<EmailHunk>,
-    /// Content-key collisions detected while building the per-mailbox
-    /// message map. The first envelope at each colliding key was kept
-    /// (so the diff still applies to it); the rest were skipped for
-    /// this sync and surface here so the user can fix the source.
+    /// Content-key collisions surfaced this sync (first envelope kept,
+    /// rest skipped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collisions: Vec<MessageCollision>,
 }
 
-/// One content-key collision group. `ids` lists every backend-native
-/// id that hashed to the same bucket; the first id was kept in the
-/// diff, the rest were skipped this sync.
+/// One content-key collision group; first id in `ids` is the kept one.
 #[derive(Debug, Serialize)]
 pub struct MessageCollision {
     pub side: Side,
     pub mailbox: String,
-    /// Shared `Message-ID:` value when every colliding envelope
-    /// carried one. `None` means at least one envelope had no
-    /// `Message-ID` and the legacy `(subject, date, from)` fallback
-    /// collapsed them.
+    /// Shared `Message-ID:` when every envelope carried one; `None`
+    /// when the legacy `(subject, date, from)` fallback collapsed
+    /// envelopes without a header.
     pub message_id: Option<String>,
     pub ids: Vec<String>,
 }
@@ -54,10 +59,6 @@ impl fmt::Display for MessageCollision {
             message_id,
             ids,
         } = self;
-        // The first id is the one that survived in the diff (kept the
-        // first time we saw the content key); everything after it was
-        // skipped this sync to avoid syncing two messages with the
-        // same Message-ID twice.
         let kept = ids.first().map(String::as_str).unwrap_or("?");
         let skipped = ids
             .iter()
@@ -92,9 +93,7 @@ impl<H> Default for PatchOutcome<H> {
 #[derive(Debug, Serialize)]
 pub struct PatchEntry<H> {
     pub hunk: H,
-    /// Formatted error (`{e:#}`) when the hunk failed to apply,
-    /// `None` on success. Stored as a string so the whole report is
-    /// `Serialize`; `anyhow::Error` is not.
+    /// Formatted apply error (`{e:#}`); `None` on success.
     pub error: Option<String>,
 }
 
@@ -127,7 +126,6 @@ impl fmt::Display for SyncReport {
         let errors = mailbox_errors + email_errors;
         let warnings = self.collisions.len();
 
-        // Full listing first: every planned / applied hunk, plain.
         if !self.mailbox.patch.is_empty() {
             writeln!(f, "Mailbox patches ({n}):", n = self.mailbox.patch.len())?;
             for entry in &self.mailbox.patch {
@@ -144,9 +142,6 @@ impl fmt::Display for SyncReport {
             writeln!(f)?;
         }
 
-        // Warnings: things the sync deliberately did not touch and
-        // the user has to resolve manually (RFC violations, duplicate
-        // Message-IDs). State on disk is untouched.
         if warnings > 0 {
             writeln!(f, "Warnings ({warnings}):")?;
             for c in &self.collisions {
@@ -155,9 +150,6 @@ impl fmt::Display for SyncReport {
             writeln!(f)?;
         }
 
-        // Errors: things the sync tried and failed (real-mode only;
-        // dry-run never carries any). Item state is uncertain on at
-        // least one side; rerun the sync to retry.
         if errors > 0 {
             writeln!(f, "Errors ({errors}):")?;
             for entry in self.mailbox.patch.iter().filter(|e| e.error.is_some()) {

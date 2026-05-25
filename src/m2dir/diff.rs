@@ -1,28 +1,22 @@
-//! Snapshot-driven incremental envelope fetch for m2dir.
-//!
-//! m2dir has no protocol-level state token (unlike IMAP QRESYNC or
-//! JMAP `Email/changes`), but it does not need one: every entry's id
-//! already encodes the message checksum (`<fnv1a-64>.<nonce>`) and
-//! flags live in a sidecar. The per-mailbox `MessageSnapshots` the
-//! engine already persists for every backend (id → flags) is therefore
-//! all the state we need.
-//!
-//! Diff algorithm — one listdir + one sidecar read per entry, no
-//! mtimes, no parallel manifest:
-//!
-//! 1. Build `id → prev_flags` from the snapshot.
-//! 2. List the m2dir's current entries (cheap; no parsing).
-//! 3. For each current entry, read its flag sidecar (~tens of bytes,
-//!    kernel-cached) to get `current_flags`.
-//!    - id missing from snapshot → new message; parse headers to
-//!      surface `Message-ID:` and emit a fresh [`Envelope`].
-//!    - id present but `current_flags != prev_flags` → flag update.
-//!    - id present, flags match → unchanged, no further work.
-//! 4. Snapshot ids absent from the current listing → vanished.
-//!
-//! Returns [`EnvelopeDiff::Incremental`] with `new_state` left empty:
-//! the engine routes m2dir through this module, not the LCD wire-state
-//! checkpoint, so the state blob is unused.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! Snapshot-driven incremental envelope delta: one listdir plus one
+//! sidecar read per entry, no protocol checkpoint needed.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -37,6 +31,7 @@ use mail_parser::MessageParser;
 
 use crate::sync::cache::MessageSnapshots;
 
+/// Computes the envelope diff for an m2dir mailbox against `prev`.
 pub fn diff_envelopes(
     client: &mut EmailClientStd,
     mailbox: &str,
@@ -81,9 +76,7 @@ pub fn diff_envelopes(
                     flags: current_flags,
                 });
             }
-            Some(_) => {
-                // Unchanged: nothing to do.
-            }
+            Some(_) => {}
         }
     }
 
@@ -220,7 +213,6 @@ mod tests {
 
         let prev = snapshot_with(&[(&id_a, &[])]);
 
-        // Set Seen flag after snapshot.
         client
             .add_flags(
                 "inbox",
@@ -272,22 +264,15 @@ mod tests {
         assert_eq!(vanished_ids, vec![id_b]);
     }
 
-    /// End-to-end: the user's scenario. Sync 1 populates an empty
-    /// m2dir from "source" envelopes; sync 2 must see zero changes
-    /// and parse nothing.
     #[test]
     fn sync_two_after_initial_population_is_a_no_op() {
         use crate::sync::{cache::MessageEntry, diff::pairs_from_envelopes, hunk::EmailHunk};
         use io_email::envelope::Envelope as IoEnvelope;
 
-        // Build an m2dir client (target side).
         let dir = tempdir().unwrap();
         let mut client = mk_client(dir.path());
         client.create_mailbox("inbox").unwrap();
 
-        // --- Sync 1: populate from source envelopes ---
-        // Apply two synthetic Copies. The engine would normally derive
-        // these from the diff; we shortcut to the apply outcome.
         let seen = Flag::from_iana(IanaFlag::Seen);
         let mut snapshot = MessageSnapshots::new();
 
@@ -300,12 +285,8 @@ mod tests {
             } else {
                 vec![]
             };
-            // Apply on the m2dir side (mirrors what EmailHunk::Copy
-            // does at apply time and returns the new target-side id).
             let new_id = client.add_message("inbox", &flags, raw.to_vec()).unwrap();
 
-            // Compute the content key the way the engine does (from
-            // the source envelope's Message-ID).
             let env = IoEnvelope {
                 id: new_id.clone(),
                 message_id: Some(mid.to_string()),
@@ -320,9 +301,6 @@ mod tests {
             let pairs = pairs_from_envelopes(vec![env]);
             let (key, _) = pairs.into_iter().next().unwrap();
 
-            // Engine's update_snapshot_from_hunk for a Copy: insert
-            // (content_key → {id, flags}) into the target snapshot.
-            // We emulate it here.
             let hunk = EmailHunk::Copy {
                 source_side: crate::side::Side::Left,
                 target_side: crate::side::Side::Right,
@@ -331,7 +309,6 @@ mod tests {
                 flags: flags.iter().cloned().collect(),
                 content_key: key,
             };
-            // Sanity-check the hunk carries the key we just computed.
             match &hunk {
                 EmailHunk::Copy { content_key, .. } => assert_eq!(*content_key, key),
                 _ => unreachable!(),
@@ -345,7 +322,6 @@ mod tests {
             );
         }
 
-        // --- Sync 2: should be a perfect no-op ---
         let diff = diff_envelopes(&mut client, "inbox", Some(&snapshot)).unwrap();
         let EnvelopeDiff::Incremental {
             new_envelopes,

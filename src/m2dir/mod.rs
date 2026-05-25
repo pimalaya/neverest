@@ -15,15 +15,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//! Bidirectional 3-way sync: diff math, hunk types, cache snapshot,
-//! worker pool, and the `run` entry point.
+//! m2dir-specific helpers: snapshot-driven envelope delta (m2dir has
+//! no protocol checkpoint, so the cached snapshot is the state).
 
-mod sync;
-
-pub mod cache;
 pub mod diff;
-pub mod hunk;
-pub mod pool;
-pub mod report;
-
-pub use sync::*;

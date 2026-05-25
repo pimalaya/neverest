@@ -1,13 +1,25 @@
-//! `neverest init` command.
+// This file is part of Neverest, a CLI to synchronize emails.
+//
+// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or
+// (at your option) any later version.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+//! `neverest init` command: probes both sides and writes the initial
+//! cache snapshot that subsequent sync runs consume.
 //!
-//! Bootstraps an account's per-side state: probes the remote
-//! connection(s) so IMAP CAPABILITY / JMAP session GET surfaces any
-//! credential / network problem up front, creates the m2dir root and
-//! marker on local sides, then writes an empty cache snapshot at
-//! `$XDG_CACHE_HOME/neverest/<account>/state.json`. The cache file's
-//! presence is the single source of truth for "this account is
-//! initialized"; [`crate::account::sync`] refuses to run when it is
-//! missing, and this command refuses to run when it is present.
+//! The cache file's presence is the single source of truth for "this
+//! account is initialized".
 
 use std::path::PathBuf;
 
@@ -20,18 +32,10 @@ use pimalaya_cli::{
 };
 use pimalaya_config::toml::TomlConfig;
 
-use crate::{
-    config::Config,
-    side::Side,
-    sync::cache::{CacheSnapshot, cache_path},
-};
+use crate::{client, config::Config, sync::cache::CacheSnapshot};
 
-/// Initialize an account's per-side state.
-///
-/// Probes both sides (open the remote connection, create the m2dir
-/// store root) and writes an empty cache snapshot that subsequent
-/// `sync` runs consume. Refuses to run if the account is already
-/// initialized.
+/// Initializes an account's per-side state; refuses to run if it is
+/// already initialized.
 #[derive(Debug, Parser)]
 pub struct InitCommand {
     #[command(flatten)]
@@ -47,26 +51,18 @@ impl InitCommand {
             bail!("Cannot find account");
         };
 
-        let cache = cache_path(&name)?;
+        let cache = CacheSnapshot::path(&name)?;
         if cache.exists() {
             let p = cache.display();
             bail!("Account `{name}` already initialized, delete `{p}` to reset");
         }
 
-        // Open and immediately drop each side: the connection handshake is the
-        // probe (CAPABILITY for IMAP, session GET for JMAP), the m2dir branch
-        // creates the store root and marker via `init_side`. `sync` will reopen
-        // on its own.
         let s = Spinner::start("Initializing left side…");
-        Side::Left
-            .init(account_config.left.clone())
-            .context("Initialize left side")?;
+        client::init(account_config.left.clone()).context("Initialize left side")?;
         s.success("Initialized left side");
 
         let s = Spinner::start("Initializing right side…");
-        Side::Right
-            .init(account_config.right.clone())
-            .context("Initialize right side")?;
+        client::init(account_config.right.clone()).context("Initialize right side")?;
         s.success("Initialized right side");
 
         let s = Spinner::start("Writing initial cache snapshot…");

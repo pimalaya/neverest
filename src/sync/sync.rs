@@ -153,7 +153,7 @@ fn resolve_diff(
     #[cfg(feature = "m2dir")]
     if client.as_m2dir().is_some() {
         let prev = snapshot.messages(side, mailbox);
-        return crate::m2dir::diff::diff_envelopes(client, mailbox, prev);
+        return crate::sync::diff::diff_envelopes(client, mailbox, prev);
     }
     let cached = snapshot.state(side, mailbox);
     client.diff_envelopes(mailbox, cached).map_err(Into::into)

@@ -15,9 +15,10 @@
 # for one side, asks for a local m2store root for the other, then writes the
 # result here.
 #
-# Users coming from mbsync, OfflineIMAP or a Dovecot Maildir layout should run
-# `neverest migrate-maildir <SRC> <DST>` once to convert their tree before
-# pointing an m2dir side at it.
+# Users coming from mbsync, OfflineIMAP or a Dovecot Maildir layout should
+# point Neverest at a fresh m2dir root and resync from the authoritative
+# IMAP/JMAP server; Maildir keyword storage is not standardized across
+# consumers, so an in-place local migration would lose or mangle flags.
 # ================================================================================
 
 # --------------------------------------------------------------------------------

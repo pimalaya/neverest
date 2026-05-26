@@ -60,7 +60,6 @@ serde_json = "1"
 shellexpand = "3.1"
 toml = "0.8"
 url = { version = "2.2", features = ["serde"] }
-walkdir = "2"
 
 [dev-dependencies]
 tempfile = "3"

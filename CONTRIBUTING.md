@@ -4,17 +4,17 @@ Thank you for investing your time in contributing to Neverest CLI!
 
 ## Development
 
-The development environment is managed by [Nix](https://nixos.org/download.html). Running `nix-shell` will spawn a shell with everything you need to get started with the lib: `cargo`, `cargo-watch`, `rust-bin`, `rust-analyzer`, `notmuch`…
+The development environment is managed by [Nix flakes](https://nixos.wiki/wiki/Flakes). Running `nix develop` drops you into a shell with everything you need: `cargo`, `rust-analyzer`, etc.
 
 ```sh
-# Start a Nix shell
-$ nix-shell
+# enter the dev shell
+$ nix develop
 
 # then build the CLI
 $ cargo build
 
-# run the CLI
-$ cargo run --feature pgp-gpg
+# or run the CLI with specific features
+$ cargo run --no-default-features --features imap,m2dir,rustls-ring
 ```
 
 ## Contributing

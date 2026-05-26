@@ -78,7 +78,7 @@ impl SyncCommand {
 
         let cache = CacheSnapshot::path(&name)?;
         if !cache.exists() {
-            bail!("Account `{name}` not initialized, run `init {name}` first");
+            bail!("Account `{name}` not initialized, run `init -a {name}` first");
         }
 
         if self.reset {

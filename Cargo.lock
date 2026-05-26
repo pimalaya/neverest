@@ -1338,7 +1338,6 @@ dependencies = [
  "tempfile",
  "toml",
  "url",
- "walkdir",
 ]
 
 [[package]]

@@ -37,7 +37,7 @@ use crate::{
 pub type MailboxSnapshots = HashMap<String, MessageSnapshots>;
 
 /// Map keyed by the stringified content hash from
-/// [`crate::sync::key::message_key`].
+/// [`crate::sync::diff::message_key`].
 pub type MessageSnapshots = HashMap<String, MessageEntry>;
 
 /// Full snapshot loaded at sync start and saved at sync end.

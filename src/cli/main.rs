@@ -32,8 +32,7 @@ use pimalaya_cli::{
 };
 
 use crate::cli::{
-    check::CheckCommand, configure::ConfigureCommand, convert::ConvertCommand, init::InitCommand,
-    sync::SyncCommand,
+    check::CheckCommand, configure::ConfigureCommand, init::InitCommand, sync::SyncCommand,
 };
 
 #[derive(Parser, Debug)]
@@ -67,7 +66,6 @@ pub enum Command {
     Sync(SyncCommand),
     #[command(alias = "cfg")]
     Configure(ConfigureCommand),
-    Convert(ConvertCommand),
     #[command(arg_required_else_help = true)]
     Manuals(ManualCommand),
     #[command(arg_required_else_help = true)]
@@ -81,7 +79,6 @@ impl Command {
             Self::Init(cmd) => cmd.execute(printer, config_paths),
             Self::Sync(cmd) => cmd.execute(printer, config_paths),
             Self::Configure(cmd) => cmd.execute(printer, config_paths),
-            Self::Convert(cmd) => cmd.execute(printer),
             Self::Manuals(cmd) => cmd.execute(printer, Cli::command()),
             Self::Completions(cmd) => cmd.execute(printer, Cli::command()),
         }

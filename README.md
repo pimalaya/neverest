@@ -33,7 +33,6 @@
 
 - Remote backend support: **IMAP**, **JMAP**
 - Local (filesystem) backend support: **m2dir** <sup>[specs](https://man.sr.ht/~bitfehler/m2dir/)</sup>
-- Bidirectional sync between any two backends (`left` and `right`); the labels are symmetric, neither side is privileged
 - **Simple auth** support for IMAP: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256
 - **HTTP auth** support for JMAP: basic, bearer, raw header
 - **TLS** support:
@@ -46,10 +45,9 @@
   - SRV DNS lookups <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup>
 - **Mailbox filters** (include / exclude / all), applied symmetrically to both sides
 - **Per-side permissions** gating `create` / `delete` on mailboxes and messages, plus `update` on flags
-- **Per-side connection pools** (defaults: IMAP 8, JMAP 4, m2dir 8) with one client per worker
-- **Incremental cache** at `$XDG_CACHE_HOME/neverest/<account>/state.json`; `--resync` rebuilds it
+- **Per-side connection pools** with one client per worker
+- **Incremental cache** at `$XDG_CACHE_HOME/neverest/<account>/state.json`
 - **Dry-run** mode (`-d`) prints the patch the sync would apply without touching either side
-- **Maildir migration** via `neverest convert maildir <src> <dst>` for users coming from mbsync, OfflineIMAP or a Dovecot tree
 - **JSON** output via `--json`
 
 > [!TIP]
@@ -112,7 +110,7 @@ A persistent configuration is loaded from the first valid path among:
 
 Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths can be passed at once, separated by `:`. The first one is the base and the rest are deep-merged on top.
 
-See [config.sample.toml](./config.sample.toml) for a documented template covering every supported field. An existing account can be re-prompted later with `neverest configure <account>`: the wizard reuses the current values as defaults instead of re-running discovery.
+See [config.sample.toml](./config.sample.toml) for a documented template covering every supported field. An existing account can be re-prompted later with `neverest configure` (or `neverest configure -a <account>` to target a non-default account): the wizard reuses the current values as defaults instead of re-running discovery.
 
 ## Usage
 
@@ -121,24 +119,26 @@ See [config.sample.toml](./config.sample.toml) for a documented template coverin
 Before the first sync each account must be initialized once:
 
 ```
-neverest init <account>
+neverest init [-a|--account <NAME>]
 ```
+
+The account flag is optional: when omitted, the account marked `default = true` in the configuration is used.
 
 This opens both sides (IMAP CAPABILITY / JMAP session GET / m2dir store creation) so credential and network errors surface up front, then writes an empty cache snapshot at `$XDG_CACHE_HOME/neverest/<account>/state.json`. The presence of that file is the single source of truth for "this account is initialized"; `sync` refuses to run when it is missing and `init` refuses to run when it is present.
 
 ### Running a sync
 
 ```
-neverest sync <account>
+neverest sync [-a|--account <NAME>]
 ```
 
 Sync walks every mailbox surviving the filter, diffs the two sides against the cached snapshot, applies the resulting hunks through per-side connection pools, then prints a report covering created / updated / deleted mailboxes, flags and messages. Pass `-d` / `--dry-run` to print the patch without applying it.
 
-Pass `--resync` to drop the cached state before running. Without `--include-mailbox`, the entire snapshot plus every IMAP / JMAP state token is cleared; with `--include-mailbox`, only the listed mailboxes are wiped. The first post-resync sync rebuilds the snapshot via a full re-list, equivalent to first-sync semantics.
+Pass `--reset` to drop the cached state before running. Without `--include-mailbox`, the entire snapshot plus every IMAP / JMAP state token is cleared; with `--include-mailbox`, only the listed mailboxes are wiped. The first post-reset sync rebuilds the snapshot via a full re-list, equivalent to first-sync semantics.
 
 ### Mailbox filters and per-side permissions
 
-Mailbox filters declared in the configuration (`mailbox.filters = "all" | { include = [...] } | { exclude = [...] }`) apply symmetrically to both sides. They can be overridden per invocation with `-m / --include-mailbox`, `-x / --exclude-mailbox`, or `-A / --all-mailboxes` (the three flags are mutually exclusive). Matching is ASCII case-insensitive: `INBOX` matches `inbox`, but non-ASCII characters (umlauts, Cyrillic, accents) must be spelled exactly as the server reports them.
+Mailbox filters declared in the configuration apply symmetrically to both sides. They can be overridden per invocation with `-m / --include-mailbox`, `-x / --exclude-mailbox`, or `-A / --all-mailboxes` (the three flags are mutually exclusive). Matching is ASCII case-insensitive: `INBOX` matches `inbox`, but non-ASCII characters (umlauts, Cyrillic, accents) must be spelled exactly as the server reports them.
 
 Per-side permissions live under each side's backend table and gate what the sync engine is allowed to mutate on that side:
 
@@ -159,18 +159,17 @@ All five permissions default to `true`. Setting any of them to `false` makes the
 
 ### Migrating from Maildir
 
-```
-neverest convert maildir <SOURCE> <DEST>
-```
+Neverest does not ship an in-tree Maildir converter: keyword storage is not standardized across Maildir consumers (info-section letters, `dovecot-keywords`, `X-Keywords` / `X-Label` headers, …), so any local migration would silently lose or mangle flags depending on which tool wrote the source tree.
 
-One-shot converter: walks a Maildir(++) tree, translates folder names (`.Work.Foo` becomes `Work/Foo`; root `cur/new/tmp` becomes `INBOX`), and copies every message into the destination m2store with its flag sidecar reconstructed from the info-section letters, an optional per-folder `dovecot-keywords` table, and an optional named header. Idempotent on re-run: messages whose checksum already exists at the destination are skipped (their flags are still re-applied).
+The recommended path for users coming from mbsync, OfflineIMAP or a Dovecot Maildir layout is to point Neverest at a fresh m2dir root and resync from the authoritative IMAP/JMAP server. Flags re-converge cleanly and the new cache reflects the actual server state.
 
-Pass `--read-headers x-keywords` (OfflineIMAP-style, comma-separated) or `--read-headers x-label` (mutt / notmuch-style, space-separated) to also recover keywords from a per-message header. The named header is stripped from the bytes written to the destination so byte fidelity is preserved against the original folded encoding.
+> [!TIP]
+> You can also use [m2m](https://github.com/pimalaya/m2m) to convert your Maildir structure into a m2dir one, which is more adapted for synchronization. But since no standards exist for managing custom flags in Maildir, it is still recommended to resync from IMAP/JMAP.
 
 ### Checking a configuration
 
 ```
-neverest check <account>
+neverest check [-a|--account <NAME>]
 ```
 
 Opens both sides and asks each one to list mailboxes. The operation itself is cheap; the value is in surfacing the credential, network or config errors that would otherwise only show up during a real sync.

@@ -19,7 +19,6 @@
 
 pub mod check;
 pub mod configure;
-pub mod convert;
 pub mod init;
 pub mod main;
 pub mod sync;

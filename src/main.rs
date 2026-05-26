@@ -21,8 +21,6 @@
 mod cli;
 mod client;
 mod config;
-#[cfg(feature = "m2dir")]
-mod m2dir;
 mod side;
 mod sync;
 mod wizard;

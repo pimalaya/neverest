@@ -8,8 +8,6 @@ allow-git = [
   "https://github.com/pimalaya/io-imap",
   "https://github.com/pimalaya/io-jmap",
   "https://github.com/pimalaya/io-m2dir",
-  "https://github.com/pimalaya/io-maildir",
-  "https://github.com/pimalaya/io-smtp",
   "https://github.com/pimalaya/stream",
   "https://github.com/soywod/domain"
 ]
@@ -19,6 +17,7 @@ unknown-registry = "deny"
 [licenses]
 allow = [
   "0BSD",
+  "AGPL-3.0-only",
   "Apache-2.0 WITH LLVM-exception",
   "Apache-2.0",
   "BSD-3-Clause",

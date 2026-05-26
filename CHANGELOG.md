@@ -9,35 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING**: Maildir is no longer a sync target. Local sync now uses **m2dir** (https://man.sr.ht/~bitfehler/m2dir/), a maildir-shaped format whose `.meta/<id>.flags` sidecar carries canonical IANA keywords plus arbitrary UTF-8 custom keywords with zero ambiguity. The `maildir` cargo feature is now `m2dir`; the `left.maildir.root` config key becomes `left.m2dir.root` (likewise `right`). Existing Maildir setups should point Neverest at a fresh m2dir root and resync from the authoritative IMAP/JMAP server; an in-place local migration is intentionally not provided because Maildir keyword storage is not standardized across consumers. A dedicated filesystem-to-filesystem converter is planned as a separate Pimalaya tool.
-- **BREAKING**: rewrote neverest on top of the new `io-*` ecosystem (`io-email`, `io-imap`, `io-jmap`, `io-m2dir`) and `pimalaya-cli` / `pimalaya-config` / `pimalaya-stream`. The old `email-lib` (pimalaya/core) dependency is gone; the sync engine now lives inside `neverest::sync` and drives both sides through `io_email::client::EmailClientStd`.
-- **BREAKING**: renamed `folder` to `mailbox` everywhere (config keys, CLI flags). `--include-folder` becomes `--include-mailbox` / `-m`; `mailbox.filters` replaces `folder.filters`; the per-side `mailbox`/`flag`/`message` permission tables now live directly under each side instead of under `left.folder.permissions`.
-- **BREAKING**: side configuration moved from `left.backend.type = "imap"` to `left.imap.server = "..."` (likewise for `jmap`, `maildir`). Exactly one of the three sub-tables must be set per side.
-- Tokio runtime removed — neverest is now synchronous (io-* clients use `std::net`).
-- Sync cache moved to `$XDG_CACHE_HOME/neverest/<account>/state.json` (JSON instead of the old binary format).
-- Error reporting now uses `anyhow` + `pimalaya_cli::error::ErrorReport`; `color-eyre`'s `--debug` / `--trace` flags are replaced by `--log-level`.
+- **BREAKING**: full rewrite on top of the I/O-free `io-*` ecosystem (`io-email`, `io-imap`, `io-jmap`, `io-m2dir`) plus `pimalaya-cli` / `pimalaya-config` / `pimalaya-stream`. The CLI, the configuration schema and the sync engine all changed shape; see [MIGRATION.md](./MIGRATION.md) for the upgrade path from v0.1.0.
 
 ### Added
 
 - **JMAP** backend support via `io-jmap`.
+- **m2dir** as the new local sync target (replaces Maildir).
 
 ### Removed
 
-- **BREAKING**: dropped the **Notmuch** backend. No replacement exists in the new `io-*` ecosystem yet; track upstream for a future `io-notmuch`.
-- Removed `email-lib`, `pimalaya-tui`, `oauth-lib`, `secret-lib`, `console`, `color-eyre`, `async-trait`, `tokio`, `once_cell` dependencies.
-
-### Refactored IMAP auth config API
-
-  The IMAP auth config option is now explicit, in order to improve error messages:
-
-  ```toml
-  # before
-  right.backend.password.cmd = "pass show example"
-
-  # after
-  right.backend.auth.type = "password"
-  right.backend.auth.cmd = "pass show example"
-  ```
+- **Notmuch** backend (no replacement in the `io-*` ecosystem yet).
+- **Maildir** as a sync target (superseded by m2dir).
 
 ## [1.0.0-beta] - 2024-04-15
 

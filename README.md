@@ -11,6 +11,9 @@
 > [!CAUTION]
 > Neverest is in active development and currently shipped as `v1.0.0-rc`. Expect breaking changes between releases until stabilization.
 
+> [!IMPORTANT]
+> This README documents Neverest v1, which is **not yet released**. If you are running v0.1, refer to the [v0.1.0 README](https://github.com/pimalaya/neverest/blob/v0.1.0/README.md) instead. The [MIGRATION.md](./MIGRATION.md) guide walks v1 users through the breaking changes.
+
 ## Table of contents
 
 - [Features](#features)

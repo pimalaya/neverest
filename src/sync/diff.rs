@@ -27,11 +27,7 @@ use std::{
 #[cfg(feature = "m2dir")]
 use anyhow::{Context, Result};
 #[cfg(feature = "m2dir")]
-use io_email::{
-    client::EmailClientStd,
-    envelope::EnvelopeDiff,
-    m2dir::convert::{envelope_from, open_m2dir},
-};
+use io_email::{client::EmailClientStd, envelope::EnvelopeDiff, m2dir::convert::envelope_from};
 use io_email::{
     envelope::{Envelope, FlagUpdate},
     flag::Flag,
@@ -207,10 +203,13 @@ pub fn diff_envelopes(
         .unwrap_or_default();
 
     let m2dir_client = client
-        .as_m2dir_mut()
+        .m2dir
+        .as_mut()
         .context("m2dir client not registered on this side")?;
-    let m2dir = open_m2dir(m2dir_client, mailbox)?;
-    let entries = m2dir_client.list_entries(m2dir.clone())?;
+    let m2dir = m2dir_client
+        .inner
+        .open_m2dir(m2dir_client.inner.root().join(mailbox))?;
+    let entries = m2dir_client.inner.list_entries(m2dir.clone())?;
 
     let parser = MessageParser::new()
         .header_text(HeaderName::Subject)
@@ -228,7 +227,7 @@ pub fn diff_envelopes(
         let id = entry.id().to_string();
         current_ids.insert(id.clone());
 
-        let flag_lines = m2dir_client.read_flags(&m2dir, entry.id())?;
+        let flag_lines = m2dir_client.inner.read_flags(&m2dir, entry.id())?;
         let current_flags: BTreeSet<Flag> = flag_lines
             .iter()
             .map(|line| Flag::from_raw(line.trim()))
@@ -236,7 +235,7 @@ pub fn diff_envelopes(
 
         match prev_by_id.get(id.as_str()) {
             None => {
-                let (_, bytes) = m2dir_client.get(m2dir.clone(), entry.id())?;
+                let (_, bytes) = m2dir_client.inner.get(m2dir.clone(), entry.id())?;
                 let parsed = parser
                     .parse_headers(&bytes)
                     .context("Parse m2dir message headers")?;
@@ -1097,9 +1096,9 @@ mod tests {
         use io_email::{
             client::EmailClientStd,
             envelope::EnvelopeDiff,
-            flag::{Flag, IanaFlag},
+            flag::{Flag, FlagOp, IanaFlag},
+            m2dir::client::M2dirClient,
         };
-        use io_m2dir::client::M2dirClient;
         use tempfile::tempdir;
 
         use super::super::*;
@@ -1121,8 +1120,8 @@ mod tests {
 
         fn mk_client(root: &std::path::Path) -> EmailClientStd {
             let m2 = M2dirClient::new(root.to_string_lossy().into_owned());
-            m2.init_store().unwrap();
-            EmailClientStd::from(m2)
+            m2.inner.init_store().unwrap();
+            EmailClientStd::new().with_m2dir(m2)
         }
 
         const RAW_A: &[u8] = b"Message-ID: <a@example.org>\r\n\
@@ -1214,10 +1213,11 @@ mod tests {
             let prev = snapshot_with(&[(&id_a, &[])]);
 
             client
-                .add_flags(
+                .store_flags(
                     "inbox",
                     &[id_a.as_str()],
                     &[Flag::from_iana(IanaFlag::Seen)],
+                    FlagOp::Add,
                 )
                 .unwrap();
 

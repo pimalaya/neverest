@@ -21,12 +21,8 @@ use anyhow::{Result, bail};
 #[cfg(feature = "jmap")]
 use base64::{Engine, prelude::BASE64_STANDARD};
 use io_email::client::EmailClientStd;
-#[cfg(feature = "imap")]
-use io_imap::client::ImapClientStd;
-#[cfg(feature = "jmap")]
-use io_jmap::client::JmapClientStd;
 #[cfg(feature = "m2dir")]
-use io_m2dir::client::M2dirClient;
+use io_email::m2dir::client::M2dirClient;
 #[cfg(feature = "imap")]
 use pimalaya_stream::sasl::Sasl;
 #[cfg(any(feature = "imap", feature = "jmap"))]
@@ -64,13 +60,14 @@ pub fn open(config: SideConfig) -> Result<EmailClientStd> {
                 }
             };
 
-            let mut client = ImapClientStd::connect(&server, &tls, config.starttls, sasl)?;
-            // NOTE: sync engine pre-selects once per mailbox batch, so
-            // every subsequent STORE / FETCH / COPY must skip its own
-            // SELECT.
-            client.auto_select = false;
-
-            Ok(EmailClientStd::new().with_imap(client))
+            let mut client =
+                EmailClientStd::new().connect_imap(&server, &tls, config.starttls, sasl)?;
+            // Sync engine pre-selects once per mailbox batch, so every
+            // subsequent STORE / FETCH / COPY must skip its own SELECT.
+            if let Some(imap) = client.imap.as_mut() {
+                imap.auto_select = false;
+            }
+            Ok(client)
         }
         #[cfg(feature = "jmap")]
         SideConfig::Jmap(config) => {
@@ -100,10 +97,7 @@ pub fn open(config: SideConfig) -> Result<EmailClientStd> {
                 }
             };
 
-            let mut client = JmapClientStd::connect(&url, &tls, http_auth)?;
-            client.session_get(&url)?;
-
-            Ok(EmailClientStd::new().with_jmap(client))
+            Ok(EmailClientStd::new().connect_jmap(&url, &tls, http_auth)?)
         }
         #[cfg(feature = "m2dir")]
         SideConfig::M2dir(config) => {
@@ -121,7 +115,7 @@ pub fn init(config: SideConfig) -> Result<EmailClientStd> {
     #[cfg(feature = "m2dir")]
     if let SideConfig::M2dir(config) = &config {
         let client = M2dirClient::new(config.root.to_string_lossy().into_owned());
-        client.init_store()?;
+        client.inner.init_store()?;
     }
 
     open(config)

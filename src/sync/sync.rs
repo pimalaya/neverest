@@ -51,8 +51,8 @@ use crate::{
 /// no-op; primes workers for an `auto_select=false` hunk batch.
 #[cfg(feature = "imap")]
 fn imap_select(client: &mut EmailClientStd, mailbox: &str) -> Result<()> {
-    if let Some(imap) = client.as_imap_mut() {
-        imap.select(mailbox.to_owned().try_into()?)?;
+    if let Some(imap) = client.imap.as_mut() {
+        imap.inner.select(mailbox.to_owned().try_into()?)?;
     }
     Ok(())
 }
@@ -151,7 +151,7 @@ fn resolve_diff(
     snapshot: &CacheSnapshot,
 ) -> Result<EnvelopeDiff> {
     #[cfg(feature = "m2dir")]
-    if client.as_m2dir().is_some() {
+    if client.m2dir.is_some() {
         let prev = snapshot.messages(side, mailbox);
         return crate::sync::diff::diff_envelopes(client, mailbox, prev);
     }

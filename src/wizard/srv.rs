@@ -18,14 +18,14 @@
 //! RFC 6186 SRV probe (`_imap._tcp` / `_imaps._tcp`) feeding the
 //! wizard's discovery chain.
 
-use io_discovery::rfc6186::{
-    client::DiscoverySrvClientStd,
-    types::{SrvReport, SrvService},
-};
 use log::debug;
 use pimalaya_cli::{
     spinner::Spinner,
     wizard::imap::{Encryption as ImapEncryption, ImapAuth, ImapSecret, WizardImapConfig},
+};
+use pimconf::rfc6186::{
+    client::DiscoverySrvClientStd,
+    types::{SrvReport, SrvService},
 };
 
 use crate::wizard::discover::{DiscoveryResult, discovery_resolver};

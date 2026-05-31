@@ -18,14 +18,14 @@
 //! Mozilla Thunderbird Autoconfiguration probe (ISP main / fallback /
 //! ISPDB, IMAP only) feeding the wizard's discovery chain.
 
-use io_discovery::autoconfig::{
-    client::DiscoveryAutoconfigClientStd,
-    types::{Autoconfig, SecurityType, Server, ServerType},
-};
 use log::debug;
 use pimalaya_cli::{
     spinner::Spinner,
     wizard::imap::{Encryption as ImapEncryption, ImapAuth, ImapSecret, WizardImapConfig},
+};
+use pimconf::autoconfig::{
+    client::DiscoveryAutoconfigClientStd,
+    types::{Autoconfig, SecurityType, Server, ServerType},
 };
 
 use crate::wizard::discover::{DiscoveryResult, discovery_resolver, discovery_tls};

@@ -22,7 +22,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use anyhow::Result;
-use io_email::{client::EmailClientStd, flag::Flag};
+use io_email::{
+    client::EmailClientStd,
+    flag::{Flag, FlagOp},
+};
 use serde::Serialize;
 
 use crate::side::Side;
@@ -134,8 +137,12 @@ impl EmailHunk {
                 ..
             } => {
                 let flag_list: Vec<Flag> = flags.iter().cloned().collect();
-                side.client_mut(left, right)
-                    .add_flags(mailbox, &[id.as_str()], &flag_list)?;
+                side.client_mut(left, right).store_flags(
+                    mailbox,
+                    &[id.as_str()],
+                    &flag_list,
+                    FlagOp::Add,
+                )?;
                 Ok(None)
             }
             Self::RemoveFlags {
@@ -146,8 +153,12 @@ impl EmailHunk {
                 ..
             } => {
                 let flag_list: Vec<Flag> = flags.iter().cloned().collect();
-                side.client_mut(left, right)
-                    .delete_flags(mailbox, &[id.as_str()], &flag_list)?;
+                side.client_mut(left, right).store_flags(
+                    mailbox,
+                    &[id.as_str()],
+                    &flag_list,
+                    FlagOp::Remove,
+                )?;
                 Ok(None)
             }
             Self::Delete {

@@ -18,7 +18,10 @@
 //! `neverest sync` command: opens the worker pool, runs the sync and
 //! prints the resulting [`crate::sync::report::SyncReport`].
 
-use std::path::PathBuf;
+use std::{
+    fs::{File, TryLockError},
+    path::PathBuf,
+};
 
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser};
@@ -80,6 +83,33 @@ impl SyncCommand {
         if !cache.exists() {
             bail!("Account `{name}` not initialized, run `init -a {name}` first");
         }
+
+        // NOTE: advisory flock held for the whole sync; the kernel
+        // releases it on FD close (normal exit or crash), so no PID
+        // file to clean up.
+        let lock_path = cache.with_file_name("sync.lock");
+        let _sync_lock = {
+            let file = File::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&lock_path)
+                .context(format!("Open sync lock `{}` error", lock_path.display()))?;
+
+            match file.try_lock() {
+                Ok(()) => {}
+                Err(TryLockError::WouldBlock) => {
+                    bail!("Another sync is already running for account `{name}`");
+                }
+                Err(TryLockError::Error(err)) => {
+                    return Err(err)
+                        .context(format!("Acquire sync lock `{}` error", lock_path.display()));
+                }
+            }
+
+            file
+        };
 
         if self.reset {
             let mut snapshot = CacheSnapshot::load(&cache)?;

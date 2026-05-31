@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **JMAP** backend support via `io-jmap`.
 - **m2dir** as the new local sync target (replaces Maildir).
+- Reintroduced the per-account `sync.lock` advisory file lock so two concurrent `sync` runs (cron tick racing a manual invocation, two terminals) no longer corrupt the cache snapshot; the second run exits early with a clear "another sync is already running" message.
 
 ### Removed
 

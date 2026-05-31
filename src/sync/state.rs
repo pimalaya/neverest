@@ -42,7 +42,7 @@ pub type MessageSnapshots = HashMap<String, MessageEntry>;
 
 /// Full snapshot loaded at sync start and saved at sync end.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct CacheSnapshot {
+pub struct StateSnapshot {
     /// `(side → mailbox → content-key → MessageEntry)`.
     #[serde(default)]
     pub sides: HashMap<Side, MailboxSnapshots>,
@@ -58,20 +58,20 @@ pub struct CacheSnapshot {
     pub mailbox_states: HashMap<Side, Vec<u8>>,
 }
 
-impl CacheSnapshot {
-    /// Resolves `<cache_dir>/neverest/<account>/state.json`.
+impl StateSnapshot {
+    /// Resolves `<state_dir>/neverest/<account>/state.json`.
     pub fn path(account: &str) -> Result<PathBuf> {
-        let base = dirs::cache_dir().context("Cannot resolve XDG cache directory")?;
+        let base = dirs::state_dir().context("Cannot resolve XDG state directory")?;
         Ok(base.join("neverest").join(account).join("state.json"))
     }
 
     pub fn load(path: &Path) -> Result<Self> {
         match fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
-                .context(format!("Parse cache `{}` error", path.display())),
+                .context(format!("Parse state `{}` error", path.display())),
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => {
-                bail!("Read cache `{}` error: {err}", path.display());
+                bail!("Read state `{}` error: {err}", path.display());
             }
         }
     }
@@ -79,10 +79,10 @@ impl CacheSnapshot {
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
-                .context(format!("Create cache dir `{}` error", parent.display()))?;
+                .context(format!("Create state dir `{}` error", parent.display()))?;
         }
-        let bytes = serde_json::to_vec_pretty(self).context("Serialize cache snapshot error")?;
-        fs::write(path, bytes).context(format!("Write cache `{}` error", path.display()))?;
+        let bytes = serde_json::to_vec_pretty(self).context("Serialize state snapshot error")?;
+        fs::write(path, bytes).context(format!("Write state `{}` error", path.display()))?;
         Ok(())
     }
 
@@ -271,8 +271,8 @@ mod mailbox_states_serde {
 mod tests {
     use super::*;
 
-    fn snapshot_with_states() -> CacheSnapshot {
-        let mut s = CacheSnapshot::default();
+    fn snapshot_with_states() -> StateSnapshot {
+        let mut s = StateSnapshot::default();
         let bytes = vec![0x00, 0xff, 0x42, 0x80, 0x01];
         s.set_state(Side::Left, "INBOX".into(), bytes.clone());
         s.set_state(Side::Right, "Sent".into(), vec![0xfe, 0xed]);
@@ -286,7 +286,7 @@ mod tests {
     fn states_base64_round_trip() {
         let original = snapshot_with_states();
         let json = serde_json::to_vec(&original).unwrap();
-        let parsed: CacheSnapshot = serde_json::from_slice(&json).unwrap();
+        let parsed: StateSnapshot = serde_json::from_slice(&json).unwrap();
 
         assert_eq!(
             parsed.state(Side::Left, "INBOX"),
@@ -302,7 +302,7 @@ mod tests {
     fn mailbox_states_base64_round_trip() {
         let original = snapshot_with_states();
         let json = serde_json::to_vec(&original).unwrap();
-        let parsed: CacheSnapshot = serde_json::from_slice(&json).unwrap();
+        let parsed: StateSnapshot = serde_json::from_slice(&json).unwrap();
 
         assert_eq!(
             parsed.mailbox_state(Side::Left),
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn state_set_state_round_trip() {
-        let mut s = CacheSnapshot::default();
+        let mut s = StateSnapshot::default();
         assert_eq!(s.state(Side::Left, "INBOX"), None);
         s.set_state(Side::Left, "INBOX".into(), vec![1, 2, 3]);
         assert_eq!(s.state(Side::Left, "INBOX"), Some([1, 2, 3].as_slice()));
@@ -359,7 +359,7 @@ mod tests {
 
     #[test]
     fn mailbox_state_round_trip() {
-        let mut s = CacheSnapshot::default();
+        let mut s = StateSnapshot::default();
         assert_eq!(s.mailbox_state(Side::Left), None);
         s.set_mailbox_state(Side::Left, vec![9, 9]);
         assert_eq!(s.mailbox_state(Side::Left), Some([9, 9].as_slice()));
@@ -380,7 +380,7 @@ mod tests {
             }
         });
         let bytes = serde_json::to_vec(&legacy).unwrap();
-        let parsed: CacheSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let parsed: StateSnapshot = serde_json::from_slice(&bytes).unwrap();
         assert!(parsed.messages(Side::Left, "INBOX").is_some());
         assert!(parsed.state(Side::Left, "INBOX").is_none());
         assert!(parsed.mailbox_state(Side::Left).is_none());

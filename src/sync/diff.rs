@@ -39,9 +39,9 @@ use crate::{
     config::{MailboxFilter, SidePermissions},
     side::Side,
     sync::{
-        cache::{MessageEntry, MessageSnapshots},
         hunk::{EmailHunk, MailboxHunk},
         report::MessageCollision,
+        state::{MessageEntry, MessageSnapshots},
     },
 };
 
@@ -1102,7 +1102,7 @@ mod tests {
         use tempfile::tempdir;
 
         use super::super::*;
-        use crate::sync::cache::{MessageEntry, MessageSnapshots};
+        use crate::sync::state::{MessageEntry, MessageSnapshots};
 
         fn snapshot_with(entries: &[(&str, &[Flag])]) -> MessageSnapshots {
             let mut snap = MessageSnapshots::new();
@@ -1268,7 +1268,7 @@ mod tests {
         fn sync_two_after_initial_population_is_a_no_op() {
             use io_email::envelope::Envelope as IoEnvelope;
 
-            use crate::sync::{cache::MessageEntry, hunk::EmailHunk};
+            use crate::sync::{hunk::EmailHunk, state::MessageEntry};
 
             let dir = tempdir().unwrap();
             let mut client = mk_client(dir.path());

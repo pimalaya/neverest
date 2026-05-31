@@ -31,7 +31,7 @@ use pimalaya_config::toml::TomlConfig;
 
 use crate::{
     config::{Config, MailboxFilter},
-    sync::{self, cache::CacheSnapshot, pool::Pool},
+    sync::{self, pool::Pool, state::StateSnapshot},
 };
 
 /// Synchronizes mailboxes and messages between the configured left and
@@ -64,7 +64,7 @@ pub struct SyncCommand {
     #[arg(conflicts_with = "include_mailbox", conflicts_with = "exclude_mailbox")]
     pub all_mailboxes: bool,
 
-    /// Drop the cached sync state before running; restricted to
+    /// Drop the persisted sync state before running; restricted to
     /// `--include-mailbox` entries when set.
     #[arg(long)]
     pub reset: bool,
@@ -79,15 +79,15 @@ impl SyncCommand {
             bail!("Cannot find account");
         };
 
-        let cache = CacheSnapshot::path(&name)?;
-        if !cache.exists() {
+        let state = StateSnapshot::path(&name)?;
+        if !state.exists() {
             bail!("Account `{name}` not initialized, run `init -a {name}` first");
         }
 
         // NOTE: advisory flock held for the whole sync; the kernel
         // releases it on FD close (normal exit or crash), so no PID
         // file to clean up.
-        let lock_path = cache.with_file_name("sync.lock");
+        let lock_path = state.with_file_name("sync.lock");
         let _sync_lock = {
             let file = File::options()
                 .read(true)
@@ -112,13 +112,13 @@ impl SyncCommand {
         };
 
         if self.reset {
-            let mut snapshot = CacheSnapshot::load(&cache)?;
+            let mut snapshot = StateSnapshot::load(&state)?;
             snapshot.resync(&self.include_mailbox);
             snapshot
-                .save(&cache)
-                .context(format!("Clear cache `{}` for --resync", cache.display()))?;
+                .save(&state)
+                .context(format!("Clear state `{}` for --resync", state.display()))?;
             if self.include_mailbox.is_empty() {
-                info!("resync: cleared cache for `{name}`");
+                info!("resync: cleared state for `{name}`");
             } else {
                 info!(
                     "resync: cleared {} mailbox(es) for `{name}`",

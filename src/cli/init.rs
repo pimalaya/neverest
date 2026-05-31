@@ -16,9 +16,9 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! `neverest init` command: probes both sides and writes the initial
-//! cache snapshot that subsequent sync runs consume.
+//! state snapshot that subsequent sync runs consume.
 //!
-//! The cache file's presence is the single source of truth for "this
+//! The state file's presence is the single source of truth for "this
 //! account is initialized".
 
 use std::path::PathBuf;
@@ -32,7 +32,7 @@ use pimalaya_cli::{
 };
 use pimalaya_config::toml::TomlConfig;
 
-use crate::{client, config::Config, sync::cache::CacheSnapshot};
+use crate::{client, config::Config, sync::state::StateSnapshot};
 
 /// Initializes an account's per-side state; refuses to run if it is
 /// already initialized.
@@ -51,9 +51,9 @@ impl InitCommand {
             bail!("Cannot find account");
         };
 
-        let cache = CacheSnapshot::path(&name)?;
-        if cache.exists() {
-            let p = cache.display();
+        let state = StateSnapshot::path(&name)?;
+        if state.exists() {
+            let p = state.display();
             bail!("Account `{name}` already initialized, delete `{p}` to reset");
         }
 
@@ -65,11 +65,11 @@ impl InitCommand {
         client::init(account_config.right.clone()).context("Initialize right side")?;
         s.success("Initialized right side");
 
-        let s = Spinner::start("Writing initial cache snapshot…");
-        CacheSnapshot::default()
-            .save(&cache)
-            .context(format!("Write initial cache `{}`", cache.display()))?;
-        s.success("Wrote initial cache snapshot");
+        let s = Spinner::start("Writing initial state snapshot…");
+        StateSnapshot::default()
+            .save(&state)
+            .context(format!("Write initial state `{}`", state.display()))?;
+        s.success("Wrote initial state snapshot");
 
         printer.out(Message::new(format!(
             "Account `{name}` successfully initialized"

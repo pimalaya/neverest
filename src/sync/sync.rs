@@ -16,7 +16,7 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 //! Bidirectional 3-way sync `run` entry point: drives the mailbox /
-//! message patch over both sides against the cached snapshot.
+//! message patch over both sides against the persisted snapshot.
 
 use std::{
     collections::{BTreeSet, HashSet},
@@ -36,7 +36,6 @@ use crate::{
     config::{AccountConfig, MailboxFilter},
     side::Side,
     sync::{
-        cache::{CacheSnapshot, MessageEntry},
         diff::{
             EnvelopePairs, diff_mailboxes, diff_messages, filter_mailboxes, message_map,
             pairs_from_delta, pairs_from_envelopes, pairs_to_snapshot,
@@ -44,6 +43,7 @@ use crate::{
         hunk::{EmailHunk, MailboxHunk},
         pool::{HunkOutcome, MailboxHunkOutcome, Pool},
         report::{PatchEntry, SyncReport},
+        state::{MessageEntry, StateSnapshot},
     },
 };
 
@@ -62,7 +62,7 @@ fn imap_select(client: &mut EmailClientStd, mailbox: &str) -> Result<()> {
 fn probe_side_mailboxes(
     client: &mut EmailClientStd,
     side: Side,
-    snapshot: &CacheSnapshot,
+    snapshot: &StateSnapshot,
 ) -> Result<(HashSet<String>, Option<Vec<u8>>)> {
     let cached = snapshot.mailbox_state(side);
 
@@ -98,7 +98,7 @@ fn fetch_side_envelopes(
     client: &mut EmailClientStd,
     side: Side,
     mailbox: &str,
-    snapshot: &CacheSnapshot,
+    snapshot: &StateSnapshot,
 ) -> Result<(EnvelopePairs, Option<Vec<u8>>)> {
     let diff = resolve_diff(client, side, mailbox, snapshot);
 
@@ -148,7 +148,7 @@ fn resolve_diff(
     client: &mut EmailClientStd,
     side: Side,
     mailbox: &str,
-    snapshot: &CacheSnapshot,
+    snapshot: &StateSnapshot,
 ) -> Result<EnvelopeDiff> {
     #[cfg(feature = "m2dir")]
     if client.m2dir.is_some() {
@@ -161,7 +161,7 @@ fn resolve_diff(
 
 /// Folds a successful hunk apply into the pre-apply snapshot baseline.
 fn update_snapshot_from_hunk(
-    snapshot: &mut CacheSnapshot,
+    snapshot: &mut StateSnapshot,
     mailbox: &str,
     hunk: &EmailHunk,
     target_id: Option<String>,
@@ -241,8 +241,8 @@ pub fn run(
         ..Default::default()
     };
 
-    let cache_path = CacheSnapshot::path(&account_name)?;
-    let mut snapshot = CacheSnapshot::load(&cache_path)?;
+    let state_path = StateSnapshot::path(&account_name)?;
+    let mut snapshot = StateSnapshot::load(&state_path)?;
 
     // 1. list + filter mailboxes (left and right probed in parallel).
     let s = Spinner::start("Listing mailboxes…");
@@ -503,8 +503,8 @@ pub fn run(
     // 4. persist post-sync snapshot.
     if !dry_run {
         let s = Spinner::start("Persisting snapshot…");
-        debug!("persisting snapshot at `{}`", cache_path.display());
-        snapshot.record(&report.mailbox.patch, &cache_path)?;
+        debug!("persisting snapshot at `{}`", state_path.display());
+        snapshot.record(&report.mailbox.patch, &state_path)?;
         s.success("Persisted snapshot");
     }
 

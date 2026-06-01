@@ -111,6 +111,11 @@ right.imap.server = "imap.fastmail.com"
 # Enable STARTTLS (only valid when the server resolves to `imap://`).
 #right.imap.starttls = false
 
+# ALPN protocol identifiers offered during the TLS handshake (rustls only;
+# native-tls ignores it). Defaults to ["imap"]; set to [] to skip ALPN.
+#right.imap.alpn = ["imap"]
+#right.imap.alpn = []
+
 # Pick exactly one SASL mechanism among `anonymous`, `login`, `plain`,
 # `oauthbearer`, `xoauth2`, `scram-sha-256`. Omit the whole `imap.sasl` table
 # to skip authentication entirely (no `AUTHENTICATE` command sent).
@@ -121,22 +126,19 @@ right.imap.server = "imap.fastmail.com"
 
 # SASL PLAIN
 # https://datatracker.ietf.org/doc/html/rfc4616
-right.imap.sasl.plain.authcid = "pimalaya@fastmail.org"
-right.imap.sasl.plain.passwd.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
-#right.imap.sasl.plain.passwd.command = "pass show example"
-#right.imap.sasl.plain.passwd.command = ["mimosa", "password", "read", "example"]
+right.imap.sasl.plain.username = "pimalaya@fastmail.org"
+right.imap.sasl.plain.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
+#right.imap.sasl.plain.password.command = "pass show example"
 
 # SASL LOGIN
 # https://datatracker.ietf.org/doc/html/draft-murchison-sasl-login-00
 #right.imap.sasl.login.username = "user@example.com"
 #right.imap.sasl.login.password.raw = "***"
 
-# SASL OAUTHBEARER (host/port echoed in the GS2 header; usually mirror the
-# server you actually connect to).
+# SASL OAUTHBEARER (host/port for the GS2 header are derived from the
+# IMAP server URL at connect time).
 # https://datatracker.ietf.org/doc/html/rfc7628
 #right.imap.sasl.oauthbearer.username = "user@example.com"
-#right.imap.sasl.oauthbearer.host = "imap.example.com"
-#right.imap.sasl.oauthbearer.port = 993
 #right.imap.sasl.oauthbearer.token.raw = "***"
 #right.imap.sasl.oauthbearer.token.command = ["ortie", "token", "read", "example"]
 
@@ -177,6 +179,11 @@ right.imap.message.delete = false
 #right.jmap.tls.provider = "rustls"
 #right.jmap.tls.rustls.crypto = "ring"
 #right.jmap.tls.cert = "/path/to/custom/cert.pem"
+
+# ALPN protocol identifiers offered during the TLS handshake. Defaults to
+# ["http/1.1"]; set to [] to skip ALPN.
+#right.jmap.alpn = ["http/1.1"]
+#right.jmap.alpn = []
 
 # Pick exactly one of `header`, `bearer`, `basic`.
 

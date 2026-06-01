@@ -361,8 +361,16 @@ pub fn run(
 
     for (index, mailbox) in common.iter().enumerate() {
         let position = index + 1;
-        let prefix = format!("[{position}/{total_mailboxes}] Syncing {mailbox}");
-        let s = Spinner::start(format!("{prefix} (0%)"));
+        // Dry-run only scans + diffs (no apply loop ever updates the
+        // spinner), so the verb shifts to "Scanning" and the percent
+        // counter is dropped.
+        let verb = if dry_run { "Scanning" } else { "Syncing" };
+        let prefix = format!("[{position}/{total_mailboxes}] {verb} {mailbox}");
+        let s = Spinner::start(if dry_run {
+            prefix.clone()
+        } else {
+            format!("{prefix} (0%)")
+        });
         debug!("resolving `{mailbox}` on both sides");
 
         let left_present = left_filtered.contains(mailbox);

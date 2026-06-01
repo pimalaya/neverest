@@ -23,10 +23,6 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use io_email::client::EmailClientStd;
 #[cfg(feature = "m2dir")]
 use io_email::m2dir::client::M2dirClient;
-#[cfg(feature = "imap")]
-use pimalaya_stream::sasl::Sasl;
-#[cfg(any(feature = "imap", feature = "jmap"))]
-use pimalaya_stream::tls::Tls;
 #[cfg(feature = "jmap")]
 use secrecy::ExposeSecret;
 #[cfg(any(feature = "imap", feature = "jmap"))]
@@ -45,10 +41,7 @@ pub fn open(config: SideConfig) -> Result<EmailClientStd> {
     match config {
         #[cfg(feature = "imap")]
         SideConfig::Imap(config) => {
-            let mut tls = Tls::from(config.tls);
-            tls.rustls.alpn = vec!["imap".into()];
-
-            let sasl = config.sasl.map(Sasl::try_from).transpose()?;
+            let tls = config.tls.into_tls(config.alpn);
 
             let server = match Url::parse(&config.server) {
                 Ok(url) => url,
@@ -60,8 +53,17 @@ pub fn open(config: SideConfig) -> Result<EmailClientStd> {
                 }
             };
 
+            let sasl = config
+                .sasl
+                .and_then(|cfg| {
+                    let host = server.host_str()?;
+                    let port = server.port_or_known_default()?;
+                    Some(cfg.try_into_sasl(host, port))
+                })
+                .transpose()?;
+
             let mut client =
-                EmailClientStd::new().connect_imap(&server, &tls, config.starttls, sasl)?;
+                EmailClientStd::new().connect_imap(&server, &tls, config.starttls, sasl, None)?;
             // Sync engine pre-selects once per mailbox batch, so every
             // subsequent STORE / FETCH / COPY must skip its own SELECT.
             if let Some(imap) = client.imap.as_mut() {
@@ -71,8 +73,7 @@ pub fn open(config: SideConfig) -> Result<EmailClientStd> {
         }
         #[cfg(feature = "jmap")]
         SideConfig::Jmap(config) => {
-            let mut tls = Tls::from(config.tls);
-            tls.rustls.alpn = vec!["http/1.1".into()];
+            let tls = config.tls.into_tls(config.alpn);
 
             let http_auth = match config.auth {
                 JmapAuthConfig::Header(token) => token.get()?,

@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./logo.svg" alt="Logo" width="128" height="128" />
   <h1>📫 Neverest</h1>
-  <p>CLI to synchronize, backup and restore emails</p>
+  <p>CLI to synchronize emails, written in Rust</p>
   <p>
     <a href="https://matrix.to/#/#pimalaya:matrix.org"><img alt="Matrix" src="https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white"/></a>
     <a href="https://fosstodon.org/@pimalaya"><img alt="Mastodon" src="https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white"/></a>
@@ -36,14 +36,14 @@
 ## Features
 
 - Remote backend support: **IMAP**, **JMAP**
-- Local (filesystem) backend support: **m2dir** <sup>[specs](https://man.sr.ht/~bitfehler/m2dir/)</sup>
+- Local (filesystem) backends support: **m2dir** <sup>[specs](https://man.sr.ht/~bitfehler/m2dir/)</sup>
 - **Simple auth** support for IMAP: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256
 - **HTTP auth** support for JMAP: basic, bearer, raw header
 - **TLS** support:
   - [Rustls](https://crates.io/crates/rustls) with ring crypto
   - [Rustls](https://crates.io/crates/rustls) with aws crypto (requires `rustls-aws` feature)
   - [Native TLS](https://crates.io/crates/native-tls) (requires `native-tls` feature)
-- **Discovery** support (wizard only):
+- **Discovery** support:
   - PACC <sup>[specs](https://datatracker.ietf.org/doc/html/draft-ietf-mailmaint-pacc)</sup>
   - Autoconfiguration (Thunderbird) <sup>[specs](https://wiki.mozilla.org/Thunderbird:Autoconfiguration)</sup>
   - SRV DNS lookups <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup>
@@ -112,9 +112,11 @@ A persistent configuration is loaded from the first valid path among:
 - `$HOME/.config/neverest/config.toml`
 - `$HOME/.neverestrc`
 
+See [config.sample.toml](./config.sample.toml) for a documented template covering every supported field.
+
 Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths can be passed at once, separated by `:`. The first one is the base and the rest are deep-merged on top.
 
-See [config.sample.toml](./config.sample.toml) for a documented template covering every supported field. An existing account can be re-prompted later with `neverest configure` (or `neverest configure -a <account>` to target a non-default account): the wizard reuses the current values as defaults instead of re-running discovery.
+An existing account can be re-prompted later with `neverest configure` (or `neverest configure -a <account>` to target a non-default account): the wizard reuses the current values as defaults instead of re-running discovery.
 
 ## Usage
 

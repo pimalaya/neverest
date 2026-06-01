@@ -277,6 +277,10 @@ side_config! {
         pub tls: TlsConfig,
         #[serde(default)]
         pub starttls: bool,
+        /// ALPN protocol identifiers offered during the TLS handshake.
+        /// Defaults to `["imap"]`; set to `[]` to skip ALPN.
+        #[serde(default = "io_imap::client::default_alpn")]
+        pub alpn: Vec<String>,
         pub sasl: Option<SaslConfig>,
     }
 }
@@ -297,6 +301,10 @@ side_config! {
         pub server: String,
         #[serde(default)]
         pub tls: TlsConfig,
+        /// ALPN protocol identifiers offered during the TLS handshake.
+        /// Defaults to `["http/1.1"]`; set to `[]` to skip ALPN.
+        #[serde(default = "io_jmap::client::default_alpn")]
+        pub alpn: Vec<String>,
         pub auth: JmapAuthConfig,
         pub identity_id: Option<String>,
         pub drafts_mailbox_id: Option<String>,
@@ -346,21 +354,26 @@ pub enum RustlsCryptoConfig {
     Ring,
 }
 
-impl From<TlsConfig> for Tls {
-    fn from(config: TlsConfig) -> Self {
+impl TlsConfig {
+    /// Builds the runtime [`Tls`] handle the connect helpers expect.
+    /// `alpn` is the protocol-level ALPN list (e.g. `["imap"]`,
+    /// `["http/1.1"]`); pass an empty vec to skip ALPN. The TOML
+    /// schema never exposes `tls.rustls.alpn` directly: the per-
+    /// protocol `*.alpn` field is folded in here.
+    pub fn into_tls(self, alpn: Vec<String>) -> Tls {
         Tls {
-            provider: config.provider.map(|config| match config {
+            provider: self.provider.map(|p| match p {
                 TlsProviderConfig::Rustls => TlsProvider::Rustls,
                 TlsProviderConfig::NativeTls => TlsProvider::NativeTls,
             }),
             rustls: Rustls {
-                crypto: config.rustls.crypto.map(|config| match config {
+                crypto: self.rustls.crypto.map(|c| match c {
                     RustlsCryptoConfig::Aws => RustlsCrypto::Aws,
                     RustlsCryptoConfig::Ring => RustlsCrypto::Ring,
                 }),
-                alpn: Vec::new(),
+                alpn,
             },
-            cert: config.cert,
+            cert: self.cert,
         }
     }
 }
@@ -396,7 +409,9 @@ pub struct SaslLoginConfig {
 pub struct SaslPlainConfig {
     pub authzid: Option<String>,
     #[serde(deserialize_with = "shell_expanded_string")]
+    #[serde(alias = "username")]
     pub authcid: String,
+    #[serde(alias = "password")]
     pub passwd: Secret,
 }
 
@@ -405,8 +420,6 @@ pub struct SaslPlainConfig {
 pub struct SaslOauthbearerConfig {
     #[serde(deserialize_with = "shell_expanded_string")]
     pub username: String,
-    pub host: String,
-    pub port: u16,
     pub token: Secret,
 }
 
@@ -426,11 +439,13 @@ pub struct SaslScramSha256Config {
     pub password: Secret,
 }
 
-impl TryFrom<SaslConfig> for Sasl {
-    type Error = anyhow::Error;
-
-    fn try_from(config: SaslConfig) -> Result<Self> {
-        Ok(match config {
+impl SaslConfig {
+    /// Resolves the SASL config into a runtime [`Sasl`]. `host` and
+    /// `port` come from the live server URL; they are only used by
+    /// OAUTHBEARER (echoed in the GS2 header) and ignored by every
+    /// other mechanism.
+    pub fn try_into_sasl(self, host: impl ToString, port: u16) -> Result<Sasl> {
+        Ok(match self {
             SaslConfig::Anonymous(c) => Sasl::Anonymous(SaslAnonymous { message: c.message }),
             SaslConfig::Login(c) => Sasl::Login(SaslLogin {
                 username: c.username,
@@ -443,8 +458,8 @@ impl TryFrom<SaslConfig> for Sasl {
             }),
             SaslConfig::Oauthbearer(c) => Sasl::Oauthbearer(SaslOauthbearer {
                 username: c.username,
-                host: c.host,
-                port: c.port,
+                host: host.to_string(),
+                port,
                 token: c.token.get()?,
             }),
             SaslConfig::Xoauth2(c) => Sasl::Xoauth2(SaslXoauth2 {

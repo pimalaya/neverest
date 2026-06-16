@@ -60,9 +60,41 @@ pub struct StateSnapshot {
 
 impl StateSnapshot {
     /// Resolves `<state_dir>/neverest/<account>/state.json`.
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "ios",
+        target_arch = "wasm32"
+    )))]
     pub fn path(account: &str) -> Result<PathBuf> {
         let base = dirs::state_dir().context("Cannot resolve XDG state directory")?;
         Ok(base.join("neverest").join(account).join("state.json"))
+    }
+
+    /// Resolves `<data_dir>/neverest/state/<account>.json`.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    pub fn path(account: &str) -> Result<PathBuf> {
+        let base = dirs::data_dir().context("Cannot resolve data directory")?;
+        Ok(base
+            .join("neverest")
+            .join("state")
+            .join(format!("{}.json", account)))
+    }
+
+    /// Resolves `<data_local_dir>/neverest/state/<account>.json`.
+    #[cfg(target_os = "windows")]
+    pub fn path(account: &str) -> Result<PathBuf> {
+        let base = dirs::data_local_dir().context("Cannot resolve data local directory")?;
+        Ok(base
+            .join("neverest")
+            .join("state")
+            .join(format!("{}.json", account)))
+    }
+
+    /// Fails gracefully on WebAssembly where a standard local file system is absent.
+    #[cfg(target_arch = "wasm32")]
+    pub fn path(_account: &str) -> Result<PathBuf> {
+        bail!("File system resolution is not supported on WebAssembly")
     }
 
     pub fn load(path: &Path) -> Result<Self> {

@@ -57,7 +57,11 @@ pub fn open(config: SideConfig) -> Result<EmailClientStd> {
                 .sasl
                 .and_then(|cfg| {
                     let host = server.host_str()?;
-                    let port = server.port_or_known_default()?;
+                    let port = server.port().or_else(|| match server.scheme() {
+                        "imaps" => Some(993),
+                        "imap" => Some(143),
+                        _ => None,
+                    })?;
                     Some(cfg.try_into_sasl(host, port))
                 })
                 .transpose()?;

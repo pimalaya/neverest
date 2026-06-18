@@ -1,14 +1,14 @@
 # Migration guide
 
-v0.1.0 and v1.0.0-beta were early releases sitting on top of `email-lib`; v1.0.0-rc is a rewrite on top of the I/O-free `io-*` ecosystem (`io-email`, `io-imap`, `io-jmap`, `io-m2dir`). This page lists the changes most likely to bite when upgrading; the full configuration schema lives in [config.sample.toml](./config.sample.toml).
+v0.1.0 and v1.0.0-beta were early releases sitting on top of `email-lib`; v1.0.0-rc is a rewrite on top of the I/O-free `io-*` ecosystem (`io-email`, `io-imap`, `io-jmap`, `io-gmail`, `io-msgraph`, `io-m2dir`). This page lists the changes most likely to bite when upgrading; the full configuration schema lives in [config.sample.toml](./config.sample.toml).
 
 ## Highlights
 
 - Tokio is gone; the binary is synchronous (`io-*` clients use `std::net`).
 - **m2dir** replaces Maildir as the local sync target (https://man.sr.ht/~bitfehler/m2dir/), so flag round-trips are lossless. Maildir consumers should point at a fresh m2dir root and resync from IMAP/JMAP.
-- **JMAP** is now a supported backend.
+- **JMAP**, **Gmail** and **Microsoft Graph** are now supported backends (Gmail and Graph take an OAuth 2.0 bearer token and are configured by hand).
 - **Notmuch** is removed.
-- **Keyring** and **OAuth** are out of the binary: use [pimalaya/mimosa](https://github.com/pimalaya/mimosa) and [pimalaya/ortie](https://github.com/pimalaya/ortie) as command-sourced secrets.
+- **Keyring** and **OAuth** are out of the binary: source secrets from a command instead (e.g. `pass` or `secret-tool`, and [pimalaya/ortie](https://github.com/pimalaya/ortie) for OAuth access tokens).
 
 ## From v1.0.0-beta to v1.0.0-rc
 
@@ -75,4 +75,4 @@ The positional `<account>` argument becomes an optional `-a` / `--account <NAME>
 | `auth.type = "oauth2"` | SASL `oauthbearer` / `xoauth2` with a token from [pimalaya/ortie](https://github.com/pimalaya/ortie) |
 | `envelope.filter.{before,after}` | removed |
 
-`left.<backend>.pool-size` is new (defaults: IMAP 8, JMAP 4, m2dir 8). The sync cache moved to $XDG_CACHE_HOME/neverest/<account>/state.json (JSON); its presence is the single source of truth for "this account is initialized".
+`left.<backend>.pool-size` is new (defaults: IMAP 8, JMAP/Gmail/Graph 4, m2dir 8). The sync cache moved to $XDG_CACHE_HOME/neverest/<account>/state.json (JSON); its presence is the single source of truth for "this account is initialized".

@@ -58,12 +58,13 @@ default = true
 # --------------------------------------------------------------------------------
 #
 # Each side picks exactly one backend variant: `<side>.imap.*`,
-# `<side>.jmap.*`, or `<side>.m2dir.*`. Cross-cutting knobs (permissions,
-# pool size) live INSIDE the chosen backend table:
+# `<side>.jmap.*`, `<side>.gmail.*`, `<side>.msgraph.*`, or
+# `<side>.m2dir.*`. Cross-cutting options (permissions, pool size) live
+# INSIDE the chosen backend table:
 #   - `<side>.<backend>.mailbox.{create,delete}` (defaults true)
 #   - `<side>.<backend>.flag.update` (default true)
 #   - `<side>.<backend>.message.{create,delete}` (defaults true)
-#   - `<side>.<backend>.pool-size` (default IMAP 8, JMAP 4, m2dir 8)
+#   - `<side>.<backend>.pool-size` (default IMAP 8, JMAP/Gmail/Graph 4, m2dir 8)
 
 # --------------------------------------------------------------------------------
 # m2dir config
@@ -193,7 +194,7 @@ right.imap.message.delete = false
 
 # OAuth 2.0 / API token bearer.
 #right.jmap.auth.bearer.token.raw = "***"
-#right.jmap.auth.bearer.token.command = ["mimosa", "password", "read", "fastmail-api"]
+#right.jmap.auth.bearer.token.command = ["ortie", "access-token", "read", "fastmail-api"]
 
 # HTTP Basic.
 #right.jmap.auth.basic.username = "user@example.com"
@@ -203,3 +204,69 @@ right.imap.message.delete = false
 # Override the JMAP default pool size of 4 if the server documents a narrower
 # concurrent-request cap.
 #right.jmap.pool-size = 4
+
+# --------------------------------------------------------------------------------
+# Gmail config (alternative to the IMAP / JMAP blocks above)
+# https://developers.google.com/gmail/api
+# --------------------------------------------------------------------------------
+
+# Gmail REST API side (https://gmail.googleapis.com). Labels are exposed as
+# mailboxes; the API host is fixed, so only the mailbox owner, TLS and the
+# OAuth 2.0 credential are configurable.
+
+# Gmail user id (the mailbox owner). Defaults to "me", the authenticated user.
+#right.gmail.user-id = "me"
+
+# Gmail TLS provider (mirrors the imap.tls block above).
+#right.gmail.tls.provider = "rustls"
+#right.gmail.tls.rustls.crypto = "ring"
+#right.gmail.tls.cert = "/path/to/custom/cert.pem"
+
+# ALPN protocol identifiers offered during the TLS handshake. Defaults to
+# ["http/1.1"] (the Gmail REST API rides on HTTP/1.1); set to [] to skip ALPN.
+#right.gmail.alpn = ["http/1.1"]
+#right.gmail.alpn = []
+
+# Gmail only accepts OAuth 2.0 bearer tokens; supply a short-lived access token
+# (token refresh is the caller's responsibility). The client adds the `Bearer `
+# prefix itself.
+#right.gmail.auth.token.raw = "***"
+#right.gmail.auth.token.command = ["ortie", "access-token", "read", "gmail"]
+
+# Per-side permissions and pool size behave exactly like the other backends.
+#right.gmail.message.create = true
+#right.gmail.message.delete = false
+#right.gmail.pool-size = 4
+
+# --------------------------------------------------------------------------------
+# Microsoft Graph config (alternative to the blocks above)
+# https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
+# --------------------------------------------------------------------------------
+
+# Microsoft Graph API side (https://graph.microsoft.com). Mail folders are
+# exposed as mailboxes; the API host is fixed, so only the mailbox owner, TLS
+# and the OAuth 2.0 credential are configurable.
+
+# Graph user id (the mailbox owner). Defaults to "me", the authenticated user.
+#right.msgraph.user-id = "me"
+
+# Graph TLS provider (mirrors the imap.tls block above).
+#right.msgraph.tls.provider = "rustls"
+#right.msgraph.tls.rustls.crypto = "ring"
+#right.msgraph.tls.cert = "/path/to/custom/cert.pem"
+
+# ALPN protocol identifiers offered during the TLS handshake. Defaults to
+# ["http/1.1"] (the Graph API rides on HTTP/1.1); set to [] to skip ALPN.
+#right.msgraph.alpn = ["http/1.1"]
+#right.msgraph.alpn = []
+
+# Graph only accepts OAuth 2.0 bearer tokens; supply a short-lived access token
+# (token refresh is the caller's responsibility). The client adds the `Bearer `
+# prefix itself.
+#right.msgraph.auth.token.raw = "***"
+#right.msgraph.auth.token.command = ["ortie", "access-token", "read", "msgraph"]
+
+# Per-side permissions and pool size behave exactly like the other backends.
+#right.msgraph.message.create = true
+#right.msgraph.message.delete = false
+#right.msgraph.pool-size = 4

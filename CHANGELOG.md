@@ -9,11 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **BREAKING**: full rewrite on top of the I/O-free `io-*` ecosystem (`io-email`, `io-imap`, `io-jmap`, `io-m2dir`) plus `pimalaya-cli` / `pimalaya-config` / `pimalaya-stream`. The CLI, the configuration schema and the sync engine all changed shape; see [MIGRATION.md](./MIGRATION.md) for the upgrade path from v0.1.0.
+- **BREAKING**: full rewrite on top of the I/O-free `io-*` ecosystem (`io-email`, `io-imap`, `io-jmap`, `io-gmail`, `io-msgraph`, `io-m2dir`) plus `pimalaya-cli` / `pimalaya-config` / `pimalaya-stream`. The CLI, the configuration schema and the sync engine all changed shape; see [MIGRATION.md](./MIGRATION.md) for the upgrade path from v0.1.0.
+- Relicensed from `AGPL-3.0-only` to `MIT OR Apache-2.0`, aligning with the rest of the Pimalaya ecosystem.
 
 ### Added
 
 - **JMAP** backend support via `io-jmap`.
+- **Gmail** backend support via `io-gmail` (Gmail REST API, OAuth 2.0 bearer token).
+- **Microsoft Graph** backend support via `io-msgraph` (Graph mail API, OAuth 2.0 bearer token).
 - **m2dir** as the new local sync target (replaces Maildir).
 - Reintroduced the per-account `sync.lock` advisory file lock so two concurrent `sync` runs (cron tick racing a manual invocation, two terminals) no longer corrupt the cache snapshot; the second run exits early with a clear "another sync is already running" message.
 

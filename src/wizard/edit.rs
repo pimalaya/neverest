@@ -1,20 +1,3 @@
-// This file is part of Neverest, a CLI to synchronize emails.
-//
-// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 //! Re-runs the wizard over an existing account, pre-filling prompts
 //! with current values; auth secrets are always re-prompted.
 
@@ -112,6 +95,16 @@ fn prompt_side(
             let imap = imap_wizard::run(&wizard_name, local_part, domain, Some(&defaults))?;
             Ok(SideConfig::Imap(imap_to_config(imap)?))
         }
+        Some(SideConfig::Gmail(c)) => {
+            info!("{label} side keeps its Gmail backend; edit the config file to change it");
+            Ok(SideConfig::Gmail(c.clone()))
+        }
+        Some(SideConfig::Msgraph(c)) => {
+            info!(
+                "{label} side keeps its Microsoft Graph backend; edit the config file to change it"
+            );
+            Ok(SideConfig::Msgraph(c.clone()))
+        }
         Some(SideConfig::M2dir(c)) => {
             let root = prompt::text(
                 format!("{label} m2dir store root:"),
@@ -149,6 +142,7 @@ fn side_email(side: &SideConfig) -> Option<String> {
             }
             _ => None,
         },
+        SideConfig::Gmail(_) | SideConfig::Msgraph(_) => None,
         SideConfig::M2dir(_) => None,
     }
 }

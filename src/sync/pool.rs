@@ -1,20 +1,3 @@
-// This file is part of Neverest, a CLI to synchronize emails.
-//
-// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 //! Connection pool: opens N independent clients per side and fans
 //! mailbox / message hunks out across paired `(left, right)` workers.
 
@@ -233,15 +216,10 @@ fn open_side(config: SideConfig) -> Result<Vec<EmailClientStd>> {
 }
 
 /// Resolves the per-side pool size from config or the per-backend
-/// default (IMAP 8, JMAP 4, m2dir 8); IMAP warns above the soft cap.
+/// default (IMAP 8, HTTP backends 4, m2dir 8); IMAP warns above the soft
+/// cap. The HTTP backends are JMAP, Gmail and Microsoft Graph.
 fn resolve_size(config: &SideConfig) -> usize {
-    let default = if config.is_imap() {
-        8
-    } else if config.is_jmap() {
-        4
-    } else {
-        8
-    };
+    let default = if config.is_http() { 4 } else { 8 };
 
     let requested = config.pool_size().unwrap_or(default).max(1);
 

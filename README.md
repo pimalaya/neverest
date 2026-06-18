@@ -29,16 +29,18 @@
   - [Mailbox filters and per-side permissions](#mailbox-filters-and-per-side-permissions)
   - [Migrating from Maildir](#migrating-from-maildir)
   - [Checking a configuration](#checking-a-configuration)
+- [License](#license)
 - [AI disclosure](#ai-disclosure)
 - [Social](#social)
 - [Sponsoring](#sponsoring)
 
 ## Features
 
-- Remote backend support: **IMAP**, **JMAP**
+- Remote backend support: **IMAP**, **JMAP**, **Gmail**, **Microsoft Graph**
 - Local (filesystem) backends support: **m2dir** <sup>[specs](https://man.sr.ht/~bitfehler/m2dir/)</sup>
 - **Simple auth** support for IMAP: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256
 - **HTTP auth** support for JMAP: basic, bearer, raw header
+- **OAuth 2.0 bearer token** auth for Gmail and Microsoft Graph
 - **TLS** support:
   - [Rustls](https://crates.io/crates/rustls) with ring crypto
   - [Rustls](https://crates.io/crates/rustls) with aws crypto (requires `rustls-aws` feature)
@@ -105,6 +107,8 @@ nix run
 ## Configuration
 
 Run `neverest`. With no configuration file on disk the wizard asks for an account name and an email address, runs provider discovery (PACC, then Thunderbird Autoconfiguration, then RFC 6186 SRV), prompts for IMAP or JMAP credentials based on what discovery returned, asks for a local m2dir store root for the other side, then writes the result to disk.
+
+Gmail and Microsoft Graph sides are configured by hand: they take an OAuth 2.0 bearer token rather than discoverable server settings, so the wizard does not prompt for them. Add a `<side>.gmail.*` or `<side>.msgraph.*` block to the config file directly; see [config.sample.toml](./config.sample.toml).
 
 A persistent configuration is loaded from the first valid path among:
 
@@ -180,11 +184,20 @@ neverest check [-a|--account <NAME>]
 
 Opens both sides and asks each one to list mailboxes. The operation itself is cheap; the value is in surfacing the credential, network or config errors that would otherwise only show up during a real sync.
 
+## License
+
+This project is licensed under either of:
+
+- [MIT license](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option.
+
 ## AI disclosure
 
 This project is developed with AI assistance. This section documents how, so users and downstream packagers can make informed decisions.
 
-- **Tools**: Claude Code (Anthropic), Opus 4.7, invoked locally with a persistent project-scoped memory and a small set of repo-specific rules.
+- **Tools**: Claude Code (Anthropic), Opus 4.8, invoked locally with a persistent project-scoped memory and a small set of repo-specific rules.
 
 - **Used for**: Refactors, mechanical multi-file edits, boilerplate (feature gates, error enums, derive macros, trait impls), test scaffolding, doc polish, exploratory design conversations.
 
@@ -194,7 +207,7 @@ This project is developed with AI assistance. This section documents how, so use
 
 - **Limitations**: AI models occasionally produce code that compiles and passes tests but is subtly wrong: off-by-one errors, missed edge cases, plausible but nonexistent APIs, stale RFC references. The verification workflow catches most of this; it does not catch all of it. Bug reports are welcome and taken seriously.
 
-- **Last reviewed**: 31/05/2026
+- **Last reviewed**: 17/06/2026
 
 ## Social
 

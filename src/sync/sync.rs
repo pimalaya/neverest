@@ -1,20 +1,3 @@
-// This file is part of Neverest, a CLI to synchronize emails.
-//
-// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 //! Bidirectional 3-way sync `run` entry point: drives the mailbox /
 //! message patch over both sides against the persisted snapshot.
 
@@ -26,9 +9,11 @@ use std::{
 use anyhow::{Result, anyhow};
 use io_email::{
     client::{EmailClientStd, EmailClientStdError},
-    envelope::EnvelopeDiff,
-    mailbox::MailboxDiff,
+    envelope::types::EnvelopeDiff,
+    mailbox::types::MailboxDiff,
 };
+#[cfg(feature = "imap")]
+use io_imap::rfc3501::select::ImapMailboxSelectOptions;
 use log::{debug, warn};
 use pimalaya_cli::spinner::Spinner;
 
@@ -52,7 +37,10 @@ use crate::{
 #[cfg(feature = "imap")]
 fn imap_select(client: &mut EmailClientStd, mailbox: &str) -> Result<()> {
     if let Some(imap) = client.imap.as_mut() {
-        imap.inner.select(mailbox.to_owned().try_into()?)?;
+        imap.inner.select(
+            mailbox.to_owned().try_into()?,
+            ImapMailboxSelectOptions::default(),
+        )?;
     }
     Ok(())
 }

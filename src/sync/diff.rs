@@ -1,20 +1,3 @@
-// This file is part of Neverest, a CLI to synchronize emails.
-//
-// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 //! Pure diff math plus the m2dir-specific snapshot-driven envelope
 //! delta: takes snapshots and live listings, emits hunks pre-gated by
 //! [`SidePermissions`].
@@ -27,10 +10,12 @@ use std::{
 #[cfg(feature = "m2dir")]
 use anyhow::{Context, Result};
 #[cfg(feature = "m2dir")]
-use io_email::{client::EmailClientStd, envelope::EnvelopeDiff, m2dir::convert::envelope_from};
 use io_email::{
-    envelope::{Envelope, FlagUpdate},
-    flag::Flag,
+    client::EmailClientStd, envelope::types::EnvelopeDiff, m2dir::convert::envelope_from,
+};
+use io_email::{
+    envelope::types::{Envelope, FlagUpdate},
+    flag::types::Flag,
 };
 #[cfg(feature = "m2dir")]
 use mail_parser::{HeaderName, MessageParser};
@@ -548,7 +533,7 @@ pub fn diff_flags(
 
 #[cfg(test)]
 mod tests {
-    use io_email::flag::{Flag, IanaFlag};
+    use io_email::flag::types::{Flag, IanaFlag};
 
     use super::*;
     use crate::config::{
@@ -1091,12 +1076,212 @@ mod tests {
         assert!(hunks.is_empty());
     }
 
+    #[test]
+    fn diff_flags_identical_flags_emit_nothing() {
+        let seen = Flag::from_iana(IanaFlag::Seen);
+        let left = envelope("L1", Some("<a>"), &[seen.clone()]);
+        let right = envelope("R1", Some("<a>"), &[seen.clone()]);
+
+        let hunks = diff_flags(
+            "INBOX",
+            42,
+            &left,
+            &right,
+            Some(&entry("L1", &[seen.clone()])),
+            Some(&entry("R1", &[seen.clone()])),
+            perms_all(),
+            perms_all(),
+        );
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn diff_flags_both_sides_gained_distinct_flags_propagate_both_ways() {
+        let flagged = Flag::from_iana(IanaFlag::Flagged);
+        let answered = Flag::from_iana(IanaFlag::Answered);
+        let left = envelope("L1", Some("<a>"), &[flagged.clone()]);
+        let right = envelope("R1", Some("<a>"), &[answered.clone()]);
+
+        // Neither flag was known at the last sync, so each is a genuine
+        // addition that must cross to the opposite side.
+        let hunks = diff_flags(
+            "INBOX",
+            42,
+            &left,
+            &right,
+            Some(&entry("L1", &[])),
+            Some(&entry("R1", &[])),
+            perms_all(),
+            perms_all(),
+        );
+        assert_eq!(hunks.len(), 2);
+        assert!(hunks.iter().any(|h| matches!(
+            h,
+            EmailHunk::AddFlags { side: Side::Right, flags, .. } if flags.contains(&flagged)
+        )));
+        assert!(hunks.iter().any(|h| matches!(
+            h,
+            EmailHunk::AddFlags { side: Side::Left, flags, .. } if flags.contains(&answered)
+        )));
+    }
+
+    #[test]
+    fn diff_flags_add_and_remove_in_single_diff() {
+        let seen = Flag::from_iana(IanaFlag::Seen);
+        let flagged = Flag::from_iana(IanaFlag::Flagged);
+        // Both sides last agreed on {Seen}. Left then added Flagged;
+        // right cleared Seen. The patch must add Flagged to the right
+        // and remove Seen from the left in one pass.
+        let left = envelope("L1", Some("<a>"), &[seen.clone(), flagged.clone()]);
+        let right = envelope("R1", Some("<a>"), &[]);
+
+        let hunks = diff_flags(
+            "INBOX",
+            42,
+            &left,
+            &right,
+            Some(&entry("L1", &[seen.clone()])),
+            Some(&entry("R1", &[seen.clone()])),
+            perms_all(),
+            perms_all(),
+        );
+        assert_eq!(hunks.len(), 2);
+        assert!(hunks.iter().any(|h| matches!(
+            h,
+            EmailHunk::AddFlags { side: Side::Right, flags, .. } if flags.contains(&flagged)
+        )));
+        assert!(hunks.iter().any(|h| matches!(
+            h,
+            EmailHunk::RemoveFlags { side: Side::Left, flags, .. } if flags.contains(&seen)
+        )));
+    }
+
+    #[test]
+    fn diff_flags_blocked_by_update_permission() {
+        let seen = Flag::from_iana(IanaFlag::Seen);
+        let left = envelope("L1", Some("<a>"), &[seen.clone()]);
+        let right = envelope("R1", Some("<a>"), &[]);
+
+        // The right side refuses flag updates, so the new \Seen cannot
+        // be written there and no hunk is planned.
+        let right_perms = perms_with(
+            MailboxSidePermissions::default(),
+            FlagSidePermissions { update: false },
+            MessageSidePermissions::default(),
+        );
+
+        let hunks = diff_flags(
+            "INBOX",
+            42,
+            &left,
+            &right,
+            Some(&entry("L1", &[])),
+            Some(&entry("R1", &[])),
+            perms_all(),
+            right_perms,
+        );
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn diff_messages_same_message_added_on_both_sides_no_copy() {
+        // Identical content landed independently on each side since the
+        // last sync; it reconciles as "already present", never a
+        // duplicate Copy.
+        let left_pairs = vec![(1u64, envelope("L1", Some("<a>"), &[]))];
+        let right_pairs = vec![(1u64, envelope("R1", Some("<a>"), &[]))];
+        let mut collisions = Vec::new();
+        let left = message_map(Side::Left, "INBOX", &left_pairs, &mut collisions);
+        let right = message_map(Side::Right, "INBOX", &right_pairs, &mut collisions);
+        assert!(collisions.is_empty());
+
+        let hunks = diff_messages(
+            "INBOX",
+            &left,
+            &right,
+            &MessageSnapshots::new(),
+            &MessageSnapshots::new(),
+            perms_all(),
+            perms_all(),
+        );
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn diff_messages_deleted_on_both_sides_no_hunks() {
+        // The message vanished from both sides since the snapshot, so
+        // there is nothing left to propagate.
+        let left_pairs: EnvelopePairs = Vec::new();
+        let right_pairs: EnvelopePairs = Vec::new();
+        let mut collisions = Vec::new();
+        let left = message_map(Side::Left, "INBOX", &left_pairs, &mut collisions);
+        let right = message_map(Side::Right, "INBOX", &right_pairs, &mut collisions);
+
+        let mut prev_left = MessageSnapshots::new();
+        prev_left.insert("1".into(), entry("L1", &[]));
+        let mut prev_right = MessageSnapshots::new();
+        prev_right.insert("1".into(), entry("R1", &[]));
+
+        let hunks = diff_messages(
+            "INBOX",
+            &left,
+            &right,
+            &prev_left,
+            &prev_right,
+            perms_all(),
+            perms_all(),
+        );
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn diff_mailboxes_added_on_both_sides_no_hunks() {
+        // Both sides created the same mailbox independently; nothing to
+        // reconcile.
+        let left = name_set(["Archive"]);
+        let right = name_set(["Archive"]);
+        let hunks = diff_mailboxes(
+            &left,
+            &right,
+            &HashSet::new(),
+            &HashSet::new(),
+            perms_all(),
+            perms_all(),
+        );
+        assert!(hunks.is_empty());
+    }
+
+    #[test]
+    fn diff_mailboxes_create_blocked_by_permissions() {
+        // Left has a new mailbox but the right side forbids creation, so
+        // no Create hunk is planned.
+        let left = name_set(["Archive"]);
+        let right = HashSet::new();
+        let right_perms = perms_with(
+            MailboxSidePermissions {
+                create: false,
+                delete: true,
+            },
+            FlagSidePermissions { update: true },
+            MessageSidePermissions::default(),
+        );
+        let hunks = diff_mailboxes(
+            &left,
+            &right,
+            &HashSet::new(),
+            &HashSet::new(),
+            perms_all(),
+            right_perms,
+        );
+        assert!(hunks.is_empty());
+    }
+
     #[cfg(feature = "m2dir")]
     mod m2dir {
         use io_email::{
             client::EmailClientStd,
-            envelope::EnvelopeDiff,
-            flag::{Flag, FlagOp, IanaFlag},
+            envelope::types::EnvelopeDiff,
+            flag::types::{Flag, FlagOp, IanaFlag},
             m2dir::client::M2dirClient,
         };
         use tempfile::tempdir;
@@ -1266,7 +1451,7 @@ mod tests {
 
         #[test]
         fn sync_two_after_initial_population_is_a_no_op() {
-            use io_email::envelope::Envelope as IoEnvelope;
+            use io_email::envelope::types::Envelope as IoEnvelope;
 
             use crate::sync::{hunk::EmailHunk, state::MessageEntry};
 

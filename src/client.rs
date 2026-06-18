@@ -1,20 +1,3 @@
-// This file is part of Neverest, a CLI to synchronize emails.
-//
-// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 //! Side-agnostic protocol client construction for the sync engine.
 
 use anyhow::{Result, bail};
@@ -23,7 +6,7 @@ use base64::{Engine, prelude::BASE64_STANDARD};
 use io_email::client::EmailClientStd;
 #[cfg(feature = "m2dir")]
 use io_email::m2dir::client::M2dirClient;
-#[cfg(feature = "jmap")]
+#[cfg(any(feature = "jmap", feature = "gmail", feature = "msgraph"))]
 use secrecy::ExposeSecret;
 #[cfg(any(feature = "imap", feature = "jmap"))]
 use url::{ParseError, Url};
@@ -99,6 +82,22 @@ pub fn open(config: SideConfig) -> Result<EmailClientStd> {
             };
 
             Ok(EmailClientStd::new().connect_jmap(&url, &tls, http_auth)?)
+        }
+        #[cfg(feature = "gmail")]
+        SideConfig::Gmail(config) => {
+            let tls = config.tls.into_tls(config.alpn);
+            let token = config.auth.token.get()?;
+            Ok(EmailClientStd::new().connect_gmail(&tls, token.expose_secret(), config.user_id)?)
+        }
+        #[cfg(feature = "msgraph")]
+        SideConfig::Msgraph(config) => {
+            let tls = config.tls.into_tls(config.alpn);
+            let token = config.auth.token.get()?;
+            Ok(EmailClientStd::new().connect_msgraph(
+                &tls,
+                token.expose_secret(),
+                config.user_id,
+            )?)
         }
         #[cfg(feature = "m2dir")]
         SideConfig::M2dir(config) => {

@@ -93,9 +93,9 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "ar_archive_writer"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7eb93bbb63b9c227414f6eb3a0adfddca591a8ce1e9b60661bb08969b87e340b"
+checksum = "4087686b4b0a3427190bae57a1d9a478dbb2d40c5dc1bd6e2b6d797913bdd348"
 dependencies = [
  "object",
 ]
@@ -136,9 +136,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bitflags"
-version = "2.11.1"
+version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c4512299f36f043ab09a583e57bceb5a5aab7a73db1805848e8fef3c9e8c78b3"
+checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
 dependencies = [
  "serde_core",
 ]
@@ -192,9 +192,9 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cc"
-version = "1.2.63"
+version = "1.2.64"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "556e016178bb5662a08681bbe0f00f8e17631781a4dfc8c45e466e4b185ec27f"
+checksum = "dad887fd958be91b5098c0248def011f4523ab786cd411be668777e55063501f"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -226,9 +226,9 @@ dependencies = [
 
 [[package]]
 name = "chrono"
-version = "0.4.44"
+version = "0.4.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
+checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
  "num-traits",
@@ -521,7 +521,7 @@ dependencies = [
 [[package]]
 name = "domain"
 version = "0.12.0"
-source = "git+https://github.com/soywod/domain?branch=new-srv#2a72dc6f55212d8b72b046992bc229bfdac48887"
+source = "git+https://github.com/nlnetlabs/domain?rev=b30087125c13e71010d9783a1bcdd9eb9fa3f336#b30087125c13e71010d9783a1bcdd9eb9fa3f336"
 dependencies = [
  "bumpalo",
  "bytes",
@@ -534,7 +534,7 @@ dependencies = [
 [[package]]
 name = "domain-macros"
 version = "0.12.0"
-source = "git+https://github.com/soywod/domain?branch=new-srv#2a72dc6f55212d8b72b046992bc229bfdac48887"
+source = "git+https://github.com/nlnetlabs/domain?rev=b30087125c13e71010d9783a1bcdd9eb9fa3f336#b30087125c13e71010d9783a1bcdd9eb9fa3f336"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -917,8 +917,9 @@ dependencies = [
 
 [[package]]
 name = "imap-codec"
-version = "2.0.0-alpha.7"
-source = "git+https://github.com/soywod/imap-codec#f1c29c7b5368063922778afdbcaefa18ed497a5e"
+version = "2.0.0-alpha.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a8848b8f674578cc2d884268a611aac82b9eb23d50aa9e84e00ffd939be8a7f7"
 dependencies = [
  "abnf-core",
  "base64",
@@ -931,7 +932,8 @@ dependencies = [
 [[package]]
 name = "imap-types"
 version = "2.0.0-alpha.6"
-source = "git+https://github.com/soywod/imap-codec#f1c29c7b5368063922778afdbcaefa18ed497a5e"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e31d8480b20e8416d52f20b737a159bd925219273aedb023caa12190ca42781c"
 dependencies = [
  "base64",
  "bounded-static",
@@ -969,15 +971,17 @@ dependencies = [
 
 [[package]]
 name = "io-email"
-version = "0.0.1"
-source = "git+https://github.com/pimalaya/io-email#050738cbaf9e177683c7e4eeeb8b2ef145c4abe2"
+version = "0.1.0"
+source = "git+https://github.com/pimalaya/io-email#116983e7212b4f8086f44c275c8db697e8c1a189"
 dependencies = [
  "chrono",
  "chumsky",
+ "io-gmail",
  "io-http",
  "io-imap",
  "io-jmap",
  "io-m2dir",
+ "io-msgraph",
  "io-smtp",
  "log",
  "mail-parser",
@@ -991,9 +995,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-gmail"
+version = "0.0.1"
+source = "git+https://github.com/pimalaya/io-gmail#cc322e4b484f566e4739fd2c4bf3342f26ec3b21"
+dependencies = [
+ "anyhow",
+ "base64",
+ "io-http",
+ "log",
+ "pimalaya-stream",
+ "serde",
+ "serde_json",
+ "serde_variant",
+ "thiserror",
+ "url",
+]
+
+[[package]]
 name = "io-http"
-version = "0.0.3"
-source = "git+https://github.com/pimalaya/io-http#23f3668558059c2db3603b1afdda5ce0f840e46a"
+version = "0.1.1"
+source = "git+https://github.com/pimalaya/io-http#3d4c14e40699f2fa19d9f7b0e327742c2ba3cdee"
 dependencies = [
  "anyhow",
  "base64",
@@ -1008,8 +1029,8 @@ dependencies = [
 
 [[package]]
 name = "io-imap"
-version = "0.0.1"
-source = "git+https://github.com/pimalaya/io-imap#5c915ae5536e5e5ac48f3284c1827111a71939f7"
+version = "0.1.0"
+source = "git+https://github.com/pimalaya/io-imap#e6b4fb10633875b2f7d313f459dbd561458ed244"
 dependencies = [
  "anyhow",
  "base64",
@@ -1023,8 +1044,8 @@ dependencies = [
 
 [[package]]
 name = "io-jmap"
-version = "0.0.1"
-source = "git+https://github.com/pimalaya/io-jmap#18103bdbf883798b48566f6d45e4dfed8458d0e6"
+version = "0.1.0"
+source = "git+https://github.com/pimalaya/io-jmap#4aed16a28a3bbc232e1783d43f243b5f089bfcaa"
 dependencies = [
  "anyhow",
  "io-http",
@@ -1039,17 +1060,37 @@ dependencies = [
 
 [[package]]
 name = "io-m2dir"
-version = "0.0.1"
-source = "git+https://github.com/pimalaya/io-m2dir#0865b8301c49b2669d66fff93efdc02596cb4e66"
+version = "0.1.0"
+source = "git+https://github.com/pimalaya/io-m2dir#d4d848ff68ab9bcf81c94d530bc81a09a999ac85"
 dependencies = [
+ "base64",
  "log",
+ "mail-parser",
+ "percent-encoding",
  "thiserror",
 ]
 
 [[package]]
-name = "io-smtp"
+name = "io-msgraph"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/io-smtp#8ade022516b83358d66772b74bd42216763b5ec3"
+source = "git+https://github.com/pimalaya/io-msgraph#d438fc3957e4c3f145e99454e5064951f798233d"
+dependencies = [
+ "anyhow",
+ "base64",
+ "io-http",
+ "log",
+ "pimalaya-stream",
+ "serde",
+ "serde_json",
+ "serde_variant",
+ "thiserror",
+ "url",
+]
+
+[[package]]
+name = "io-smtp"
+version = "0.1.0"
+source = "git+https://github.com/pimalaya/io-smtp#43e2e2e8f559237c96107ef63eca7b1df9227de1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1160,13 +1201,12 @@ dependencies = [
 
 [[package]]
 name = "js-sys"
-version = "0.3.99"
+version = "0.3.102"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "142bc4740e452c1e57ade0cbc129f139c9093e354346f0872ef985f4f5cf5f11"
+checksum = "03d04c30968dffe80775bd4d7fb676131cd04a1fb46d2686dbffbaec2d9dfd31"
 dependencies = [
  "cfg-if",
  "futures-util",
- "once_cell",
  "wasm-bindgen",
 ]
 
@@ -1244,9 +1284,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.30"
+version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "616ec5685824bcc94416c6d4a7a446eea774a31efd7062c8480ba6fd06d7a6e5"
+checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "mail-parser"
@@ -1260,9 +1300,9 @@ dependencies = [
 
 [[package]]
 name = "memchr"
-version = "2.8.1"
+version = "2.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b947ae49db0d222b1dbc6b113ce7248a3fc3a6ca21b696717bfc000ba4484d8"
+checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "memoffset"
@@ -1320,9 +1360,11 @@ dependencies = [
  "crossterm",
  "dirs",
  "io-email",
+ "io-gmail",
  "io-imap",
  "io-jmap",
  "io-m2dir",
+ "io-msgraph",
  "log",
  "mail-parser",
  "percent-encoding",
@@ -1418,9 +1460,9 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openssl"
-version = "0.10.80"
+version = "0.10.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a45fa2aa886c42762255da344f0a0d313e254066c46aad76f300c3d3da62d967"
+checksum = "77823a27f0babb03091cb9ed9ef80af3b39dbc82f97e8fa530374b7dafd87a45"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -1449,18 +1491,18 @@ checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
 
 [[package]]
 name = "openssl-src"
-version = "300.6.0+3.6.2"
+version = "300.6.1+3.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8e8cbfd3a4a8c8f089147fd7aaa33cf8c7450c4d09f8f80698a0cf093abeff4"
+checksum = "46eb8fb9fb3b61ce1c0f8a026c4c1a0714d3a9e138e7fbde78753ce2babc3846"
 dependencies = [
  "cc",
 ]
 
 [[package]]
 name = "openssl-sys"
-version = "0.9.116"
+version = "0.9.117"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f28a22dc7140cda5f096e5e7724a6962ca81a7f8bfd2979f9b18c11af56318c4"
+checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
 dependencies = [
  "cc",
  "libc",
@@ -1507,7 +1549,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "pimalaya-cli"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/cli#64cd78d702ed9251021f4ed8f549ac262b0e6985"
+source = "git+https://github.com/pimalaya/cli#0331ddd1d8878c27dce1680c12ac5585b92868ea"
 dependencies = [
  "anyhow",
  "clap",
@@ -1530,7 +1572,7 @@ dependencies = [
 [[package]]
 name = "pimalaya-config"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/config#c10cd14039de1ef31c56c5efa3463a20b38d2c57"
+source = "git+https://github.com/pimalaya/config#aef6d5a928ec2c3095f3e07e0903e6f4f8ef2a3b"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1546,7 +1588,7 @@ dependencies = [
 [[package]]
 name = "pimalaya-stream"
 version = "0.0.1"
-source = "git+https://github.com/pimalaya/stream#152911be92647ae47c2052c1bf1270f02eefbdd1"
+source = "git+https://github.com/pimalaya/stream#fc3892ac383b1f1eb0e0535df468593d1d3b10f8"
 dependencies = [
  "anyhow",
  "log",
@@ -1562,7 +1604,7 @@ dependencies = [
 [[package]]
 name = "pimconf"
 version = "0.1.0"
-source = "git+https://github.com/pimalaya/pimconf#4b01b9e105c82052a223b9d13261dd118fd159da"
+source = "git+https://github.com/pimalaya/pimconf#bf91d24c622b9e5849a136079ced959541cb1758"
 dependencies = [
  "anyhow",
  "base64",
@@ -1743,9 +1785,9 @@ dependencies = [
 
 [[package]]
 name = "regex-syntax"
-version = "0.8.10"
+version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "rfc2047-decoder"
@@ -2022,6 +2064,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_variant"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a0068df419f9d9b6488fdded3f1c818522cdea328e02ce9d9f147380265a432"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "sha2"
 version = "0.10.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2102,9 +2153,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.15.1"
+version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
 
 [[package]]
 name = "stable_deref_trait"
@@ -2139,9 +2190,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.117"
+version = "2.0.118"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e665b8803e7b1d2a727f4023456bbbbe74da67099c585258af0ad9c5013b9b99"
+checksum = "1b9ae57f904213ebb649ce6895b8a66c66f0203b9319718f69a5612a065b1422"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2336,9 +2387,9 @@ checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
 name = "uuid"
-version = "1.23.2"
+version = "1.23.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d258b83ceec21034727ecee8c382cfa6c3e133699b0742c64571814fb420c9f7"
+checksum = "144d6b123cef80b301b8f72a9e2ca4370ddec21950d0a103dd22c437006d2db7"
 dependencies = [
  "getrandom 0.4.2",
  "js-sys",
@@ -2375,9 +2426,9 @@ checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "wasip2"
-version = "1.0.3+wasi-0.2.9"
+version = "1.0.4+wasi-0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "20064672db26d7cdc89c7798c48a0fdfac8213434a1186e5ef29fd560ae223d6"
+checksum = "b67efb37e106e55ce722a510d6b5f9c17f083e5fc79afc2badeb12cc313d9487"
 dependencies = [
  "wit-bindgen 0.57.1",
 ]
@@ -2393,9 +2444,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen"
-version = "0.2.122"
+version = "0.2.125"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ed04576f974d2b2fba0f38c51dbc5518011e38c36bf1143164be765528fd409"
+checksum = "8ddb3f79143bced6de84270411622a2699cee572fc0875aeaf1e7867cf9fca1a"
 dependencies = [
  "cfg-if",
  "once_cell",
@@ -2406,9 +2457,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro"
-version = "0.2.122"
+version = "0.2.125"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "916151b09da36bd82f6615cbf3a419e2f0ba23a03c6160e8e92eb6bd4aa1dec6"
+checksum = "4e21a184b13fb19e157296e2c46056aec9092264fab83e4ba59e68c61b323c3d"
 dependencies = [
  "quote",
  "wasm-bindgen-macro-support",
@@ -2416,9 +2467,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-macro-support"
-version = "0.2.122"
+version = "0.2.125"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "299047362ccbfce148b67ab7e73349f77748e00c8296f9542adfad2ad82c5c5e"
+checksum = "fecefd9c35bd935a20fc3fc344b5f29138961e4f47fb03297d88f2587afb5ebd"
 dependencies = [
  "bumpalo",
  "proc-macro2",
@@ -2429,9 +2480,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-shared"
-version = "0.2.122"
+version = "0.2.125"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9a929b2c61f11ba3e9bc35b50c1f25cb38e0e892c0c231ae2b8cf78d5dad4437"
+checksum = "23939e44bb9a5d7576fa2b563dc2e136628f1224e88a8deed09e04858b77871f"
 dependencies = [
  "unicode-ident",
 ]
@@ -2472,9 +2523,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.7"
+version = "1.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
+checksum = "0d46a5a140e6f7afeccd8eae97eff335163939eac8b929834875168b29b3d267"
 dependencies = [
  "rustls-pki-types",
 ]
@@ -2768,9 +2819,9 @@ checksum = "636f85e5ca6488e96401b61eb7de54f4e44755c988af0f52cf90230c312a1a89"
 
 [[package]]
 name = "yoke"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "abe8c5fda708d9ca3df187cae8bfb9ceda00dd96231bed36e445a1a48e66f9ca"
+checksum = "709fe23a0424b6a435d82152b1bd3fdfb0833487d5fa90d05d42762a9891fef5"
 dependencies = [
  "stable_deref_trait",
  "yoke-derive",
@@ -2791,18 +2842,18 @@ dependencies = [
 
 [[package]]
 name = "zerocopy"
-version = "0.8.50"
+version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b065d4f0e55f82fae73202e189638116a87c55ab6b8e6c2721e13dd9d854ad1"
+checksum = "ce1022995ff5ff5d841ad7d994facc23098cd40152f2c1d11cd607c6f530653f"
 dependencies = [
  "zerocopy-derive",
 ]
 
 [[package]]
 name = "zerocopy-derive"
-version = "0.8.50"
+version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b631b19d36a892ab55420c92dbc83ccd79274f25be714855d3074aa71cab639"
+checksum = "1ae7f38b72ec2a254e2b87ef277cf2cd4fb97cbebf944faa6f33354da0867930"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2832,9 +2883,9 @@ dependencies = [
 
 [[package]]
 name = "zeroize"
-version = "1.8.2"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b97154e67e32c85465826e8bcc1c59429aaaf107c1e4a9e53c8d8ccd5eff88d0"
+checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
 
 [[package]]
 name = "zerotrie"

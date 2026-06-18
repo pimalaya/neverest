@@ -1,20 +1,3 @@
-// This file is part of Neverest, a CLI to synchronize emails.
-//
-// Copyright (C) 2024-2026  soywod <pimalaya.org@posteo.net>
-//
-// This program is free software: you can redistribute it and/or modify
-// it under the terms of the GNU Affero General Public License as published by
-// the Free Software Foundation, either version 3 of the License, or
-// (at your option) any later version.
-//
-// This program is distributed in the hope that it will be useful,
-// but WITHOUT ANY WARRANTY; without even the implied warranty of
-// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-// GNU Affero General Public License for more details.
-//
-// You should have received a copy of the GNU Affero General Public License
-// along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
 //! Account configuration: each account pairs a `left` and a `right`
 //! [`SideConfig`] plus mailbox/message sync settings.
 
@@ -75,6 +58,8 @@ macro_rules! side_accessor {
             match self {
                 Self::Imap(c) => c.$name,
                 Self::Jmap(c) => c.$name,
+                Self::Gmail(c) => c.$name,
+                Self::Msgraph(c) => c.$name,
                 Self::M2dir(c) => c.$name,
             }
         }
@@ -161,6 +146,8 @@ pub struct AccountConfig {
 pub enum SideConfig {
     Imap(ImapConfig),
     Jmap(JmapConfig),
+    Gmail(GmailConfig),
+    Msgraph(MsgraphConfig),
     M2dir(M2dirConfig),
 }
 
@@ -174,8 +161,10 @@ impl SideConfig {
         matches!(self, Self::Imap(_))
     }
 
-    pub fn is_jmap(&self) -> bool {
-        matches!(self, Self::Jmap(_))
+    /// Whether this side talks a remote HTTP backend (JMAP, Gmail or
+    /// Microsoft Graph); these share the smaller default pool size.
+    pub fn is_http(&self) -> bool {
+        matches!(self, Self::Jmap(_) | Self::Gmail(_) | Self::Msgraph(_))
     }
 
     /// Snapshots the per-side mailbox/flag/message permissions.
@@ -323,6 +312,82 @@ pub enum JmapAuthConfig {
         username: String,
         password: Secret,
     },
+}
+
+side_config! {
+    /// Gmail REST API side (`https://gmail.googleapis.com`). Labels are
+    /// exposed as mailboxes; the API host is fixed, so only the mailbox
+    /// owner, TLS and the OAuth 2.0 credential are configurable.
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    pub struct GmailConfig {
+        /// Gmail user id (the mailbox owner). Defaults to `me`, the
+        /// authenticated user.
+        #[serde(default = "default_gmail_user_id")]
+        pub user_id: String,
+        #[serde(default)]
+        pub tls: TlsConfig,
+        /// ALPN protocol identifiers offered during the TLS handshake.
+        /// Defaults to `["http/1.1"]`; set to `[]` to skip ALPN.
+        #[serde(default = "default_http_alpn")]
+        pub alpn: Vec<String>,
+        pub auth: GmailAuthConfig,
+    }
+}
+
+/// Gmail authentication; only OAuth 2.0 bearer tokens are accepted.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct GmailAuthConfig {
+    /// OAuth 2.0 bearer access token; the client adds the `Bearer `
+    /// prefix itself. Refresh is the caller's responsibility.
+    pub token: Secret,
+}
+
+side_config! {
+    /// Microsoft Graph API side (`https://graph.microsoft.com`). Mail
+    /// folders are exposed as mailboxes; the API host is fixed, so only
+    /// the mailbox owner, TLS and the OAuth 2.0 credential are
+    /// configurable.
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    pub struct MsgraphConfig {
+        /// Graph user id (the mailbox owner). Defaults to `me`, the
+        /// authenticated user.
+        #[serde(default = "default_msgraph_user_id")]
+        pub user_id: String,
+        #[serde(default)]
+        pub tls: TlsConfig,
+        /// ALPN protocol identifiers offered during the TLS handshake.
+        /// Defaults to `["http/1.1"]`; set to `[]` to skip ALPN.
+        #[serde(default = "default_http_alpn")]
+        pub alpn: Vec<String>,
+        pub auth: MsgraphAuthConfig,
+    }
+}
+
+/// Microsoft Graph authentication; only OAuth 2.0 bearer tokens are
+/// accepted.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct MsgraphAuthConfig {
+    /// OAuth 2.0 bearer access token; the client adds the `Bearer `
+    /// prefix itself. Refresh is the caller's responsibility.
+    pub token: Secret,
+}
+
+fn default_gmail_user_id() -> String {
+    String::from("me")
+}
+
+fn default_msgraph_user_id() -> String {
+    String::from("me")
+}
+
+/// Default ALPN list for the HTTP-based backends (Gmail, Microsoft
+/// Graph): the REST APIs ride on HTTP/1.1.
+fn default_http_alpn() -> Vec<String> {
+    vec![String::from("http/1.1")]
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

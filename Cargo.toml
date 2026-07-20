@@ -78,7 +78,9 @@ tempfile = "3"
 # pimconf.path = "../pimconf"
 
 [patch.crates-io]
-domain = { git = "https://github.com/soywod/domain", branch = "new-srv" }
+# soywod/domain#new-srv is deleted; the commit lives on in the parent repo's
+# network and is fetchable by SHA. "Bring SRV record to new API", 0.12.0.
+domain = { git = "https://github.com/NLnetLabs/domain", rev = "2a72dc6f55212d8b72b046992bc229bfdac48887" }
 imap-codec.git = "https://github.com/soywod/imap-codec"
 io-email.git = "https://github.com/pimalaya/io-email"
 io-http.git = "https://github.com/pimalaya/io-http"

@@ -521,7 +521,7 @@ dependencies = [
 [[package]]
 name = "domain"
 version = "0.12.0"
-source = "git+https://github.com/soywod/domain?branch=new-srv#2a72dc6f55212d8b72b046992bc229bfdac48887"
+source = "git+https://github.com/NLnetLabs/domain?rev=2a72dc6f55212d8b72b046992bc229bfdac48887#2a72dc6f55212d8b72b046992bc229bfdac48887"
 dependencies = [
  "bumpalo",
  "bytes",
@@ -534,7 +534,7 @@ dependencies = [
 [[package]]
 name = "domain-macros"
 version = "0.12.0"
-source = "git+https://github.com/soywod/domain?branch=new-srv#2a72dc6f55212d8b72b046992bc229bfdac48887"
+source = "git+https://github.com/NLnetLabs/domain?rev=2a72dc6f55212d8b72b046992bc229bfdac48887#2a72dc6f55212d8b72b046992bc229bfdac48887"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1334,6 +1334,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shellexpand",
+ "signal-hook",
  "tempfile",
  "toml",
  "url",

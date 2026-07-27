@@ -1,13 +1,11 @@
-//! `neverest init` command: probes both sides and writes the initial
-//! state snapshot that subsequent sync runs consume.
-//!
-//! The state file's presence is the single source of truth for "this
-//! account is initialized".
+//! `neverest init` command: probes both sides and creates the pimdir replica
+//! store whose `pimdir.db` marks the account initialized.
 
-use std::path::PathBuf;
+use std::{fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use io_pimdir::PimdirStore;
 use pimalaya_cli::{
     clap::args::AccountFlag,
     printer::{Message, Printer},
@@ -15,10 +13,9 @@ use pimalaya_cli::{
 };
 use pimalaya_config::toml::TomlConfig;
 
-use crate::{client, config::Config, sync::state::StateSnapshot};
+use crate::{client, config::Config, offline::driver};
 
-/// Initializes an account's per-side state; refuses to run if it is
-/// already initialized.
+/// Initializes an account's replica; refuses to run if it already exists.
 #[derive(Debug, Parser)]
 pub struct InitCommand {
     #[command(flatten)]
@@ -27,32 +24,42 @@ pub struct InitCommand {
 
 impl InitCommand {
     pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
-        let mut config = Config::load_or_wizard(config_paths)?;
+        let mut config = Config::load_or_wizard(printer, config_paths)?;
 
         let account_name = self.account.name.as_deref();
         let Some((name, account_config)) = config.take_account(account_name)? else {
             bail!("Cannot find account");
         };
 
-        let state = StateSnapshot::path(&name)?;
-        if state.exists() {
-            let p = state.display();
-            bail!("Account `{name}` already initialized, delete `{p}` to reset");
+        account_config.validate()?;
+
+        let replica = driver::store_dir(&name, &account_config)?;
+        let store_db = replica.join("pimdir.db");
+        if store_db.exists() {
+            bail!(
+                "Account `{name}` already initialized, delete `{}` to reset",
+                replica.display()
+            );
         }
 
-        let s = Spinner::start("Initializing left side…");
-        client::init(account_config.left.clone()).context("Initialize left side")?;
-        s.success("Initialized left side");
+        let sides = account_config.sides();
+        if sides.is_empty() {
+            bail!("Account `{name}` has no side configured (set `left` and/or `right`)");
+        }
+        for (side, config) in sides {
+            let s = Spinner::start(format!("Initializing {side} side…"));
+            client::init(config.clone()).with_context(|| format!("Initialize {side} side"))?;
+            s.success(format!("Initialized {side} side"));
+        }
 
-        let s = Spinner::start("Initializing right side…");
-        client::init(account_config.right.clone()).context("Initialize right side")?;
-        s.success("Initialized right side");
-
-        let s = Spinner::start("Writing initial state snapshot…");
-        StateSnapshot::default()
-            .save(&state)
-            .context(format!("Write initial state `{}`", state.display()))?;
-        s.success("Wrote initial state snapshot");
+        let s = Spinner::start("Creating replica store…");
+        fs::create_dir_all(&replica)
+            .with_context(|| format!("Create replica dir `{}`", replica.display()))?;
+        // NOTE: opening the store materializes `pimdir.db` (and its schema); the
+        // handle is dropped immediately, the sync opens its own.
+        PimdirStore::open(&replica, "left")
+            .with_context(|| format!("Create pimdir store `{}`", replica.display()))?;
+        s.success("Created replica store");
 
         printer.out(Message::new(format!(
             "Account `{name}` successfully initialized"

@@ -28,7 +28,7 @@ Everything in the v0.1.0 → v1.0.0-rc section above applies. v1.0.0-beta only a
 |---|---|
 | `folder.filters = "..."` (already plural in v1.0.0-beta) | `mailbox.filters = "..."` |
 | `envelope.filters.{before,after}` | removed |
-| `left\|right.folder.aliases.<name> = "..."` (per-side) | `[accounts.<account>.mailbox.alias]` `<name> = "..."` (single shared table) |
+| `left\|right.folder.aliases.<name> = "..."` (per-side) | removed |
 
 `color-eyre`'s spantrace/backtrace output is gone; errors now flow through `anyhow` + `pimalaya_cli::error::ErrorReport`. `tracing` is replaced by `log`.
 

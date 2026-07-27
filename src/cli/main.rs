@@ -24,8 +24,10 @@ use crate::cli::{
 #[command(long_version = long_version!())]
 #[command(propagate_version = true, infer_subcommands = true)]
 pub struct Cli {
+    /// The command to run; a bare `neverest` (no subcommand) runs the
+    /// configuration wizard instead.
     #[command(subcommand)]
-    pub command: Command,
+    pub command: Option<Command>,
 
     /// Override the default configuration file path.
     ///

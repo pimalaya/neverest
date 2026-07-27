@@ -1,70 +1,67 @@
-//! Re-runs the wizard over an existing account, pre-filling prompts
-//! with current values; auth secrets are always re-prompted.
+//! Re-runs the wizard over an existing account.
+//!
+//! `neverest configure` runs the same discovery flow as the first-run
+//! wizard (see [`super::discover`]), seeding the email prompt from the
+//! account's current side. It owns the `left` side and the send channel
+//! only: the `default` flag, the store, the collection and item settings,
+//! the connection budget and a hand-written `right` side are carried
+//! over untouched, since remote-to-remote sides are configured by hand.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use log::info;
-use pimalaya_cli::{
-    prompt,
-    wizard::{
-        imap::{
-            self as imap_wizard, Encryption as ImapEncryption, ImapAuth, ImapSecret,
-            WizardImapConfig,
-        },
-        jmap::{self as jmap_wizard, JmapAuth, JmapSecret, WizardJmapConfig},
-    },
-};
 
 use crate::{
-    config::{
-        AccountConfig, Config, FlagSidePermissions, ImapConfig, JmapAuthConfig, JmapConfig,
-        M2dirConfig, MailboxSidePermissions, MessageSidePermissions, SaslConfig, SideConfig,
-    },
-    wizard::account::{imap_to_config, jmap_to_config},
+    config::{AccountConfig, Config, JmapAuthConfig, SaslConfig, SideBackendConfig, SideConfig},
+    wizard::discover,
 };
 
 /// Edits (or creates) `account_name`, then writes `config` to `target`.
 pub fn edit_account(target: &Path, mut config: Config, account_name: &str) -> Result<Config> {
     let existing = config.accounts.remove(account_name);
 
-    let (left_default, right_default) = match existing.as_ref() {
-        Some(a) => (Some(&a.left), Some(&a.right)),
-        None => (None, None),
-    };
+    let default_email = existing
+        .as_ref()
+        .and_then(|account| account.left.as_ref().or(account.right.as_ref()))
+        .and_then(side_email);
 
-    let default_email = right_default
-        .and_then(side_email)
-        .or_else(|| left_default.and_then(side_email));
+    if existing.as_ref().is_some_and(|a| a.right.is_some()) {
+        eprintln!(
+            "This account syncs two remotes; the wizard configures the `left` side, and keeps `right` as configured."
+        );
+    }
 
-    let email = prompt::text("Email address:", default_email.as_deref())?;
-    let (local_part, domain) = email
-        .rsplit_once('@')
-        .ok_or_else(|| anyhow!("Invalid email address `{email}`: missing `@`"))?;
+    let email = discover::prompt_email_with(default_email.as_deref())?;
+    let mut side = discover::configure(account_name, &email)?;
 
+    // The wizard never invents a submission server, so a run that
+    // discovered none keeps the channel the side already carried.
+    if side.smtp.is_none() {
+        side.smtp = existing
+            .as_ref()
+            .and_then(|account| account.left.as_ref())
+            .and_then(|left| left.smtp.clone());
+    }
+
+    // A fresh account is the default one when it is the only one; an
+    // existing account keeps whatever it was.
     let is_first_account = config.accounts.is_empty() && existing.is_none();
-    let default = existing
-        .as_ref()
-        .map(|a| a.default)
-        .unwrap_or(is_first_account);
-    let mailbox = existing
-        .as_ref()
-        .map(|a| a.mailbox.clone())
-        .unwrap_or_default();
-    let message = existing
-        .as_ref()
-        .map(|a| a.message.clone())
-        .unwrap_or_default();
 
-    let left = prompt_side("left", local_part, domain, account_name, left_default)?;
-    let right = prompt_side("right", local_part, domain, account_name, right_default)?;
-
-    let account = AccountConfig {
-        default,
-        left,
-        right,
-        mailbox,
-        message,
+    let account = match existing {
+        Some(existing) => AccountConfig {
+            left: Some(side),
+            ..existing
+        },
+        None => AccountConfig {
+            default: is_first_account,
+            left: Some(side),
+            right: None,
+            store: Default::default(),
+            collection: Default::default(),
+            item: Default::default(),
+            connections: None,
+        },
     };
 
     config.accounts.insert(account_name.to_owned(), account);
@@ -74,147 +71,71 @@ pub fn edit_account(target: &Path, mut config: Config, account_name: &str) -> Re
     Ok(config)
 }
 
-/// Re-runs the wizard for one side; pre-fills from `existing` when set.
-fn prompt_side(
-    label: &str,
-    local_part: &str,
-    domain: &str,
-    account_name: &str,
-    existing: Option<&SideConfig>,
-) -> Result<SideConfig> {
-    match existing {
-        Some(SideConfig::Jmap(c)) => {
-            let defaults = jmap_to_wizard(c);
-            let wizard_name = format!("{account_name} {label}");
-            let jmap = jmap_wizard::run(&wizard_name, local_part, domain, Some(&defaults))?;
-            Ok(SideConfig::Jmap(jmap_to_config(jmap)?))
-        }
-        Some(SideConfig::Imap(c)) => {
-            let defaults = imap_to_wizard(c);
-            let wizard_name = format!("{account_name} {label}");
-            let imap = imap_wizard::run(&wizard_name, local_part, domain, Some(&defaults))?;
-            Ok(SideConfig::Imap(imap_to_config(imap)?))
-        }
-        Some(SideConfig::Gmail(c)) => {
-            info!("{label} side keeps its Gmail backend; edit the config file to change it");
-            Ok(SideConfig::Gmail(c.clone()))
-        }
-        Some(SideConfig::Msgraph(c)) => {
-            info!(
-                "{label} side keeps its Microsoft Graph backend; edit the config file to change it"
-            );
-            Ok(SideConfig::Msgraph(c.clone()))
-        }
-        Some(SideConfig::M2dir(c)) => {
-            let root = prompt::text(
-                format!("{label} m2dir store root:"),
-                Some(c.root.display().to_string()),
-            )?;
-            Ok(SideConfig::M2dir(M2dirConfig {
-                root: PathBuf::from(root),
-                mailbox: c.mailbox,
-                flag: c.flag,
-                message: c.message,
-                pool_size: c.pool_size,
-            }))
-        }
-        None => {
-            let default_root = format!("~/Mail/{account_name}-{label}");
-            let root = prompt::text(format!("{label} m2dir store root:"), Some(default_root))?;
-            Ok(SideConfig::M2dir(M2dirConfig {
-                root: PathBuf::from(root),
-                mailbox: MailboxSidePermissions::default(),
-                flag: FlagSidePermissions::default(),
-                message: MessageSidePermissions::default(),
-                pool_size: None,
-            }))
-        }
-    }
-}
-
-/// User-facing email for a side, when extractable.
+/// User-facing email for a side, seeding the email prompt when
+/// extractable.
 fn side_email(side: &SideConfig) -> Option<String> {
-    match side {
-        SideConfig::Imap(c) => Some(sasl_login(c.sasl.as_ref())).filter(|s| !s.is_empty()),
-        SideConfig::Jmap(c) => match &c.auth {
+    match &side.backend {
+        SideBackendConfig::Imap(c) => sasl_login(c.sasl.as_ref()),
+        SideBackendConfig::Jmap(c) => match &c.auth {
             JmapAuthConfig::Basic { username, .. } if !username.is_empty() => {
                 Some(username.clone())
             }
             _ => None,
         },
-        SideConfig::Gmail(_) | SideConfig::Msgraph(_) => None,
-        SideConfig::M2dir(_) => None,
+        SideBackendConfig::Gmail(_) | SideBackendConfig::Msgraph(_) => None,
+        // A DAV account authenticates with a username, not an email address,
+        // and the two differ often enough not to seed a prompt with one.
+        SideBackendConfig::Carddav(_) => None,
     }
 }
 
-/// Default [`WizardImapConfig`] derived from an existing
-/// [`ImapConfig`]; the auth secret is reset.
-pub fn imap_to_wizard(c: &ImapConfig) -> WizardImapConfig {
-    let (scheme, host, port_from_url) = parse_server(&c.server, "imaps");
-    let encryption = match scheme.as_str() {
-        "imaps" => ImapEncryption::Tls,
-        _ if c.starttls => ImapEncryption::StartTls,
-        _ => ImapEncryption::None,
-    };
-    let port = port_from_url.unwrap_or(match encryption {
-        ImapEncryption::Tls => 993,
-        _ => 143,
-    });
-    let login = sasl_login(c.sasl.as_ref());
-
-    WizardImapConfig {
-        host,
-        port,
-        encryption,
-        login,
-        auth: ImapAuth::Password(ImapSecret::Raw(String::new().into())),
-    }
-}
-
-/// JMAP counterpart of [`imap_to_wizard`].
-pub fn jmap_to_wizard(c: &JmapConfig) -> WizardJmapConfig {
-    let auth = match &c.auth {
-        JmapAuthConfig::Basic { username, .. } => JmapAuth::Basic {
-            login: username.clone(),
-            secret: JmapSecret::Raw(String::new().into()),
-        },
-        JmapAuthConfig::Bearer { .. } | JmapAuthConfig::Header(_) => JmapAuth::Bearer {
-            secret: JmapSecret::Raw(String::new().into()),
-        },
+/// The user-facing login of a SASL block, when it carries one.
+fn sasl_login(sasl: Option<&SaslConfig>) -> Option<String> {
+    let login = match sasl? {
+        SaslConfig::Plain(c) => c.authcid.clone(),
+        SaslConfig::Login(c) => c.username.clone(),
+        SaslConfig::Oauthbearer(c) => c.username.clone(),
+        SaslConfig::Xoauth2(c) => c.username.clone(),
+        SaslConfig::ScramSha256(c) => c.username.clone(),
+        SaslConfig::Anonymous(_) => return None,
     };
 
-    WizardJmapConfig {
-        server: c.server.clone(),
-        auth,
-    }
+    Some(login).filter(|login| !login.is_empty())
 }
 
-/// Extracts the user-facing login from a SASL block, or "" when none.
-fn sasl_login(sasl: Option<&SaslConfig>) -> String {
-    match sasl {
-        Some(SaslConfig::Plain(p)) => p.authcid.clone(),
-        Some(SaslConfig::Login(l)) => l.username.clone(),
-        Some(SaslConfig::Oauthbearer(o)) => o.username.clone(),
-        Some(SaslConfig::Xoauth2(x)) => x.username.clone(),
-        Some(SaslConfig::ScramSha256(s)) => s.username.clone(),
-        Some(SaslConfig::Anonymous(_)) | None => String::new(),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use pimalaya_config::secret::Secret;
 
-/// Best-effort URL split into `(scheme, host, port?)`; tolerates bare
-/// authorities by defaulting the scheme.
-fn parse_server(server: &str, default_scheme: &'static str) -> (String, String, Option<u16>) {
-    if let Ok(url) = url::Url::parse(server) {
-        let scheme = url.scheme().to_owned();
-        let host = url.host_str().map(str::to_owned).unwrap_or_default();
-        let port = url.port_or_known_default();
-        return (scheme, host, port);
+    use super::*;
+    use crate::config::{ImapConfig, SaslAnonymousConfig, SaslPlainConfig};
+
+    fn imap_side(sasl: Option<SaslConfig>) -> SideConfig {
+        SideConfig::new(SideBackendConfig::Imap(ImapConfig {
+            server: "imaps://imap.example.org:993".into(),
+            tls: Default::default(),
+            starttls: false,
+            alpn: None,
+            sasl,
+            collection: Default::default(),
+            flag: Default::default(),
+            item: Default::default(),
+            pool_size: None,
+        }))
     }
-    if let Ok(url) = url::Url::parse(&format!("{default_scheme}://{server}")) {
-        let scheme = url.scheme().to_owned();
-        let host = url.host_str().map(str::to_owned).unwrap_or_default();
-        let port = url.port();
-        return (scheme, host, port);
+
+    #[test]
+    fn the_email_prompt_is_seeded_from_the_side_login() {
+        let side = imap_side(Some(SaslConfig::Plain(SaslPlainConfig {
+            authzid: None,
+            authcid: "user@example.org".into(),
+            passwd: Secret::Raw(String::from("pw").into()),
+        })));
+        assert_eq!(side_email(&side), Some("user@example.org".into()));
+
+        // A credential-less side carries no login to seed with.
+        let anonymous = imap_side(Some(SaslConfig::Anonymous(SaslAnonymousConfig::default())));
+        assert_eq!(side_email(&anonymous), None);
+        assert_eq!(side_email(&imap_side(None)), None);
     }
-    (default_scheme.to_owned(), server.to_owned(), None)
 }

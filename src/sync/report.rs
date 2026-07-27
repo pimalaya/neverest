@@ -7,26 +7,175 @@ use serde::Serialize;
 
 use crate::{
     side::Side,
-    sync::hunk::{EmailHunk, MailboxHunk},
+    sync::hunk::{CollectionHunk, ItemHunk},
 };
 
 #[derive(Debug, Default, Serialize)]
 pub struct SyncReport {
     pub account: String,
     pub dry_run: bool,
-    pub mailbox: PatchOutcome<MailboxHunk>,
-    pub email: PatchOutcome<EmailHunk>,
+    pub collection: PatchOutcome<CollectionHunk>,
+    pub item: PatchOutcome<ItemHunk>,
     /// Content-key collisions surfaced this sync (first envelope kept,
     /// rest skipped).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collisions: Vec<MessageCollision>,
+    /// Frontend-queued actions the pre-sync drain applied, per
+    /// collection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drained: Vec<DrainedQueue>,
+    /// Queue actions parked as permanently unappliable, surfaced until
+    /// an operator repairs them (counted as warnings).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parked: Vec<ParkedQueueAction>,
+    /// The queued submit intents attempted this run, one entry each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub submitted: Vec<SubmitEntry>,
+    /// What the retention sweep reclaimed, when one ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purged: Option<PurgedItems>,
+    /// Items whose content diverged on both sides and were left conflicted.
+    /// Re-reported by every run until resolved (counted as warnings).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<ItemConflict>,
+}
+
+/// One item left conflicted: its content changed on both sides against a
+/// shared base, so neither could win without losing an edit.
+///
+/// Neverest never resolves one by itself — resolution is an edit, and whose
+/// edit wins is not a decision a sync run can make. The item is reported here
+/// on every run until someone settles it (a frontend stages the merged body
+/// through the pimdir queue's `update` action).
+///
+/// Only mutable-content kinds can reach this state: mail bodies are immutable,
+/// so a mail sync never reports a conflict.
+#[derive(Debug, Serialize)]
+pub struct ItemConflict {
+    pub side: Side,
+    pub collection: String,
+    /// The item's handle on that side.
+    pub id: String,
+}
+
+impl fmt::Display for ItemConflict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            id,
+        } = self;
+        write!(
+            f,
+            "item `{id}` in `{collection}` on {side} changed on both sides and is left conflicted"
+        )
+    }
+}
+
+/// One collection's applied count from the pre-sync queue drain.
+#[derive(Debug, Serialize)]
+pub struct DrainedQueue {
+    pub collection: String,
+    /// Actions applied to the store and deleted from the queue.
+    pub applied: usize,
+}
+
+impl fmt::Display for DrainedQueue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            collection,
+            applied,
+        } = self;
+        write!(f, "applied {applied} queued action(s) in `{collection}`")
+    }
+}
+
+/// One queue action the drain parked as permanently unappliable
+/// (malformed payload, unknown target); it stays queryable in the store
+/// until repaired and is re-reported by every run.
+#[derive(Debug, Serialize)]
+pub struct ParkedQueueAction {
+    /// The queue row's global append id.
+    pub id: i64,
+    pub collection: String,
+    /// The raw action kind (`add`, `set_flags`, …).
+    pub action: String,
+    /// The enqueuing process, diagnostic only.
+    pub producer: String,
+    /// The failure that parked the row.
+    pub error: String,
+}
+
+impl fmt::Display for ParkedQueueAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            id,
+            collection,
+            action,
+            producer,
+            error,
+        } = self;
+        write!(
+            f,
+            "parked queue action #{id} (`{action}` in `{collection}` from `{producer}`): {error}"
+        )
+    }
+}
+
+/// One submit intent attempted this run: acknowledged (its queue row
+/// dropped, releasing the body's pin) when `error` is `None`, parked when
+/// the failure is permanent, left pending otherwise.
+#[derive(Debug, Serialize)]
+pub struct SubmitEntry {
+    /// The queue row's global append id.
+    pub id: i64,
+    /// The collection the intent was anchored on.
+    pub collection: String,
+    /// The submitted item's subject, when the intent payload carried one.
+    pub subject: Option<String>,
+    /// Formatted send error; `None` on success.
+    pub error: Option<String>,
+    /// Whether the failure parked the row (permanent) rather than leaving
+    /// it pending for the next run (transient). Always false on success.
+    pub parked: bool,
+}
+
+impl fmt::Display for SubmitEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let subject = self.subject.as_deref().unwrap_or("<no subject>");
+        match (&self.error, self.parked) {
+            (None, _) => write!(f, "submitted `{subject}`"),
+            (Some(err), true) => write!(f, "`{subject}` parked, never retried: {err}"),
+            (Some(err), false) => write!(f, "`{subject}` not submitted, retried next run: {err}"),
+        }
+    }
+}
+
+/// What the retention sweep reclaimed: the retained (soft-deleted) items
+/// purged past `store.purge-after`, and the bytes their bodies freed.
+#[derive(Debug, Serialize)]
+pub struct PurgedItems {
+    /// Retained items deleted for good.
+    pub items: usize,
+    /// Blob bytes reclaimed with them.
+    pub bytes: u64,
+}
+
+impl fmt::Display for PurgedItems {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { items, bytes } = self;
+        write!(
+            f,
+            "purged {items} retained item(s), {bytes} byte(s) reclaimed"
+        )
+    }
 }
 
 /// One content-key collision group; first id in `ids` is the kept one.
 #[derive(Debug, Serialize)]
 pub struct MessageCollision {
     pub side: Side,
-    pub mailbox: String,
+    pub collection: String,
     /// Shared `Message-ID:` when every envelope carried one; `None`
     /// when the legacy `(subject, date, from)` fallback collapsed
     /// envelopes without a header.
@@ -38,7 +187,7 @@ impl fmt::Display for MessageCollision {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             side,
-            mailbox,
+            collection,
             message_id,
             ids,
         } = self;
@@ -52,11 +201,11 @@ impl fmt::Display for MessageCollision {
         match message_id {
             Some(mid) => write!(
                 f,
-                "skip {skipped} on {side} `{mailbox}`: same Message-ID `{mid}` as `{kept}`"
+                "skip {skipped} on {side} `{collection}`: same Message-ID `{mid}` as `{kept}`"
             ),
             None => write!(
                 f,
-                "skip {skipped} on {side} `{mailbox}`: same subject/date/sender as `{kept}` (no Message-ID header)"
+                "skip {skipped} on {side} `{collection}`: same subject/date/sender as `{kept}` (no Message-ID header)"
             ),
         }
     }
@@ -93,35 +242,61 @@ impl fmt::Display for SyncReport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f)?;
 
-        let total = self.mailbox.patch.len() + self.email.patch.len();
+        let total = self.collection.patch.len() + self.item.patch.len();
         let mailbox_errors = self
-            .mailbox
+            .collection
             .patch
             .iter()
             .filter(|e| e.error.is_some())
             .count();
-        let email_errors = self
-            .email
-            .patch
-            .iter()
-            .filter(|e| e.error.is_some())
-            .count();
-        let errors = mailbox_errors + email_errors;
-        let warnings = self.collisions.len();
+        let item_errors = self.item.patch.iter().filter(|e| e.error.is_some()).count();
+        let submit_errors = self.submitted.iter().filter(|e| e.error.is_some()).count();
+        let errors = mailbox_errors + item_errors + submit_errors;
+        let warnings = self.collisions.len() + self.parked.len() + self.conflicts.len();
 
-        if !self.mailbox.patch.is_empty() {
-            writeln!(f, "Mailbox patches ({n}):", n = self.mailbox.patch.len())?;
-            for entry in &self.mailbox.patch {
+        if !self.drained.is_empty() {
+            writeln!(f, "Queue ({n}):", n = self.drained.len())?;
+            for entry in &self.drained {
+                writeln!(f, " - {entry}")?;
+            }
+            writeln!(f)?;
+        }
+
+        if !self.submitted.is_empty() {
+            writeln!(f, "Submissions ({n}):", n = self.submitted.len())?;
+            for entry in &self.submitted {
+                writeln!(f, " - {entry}")?;
+            }
+            writeln!(f)?;
+        }
+
+        if !self.collection.patch.is_empty() {
+            writeln!(
+                f,
+                "Collection patches ({n}):",
+                n = self.collection.patch.len()
+            )?;
+            for entry in &self.collection.patch {
                 writeln!(f, " - {hunk}", hunk = entry.hunk)?;
             }
             writeln!(f)?;
         }
 
-        if !self.email.patch.is_empty() {
-            writeln!(f, "Message patches ({n}):", n = self.email.patch.len())?;
-            for entry in &self.email.patch {
+        if !self.item.patch.is_empty() {
+            writeln!(f, "Item patches ({n}):", n = self.item.patch.len())?;
+            for entry in &self.item.patch {
                 writeln!(f, " - {hunk}", hunk = entry.hunk)?;
             }
+            writeln!(f)?;
+        }
+
+        // NOTE: only rendered when something was actually reclaimed, so a run
+        // whose sweep found nothing (the common case) stays quiet.
+        if let Some(purged) = &self.purged
+            && purged.items > 0
+        {
+            writeln!(f, "Retention:")?;
+            writeln!(f, " - {purged}")?;
             writeln!(f)?;
         }
 
@@ -130,12 +305,18 @@ impl fmt::Display for SyncReport {
             for c in &self.collisions {
                 writeln!(f, " - {c}")?;
             }
+            for c in &self.conflicts {
+                writeln!(f, " - {c}")?;
+            }
+            for p in &self.parked {
+                writeln!(f, " - {p}")?;
+            }
             writeln!(f)?;
         }
 
         if errors > 0 {
             writeln!(f, "Errors ({errors}):")?;
-            for entry in self.mailbox.patch.iter().filter(|e| e.error.is_some()) {
+            for entry in self.collection.patch.iter().filter(|e| e.error.is_some()) {
                 writeln!(
                     f,
                     " - {hunk}: {err}",
@@ -143,7 +324,7 @@ impl fmt::Display for SyncReport {
                     err = entry.error.as_deref().unwrap_or_default(),
                 )?;
             }
-            for entry in self.email.patch.iter().filter(|e| e.error.is_some()) {
+            for entry in self.item.patch.iter().filter(|e| e.error.is_some()) {
                 writeln!(
                     f,
                     " - {hunk}: {err}",
@@ -156,31 +337,31 @@ impl fmt::Display for SyncReport {
 
         let account = &self.account;
         match (total, errors, warnings, self.dry_run) {
-            (0, 0, 0, _) => write!(f, "Account `{account}` is already in sync"),
-            (0, 0, w, _) => write!(f, "Account `{account}` is already in sync ({w} warnings)"),
-            (n, 0, 0, true) => write!(f, "Account `{account}` would apply {n} hunks"),
-            (n, 0, w, true) => write!(
+            (0, 0, 0, _) => writeln!(f, "Account `{account}` is already in sync"),
+            (0, 0, w, _) => writeln!(f, "Account `{account}` is already in sync ({w} warnings)"),
+            (n, 0, 0, true) => writeln!(f, "Account `{account}` would apply {n} hunks"),
+            (n, 0, w, true) => writeln!(
                 f,
                 "Account `{account}` would apply {n} hunks ({w} warnings)"
             ),
-            (n, e, 0, true) => write!(
+            (n, e, 0, true) => writeln!(
                 f,
                 "Account `{account}` would apply {n} hunks ({e} would fail)"
             ),
-            (n, e, w, true) => write!(
+            (n, e, w, true) => writeln!(
                 f,
                 "Account `{account}` would apply {n} hunks ({e} would fail, {w} warnings)"
             ),
-            (n, 0, 0, false) => write!(f, "Account `{account}` synchronized: {n} hunks"),
-            (n, 0, w, false) => write!(
+            (n, 0, 0, false) => writeln!(f, "Account `{account}` synchronized: {n} hunks"),
+            (n, 0, w, false) => writeln!(
                 f,
                 "Account `{account}` synchronized: {n} hunks, {w} warnings"
             ),
-            (n, e, 0, false) => write!(
+            (n, e, 0, false) => writeln!(
                 f,
                 "Account `{account}` partially synchronized: {n} hunks, {e} errors"
             ),
-            (n, e, w, false) => write!(
+            (n, e, w, false) => writeln!(
                 f,
                 "Account `{account}` partially synchronized: {n} hunks, {e} errors, {w} warnings"
             ),

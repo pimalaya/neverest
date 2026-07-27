@@ -1,198 +1,162 @@
-//! Atomic sync work units: mailbox / message / flag hunks emitted by
-//! the diff and applied by the worker pool.
+//! Report DTOs: the collection / item / flag changes a sync applied, rendered
+//! in the printed report and `--json`.
+//!
+//! These were the applied work units of the v1 engine; under io-replica they
+//! are pure descriptors the driver emits for each cross-side propagation step
+//! (the per-side server reconcile is internal and not itemized). `content_key`
+//! is the cross-side alignment key, skipped from JSON to keep the report shape
+//! stable.
 
-use std::collections::BTreeSet;
-use std::fmt;
+use std::{collections::BTreeSet, fmt};
 
-use anyhow::Result;
-use io_email::{
-    client::EmailClientStd,
-    flag::types::{Flag, FlagOp},
-};
 use serde::Serialize;
 
-use crate::side::Side;
+use crate::{item::flag::Flag, side::Side};
 
-/// Mailbox-level patch hunk: create or delete a mailbox on one side.
+/// Collection-level change: create or delete a collection on one side.
+///
+/// `Delete` is kept for the report and --json shape, though collection
+/// deletion is not propagated yet (only creation).
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum MailboxHunk {
-    Create { side: Side, mailbox: String },
-    Delete { side: Side, mailbox: String },
+#[allow(dead_code)]
+pub enum CollectionHunk {
+    Create { side: Side, collection: String },
+    Delete { side: Side, collection: String },
 }
 
-impl MailboxHunk {
-    /// Applies the hunk via the side's client.
-    pub fn apply(&self, left: &mut EmailClientStd, right: &mut EmailClientStd) -> Result<()> {
-        match self {
-            Self::Create { side, mailbox } => {
-                side.client_mut(left, right).create_mailbox(mailbox)?;
-            }
-            Self::Delete { side, mailbox } => {
-                side.client_mut(left, right).delete_mailbox(mailbox)?;
-            }
-        }
-        Ok(())
-    }
-}
-
-impl fmt::Display for MailboxHunk {
+impl fmt::Display for CollectionHunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Create { side, mailbox } => write!(f, "create mailbox `{mailbox}` on {side}"),
-            Self::Delete { side, mailbox } => write!(f, "delete mailbox `{mailbox}` on {side}"),
+            Self::Create { side, collection } => {
+                write!(f, "create collection `{collection}` on {side}")
+            }
+            Self::Delete { side, collection } => {
+                write!(f, "delete collection `{collection}` on {side}")
+            }
         }
     }
 }
 
-/// Message-level patch hunk; `content_key` is the cross-side alignment
-/// key, skipped from JSON to keep the report shape stable.
+/// Item-level change.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum EmailHunk {
-    /// Copy a message from `source_side` to `target_side`; `apply`
-    /// returns the new backend-assigned id on the target side.
+pub enum ItemHunk {
+    /// Copy an item from `source_side` to `target_side`.
     Copy {
         source_side: Side,
         target_side: Side,
-        mailbox: String,
+        collection: String,
         source_id: String,
         flags: BTreeSet<Flag>,
         #[serde(skip)]
         content_key: u64,
     },
-    /// Add `flags` on `side`'s copy of the message.
+    /// Add `flags` on `side`'s copy of the item.
     AddFlags {
         side: Side,
-        mailbox: String,
+        collection: String,
         id: String,
         flags: BTreeSet<Flag>,
         #[serde(skip)]
         content_key: u64,
     },
-    /// Remove `flags` from `side`'s copy of the message.
+    /// Remove `flags` from `side`'s copy of the item.
     RemoveFlags {
         side: Side,
-        mailbox: String,
+        collection: String,
         id: String,
         flags: BTreeSet<Flag>,
         #[serde(skip)]
         content_key: u64,
     },
-    /// Delete `side`'s copy of the message via `delete_message`.
+    /// Delete `side`'s copy of the item.
     Delete {
         side: Side,
-        mailbox: String,
+        collection: String,
+        id: String,
+        #[serde(skip)]
+        content_key: u64,
+    },
+    /// Fetch (download) an item from `side` into the local store — the pull
+    /// plan of a one-source local sync (reported by a dry run; a real run just
+    /// hydrates it).
+    Fetch {
+        side: Side,
+        collection: String,
+        id: String,
+        #[serde(skip)]
+        content_key: u64,
+    },
+    /// Replace `side`'s copy of the item's body in place — a mutable-content
+    /// edit. Never emitted for mail, whose bodies are immutable.
+    Update {
+        side: Side,
+        collection: String,
         id: String,
         #[serde(skip)]
         content_key: u64,
     },
 }
 
-impl EmailHunk {
-    /// Applies the hunk; returns `Some(new_id)` for a successful
-    /// `Copy` and `None` for the other variants.
-    pub fn apply(
-        &self,
-        left: &mut EmailClientStd,
-        right: &mut EmailClientStd,
-    ) -> Result<Option<String>> {
-        match self {
-            Self::Copy {
-                source_side,
-                target_side,
-                mailbox,
-                source_id,
-                flags,
-                ..
-            } => {
-                let (source, target) = Side::pair_mut(*source_side, *target_side, left, right)?;
-                let raw = source.get_message(mailbox, source_id)?;
-                let flag_list: Vec<Flag> = flags.iter().cloned().collect();
-                let target_id = target.add_message(mailbox, &flag_list, raw)?;
-                Ok(Some(target_id))
-            }
-            Self::AddFlags {
-                side,
-                mailbox,
-                id,
-                flags,
-                ..
-            } => {
-                let flag_list: Vec<Flag> = flags.iter().cloned().collect();
-                side.client_mut(left, right).store_flags(
-                    mailbox,
-                    &[id.as_str()],
-                    &flag_list,
-                    FlagOp::Add,
-                )?;
-                Ok(None)
-            }
-            Self::RemoveFlags {
-                side,
-                mailbox,
-                id,
-                flags,
-                ..
-            } => {
-                let flag_list: Vec<Flag> = flags.iter().cloned().collect();
-                side.client_mut(left, right).store_flags(
-                    mailbox,
-                    &[id.as_str()],
-                    &flag_list,
-                    FlagOp::Remove,
-                )?;
-                Ok(None)
-            }
-            Self::Delete {
-                side, mailbox, id, ..
-            } => {
-                side.client_mut(left, right).delete_message(mailbox, id)?;
-                Ok(None)
-            }
-        }
-    }
-}
-
-impl fmt::Display for EmailHunk {
+impl fmt::Display for ItemHunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Copy {
                 source_side,
                 target_side,
-                mailbox,
+                collection,
                 source_id,
                 ..
             } => write!(
                 f,
-                "copy message `{source_id}` in `{mailbox}` from {source_side} to {target_side}"
+                "copy item `{source_id}` in `{collection}` from {source_side} to {target_side}"
             ),
             Self::AddFlags {
                 side,
-                mailbox,
+                collection,
                 id,
                 flags,
                 ..
             } => write!(
                 f,
-                "add {flags} to message `{id}` in `{mailbox}` on {side}",
+                "add {flags} to item `{id}` in `{collection}` on {side}",
                 flags = format_flag_list(flags),
             ),
             Self::RemoveFlags {
                 side,
-                mailbox,
+                collection,
                 id,
                 flags,
                 ..
             } => write!(
                 f,
-                "remove {flags} from message `{id}` in `{mailbox}` on {side}",
+                "remove {flags} from item `{id}` in `{collection}` on {side}",
                 flags = format_flag_list(flags),
             ),
             Self::Delete {
-                side, mailbox, id, ..
+                side,
+                collection,
+                id,
+                ..
             } => {
-                write!(f, "delete message `{id}` in `{mailbox}` on {side}")
+                write!(f, "delete item `{id}` in `{collection}` on {side}")
+            }
+            Self::Fetch {
+                side,
+                collection,
+                id,
+                ..
+            } => {
+                write!(f, "fetch item `{id}` in `{collection}` from {side}")
+            }
+            Self::Update {
+                side,
+                collection,
+                id,
+                ..
+            } => {
+                write!(f, "update item `{id}` in `{collection}` on {side}")
             }
         }
     }

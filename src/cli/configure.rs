@@ -13,6 +13,8 @@ use pimalaya_config::toml::TomlConfig;
 
 use crate::{config::Config, wizard::edit::edit_account};
 
+/// Re-runs the wizard over an existing account, seeded with its current
+/// values, and saves the result.
 #[derive(Debug, Parser)]
 pub struct ConfigureCommand {
     #[command(flatten)]
@@ -21,7 +23,7 @@ pub struct ConfigureCommand {
 
 impl ConfigureCommand {
     pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
-        let config = Config::load_or_wizard(config_paths)?;
+        let config = Config::load_or_wizard(printer, config_paths)?;
 
         let name = match self.account.name.as_deref() {
             Some(name) => name.to_owned(),

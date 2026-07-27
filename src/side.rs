@@ -1,13 +1,10 @@
-//! Per-side dispatch tag carried by hunks and cache entries.
+//! Per-side dispatch tag carried by report hunks and the replica index.
 
 use std::fmt;
 
-use anyhow::{Result, bail};
-use io_email::client::EmailClientStd;
 use serde::{Deserialize, Serialize};
 
-/// Which half of the sync a value belongs to. Pure tag; carried by hunks
-/// and cache entries.
+/// Which half of the sync a value belongs to. Pure tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Side {
@@ -16,30 +13,11 @@ pub enum Side {
 }
 
 impl Side {
-    /// Selects the matching client from a `(left, right)` mutable pair.
-    pub fn client_mut<'a>(
-        self,
-        left: &'a mut EmailClientStd,
-        right: &'a mut EmailClientStd,
-    ) -> &'a mut EmailClientStd {
+    /// The opposite side.
+    pub fn other(self) -> Side {
         match self {
-            Side::Left => left,
-            Side::Right => right,
-        }
-    }
-
-    /// Returns the `(source, target)` client pair for a `Copy` hunk;
-    /// errors when `source == target`.
-    pub fn pair_mut<'a>(
-        source: Side,
-        target: Side,
-        left: &'a mut EmailClientStd,
-        right: &'a mut EmailClientStd,
-    ) -> Result<(&'a mut EmailClientStd, &'a mut EmailClientStd)> {
-        match (source, target) {
-            (Side::Left, Side::Right) => Ok((left, right)),
-            (Side::Right, Side::Left) => Ok((right, left)),
-            _ => bail!("Copy hunk has identical source and target side"),
+            Side::Left => Side::Right,
+            Side::Right => Side::Left,
         }
     }
 }

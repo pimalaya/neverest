@@ -1,12 +1,10 @@
-//! Bidirectional 3-way sync: diff math, hunk types, state snapshot,
-//! worker pool, and the `run` entry point.
+//! Report DTOs shared with the printer.
+//!
+//! The reconcile engine moved to [`crate::offline`] (io-replica). What remains
+//! here is the user-facing report shape: [`hunk`] describes one applied change
+//! and [`report`] aggregates them into the printed `SyncReport`. The driver
+//! translates what io-replica did back into these DTOs so the CLI output stays
+//! stable.
 
-mod sync;
-
-pub mod diff;
 pub mod hunk;
-pub mod pool;
 pub mod report;
-pub mod state;
-
-pub use sync::*;

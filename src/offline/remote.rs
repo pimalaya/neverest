@@ -19,7 +19,7 @@
 //! the complete snapshot against the stored placements. `fetch` resolves the link
 //! id from the `Message-ID` header
 //! (ENVELOPE only at the `Meta` tier, the raw body at `Full`); `push`
-//! maps the four [`ReplicaChange`] variants onto `store_flags`/
+//! maps the four [`ReplicaChangeKind`] variants onto `store_flags`/
 //! `delete_item`/`move_items`/`add_item_stream`.
 //!
 //! The link id is the message's `Message-ID` (prefixed `mid:`), falling
@@ -48,7 +48,7 @@ use anyhow::{Context, Result};
 use crossbeam_queue::SegQueue;
 use io_pimdir::{PimdirBlobWriter, PimdirBlobs, hash::PimdirHasher};
 use io_replica::{
-    change::ReplicaChange,
+    change::{ReplicaChange, ReplicaChangeKind},
     client::ReplicaRemote,
     collection::{ReplicaCheckpoint, ReplicaCollectionId},
     object::ReplicaHash,
@@ -230,8 +230,8 @@ impl ReplicaRemote for PimRemote<'_> {
         let mut results = Vec::with_capacity(changes.len());
 
         for change in changes {
-            let result = match change {
-                ReplicaChange::SetFlags { handle, flags } => {
+            let result = match change.kind {
+                ReplicaChangeKind::SetFlags { handle, flags } => {
                     let email_flags = to_item_flags(&flags);
                     match self.pool.primary().store_flags(
                         &collection,
@@ -250,7 +250,7 @@ impl ReplicaRemote for PimRemote<'_> {
                 // both halves of a move can deliver and the target may end up
                 // holding the item twice, which the engine now freezes and
                 // this crate reports rather than mispairing silently.
-                ReplicaChange::Remove {
+                ReplicaChangeKind::Remove {
                     handle,
                     to,
                     link_id: _,
@@ -280,7 +280,7 @@ impl ReplicaRemote for PimRemote<'_> {
                         Err(err) => rejected(handle, "delete item", err),
                     },
                 },
-                ReplicaChange::Add {
+                ReplicaChangeKind::Add {
                     handle,
                     link_id,
                     flags,
@@ -302,7 +302,7 @@ impl ReplicaRemote for PimRemote<'_> {
                 // never gets here — its bodies are immutable, so io-replica
                 // derives no `Update` — and both mail backends refuse the call
                 // anyway.
-                ReplicaChange::Update {
+                ReplicaChangeKind::Update {
                     handle,
                     object,
                     if_match,

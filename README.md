@@ -29,7 +29,7 @@
 
 ## Features
 
-- Mail backend support: **IMAP**, **JMAP**, **Gmail**, **Microsoft Graph**
+- Mail backend support: **IMAP**, **Microsoft Graph** (**JMAP** and **Gmail** configure but have no backend yet)
 - Contacts backend support: **CardDAV** <sup>[rfc6352](https://www.iana.org/go/rfc6352)</sup> (requires the `carddav` feature)
 - Local **pimdir store** (`pimdir.db` + a content-addressed `objects/` blob store), the single local copy an app reads
 - **Simple auth** support for IMAP: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256

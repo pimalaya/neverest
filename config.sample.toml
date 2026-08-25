@@ -118,6 +118,9 @@ left.imap.item.delete = false
 # https://www.iana.org/go/rfc8620
 # https://www.iana.org/go/rfc8621
 # --------------------------------------------------------------------------------
+#
+# NOTE: this block parses, but no JMAP backend is compiled in yet, so a side
+# declaring it is refused when the sync opens it.
 
 # Bare authority (discovered through `GET /.well-known/jmap`) or session URL.
 #right.jmap.server = "fastmail.com"
@@ -145,6 +148,9 @@ left.imap.item.delete = false
 # Gmail config (alternative to the IMAP / JMAP blocks above)
 # https://developers.google.com/gmail/api
 # --------------------------------------------------------------------------------
+#
+# NOTE: this block parses, but no Gmail backend is compiled in yet, so a side
+# declaring it is refused when the sync opens it.
 
 # Labels are exposed as collections; the API host is fixed, so only the owner,
 # TLS and the credential are configurable.

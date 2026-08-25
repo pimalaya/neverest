@@ -52,9 +52,11 @@ pub enum Command {
     #[command(alias = "cfg")]
     Configure(ConfigureCommand),
     #[command(arg_required_else_help = true)]
-    Manuals(ManualCommand),
+    #[command(alias = "manuals")]
+    Manual(ManualCommand),
     #[command(arg_required_else_help = true)]
-    Completions(CompletionCommand),
+    #[command(alias = "completions")]
+    Completion(CompletionCommand),
 }
 
 impl Command {
@@ -64,8 +66,8 @@ impl Command {
             Self::Init(cmd) => cmd.execute(printer, config_paths),
             Self::Sync(cmd) => cmd.execute(printer, config_paths),
             Self::Configure(cmd) => cmd.execute(printer, config_paths),
-            Self::Manuals(cmd) => cmd.execute(printer, Cli::command()),
-            Self::Completions(cmd) => cmd.execute(printer, Cli::command()),
+            Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
+            Self::Completion(cmd) => cmd.execute(printer, Cli::command()),
         }
     }
 }

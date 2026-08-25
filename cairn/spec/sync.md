@@ -553,3 +553,45 @@ A backend with no flag concept (CardDAV, CalDAV) SHALL report an item's flags as
 Annex A): reporting unknown makes the engine treat the flag set as unfetched and
 re-probe the item on every run.
 
+
+### Requirement: A refused delete is held, never reverted
+Every side SHALL sync under `ReplicaDeletePolicy::Keep`. Both refusals (`push`
+off, or `item.delete = false`) run through that one disposition, and each side
+here is bound to the store's hub, which fixes the answer: reverting a tombstone
+states that the source still holds the member, and a hub reads that as the item
+being alive (add-beats-delete across sources), so it clears the deletion for
+every side and mirrors the item back to the one it was deleted on.
+
+A side configured to take no deletes would then resurrect on both what the user
+removed on one, which is the opposite of what that setting is for.
+
+#### Scenario: A read-only side keeps the removal
+- GIVEN a staged delete on a side whose `item.delete` is false
+- WHEN the side is synced
+- THEN nothing is pushed and the tombstone stays, rather than being undone into a clean row
+
+### Requirement: A purge is followed by a collection
+The store reclaims nothing by itself (pimdir SPEC §5: an object at refcount zero
+is unreferenced, not deleted, because the batch that attaches a body may not be
+the one that indexed it), so the retention sweep SHALL run the collector after a
+purge that removed rows, and SHALL report the objects it dropped and the bytes it
+freed beside the items the purge removed. A purge releases a body; it does not
+reclaim one.
+
+The collector SHALL NOT run after a sweep that took nothing: its cost is a walk
+of the whole blob tree, and a purge that removed no row released nothing. Orphan
+blobs a crash left are not this run's to find; they are what `pimdir gc` is for.
+
+#### Scenario: The bytes a purge reports are bytes that left
+- GIVEN a retained item past the purge cutoff, holding a body nothing else references
+- WHEN the sweep runs
+- THEN the item is purged, the object row is dropped, and the blob is gone from the tree
+
+### Requirement: A submission greets with an address literal
+An SMTP submission session SHALL greet with the loopback address literal
+(`EHLO [127.0.0.1]`), the form RFC 5321 §4.1.3 reserves for a client with no
+resolvable domain name of its own, which a desktop client behind a NAT never
+has. It SHALL NOT greet with a bare `localhost`, which is not such a name
+either: RFC 5321 §4.1.4 entitles a server to check, and one that does (Stalwart)
+answers `550 5.5.0 Invalid EHLO domain`, failing the session before `MAIL FROM`
+and leaving every intent pending behind a warning.

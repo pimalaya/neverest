@@ -60,7 +60,7 @@
 //! build can perform them.
 
 #[cfg(feature = "smtp")]
-use std::borrow::Cow;
+use std::{borrow::Cow, net::Ipv4Addr};
 
 #[cfg(feature = "smtp")]
 use anyhow::Context;
@@ -307,10 +307,16 @@ pub fn connect_smtp(config: &SmtpConfig) -> Result<SmtpClientStd> {
     Ok(client)
 }
 
-/// The EHLO identity of the submission sessions.
+/// The EHLO identity of the submission sessions: the loopback address
+/// literal RFC 5321 §4.1.3 reserves for a client with no resolvable domain
+/// name of its own, which a desktop client behind a NAT never has.
+///
+/// A bare `localhost` is not a name either, and a server entitled to check
+/// (RFC 5321 §4.1.4) refuses it: Stalwart answers `550 5.5.0 Invalid EHLO
+/// domain`, so every queued intent stayed pending against it.
 #[cfg(feature = "smtp")]
 fn ehlo_domain() -> SmtpEhloDomain<'static> {
-    SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Borrowed("localhost")))
+    Ipv4Addr::LOCALHOST.into()
 }
 
 /// Sends one intent through `channel`: the payload provides the SMTP

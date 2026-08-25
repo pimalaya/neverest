@@ -43,7 +43,10 @@ use io_replica::{
     rekey::{ReplicaRekey, ReplicaRekeyReport},
     remote::{ReplicaFetchedItem, ReplicaTier},
     storage::ReplicaLoadScope,
-    sync::{ReplicaEvent, ReplicaPushRights, ReplicaSync, ReplicaSyncOptions, ReplicaSyncReport},
+    sync::{
+        ReplicaDeletePolicy, ReplicaEvent, ReplicaPushRights, ReplicaSync, ReplicaSyncOptions,
+        ReplicaSyncReport,
+    },
     upgrade::ReplicaUpgrade,
 };
 use log::{info, warn};
@@ -1514,6 +1517,29 @@ where
     }
 }
 
+/// The engine options one side syncs under.
+///
+/// Every side here is bound to the store's hub, which is what fixes the delete
+/// disposition: a refused delete (`push` off, or `item.delete = false`) is
+/// **held**, never reverted. Reverting one says "this source still holds the
+/// member", and a hub reads that as the item being alive (add-beats-delete
+/// across sources): it clears the deletion for every side and mirrors the item
+/// back to the one it was deleted on. A backup side configured to take no
+/// deletes would resurrect on both what the user removed on one, which is the
+/// opposite of what the setting is for.
+///
+/// Written once because the tests sync through it too: a wrong disposition is
+/// invisible until an item comes back from the dead, so it is not something to
+/// restate per call site.
+fn sync_options(push: bool, rights: ReplicaPushRights) -> ReplicaSyncOptions {
+    ReplicaSyncOptions {
+        push,
+        rights,
+        delete: ReplicaDeletePolicy::Keep,
+        ..Default::default()
+    }
+}
+
 /// Runs one side's `sync` against its server and returns its report.
 fn sync_side(
     collection: &str,
@@ -1522,11 +1548,7 @@ fn sync_side(
     blobs: &PimdirBlobs,
     push: bool,
 ) -> Result<ReplicaSyncReport> {
-    let opts = ReplicaSyncOptions {
-        push,
-        rights: ctx.push_rights(),
-        ..Default::default()
-    };
+    let opts = sync_options(push, ctx.push_rights());
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone());
     drive(
         store,
@@ -2038,6 +2060,18 @@ fn drain_submits(
 /// Unset means never purge, so the sweep does not run at all. It warns
 /// rather than fails: a store that cannot be swept is a housekeeping
 /// problem, not a reason to fail a run that synced correctly.
+///
+/// A purge releases a body; it does not reclaim one. The store collects nothing
+/// by itself (pimdir SPEC §5: an object at refcount zero is unreferenced, not
+/// deleted, because the batch that attaches a body may not be the one that
+/// indexed it), so whoever owns the store is what runs the collector, and here
+/// that is this. Without it a store driven by neverest keeps every dereferenced
+/// body for ever, reports nothing about it, and passes every check it has.
+///
+/// Only after a purge that took something, since that is the moment this run
+/// knows a body was released, and the collector's own cost is a walk of the
+/// whole blob tree. Orphans left by a crash are not this run's to find: they
+/// are what `pimdir gc` is for.
 fn sweep_retained(
     account_config: &AccountConfig,
     store: &mut PimdirStore,
@@ -2047,21 +2081,37 @@ fn sweep_retained(
         return;
     };
 
-    match store.purge_retained_before(&cutoff) {
-        Ok(purged) => {
-            if purged.items > 0 {
-                info!(
-                    "purged {} retained item(s) older than {cutoff}, {} byte(s) reclaimed",
-                    purged.items, purged.bytes
-                );
+    let purged = match store.purge_retained_before(&cutoff) {
+        Ok(purged) => purged,
+        Err(err) => return warn!("retention sweep failed, nothing was purged: {err}"),
+    };
+
+    let collected = match purged.items {
+        0 => Default::default(),
+        _ => match store.collect_garbage() {
+            Ok(collected) => collected,
+            // A producer mid-append holds the staging lock, which the collector
+            // takes exclusively. Nothing was purged in vain: the bodies stay
+            // released and the next run, or `pimdir gc`, takes them.
+            Err(err) => {
+                warn!("purged items but collected nothing: {err}");
+                Default::default()
             }
-            report.purged = Some(PurgedItems {
-                items: purged.items,
-                bytes: purged.bytes,
-            });
-        }
-        Err(err) => warn!("retention sweep failed, nothing was purged: {err}"),
+        },
+    };
+
+    if purged.items > 0 {
+        info!(
+            "purged {} retained item(s) older than {cutoff}, collected {} object(s), {} byte(s) reclaimed",
+            purged.items, collected.objects, collected.bytes
+        );
     }
+
+    report.purged = Some(PurgedItems {
+        items: purged.items,
+        objects: collected.objects,
+        bytes: collected.bytes,
+    });
 }
 
 /// Resolves the account's send channel. The channel belongs to a side:
@@ -2218,7 +2268,7 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
 mod tests {
     use io_pimdir::{PimdirProducer, codec::PimdirAction};
     use io_replica::{
-        change::{ReplicaChange, ReplicaWriteOp},
+        change::{ReplicaChange, ReplicaChangeKind, ReplicaDropReason, ReplicaWriteOp},
         collection::ReplicaCheckpoint,
         object::{ReplicaHash, ReplicaObject},
         placement::{ReplicaBase, ReplicaLinkId, ReplicaSortKey},
@@ -2592,7 +2642,86 @@ mod tests {
         sweep_retained(&config, &mut store, &mut report);
         let purged = report.purged.expect("a retention section");
         assert_eq!(purged.items, 0);
+        assert_eq!(purged.objects, 0);
         assert_eq!(purged.bytes, 0);
+    }
+
+    /// A purged item's body actually leaves the disk.
+    ///
+    /// A purge releases a reference; it does not reclaim bytes, and the store
+    /// collects nothing by itself (pimdir SPEC §5). Without a collector on this
+    /// path the sweep reported items it had deleted and left every one of their
+    /// bodies in the blob tree, for ever, with no read and no check mentioning
+    /// them: a backup store would grow without bound while reporting that it
+    /// had reclaimed things.
+    #[test]
+    fn the_sweep_collects_the_bodies_the_purge_released() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = PimdirStore::open(dir.path()).unwrap().for_source("left");
+
+        source
+            .write(vec![
+                ReplicaWriteOp::StoreObject {
+                    object: ReplicaObject {
+                        hash: ReplicaHash("beef0002".into()),
+                        size: 3,
+                    },
+                    body: Some(b"abc".to_vec()),
+                },
+                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+                    collection: ReplicaCollectionId("INBOX".into()),
+                    handle: ReplicaHandle("1".into()),
+                    link_id: Some(ReplicaLinkId("mid:gone@x".into())),
+                    object: Some(ReplicaHash("beef0002".into())),
+                    level: ReplicaLevel::Full,
+                    meta: None,
+                    sort_key: ReplicaSortKey::default(),
+                    flags: ReplicaFlags::default(),
+                    status: ReplicaStatus::Clean,
+                    conflict_revision: None,
+                    base: Some(ReplicaBase {
+                        flags: ReplicaFlags::default(),
+                        revision: None,
+                        object: Some(ReplicaHash("beef0002".into())),
+                    }),
+                    origin: None,
+                    ambiguous_handles: Vec::new(),
+                }),
+            ])
+            .unwrap();
+
+        let body = source.blobs().path(&ReplicaHash("beef0002".into()));
+        assert!(body.is_file(), "the body was stored");
+
+        // The source drops it for good: no binding is left, so the item is
+        // retained rather than deleted, and keeps holding its body.
+        source
+            .write(vec![ReplicaWriteOp::DropPlacement {
+                collection: ReplicaCollectionId("INBOX".into()),
+                handle: ReplicaHandle("1".into()),
+                reason: ReplicaDropReason::Deleted,
+            }])
+            .unwrap();
+        assert!(body.is_file(), "retention keeps the body");
+
+        let mut store = PimdirStore::open(dir.path()).unwrap();
+        let config: AccountConfig = toml::from_str(
+            r#"
+            left.imap.server = "imaps://imap.example.org:993"
+            store.purge-after = "0s"
+            "#,
+        )
+        .unwrap();
+
+        let mut report = SyncReport::default();
+        drop(source);
+        sweep_retained(&config, &mut store, &mut report);
+
+        let purged = report.purged.expect("a retention section");
+        assert_eq!(purged.items, 1);
+        assert_eq!(purged.objects, 1);
+        assert_eq!(purged.bytes, 3);
+        assert!(!body.exists(), "the body is gone from the blob tree");
     }
 
     /// A mutable-content remote: every item carries an ETag, and a write is
@@ -2676,8 +2805,8 @@ mod tests {
             let mut results = Vec::new();
             for change in changes {
                 self.pushed.push(change.clone());
-                let result = match &change {
-                    ReplicaChange::Update {
+                let result = match &change.kind {
+                    ReplicaChangeKind::Update {
                         handle,
                         object,
                         if_match,
@@ -2758,22 +2887,94 @@ mod tests {
         store
     }
 
+    /// A store holding one card the client has staged a delete for: the
+    /// tombstone a frontend leaves behind after removing an item offline.
+    fn store_with_local_delete(dir: &std::path::Path) -> PimdirSourceStore {
+        let mut store = PimdirStore::open(dir).unwrap().for_source("left");
+        store.ensure_collection("contacts", "text/vcard").unwrap();
+        store
+            .write(vec![
+                ReplicaWriteOp::StoreObject {
+                    object: ReplicaObject {
+                        hash: ReplicaHash("0rig".into()),
+                        size: 3,
+                    },
+                    body: Some(b"old".to_vec()),
+                },
+                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+                    collection: ReplicaCollectionId("contacts".into()),
+                    handle: ReplicaHandle("card1".into()),
+                    link_id: Some(ReplicaLinkId("uid:a".into())),
+                    object: Some(ReplicaHash("0rig".into())),
+                    level: ReplicaLevel::Full,
+                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
+                    sort_key: ReplicaSortKey::default(),
+                    flags: ReplicaFlags::default(),
+                    status: ReplicaStatus::Tombstone,
+                    conflict_revision: None,
+                    base: Some(ReplicaBase {
+                        flags: ReplicaFlags::default(),
+                        revision: Some(String::from("v1")),
+                        object: Some(ReplicaHash("0rig".into())),
+                    }),
+                    origin: None,
+                    ambiguous_handles: Vec::new(),
+                }),
+            ])
+            .unwrap();
+        store
+    }
+
     fn sync_with(
         store: &mut PimdirSourceStore,
         remote: &mut MutableRemote,
         rights: ReplicaPushRights,
     ) -> ReplicaSyncReport {
-        let opts = ReplicaSyncOptions {
-            push: true,
-            rights,
-            ..Default::default()
-        };
         drive(
             store,
             remote,
-            ReplicaSync::new(String::from("contacts"), opts),
+            ReplicaSync::new(String::from("contacts"), sync_options(true, rights)),
         )
         .unwrap()
+    }
+
+    /// A side that may not delete holds the tombstone instead of undoing it.
+    ///
+    /// Both refusals (`push = false`, `item.delete = false`) run through one
+    /// disposition, and for a hub-backed store it has to be `Keep`. Undoing the
+    /// delete writes the placement back clean, which says the source still
+    /// holds the member; the hub takes that as the item being alive and clears
+    /// the deletion on every side, so removing an item once brings it back
+    /// everywhere. The tombstone staying is what keeps the removal a removal
+    /// until a run that may push delivers it.
+    #[test]
+    fn a_side_that_may_not_delete_keeps_the_tombstone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_local_delete(dir.path());
+        let mut remote = MutableRemote::at("card1", "v1");
+
+        let rights = ReplicaPushRights {
+            remove: false,
+            ..ReplicaPushRights::all()
+        };
+        let report = sync_with(&mut store, &mut remote, rights);
+
+        assert_eq!(report.pushed, 0, "the delete is not pushed");
+        assert!(remote.pushed.is_empty(), "and nothing else is either");
+
+        let placements = store
+            .load(
+                &ReplicaCollectionId("contacts".into()),
+                &ReplicaLoadScope::All,
+            )
+            .unwrap()
+            .placements;
+        assert_eq!(placements.len(), 1);
+        assert_eq!(
+            placements[0].status,
+            ReplicaStatus::Tombstone,
+            "the removal is still a removal, not undone into a clean row",
+        );
     }
 
     #[test]
@@ -2789,7 +2990,8 @@ mod tests {
         assert!(
             matches!(
                 remote.pushed.as_slice(),
-                [ReplicaChange::Update { if_match, .. }] if if_match.as_deref() == Some("v1")
+                [ReplicaChange { kind: ReplicaChangeKind::Update { if_match, .. }, .. }]
+                    if if_match.as_deref() == Some("v1")
             ),
             "expected one If-Match update, got {:?}",
             remote.pushed

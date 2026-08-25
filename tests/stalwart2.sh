@@ -9,6 +9,8 @@
 # Host port mapping per instance:
 #   admin HTTP (JMAP)  → container 8080
 #   plain IMAP         → container 993 (reconfigured to plain)
+#   plain SMTP         → container 25, the channel a queued `submit` intent
+#                        leaves through
 
 set -eu
 
@@ -16,9 +18,9 @@ IMAP_PASS='P!malaya-test-2026'
 ADMIN_PASS="test"
 IMAGE="stalwartlabs/stalwart:v0.16-alpine"
 
-# provision <container-name> <admin-host-port> <imap-host-port>
+# provision <container-name> <admin-host-port> <imap-host-port> <smtp-host-port>
 provision() {
-    local name="$1" admin_port="$2" imap_port="$3"
+    local name="$1" admin_port="$2" imap_port="$3" smtp_port="$4"
 
     local config
     config=$(mktemp)
@@ -31,6 +33,7 @@ provision() {
         -v "${config}:/etc/stalwart/config.json:ro" \
         -p "${admin_port}:8080" \
         -p "${imap_port}:993" \
+        -p "${smtp_port}:25" \
         "$IMAGE" >/dev/null
 
     for _ in $(seq 1 30); do
@@ -92,9 +95,9 @@ provision() {
     done
 
     rm -f "$config"
-    echo "stalwart ${name} ready: imap://127.0.0.1:${imap_port}"
+    echo "stalwart ${name} ready: imap://127.0.0.1:${imap_port}, smtp://127.0.0.1:${smtp_port}"
 }
 
-provision "neverest-relay-a" 8080 143
-provision "neverest-relay-b" 8081 144
-echo "both servers ready (A :143, B :144)"
+provision "neverest-relay-a" 8080 143 2525
+provision "neverest-relay-b" 8081 144 2526
+echo "both servers ready (A :143 imap, :2525 smtp; B :144 imap, :2526 smtp)"

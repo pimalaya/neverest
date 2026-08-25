@@ -2,15 +2,14 @@
 name = "neverest"
 description = "CLI to synchronize PIM collections: mail, contact, calendar…"
 version = "1.0.0-rc"
-authors = ["soywod <clement.douin@posteo.net>"]
+authors = ["Clément DOUIN (soywod) <clement.douin@posteo.net>"]
 rust-version = "1.89"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 categories = ["command-line-utilities", "email"]
 keywords = ["cli", "email", "contacts", "imap", "sync"]
 homepage = "https://pimalaya.org"
-documentation = "https://pimalaya.org/neverest/cli/latest"
-repository = "https://github.com/soywod/neverest"
+repository = "https://github.com/pimalaya/neverest"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -69,9 +68,6 @@ shellexpand = "3.1"
 toml = "1.1"
 url = { version = "2.2", features = ["serde"] }
 
-# NOTE: io-replica and io-pimdir carry the duplicate-link-id freeze but neither
-# is published yet; the requirements above stay honest and this block goes away
-# once both are released.
 [patch.crates-io]
-io-pimdir = { path = "../io-pimdir" }
-io-replica = { path = "../io-replica" }
+io-pimdir.git = "https://github.com/pimalaya/io-pimdir"
+io-replica.git = "https://github.com/pimalaya/io-replica"

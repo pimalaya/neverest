@@ -201,21 +201,33 @@ impl fmt::Display for SubmitEntry {
 }
 
 /// What the retention sweep reclaimed: the retained (soft-deleted) items
-/// purged past `store.purge-after`, and the bytes their bodies freed.
+/// purged past `store.purge-after`, and the bytes the collector then freed.
+///
+/// The two are counted by two operations, because a purge releases a body and
+/// does not reclaim one: the row goes and its reference with it, and the bytes
+/// are the collector's to take once nothing else points at them. A body a live
+/// item still holds survives both, so `bytes` is what this run actually freed
+/// rather than what the purged items were holding.
 #[derive(Debug, Serialize)]
 pub struct PurgedItems {
     /// Retained items deleted for good.
     pub items: usize,
-    /// Blob bytes reclaimed with them.
+    /// Object rows the collector dropped afterwards.
+    pub objects: usize,
+    /// Blob bytes it freed with them.
     pub bytes: u64,
 }
 
 impl fmt::Display for PurgedItems {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self { items, bytes } = self;
+        let Self {
+            items,
+            objects,
+            bytes,
+        } = self;
         write!(
             f,
-            "purged {items} retained item(s), {bytes} byte(s) reclaimed"
+            "purged {items} retained item(s), collected {objects} object(s), {bytes} byte(s) reclaimed"
         )
     }
 }

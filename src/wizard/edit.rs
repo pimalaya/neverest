@@ -35,7 +35,7 @@ pub fn edit_account(target: &Path, mut config: Config, account_name: &str) -> Re
     let email = discover::prompt_email_with(default_email.as_deref())?;
     let mut side = discover::configure(account_name, &email)?;
 
-    // The wizard never invents a submission server, so a run that
+    // NOTE: the wizard never invents a submission server, so a run that
     // discovered none keeps the channel the side already carried.
     if side.smtp.is_none() {
         side.smtp = existing
@@ -44,8 +44,6 @@ pub fn edit_account(target: &Path, mut config: Config, account_name: &str) -> Re
             .and_then(|left| left.smtp.clone());
     }
 
-    // A fresh account is the default one when it is the only one; an
-    // existing account keeps whatever it was.
     let is_first_account = config.accounts.is_empty() && existing.is_none();
 
     let account = match existing {
@@ -83,8 +81,8 @@ fn side_email(side: &SideConfig) -> Option<String> {
             _ => None,
         },
         SideBackendConfig::Gmail(_) | SideBackendConfig::Msgraph(_) => None,
-        // A DAV account authenticates with a username, not an email address,
-        // and the two differ often enough not to seed a prompt with one.
+        // NOTE: a DAV account authenticates with a username rather than an
+        // email address, and the two differ often enough not to seed a prompt.
         SideBackendConfig::Carddav(_) => None,
     }
 }
@@ -133,7 +131,6 @@ mod tests {
         })));
         assert_eq!(side_email(&side), Some("user@example.org".into()));
 
-        // A credential-less side carries no login to seed with.
         let anonymous = imap_side(Some(SaslConfig::Anonymous(SaslAnonymousConfig::default())));
         assert_eq!(side_email(&anonymous), None);
         assert_eq!(side_email(&imap_side(None)), None);

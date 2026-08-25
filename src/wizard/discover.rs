@@ -69,8 +69,8 @@ pub fn run(printer: &mut impl Printer, target: &Path) -> Result<Config> {
 
     let email = prompt_email()?;
 
-    // NOTE: the account name is just the TOML table key, so it is derived
-    // from the email rather than prompted; the user renames it by hand.
+    // NOTE: the account name is just the TOML table key, so it is derived from
+    // the email rather than prompted, and the user renames it by hand.
     let account_name = default_account_name(&email);
     let side = configure(&account_name, &email)?;
 
@@ -88,9 +88,8 @@ pub fn run(printer: &mut impl Printer, target: &Path) -> Result<Config> {
         accounts: HashMap::from([(account_name.clone(), account)]),
     };
 
-    // JSON mode and a redirected stdout stay non-interactive: emit the
-    // document straight to stdout so scripts and `neverest > config.toml`
-    // keep working. Only offer to save when writing to a terminal.
+    // NOTE: JSON mode and a redirected stdout stay non-interactive, so the
+    // document goes straight to stdout and `neverest > config.toml` works.
     if printer.is_json() || !std::io::stdout().is_terminal() {
         printer.out(GeneratedConfig(&config))?;
         return Ok(config);
@@ -105,9 +104,6 @@ pub fn run(printer: &mut impl Printer, target: &Path) -> Result<Config> {
 fn save_or_print(printer: &mut impl Printer, target: &Path, config: Config) -> Result<Config> {
     let prompt = format!("Save this configuration to {}?", target.display());
 
-    // Bare `neverest` runs the wizard even when a config already exists,
-    // so never clobber without confirmation, and fall back to printing so
-    // the generated config is never lost.
     let save = prompt::bool(&prompt, true)?
         && (!target.exists()
             || prompt::bool(
@@ -219,9 +215,6 @@ fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<SideC
     match &choice.kind {
         #[cfg(feature = "imap")]
         DiscoveredKind::ImapSmtp { .. } => {
-            // The submission endpoint belongs to the side it was
-            // discovered with: IMAP cannot send, so its companion SMTP
-            // server is what performs this side's submit intents.
             let (imap, smtp) = imap_smtp::configure_discovered(account_name, email, &choice)?;
             Ok(SideConfig {
                 backend: SideBackendConfig::Imap(imap),
@@ -229,13 +222,11 @@ fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<SideC
             })
         }
         #[cfg(feature = "msgraph")]
-        // Graph sends through its own `sendMail` action, so this side
+        // NOTE: Graph sends through its own `sendMail` action, so this side
         // needs no channel of its own.
         DiscoveredKind::Msgraph => Ok(SideConfig::new(SideBackendConfig::Msgraph(
             msgraph::configure(account_name)?,
         ))),
-        // Contacts never submit anything, so a CardDAV side carries no send
-        // channel at all (the config refuses one).
         #[cfg(feature = "carddav")]
         DiscoveredKind::Carddav { url } => Ok(SideConfig::new(SideBackendConfig::Carddav(
             carddav::configure(account_name, url, &choice)?,
@@ -279,13 +270,12 @@ mod tests {
 
     #[test]
     fn account_name_defaults_to_the_first_domain_label() {
-        // Email: the domain's first label, never the local part.
         assert_eq!(default_account_name("clement.douin@posteo.net"), "posteo");
         assert_eq!(default_account_name("alice@mail.example.co.uk"), "mail");
-        // Bare domain, as the email prompt synthesizes it.
+
         assert_eq!(default_account_name("@posteo.net"), "posteo");
         assert_eq!(default_account_name("posteo.net"), "posteo");
-        // Nothing usable: a name is still needed for the TOML key.
+
         assert_eq!(default_account_name("@"), "default");
     }
 }

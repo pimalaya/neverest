@@ -97,8 +97,6 @@ impl SyncCommand {
 
         account_config.validate()?;
 
-        // NOTE: the actual store directory (honouring `store.root`), so the
-        // lock and the existence check target the store a frontend reads.
         let replica = driver::store_dir(&name, &account_config)?;
         if !replica.join("pimdir.db").exists() {
             bail!("Account `{name}` not initialized, run `init -a {name}` first");
@@ -122,7 +120,6 @@ impl SyncCommand {
             None
         };
 
-        // A CLI flag overrides the account's `connections`, defaulting to 4.
         let connections = self
             .connections
             .or(account_config.connections)
@@ -191,9 +188,8 @@ fn reset_replica(replica: &std::path::Path, include: &[String]) -> Result<()> {
     if !include.is_empty() {
         info!("reset: per-collection scope not yet supported, resetting whole replica");
     }
-    // NOTE: `pimdir.db` and its WAL sidecars; `replica.json` / `index.json` /
-    // `links.json` are the pre-pimdir layouts, removed so an upgraded install
-    // resets cleanly.
+    // NOTE: the JSON files are the pre-pimdir layouts, removed so an upgraded
+    // install resets cleanly.
     for name in [
         "pimdir.db",
         "pimdir.db-wal",
@@ -213,7 +209,7 @@ fn reset_replica(replica: &std::path::Path, include: &[String]) -> Result<()> {
         fs::remove_dir_all(&objects)
             .with_context(|| format!("Remove `{}` for reset", objects.display()))?;
     }
-    // Recreate the empty store so the account stays "initialized".
+    // NOTE: the empty store is recreated so the account stays initialized.
     PimdirStore::open(replica).context("Recreate pimdir store after reset")?;
     Ok(())
 }
@@ -228,14 +224,11 @@ mod tests {
 
         let held = acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap();
 
-        // While held, a second run waits its bounded timeout then errors
-        // clearly instead of corrupting or hanging forever.
         let start = Instant::now();
         let err = acquire_store_lock(dir.path(), Duration::from_millis(50)).unwrap_err();
         assert!(start.elapsed() >= Duration::from_millis(50));
         assert!(format!("{err:#}").contains("Another sync still holds"));
 
-        // Releasing the holder (drop = FD close) unblocks the next run.
         drop(held);
         acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap();
     }

@@ -35,9 +35,6 @@ use crate::{
     },
 };
 
-// NOTE: the mechanisms split by credential kind, a password family
-// (login + secret) and a token family (login + API token); ANONYMOUS
-// carries none.
 const PLAIN: &str = "PLAIN (username + password)";
 const LOGIN: &str = "LOGIN (username + password)";
 const SCRAM_SHA_256: &str = "SCRAM-SHA-256 (username + password)";
@@ -62,9 +59,6 @@ pub fn configure_discovered(
 
     let login_hint = discovered.login_default(email);
 
-    // Probe the server so only the mechanisms it actually advertises are
-    // offered (LOGIN last); on any probe failure fall back to the full
-    // list keyed on what discovery advertised.
     let probed = probe_mechanisms(imap);
     let imap_sasl = prompt_sasl(
         account_name,
@@ -101,9 +95,9 @@ fn configure_smtp(
         return Ok(None);
     };
 
-    // The send channel authenticates with SASL LOGIN, so the IMAP
-    // credentials are reusable only when they carry a login and a
-    // password; a token mechanism has nothing to hand over.
+    // NOTE: the send channel authenticates with SASL LOGIN, so the IMAP
+    // credentials are reusable only when they carry a login and a password. A
+    // token mechanism has nothing to hand over.
     let credentials = match login_password(imap_sasl) {
         Some(pair) if prompt::bool("Use the same credentials for SMTP?", true)? => Some(pair),
         Some(_) => prompt_credentials(account_name, login_hint)?,
@@ -209,7 +203,7 @@ fn prompt_sasl(
 fn prompt_mechanism(caps: AuthCaps, probed: Option<&[SaslMechanism]>) -> Result<SaslMechanism> {
     // NOTE: io-sasl names more mechanisms than [`SaslConfig`] can spell, so a
     // probed one this wizard cannot write a config for is dropped rather than
-    // offered; a probe left with nothing falls back like a failed one.
+    // offered. A probe left with nothing falls back like a failed one.
     let probed: Vec<SaslMechanism> = probed
         .unwrap_or_default()
         .iter()
@@ -229,8 +223,6 @@ fn prompt_mechanism(caps: AuthCaps, probed: Option<&[SaslMechanism]>) -> Result<
         prompt::item("SASL mechanism:", labels, None)?
     };
 
-    // Labels are unique, so the chosen one maps back to exactly one
-    // mechanism.
     Ok(mechanisms
         .into_iter()
         .find(|m| mechanism_label(m) == Some(label))
@@ -293,8 +285,6 @@ fn build_sasl(
             })
         }
         SaslMechanism::Anonymous => unreachable!("handled above"),
-        // Only the labelled mechanisms are ever offered, so this arm is
-        // where an io-sasl mechanism the config cannot spell would land.
         mechanism => bail!("Unsupported SASL mechanism {}", mechanism.as_str()),
     })
 }
@@ -386,8 +376,8 @@ fn imap_config(endpoint: &TcpEndpoint, sasl: SaslConfig) -> ImapConfig {
         server: endpoint_server(endpoint),
         tls: Default::default(),
         starttls: endpoint.security == DiscoverySecurity::Starttls,
-        // NOTE: unset, so io-imap keeps owning the default rather than
-        // the value being frozen into the written config.
+        // NOTE: unset, so io-imap keeps owning the default rather than the
+        // value being frozen into the written config.
         alpn: None,
         sasl: Some(sasl),
         collection: Default::default(),
@@ -439,7 +429,6 @@ mod tests {
         );
         assert_eq!(tls.server, "imaps://imap.example.org:993");
         assert!(!tls.starttls);
-        // The backend owns its ALPN default, so the wizard writes none.
         assert!(tls.alpn.is_none());
 
         let starttls = imap_config(
@@ -450,8 +439,8 @@ mod tests {
         assert!(starttls.starttls);
     }
 
-    /// The offered menu, as the labels the user actually sees
-    /// (`SaslMechanism` implements no `PartialEq`).
+    /// The offered menu, as the labels the user actually sees, since
+    /// `SaslMechanism` implements no `PartialEq`.
     fn labels(caps: AuthCaps) -> Vec<&'static str> {
         fallback_mechanisms(caps)
             .iter()
@@ -461,8 +450,6 @@ mod tests {
 
     #[test]
     fn fallback_mechanisms_follow_the_advertised_capabilities() {
-        // A password-only server never offers the token mechanisms, and
-        // LOGIN stays last whatever the family.
         let basic = labels(AuthCaps {
             basic: true,
             ..Default::default()
@@ -477,7 +464,6 @@ mod tests {
         });
         assert_eq!(token, vec![OAUTHBEARER, XOAUTH2]);
 
-        // Nothing advertised: every mechanism stays on offer.
         let unknown = labels(AuthCaps::default());
         assert!(unknown.contains(&PLAIN));
         assert!(unknown.contains(&XOAUTH2));

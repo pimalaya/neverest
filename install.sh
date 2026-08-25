@@ -9,7 +9,7 @@ die() {
 
 DESTDIR="${DESTDIR:-}"
 PREFIX="${PREFIX:-"$DESTDIR/usr/local"}"
-RELEASES_URL="https://github.com/soywod/neverest/releases"
+RELEASES_URL="https://github.com/pimalaya/neverest/releases"
 
 binary=neverest
 system=$(uname -s | tr [:upper:] [:lower:])
@@ -23,14 +23,17 @@ case $system in
     linux|freebsd)
 	case $machine in
 	    x86_64) target=x86_64-linux;;
-	    arm64|aarch64) target=arm64-linux;;
+	    x86|i386|i686) target=i686-linux;;
+	    arm64|aarch64) target=aarch64-linux;;
+	    armv6l) target=armv6l-linux;;
+	    armv7l) target=armv7l-linux;;
 	    *) die "Unsupported machine $machine for system $system";;
 	esac;;
 
     darwin)
 	case $machine in
-	    x86_64) target=x86_64-macos;;
-	    arm64|aarch64) target=arm64-macos;;
+	    x86_64) target=x86_64-darwin;;
+	    arm64|aarch64) target=aarch64-darwin;;
 	    *) die "Unsupported machine $machine for system $system";;
 	esac;;
 

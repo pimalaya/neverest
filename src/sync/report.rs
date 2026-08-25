@@ -352,8 +352,6 @@ impl fmt::Display for SyncReport {
             writeln!(f)?;
         }
 
-        // NOTE: only rendered when something was actually reclaimed, so a run
-        // whose sweep found nothing (the common case) stays quiet.
         if let Some(purged) = &self.purged
             && purged.items > 0
         {

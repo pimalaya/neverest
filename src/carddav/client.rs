@@ -162,9 +162,10 @@ impl CarddavClient {
 
         match self.sync(collection, token.as_deref()) {
             Ok(enumeration) => Ok(enumeration),
-            // The server forgot the token (RFC 6578 §3.2 `valid-sync-token`),
-            // so the delta is unrecoverable and a full snapshot takes over.
-            // Handles are hrefs and survive it, so no rebuild follows.
+            // NOTE: the server forgot the token (RFC 6578 §3.2
+            // `valid-sync-token`), so the delta is unrecoverable and a full
+            // snapshot takes over. Handles are hrefs and survive it, so no
+            // rebuild follows.
             Err(err) if is_invalid_sync_token(&err) => {
                 warn!("carddav sync token rejected for `{collection}`, enumerating in full");
                 self.sync(collection, None)
@@ -237,8 +238,7 @@ impl CarddavClient {
         for card in cards {
             let mut sink = open(&card.id)?;
             sink.write_all(&card.data)?;
-            // The ETag the body was fetched at rides with it, so the engine
-            // records the revision it actually stored.
+
             done(&card.id, card.etag.as_deref(), sink)?;
         }
 
@@ -433,7 +433,7 @@ mod tests {
             href_id("https://dav.example.org/books/default/card-1.vcf"),
             "card-1.vcf"
         );
-        // A collection href may carry a trailing slash.
+
         assert_eq!(href_id("/dav/books/default/"), "default");
         assert_eq!(href_id("card-1.vcf"), "card-1.vcf");
     }
@@ -442,9 +442,6 @@ mod tests {
     fn a_new_card_is_addressed_by_its_uid() {
         assert_eq!(card_id(Some("card-1"), b""), "card-1.vcf");
 
-        // A UID is free-form text: anything that would not survive a URL path
-        // is folded away rather than escaped, since the id only has to be
-        // stable and unique, not reversible.
         assert_eq!(
             card_id(Some("urn:uuid:4fbe8971-0bc3"), b""),
             "urn:uuid:4fbe8971-0bc3.vcf"
@@ -459,7 +456,7 @@ mod tests {
         let id = card_id(None, raw);
         assert!(id.ends_with(".vcf"), "got {id}");
         assert!(!id.starts_with("hash:"), "the prefix is not a path segment");
-        // Deterministic: the same body must address the same resource.
+
         assert_eq!(id, card_id(None, raw));
     }
 }

@@ -125,15 +125,12 @@ mod tests {
 
     #[test]
     fn streams_across_threads_bounded() {
-        // A body larger than the buffer must still flow through intact, proving
-        // the writer blocks and the reader drains rather than buffering it whole.
         let body: Vec<u8> = (0..100_000u32).map(|i| i as u8).collect();
         let (mut w, mut r) = bounded(4096);
 
         let src = body.clone();
         let producer = thread::spawn(move || {
             w.write_all(&src).unwrap();
-            // drop(w) closes the pipe
         });
 
         let mut got = Vec::new();

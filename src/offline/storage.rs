@@ -147,7 +147,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
 
-        // NOTE: left holds a hydrated item; right has never seen it.
         left.write(vec![
             ReplicaWriteOp::StoreObject {
                 object: ReplicaObject {
@@ -160,7 +159,6 @@ mod tests {
         ])
         .unwrap();
 
-        // NOTE: right's projection stages the item as a Created append.
         let right_view = projection_view(&left, "INBOX", Side::Right).unwrap();
         assert_eq!(right_view.len(), 1);
         assert_eq!(right_view[0].status, ReplicaStatus::Created);
@@ -172,20 +170,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
 
-        // NOTE: left holds a bodiless (Meta-only) item; right lacks it.
         left.write(vec![ReplicaWriteOp::UpsertPlacement(linked(
             "INBOX", "1", "mid:a", None,
         ))])
         .unwrap();
 
-        // NOTE: right may create — left's bodiless item is a hydration target
-        // on the holding (left) side.
         let targets = hydration_targets(&left, "INBOX", false, true).unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].0, Side::Left);
         assert_eq!(targets[0].1.0, "1");
 
-        // NOTE: right may not create — nothing to hydrate.
         assert!(
             hydration_targets(&left, "INBOX", false, false)
                 .unwrap()

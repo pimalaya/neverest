@@ -109,8 +109,6 @@ pub enum Client {
 #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
 const NO_BACKEND: &str = "No sync backend is compiled in (rebuild with the `imap`, `msgraph` or `carddav` cargo feature)";
 
-// Each method takes the union of what the backends need, so a build
-// missing one of them leaves some parameters unread.
 #[cfg_attr(
     not(all(feature = "imap", feature = "msgraph", feature = "carddav")),
     allow(unused_variables)
@@ -182,8 +180,6 @@ impl Client {
             Client::Imap(c) => c.fetch_envelopes(collection, ids),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.fetch_envelopes(collection, ids),
-            // Cards resolve at `Full` only: a `sync-collection` REPORT
-            // carries no `UID`, so there is no summary tier to serve.
             #[cfg(feature = "carddav")]
             Client::Carddav(_) => {
                 bail!("CardDAV cards have no summary tier (they resolve at Full)")
@@ -278,8 +274,6 @@ impl Client {
     /// **Mutable-content backends only.** Mail bodies are immutable — a message
     /// is replaced by delete + append, never edited — so both mail backends
     /// refuse this, and io-replica never derives an `Update` for them.
-    // Every arm compiled in today refuses before reading an argument; the DAV
-    // arms (phase 4) consume all of them.
     #[allow(unused_variables)]
     pub fn update_item_stream(
         &mut self,
@@ -373,8 +367,6 @@ impl Client {
             Client::Msgraph(_) => "message/rfc822",
             #[cfg(feature = "carddav")]
             Client::Carddav(_) => "text/vcard",
-            // This method cannot report an error, and the placeholder is
-            // never constructed, so nothing can ever read this value.
             #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
             Client::Unavailable => "",
         }
@@ -401,8 +393,8 @@ impl Client {
             }
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => None,
-            // A card href survives everything: there is no handle space to
-            // rebuild, so no generation ever bumps on a DAV side.
+            // NOTE: a card href survives everything, so there is no handle space
+            // to rebuild and no generation ever bumps on a DAV side.
             #[cfg(feature = "carddav")]
             Client::Carddav(_) => None,
             #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
@@ -432,10 +424,10 @@ pub fn open(config: SideConfig) -> Result<Client> {
                 .sasl
                 .map(|cfg| {
                     let host = server.host_str().unwrap_or_default();
-                    // url does not know the imap(s) default ports; gating on
-                    // port_or_known_default() would silently drop the whole
-                    // SASL config for a portless URL, opening an
-                    // unauthenticated session.
+                    // NOTE: url does not know the imap and imaps default ports,
+                    // so gating on port_or_known_default() would drop the whole
+                    // SASL config for a portless URL and open an unauthenticated
+                    // session.
                     let port = server
                         .port()
                         .unwrap_or_else(|| io_imap::client::default_port(server.scheme()));

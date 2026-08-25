@@ -1,21 +1,19 @@
-//! Per-account/per-collection orchestration over the io-replica engine.
+//! Per-account and per-collection orchestration over the io-replica engine.
 //!
-//! Each collection's two sides are the two *sources* of one shared collection in a
-//! pimdir store: one [`PimdirSourceStore`] handle per side (`"left"` /
-//! `"right"`) over the same files, the collection name as the bare collection
-//! id. The driver only
-//! runs the engine's per-side `sync` (and a `Meta` `upgrade` to resolve link
-//! ids, plus a `Full` upgrade to hydrate a body about to be copied): cross-side
-//! propagation of items, flags and deletions falls out of the shared hub's
-//! project/absorb, so there is no hand-rolled cross-merge. Syncing the sides in
-//! turn until quiescent converges them (a change one side folds into the hub
-//! reads as dirty for the other, which its next sync pushes). The topology
-//! mismatch this resolves is in the crate header.
+//! Each collection's two sides are the two sources of one shared collection in
+//! a pimdir store: one [`PimdirSourceStore`] handle per side over the same
+//! files, the collection name as the bare collection id. The driver only runs
+//! the engine's per-side sync, an upgrade to resolve link ids and a `Full`
+//! upgrade to hydrate a body about to be copied. Cross-side propagation of
+//! items, flags and deletions falls out of the shared hub's project and absorb,
+//! so there is no hand-rolled cross-merge, and syncing the sides in turn until
+//! quiescent converges them. The topology mismatch this resolves is in the
+//! crate header.
 //!
-//! First-cut gaps: collection deletion is not propagated (only creation), and the
-//! itemized report lists cross-side copies/flags/deletes (the per-side server
-//! reconcile is internal). A `Full` fetch opens a small connection pool to stream
-//! several bodies at once, largest-first; the rest of a side runs on one
+//! Collection deletion is not propagated yet, only creation, and the itemized
+//! report lists cross-side copies, flags and deletes, the per-side server
+//! reconcile being internal. A `Full` fetch opens a small connection pool to
+//! stream several bodies at once, largest-first; the rest of a side runs on one
 //! connection.
 
 use std::{
@@ -80,8 +78,8 @@ use crate::{
 use crate::{config::SmtpConfig, sync::report::SubmitEntry};
 
 /// How many extra sync passes to run after the first, propagating and settling
-/// cross-side changes. Two or three passes converge a collection in practice; the
-/// cap only guards against a pathological loop.
+/// cross-side changes. Two or three passes converge a collection in practice,
+/// so the cap only guards against a pathological loop.
 const MAX_EXTRA_PASSES: usize = 4;
 
 /// Resolves `<state_dir>/neverest/<account>/`, the default replica root.
@@ -99,15 +97,24 @@ pub fn store_dir(account: &str, config: &AccountConfig) -> Result<PathBuf> {
     }
 }
 
-/// Opens one source handle over the account's store, grouping every
-/// collection it writes under `account` (pimdir SPEC §9.2) so a store two
-/// hand-written accounts share tells whose collection is whose without a
-/// reader guessing from the naming.
+/// How many connections a side may open. An HTTP backend keeps one: extra
+/// connections only pay extra token acquisitions, the API being
+/// request/response anyway.
+fn connection_budget(config: &SideConfig, connections: usize) -> usize {
+    if config.is_imap() {
+        connections.max(1)
+    } else {
+        1
+    }
+}
+
+/// Opens one source handle over the account's store, grouping every collection
+/// it writes under `account` (pimdir SPEC §9.2) so a store shared by two
+/// hand-written accounts tells whose collection is whose.
 ///
-/// A store an earlier draft of the format wrote cannot be migrated in place
-/// (the spec is a draft, and the reference schema keeps folding into version
-/// 1), so the refusal is answered with the one command that fixes it: the
-/// store is a derived cache, and dropping it costs a resync.
+/// A store an earlier draft of the format wrote cannot be migrated in place, so
+/// the refusal is answered with the one command that fixes it: the store is a
+/// derived cache, and dropping it costs a resync.
 fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
     match PimdirStore::open(dir) {
         Ok(store) => Ok(store.for_account(account).for_source(source)),
@@ -123,11 +130,11 @@ fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceSto
 /// The one kind a two-side account syncs, refusing a pair whose backends
 /// disagree.
 ///
-/// The kind is never configured — it falls out of each side's backend — so the
+/// The kind is never configured, falling out of each side's backend, so the
 /// configuration schema cannot express "these two sides are compatible" and
-/// this check is the enforcement point. It runs after the sides open (the
-/// earliest moment their media types are known) and before the first store
-/// write, so a mismatched account fails cleanly with nothing half-written.
+/// this check is the enforcement point. It runs after the sides open, the
+/// earliest moment their media types are known, and before the first store
+/// write, so a mismatched account fails with nothing half-written.
 fn check_kinds(left: &mut SideCtx, right: &mut SideCtx) -> Result<Kind> {
     let left = (left.side, left.pool.primary().media_type());
     let right = (right.side, right.pool.primary().media_type());
@@ -160,9 +167,9 @@ fn pair_kind(left: (Side, &str), right: (Side, &str)) -> Result<Kind> {
     Ok(left_kind)
 }
 
-/// Live per-collection progress: the collection spinner and its base label, so an inner
-/// phase (body hydration, relay) can append a percentage to the `[2/7] Syncing
-/// INBOX` line (`… Syncing INBOX 66%`).
+/// Live per-collection progress: the collection spinner and its base label, so
+/// an inner phase such as body hydration or relay can append a percentage to
+/// the `[2/7] Syncing INBOX` line.
 struct MailboxProgress<'a> {
     spinner: &'a Spinner,
     label: &'a str,
@@ -210,8 +217,8 @@ impl SideCtx {
 }
 
 /// Runs the whole account sync and returns the report. Dispatches on the number
-/// of configured sides: one is a **local sync** (that remote against the retained
-/// pimdir store the app reads), two is a **remote-to-remote** sync through the
+/// of configured sides: one is a local sync, that remote against the retained
+/// pimdir store the app reads, two is a remote-to-remote sync through the
 /// store, cross-side propagation falling out of the shared hub.
 pub fn run(
     account_name: impl Into<String>,
@@ -279,8 +286,6 @@ fn run_dual(
         ..Default::default()
     };
 
-    // NOTE: the real replica; in dry-run everything runs against a throwaway
-    // copy of the store, so no checkpoint advances and no server is written.
     let real_dir = store_dir(&account_name, account_config)?;
     let work_dir = if dry_run {
         dry_run_replica(&real_dir)?
@@ -290,29 +295,14 @@ fn run_dual(
     fs::create_dir_all(&work_dir)
         .with_context(|| format!("Create replica dir `{}` error", work_dir.display()))?;
 
-    // NOTE: two source handles over one pimdir store — `"left"` and `"right"`
-    // bindings of each shared item. The blob reader is independent of either
-    // connection, so a remote can read a stored body back while a store is
-    // borrowed to service a sync. It comes from a store handle rather than
-    // the directory, so bodies are named by the hash the store records
-    // (pimdir SPEC §5) instead of one this side picks.
     let mut left_store = open_store(&work_dir, "left", &account_name)?;
     let mut right_store = open_store(&work_dir, "right", &account_name)?;
     let blobs = left_store.blobs();
 
-    // NOTE: neverest is the store's sole owner — apply what the frontends
-    // queued before any network work, so this run's sync pushes the resulting
-    // dirty state.
     drain_queues(&mut left_store, &mut report);
 
-    // NOTE: `hydration = "full"` mirrors every body, which needs retention.
     let hydrate_full = account_config.store.hydration == Some(Hydration::Full);
 
-    // NOTE: retention — a two-side sync relays (streams a body server-to-server,
-    // the store keeping only the spine) by default when both sides are IMAP
-    // (relay is IMAP-first); any other pairing, or `store.retention = "retain"`,
-    // retains. An explicit `relay` on a non-IMAP pairing falls back to retain,
-    // as does one combined with `hydration = "full"`.
     let relay_capable = left_config.is_imap() && right_config.is_imap();
     let relay = match account_config.store.retention {
         Some(Retention::Retain) => false,
@@ -328,12 +318,8 @@ fn run_dual(
         None => relay_capable && !hydrate_full,
     };
 
-    // NOTE: HTTP backends (Graph) keep one connection: extra ones only
-    // pay extra token acquisitions, the API is request/response anyway.
-    let left_imap = left_config.is_imap();
-    let right_imap = right_config.is_imap();
-    let left_budget = if left_imap { connections } else { 1 };
-    let right_budget = if right_imap { connections } else { 1 };
+    let left_budget = connection_budget(&left_config, connections);
+    let right_budget = connection_budget(&right_config, connections);
 
     let s = Spinner::start("Opening sides…");
     let mut left = SideCtx {
@@ -349,18 +335,9 @@ fn run_dual(
     };
     s.success("Opened sides");
 
-    // The item kind recorded on every collection this account touches. It is
-    // never configured: it falls out of each side's backend
-    // (`Client::media_type`), so the two sides must agree before anything is
-    // written — a mailbox cannot reconcile against an address book. The
-    // configuration schema cannot express the constraint (a side is just a
-    // backend), so this is where it is enforced, at runtime, right after the
-    // sides open and before the first store write.
     let kind = check_kinds(&mut left, &mut right)?;
     let media_type = kind.media_type();
 
-    // NOTE: the queue's capability-bound half: the pre-network drain applied
-    // every store mutation and left the intents only this build can perform.
     if !dry_run {
         drain_submits(
             account_config,
@@ -393,8 +370,6 @@ fn run_dual(
         report.collection.patch.push(PatchEntry::new(hunk, error));
     }
 
-    // NOTE: item sync runs over collections present (post-create) on both
-    // sides.
     let mut present_left = left_filtered.clone();
     let mut present_right = right_filtered.clone();
     for entry in &report.collection.patch {
@@ -437,8 +412,6 @@ fn run_dual(
             continue;
         }
 
-        // NOTE: `hydration = "full"` — mirror every body, not only the
-        // crossing ones; the shared object store dedups across sides.
         if hydrate_full
             && !dry_run
             && let Err(err) = hydrate_full_mailbox(
@@ -457,15 +430,10 @@ fn run_dual(
         s.success(format!("{collection}: done"));
     }
 
-    // NOTE: the retention sweep runs after the sync, so an item this run
-    // retired starts its delay now rather than being reclaimed by the very
-    // run that retired it.
     if !dry_run && !no_purge {
         sweep_retained(account_config, &mut left_store, &mut report);
     }
 
-    // NOTE: pimdir commits each write batch, so there is nothing to flush; a
-    // dry run just discards its throwaway store copy.
     if dry_run {
         let _ = fs::remove_dir_all(&work_dir);
     }
@@ -478,14 +446,14 @@ fn run_dual(
 /// carried from Phase 1 (spine) into Phase 2 (hydrate) and Phase 3 (apply).
 type MailboxPlan = (String, Vec<(ReplicaHandle, u64)>);
 
-/// The local (one-source) sync, run as three account-wide phases so the
-/// connection pool stays saturated end to end (never idling at collection
-/// boundaries): **Phase 1** spines every collection in parallel (enumerate + meta +
-/// push) over its own connection and store handle, collecting the bodies to
-/// hydrate; **Phase 2** streams every body across all collections through one global
-/// work-stealing pool into the blob store; **Phase 3** applies the fetched bodies
-/// to the index per collection from cache, no network. The store is the single local
-/// copy the app reads; there is no cross-side hydration.
+/// The local, one-source sync, run as three account-wide phases so the
+/// connection pool stays saturated end to end rather than idling at collection
+/// boundaries. Phase 1 spines every collection in parallel over its own
+/// connection and store handle, collecting the bodies to hydrate. Phase 2
+/// streams every body across all collections through one global work-stealing
+/// pool into the blob store. Phase 3 applies the fetched bodies to the index
+/// per collection from cache, with no network. The store is the single local
+/// copy the app reads, so there is no cross-side hydration.
 #[allow(clippy::too_many_arguments)]
 fn run_single(
     account_name: String,
@@ -515,46 +483,31 @@ fn run_single(
         .with_context(|| format!("Create replica dir `{}` error", work_dir.display()))?;
 
     // NOTE: the store is opened as the one side's source, so an app writing as
-    // that same source (himalaya auto-detects it) stages edits this sync pushes.
-    // We open one store handle *per connection*: Phase 1 fans the spine across
-    // them, their writes serialising on the store's single-writer lock while the
-    // network overlaps.
+    // that same source (himalaya auto-detects it) stages edits this sync
+    // pushes. One store handle per connection: Phase 1 fans the spine across
+    // them, their writes serialising on the store's single-writer lock while
+    // the network overlaps.
     let side = match side_name {
         SideName::Left => Side::Left,
         SideName::Right => Side::Right,
     };
     let source = side_name.to_string();
-    // NOTE: HTTP backends (Graph) keep one connection: extra ones only pay
-    // extra token acquisitions, the API is request/response anyway.
-    let workers = if side_config.is_imap() {
-        connections.max(1)
-    } else {
-        1
-    };
+    let workers = connection_budget(&side_config, connections);
     let s = Spinner::start("Opening connections…");
     let mut ctxs = open_side_contexts(side, &side_config, workers)?;
     let mut stores: Vec<PimdirSourceStore> = (0..workers)
         .map(|_| open_store(&work_dir, &source, &account_name))
         .collect::<Result<_>>()?;
-    // NOTE: from a store handle, so a body is named by the hash the store
-    // records (pimdir SPEC §5) rather than one this side picks.
     let blobs = stores[0].blobs();
     s.success(format!("Opened {} connection(s)", ctxs.len()));
 
-    // NOTE: neverest is the store's sole owner — apply what the frontends
-    // queued before any network work, so this run's sync pushes the resulting
-    // dirty state.
     drain_queues(&mut stores[0], &mut report);
 
-    // One side, so there is no cross-side pairing to check — only that this
-    // build knows the backend's kind at all.
     let raw = ctxs[0].pool.primary().media_type();
     let kind = Kind::from_media_type(raw)
         .with_context(|| format!("This build cannot sync items of type `{raw}`"))?;
     let media_type = kind.media_type();
 
-    // NOTE: the queue's capability-bound half: the pre-network drain applied
-    // every store mutation and left the intents only this build can perform.
     if !dry_run {
         let (first, _) = ctxs.split_first_mut().expect("at least one connection");
         drain_submits(
@@ -573,15 +526,14 @@ fn run_single(
         .into_iter()
         .collect();
 
-    // Pre-create every collection serially, so no Phase-1 worker races on lazy
-    // collection creation (and each carries its declared media type).
+    // NOTE: pre-created serially so no Phase-1 worker races on lazy collection
+    // creation, and each carries its declared media type.
     for collection in &filtered {
         stores[0]
             .ensure_collection(collection, media_type)
             .with_context(|| format!("Declare kind for `{collection}`"))?;
     }
 
-    // === Phase 1: spine (parallel over collections) ===
     let plans = phase1_spine(
         &filtered,
         &mut ctxs,
@@ -597,15 +549,9 @@ fn run_single(
         return Ok(report);
     }
 
-    // === Phase 2: hydrate (one global work-stealing pool over every body) ===
     let cache = phase2_hydrate(&plans, &mut ctxs, &blobs)?;
-
-    // === Phase 3: apply the fetched bodies to the index, per collection, no network ===
     phase3_apply(&plans, &mut ctxs[0], &mut stores[0], &blobs, &cache)?;
 
-    // NOTE: the retention sweep runs after the sync, so an item this run
-    // retired starts its delay now rather than being reclaimed by the very
-    // run that retired it.
     if !no_purge {
         sweep_retained(account_config, &mut stores[0], &mut report);
     }
@@ -641,12 +587,12 @@ fn open_side_contexts(side: Side, config: &SideConfig, count: usize) -> Result<V
     Ok(ctxs)
 }
 
-/// Phase 1 — spine each collection in parallel: a work-stealing pool of workers, each
-/// on its own connection and store handle, pulls the collection queue and reconciles
-/// (pull + meta + itemize + push), collecting the bodies to hydrate. Reads run
-/// concurrently (WAL); writes serialise on the store's single-writer lock. Report
-/// patches are merged after the barrier. A collection that errors is logged and
-/// skipped (its bodies simply don't enter the plan).
+/// Phase 1, spining each collection in parallel: a work-stealing pool of
+/// workers, each on its own connection and store handle, pulls the collection
+/// queue and reconciles, collecting the bodies to hydrate. Reads run
+/// concurrently through WAL and writes serialise on the store's single-writer
+/// lock. Report patches are merged after the barrier. A collection that errors
+/// is logged and skipped, its bodies never entering the plan.
 fn phase1_spine(
     filtered: &[String],
     ctxs: &mut [SideCtx],
@@ -698,11 +644,11 @@ fn phase1_spine(
     Ok(plans)
 }
 
-/// Reconciles one collection's spine (no hydration): pull the remote into the hub,
-/// itemize the pending local→remote edits and the pull plan, then push and settle,
-/// and return the not-yet-`Full` bodies to hydrate (handle + size from the local
-/// envelope meta, for a largest-first download) plus the report patches. A dry run
-/// stops after itemizing (targets empty).
+/// Reconciles one collection's spine, without hydration: pull the remote into
+/// the hub, itemize the pending local edits and the pull plan, then push and
+/// settle. Returns the not-yet-`Full` bodies to hydrate, each with the size its
+/// local envelope meta carries so the download can run largest-first, plus the
+/// report patches. A dry run stops after itemizing, leaving the targets empty.
 fn mailbox_spine(
     collection: &str,
     ctx: &mut SideCtx,
@@ -712,13 +658,13 @@ fn mailbox_spine(
 ) -> Result<(Vec<(ReplicaHandle, u64)>, SyncReport)> {
     let mut report = SyncReport::default();
 
-    // NOTE: snapshot flags before the pull so remote flag changes (which the pull
-    // applies silently, leaving the item Clean) can be itemized from the sync's
-    // per-item events rather than the post-pull projection.
+    // NOTE: flags are snapshotted before the pull because the pull applies
+    // remote changes silently, leaving the item Clean: they can only be
+    // itemized from the sync events, not from the post-pull projection.
     let before = flag_snapshot(store, collection, ctx.side)?;
 
     // NOTE: pull only first, so the projection still carries any edit the app
-    // staged locally (kept dirty because we did not push it yet).
+    // staged locally, kept dirty because it was not pushed yet.
     let pull = sync_side_rebuilding(collection, ctx, store, blobs, false)?;
     itemize_pulled(
         &pull.events,
@@ -735,7 +681,6 @@ fn mailbox_spine(
         return Ok((Vec::new(), report));
     }
 
-    // NOTE: push the staged local edits to the remote and settle.
     for _ in 0..=MAX_EXTRA_PASSES {
         let pass = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable())?;
         upgrade_probed(collection, ctx, store, blobs)?;
@@ -744,12 +689,10 @@ fn mailbox_spine(
         }
     }
 
-    // NOTE: the bodies to hydrate — every item with no stored body — with its
-    // size from the already-local envelope meta, so Phase 2 can order
-    // largest-first. The body is what is asked for, so the body is what is
-    // tested: a remote content change drops the stale one while the hub keeps
-    // the level it had reached (a level never falls back there), and keying on
-    // the level would leave the edited item bodiless forever.
+    // NOTE: the body is what is asked for, so the body is what is tested. A
+    // remote content change drops the stale one while the hub keeps the level
+    // it had reached (a level never falls back there), so keying on the level
+    // would leave the edited item bodiless forever.
     let mut targets: Vec<(ReplicaHandle, u64)> = Vec::new();
     for placement in projection_view(store, collection, ctx.side)
         .with_context(|| format!("Project {} `{collection}`", ctx.side))?
@@ -763,20 +706,19 @@ fn mailbox_spine(
     Ok((targets, report))
 }
 
-/// Phase 2 — hydrate every body across every collection through **one** global
-/// work-stealing pool. Bodies are chunked into largest-first per-collection batches
-/// (a batched `UID FETCH` is within one selected collection), the biggest batches
-/// queued first for a global largest-first order, and work-stolen across the
-/// connections: a worker finishing one collection's last batch immediately steals the
-/// next collection's — `select_cached` re-SELECTs across the boundary — so no
-/// connection idles at a collection edge. Bodies stream into the blob store; the
-/// fetched items are cached by `(collection, handle)` for Phase 3.
+/// Phase 2, hydrating every body across every collection through one global
+/// work-stealing pool. Bodies are chunked into largest-first per-collection
+/// batches, since a batched fetch stays within one selected collection, and the
+/// biggest batches are queued first for a global largest-first order. A worker
+/// finishing one collection's last batch immediately steals the next
+/// collection's, so no connection idles at a collection edge. Bodies stream
+/// into the blob store, and the fetched items are cached by collection and
+/// handle for Phase 3.
 fn phase2_hydrate(
     plans: &[MailboxPlan],
     ctxs: &mut [SideCtx],
     blobs: &PimdirBlobs,
 ) -> Result<HashMap<FetchKey, ReplicaFetchedItem>> {
-    // (max_size, collection, handles) per batch; sort biggest-first, then queue.
     let mut batches: Vec<(u64, String, Vec<ReplicaHandle>)> = Vec::new();
     let mut total_bodies = 0usize;
     for (collection, targets) in plans {
@@ -799,9 +741,9 @@ fn phase2_hydrate(
         queue.push((collection, handles));
     }
 
-    // The kind is a property of the backend, so every connection of this side
-    // reports the same one; resolve it once here rather than per batch, before
-    // the workers borrow the contexts.
+    // NOTE: the kind is a property of the backend, so every connection of this
+    // side reports the same one. Resolve it before the workers borrow the
+    // contexts.
     let kind = ctxs
         .first_mut()
         .map(|ctx| resolve_kind(&mut ctx.pool))
@@ -866,10 +808,10 @@ fn phase2_hydrate(
     Ok(cache)
 }
 
-/// Phase 3 — apply the pre-fetched bodies to the index, one collection at a time,
-/// with no network: drive io-replica's `Full` upgrade over a [`CachedFetchRemote`]
-/// that serves each body from the Phase-2 cache (a miss falls back to a real
-/// fetch). Only store writes happen here — fast, single writer.
+/// Phase 3, applying the pre-fetched bodies to the index one collection at a
+/// time with no network: io-replica's `Full` upgrade runs over a
+/// [`CachedFetchRemote`] serving each body from the Phase 2 cache, a miss
+/// falling back to a real fetch. Only store writes happen here.
 fn phase3_apply(
     plans: &[MailboxPlan],
     ctx: &mut SideCtx,
@@ -933,13 +875,12 @@ fn flag_snapshot(
         .collect())
 }
 
-/// Itemizes the remote-originated changes a pull applied — flag changes and
-/// removals on already-synced items — into the report. The pull applies them
-/// silently (the item reads `Clean` afterwards), so they are recovered from the
-/// sync's per-item `events`: a `FlagsChanged` is diffed against the pre-pull
-/// snapshot into add/remove hunks, a `Vanished` becomes a delete. (A new remote
-/// item is an `Added` event but is already reported as a `Fetch` by the pull
-/// plan, so it is not re-itemized here.)
+/// Itemizes into the report the remote-originated changes a pull applied: flag
+/// changes and removals on already-synced items. The pull applies them silently,
+/// the item reading `Clean` afterwards, so they are recovered from the sync's
+/// per-item events. A `FlagsChanged` is diffed against the pre-pull snapshot
+/// into add and remove hunks, and a `Vanished` becomes a delete. A new remote
+/// item is an `Added` event but the pull plan already reports it as a `Fetch`.
 fn itemize_pulled(
     events: &[ReplicaEvent],
     before: &HashMap<String, ReplicaFlags>,
@@ -993,10 +934,6 @@ fn itemize_pulled(
                     None,
                 ));
             }
-            // Content diverged on both sides. The engine left the placement
-            // conflicted rather than picking a winner; surface it so it is not
-            // silently stuck, and keep surfacing it on every run until someone
-            // resolves it with an edit.
             ReplicaEvent::Conflicted(handle) => {
                 report.conflicts.push(ItemConflict {
                     side,
@@ -1010,8 +947,8 @@ fn itemize_pulled(
     Ok(())
 }
 
-/// Itemizes one side's pending projection into the report (the local→remote work
-/// a flag/move/delete/compose staged), reusing the shared placement mapping.
+/// Itemizes one side's pending projection into the report, the outbound work a
+/// flag, move, delete or compose staged, reusing the shared placement mapping.
 fn itemize_single(
     collection: &str,
     store: &PimdirStore,
@@ -1031,8 +968,8 @@ fn itemize_single(
     Ok(())
 }
 
-/// Reports the pull plan of a one-source local sync (dry run): each not-yet-Full,
-/// non-tombstone item is a body a real run would fetch into the store.
+/// Reports the pull plan of a one-source local sync under a dry run: each
+/// not-yet-`Full`, non-tombstone item is a body a real run would fetch.
 fn itemize_fetches(
     collection: &str,
     store: &PimdirStore,
@@ -1063,9 +1000,9 @@ fn itemize_fetches(
     Ok(())
 }
 
-/// Reconciles one collection: a first per-side reconcile that resolves link ids and
-/// pulls both servers into the hub, a hydration of the bodies about to cross,
-/// then extra passes that push the projected propagations until quiescent.
+/// Reconciles one collection: a first per-side reconcile resolving link ids and
+/// pulling both servers into the hub, a hydration of the bodies about to cross,
+/// then extra passes pushing the projected propagations until quiescent.
 #[allow(clippy::too_many_arguments)]
 fn sync_mailbox(
     collection: &str,
@@ -1080,15 +1017,12 @@ fn sync_mailbox(
     progress: &MailboxProgress,
     report: &mut SyncReport,
 ) -> Result<()> {
-    // NOTE: declare the collection's media type up front so the store is
-    // self-describing; one call suffices (both handles share the database), and
-    // the sync's lazy collection creation never clobbers it.
+    // NOTE: one call suffices, both handles sharing the database, and the
+    // sync's lazy collection creation never clobbers the declared media type.
     left_store
         .ensure_collection(collection, media_type)
         .with_context(|| format!("Declare kind for `{collection}`"))?;
 
-    // NOTE: Round one — pull both servers into the shared hub and resolve link
-    // ids so items pair up across the sides.
     reconcile_pass(
         collection,
         left,
@@ -1110,16 +1044,11 @@ fn sync_mailbox(
         report,
     )?;
 
-    // NOTE: Itemize the pending cross-side work from the projection — identical
-    // for a dry run (which stops here) and a real run (which pushes it below).
-    // The projection reads the whole hub, so either handle serves it.
     itemize(collection, left_store, left, right, report)?;
     if dry_run {
         return Ok(());
     }
 
-    // NOTE: Push the propagations and settle. Each pass projects the hub as
-    // dirty/created/tombstone for the lagging side, whose sync pushes it.
     for _ in 0..MAX_EXTRA_PASSES {
         let progressed = reconcile_pass(
             collection,
@@ -1149,10 +1078,10 @@ fn sync_mailbox(
     Ok(())
 }
 
-/// Propagates the collection's cross-side copies, either by retaining (hydrating the
-/// body into the store, then the projection pushes it) or by relaying (streaming
-/// the body server-to-server, the store keeping only the spine). Returns how many
-/// bodies were moved.
+/// Propagates the collection's cross-side copies, either by retaining, which
+/// hydrates the body into the store for the projection to push, or by relaying,
+/// which streams the body server-to-server and keeps only the spine. Returns
+/// how many bodies were moved.
 #[allow(clippy::too_many_arguments)]
 fn propagate(
     collection: &str,
@@ -1180,9 +1109,9 @@ fn propagate(
     }
 }
 
-/// One cross-copy body to relay: its holding side + fetch handle, the exact octet
-/// length (from the item's `v:1` meta `size`, so the target APPEND is
-/// length-prefixed without buffering the body), the link id, the flags and the
+/// One cross-copy body to relay: its holding side and fetch handle, the exact
+/// octet length taken from the item's meta so the target append is
+/// length-prefixed without buffering the body, the link id, the flags and the
 /// Message-ID.
 struct RelayTarget {
     holding: Side,
@@ -1195,9 +1124,8 @@ struct RelayTarget {
     message_id: Option<String>,
 }
 
-/// Reads the relay targets from the hub: an item held by exactly one side, not
-/// yet on the other (never hydrated — no stored object), whose far side may
-/// create it.
+/// Reads the relay targets from the hub: an item held by exactly one side,
+/// never hydrated so with no stored object, whose far side may create it.
 fn relay_targets(
     store: &PimdirStore,
     collection: &str,
@@ -1249,17 +1177,14 @@ fn meta_size(meta: &Option<ReplicaMeta>) -> Option<usize> {
     value.get("size")?.as_u64().map(|n| n as usize)
 }
 
-/// Streams each cross-copy body directly from its holding side to the other,
-/// through a bounded pipe — the store keeps only the spine (the target's next
-/// enumerate binds the relayed message; its body is never stored). Returns how
+/// Streams each cross-copy body directly from its holding side to the other
+/// through a bounded pipe, the store keeping only the spine: the target's next
+/// enumerate binds the relayed message, whose body is never stored. Returns how
 /// many were relayed.
 ///
-/// Each relay is a write to the target server, so each is itemized as the copy
-/// it is. The hydrating path is reported from the projection, which stages the
-/// copy as a pending `Created` before the push; a relay never reaches the
-/// projection (the body goes straight across, the store keeping only the
-/// spine), so reporting it here is what keeps `already in sync` meaning the run
-/// wrote nothing.
+/// A relay never reaches the projection the hydrating path is reported from, so
+/// each write to the target server is itemized here instead. Without that, a
+/// run that relayed would report having written nothing.
 fn relay_copies(
     collection: &str,
     left: &mut SideCtx,
@@ -1301,8 +1226,8 @@ fn relay_copies(
 }
 
 /// Relays one message: a worker thread streams the fetch into the bounded pipe
-/// while this thread streams the pipe into the length-prefixed target append, so
-/// the body flows source→target without ever being held whole or stored.
+/// while this thread streams the pipe into the length-prefixed target append,
+/// so the body crosses without ever being held whole or stored.
 fn relay_one(
     holding_pool: &mut Pool,
     target_pool: &mut Pool,
@@ -1330,9 +1255,9 @@ fn relay_one(
     Ok(())
 }
 
-/// One per-side reconcile round: sync each side against its server (pull +
-/// push), then resolve any freshly probed placement to `Meta` so its link id is
-/// known and it joins the hub. Returns whether either side pulled or pushed.
+/// One per-side reconcile round: sync each side against its server, then
+/// resolve any freshly probed placement to `Meta` so its link id is known and
+/// it joins the hub. Returns whether either side pulled or pushed.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_pass(
     collection: &str,
@@ -1368,22 +1293,19 @@ fn moved(report: &ReplicaSyncReport) -> bool {
     report.pulled > 0 || report.pushed > 0
 }
 
-/// Runs one side's sync, then (IMAP only) the handle-space rebuild guard:
-/// the stored checkpoint's UIDVALIDITY is read before and after the sync;
-/// a change means the server renumbered every UID, so io-replica's rekey
-/// re-enumerates the new handle space and carries cached bodies, summaries
-/// and pending state over by link id, and its write batch lands through
+/// Runs one side's sync, then the handle-space rebuild guard: the stored
+/// checkpoint's epoch is read before and after the sync, and a change means the
+/// server renumbered every handle. io-replica's rekey then re-enumerates the
+/// new handle space, carrying cached bodies, summaries and pending state over
+/// by link id, and its write batch lands through
 /// [`PimdirSourceStore::write_rekeyed`] so `collections.generation` bumps
-/// atomically with the rebuild (a frontend derives its epoch — an IMAP
-/// UIDVALIDITY — from it alone). Ordinary syncs and full resyncs never
-/// bump. Graph sides never rebuild: their message ids survive a delta
-/// reset (see `crate::msgraph::client`).
+/// atomically with the rebuild. Ordinary syncs and full resyncs never bump.
+/// Graph sides never rebuild, their message ids surviving a delta reset.
 ///
-/// NOTE: the guard is pre/post within one run (neverest keeps no
-/// per-collection state beside the store). A crash between the sync's
-/// checkpoint write and the rekey loses the pre value, so that window can
-/// miss one generation bump; content still converges through link ids on
-/// the next sync.
+/// NOTE: the guard is pre/post within one run, neverest keeping no
+/// per-collection state beside the store. A crash between the sync's checkpoint
+/// write and the rekey loses the pre value, so that window can miss one
+/// generation bump; content still converges through link ids on the next sync.
 fn sync_side_rebuilding(
     collection: &str,
     ctx: &mut SideCtx,
@@ -1466,8 +1388,6 @@ where
     loop {
         match coroutine.resume(arg.take()) {
             ReplicaCoroutineState::Complete(Ok(report)) => {
-                // NOTE: the rekey emits exactly one write batch, so exactly
-                // one generation bump lands.
                 let generation = generation.context("Rekey completed without a write")?;
                 return Ok((report, generation));
             }
@@ -1521,16 +1441,11 @@ where
 ///
 /// Every side here is bound to the store's hub, which is what fixes the delete
 /// disposition: a refused delete (`push` off, or `item.delete = false`) is
-/// **held**, never reverted. Reverting one says "this source still holds the
-/// member", and a hub reads that as the item being alive (add-beats-delete
-/// across sources): it clears the deletion for every side and mirrors the item
-/// back to the one it was deleted on. A backup side configured to take no
-/// deletes would resurrect on both what the user removed on one, which is the
-/// opposite of what the setting is for.
-///
-/// Written once because the tests sync through it too: a wrong disposition is
-/// invisible until an item comes back from the dead, so it is not something to
-/// restate per call site.
+/// held, never reverted. Reverting one says "this source still holds the
+/// member", which a hub reads as the item being alive, since an add beats a
+/// delete across sources: it clears the deletion for every side and mirrors the
+/// item back to the one it was deleted on. A backup side configured to take no
+/// deletes would then resurrect on both what the user removed on one.
 fn sync_options(push: bool, rights: ReplicaPushRights) -> ReplicaSyncOptions {
     ReplicaSyncOptions {
         push,
@@ -1560,8 +1475,8 @@ fn sync_side(
 
 /// Raises every freshly probed placement to the tier its kind resolves at
 /// ([`Kind::probe_tier`]) so its link id and summary are known and it enters
-/// the hub: `Meta` for mail, whose envelope carries the identity, `Full` for
-/// a kind whose body is the only thing that does.
+/// the hub: `Meta` for mail, whose envelope carries the identity, `Full` for a
+/// kind whose body is the only thing that does.
 fn upgrade_probed(
     collection: &str,
     ctx: &mut SideCtx,
@@ -1600,7 +1515,6 @@ fn hydrate_copies(
     blobs: &PimdirBlobs,
     progress: &MailboxProgress,
 ) -> Result<usize> {
-    // NOTE: the hub is shared, so either handle reports the same targets.
     let targets = hydration_targets(
         left_store,
         collection,
@@ -1612,9 +1526,6 @@ fn hydrate_copies(
         return Ok(0);
     }
 
-    // NOTE: the holding side owns the bodies; batch each side's targets into one
-    // Full upgrade so its fetch streams them concurrently, largest-first, instead
-    // of one heavy item stalling the rest.
     let mut left_handles = Vec::new();
     let mut right_handles = Vec::new();
     for (side, handle) in &targets {
@@ -1624,13 +1535,12 @@ fn hydrate_copies(
         }
     }
     let total = targets.len();
-    // One counter over both sides so the tick reads `fetched i/total` end to end.
     let done = AtomicUsize::new(0);
     let tick = || progress.tick(done.fetch_add(1, Ordering::Relaxed) + 1, total);
 
     if !left_handles.is_empty() {
-        // Cross-side hydration orders by UID (empty size map); largest-first is
-        // the local-sync retain path's concern.
+        // NOTE: cross-side hydration orders by handle, the empty size map, since
+        // largest-first is the local-sync retain path's concern.
         let mut remote =
             PimRemote::with_progress(&mut left.pool, blobs.clone(), &tick, HashMap::new());
         drive(
@@ -1678,8 +1588,8 @@ fn itemize(
     Ok(())
 }
 
-/// Maps a projected placement to its report hunks (a flag change can surface as
-/// both an add and a remove).
+/// Maps a projected placement to its report hunks. A flag change can surface as
+/// both an add and a remove.
 fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -> Vec<ItemHunk> {
     match placement.status {
         ReplicaStatus::Created => {
@@ -1729,11 +1639,10 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
                     content_key: 0,
                 });
             }
-            // `Dirty` covers a flag change *and* a body edit, so compare the
-            // body pointer against the base's too: a mutable-content item whose
-            // object moved is a pending in-place update. Mail never trips this
-            // (its bodies are immutable, so the pointer only moves when the item
-            // does), which is why the flag diff alone sufficed until now.
+            // NOTE: Dirty covers a flag change and a body edit alike, so the
+            // body pointer is compared against the base's too: a mutable-content
+            // item whose object moved is a pending in-place update. Mail never
+            // trips this, its bodies being immutable.
             let base_object = placement.base.as_ref().and_then(|b| b.object.as_ref());
             if placement.object.as_ref() != base_object {
                 hunks.push(ItemHunk::Update {
@@ -1745,9 +1654,9 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
             }
             hunks
         }
-        // NOTE: an `Ambiguous` placement derives nothing on any axis, the
-        // engine refusing to guess which copy a change belongs to, so it has no
-        // hunk. It surfaces through [`ambiguity`] instead.
+        // NOTE: an Ambiguous placement derives nothing on any axis, the engine
+        // refusing to guess which copy a change belongs to, so it has no hunk.
+        // It surfaces through [`ambiguity`] instead.
         ReplicaStatus::Clean | ReplicaStatus::Conflict | ReplicaStatus::Ambiguous => Vec::new(),
     }
 }
@@ -1757,11 +1666,10 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
 /// first. `None` for any other status.
 ///
 /// The freeze itself is upstream: io-replica marks the identity and derives
-/// nothing for it, io-pimdir persists the losing handles on the binding. So
-/// this crate derives no duplicate rule of its own, it reads what they marked
-/// and names it in the user's terms. The state being persisted is what makes
-/// the warning come back on every run: the second copy appears in exactly one
-/// enumeration, so nothing here could rediscover it.
+/// nothing for it, io-pimdir persists the losing handles on the binding. This
+/// crate reads what they marked and names it in the user's terms. Persisting
+/// the state is what makes the warning come back on every run, since the second
+/// copy appears in exactly one enumeration.
 fn ambiguity(
     side: Side,
     collection: &str,
@@ -1887,8 +1795,8 @@ fn flag_diff(old: &ReplicaFlags, new: &ReplicaFlags) -> (BTreeSet<Flag>, BTreeSe
     (diff(new, old), diff(old, new))
 }
 
-/// A stable-ish u64 content key for the report DTO (display never shows it; it
-/// only needs to be internally consistent).
+/// A stable-ish u64 content key for the report DTO. Display never shows it, so
+/// it only needs to be internally consistent.
 fn content_key(link: &str) -> u64 {
     let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in link.bytes() {
@@ -1898,13 +1806,13 @@ fn content_key(link: &str) -> u64 {
     acc
 }
 
-/// Drains every collection's pending frontend actions into the store
-/// before the sync (spec: neverest is the store's sole owner). Each
-/// collection is exactly-once applied by io-pimdir's
-/// [`drain_collection`](PimdirSourceStore::drain_collection); permanently bad
-/// actions park (reported as warnings until repaired), a transient
-/// failure leaves the collection queued for the next run and is only
-/// warned — the sync itself still runs offline-first.
+/// Drains every collection's pending frontend actions into the store before the
+/// sync, neverest being the store's sole owner. Each collection is applied
+/// exactly once by io-pimdir's
+/// [`drain_collection`](PimdirSourceStore::drain_collection). A permanently bad
+/// action parks and is reported until repaired; a transient failure leaves the
+/// collection queued for the next run and only warns, the sync itself still
+/// running offline-first.
 fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
     let collections = match store.queued_collections() {
         Ok(collections) => collections,
@@ -1950,17 +1858,15 @@ fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
     }
 }
 
-/// Performs the queue's `submit` intents, the half the store's own drain
-/// leaves pending because performing it is a capability, not a mutation
-/// (spec: an owner that cannot perform an action kind skips the row).
+/// Performs the queue's `submit` intents, the half the store's own drain leaves
+/// pending because performing one is a capability rather than a mutation.
 ///
 /// Each intent goes through the first side offering a send channel: its own
-/// `smtp` table when it carries one, else its native send (the Graph
-/// sendMail action). A sent intent is acknowledged (`drop_action`), which
-/// releases its body's pin; a permanent failure parks the row with its
-/// error; a transient one leaves it pending for the next run. Without a
-/// channel at all the intents stay pending with a warning: they are never
-/// parked, since another build (or another host) can perform them.
+/// `smtp` table when it carries one, else its native send. A sent intent is
+/// acknowledged, which releases its body's pin; a permanent failure parks the
+/// row with its error; a transient one leaves it pending for the next run.
+/// Without a channel at all the intents stay pending with a warning, never
+/// parked, since another build or another host can perform them.
 fn drain_submits(
     account_config: &AccountConfig,
     sides: &mut [&mut SideCtx],
@@ -1992,8 +1898,7 @@ fn drain_submits(
             let entry = match submit::send_one(&mut channel, blobs, intent) {
                 Ok(()) => {
                     // NOTE: at-least-once, since a crash between the server's
-                    // acceptance and this acknowledgement resends next run
-                    // (see the module header; dedup is the provider's job).
+                    // acceptance and this acknowledgement resends next run.
                     match store.drop_action(intent.id) {
                         Ok(true) => {}
                         Ok(false) => warn!(
@@ -2018,8 +1923,8 @@ fn drain_submits(
                     let error = format!("{:#}", failure.error());
                     let parked = failure.parks();
                     warn!("submit intent #{} failed: {error}", intent.id);
-                    // NOTE: `None` bumps the attempt counter and leaves the
-                    // row pending for the next run; `Some` parks it.
+                    // NOTE: `None` bumps the attempt counter and leaves the row
+                    // pending for the next run; `Some` parks it.
                     let outcome = parked.then_some(error.as_str());
                     if let Err(err) = store.fail_action(intent.id, outcome) {
                         warn!("cannot record submit intent #{} failure: {err}", intent.id);
@@ -2044,8 +1949,8 @@ fn drain_submits(
 
     #[cfg(not(any(feature = "smtp", feature = "msgraph")))]
     {
-        // NOTE: skipped, never parked: parking means permanently
-        // unappliable, and a build with a send channel performs these.
+        // NOTE: skipped, never parked: parking means permanently unappliable,
+        // and a build with a send channel performs these.
         let _ = (account_config, sides, blobs, store, report);
         warn!(
             "this build has no send channel (needs the `smtp` or the `msgraph` cargo feature), {} submit intent(s) stay pending",
@@ -2055,23 +1960,20 @@ fn drain_submits(
 }
 
 /// Reclaims the store's retained (soft-deleted) items older than
-/// `store.purge-after`, after the sync and before the report is finalised.
+/// `store.purge-after`. It runs after the sync rather than before it, so an
+/// item this run retired starts its delay now instead of being reclaimed by
+/// the very run that retired it.
 ///
-/// Unset means never purge, so the sweep does not run at all. It warns
-/// rather than fails: a store that cannot be swept is a housekeeping
-/// problem, not a reason to fail a run that synced correctly.
+/// Unset means never purge, so the sweep does not run at all. It warns rather
+/// than fails: a store that cannot be swept is a housekeeping problem, not a
+/// reason to fail a run that synced correctly.
 ///
-/// A purge releases a body; it does not reclaim one. The store collects nothing
-/// by itself (pimdir SPEC §5: an object at refcount zero is unreferenced, not
-/// deleted, because the batch that attaches a body may not be the one that
-/// indexed it), so whoever owns the store is what runs the collector, and here
-/// that is this. Without it a store driven by neverest keeps every dereferenced
-/// body for ever, reports nothing about it, and passes every check it has.
-///
-/// Only after a purge that took something, since that is the moment this run
-/// knows a body was released, and the collector's own cost is a walk of the
-/// whole blob tree. Orphans left by a crash are not this run's to find: they
-/// are what `pimdir gc` is for.
+/// A purge releases a body, it does not reclaim one. The store collects nothing
+/// by itself (pimdir SPEC §5), so the store's owner runs the collector, and
+/// here that is this. It runs only after a purge that took something, since
+/// that is when this run knows a body was released and the collector costs a
+/// walk of the whole blob tree. Orphans left by a crash are what `pimdir gc`
+/// is for.
 fn sweep_retained(
     account_config: &AccountConfig,
     store: &mut PimdirStore,
@@ -2090,7 +1992,7 @@ fn sweep_retained(
         0 => Default::default(),
         _ => match store.collect_garbage() {
             Ok(collected) => collected,
-            // A producer mid-append holds the staging lock, which the collector
+            // NOTE: a producer mid-append holds the staging lock the collector
             // takes exclusively. Nothing was purged in vain: the bodies stay
             // released and the next run, or `pimdir gc`, takes them.
             Err(err) => {
@@ -2114,19 +2016,18 @@ fn sweep_retained(
     });
 }
 
-/// Resolves the account's send channel. The channel belongs to a side:
-/// its own `smtp` table when it carries one, else its native send (the
-/// Graph `sendMail` action). Sides are walked in configuration order, so
-/// `left` wins when both offer one. `None` warns and leaves the `queued`
-/// intent(s) pending.
+/// Resolves the account's send channel. The channel belongs to a side: its own
+/// `smtp` table when it carries one, else its native send. Sides are walked in
+/// configuration order, so `left` wins when both offer one. `None` warns and
+/// leaves the queued intents pending.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 fn open_send_channel<'a>(
     account_config: &AccountConfig,
     sides: &'a mut [&mut SideCtx],
     queued: usize,
 ) -> Option<submit::SendChannel<'a>> {
-    // Decided before any borrow of `sides`, so the Graph arm can hand
-    // out the live session of the side it picked.
+    // NOTE: decided before any borrow of `sides`, so the Graph arm can hand out
+    // the live session of the side it picked.
     let pick = account_config
         .sides()
         .into_iter()
@@ -2176,12 +2077,12 @@ fn open_send_channel<'a>(
     }
 }
 
-/// Which side performs the submit intents, and how: its own SMTP channel,
-/// or the live session of the side at that index (a native sender).
+/// Which side performs the submit intents, and how: its own SMTP channel, or
+/// the live session of the side at that index, a native sender.
 ///
-// NOTE: each variant is consumed by the arm its cargo feature gates, so a
-// build with only one of them carries the other unread rather than
-// duplicating the walk per feature combination.
+/// NOTE: each variant is consumed by the arm its cargo feature gates, so a
+/// build with only one of them carries the other unread rather than duplicating
+/// the walk per feature combination.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 #[allow(dead_code)]
 enum SendChannelPick<'a> {
@@ -2189,11 +2090,11 @@ enum SendChannelPick<'a> {
     Native(usize),
 }
 
-/// Hydrates every not-yet-`Full`, non-tombstone placement of both sides
-/// to `Full` (`store.hydration = "full"`), so the store mirrors every
-/// body. The shared object store dedups: the second side's upgrade
-/// links an already-stored body by link id without a fetch. Returns how
-/// many placements were raised.
+/// Hydrates every not-yet-`Full`, non-tombstone placement of both sides to
+/// `Full` under `store.hydration = "full"`, so the store mirrors every body.
+/// The shared object store dedups, so the second side's upgrade links an
+/// already-stored body by link id without a fetch. Returns how many placements
+/// were raised.
 #[allow(clippy::too_many_arguments)]
 fn hydrate_full_mailbox(
     collection: &str,
@@ -2231,8 +2132,8 @@ fn hydrate_full_mailbox(
     Ok(raised)
 }
 
-/// Builds a throwaway copy of the pimdir store for a dry run (so no checkpoint
-/// advances and no server is written): the SQLite database, its sidecar files
+/// Builds a throwaway copy of the pimdir store for a dry run, so no checkpoint
+/// advances and no server is written: the SQLite database, its sidecar files
 /// and the blob directory.
 fn dry_run_replica(real_dir: &Path) -> Result<PathBuf> {
     let mut tmp = std::env::temp_dir();
@@ -2248,7 +2149,7 @@ fn dry_run_replica(real_dir: &Path) -> Result<PathBuf> {
     Ok(tmp)
 }
 
-/// Recursively copies `src`'s contents into `dst` (created on demand).
+/// Recursively copies `src`'s contents into `dst`, created on demand.
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
@@ -2282,19 +2183,13 @@ mod tests {
 
     #[test]
     fn a_side_pair_must_agree_on_its_kind() {
-        // The kind is never configured — it falls out of each side's backend —
-        // so this runtime check is the only thing standing between a mail side
-        // and an address-book side sharing one collection.
         let mail = "message/rfc822";
 
-        // Two mail sides: the ordinary case, one kind out.
         assert_eq!(
             pair_kind((Side::Left, mail), (Side::Right, mail)).unwrap(),
             Kind::Mail
         );
 
-        // A media type this build cannot sync is refused, and the error names
-        // both the type and which side carried it.
         let err = pair_kind((Side::Left, mail), (Side::Right, "text/vcard"))
             .unwrap_err()
             .to_string();
@@ -2306,22 +2201,19 @@ mod tests {
             .to_string();
         assert!(err.contains("left"), "{err}");
 
-        // NOTE: the *mismatch* branch (two kinds this build knows, but
-        // different ones) cannot be exercised until a second backend lands in
-        // phase 4; today every known media type is mail, so an unknown one
-        // trips the resolve step first.
+        // NOTE: the mismatch branch, two kinds this build knows but different
+        // ones, cannot be exercised while every known media type is mail: an
+        // unknown one trips the resolve step first.
     }
 
     #[test]
     fn the_pre_sync_drain_applies_queued_actions_and_reports_parked_ones() {
         let dir = tempfile::tempdir().unwrap();
-        // NOTE: the owner opens (and creates) the store first, as the real
-        // driver does; only then can a producer attach.
+        // NOTE: the owner opens the store first, as the real driver does; only
+        // then can a producer attach.
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
-        // A frontend enqueues an add (body written durably first) and a
-        // permanently bad action (unknown seq).
         let blobs = store.blobs();
         let mut writer = blobs.writer().unwrap();
         std::io::Write::write_all(&mut writer, b"Subject: queued\r\n\r\nhello").unwrap();
@@ -2366,9 +2258,6 @@ mod tests {
         let mut report = SyncReport::default();
         drain_queues(&mut store, &mut report);
 
-        // The add applied (staged as a pending creation the sync derives an
-        // append push from) and the remove of an absent item is a no-op
-        // success; the set-flags on an unknown seq parked.
         assert_eq!(report.drained.len(), 1);
         assert_eq!(report.drained[0].collection, "INBOX");
         assert_eq!(report.drained[0].applied, 2);
@@ -2377,9 +2266,6 @@ mod tests {
 
         let placements = load_side(&store, "INBOX").unwrap();
         assert_eq!(placements.len(), 1);
-        // NOTE: the drained add lands base-less, which the hub projects as a
-        // dirty staged creation — exactly what the next sync derives an
-        // append push from.
         assert_eq!(placements[0].status, ReplicaStatus::Dirty);
         assert!(placements[0].base.is_none());
         assert_eq!(
@@ -2387,8 +2273,6 @@ mod tests {
             Some("mid:q1@x")
         );
 
-        // The queue is empty (the parked row is not pending) and a second
-        // drain applies nothing new but re-reports the parked row.
         let mut second = SyncReport::default();
         drain_queues(&mut store, &mut second);
         assert!(second.drained.is_empty());
@@ -2397,8 +2281,8 @@ mod tests {
 
     /// The stored checkpoint's UIDVALIDITY, read the way the IMAP adapter
     /// encodes it. The rekey guard itself goes through
-    /// `Client::handle_space_epoch`; this test has no client, so it decodes
-    /// directly — which is also why it is gated on the IMAP feature.
+    /// `Client::handle_space_epoch`, but this test has no client, so it decodes
+    /// directly, which is also why it is gated on the IMAP feature.
     #[cfg(feature = "imap")]
     fn stored_checkpoint_uid_validity(store: &PimdirSourceStore, collection: &str) -> Option<u32> {
         let loaded = store
@@ -2488,7 +2372,6 @@ mod tests {
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
-        // The old handle space: UID 1 under UIDVALIDITY 1, hydrated.
         store
             .write(vec![
                 ReplicaWriteOp::StoreObject {
@@ -2525,14 +2408,11 @@ mod tests {
             .unwrap();
         assert_eq!(store.generation("INBOX").unwrap(), Some(1));
 
-        // The server renumbered: the same message now lives under UID 7.
         let mut remote = ScriptedRemote {
             spine: vec![(String::from("7"), String::from("mid:a@x"))],
         };
         let (rekey, generation) = drive_rekey(&mut store, &mut remote, "INBOX").unwrap();
 
-        // Carried by link id (the body survives without a refetch), and the
-        // generation bumped exactly once, atomically with the rebuild.
         assert_eq!(rekey.rekeyed, 1);
         assert_eq!(rekey.pulled, 0);
         assert_eq!(generation, 2);
@@ -2544,16 +2424,11 @@ mod tests {
         assert_eq!(placements[0].object, Some(ReplicaHash("beef0001".into())));
         assert_eq!(placements[0].status, ReplicaStatus::Clean);
 
-        // The stored checkpoint now carries the new UIDVALIDITY: the guard
-        // reads pre 1 / post 2 as the change that triggers this rebuild.
         assert_eq!(stored_checkpoint_uid_validity(&store, "INBOX"), Some(2));
     }
 
     #[test]
     fn no_collection_name_is_reserved() {
-        // The Outbox used to be filtered out of every listing, whatever the
-        // filter said. Submission is a queue intent now, so a remote folder
-        // of that name syncs like any other one.
         let collections: HashSet<String> = ["INBOX", "Outbox", "Sent"].map(String::from).into();
 
         let filtered = filter_mailboxes(&collections, &CollectionFilter::All);
@@ -2573,8 +2448,6 @@ mod tests {
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("Sent", "message/rfc822").unwrap();
 
-        // A producer stages the body durably, then enqueues the intent
-        // anchored on whatever collection it chose.
         let blobs = store.blobs();
         let mut writer = blobs.writer().unwrap();
         std::io::Write::write_all(&mut writer, b"Subject: hi\r\n\r\nhello").unwrap();
@@ -2596,15 +2469,12 @@ mod tests {
             )
             .unwrap();
 
-        // The store's drain cannot perform an intent, so it skips the row:
-        // pending, not parked, and no item was created in `Sent`.
         let mut report = SyncReport::default();
         drain_queues(&mut store, &mut report);
         assert!(report.drained.is_empty());
         assert!(report.parked.is_empty());
         assert!(load_side(&store, "Sent").unwrap().is_empty());
 
-        // Neverest reads it back, with its envelope and its pinned body.
         let intents = submit::pending(&store).unwrap();
         assert_eq!(intents.len(), 1);
         assert_eq!(intents[0].collection, "Sent");
@@ -2614,8 +2484,6 @@ mod tests {
             Some("cafe0002")
         );
 
-        // Acknowledging it (what a successful send does) takes the row out
-        // and releases the body's pin.
         assert!(store.drop_action(intents[0].id).unwrap());
         assert!(submit::pending(&store).unwrap().is_empty());
     }
@@ -2627,15 +2495,11 @@ mod tests {
         let mut config: AccountConfig =
             toml::from_str(r#"left.imap.server = "imaps://imap.example.org:993""#).unwrap();
 
-        // Unset means never purge: the sweep does not run, and the report
-        // carries no retention section at all.
         let mut report = SyncReport::default();
         sweep_retained(&config, &mut store, &mut report);
         assert!(report.purged.is_none());
         assert!(config.store.purge_cutoff(chrono::Utc::now()).is_none());
 
-        // Configured, the run says what it reclaimed (nothing, here: the
-        // store holds no retained item).
         config.store.purge_after = Some(crate::config::HumanDuration(
             std::time::Duration::from_secs(0),
         ));
@@ -2648,12 +2512,10 @@ mod tests {
 
     /// A purged item's body actually leaves the disk.
     ///
-    /// A purge releases a reference; it does not reclaim bytes, and the store
+    /// A purge releases a reference, it does not reclaim bytes, and the store
     /// collects nothing by itself (pimdir SPEC §5). Without a collector on this
-    /// path the sweep reported items it had deleted and left every one of their
-    /// bodies in the blob tree, for ever, with no read and no check mentioning
-    /// them: a backup store would grow without bound while reporting that it
-    /// had reclaimed things.
+    /// path a backup store would grow without bound while reporting that it had
+    /// reclaimed things.
     #[test]
     fn the_sweep_collects_the_bodies_the_purge_released() {
         let dir = tempfile::tempdir().unwrap();
@@ -2693,8 +2555,6 @@ mod tests {
         let body = source.blobs().path(&ReplicaHash("beef0002".into()));
         assert!(body.is_file(), "the body was stored");
 
-        // The source drops it for good: no binding is left, so the item is
-        // retained rather than deleted, and keeps holding its body.
         source
             .write(vec![ReplicaWriteOp::DropPlacement {
                 collection: ReplicaCollectionId("INBOX".into()),
@@ -2727,9 +2587,9 @@ mod tests {
     /// A mutable-content remote: every item carries an ETag, and a write is
     /// conditional on it.
     ///
-    /// This is the whole point of phase 3 — the path no compiled-in backend
-    /// exercises yet, proven here before any DAV code exists, so a CardDAV
-    /// failure later is a protocol bug rather than an engine one.
+    /// This is the path no compiled-in backend exercises yet, proven here
+    /// before any DAV code exists, so a CardDAV failure later is a protocol bug
+    /// rather than an engine one.
     struct MutableRemote {
         /// `handle -> (revision, accepted body)`.
         items: HashMap<String, (String, Option<ReplicaHash>)>,
@@ -2763,8 +2623,8 @@ mod tests {
                     .iter()
                     .map(|(handle, (revision, _))| ReplicaRemoteItem {
                         handle: ReplicaHandle(handle.clone()),
-                        // A backend with no flag concept reports known-empty,
-                        // never unknown.
+                        // NOTE: a backend with no flag concept reports
+                        // known-empty, never unknown.
                         flags: ReplicaFlags::default(),
                         revision: Some(revision.clone()),
                     })
@@ -2812,8 +2672,9 @@ mod tests {
                         if_match,
                     } => {
                         let current = self.items.get(&handle.0).map(|(rev, _)| rev.clone());
-                        // The whole contract: write only if the caller's base
-                        // still matches, else reject so the engine re-merges.
+                        // NOTE: the whole contract: write only if the caller's
+                        // base still matches, else reject so the engine
+                        // re-merges.
                         if if_match.is_some() && if_match.as_deref() == current.as_deref() {
                             let revision = self.next_revision.clone();
                             self.items
@@ -2981,12 +2842,10 @@ mod tests {
     fn a_local_body_edit_is_pushed_conditionally_and_confirmed() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store_with_local_edit(dir.path(), "v1");
-        // The remote still holds the revision the edit was based on.
         let mut remote = MutableRemote::at("card1", "v1");
 
         let report = sync_with(&mut store, &mut remote, ReplicaPushRights::all());
 
-        // Pushed as a conditional in-place update, not a delete + re-add.
         assert!(
             matches!(
                 remote.pushed.as_slice(),
@@ -2999,8 +2858,6 @@ mod tests {
         assert_eq!(report.conflicts, 0);
         assert_eq!(report.rejected, 0);
 
-        // The remote now holds the edited body under its new revision, and the
-        // placement is clean and rebased onto it.
         assert_eq!(
             remote.items["card1"],
             (String::from("v2"), Some(ReplicaHash("ed17".into())))
@@ -3016,12 +2873,10 @@ mod tests {
     fn a_body_edited_on_both_sides_is_left_conflicted_not_overwritten() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = store_with_local_edit(dir.path(), "v1");
-        // Someone else edited the same contact since: the remote has moved on.
         let mut remote = MutableRemote::at("card1", "v9");
 
         let report = sync_with(&mut store, &mut remote, ReplicaPushRights::all());
 
-        // The remote body is untouched — losing an edit is worse than stopping.
         assert_eq!(
             remote.items["card1"].1, None,
             "remote must not be clobbered"
@@ -3036,18 +2891,11 @@ mod tests {
             report.events
         );
 
-        // The conflict must also survive the round trip through the store, not
-        // just be reported by the run: io-replica's hub round-trips it on the
-        // binding and io-pimdir persists it (`bindings.conflicted` /
-        // `bindings.conflict_revision`). Before that landed the placement read
-        // back `Dirty`, so the next run re-derived the same push, re-conflicted
-        // and re-reported forever, and a frontend reading the store could not
-        // tell which items needed a human. Inert for mail (immutable bodies
-        // never conflict), fatal for CardDAV and CalDAV.
-        //
-        // Both fixes are in their working trees and not published yet, which is
-        // why Cargo.toml patches them; this assertion is what proves the patch
-        // is doing its job.
+        // NOTE: the conflict must survive the round trip through the store, not
+        // only be reported by the run. Otherwise the placement reads back Dirty
+        // and the next run re-derives the same push, re-conflicts and
+        // re-reports forever, with no way for a frontend to tell which items
+        // need a human.
         let placements = load_side(&store, "contacts").unwrap();
         assert_eq!(
             placements[0].status,
@@ -3067,7 +2915,6 @@ mod tests {
         let mut store = store_with_local_edit(dir.path(), "v1");
         let mut remote = MutableRemote::at("card1", "v1");
 
-        // `item.update = false` on this side.
         let rights = ReplicaPushRights {
             content: false,
             ..ReplicaPushRights::all()
@@ -3079,8 +2926,6 @@ mod tests {
             "a forbidden update must not reach the remote, got {:?}",
             remote.pushed
         );
-        // Kept pending rather than dropped: the edit survives for a run where
-        // the permission is granted.
         let placements = load_side(&store, "contacts").unwrap();
         assert_eq!(placements[0].status, ReplicaStatus::Dirty);
         assert_eq!(placements[0].object, Some(ReplicaHash("ed17".into())));
@@ -3139,17 +2984,15 @@ mod tests {
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
-        // The shape the engine leaves behind when a source holds one identity
-        // under two handles: the copy it bound, carrying the one it did not.
+        // NOTE: the shape the engine leaves behind when a source holds one
+        // identity under two handles: the copy it bound, carrying the one it
+        // did not.
         let mut placement = linked("145", "mid:a@x", r#"{"v":1}"#);
         placement.ambiguous_handles = vec![ReplicaHandle("146".into())];
         store
             .write(vec![ReplicaWriteOp::UpsertPlacement(placement)])
             .unwrap();
 
-        // The freeze survives the store round trip, which is what makes the
-        // warning come back on every run: the second copy is reported by
-        // exactly one enumeration, so nothing could rediscover it.
         let view = projection_view(&store, "INBOX", Side::Left).unwrap();
         assert_eq!(view.len(), 1);
         assert_eq!(view[0].status, ReplicaStatus::Ambiguous);
@@ -3165,14 +3008,11 @@ mod tests {
         assert_eq!(report.ambiguous.len(), 1);
         assert_eq!(report.ambiguous[0].ids, ["145", "146"]);
 
-        // Text: one warning naming the collection and both handles, and
-        // nothing that reads as a repair or as an invalid mailbox.
         let text = report.to_string();
         assert!(text.contains("Warnings (1)"), "{text}");
         assert!(text.contains("`INBOX`"), "{text}");
         assert!(text.contains("`145`") && text.contains("`146`"), "{text}");
 
-        // `--json`: the same coordinates, machine-readable.
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["ambiguous"][0]["collection"], "INBOX");
         assert_eq!(
@@ -3187,7 +3027,6 @@ mod tests {
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
-        // One side holds a bodiless item the other lacks: the relay plan.
         store
             .write(vec![ReplicaWriteOp::UpsertPlacement(linked(
                 "1",
@@ -3201,9 +3040,6 @@ mod tests {
         assert_eq!(targets[0].holding, Side::Left);
         assert_eq!(targets[0].link, "mid:a@x");
 
-        // A relay streams the body server-to-server and never reaches the
-        // projection, so it is itemized where it happens; without that the run
-        // wrote to a server and reported nothing.
         let target = &targets[0];
         let mut report = SyncReport {
             account: "relay".into(),

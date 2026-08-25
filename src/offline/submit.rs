@@ -102,8 +102,6 @@ pub const SUBMIT: &str = "submit";
 /// so a malformed one can be parked with its reason rather than hiding the
 /// whole intent.
 //
-// NOTE: a build with no send channel reads the intents (to warn that they
-// stay pending) without ever performing one, so its fields go unread there.
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub struct SubmitIntent {
@@ -118,9 +116,6 @@ pub struct SubmitIntent {
     pub payload: String,
 }
 
-// NOTE: a build with no send channel never performs an intent, so it
-// reads none of this; the module still compiles whole so the two halves
-// cannot drift.
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
 impl SubmitIntent {
     /// The decoded envelope. A payload that does not decode is a
@@ -328,9 +323,9 @@ pub fn send_one(
     blobs: &PimdirBlobs,
     intent: &SubmitIntent,
 ) -> Result<(), SubmitFailure> {
-    // NOTE: decoded whatever the channel is: a payload this build cannot
-    // read is a broken intent, and parking it beats sending it blind. A
-    // native sender then takes its addresses from the MIME body itself.
+    // NOTE: decoded whatever the channel is, since a payload this build cannot
+    // read is a broken intent and parking it beats sending it blind. A native
+    // sender then takes its addresses from the MIME body itself.
     #[cfg_attr(not(feature = "smtp"), allow(unused_variables))]
     let meta = intent.envelope()?;
     let hash = intent
@@ -339,7 +334,7 @@ pub fn send_one(
         .ok_or_else(|| SubmitFailure::permanent(anyhow!("Submit intent has no stored body")))?;
     let bytes = blobs
         .get(hash)
-        // A blob read failure is a filesystem problem, not a bad intent.
+        // NOTE: a blob read failure is a filesystem problem, not a bad intent.
         .map_err(|err| SubmitFailure::Transient(anyhow!("Cannot read the queued blob: {err}")))?
         .ok_or_else(|| SubmitFailure::permanent(anyhow!("The queued body is missing")))?;
 
@@ -368,8 +363,8 @@ pub fn send_one(
 #[cfg(feature = "smtp")]
 fn classify_smtp(err: SmtpClientError) -> SubmitFailure {
     // NOTE: a `send` runs the composite coroutine, so its rejections arrive
-    // nested under `MessageSend`; the flat variants are the same failures
-    // seen through a single-command call.
+    // nested under `MessageSend`. The flat variants are the same failures seen
+    // through a single-command call.
     let code = match &err {
         SmtpClientError::MessageSend(SmtpMessageSendError::MailFrom(SmtpMailError::Rejected {
             code,
@@ -565,7 +560,6 @@ mod tests {
         send_one(&mut channel, &blobs, &intent).expect("send");
         channel.close();
 
-        // The sink saw the envelope from the payload and the exact bytes.
         let captured = captured.recv().expect("captured session");
         assert_eq!(
             captured.commands,
@@ -575,8 +569,6 @@ mod tests {
                 "RCPT TO:<c@y.org>",
             ]
         );
-        // NOTE: the client terminates the DATA block with a CRLF before the
-        // final dot; the payload itself is byte-identical.
         assert_eq!(captured.data, [body.as_slice(), b"\r\n"].concat());
     }
 
@@ -586,15 +578,12 @@ mod tests {
         let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
         let payload = r#"{"v":1,"from":"a@x.org","rcpts":["b@y.org"],"subject":"hi"}"#;
 
-        // A 5xx is the server saying "never": park it rather than resend
-        // forever.
         let intent = stage_intent(&blobs, 1, payload, b"body");
         let (port, _) = spawn_smtp_sink(Some("554 rejected\r\n"));
         let mut channel = channel_to(port);
         let failure = send_one(&mut channel, &blobs, &intent).expect_err("rejected");
         assert!(failure.parks(), "5xx must park: {}", failure.error());
 
-        // A 4xx is "not now": keep it pending for the next run.
         let intent = stage_intent(&blobs, 2, payload, b"body");
         let (port, _) = spawn_smtp_sink(Some("451 try later\r\n"));
         let mut channel = channel_to(port);
@@ -607,16 +596,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
 
-        // Not JSON at all, and a version this build does not implement:
-        // both are permanent, no run decodes them better.
         let broken = stage_intent(&blobs, 1, "not json", b"body");
         assert!(broken.envelope().expect_err("malformed").parks());
         assert!(broken.subject().is_none());
         let future = stage_intent(&blobs, 2, r#"{"v":9,"from":"a@x.org"}"#, b"body");
         assert!(future.envelope().expect_err("v9").parks());
 
-        // The body pin is what makes the intent sendable; without it there
-        // is nothing to submit, ever.
         let bodyless = SubmitIntent {
             object: None,
             ..stage_intent(&blobs, 3, r#"{"v":1,"from":"a@x.org"}"#, b"body")

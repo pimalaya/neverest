@@ -250,7 +250,6 @@ impl GraphClient {
                 vanished.push(row.message.id.clone());
             } else {
                 items.push(EnumEntry {
-                    // Graph message bodies are immutable: no content revision.
                     revision: None,
                     id: row.message.id.clone(),
                     flags: message_flags(&row.message),
@@ -542,18 +541,17 @@ fn message_envelope(id: &str, message: &MsgraphMessage) -> ItemSummary {
             .internet_message_id
             .as_deref()
             .and_then(normalize_message_id),
-        // NOTE: Graph carries In-Reply-To only inside
-        // `internetMessageHeaders`, which a listing selection does not
-        // return, so the field stays empty rather than costing one
-        // request per row.
+        // NOTE: Graph carries In-Reply-To only inside `internetMessageHeaders`,
+        // which a listing selection does not return, so the field stays empty
+        // rather than costing one request per row.
         in_reply_to: Vec::new(),
         flags: message_flags(message),
         subject: message.subject.clone().unwrap_or_default(),
         from: message.from.as_ref().map(address).into_iter().collect(),
         to: message.to_recipients.iter().map(address).collect(),
         date: message_date(message),
-        // NOTE: Graph exposes no RFC 5322 octet size; the meta `size`
-        // is filled from the blob length at the `Full` tier.
+        // NOTE: Graph exposes no RFC 5322 octet size, so the meta `size` is
+        // filled from the blob length at the `Full` tier.
         size: 0,
         has_attachment: None,
     }
@@ -628,9 +626,6 @@ mod tests {
         assert_eq!(env.subject, "Hello");
         assert_eq!(env.from[0].email, "alice@example.org");
         assert_eq!(env.to[0].email, "bob@example.org");
-        // NOTE: the meta date spelling (`Z`, seconds precision) is what
-        // the shared seam derives from this parsed date; it must round
-        // out of the ISO input unchanged.
         assert_eq!(
             env.date
                 .unwrap()
@@ -648,7 +643,6 @@ mod tests {
             patch.flag.as_ref().and_then(|f| f.flag_status),
             Some(MsgraphFlagStatus::NotFlagged)
         );
-        // NOTE: the PATCH body must not clobber unrelated fields.
         let body = serde_json::to_value(&patch).unwrap();
         assert_eq!(
             body.as_object().unwrap().keys().collect::<Vec<_>>(),
@@ -672,8 +666,6 @@ mod tests {
         });
         assert!(is_expired_link(&expired));
 
-        // NOTE: any other failure must surface, never silently restart
-        // a full round.
         let denied = MsgraphClientStdError::Send(MsgraphSendError::Api {
             status: 403,
             code: "accessDenied".into(),
@@ -730,7 +722,6 @@ mod tests {
             map.get("Inbox/Receipts").map(String::as_str),
             Some("id-child")
         );
-        // NOTE: the nameless folder is skipped, not stored empty.
         assert_eq!(map.len(), 3);
 
         assert_eq!(

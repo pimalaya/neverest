@@ -117,8 +117,8 @@ impl Kind {
     ) -> Option<(ReplicaLinkId, ReplicaMeta, ReplicaSortKey)> {
         match self {
             Self::Mail => Some(mail::parse_summary(summary)),
-            // A DAV `sync-collection` REPORT returns hrefs and ETags but no
-            // `UID`, so a card can only resolve from its body.
+            // NOTE: a DAV `sync-collection` REPORT returns hrefs and ETags but
+            // no `UID`, so a card can only resolve from its body.
             #[cfg(feature = "carddav")]
             Self::Vcard => None,
         }

@@ -95,7 +95,6 @@ impl ImapClient {
         let mbox = parse_mailbox(mailbox)?;
         let cursor = cursor.and_then(decode_checkpoint);
 
-        // Delta path: QRESYNC SELECT when the cursor matches.
         if let Some((cv, cmodseq)) = cursor
             && cmodseq > 0
             && self.supports_qresync()
@@ -105,8 +104,6 @@ impl ImapClient {
             self.mark_selected(mailbox);
             let uid_validity = data.uid_validity.map(|v| v.get()).unwrap_or(cv);
             let highest_mod_seq = data.highest_mod_seq.unwrap_or(cmodseq);
-            // UIDVALIDITY unchanged → the delta is valid; else the mailbox was
-            // recreated, so fall through to a full snapshot.
             if uid_validity == cv {
                 let items = data
                     .changed
@@ -127,7 +124,6 @@ impl ImapClient {
             }
         }
 
-        // Full path: plain SELECT + FETCH 1:* (UID FLAGS).
         let select = self.select(mbox, ImapMailboxSelectOptions::default())?;
         self.mark_selected(mailbox);
         let uid_validity = select.uid_validity.map(|v| v.get()).unwrap_or(0);
@@ -285,9 +281,9 @@ impl ImapClient {
             return Ok(uid.to_string());
         }
 
-        // No UIDPLUS: recover the UID via SELECT + UID SEARCH on the message's
-        // own Message-ID (carried from the link id, since the body streamed
-        // past without being parsed).
+        // NOTE: without UIDPLUS the UID is recovered by searching the message's
+        // own Message-ID, carried from the link id since the body streamed past
+        // without being parsed.
         let message_id = message_id.map(str::trim).filter(|id| !id.is_empty());
         let Some(message_id) = message_id else {
             bail!(
@@ -384,9 +380,9 @@ fn is_selectable(row: &ListRow) -> bool {
 /// Converts one IMAP LIST row into the shared [`Collection`] shape.
 fn mailbox_from(row: ListRow) -> Collection {
     let name = match row.0 {
-        // NOTE: the RFC 3501 canonical spelling (uppercase). Sync pairs
-        // mailboxes by name across backends, so the IMAP INBOX must match
-        // the conventional `INBOX`.
+        // NOTE: the RFC 3501 canonical spelling is uppercase. Sync pairs
+        // mailboxes by name across backends, so the IMAP INBOX must match the
+        // conventional one.
         ImapMailbox::Inbox => "INBOX".to_string(),
         ImapMailbox::Other(other) => String::from_utf8_lossy(other.inner().as_ref()).into_owned(),
     };
@@ -448,7 +444,6 @@ fn enum_entry(items: &[MessageDataItem<'static>]) -> Option<EnumEntry> {
         }
     }
     Some(EnumEntry {
-        // IMAP message bodies are immutable, so there is no content revision.
         revision: None,
         id: uid?.to_string(),
         flags,
@@ -484,9 +479,6 @@ fn envelope_from(seq: u32, items: Vec<MessageDataItem<'static>>) -> ItemSummary 
                 if let Some(m) = env.message_id.into_option() {
                     message_id = normalize_message_id(&bytes_to_string(m.as_ref()));
                 }
-                // NOTE: the 9th ENVELOPE element (RFC 3501 §7.4.2), so the
-                // reply's parent costs nothing beyond the FETCH the
-                // enumeration already issues.
                 if let Some(m) = env.in_reply_to.into_option() {
                     in_reply_to = parse_message_ids(&bytes_to_string(m.as_ref()));
                 }
@@ -703,17 +695,12 @@ mod tests {
 
     #[test]
     fn checkpoint_round_trips_and_rejects_garbage() {
-        // The IMAP cursor survives encode → store → decode.
         let bytes = encode_checkpoint(1_774_329_954, 5035);
         assert_eq!(decode_checkpoint(&bytes), Some((1_774_329_954, 5035)));
         assert_eq!(checkpoint_uid_validity(&bytes), Some(1_774_329_954));
-        // A wrong length (an old/foreign checkpoint) decodes to None, which forces
-        // a full enumerate rather than a bogus delta.
         assert_eq!(decode_checkpoint(&[]), None);
         assert_eq!(decode_checkpoint(&[0; 8]), None);
         assert_eq!(checkpoint_uid_validity(&[0; 3]), None);
-        // A non-CONDSTORE checkpoint (modseq 0) round-trips but the delta guard
-        // (`modseq > 0`) makes the next enumerate full.
         assert_eq!(decode_checkpoint(&encode_checkpoint(42, 0)), Some((42, 0)));
     }
 }

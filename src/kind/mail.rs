@@ -206,15 +206,13 @@ mod tests {
 
     #[test]
     fn meta_and_full_link_ids_agree_on_dates() {
-        // The `alt:` link id embeds the date; the Meta path (ENVELOPE via chrono)
-        // and the Full path (body via mail_parser) must format it identically, or
-        // the same message links differently at each tier and is re-fetched every
-        // sync. Covers UTC (the `Z` vs `+00:00` regression) and a non-UTC offset.
+        // NOTE: the `alt:` link id embeds the date, so the Meta and the Full
+        // path must format it identically. Otherwise the same message links
+        // differently at each tier and is re-fetched on every sync.
         for date_hdr in [
             "Tue, 16 Apr 2019 11:40:14 +0000",
             "Tue, 16 May 2023 13:06:22 +0200",
         ] {
-            // Full: a raw body with no Message-ID → the `alt:` fallback.
             let raw = format!(
                 "From: Alice <alice@example.org>\r\n\
                  Subject: Hello there\r\n\
@@ -222,8 +220,6 @@ mod tests {
             );
             let (full_link, _, full_key) = parse_body(raw.as_bytes(), 10);
 
-            // Meta: an ENVELOPE with the same fields, its date chrono-parsed as the
-            // IMAP backend does.
             let env = ItemSummary {
                 id: "1".into(),
                 in_reply_to: Vec::new(),
@@ -247,8 +243,6 @@ mod tests {
                 meta_link.0, full_link.0,
                 "Meta and Full link ids must match for date `{date_hdr}`"
             );
-            // A key that moved when the body arrived would re-sort the message
-            // on hydration, so the two tiers owe the same one.
             assert_eq!(
                 meta_key, full_key,
                 "Meta and Full sort keys must match for date `{date_hdr}`"
@@ -258,15 +252,12 @@ mod tests {
 
     #[test]
     fn the_sort_key_is_the_date_in_utc_at_a_fixed_width() {
-        // Byte order is the order (pimdir SPEC §9.3), so a zoned date has to
-        // land in UTC: `+02:00` and `Z` sort apart while naming one instant.
+        // NOTE: byte order is the order (pimdir SPEC §9.3), so a zoned date has
+        // to land in UTC: `+02:00` and `Z` sort apart while naming one instant.
         let raw = b"Subject: Zoned\r\nDate: Tue, 16 May 2023 13:06:22 +0200\r\n\r\nbody";
         let (_, _, key) = parse_body(raw, 10);
         assert_eq!(key.0, "2023-05-16T11:06:22Z");
 
-        // A message with no parseable date keeps the unknown key, which lands
-        // it at the end of a newest-first listing rather than at a made-up
-        // instant.
         let (_, _, key) = parse_body(b"Subject: Undated\r\n\r\nbody", 10);
         assert!(key.is_unknown(), "an undated message sorts as unknown");
     }
@@ -316,7 +307,6 @@ mod tests {
 
     #[test]
     fn absent_optionals_are_omitted_not_null() {
-        // "unknown" is an absent key, so a reader's Option fields default to None.
         let (_, meta, _) = parse_body(b"Subject: Bare\r\n\r\n", 0);
         assert!(
             !meta.0.contains("null"),

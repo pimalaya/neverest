@@ -10,8 +10,6 @@
 //! only IMAP + SMTP and Microsoft Graph are proposed, so the wizard
 //! never writes a side [`crate::client::open`] would refuse.
 
-// Every consumer sits behind a backend feature, so a build with none
-// compiles the search but never calls it.
 #![cfg_attr(not(feature = "imap"), allow(dead_code, unused_imports))]
 
 use std::{collections::BTreeSet, env, fmt, time::Duration};
@@ -139,8 +137,6 @@ impl Discovered {
         match self.kind {
             DiscoveredKind::ImapSmtp { .. } => 0,
             DiscoveredKind::Msgraph => 1,
-            // Ranked last: mail is what most runs are after, and a contacts
-            // account is a deliberate second choice rather than a default.
             DiscoveredKind::Carddav { .. } => 2,
         }
     }
@@ -160,10 +156,9 @@ pub fn search(email: &str) -> Result<Vec<Discovered>> {
     let provider = provider_of(email, &configs);
     let mut found = Vec::new();
 
-    // A detected provider restricts IMAP+SMTP to its own configs, so the
-    // provider's own set shows instead of every discovered relay. IMAP
-    // and SMTP may advertise different auth, so the entry carries the
-    // union of both sides' capabilities.
+    // NOTE: a detected provider restricts IMAP and SMTP to its own configs, so
+    // its own set shows instead of every discovered relay. The two may
+    // advertise different auth, so the entry carries the union of both.
     if let Some(imap) = best(&configs, DiscoveryService::Imap, provider)
         && let Some(endpoint) = tcp_endpoint(imap)
     {
@@ -185,9 +180,9 @@ pub fn search(email: &str) -> Result<Vec<Discovered>> {
         });
     }
 
-    // NOTE: Google has no proprietary entry here (neverest has no Gmail
-    // backend), so a Google account is configured over IMAP + SMTP with
-    // one of the token mechanisms.
+    // NOTE: Google has no proprietary entry here, neverest carrying no Gmail
+    // backend, so a Google account is configured over IMAP and SMTP with one of
+    // the token mechanisms.
     if let Some(DiscoveryKnownProvider::Microsoft) = provider {
         found.push(Discovered {
             kind: DiscoveredKind::Msgraph,
@@ -199,10 +194,6 @@ pub fn search(email: &str) -> Result<Vec<Discovered>> {
         });
     }
 
-    // Contacts are a kind of their own, not a variation of a mail account:
-    // the entry is offered beside the mail ones and picking it writes a
-    // contacts account. Pairing both against one `store.root` is a
-    // hand-written setup for now.
     if let Some(carddav) = best(&configs, DiscoveryService::Carddav, provider)
         && let Some(url) = http_endpoint(carddav)
     {
@@ -386,8 +377,6 @@ mod tests {
             }
         );
 
-        // NOTE: the Fastmail shape, bearer plus an OAuth grant and no
-        // Basic, is one "API token" method whose brokers are unlocked.
         let fastmail = caps_of(&[DiscoveryAuthMethod::Bearer, oauth]);
         assert_eq!(
             fastmail,
@@ -440,12 +429,11 @@ mod tests {
             entry(Some("advertised@example.org")).login_default("typed@example.org"),
             Some("advertised@example.org".into())
         );
-        // A bare domain advertised as `@domain` is no login: fall back.
         assert_eq!(
             entry(Some("@example.org")).login_default("typed@example.org"),
             Some("typed@example.org".into())
         );
-        // Nothing usable on either side: the prompt gets no default.
+
         assert_eq!(entry(None).login_default("@example.org"), None);
     }
 }

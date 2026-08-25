@@ -8,8 +8,6 @@
 //! secret: the value must already be stored, and a missing one surfaces
 //! when the connection is tested right after.
 
-// Only the per-backend wizards prompt secrets, and each sits behind its
-// own feature.
 #![cfg_attr(not(feature = "imap"), allow(dead_code, unused_imports))]
 
 use std::process::Command;

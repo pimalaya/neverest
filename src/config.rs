@@ -447,10 +447,9 @@ pub enum SideBackendConfig {
     Msgraph(MsgraphConfig),
 }
 
-// `pool_size`/`is_imap`/`is_http` describe the config surface (connection
-// pooling is a documented io-replica-integration gap) and may be unused until
-// pools return; `new` is called from the wizard paths their backend feature
-// gates.
+// NOTE: `pool_size`, `is_imap` and `is_http` describe the config surface and
+// may be unused until pools return; `new` is called from the wizard paths their
+// backend feature gates.
 #[allow(dead_code)]
 impl SideConfig {
     /// Wraps a backend into a side with no send channel of its own.
@@ -871,8 +870,6 @@ pub enum RustlsCryptoConfig {
     Ring,
 }
 
-// Only a connect helper builds one, so a build with no backend and no
-// send channel never calls this.
 #[cfg_attr(
     not(any(feature = "imap", feature = "msgraph", feature = "smtp")),
     allow(dead_code)
@@ -962,14 +959,11 @@ pub struct SaslScramSha256Config {
     pub password: Secret,
 }
 
-// SASL is the IMAP backend's authentication surface; the SMTP channel
-// builds its own LOGIN exchange from `login` / `password`.
 #[cfg_attr(not(feature = "imap"), allow(dead_code))]
 impl SaslConfig {
-    /// Resolves the SASL config into a runtime [`Sasl`]. `host` and
-    /// `port` come from the live server URL; they are only used by
-    /// OAUTHBEARER (echoed in the GS2 header) and ignored by every
-    /// other mechanism.
+    /// Resolves the SASL config into a runtime [`Sasl`]. `host` and `port` come
+    /// from the live server URL, and only OAUTHBEARER uses them, echoing them
+    /// in the GS2 header.
     pub fn try_into_sasl(self, host: impl ToString, port: u16) -> Result<Sasl> {
         Ok(match self {
             SaslConfig::Anonymous(c) => Sasl::Anonymous(SaslAnonymousCreds { message: c.message }),
@@ -992,9 +986,9 @@ impl SaslConfig {
                 username: c.username,
                 token: c.token.get()?,
             }),
-            // NOTE: the nonce is left empty, which io-imap fills with one it
-            // draws itself when opening the session (an I/O-free coroutine
-            // cannot generate randomness, so the credentials carry it).
+            // NOTE: the nonce is left empty, io-imap filling it with one it
+            // draws when opening the session, an I/O-free coroutine being
+            // unable to generate randomness.
             SaslConfig::ScramSha256(c) => Sasl::ScramSha256(SaslScramCreds {
                 username: c.username,
                 password: c.password.get()?,
@@ -1011,10 +1005,6 @@ mod tests {
 
     #[test]
     fn a_generated_config_renders_as_dotted_keys_under_one_header() {
-        // A wizard-shaped Graph account: the rendered document carries
-        // one table header (the account) and nothing else, every field
-        // dotted below it, and no defaulted value at all (permissions,
-        // ALPN, TLS, store, filters).
         let account: AccountConfig = toml::from_str(
             r#"
             default = true
@@ -1057,8 +1047,6 @@ left.msgraph.user-id = "me"
         .unwrap();
         assert_eq!(config.user_id, "user@example.org");
 
-        // NOTE: the OAuth flow tables moved out to ortie; a leftover
-        // flow config must fail loudly, not silently skip auth.
         let err = toml::from_str::<MsgraphConfig>(
             r#"
             [auth.device-code]
@@ -1071,8 +1059,6 @@ left.msgraph.user-id = "me"
 
     #[test]
     fn smtp_channel_and_hydration_parse() {
-        // The send channel sits beside the backend it completes, inside
-        // the side, not at the account root.
         let account: AccountConfig = toml::from_str(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1097,7 +1083,6 @@ left.msgraph.user-id = "me"
         assert!(matches!(left.backend, SideBackendConfig::Imap(_)));
         assert_eq!(account.store.hydration, Some(Hydration::Full));
 
-        // NOTE: both the channel and the knob stay optional.
         let account: AccountConfig = toml::from_str(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1110,8 +1095,6 @@ left.msgraph.user-id = "me"
 
     #[test]
     fn an_account_level_smtp_table_is_refused() {
-        // The channel moved into the side: a v1 config keeping it at the
-        // root must fail loudly, not silently stop sending.
         let err = toml::from_str::<AccountConfig>(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1124,10 +1107,6 @@ left.msgraph.user-id = "me"
 
     #[test]
     fn the_pre_generic_pim_sync_spellings_still_load() {
-        // The `mailbox` / `message` tables became `collection` / `item` when the
-        // vocabulary was de-mailed. An existing mail configuration must keep
-        // loading unchanged, at the account level and inside a side, so the
-        // rename is not a silent behaviour change for anyone on the old keys.
         let account: AccountConfig = toml::from_str(
             r#"
             mailbox.filter.include = ["INBOX"]
@@ -1150,15 +1129,9 @@ left.msgraph.user-id = "me"
         assert!(!perms.collection.delete);
         assert!(perms.item.create);
         assert!(!perms.item.delete);
-        // The flag gate is untouched by the rename and keeps its default.
         assert!(perms.flag.update);
-        // `item.update` was added after the fact, so a configuration written
-        // before it existed must still parse and grant it.
         assert!(perms.item.update);
 
-        // The new spellings mean exactly the same thing. (A permission block is
-        // declared in full or not at all — both fields are required — which the
-        // rename leaves untouched.)
         let account: AccountConfig = toml::from_str(
             r#"
             collection.filter.include = ["INBOX"]
@@ -1183,8 +1156,6 @@ left.msgraph.user-id = "me"
 
     #[test]
     fn item_update_is_denied_only_when_asked_for() {
-        // Denying in-place body edits is what makes a mutable-content side
-        // read-only for content while still accepting flags and membership.
         let account: AccountConfig = toml::from_str(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1199,7 +1170,6 @@ left.msgraph.user-id = "me"
         assert!(perms.item.delete);
         assert!(!perms.item.update);
 
-        // A block declared without it still grants it (see the type's docs).
         let account: AccountConfig = toml::from_str(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1213,9 +1183,6 @@ left.msgraph.user-id = "me"
 
     #[test]
     fn the_documented_sample_still_loads() {
-        // The sample is what a user copies from, so a schema change that
-        // leaves it behind (a removed backend, a renamed table) is a bug in
-        // the documentation, caught here rather than by the user.
         let raw = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.sample.toml"))
             .expect("read the sample");
         let config: Config = toml::from_str(&raw).expect("the sample must parse");
@@ -1228,7 +1195,6 @@ left.msgraph.user-id = "me"
     fn the_purge_delay_is_a_human_duration_and_drives_the_cutoff() {
         let now: DateTime<Utc> = "2026-08-07T12:00:00Z".parse().unwrap();
 
-        // Unset means never purge, so there is no cutoff to sweep against.
         let account: AccountConfig = toml::from_str(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1238,9 +1204,6 @@ left.msgraph.user-id = "me"
         assert!(account.store.purge_after.is_none());
         assert!(account.store.purge_cutoff(now).is_none());
 
-        // A delay pushes the cutoff that far back, in the shape the store
-        // stamps `retained_at` with (millisecond precision, `Z`), so the
-        // comparison is a plain lexicographic one.
         let account: AccountConfig = toml::from_str(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1253,8 +1216,6 @@ left.msgraph.user-id = "me"
             Some("2026-05-09T12:00:00.000Z")
         );
 
-        // `0` is the on switch of the pair: everything retained is already
-        // older than "now", so a run purges immediately.
         let account: AccountConfig = toml::from_str(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1267,8 +1228,6 @@ left.msgraph.user-id = "me"
             Some("2026-08-07T12:00:00.000Z")
         );
 
-        // A typo must fail loudly: silently keeping data forever is the one
-        // outcome a retention knob must not have.
         let err = toml::from_str::<AccountConfig>(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1295,8 +1254,6 @@ left.msgraph.user-id = "me"
             assert_eq!(parsed.to_string(), raw, "{raw}");
         }
 
-        // Rendering picks the largest unit that divides evenly, so a value
-        // written one way reads back as the same duration.
         assert_eq!(HumanDuration(Duration::from_secs(86400)).to_string(), "1d");
         assert_eq!(
             HumanDuration(Duration::from_secs(90061)).to_string(),
@@ -1311,7 +1268,6 @@ left.msgraph.user-id = "me"
 
     #[test]
     fn a_side_pairs_one_backend_with_its_send_channel() {
-        // Graph sends by itself, so a Graph side needs no channel.
         let account: AccountConfig = toml::from_str(
             r#"
             left.msgraph.auth.token.raw = "tok"
@@ -1322,7 +1278,6 @@ left.msgraph.user-id = "me"
         assert!(left.sends_natively());
         assert!(left.smtp.is_none());
 
-        // A typo in the backend key names the backends, not the fields.
         let err = toml::from_str::<AccountConfig>(
             r#"
             left.imapp.server = "imaps://imap.example.org:993"
@@ -1334,9 +1289,8 @@ left.msgraph.user-id = "me"
                 .contains("no variant of enum SideBackendConfig")
         );
 
-        // Two backends on one side: the first wins, which is what the
-        // flattened enum can express; it is not silently dropped work,
-        // the side simply talks one protocol.
+        // NOTE: with two backends on one side the first wins, which is all the
+        // flattened enum can express: a side talks one protocol.
         let account: AccountConfig = toml::from_str(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
@@ -1366,8 +1320,6 @@ left.msgraph.user-id = "me"
         assert!(!left.sends_natively());
         account.validate().unwrap();
 
-        // Submission is a mail capability: an `smtp` table on a contacts
-        // side is a configuration error, not a dead option silently ignored.
         let account: AccountConfig = toml::from_str(
             r#"
             left.carddav.server = "https://dav.example.org/"

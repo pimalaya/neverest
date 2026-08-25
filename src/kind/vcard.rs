@@ -122,8 +122,8 @@ fn properties(raw: &[u8]) -> Vec<(String, String)> {
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
         match line.strip_prefix([' ', '\t']) {
-            // A line starting with one whitespace continues the previous one,
-            // that whitespace being the fold marker rather than content.
+            // NOTE: a line starting with one whitespace continues the previous
+            // one, that whitespace being the fold marker rather than content.
             Some(rest) => {
                 if let Some(last) = logical.last_mut() {
                     last.push_str(rest);
@@ -147,8 +147,6 @@ fn split_property(line: &str) -> Option<(String, String)> {
     let colon = unquoted_colon(line)?;
     let (head, value) = line.split_at(colon);
 
-    // Parameters (`;TYPE=work`) and a group prefix (`item1.EMAIL`) both
-    // decorate the name; neither is part of it.
     let name = head.split(';').next().unwrap_or(head);
     let name = name.rsplit('.').next().unwrap_or(name);
 
@@ -213,8 +211,6 @@ mod tests {
 
     #[test]
     fn the_uid_is_the_link_id_even_when_it_holds_colons() {
-        // A `urn:uuid:` UID is the common shape, and it is exactly the case a
-        // naive "split on the first colon" would mangle.
         let (link, _, _) = parse_body(CARD.as_bytes(), CARD.len() as u64);
         assert_eq!(link.0, "uid:urn:uuid:4fbe8971-0bc3-424c-9c26-36c3e1eff6b1");
     }
@@ -235,14 +231,10 @@ mod tests {
 
     #[test]
     fn the_sort_key_is_the_display_name_normalised_for_ordering() {
-        // Two writers that disagreed on case would interleave `alice` and
-        // `Alice` in one A-to-Z listing (pimdir SPEC Annex A.2).
         let raw = "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:  Jane DOE \r\nEND:VCARD\r\n";
         let (_, _, key) = parse_body(raw.as_bytes(), raw.len() as u64);
         assert_eq!(key.0, "jane doe");
 
-        // A nameless card keeps the unknown key and sorts to the head, where
-        // it is visible rather than buried.
         let raw = "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:no-name\r\nEND:VCARD\r\n";
         let (_, _, key) = parse_body(raw.as_bytes(), raw.len() as u64);
         assert!(key.is_unknown(), "a card with no FN sorts as unknown");
@@ -250,7 +242,6 @@ mod tests {
 
     #[test]
     fn folded_lines_are_unfolded_before_the_name_is_read() {
-        // The fold splits `UID` mid-value and `FN` mid-name, both legal.
         let raw = "BEGIN:VCARD\r\n\
              VERSION:4.0\r\n\
              UID:card\r\n \
@@ -270,7 +261,7 @@ mod tests {
         assert_eq!(summary["v"], 1);
         assert_eq!(summary["fn"], "Jane Doe");
         assert_eq!(summary["size"], CARD.len());
-        // A group prefix (`item1.EMAIL`) names the same property.
+
         assert_eq!(
             summary["emails"],
             serde_json::json!(["jane@example.org", "jane@home.example.org"])

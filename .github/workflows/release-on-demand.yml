@@ -19,13 +19,20 @@ on:
         options:
           - aarch64-apple-darwin
           - aarch64-unknown-linux-musl
-          - aarch64-unknown-linux-musl
           - armv6l-unknown-linux-musleabihf
           - armv7l-unknown-linux-musleabihf
           - i686-unknown-linux-musl
           - x86_64-apple-darwin
           - x86_64-unknown-linux-musl
           - x86_64-w64-mingw32
+      nixpkgs:
+        description: Nixpkgs
+        type: string
+        default: nixpkgs-unstable
+      nix-info:
+        description: Run nix-info
+        type: boolean
+        default: false
       features:
         description: Cargo features
         type: string
@@ -37,6 +44,8 @@ jobs:
     secrets: inherit
     with:
       project: neverest
+      nixpkgs: ${{ inputs.nixpkgs }}
+      nix-info: ${{ inputs.nix-info }}
       os: ${{ inputs.os }}
       target: ${{ inputs.target }}
       features: ${{ inputs.features }}

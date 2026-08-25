@@ -1,37 +1,21 @@
-//! [`io_replica::client::ReplicaRemote`] backed by one [`Client`], one
-//! side of the sync.
+//! [`io_replica::client::ReplicaRemote`] backed by one [`Client`], one side of
+//! the sync.
 //!
-//! **Still mail-only.** The seam it sits on ([`crate::client`]) is
-//! kind-neutral, but everything below is `message/rfc822`: the link id is a
-//! `Message-ID`, the summary is the mail `v:1` schema, and the enumerate
-//! narration is IMAP's. The kind seam (change `generic-pim-sync`, phase 2)
-//! lifts the link-id and summary derivation out of here into one
-//! implementation per media type, selected from [`Client::media_type`];
-//! phase 3 then teaches `push` the mutable-content path this file rejects
-//! outright today.
+//! `enumerate` reads the collection's handle and flag spine incrementally,
+//! passing the stored cursor down opaquely so the backend decides whether it
+//! can answer a delta or owes a full snapshot. io-replica derives what vanished
+//! by diffing a complete snapshot against the stored placements. `fetch`
+//! resolves the link id and the summary through [`Kind`], at the cheap
+//! server-side tier when the kind has one and from the raw body otherwise.
+//! `push` maps the four [`ReplicaChangeKind`] variants onto the client's flag,
+//! delete, move, append and update calls.
 //!
-//! `enumerate` reads the collection's UID+flag spine incrementally: with a stored
-//! cursor (`(UIDVALIDITY, HIGHESTMODSEQ)`) and a QRESYNC server it does a QRESYNC
-//! `SELECT`, which streams only the messages changed since the modseq and the
-//! UIDs that vanished — nothing is fetched when nothing changed. Without a cursor
-//! (or on a UIDVALIDITY change, or a non-QRESYNC server) it falls back to a full
-//! `FETCH 1:* (UID FLAGS)` snapshot; io-replica derives what vanished by diffing
-//! the complete snapshot against the stored placements. `fetch` resolves the link
-//! id from the `Message-ID` header
-//! (ENVELOPE only at the `Meta` tier, the raw body at `Full`); `push`
-//! maps the four [`ReplicaChangeKind`] variants onto `store_flags`/
-//! `delete_item`/`move_items`/`add_item_stream`.
-//!
-//! The link id is the message's `Message-ID` (prefixed `mid:`), falling
-//! back to a `(subject, date, sender)` digest (prefixed `alt:`) when the
-//! header is missing — so a headerless message still links across the
-//! two sides. Bodies are content-addressed by the store's own hash
-//! ([`PimdirBlobs::hasher`], the algorithm the store records); mail is
-//! immutable, so `revision` is always `None` and content conflicts never
-//! arise.
-//!
-//! (A CONDSTORE-only server without QRESYNC still full-enumerates today — the
-//! `FETCH … CHANGEDSINCE` fallback is a later refinement.)
+//! Everything kind-specific (the link id, the summary, the sort key) lives in
+//! [`crate::kind`] and is resolved once per side from
+//! [`Client::media_type`](crate::client::Client::media_type). Bodies are
+//! content-addressed by the store's own hash ([`PimdirBlobs::hasher`]). A
+//! mutable-content kind carries a revision, so its writes are conditional on
+//! the last-synced one; an immutable one leaves it `None` and never conflicts.
 
 use std::{
     cmp::Reverse,
@@ -83,15 +67,15 @@ pub struct PimRemote<'a> {
     kind: Kind,
     pool: &'a mut Pool,
     blob: PimdirBlobs,
-    /// Called once per body streamed at the `Full` tier, so the driver can tick a
-    /// per-message progress counter. `Sync` because the fetch pool calls it from
+    /// Called once per body streamed at the `Full` tier, so the driver can tick
+    /// a per-item progress counter. `Sync` because the fetch pool calls it from
     /// several worker threads at once.
     on_body: Option<&'a (dyn Fn() + Sync)>,
-    /// Handle → body octet size, from the store's already-fetched envelope meta
-    /// (no server round trip). When present, `Full` fetches are ordered
-    /// largest-first so the heavy messages go up front — the progress counter then
-    /// crawls at the start and accelerates to a smooth finish (rather than
-    /// stalling on a big message that happened to land last).
+    /// Handle to body octet size, from the store's already-fetched envelope
+    /// meta, so no round trip. When present, `Full` fetches are ordered
+    /// largest-first so the heavy items go up front and the progress counter
+    /// accelerates to a smooth finish rather than stalling on a big body that
+    /// happened to land last.
     sizes: HashMap<String, u64>,
 }
 
@@ -107,10 +91,9 @@ impl<'a> PimRemote<'a> {
         }
     }
 
-    /// Like [`new`](Self::new) but ticks `on_body` after each `Full` body streams,
-    /// and orders the `Full` fetch largest-first using `sizes` (handle → octets,
-    /// from the store's envelope meta — no round trip). Pass an empty map to keep
-    /// UID order.
+    /// Like [`new`](Self::new) but ticks `on_body` after each `Full` body
+    /// streams, and orders the `Full` fetch largest-first using `sizes`, taken
+    /// from the store's envelope meta. Pass an empty map to keep handle order.
     pub fn with_progress(
         pool: &'a mut Pool,
         blob: PimdirBlobs,
@@ -131,9 +114,9 @@ impl<'a> PimRemote<'a> {
 /// The [`Kind`] a pool's backend syncs.
 ///
 /// The driver refuses an unknown or cross-kind media type before opening any
-/// remote (`check_kinds`), so this cannot legitimately fail; falling back to
-/// [`Kind::Mail`] rather than panicking keeps a construction path that takes no
-/// `Result` honest, and the warning names the media type if it ever does.
+/// remote, so this cannot legitimately fail. Falling back to [`Kind::Mail`]
+/// rather than panicking keeps a construction path that takes no `Result`
+/// honest, and the warning names the media type if it ever does.
 pub(crate) fn resolve_kind(pool: &mut Pool) -> Kind {
     let media_type = pool.primary().media_type();
     Kind::from_media_type(media_type).unwrap_or_else(|| {
@@ -142,14 +125,13 @@ pub(crate) fn resolve_kind(pool: &mut Pool) -> Kind {
     })
 }
 
-/// How many message bodies to request per batched `UID FETCH`. Larger cuts round
-/// trips but coarsens the per-batch error/retry unit and the command size; 64 is
-/// a balance that still turns a collection into ~N/64 fetches per connection.
+/// How many bodies to request per batched fetch. Larger cuts round trips but
+/// coarsens the per-batch retry unit and the command size.
 pub(crate) const BATCH_SIZE: usize = 64;
 
-/// Maps shared flags to protocol-neutral offline flag strings (their raw
-/// wire spelling; a single side is internally consistent, and both sides
-/// run the same normalization for the system flags that matter).
+/// Maps shared flags to protocol-neutral offline flag strings, their raw wire
+/// spelling. A single side is internally consistent, and both sides run the
+/// same normalization for the system flags that matter.
 fn to_offline_flags<'f>(flags: impl IntoIterator<Item = &'f Flag>) -> ReplicaFlags {
     flags.into_iter().map(|f| f.raw()).collect()
 }
@@ -175,10 +157,6 @@ impl ReplicaRemote for PimRemote<'_> {
         cursor: Option<ReplicaCheckpoint>,
     ) -> Result<ReplicaRemoteSnapshot, Self::Error> {
         let collection = collection.as_str();
-        // NOTE: the cursor bytes are opaque to this seam; the backend decodes
-        // its own encoding (IMAP `(UIDVALIDITY, HIGHESTMODSEQ)`, the Graph
-        // delta link) and enumerates incrementally when it can, else a full
-        // snapshot.
         let cursor = cursor.as_ref().map(|c| c.0.as_slice());
         let enumeration = self
             .pool
@@ -248,8 +226,8 @@ impl ReplicaRemote for PimRemote<'_> {
                 // uses to demote the move to a plain delete. No backend seam
                 // here answers that short of enumerating the destination, so
                 // both halves of a move can deliver and the target may end up
-                // holding the item twice, which the engine now freezes and
-                // this crate reports rather than mispairing silently.
+                // holding the item twice, which the engine freezes and this
+                // crate reports rather than mispairing silently.
                 ReplicaChangeKind::Remove {
                     handle,
                     to,
@@ -267,10 +245,10 @@ impl ReplicaRemote for PimRemote<'_> {
                             Err(err) => rejected(handle, "move item", err),
                         }
                     }
-                    // `if_match` is the last-synced revision: a
-                    // mutable-content backend deletes conditionally on it, so
-                    // a delete cannot silently drop a body the remote changed
-                    // after the last sync. Immutable-content backends ignore it.
+                    // NOTE: `if_match` is the last-synced revision, so a
+                    // mutable-content backend deletes conditionally on it and
+                    // cannot drop a body the remote changed since. An
+                    // immutable-content backend ignores it.
                     None => match self.pool.primary().delete_item(
                         &collection,
                         handle.as_str(),
@@ -287,21 +265,9 @@ impl ReplicaRemote for PimRemote<'_> {
                     object,
                     ..
                 } => {
-                    // NOTE: what a backend can address the new item by rides in
-                    // the link id, and which prefix carries it is the kind's own
-                    // business (a `mid:` Message-ID, a `uid:` card UID); a
-                    // fallback link id (`alt:`, `hash:`) names nothing.
                     let hint = link_id.as_ref().and_then(|l| self.kind.link_hint(l));
                     self.append(&collection, handle, &flags, object, hint)
                 }
-                // An in-place body edit, on a mutable-content backend only.
-                // The push is conditional on `if_match` (the last-synced
-                // revision), so a remote that moved since is *rejected* rather
-                // than overwritten: io-replica then re-merges and records the
-                // divergence as a conflict for the consumer to settle. Mail
-                // never gets here — its bodies are immutable, so io-replica
-                // derives no `Update` — and both mail backends refuse the call
-                // anyway.
                 ReplicaChangeKind::Update {
                     handle,
                     object,
@@ -363,7 +329,6 @@ impl ReplicaRemote for CachedFetchRemote<'_> {
             }
         }
         if !misses.is_empty() {
-            // A body the pre-fetch missed: fetch it for real (network) now.
             items.extend(self.fallback.fetch(collection, misses, tier)?);
         }
         Ok(items)
@@ -379,9 +344,9 @@ impl ReplicaRemote for CachedFetchRemote<'_> {
 }
 
 impl PimRemote<'_> {
-    /// Meta tier: a targeted ENVELOPE fetch of just the requested handles (no
-    /// bodies, no whole-collection sweep), indexed by id, so they resolve their link
-    /// id and summary cheaply and the cost scales with the change, not the collection.
+    /// Meta tier: a targeted summary fetch of just the requested handles, with
+    /// no bodies and no whole-collection sweep, so the link ids and summaries
+    /// resolve cheaply and the cost scales with the change.
     fn fetch_meta(
         &mut self,
         collection: &str,
@@ -401,8 +366,8 @@ impl PimRemote<'_> {
             let Some(env) = by_id.get(handle.as_str()) else {
                 continue;
             };
-            // A kind with no cheap summary tier never reaches here: the driver
-            // upgrades it straight to `Full` instead.
+            // NOTE: a kind with no cheap summary tier never reaches here, the
+            // driver upgrading it straight to `Full` instead.
             let Some((link_id, meta, sort_key)) = self.kind.parse_summary(env) else {
                 continue;
             };
@@ -418,11 +383,11 @@ impl PimRemote<'_> {
         Ok(items)
     }
 
-    /// Full tier: every body streamed straight into the blob store (never held
-    /// whole), fetched in **batches** — one `UID FETCH <set> (UID BODY.PEEK[])`
-    /// per batch instead of one command per message, so N bodies cost ~N/BATCH
-    /// round trips. Batches are work-stolen across a bounded pool of connections;
-    /// the engine serialises the index write afterwards.
+    /// Full tier: every body streamed straight into the blob store, never held
+    /// whole, and fetched in batches rather than one command per item, so N
+    /// bodies cost about N/[`BATCH_SIZE`] round trips. Batches are work-stolen
+    /// across a bounded pool of connections, and the engine serialises the index
+    /// write afterwards.
     fn fetch_full(
         &mut self,
         collection: &str,
@@ -432,14 +397,10 @@ impl PimRemote<'_> {
             return Ok(Vec::new());
         }
         if self.sizes.is_empty() {
-            // No sizes: sort by numeric UID so consecutive ids collapse to ranges
-            // in the FETCH command (a first sync's 1..N becomes a few ranges).
+            // NOTE: with no sizes, sorting numerically collapses consecutive
+            // handles into ranges in the fetch command.
             handles.sort_by_key(|h| h.as_str().parse::<u64>().unwrap_or(u64::MAX));
         } else {
-            // Largest-first: the heavy messages go up front, so the progress
-            // counter starts slow and accelerates to a smooth finish instead of
-            // freezing on a big message that landed last. Sizes come from the
-            // store's envelope meta, so this costs no round trip.
             handles.sort_by_key(|h| Reverse(self.sizes.get(h.as_str()).copied().unwrap_or(0)));
         }
 
@@ -451,7 +412,6 @@ impl PimRemote<'_> {
             .collect();
 
         if target <= 1 {
-            // One connection: run each batch serially on the primary.
             let blob = self.blob.clone();
             let mut items = Vec::with_capacity(total);
             for batch in &batches {
@@ -471,10 +431,9 @@ impl PimRemote<'_> {
     }
 
     /// Fetches `batches` across up to `target` of the pool's persistent
-    /// connections: a shared queue of batches, each worker draining it on its own
-    /// connection and issuing one batched `UID FETCH` per batch. Work-stealing
-    /// balances load (a worker with heavy batches naturally takes fewer) with no
-    /// size probe.
+    /// connections: a shared queue of batches, each worker draining it on its
+    /// own connection. Work-stealing balances the load with no size probe, a
+    /// worker with heavy batches naturally taking fewer.
     fn fetch_full_pooled(
         &mut self,
         collection: &str,
@@ -489,10 +448,9 @@ impl PimRemote<'_> {
         let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
         let stop = AtomicBool::new(false);
 
-        // Copy the kind before the worker borrow: `workers()` takes `self` mutably.
+        // NOTE: copied before the worker borrow, `workers()` taking `self`
+        // mutably.
         let kind = self.kind;
-        // Clone the cheap blob handle so the worker connections can borrow the
-        // pool without also tying up `self.blob`.
         let blob = self.blob.clone();
         let clients = self.pool.workers(target)?;
 
@@ -557,20 +515,16 @@ fn fetch_one_full(
         meta,
         sort_key,
         body: Some(ReplicaFetchedBody::Persisted { hash, size }),
-        // The revision this body corresponds to, so a later edit can be pushed
-        // conditionally on it. `None` on immutable content.
         revision,
     })
 }
 
-/// Fetches a batch of bodies in one `UID FETCH … (UID BODY.PEEK[])` command, each
-/// streamed straight into its own blob (bounded memory), returning a fetched item
-/// per message. The message's UID (from its FETCH line) keys it back to its
-/// handle, so out-of-order server responses still route correctly. On any batch
-/// error — a server that ordered `UID` after the body, or a transient failure —
-/// it falls back to per-message fetches; content-addressing makes the partial
-/// retry idempotent. Ticks `on_body` per body. Runs on one connection (one
-/// worker), so no cross-thread sharing inside.
+/// Fetches a batch of bodies in one command, each streamed straight into its own
+/// blob so memory stays bounded, returning one fetched item per body. The
+/// handle the server echoes keys each body back, so out-of-order responses
+/// still route correctly. Any batch error falls back to per-item fetches, which
+/// content-addressing makes idempotent. Ticks `on_body` per body, and runs on
+/// one connection so nothing inside is shared across threads.
 pub(crate) fn hydrate_batch(
     kind: Kind,
     client: &mut Client,
@@ -610,9 +564,7 @@ pub(crate) fn hydrate_batch(
     match batched {
         Ok(()) => Ok(items),
         Err(err) => {
-            warn!("batched fetch `{collection}` failed ({err:#}); falling back to per-message");
-            // Discard any partial batch items and refetch each body; the blobs are
-            // content-addressed, so re-committing is idempotent.
+            warn!("batched fetch `{collection}` failed ({err:#}); falling back to per-item");
             items.clear();
             let blob = blob.clone();
             for handle in handles {
@@ -633,9 +585,9 @@ pub(crate) fn hydrate_batch(
 }
 
 impl PimRemote<'_> {
-    /// Appends a stored body as a genuine new member (a cross-side copy:
-    /// the two sides are different servers, so no server-side copy is
-    /// possible; the deduped body is uploaded).
+    /// Appends a stored body as a genuine new member. The two sides are
+    /// different servers, so no server-side copy is possible and the deduped
+    /// body is uploaded.
     fn append(
         &mut self,
         collection: &str,
@@ -652,8 +604,6 @@ impl PimRemote<'_> {
             return rejected_bare(handle);
         };
 
-        // NOTE: stream the stored body straight to the socket; the body is never
-        // read into memory whole (bounded-memory transfer).
         let reader = match self.blob.reader(&hash) {
             Ok(Some(file)) => file,
             Ok(None) => {
@@ -683,9 +633,6 @@ impl PimRemote<'_> {
                 handle,
                 outcome: ReplicaPushOutcome::Accepted,
                 assigned: Some(ReplicaHandle::from(written.id)),
-                // The revision the remote now holds, so the next merge
-                // compares against what it actually wrote rather than
-                // re-fetching to find out. `None` on immutable content.
                 revision: written.revision,
             },
             Err(err) => {
@@ -698,11 +645,11 @@ impl PimRemote<'_> {
     /// Replaces an item's body in place, conditionally on the last-synced
     /// revision.
     ///
-    /// A refusal is reported as [`ReplicaPushOutcome::Rejected`], **not** as an
-    /// error: rejection is the expected outcome when the remote moved since the
-    /// base, and it is what makes io-replica re-merge and mark the placement
-    /// conflicted instead of clobbering the remote body. An error would abort
-    /// the whole batch.
+    /// A refusal is reported as [`ReplicaPushOutcome::Rejected`] rather than as
+    /// an error: rejection is the expected outcome when the remote moved since
+    /// the base, and it is what makes io-replica re-merge and mark the
+    /// placement conflicted instead of clobbering the remote body. An error
+    /// would abort the whole batch.
     fn update(
         &mut self,
         collection: &str,
@@ -710,8 +657,6 @@ impl PimRemote<'_> {
         object: ReplicaHash,
         if_match: Option<&str>,
     ) -> ReplicaPushResult {
-        // The edited body streams straight from the blob store, as an append
-        // does: bounded memory regardless of size.
         let reader = match self.blob.reader(&object) {
             Ok(Some(file)) => file,
             Ok(None) => {
@@ -775,14 +720,14 @@ fn rejected_bare(handle: ReplicaHandle) -> ReplicaPushResult {
     }
 }
 
-/// Cap on captured header bytes; bounds memory if a message has no header/body
-/// boundary (defensive — real headers are a few KB).
+/// Cap on captured header bytes, bounding memory if an item carries no header
+/// and body boundary at all.
 const HEADER_CAP: usize = 256 * 1024;
 
-/// A [`Write`] sink for a streaming Full fetch. It tees each chunk into the blob
-/// store, folds it into the content hash, and captures the header prefix (up to
-/// the blank line) so the link id and summary parse without a second pass — so
-/// the whole body never sits in memory.
+/// A [`Write`] sink for a streaming `Full` fetch. It tees each chunk into the
+/// blob store, folds it into the content hash, and captures the header prefix
+/// up to the blank line so the link id and summary parse without a second pass.
+/// The whole body never sits in memory.
 struct HydrateSink {
     writer: PimdirBlobWriter,
     hasher: PimdirHasher,
@@ -817,8 +762,8 @@ impl Write for HydrateSink {
         self.writer.write_all(buf)?;
         self.hasher.update(buf);
         if !self.header_done {
-            // Re-scan a few bytes back so a boundary split across chunks is
-            // still found.
+            // NOTE: the scan starts a few bytes back so a boundary split across
+            // two chunks is still found.
             let from = self.header.len().saturating_sub(3);
             self.header.extend_from_slice(buf);
             if let Some(end) = header_boundary(&self.header[from..]) {
@@ -837,8 +782,8 @@ impl Write for HydrateSink {
     }
 }
 
-/// The byte offset just past the header/body boundary (`\r\n\r\n`, or a bare
-/// `\n\n`) in `buf`, or `None` when it is not present.
+/// The byte offset just past the header and body boundary in `buf`, or `None`
+/// when it is not present.
 fn header_boundary(buf: &[u8]) -> Option<usize> {
     buf.windows(4)
         .position(|w| w == b"\r\n\r\n")

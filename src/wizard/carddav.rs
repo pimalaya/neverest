@@ -20,8 +20,6 @@ use crate::{
 pub fn configure(account_name: &str, url: &str, choice: &Discovered) -> Result<CarddavConfig> {
     let server = prompt::text("CardDAV server URL:", Some(url))?;
 
-    // A DAV login is often the account's email, but just as often a bare
-    // username, so the discovered value only seeds the prompt.
     let auth = if choice.auth.token() && !choice.auth.basic {
         DavAuthConfig::Bearer {
             token: secret::configure_token(

@@ -1176,9 +1176,9 @@ dependencies = [
 
 [[package]]
 name = "io-replica"
-version = "0.4.1"
+version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2982110195cead7292f352cc32c6feb78063e75c4f45e8f5321afbada7d29dc2"
+checksum = "3e21697a84dbf5c255f1625bf5e19d550a33ef3a2f0ca667ccc6c2c966e28aed"
 dependencies = [
  "log",
  "thiserror",

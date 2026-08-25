@@ -243,9 +243,17 @@ impl ReplicaRemote for PimRemote<'_> {
                         Err(err) => rejected(handle, "store flags", err),
                     }
                 }
+                // NOTE: `link_id` is the identity a relocation would deliver,
+                // which a consumer able to ask "does `to` already hold it?"
+                // uses to demote the move to a plain delete. No backend seam
+                // here answers that short of enumerating the destination, so
+                // both halves of a move can deliver and the target may end up
+                // holding the item twice, which the engine now freezes and
+                // this crate reports rather than mispairing silently.
                 ReplicaChange::Remove {
                     handle,
                     to,
+                    link_id: _,
                     if_match,
                 } => match to {
                     Some(target) => {

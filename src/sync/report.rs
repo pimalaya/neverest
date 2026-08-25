@@ -38,6 +38,55 @@ pub struct SyncReport {
     /// Re-reported by every run until resolved (counted as warnings).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<ItemConflict>,
+    /// Identities a side holds under more than one handle, which the engine
+    /// froze. Re-reported by every run until the collection holds each once
+    /// (counted as warnings).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ambiguous: Vec<AmbiguousIdentity>,
+}
+
+/// One identity a side's collection holds more than once: two items carrying
+/// the same link id, two messages with one `Message-ID`, so which copy a
+/// change belongs to cannot be decided.
+///
+/// Neverest reports the coordinates and repairs nothing. Which copy to keep is
+/// the user's call, made with their own client, and the report says what
+/// neverest cannot tell apart rather than that the collection is invalid: RFC
+/// 5322 §3.6.4 binds the *generator* of a `Message-ID` and says nothing about
+/// what a store may hold, a copy legitimately carries the identifier of the
+/// message it copies, and a migration (this tool's own use case) commonly
+/// produces such a pair.
+///
+/// Detection, policy and state belong to the engine and the store, which
+/// persist the freeze, so this comes back on every run until the collection
+/// holds the identity once. A warning the user cannot act on twice is a
+/// warning they will not act on once.
+#[derive(Debug, Serialize)]
+pub struct AmbiguousIdentity {
+    pub side: Side,
+    pub collection: String,
+    /// Every handle the side holds the identity under, the bound one first.
+    pub ids: Vec<String>,
+}
+
+impl fmt::Display for AmbiguousIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            ids,
+        } = self;
+        let count = ids.len();
+        let list = ids
+            .iter()
+            .map(|id| format!("`{id}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            f,
+            "{count} copies of one item in `{collection}` on {side} ({list}): neverest cannot tell them apart, so none of them syncs until one is removed"
+        )
+    }
 }
 
 /// One item left conflicted: its content changed on both sides against a
@@ -252,7 +301,8 @@ impl fmt::Display for SyncReport {
         let item_errors = self.item.patch.iter().filter(|e| e.error.is_some()).count();
         let submit_errors = self.submitted.iter().filter(|e| e.error.is_some()).count();
         let errors = mailbox_errors + item_errors + submit_errors;
-        let warnings = self.collisions.len() + self.parked.len() + self.conflicts.len();
+        let warnings =
+            self.collisions.len() + self.parked.len() + self.conflicts.len() + self.ambiguous.len();
 
         if !self.drained.is_empty() {
             writeln!(f, "Queue ({n}):", n = self.drained.len())?;
@@ -307,6 +357,9 @@ impl fmt::Display for SyncReport {
             }
             for c in &self.conflicts {
                 writeln!(f, " - {c}")?;
+            }
+            for a in &self.ambiguous {
+                writeln!(f, " - {a}")?;
             }
             for p in &self.parked {
                 writeln!(f, " - {p}")?;

@@ -759,6 +759,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "fs4"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e72ed92b67c146290f88e9c89d60ca163ea417a446f61ffd7b72df3e7f1dfd5"
+dependencies = [
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1153,10 +1163,9 @@ dependencies = [
 [[package]]
 name = "io-pimdir"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "46b3f6bacb3f603d420e682c387cd1c795480c86c964be86c46a1c0c0d17b2ce"
 dependencies = [
  "blake3",
+ "fs4",
  "io-replica",
  "rusqlite",
  "serde_json",
@@ -1177,8 +1186,6 @@ dependencies = [
 [[package]]
 name = "io-replica"
 version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e21697a84dbf5c255f1625bf5e19d550a33ef3a2f0ca667ccc6c2c966e28aed"
 dependencies = [
  "log",
  "thiserror",

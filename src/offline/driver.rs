@@ -1,8 +1,9 @@
 //! Per-account/per-collection orchestration over the io-replica engine.
 //!
 //! Each collection's two sides are the two *sources* of one shared collection in a
-//! pimdir store: one [`PimdirStore`] handle per side (`"left"` / `"right"`) over
-//! the same files, the collection name as the bare collection id. The driver only
+//! pimdir store: one [`PimdirSourceStore`] handle per side (`"left"` /
+//! `"right"`) over the same files, the collection name as the bare collection
+//! id. The driver only
 //! runs the engine's per-side `sync` (and a `Meta` `upgrade` to resolve link
 //! ids, plus a `Full` upgrade to hydrate a body about to be copied): cross-side
 //! propagation of items, flags and deletions falls out of the shared hub's
@@ -31,7 +32,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use crossbeam_queue::SegQueue;
-use io_pimdir::{PimdirBlobs, PimdirError, PimdirStore};
+use io_pimdir::{PimdirBlobs, PimdirError, PimdirSourceStore, PimdirStore};
 use io_replica::{
     client::{ReplicaRemote, ReplicaStorage},
     collection::ReplicaCollectionId,
@@ -41,6 +42,7 @@ use io_replica::{
     },
     rekey::{ReplicaRekey, ReplicaRekeyReport},
     remote::{ReplicaFetchedItem, ReplicaTier},
+    storage::ReplicaLoadScope,
     sync::{ReplicaEvent, ReplicaPushRights, ReplicaSync, ReplicaSyncOptions, ReplicaSyncReport},
     upgrade::ReplicaUpgrade,
 };
@@ -66,7 +68,8 @@ use crate::{
     sync::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
-            DrainedQueue, ItemConflict, ParkedQueueAction, PatchEntry, PurgedItems, SyncReport,
+            AmbiguousIdentity, DrainedQueue, ItemConflict, ParkedQueueAction, PatchEntry,
+            PurgedItems, SyncReport,
         },
     },
 };
@@ -102,9 +105,9 @@ pub fn store_dir(account: &str, config: &AccountConfig) -> Result<PathBuf> {
 /// (the spec is a draft, and the reference schema keeps folding into version
 /// 1), so the refusal is answered with the one command that fixes it: the
 /// store is a derived cache, and dropping it costs a resync.
-fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirStore> {
-    match PimdirStore::open(dir, source) {
-        Ok(store) => Ok(store.for_account(account)),
+fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
+    match PimdirStore::open(dir) {
+        Ok(store) => Ok(store.for_account(account).for_source(source)),
         Err(err @ (PimdirError::Version { .. } | PimdirError::Unreconcilable { .. })) => Err(
             anyhow::Error::new(err).context(format!(
                 "The replica store predates this neverest; drop it with `neverest sync --reset -a {account}` and let it resync"
@@ -527,7 +530,7 @@ fn run_single(
     };
     let s = Spinner::start("Opening connections…");
     let mut ctxs = open_side_contexts(side, &side_config, workers)?;
-    let mut stores: Vec<PimdirStore> = (0..workers)
+    let mut stores: Vec<PimdirSourceStore> = (0..workers)
         .map(|_| open_store(&work_dir, &source, &account_name))
         .collect::<Result<_>>()?;
     // NOTE: from a store handle, so a body is named by the hash the store
@@ -644,7 +647,7 @@ fn open_side_contexts(side: Side, config: &SideConfig, count: usize) -> Result<V
 fn phase1_spine(
     filtered: &[String],
     ctxs: &mut [SideCtx],
-    stores: &mut [PimdirStore],
+    stores: &mut [PimdirSourceStore],
     blobs: &PimdirBlobs,
     dry_run: bool,
     report: &mut SyncReport,
@@ -700,7 +703,7 @@ fn phase1_spine(
 fn mailbox_spine(
     collection: &str,
     ctx: &mut SideCtx,
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     dry_run: bool,
 ) -> Result<(Vec<(ReplicaHandle, u64)>, SyncReport)> {
@@ -867,7 +870,7 @@ fn phase2_hydrate(
 fn phase3_apply(
     plans: &[MailboxPlan],
     ctx: &mut SideCtx,
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     cache: &HashMap<FetchKey, ReplicaFetchedItem>,
 ) -> Result<()> {
@@ -889,7 +892,7 @@ fn phase3_apply(
 fn apply_full(
     collection: &str,
     ctx: &mut SideCtx,
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     cache: &HashMap<FetchKey, ReplicaFetchedItem>,
 ) -> Result<()> {
@@ -916,7 +919,7 @@ fn apply_full(
 /// A `handle → flags` snapshot of a side's items, taken before a pull so its
 /// remote flag changes can be diffed out of the sync's per-item events.
 fn flag_snapshot(
-    store: &PimdirStore,
+    store: &PimdirSourceStore,
     collection: &str,
     side: Side,
 ) -> Result<HashMap<String, ReplicaFlags>> {
@@ -937,7 +940,7 @@ fn flag_snapshot(
 fn itemize_pulled(
     events: &[ReplicaEvent],
     before: &HashMap<String, ReplicaFlags>,
-    store: &PimdirStore,
+    store: &PimdirSourceStore,
     collection: &str,
     side: Side,
     report: &mut SyncReport,
@@ -1015,6 +1018,9 @@ fn itemize_single(
     let view = projection_view(store, collection, ctx.side)
         .with_context(|| format!("Project {} `{collection}`", ctx.side))?;
     for placement in view {
+        report
+            .ambiguous
+            .extend(ambiguity(ctx.side, collection, &placement));
         for hunk in placement_hunks(ctx.side, collection, &placement) {
             report.item.patch.push(PatchEntry::new(hunk, None));
         }
@@ -1063,8 +1069,8 @@ fn sync_mailbox(
     media_type: &str,
     left: &mut SideCtx,
     right: &mut SideCtx,
-    left_store: &mut PimdirStore,
-    right_store: &mut PimdirStore,
+    left_store: &mut PimdirSourceStore,
+    right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     dry_run: bool,
     relay: bool,
@@ -1098,6 +1104,7 @@ fn sync_mailbox(
         blobs,
         relay,
         progress,
+        report,
     )?;
 
     // NOTE: Itemize the pending cross-side work from the projection — identical
@@ -1129,6 +1136,7 @@ fn sync_mailbox(
             blobs,
             relay,
             progress,
+            report,
         )?;
         if !progressed && propagated == 0 {
             break;
@@ -1147,14 +1155,15 @@ fn propagate(
     collection: &str,
     left: &mut SideCtx,
     right: &mut SideCtx,
-    left_store: &mut PimdirStore,
-    right_store: &mut PimdirStore,
+    left_store: &mut PimdirSourceStore,
+    right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     relay: bool,
     progress: &MailboxProgress,
+    report: &mut SyncReport,
 ) -> Result<usize> {
     if relay {
-        relay_copies(collection, left, right, left_store, progress)
+        relay_copies(collection, left, right, left_store, progress, report)
     } else {
         hydrate_copies(
             collection,
@@ -1170,10 +1179,14 @@ fn propagate(
 
 /// One cross-copy body to relay: its holding side + fetch handle, the exact octet
 /// length (from the item's `v:1` meta `size`, so the target APPEND is
-/// length-prefixed without buffering the body), the flags and the Message-ID.
+/// length-prefixed without buffering the body), the link id, the flags and the
+/// Message-ID.
 struct RelayTarget {
     holding: Side,
     handle: ReplicaHandle,
+    /// The cross-side identity, carried so the relayed append can be itemized
+    /// under the same id the hydrating path reports a copy under.
+    link: String,
     size: usize,
     flags: Vec<Flag>,
     message_id: Option<String>,
@@ -1217,6 +1230,7 @@ fn relay_targets(
         out.push(RelayTarget {
             holding,
             handle: binding.handle.clone(),
+            link: link.0.clone(),
             size,
             flags: to_email_flag_set(&item.flags).into_iter().collect(),
             message_id: link.0.strip_prefix("mid:").map(str::to_string),
@@ -1236,12 +1250,20 @@ fn meta_size(meta: &Option<ReplicaMeta>) -> Option<usize> {
 /// through a bounded pipe — the store keeps only the spine (the target's next
 /// enumerate binds the relayed message; its body is never stored). Returns how
 /// many were relayed.
+///
+/// Each relay is a write to the target server, so each is itemized as the copy
+/// it is. The hydrating path is reported from the projection, which stages the
+/// copy as a pending `Created` before the push; a relay never reaches the
+/// projection (the body goes straight across, the store keeping only the
+/// spine), so reporting it here is what keeps `already in sync` meaning the run
+/// wrote nothing.
 fn relay_copies(
     collection: &str,
     left: &mut SideCtx,
     right: &mut SideCtx,
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     progress: &MailboxProgress,
+    report: &mut SyncReport,
 ) -> Result<usize> {
     let targets = relay_targets(
         store,
@@ -1258,6 +1280,17 @@ fn relay_copies(
         };
         relay_one(holding_pool, target_pool, collection, &target)
             .with_context(|| format!("Relay `{}` in `{collection}`", target.handle.0))?;
+        report.item.patch.push(PatchEntry::new(
+            ItemHunk::Copy {
+                source_side: target.holding,
+                target_side: target.holding.other(),
+                collection: collection.to_string(),
+                source_id: target.link.clone(),
+                flags: target.flags.iter().cloned().collect(),
+                content_key: content_key(&target.link),
+            },
+            None,
+        ));
         count += 1;
         progress.tick(count, total);
     }
@@ -1302,8 +1335,8 @@ fn reconcile_pass(
     collection: &str,
     left: &mut SideCtx,
     right: &mut SideCtx,
-    left_store: &mut PimdirStore,
-    right_store: &mut PimdirStore,
+    left_store: &mut PimdirSourceStore,
+    right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     dry_run: bool,
 ) -> Result<bool> {
@@ -1337,7 +1370,7 @@ fn moved(report: &ReplicaSyncReport) -> bool {
 /// a change means the server renumbered every UID, so io-replica's rekey
 /// re-enumerates the new handle space and carries cached bodies, summaries
 /// and pending state over by link id, and its write batch lands through
-/// [`PimdirStore::write_rekeyed`] so `collections.generation` bumps
+/// [`PimdirSourceStore::write_rekeyed`] so `collections.generation` bumps
 /// atomically with the rebuild (a frontend derives its epoch — an IMAP
 /// UIDVALIDITY — from it alone). Ordinary syncs and full resyncs never
 /// bump. Graph sides never rebuild: their message ids survive a delta
@@ -1351,7 +1384,7 @@ fn moved(report: &ReplicaSyncReport) -> bool {
 fn sync_side_rebuilding(
     collection: &str,
     ctx: &mut SideCtx,
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     push: bool,
 ) -> Result<ReplicaSyncReport> {
@@ -1380,9 +1413,16 @@ fn sync_side_rebuilding(
 /// The checkpoint bytes are the backend's own encoding, so the backend decodes
 /// them ([`Client::handle_space_epoch`]); the driver only compares the number
 /// it gets back, and knows nothing about IMAP's UIDVALIDITY.
-fn stored_epoch(client: &Client, store: &PimdirStore, collection: &str) -> Result<Option<u64>> {
+fn stored_epoch(
+    client: &Client,
+    store: &PimdirSourceStore,
+    collection: &str,
+) -> Result<Option<u64>> {
     let loaded = store
-        .load(&ReplicaCollectionId(collection.to_string()))
+        .load(
+            &ReplicaCollectionId(collection.to_string()),
+            &ReplicaLoadScope::All,
+        )
         .map_err(|err| anyhow!("Load `{collection}` checkpoint error: {err}"))?;
     Ok(loaded
         .checkpoint
@@ -1391,14 +1431,14 @@ fn stored_epoch(client: &Client, store: &PimdirStore, collection: &str) -> Resul
 }
 
 /// Drives io-replica's rekey over the side's remote, routing its rebuild
-/// write batch through [`PimdirStore::write_rekeyed`] instead of the
+/// write batch through [`PimdirSourceStore::write_rekeyed`] instead of the
 /// plain storage seam, so "the ids you cached are void" (the generation
 /// bump) commits atomically with the rebuild that voided them. Returns
 /// the rekey report and the new generation.
 fn rebuild_collection(
     collection: &str,
     ctx: &mut SideCtx,
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
 ) -> Result<(ReplicaRekeyReport, i64)> {
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone());
@@ -1408,7 +1448,7 @@ fn rebuild_collection(
 /// The generic rekey pump behind [`rebuild_collection`], seam-typed so a
 /// test can drive it over a scripted remote.
 fn drive_rekey<R>(
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     remote: &mut R,
     collection: &str,
 ) -> Result<(ReplicaRekeyReport, i64)>
@@ -1431,9 +1471,9 @@ where
             ReplicaCoroutineState::Complete(Err(err)) => {
                 return Err(anyhow!("Rekey engine error: {err}"));
             }
-            ReplicaCoroutineState::Yielded(ReplicaYield::WantsLoad(collection)) => {
+            ReplicaCoroutineState::Yielded(ReplicaYield::WantsLoad { collection, scope }) => {
                 let loaded = store
-                    .load(&collection)
+                    .load(&collection, &scope)
                     .map_err(|err| anyhow!("Storage load error: {err}"))?;
                 arg = Some(ReplicaArg::Load(loaded));
             }
@@ -1478,7 +1518,7 @@ where
 fn sync_side(
     collection: &str,
     ctx: &mut SideCtx,
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     push: bool,
 ) -> Result<ReplicaSyncReport> {
@@ -1503,7 +1543,7 @@ fn sync_side(
 fn upgrade_probed(
     collection: &str,
     ctx: &mut SideCtx,
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
 ) -> Result<()> {
     let probed: Vec<ReplicaHandle> = load_side(store, collection)
@@ -1533,8 +1573,8 @@ fn hydrate_copies(
     collection: &str,
     left: &mut SideCtx,
     right: &mut SideCtx,
-    left_store: &mut PimdirStore,
-    right_store: &mut PimdirStore,
+    left_store: &mut PimdirSourceStore,
+    right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     progress: &MailboxProgress,
 ) -> Result<usize> {
@@ -1605,6 +1645,9 @@ fn itemize(
         let view = projection_view(store, collection, ctx.side)
             .with_context(|| format!("Project {} `{collection}`", ctx.side))?;
         for placement in view {
+            report
+                .ambiguous
+                .extend(ambiguity(ctx.side, collection, &placement));
             for hunk in placement_hunks(ctx.side, collection, &placement) {
                 report.item.patch.push(PatchEntry::new(hunk, None));
             }
@@ -1680,8 +1723,40 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
             }
             hunks
         }
-        ReplicaStatus::Clean | ReplicaStatus::Conflict => Vec::new(),
+        // NOTE: an `Ambiguous` placement derives nothing on any axis, the
+        // engine refusing to guess which copy a change belongs to, so it has no
+        // hunk. It surfaces through [`ambiguity`] instead.
+        ReplicaStatus::Clean | ReplicaStatus::Conflict | ReplicaStatus::Ambiguous => Vec::new(),
     }
+}
+
+/// The warning an [`ReplicaStatus::Ambiguous`] placement carries: the
+/// collection and every handle the side holds the identity under, the bound one
+/// first. `None` for any other status.
+///
+/// The freeze itself is upstream: io-replica marks the identity and derives
+/// nothing for it, io-pimdir persists the losing handles on the binding. So
+/// this crate derives no duplicate rule of its own, it reads what they marked
+/// and names it in the user's terms. The state being persisted is what makes
+/// the warning come back on every run: the second copy appears in exactly one
+/// enumeration, so nothing here could rediscover it.
+fn ambiguity(
+    side: Side,
+    collection: &str,
+    placement: &ReplicaPlacement,
+) -> Option<AmbiguousIdentity> {
+    if placement.status != ReplicaStatus::Ambiguous {
+        return None;
+    }
+
+    let mut ids = vec![placement.handle.0.clone()];
+    ids.extend(placement.ambiguous_handles.iter().map(|h| h.0.clone()));
+
+    Some(AmbiguousIdentity {
+        side,
+        collection: collection.to_string(),
+        ids,
+    })
 }
 
 fn side_ctx<'a>(side: Side, left: &'a mut SideCtx, right: &'a mut SideCtx) -> &'a mut SideCtx {
@@ -1804,11 +1879,11 @@ fn content_key(link: &str) -> u64 {
 /// Drains every collection's pending frontend actions into the store
 /// before the sync (spec: neverest is the store's sole owner). Each
 /// collection is exactly-once applied by io-pimdir's
-/// [`drain_collection`](PimdirStore::drain_collection); permanently bad
+/// [`drain_collection`](PimdirSourceStore::drain_collection); permanently bad
 /// actions park (reported as warnings until repaired), a transient
 /// failure leaves the collection queued for the next run and is only
 /// warned — the sync itself still runs offline-first.
-fn drain_queues(store: &mut PimdirStore, report: &mut SyncReport) {
+fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
     let collections = match store.queued_collections() {
         Ok(collections) => collections,
         Err(err) => {
@@ -1867,7 +1942,7 @@ fn drain_queues(store: &mut PimdirStore, report: &mut SyncReport) {
 fn drain_submits(
     account_config: &AccountConfig,
     sides: &mut [&mut SideCtx],
-    store: &mut PimdirStore,
+    store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     report: &mut SyncReport,
 ) {
@@ -2074,8 +2149,8 @@ fn hydrate_full_mailbox(
     collection: &str,
     left: &mut SideCtx,
     right: &mut SideCtx,
-    left_store: &mut PimdirStore,
-    right_store: &mut PimdirStore,
+    left_store: &mut PimdirSourceStore,
+    right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     progress: &MailboxProgress,
 ) -> Result<usize> {
@@ -2192,7 +2267,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // NOTE: the owner opens (and creates) the store first, as the real
         // driver does; only then can a producer attach.
-        let mut store = PimdirStore::open(dir.path(), "left").unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
         // A frontend enqueues an add (body written durably first) and a
@@ -2275,9 +2350,12 @@ mod tests {
     /// `Client::handle_space_epoch`; this test has no client, so it decodes
     /// directly — which is also why it is gated on the IMAP feature.
     #[cfg(feature = "imap")]
-    fn stored_checkpoint_uid_validity(store: &PimdirStore, collection: &str) -> Option<u32> {
+    fn stored_checkpoint_uid_validity(store: &PimdirSourceStore, collection: &str) -> Option<u32> {
         let loaded = store
-            .load(&ReplicaCollectionId(collection.to_string()))
+            .load(
+                &ReplicaCollectionId(collection.to_string()),
+                &ReplicaLoadScope::All,
+            )
             .unwrap();
         loaded
             .checkpoint
@@ -2357,7 +2435,7 @@ mod tests {
     #[cfg(feature = "imap")]
     fn a_rekey_carries_state_by_link_id_and_bumps_the_generation_once() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = PimdirStore::open(dir.path(), "left").unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
         // The old handle space: UID 1 under UIDVALIDITY 1, hydrated.
@@ -2387,6 +2465,7 @@ mod tests {
                         object: Some(ReplicaHash("beef0001".into())),
                     }),
                     origin: None,
+                    ambiguous_handles: Vec::new(),
                 }),
                 ReplicaWriteOp::SetCheckpoint {
                     collection: ReplicaCollectionId("INBOX".into()),
@@ -2441,7 +2520,7 @@ mod tests {
     #[test]
     fn a_submit_intent_survives_the_drain_and_is_read_back() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = PimdirStore::open(dir.path(), "left").unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("Sent", "message/rfc822").unwrap();
 
         // A producer stages the body durably, then enqueues the intent
@@ -2494,7 +2573,7 @@ mod tests {
     #[test]
     fn the_retention_sweep_runs_only_when_a_delay_is_configured() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = PimdirStore::open(dir.path(), "left").unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         let mut config: AccountConfig =
             toml::from_str(r#"left.imap.server = "imaps://imap.example.org:993""#).unwrap();
 
@@ -2636,8 +2715,8 @@ mod tests {
     /// Seeds a store holding one locally edited item: its body points at
     /// `edited`, its base at `original` and revision `base_revision`, i.e. the
     /// state a frontend leaves behind after staging an edit offline.
-    fn store_with_local_edit(dir: &std::path::Path, base_revision: &str) -> PimdirStore {
-        let mut store = PimdirStore::open(dir, "left").unwrap();
+    fn store_with_local_edit(dir: &std::path::Path, base_revision: &str) -> PimdirSourceStore {
+        let mut store = PimdirStore::open(dir).unwrap().for_source("left");
         store.ensure_collection("contacts", "text/vcard").unwrap();
         store
             .write(vec![
@@ -2672,6 +2751,7 @@ mod tests {
                         object: Some(ReplicaHash("0rig".into())),
                     }),
                     origin: None,
+                    ambiguous_handles: Vec::new(),
                 }),
             ])
             .unwrap();
@@ -2679,7 +2759,7 @@ mod tests {
     }
 
     fn sync_with(
-        store: &mut PimdirStore,
+        store: &mut PimdirSourceStore,
         remote: &mut MutableRemote,
         rights: ReplicaPushRights,
     ) -> ReplicaSyncReport {
@@ -2825,5 +2905,123 @@ mod tests {
         assert!(ctx_rights.content);
         assert!(ctx_rights.add);
         assert!(!ctx_rights.remove);
+    }
+
+    /// A `Meta`-level placement with a base, the shape a side reports once its
+    /// first reconcile has linked it.
+    fn linked(handle: &str, link: &str, meta: &str) -> ReplicaPlacement {
+        ReplicaPlacement {
+            collection: ReplicaCollectionId("INBOX".into()),
+            handle: ReplicaHandle(handle.into()),
+            link_id: Some(ReplicaLinkId(link.into())),
+            object: None,
+            level: ReplicaLevel::Meta,
+            meta: Some(ReplicaMeta(meta.into())),
+            sort_key: ReplicaSortKey::default(),
+            flags: ReplicaFlags::default(),
+            status: ReplicaStatus::Clean,
+            conflict_revision: None,
+            base: Some(ReplicaBase {
+                flags: ReplicaFlags::default(),
+                revision: None,
+                object: None,
+            }),
+            origin: None,
+            ambiguous_handles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_frozen_identity_derives_no_hunk_and_is_reported_with_every_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+        store.ensure_collection("INBOX", "message/rfc822").unwrap();
+
+        // The shape the engine leaves behind when a source holds one identity
+        // under two handles: the copy it bound, carrying the one it did not.
+        let mut placement = linked("145", "mid:a@x", r#"{"v":1}"#);
+        placement.ambiguous_handles = vec![ReplicaHandle("146".into())];
+        store
+            .write(vec![ReplicaWriteOp::UpsertPlacement(placement)])
+            .unwrap();
+
+        // The freeze survives the store round trip, which is what makes the
+        // warning come back on every run: the second copy is reported by
+        // exactly one enumeration, so nothing could rediscover it.
+        let view = projection_view(&store, "INBOX", Side::Left).unwrap();
+        assert_eq!(view.len(), 1);
+        assert_eq!(view[0].status, ReplicaStatus::Ambiguous);
+        assert!(placement_hunks(Side::Left, "INBOX", &view[0]).is_empty());
+
+        let mut report = SyncReport {
+            account: "dup".into(),
+            ..Default::default()
+        };
+        report
+            .ambiguous
+            .extend(ambiguity(Side::Left, "INBOX", &view[0]));
+        assert_eq!(report.ambiguous.len(), 1);
+        assert_eq!(report.ambiguous[0].ids, ["145", "146"]);
+
+        // Text: one warning naming the collection and both handles, and
+        // nothing that reads as a repair or as an invalid mailbox.
+        let text = report.to_string();
+        assert!(text.contains("Warnings (1)"), "{text}");
+        assert!(text.contains("`INBOX`"), "{text}");
+        assert!(text.contains("`145`") && text.contains("`146`"), "{text}");
+
+        // `--json`: the same coordinates, machine-readable.
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["ambiguous"][0]["collection"], "INBOX");
+        assert_eq!(
+            json["ambiguous"][0]["ids"],
+            serde_json::json!(["145", "146"])
+        );
+    }
+
+    #[test]
+    fn a_relayed_copy_is_itemized_so_the_run_never_reads_as_already_in_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+        store.ensure_collection("INBOX", "message/rfc822").unwrap();
+
+        // One side holds a bodiless item the other lacks: the relay plan.
+        store
+            .write(vec![ReplicaWriteOp::UpsertPlacement(linked(
+                "1",
+                "mid:a@x",
+                r#"{"v":1,"size":42}"#,
+            ))])
+            .unwrap();
+
+        let targets = relay_targets(&store, "INBOX", false, true).unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].holding, Side::Left);
+        assert_eq!(targets[0].link, "mid:a@x");
+
+        // A relay streams the body server-to-server and never reaches the
+        // projection, so it is itemized where it happens; without that the run
+        // wrote to a server and reported nothing.
+        let target = &targets[0];
+        let mut report = SyncReport {
+            account: "relay".into(),
+            ..Default::default()
+        };
+        report.item.patch.push(PatchEntry::new(
+            ItemHunk::Copy {
+                source_side: target.holding,
+                target_side: target.holding.other(),
+                collection: "INBOX".into(),
+                source_id: target.link.clone(),
+                flags: target.flags.iter().cloned().collect(),
+                content_key: content_key(&target.link),
+            },
+            None,
+        ));
+
+        let text = report.to_string();
+        assert!(!text.contains("already in sync"), "{text}");
+        assert!(text.contains("synchronized: 1 hunks"), "{text}");
+        assert!(text.contains("from left to right"), "{text}");
     }
 }

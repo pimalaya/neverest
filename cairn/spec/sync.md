@@ -502,6 +502,27 @@ run until it is resolved. Neverest SHALL NOT resolve a content conflict by
 itself; resolution is an edit, staged through the pimdir queue by whoever owns
 the decision.
 
+### Requirement: An ambiguous identity is reported, never judged
+An identity the engine marked ambiguous (a collection holding two items with one
+link id, two messages with the same `Message-ID`) SHALL appear in the sync
+report, text and `--json`, naming its collection and every handle involved, and
+SHALL keep appearing on every run until the collection holds the identity once.
+
+Neverest SHALL NOT repair a duplicated collection, and SHALL NOT report it as an
+invalid mailbox: RFC 5322 §3.6.4 binds the generator of a `Message-ID` and says
+nothing about what a store may hold, so the report states what neverest cannot
+tell apart rather than what the user did wrong. Detection, policy and state
+belong to the engine and the store; this crate surfaces them and derives no
+duplicate rule of its own.
+
+### Requirement: The report accounts for every write the run made
+A run that wrote to a remote SHALL report it. `already in sync` SHALL mean the
+run wrote nothing, and an append performed by the sync SHALL appear as a hunk,
+so a report can be read as the record of what happened rather than a summary
+that may omit it. A relayed copy (streamed side to side, never reaching the
+projection the report is otherwise built from) SHALL therefore be itemized where
+it is performed.
+
 ### Requirement: A side may be denied item updates
 The per-side permission set SHALL gate item updates (`item.update`, default
 true) beside the existing collection and item create/delete and flag gates. An

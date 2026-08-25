@@ -190,6 +190,12 @@ Sync walks every mailbox surviving the filter, diffs the two sides against the c
 
 Pass `--reset` to drop the cached state before running. Without `--include-mailbox`, the entire snapshot plus every IMAP / JMAP state token is cleared; with `--include-mailbox`, only the listed mailboxes are wiped. The first post-reset sync rebuilds the snapshot via a full re-list, equivalent to first-sync semantics.
 
+### Duplicated identities
+
+A collection may hold one identity twice: two messages carrying the same `Message-ID`, two cards carrying the same `UID`. Neverest cannot tell such copies apart, so it syncs neither of them and reports the collection and every id involved, on every run until the collection holds the identity once. Nothing is repaired for you: which copy to keep is a decision only you can make, with your own client.
+
+This is not an invalid mailbox, and nothing is wrong with your server. RFC 5322 binds the *generator* of a `Message-ID`, not what a store may hold, a copy legitimately carries the identifier of the message it copies, and a migration commonly produces such a pair. Reporting is what neverest does instead of guessing, because guessing costs mail: propagating a delete of the copy it happened to pick removes the only copy on the other side, while the first side still holds the message.
+
 ### Collection filters and per-side permissions
 
 Collection filters declared in the configuration apply symmetrically to both sides. They can be overridden per invocation with `-m / --include-collection`, `-x / --exclude-collection`, or `-A / --all-collections` (the three flags are mutually exclusive, and the pre-v1 `--include-mailbox` spellings still work). Matching is ASCII case-insensitive: `INBOX` matches `inbox`, but non-ASCII characters (umlauts, Cyrillic, accents) must be spelled exactly as the server reports them.

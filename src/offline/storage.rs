@@ -1,10 +1,11 @@
-//! Per-side views over a shared [`PimdirStore`].
+//! Per-side views over a shared pimdir store.
 //!
 //! The store persists a [`ReplicaHub`](io_replica::hub::ReplicaHub) per
 //! collection — one shared item plus a base per source. The engine's
 //! [`ReplicaStorage`] seam (`load` / `lookup_objects` / `write`) is serviced by
-//! the [`PimdirStore`] handle itself, one per side (`"left"` / `"right"`); this
-//! module adds the two multi-source reads the driver needs on top of that seam:
+//! the [`PimdirSourceStore`] handle itself, one per side (`"left"` /
+//! `"right"`); this module adds the two multi-source reads the driver needs on
+//! top of that seam:
 //!
 //! - [`load_side`]: the placements one side's coroutines see (its hub
 //!   projection plus its not-yet-linked residual), for the `Meta` upgrade pass;
@@ -15,13 +16,15 @@
 //!
 //! [`load_side`] reads through one source handle (so it carries that source's
 //! residual); [`projection_view`] and [`hydration_targets`] read the whole hub
-//! (both sources' bindings), so either handle serves them.
+//! (both sources' bindings), so they take the source-less handle a side's own
+//! handle dereferences to.
 
-use io_pimdir::{PimdirError, PimdirStore};
+use io_pimdir::{PimdirError, PimdirSourceStore, PimdirStore};
 use io_replica::{
     client::ReplicaStorage,
     collection::ReplicaCollectionId,
     placement::{ReplicaHandle, ReplicaPlacement},
+    storage::ReplicaLoadScope,
 };
 
 use crate::{offline::source_id, side::Side};
@@ -30,11 +33,14 @@ use crate::{offline::source_id, side::Side};
 /// plus this source handle's residual (freshly probed items not yet linked).
 /// The handle must be the side's own store (source is fixed at open).
 pub fn load_side(
-    store: &PimdirStore,
+    store: &PimdirSourceStore,
     collection: &str,
 ) -> Result<Vec<ReplicaPlacement>, PimdirError> {
     Ok(store
-        .load(&ReplicaCollectionId(collection.to_string()))?
+        .load(
+            &ReplicaCollectionId(collection.to_string()),
+            &ReplicaLoadScope::All,
+        )?
         .placements)
 }
 
@@ -132,13 +138,14 @@ mod tests {
                 object: object.map(|h| ReplicaHash(h.into())),
             }),
             origin: None,
+            ambiguous_handles: Vec::new(),
         }
     }
 
     #[test]
     fn a_one_sided_body_projects_as_a_copy_and_is_a_hydration_target() {
         let dir = tempfile::tempdir().unwrap();
-        let mut left = PimdirStore::open(dir.path(), "left").unwrap();
+        let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
 
         // NOTE: left holds a hydrated item; right has never seen it.
         left.write(vec![
@@ -163,7 +170,7 @@ mod tests {
     #[test]
     fn hydration_targets_pick_one_sided_bodiless_items_when_the_far_side_creates() {
         let dir = tempfile::tempdir().unwrap();
-        let mut left = PimdirStore::open(dir.path(), "left").unwrap();
+        let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
 
         // NOTE: left holds a bodiless (Meta-only) item; right lacks it.
         left.write(vec![ReplicaWriteOp::UpsertPlacement(linked(

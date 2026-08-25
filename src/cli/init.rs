@@ -57,7 +57,7 @@ impl InitCommand {
             .with_context(|| format!("Create replica dir `{}`", replica.display()))?;
         // NOTE: opening the store materializes `pimdir.db` (and its schema); the
         // handle is dropped immediately, the sync opens its own.
-        PimdirStore::open(&replica, "left")
+        PimdirStore::open(&replica)
             .with_context(|| format!("Create pimdir store `{}`", replica.display()))?;
         s.success("Created replica store");
 

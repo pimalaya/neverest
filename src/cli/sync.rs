@@ -214,7 +214,7 @@ fn reset_replica(replica: &std::path::Path, include: &[String]) -> Result<()> {
             .with_context(|| format!("Remove `{}` for reset", objects.display()))?;
     }
     // Recreate the empty store so the account stays "initialized".
-    PimdirStore::open(replica, "left").context("Recreate pimdir store after reset")?;
+    PimdirStore::open(replica).context("Recreate pimdir store after reset")?;
     Ok(())
 }
 

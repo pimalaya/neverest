@@ -6,8 +6,8 @@
 //! a content-addressed blob directory).
 //!
 //! A collection's two sides are the two *sources* of one shared collection in the
-//! store: one [`PimdirStore`](io_pimdir::PimdirStore) handle per side (`"left"`
-//! / `"right"`) over the same files, the collection name as the bare collection id.
+//! store: one [`PimdirSourceStore`](io_pimdir::PimdirSourceStore) handle per
+//! side (`"left"` / `"right"`) over the same files, the collection name as the bare collection id.
 //! `load` projects that source's view of the shared hub, `write` absorbs the
 //! engine's writes back into that source's bindings, so cross-side propagation
 //! of items, flags and deletions falls out of the per-side reconcile with no
@@ -15,7 +15,7 @@
 //!
 //! Layout:
 //! - [`storage`] the per-side projection and hydration helpers over a
-//!   [`PimdirStore`](io_pimdir::PimdirStore);
+//!   [`PimdirSourceStore`](io_pimdir::PimdirSourceStore);
 //! - [`remote`] [`remote::PimRemote`], the [`ReplicaRemote`] over one client;
 //! - [`driver`] per-account/per-collection orchestration and the report.
 
@@ -48,7 +48,7 @@ pub fn source_id(side: Side) -> ReplicaSourceId {
 /// Drives any standard-shape io-replica coroutine to completion over borrowed
 /// storage and remote seams (io-replica's `ReplicaClient::run`, but borrowing so
 /// the driver keeps its long-lived per-side
-/// [`PimdirStore`](io_pimdir::PimdirStore) handle and client across the
+/// [`PimdirSourceStore`](io_pimdir::PimdirSourceStore) handle and client across the
 /// ephemeral coroutine).
 pub fn drive<S, R, C, T, E>(storage: &mut S, remote: &mut R, mut coroutine: C) -> Result<T>
 where
@@ -98,10 +98,10 @@ where
                 prof::PUSH.add(t.elapsed());
                 arg = Some(ReplicaArg::Push(results));
             }
-            ReplicaCoroutineState::Yielded(ReplicaYield::WantsLoad(collection)) => {
+            ReplicaCoroutineState::Yielded(ReplicaYield::WantsLoad { collection, scope }) => {
                 let t = std::time::Instant::now();
                 let loaded = storage
-                    .load(&collection)
+                    .load(&collection, &scope)
                     .map_err(|err| anyhow!("Storage load error: {err}"))?;
                 prof::LOAD.add(t.elapsed());
                 arg = Some(ReplicaArg::Load(loaded));

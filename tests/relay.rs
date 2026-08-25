@@ -66,15 +66,16 @@ fn relay_streams_a_to_b_without_retaining() {
     // 2. Relay A ↔ B.
     let config_toml = format!(
         "[accounts.relay]\n\
-         left.imap.server = \"{A}\"\n\
-         left.imap.starttls = false\n\
-         left.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
-         left.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
-         right.imap.server = \"{B}\"\n\
-         right.imap.starttls = false\n\
-         right.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
-         right.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
-         store.retention = \"relay\"\n",
+         sources.left.imap.server = \"{A}\"\n\
+         sources.left.imap.starttls = false\n\
+         sources.left.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
+         sources.left.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
+         sources.right.imap.server = \"{B}\"\n\
+         sources.right.imap.starttls = false\n\
+         sources.right.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
+         sources.right.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
+         sources.left.imap.collection.namespace = \"mail\"\n\
+         sources.right.imap.collection.namespace = \"mail\"\n",
     );
     fs::write(&config, config_toml).unwrap();
     neverest(&["init", "-a", "relay"], &config, &state);

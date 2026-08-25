@@ -1,5 +1,5 @@
-//! Account configuration: each account pairs a `left` and a `right`
-//! [`SideConfig`] plus collection/item sync settings.
+//! Account configuration: each account holds named [`SourceConfig`]s over one
+//! pimdir store, plus that store's settings.
 
 use std::{
     collections::HashMap, fmt, fs, path::Path, path::PathBuf, process::exit, time::Duration,
@@ -36,13 +36,13 @@ fn is_default_http_alpn(alpn: &[String]) -> bool {
     alpn == default_http_alpn().as_slice()
 }
 
-/// Splices the per-side shared fields (`collection`, `flag`, `item`,
+/// Splices the per-source shared fields (`collection`, `flag`, `item`,
 /// `pool_size`) onto every protocol-specific config struct.
 ///
 /// `collection` and `item` keep a serde alias on their pre-`generic-pim-sync`
 /// spellings (`mailbox` / `message`), so an existing mail configuration keeps
 /// loading unchanged.
-macro_rules! side_config {
+macro_rules! source_config {
     (
         $(#[$struct_meta:meta])*
         pub struct $Name:ident {
@@ -59,12 +59,12 @@ macro_rules! side_config {
                 pub $field_name: $field_ty,
             )*
             #[serde(default, alias = "mailbox", skip_serializing_if = "is_default")]
-            pub collection: CollectionSidePermissions,
+            pub collection: CollectionSourceConfig,
             #[serde(default, skip_serializing_if = "is_default")]
-            pub flag: FlagSidePermissions,
+            pub flag: FlagSourcePermissions,
             #[serde(default, alias = "message", skip_serializing_if = "is_default")]
-            pub item: ItemSidePermissions,
-            /// Per-side connection pool size override; defaults are
+            pub item: ItemSourcePermissions,
+            /// Per-source connection pool size override; defaults are
             /// picked per backend.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub pool_size: Option<usize>,
@@ -72,17 +72,32 @@ macro_rules! side_config {
     };
 }
 
-/// Generates a [`SideConfig`] accessor that forwards to the matching
-/// shared field on the side's backend variant.
-macro_rules! side_accessor {
+/// Generates a [`SourceConfig`] accessor that forwards to the matching
+/// shared field on the source's backend variant, by value.
+macro_rules! source_accessor {
     ($name:ident, $ty:ty) => {
         pub fn $name(&self) -> $ty {
             match &self.backend {
-                SideBackendConfig::Imap(c) => c.$name,
-                SideBackendConfig::Carddav(c) => c.$name,
-                SideBackendConfig::Jmap(c) => c.$name,
-                SideBackendConfig::Gmail(c) => c.$name,
-                SideBackendConfig::Msgraph(c) => c.$name,
+                SourceBackendConfig::Imap(c) => c.$name,
+                SourceBackendConfig::Carddav(c) => c.$name,
+                SourceBackendConfig::Jmap(c) => c.$name,
+                SourceBackendConfig::Gmail(c) => c.$name,
+                SourceBackendConfig::Msgraph(c) => c.$name,
+            }
+        }
+    };
+}
+
+/// [`source_accessor`] for a field too large to copy out.
+macro_rules! source_ref_accessor {
+    ($name:ident, $ty:ty) => {
+        pub fn $name(&self) -> &$ty {
+            match &self.backend {
+                SourceBackendConfig::Imap(c) => &c.$name,
+                SourceBackendConfig::Carddav(c) => &c.$name,
+                SourceBackendConfig::Jmap(c) => &c.$name,
+                SourceBackendConfig::Gmail(c) => &c.$name,
+                SourceBackendConfig::Msgraph(c) => &c.$name,
             }
         }
     };
@@ -157,83 +172,335 @@ impl Config {
     }
 }
 
-/// Per-account configuration: two sides plus optional sync filters.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+/// Per-account configuration: one or more named sources over one pimdir store.
+///
+/// An account is the hub: one store, one database, one blob directory, and
+/// whatever sources feed it. A source's name is its pimdir source id, so it
+/// names every binding that source owns in the store and renaming one orphans
+/// them all.
+///
+/// A backend written directly under the account (`imap`, `carddav`, …) is sugar
+/// for a source named after its protocol, which is the whole configuration for
+/// the common single-provider account. The `sources` table is what a mirror or
+/// a fan-in reaches for, since those need two sources of one protocol.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct AccountConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub default: bool,
 
-    /// The account's sync sides. At least one SHALL be set; exactly one makes
-    /// this a **local sync** (that remote against the retained pimdir store the
-    /// app reads), both make it a **remote-to-remote** sync through the store.
-    #[serde(default)]
-    pub left: Option<SideConfig>,
-    #[serde(default)]
-    pub right: Option<SideConfig>,
+    /// Named sources, the map key being the pimdir source id.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sources: HashMap<String, SourceConfig>,
+
+    /// Direct-backend sugar: each is a source named after its protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imap: Option<ImapConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carddav: Option<CarddavConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jmap: Option<JmapConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gmail: Option<GmailConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msgraph: Option<MsgraphConfig>,
+
+    /// The send channel of the sugar source that carries mail, the flat
+    /// spelling of `sources.<name>.smtp`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp: Option<SmtpConfig>,
 
     /// The local pimdir store this account syncs through. Optional: the store is
     /// implicit (per-account state dir) and customised only here, never as a
-    /// side.
+    /// source.
     #[serde(default)]
     pub store: StoreConfig,
-
-    /// Collection-level sync settings shared by both sides.
-    #[serde(default, alias = "mailbox")]
-    pub collection: CollectionSyncConfig,
 
     // TODO: item-level sync filters (date range, sender, subject).
     #[serde(default, alias = "message")]
     pub item: ItemSyncConfig,
 
-    /// Max connections per side for concurrent `Full` body fetches (default 4).
-    /// Keep it under your provider's per-account connection limit. A `sync
+    /// Max connections per source for concurrent `Full` body fetches (default
+    /// 4). Keep it under your provider's per-account connection limit. A `sync
     /// --connections N` flag overrides it.
     #[serde(default)]
     pub connections: Option<usize>,
-}
 
-/// A synced side and its configured backend (used when reporting/iterating over
-/// the account's sides).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum SideName {
-    Left,
-    Right,
-}
-
-impl std::fmt::Display for SideName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SideName::Left => f.write_str("left"),
-            SideName::Right => f.write_str("right"),
-        }
-    }
+    /// Removed keys, kept only so a configuration carrying one is refused by
+    /// name rather than as an unknown field. See [`AccountConfig::validate`].
+    #[serde(default, skip_serializing)]
+    left: Option<RemovedKey>,
+    #[serde(default, skip_serializing)]
+    right: Option<RemovedKey>,
+    #[serde(default, skip_serializing, alias = "mailbox")]
+    collection: Option<RemovedKey>,
 }
 
 impl AccountConfig {
-    /// Rejects an account whose sides declare options their backend cannot
-    /// honour. Run by every command that opens an account, so a bad
-    /// configuration is refused before any connection is made rather than
-    /// halfway through a sync.
+    /// A single-source account, which is the only shape the wizard writes: one
+    /// provider, one protocol, and a store that keeps every body because
+    /// nothing crosses. Everything beyond that is configured by hand.
+    pub fn with_source(default: bool, source: SourceConfig) -> Self {
+        let mut account = Self {
+            default,
+            ..Self::default()
+        };
+        account.set_direct_source(source);
+        account
+    }
+
+    /// Writes `source` as the direct-backend sugar, replacing whatever backend
+    /// of that protocol the account carried and lifting its send channel to the
+    /// account-level `smtp` table the sugar spells it with.
+    pub fn set_direct_source(&mut self, source: SourceConfig) {
+        let SourceConfig { backend, smtp } = source;
+
+        self.smtp = smtp;
+
+        match backend {
+            SourceBackendConfig::Imap(config) => self.imap = Some(config),
+            SourceBackendConfig::Carddav(config) => self.carddav = Some(config),
+            SourceBackendConfig::Jmap(config) => self.jmap = Some(config),
+            SourceBackendConfig::Gmail(config) => self.gmail = Some(config),
+            SourceBackendConfig::Msgraph(config) => self.msgraph = Some(config),
+        }
+    }
+
+    /// The direct-backend sources in protocol order, which is what the wizard
+    /// owns and what `configure` re-runs over. A source from the explicit
+    /// `sources` table is hand-written and never appears here.
+    pub fn direct_sources(&self) -> Vec<SourceConfig> {
+        [
+            self.imap.clone().map(SourceBackendConfig::Imap),
+            self.carddav.clone().map(SourceBackendConfig::Carddav),
+            self.jmap.clone().map(SourceBackendConfig::Jmap),
+            self.gmail.clone().map(SourceBackendConfig::Gmail),
+            self.msgraph.clone().map(SourceBackendConfig::Msgraph),
+        ]
+        .into_iter()
+        .flatten()
+        .map(|backend| SourceConfig {
+            backend,
+            smtp: self.smtp.clone(),
+        })
+        .collect()
+    }
+
+    /// Every configured source keyed by its id, the direct-backend sugar folded
+    /// into the explicit `sources` table.
+    ///
+    /// The sugar's source id is its protocol name, which is the id the expanded
+    /// form writes too, so expanding an account by hand is a no-op on the store.
+    pub fn sources(&self) -> Result<HashMap<String, SourceConfig>> {
+        let mut sources = self.sources.clone();
+
+        let sugar = [
+            self.imap.clone().map(SourceBackendConfig::Imap),
+            self.carddav.clone().map(SourceBackendConfig::Carddav),
+            self.jmap.clone().map(SourceBackendConfig::Jmap),
+            self.gmail.clone().map(SourceBackendConfig::Gmail),
+            self.msgraph.clone().map(SourceBackendConfig::Msgraph),
+        ];
+
+        for backend in sugar.into_iter().flatten() {
+            let name = backend.protocol().to_string();
+
+            if sources.contains_key(&name) {
+                bail!(
+                    "Source `{name}` is declared both directly under the account and in the \
+                     `sources` table; the direct form is sugar for `sources.{name}`, so keep one."
+                );
+            }
+
+            sources.insert(name, SourceConfig::new(backend));
+        }
+
+        self.attach_send_channel(&mut sources)?;
+
+        Ok(sources)
+    }
+
+    /// Hands the account-level `smtp` table to the one sugar source that could
+    /// use it. A source in the explicit table carries its own.
+    fn attach_send_channel(&self, sources: &mut HashMap<String, SourceConfig>) -> Result<()> {
+        let Some(smtp) = &self.smtp else {
+            return Ok(());
+        };
+
+        let mut candidates: Vec<_> = sources
+            .iter()
+            .filter(|(name, source)| {
+                self.is_sugar(name) && source.carries_mail() && !source.sends_natively()
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        candidates.sort();
+
+        let [name] = candidates.as_slice() else {
+            bail!(
+                "The account-level `smtp` channel needs exactly one direct mail backend to \
+                 complete, and this account has {}; move it under the source that sends, as \
+                 `sources.<name>.smtp`.",
+                candidates.len()
+            );
+        };
+
+        sources
+            .get_mut(name)
+            .expect("candidate name comes from the map")
+            .smtp = Some(smtp.clone());
+
+        Ok(())
+    }
+
+    /// Whether a source of that name came from the direct-backend sugar rather
+    /// than from the explicit table.
+    fn is_sugar(&self, name: &str) -> bool {
+        !self.sources.contains_key(name)
+    }
+
+    /// The account's sources grouped into hub namespaces, ordered by kind then
+    /// namespace so a report reads the same twice.
+    ///
+    /// This is the one place [`StoredBodies`] is decided. Both `check` and the
+    /// sync go through it, so what a run reports and what it does cannot drift
+    /// apart.
+    pub fn groups(&self) -> Result<Vec<SourceGroup>> {
+        let sources = self.sources()?;
+        let mut grouped: HashMap<(&'static str, String), Vec<String>> = HashMap::new();
+
+        for (name, source) in &sources {
+            let key = (
+                source.backend.media_type(),
+                source.namespace(name).to_string(),
+            );
+            grouped.entry(key).or_default().push(name.clone());
+        }
+
+        let mut groups: Vec<_> = grouped
+            .into_iter()
+            .map(|((media_type, namespace), mut names)| {
+                names.sort();
+
+                // A group streams only when every source in it can, which today
+                // means an IMAP to IMAP pairing and nothing else.
+                let streamable = names.iter().all(|name| sources[name].is_streamable());
+
+                SourceGroup {
+                    media_type,
+                    namespace,
+                    bodies: StoredBodies::derive(names.len(), streamable),
+                    sources: names,
+                }
+            })
+            .collect();
+
+        groups.sort_by(|a, b| (a.media_type, &a.namespace).cmp(&(b.media_type, &b.namespace)));
+
+        // A hub collection id is `<namespace>/<name>` with the kind on the
+        // collection row, so two kinds under one namespace would key onto the
+        // same ids: a mailbox and an address book both named `Default` would
+        // become one collection. Mirroring across kinds means nothing anyway.
+        for pair in groups.windows(2) {
+            let [previous, group] = pair else { continue };
+
+            if previous.namespace == group.namespace {
+                bail!(
+                    "Namespace `{}` is claimed by two kinds, `{}` and `{}`, whose collections \
+                     would collide. A namespace names the sources that mirror each other, which \
+                     only one kind can do; give one of them a namespace of its own.",
+                    group.namespace,
+                    previous.media_type,
+                    group.media_type,
+                );
+            }
+        }
+
+        Ok(groups)
+    }
+
+    /// Rejects an account a command cannot run: a removed key, no source at all,
+    /// a source declaring options its backend cannot honour, or two sources
+    /// racing for the send channel.
+    ///
+    /// Run by every command that opens an account, so a bad configuration is
+    /// refused before any connection is made rather than halfway through a sync.
     pub fn validate(&self) -> Result<()> {
-        for (name, side) in self.sides() {
-            side.validate(name)?;
+        self.reject_removed_keys()?;
+
+        let sources = self.sources()?;
+
+        if sources.is_empty() {
+            bail!(
+                "This account declares no source. Write a backend directly under it \
+                 (`imap.server = \"…\"`), or name one in its `sources` table."
+            );
+        }
+
+        for (name, source) in &sources {
+            source.validate(name)?;
+        }
+
+        let mut senders: Vec<_> = sources
+            .iter()
+            .filter(|(_, source)| source.smtp.is_some())
+            .map(|(name, _)| name.clone())
+            .collect();
+        senders.sort();
+
+        if senders.len() > 1 {
+            bail!(
+                "Sources {} each declare an `smtp` channel, and an account sends through one; \
+                 keep the table on the source that sends and drop the others.",
+                senders.join(", "),
+            );
         }
 
         Ok(())
     }
 
-    /// The configured sides in order, skipping unset ones. Empty means the
-    /// account has no side (a config error the commands reject).
-    pub fn sides(&self) -> Vec<(SideName, &SideConfig)> {
-        let mut sides = Vec::new();
-        if let Some(left) = &self.left {
-            sides.push((SideName::Left, left));
+    /// Refuses a key this version removed, naming what replaces it. A removed
+    /// key is refused rather than ignored: honouring neither the old meaning nor
+    /// the new one silently is how a configuration ends up doing the opposite of
+    /// what it says.
+    fn reject_removed_keys(&self) -> Result<()> {
+        if self.left.is_some() || self.right.is_some() {
+            bail!(
+                "`left` and `right` are gone: an account holds named sources. Write them as \
+                 `sources.left` and `sources.right`, and give both the same \
+                 `collection.namespace` to keep them mirroring each other (without it they sync \
+                 side by side into the store and never push to one another)."
+            );
         }
-        if let Some(right) = &self.right {
-            sides.push((SideName::Right, right));
+
+        if self.collection.is_some() {
+            bail!(
+                "The account-level `collection` table is gone: a filter belongs to the source it \
+                 filters, since an account may hold sources of several kinds. Write it as \
+                 `sources.<name>.collection.filter`, or `<protocol>.collection.filter` under the \
+                 account."
+            );
         }
-        sides
+
+        self.store.reject_removed_keys()
+    }
+}
+
+/// Presence marker for a configuration key this version removed.
+///
+/// Deserializing accepts whatever the key held and discards it, so the account
+/// can refuse it by name with its replacement instead of failing as an unknown
+/// field with no explanation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RemovedKey;
+
+impl<'de> Deserialize<'de> for RemovedKey {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        serde::de::IgnoredAny::deserialize(deserializer)?;
+        Ok(Self)
     }
 }
 
@@ -246,21 +513,6 @@ pub struct StoreConfig {
     /// to the per-account XDG state directory.
     #[serde(default, deserialize_with = "shell_expanded_path_opt")]
     pub root: Option<PathBuf>,
-
-    /// Whether bodies are kept in the store. Defaults by mode: a one-side (local)
-    /// sync always retains (the app reads bodies); a two-side sync relays
-    /// (streams body between the servers, the store keeping only the spine) when
-    /// both sides are streamable, else retains. Set to force one.
-    #[serde(default)]
-    pub retention: Option<Retention>,
-
-    /// How far a two-side retain sync hydrates bodies. Defaults by mode: a
-    /// one-side (local) sync always hydrates everything (the app reads bodies);
-    /// a two-side sync hydrates only the bodies about to cross (`crossing`).
-    /// `full` makes a two-side sync mirror every body into the store (and
-    /// forces retention).
-    #[serde(default)]
-    pub hydration: Option<Hydration>,
 
     /// How long the store keeps a **retained** (soft-deleted) item before a
     /// sync run reclaims it: `store.purge-after = "90d"`.
@@ -276,9 +528,35 @@ pub struct StoreConfig {
     /// off switch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purge_after: Option<HumanDuration>,
+
+    /// Removed keys, kept only so a configuration carrying one is refused by
+    /// name. See [`StoreConfig::reject_removed_keys`].
+    #[serde(default, skip_serializing)]
+    retention: Option<RemovedKey>,
+    #[serde(default, skip_serializing)]
+    hydration: Option<RemovedKey>,
 }
 
 impl StoreConfig {
+    /// Refuses `retention` and `hydration`, which no longer exist: what the
+    /// store keeps is derived per kind from how many sources share a namespace
+    /// (see [`StoredBodies::derive`]) and reported on every run.
+    ///
+    /// Accepting and ignoring `retention = "retain"` on a pairing that derives
+    /// [`StoredBodies::None`] would hand back the opposite of what was written,
+    /// so the key is refused rather than tolerated.
+    fn reject_removed_keys(&self) -> Result<()> {
+        if self.retention.is_some() || self.hydration.is_some() {
+            bail!(
+                "`store.retention` and `store.hydration` are gone: what the store keeps is \
+                 derived per kind and reported on every run. One source keeps every body, two \
+                 sources sharing a `collection.namespace` on a streamable pairing keep none, \
+                 anything else keeps what crossed. Run `neverest check` to see the value in force."
+            );
+        }
+
+        Ok(())
+    }
     /// The RFC 3339 purge cutoff of a run starting at `now`: a retained item
     /// whose `retained_at` is strictly older is reclaimed. `None` when
     /// `purge-after` is unset (never purge) or so large that no instant can
@@ -380,27 +658,61 @@ impl Serialize for HumanDuration {
     }
 }
 
-/// How far a two-side retain sync hydrates item bodies.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
+/// Which item bodies the store keeps for one kind.
+///
+/// Not configured: derived by [`StoredBodies::derive`] from how many sources
+/// share a collection namespace and whether their pairing can stream, then
+/// reported on every run. The three points replace the old `store.retention`
+/// and `store.hydration` pair, whose fourth combination (relay every body) meant
+/// nothing.
+#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
-pub enum Hydration {
-    /// Hydrate only the bodies about to cross to the other side (the
-    /// two-source default).
+pub enum StoredBodies {
+    /// No body at rest: each crossing is streamed from its holding source to
+    /// the target and the store keeps only the spine. The pass-through mirror,
+    /// which trades away dedup, cheap retry and resumability.
+    None,
+    /// Only the bodies that had to cross, kept once they have.
     Crossing,
-    /// Hydrate every placement to `Full` so the store mirrors every body
-    /// (the gateway deployment).
-    Full,
+    /// Every body, the store being the offline replica an app reads.
+    All,
 }
 
-/// Whether a two-side sync keeps item bodies in the store.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum Retention {
-    /// Keep every body in the store (browsable, deduped, resumable).
-    Retain,
-    /// Stream the body server-to-server, keeping only the spine (no body at
-    /// rest) — a pure pass-through mirror.
-    Relay,
+impl StoredBodies {
+    /// What the store keeps for a namespace holding `sources` sources, given
+    /// whether that pairing can stream a body server to server.
+    ///
+    /// One source keeps everything, because nothing crosses and anything less
+    /// makes the store an index rather than a replica. Exactly two on a
+    /// streamable pairing keep nothing, which is the pass-through migrate. Three
+    /// or more, and every pairing that cannot stream, keep what crossed.
+    pub fn derive(sources: usize, streamable: bool) -> Self {
+        match sources {
+            0 | 1 => Self::All,
+            2 if streamable => Self::None,
+            _ => Self::Crossing,
+        }
+    }
+
+    /// Whether a body crossing to another source is streamed rather than stored.
+    pub fn relays(self) -> bool {
+        matches!(self, Self::None)
+    }
+
+    /// Whether every item is hydrated, rather than only those about to cross.
+    pub fn hydrates_everything(self) -> bool {
+        matches!(self, Self::All)
+    }
+}
+
+impl fmt::Display for StoredBodies {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::None => f.write_str("none"),
+            Self::Crossing => f.write_str("crossing"),
+            Self::All => f.write_str("all"),
+        }
+    }
 }
 
 /// `serde` helper: shell-expand an optional path.
@@ -412,34 +724,33 @@ where
     Ok(raw.map(|s| PathBuf::from(shellexpand::tilde(&s).into_owned())))
 }
 
-/// One side of the bidirectional sync: the remote it talks to, plus the
+/// One source of the account's hub: the remote it talks to, plus the
 /// send channel its queued submit intents leave through when that remote
 /// cannot submit by itself.
 ///
-/// The channel belongs to the side, not to the account: a backend either
+/// The channel belongs to the source, not to the account: a backend either
 /// sends natively (Microsoft Graph through `sendMail`, and JMAP once its
 /// submission lands) or needs a companion SMTP server, which is a
-/// property of that provider. An account whose two sides both offer one
-/// flushes through the first (`left`, then `right`).
+/// property of that provider. At most one source per account may declare one.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub struct SideConfig {
+pub struct SourceConfig {
     #[serde(flatten)]
-    pub backend: SideBackendConfig,
+    pub backend: SourceBackendConfig,
 
-    /// The SMTP submission server this side's queued submit intents are
+    /// The SMTP submission server this source's queued submit intents are
     /// flushed through. Only meaningful on a backend that cannot send by
-    /// itself (IMAP): a Graph side sends through the Graph `sendMail`
-    /// action instead. Absent (and no side that sends natively), queued
+    /// itself (IMAP): a Graph source sends through the Graph `sendMail`
+    /// action instead. Absent (and no source that sends natively), queued
     /// submit intents stay pending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<SmtpConfig>,
 }
 
-/// The remote backend behind a side; exactly one variant per side.
+/// The remote backend behind a source; exactly one variant per source.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
-pub enum SideBackendConfig {
+pub enum SourceBackendConfig {
     Imap(ImapConfig),
     Carddav(CarddavConfig),
     Jmap(JmapConfig),
@@ -447,89 +758,155 @@ pub enum SideBackendConfig {
     Msgraph(MsgraphConfig),
 }
 
+impl SourceBackendConfig {
+    /// The protocol table this backend is written under, which is also the id
+    /// of the source the direct-backend sugar builds from it.
+    pub fn protocol(&self) -> &'static str {
+        match self {
+            Self::Imap(_) => "imap",
+            Self::Carddav(_) => "carddav",
+            Self::Jmap(_) => "jmap",
+            Self::Gmail(_) => "gmail",
+            Self::Msgraph(_) => "msgraph",
+        }
+    }
+
+    /// The media type this backend syncs, known from the protocol alone.
+    ///
+    /// The open client answers the same question (`Client::media_type`), and
+    /// has to, since that is what the collection kind is written from. Knowing
+    /// it here too is what lets a namespace be grouped, and its
+    /// [`StoredBodies`] derivation reported, before a single connection is
+    /// opened: `check` answers while a remote is down, and a first `sync`
+    /// answers before it fetches anything.
+    pub fn media_type(&self) -> &'static str {
+        match self {
+            Self::Imap(_) | Self::Jmap(_) | Self::Gmail(_) | Self::Msgraph(_) => "message/rfc822",
+            Self::Carddav(_) => "text/vcard",
+        }
+    }
+}
+
+/// One hub namespace: every source of one kind sharing one collection
+/// namespace, and what the store consequently keeps for them.
+///
+/// Sources meet here and nowhere else. Two of them in one group bind the same
+/// hub collections, which is what makes them mirror; two in different groups
+/// sit side by side in the store and never push to one another.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SourceGroup {
+    /// The kind every source in the group syncs.
+    pub media_type: &'static str,
+    /// The shared `collection.namespace`.
+    pub namespace: String,
+    /// The group's source names, sorted, so a report reads the same twice.
+    pub sources: Vec<String>,
+    /// What the store keeps for this group, derived and never configured.
+    pub bodies: StoredBodies,
+}
+
+impl fmt::Display for SourceGroup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} / {} ({}): bodies {}",
+            self.media_type,
+            self.namespace,
+            self.sources.join(", "),
+            self.bodies,
+        )
+    }
+}
+
 // NOTE: `pool_size`, `is_imap` and `is_http` describe the config surface and
 // may be unused until pools return; `new` is called from the wizard paths their
 // backend feature gates.
 #[allow(dead_code)]
-impl SideConfig {
-    /// Wraps a backend into a side with no send channel of its own.
-    pub fn new(backend: SideBackendConfig) -> Self {
+impl SourceConfig {
+    /// Wraps a backend into a source with no send channel of its own.
+    pub fn new(backend: SourceBackendConfig) -> Self {
         Self {
             backend,
             smtp: None,
         }
     }
 
-    side_accessor!(collection, CollectionSidePermissions);
-    side_accessor!(flag, FlagSidePermissions);
-    side_accessor!(item, ItemSidePermissions);
-    side_accessor!(pool_size, Option<usize>);
+    source_ref_accessor!(collection, CollectionSourceConfig);
+    source_accessor!(flag, FlagSourcePermissions);
+    source_accessor!(item, ItemSourcePermissions);
+    source_accessor!(pool_size, Option<usize>);
 
-    pub fn is_imap(&self) -> bool {
-        matches!(self.backend, SideBackendConfig::Imap(_))
+    /// The hub collection namespace this source binds into: the configured
+    /// value, else its own name, which keeps sources isolated unless two are
+    /// deliberately pointed at the same one.
+    pub fn namespace<'a>(&'a self, name: &'a str) -> &'a str {
+        self.collection().namespace.as_deref().unwrap_or(name)
     }
 
-    /// Whether this side talks a remote HTTP backend (JMAP, Gmail or
+    pub fn is_imap(&self) -> bool {
+        matches!(self.backend, SourceBackendConfig::Imap(_))
+    }
+
+    /// Whether this source talks a remote HTTP backend (JMAP, Gmail or
     /// Microsoft Graph); these share the smaller default pool size.
     pub fn is_http(&self) -> bool {
         matches!(
             self.backend,
-            SideBackendConfig::Jmap(_)
-                | SideBackendConfig::Gmail(_)
-                | SideBackendConfig::Msgraph(_)
-                | SideBackendConfig::Carddav(_)
+            SourceBackendConfig::Jmap(_)
+                | SourceBackendConfig::Gmail(_)
+                | SourceBackendConfig::Msgraph(_)
+                | SourceBackendConfig::Carddav(_)
         )
     }
 
-    /// Whether this side sends by itself, without a companion SMTP
+    /// Whether this source sends by itself, without a companion SMTP
     /// channel: the Graph `sendMail` action today.
     pub fn sends_natively(&self) -> bool {
-        matches!(self.backend, SideBackendConfig::Msgraph(_))
+        matches!(self.backend, SourceBackendConfig::Msgraph(_))
     }
 
-    /// Whether this side can carry a send channel at all. A contacts or
-    /// calendar side cannot: submission is a mail capability, so an `smtp`
+    /// Whether this source can carry a send channel at all. A contacts or
+    /// calendar source cannot: submission is a mail capability, so an `smtp`
     /// table there is a configuration error rather than a dead option.
     pub fn carries_mail(&self) -> bool {
-        !matches!(self.backend, SideBackendConfig::Carddav(_))
+        !matches!(self.backend, SourceBackendConfig::Carddav(_))
     }
 
-    /// Rejects a side whose declared options its backend cannot honour.
-    pub fn validate(&self, side: SideName) -> Result<()> {
+    /// Whether a body can be streamed straight from this source to another
+    /// rather than stored on the way. Only the IMAP to IMAP pairing can, so
+    /// this gates the [`StoredBodies::None`] derivation.
+    pub fn is_streamable(&self) -> bool {
+        self.is_imap()
+    }
+
+    /// Rejects a source whose declared options its backend cannot honour.
+    pub fn validate(&self, name: &str) -> Result<()> {
         if self.smtp.is_some() && !self.carries_mail() {
             bail!(
-                "The `{side}.smtp` channel is a mail capability and this side syncs contacts; \
-                 drop the table, or move it to the mail account that sends."
+                "The `sources.{name}.smtp` channel is a mail capability and this source syncs \
+                 contacts; drop the table, or move it to the source that sends."
             );
         }
 
         Ok(())
     }
 
-    /// Snapshots the per-side collection/flag/item permissions.
-    pub fn permissions(&self) -> SidePermissions {
-        SidePermissions {
-            collection: self.collection(),
+    /// Snapshots the per-source collection/flag/item permissions.
+    pub fn permissions(&self) -> SourcePermissions {
+        SourcePermissions {
+            collection: self.collection().permissions(),
             flag: self.flag(),
             item: self.item(),
         }
     }
 }
 
-/// Per-side permission triple gating which sync hunks may materialize.
+/// Per-source permission triple gating which sync hunks may materialize.
 #[derive(Clone, Copy, Debug)]
-pub struct SidePermissions {
-    pub collection: CollectionSidePermissions,
-    pub flag: FlagSidePermissions,
-    pub item: ItemSidePermissions,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct CollectionSyncConfig {
-    /// Collection-name filter applied symmetrically to both sides.
-    #[serde(default, alias = "filters", skip_serializing_if = "is_default")]
-    pub filter: CollectionFilter,
+pub struct SourcePermissions {
+    pub collection: CollectionPermissions,
+    pub flag: FlagSourcePermissions,
+    pub item: ItemSourcePermissions,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -546,15 +923,77 @@ pub enum CollectionFilter {
     Exclude(Vec<String>),
 }
 
-/// Per-side collection permissions gating collection-set mutations.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// A source's collection-level configuration: which hub collections it binds
+/// into, which of them it syncs, and what it may do to the collection set.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct CollectionSidePermissions {
+pub struct CollectionSourceConfig {
+    /// Whether the sync may create a collection on this source, and delete one.
+    ///
+    /// Both default to granting, unlike the `item` block, which requires its
+    /// pair to be declared in full. The asymmetry is deliberate: this table now
+    /// also carries `namespace` and `filter`, so it is declared for reasons that
+    /// have nothing to do with permissions, and demanding a permission pair
+    /// from someone writing a namespace would be a trap.
+    #[serde(default = "default_true")]
+    pub create: bool,
+    #[serde(default = "default_true")]
+    pub delete: bool,
+
+    /// The hub collection namespace, defaulting to the source's own name.
+    ///
+    /// A hub collection is keyed by `(kind, namespace, name)`, so two sources
+    /// of one kind meet only where they declare the same namespace. Meeting is
+    /// what propagation *is*: an item sitting in a collection a source
+    /// participates in, with no binding for that source, is pushed to it. Two
+    /// sources left on their own names therefore sync side by side into one
+    /// store and never write to one another, which is the merged read view a
+    /// frontend unions at display time.
+    ///
+    /// Sharing a value is the explicit act of saying "these two are the same
+    /// thing", and it is what turns a pair of sources into a mirror.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+
+    /// Collection-name filter for this source.
+    ///
+    /// Per source rather than per account, because an account may hold sources
+    /// of several kinds and a mailbox include-list means nothing to a contacts
+    /// source. Filters are consequently asymmetric: a collection may be synced
+    /// on one source and skipped on another.
+    #[serde(default, alias = "filters", skip_serializing_if = "is_default")]
+    pub filter: CollectionFilter,
+}
+
+impl CollectionSourceConfig {
+    /// The copyable permission pair, the only part the sync seam gates on.
+    pub fn permissions(&self) -> CollectionPermissions {
+        CollectionPermissions {
+            create: self.create,
+            delete: self.delete,
+        }
+    }
+}
+
+impl Default for CollectionSourceConfig {
+    fn default() -> Self {
+        Self {
+            create: true,
+            delete: true,
+            namespace: None,
+            filter: CollectionFilter::default(),
+        }
+    }
+}
+
+/// Per-source collection permissions gating collection-set mutations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CollectionPermissions {
     pub create: bool,
     pub delete: bool,
 }
 
-impl Default for CollectionSidePermissions {
+impl Default for CollectionPermissions {
     fn default() -> Self {
         Self {
             create: true,
@@ -565,17 +1004,17 @@ impl Default for CollectionSidePermissions {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct FlagSidePermissions {
+pub struct FlagSourcePermissions {
     pub update: bool,
 }
 
-impl Default for FlagSidePermissions {
+impl Default for FlagSourcePermissions {
     fn default() -> Self {
         Self { update: true }
     }
 }
 
-/// Per-side item permissions gating item mutations.
+/// Per-source item permissions gating item mutations.
 ///
 /// `create` and `delete` are required when the block is declared at all
 /// (declare it in full or omit it); `update` instead **defaults to true**,
@@ -587,14 +1026,14 @@ impl Default for FlagSidePermissions {
 /// immutable, so an in-place update never arises there and the gate is inert.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ItemSidePermissions {
+pub struct ItemSourcePermissions {
     pub create: bool,
     pub delete: bool,
     #[serde(default = "default_true")]
     pub update: bool,
 }
 
-impl Default for ItemSidePermissions {
+impl Default for ItemSourcePermissions {
     fn default() -> Self {
         Self {
             create: true,
@@ -609,7 +1048,7 @@ fn default_true() -> bool {
     true
 }
 
-side_config! {
+source_config! {
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct ImapConfig {
@@ -627,7 +1066,7 @@ side_config! {
     }
 }
 
-side_config! {
+source_config! {
     /// CardDAV side (RFC 6352). The server URL is the entry point only:
     /// the principal and the address book home set are discovered from it,
     /// and each address book becomes a collection.
@@ -687,7 +1126,7 @@ impl DavAuthConfig {
     }
 }
 
-side_config! {
+source_config! {
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct JmapConfig {
@@ -721,7 +1160,7 @@ pub enum JmapAuthConfig {
     },
 }
 
-side_config! {
+source_config! {
     /// Gmail REST API side (`https://gmail.googleapis.com`). Labels are
     /// exposed as mailboxes; the API host is fixed, so only the mailbox
     /// owner, TLS and the OAuth 2.0 credential are configurable.
@@ -754,7 +1193,7 @@ pub struct GmailAuthConfig {
     pub token: Secret,
 }
 
-side_config! {
+source_config! {
     /// Microsoft Graph API side (`https://graph.microsoft.com`). Mail
     /// folders are exposed as mailboxes; the API host is fixed, so only
     /// the mailbox owner, TLS and the OAuth 2.0 credential are
@@ -1008,8 +1447,8 @@ mod tests {
         let account: AccountConfig = toml::from_str(
             r#"
             default = true
-            left.msgraph.user-id = "me"
-            left.msgraph.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
+            msgraph.user-id = "me"
+            msgraph.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
             "#,
         )
         .unwrap();
@@ -1022,8 +1461,8 @@ mod tests {
             config_toml::to_string(&config).unwrap(),
             r#"[accounts.outlook]
 default = true
-left.msgraph.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
-left.msgraph.user-id = "me"
+msgraph.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
+msgraph.user-id = "me"
 "#
         );
     }
@@ -1057,74 +1496,254 @@ left.msgraph.user-id = "me"
         assert!(err.to_string().contains("device-code"));
     }
 
+    /// The sugar's source id is its protocol name, which is the id the expanded
+    /// form writes: the store cannot tell the two spellings apart, so expanding
+    /// an account by hand never orphans a binding.
     #[test]
-    fn smtp_channel_and_hydration_parse() {
-        let account: AccountConfig = toml::from_str(
+    fn the_direct_backend_sugar_expands_to_the_same_source() {
+        let sugar: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
-
-            [left.smtp]
-            server = "smtp://smtp.example.org:587"
-            starttls = true
-            login = "user@example.org"
-            password.raw = "pw"
-
-            [store]
-            hydration = "full"
+            imap.server = "imaps://imap.example.org:993"
+            imap.item.create = true
+            imap.item.delete = false
             "#,
         )
         .unwrap();
 
-        let left = account.left.expect("a left side");
-        let smtp = left.smtp.expect("an smtp channel");
-        assert_eq!(smtp.server, "smtp://smtp.example.org:587");
-        assert!(smtp.starttls);
-        assert_eq!(smtp.login.as_deref(), Some("user@example.org"));
-        assert!(matches!(left.backend, SideBackendConfig::Imap(_)));
-        assert_eq!(account.store.hydration, Some(Hydration::Full));
-
-        let account: AccountConfig = toml::from_str(
+        let explicit: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
+            sources.imap.imap.server = "imaps://imap.example.org:993"
+            sources.imap.imap.item.create = true
+            sources.imap.imap.item.delete = false
             "#,
         )
         .unwrap();
-        assert!(account.left.expect("a left side").smtp.is_none());
-        assert!(account.store.hydration.is_none());
+
+        let sugar = sugar.sources().unwrap();
+        let explicit = explicit.sources().unwrap();
+
+        assert_eq!(sugar.keys().collect::<Vec<_>>(), vec!["imap"]);
+        assert_eq!(explicit.keys().collect::<Vec<_>>(), vec!["imap"]);
+        assert!(!sugar["imap"].permissions().item.delete);
+        assert!(!explicit["imap"].permissions().item.delete);
+        assert_eq!(sugar["imap"].namespace("imap"), "imap");
+        assert_eq!(explicit["imap"].namespace("imap"), "imap");
     }
 
     #[test]
-    fn an_account_level_smtp_table_is_refused() {
-        let err = toml::from_str::<AccountConfig>(
+    fn a_protocol_declared_both_ways_is_refused() {
+        let account: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
-            smtp.server = "smtp://smtp.example.org:587"
+            imap.server = "imaps://imap.example.org:993"
+            sources.imap.imap.server = "imaps://other.example.org:993"
             "#,
         )
-        .unwrap_err();
-        assert!(err.to_string().contains("unknown field `smtp`"));
+        .unwrap();
+
+        let err = account.sources().unwrap_err().to_string();
+        assert!(err.contains("declared both"), "got {err}");
+    }
+
+    #[test]
+    fn several_sources_of_one_protocol_live_under_one_account() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.fastmail.imap.server = "imaps://imap.fastmail.com:993"
+            sources.fastmail.imap.collection.namespace = "mail"
+            sources.gmail.imap.server = "imaps://imap.gmail.com:993"
+            sources.gmail.imap.collection.namespace = "mail"
+            sources.dav.carddav.server = "https://carddav.fastmail.com/"
+            sources.dav.carddav.auth.basic.username = "user"
+            sources.dav.carddav.auth.basic.password.raw = "pw"
+            "#,
+        )
+        .unwrap();
+
+        account.validate().unwrap();
+        let sources = account.sources().unwrap();
+        assert_eq!(sources.len(), 3);
+        assert_eq!(sources["fastmail"].namespace("fastmail"), "mail");
+        assert_eq!(sources["gmail"].namespace("gmail"), "mail");
+        assert_eq!(sources["dav"].namespace("dav"), "dav");
+    }
+
+    /// Mail and contacts under one account is the case the whole change exists
+    /// for: their kinds differ, so nothing forces them to agree.
+    #[test]
+    fn mail_and_contacts_sit_under_one_account() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.fastmail.com:993"
+            carddav.server = "https://carddav.fastmail.com/"
+            carddav.auth.basic.username = "user"
+            carddav.auth.basic.password.raw = "pw"
+            smtp.server = "smtps://smtp.fastmail.com:465"
+            "#,
+        )
+        .unwrap();
+
+        account.validate().unwrap();
+        let sources = account.sources().unwrap();
+
+        assert!(sources["imap"].is_imap());
+        assert!(sources["imap"].smtp.is_some(), "the channel completes mail");
+        assert!(!sources["carddav"].carries_mail());
+        assert!(sources["carddav"].smtp.is_none());
+    }
+
+    /// A source left on its own name is isolated; two pointed at one namespace
+    /// meet, and meeting is what propagation is.
+    #[test]
+    fn a_namespace_defaults_to_the_source_name() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.fastmail.imap.server = "imaps://imap.fastmail.com:993"
+            sources.gmail.imap.server = "imaps://imap.gmail.com:993"
+            "#,
+        )
+        .unwrap();
+
+        let sources = account.sources().unwrap();
+        assert_eq!(sources["fastmail"].namespace("fastmail"), "fastmail");
+        assert_eq!(sources["gmail"].namespace("gmail"), "gmail");
+        assert_ne!(
+            sources["fastmail"].namespace("fastmail"),
+            sources["gmail"].namespace("gmail"),
+            "isolated by default, so neither pushes to the other",
+        );
+    }
+
+    #[test]
+    fn what_the_store_keeps_is_derived_from_the_namespace() {
+        assert_eq!(StoredBodies::derive(1, true), StoredBodies::All);
+        assert_eq!(StoredBodies::derive(1, false), StoredBodies::All);
+        assert_eq!(StoredBodies::derive(2, true), StoredBodies::None);
+        assert_eq!(StoredBodies::derive(2, false), StoredBodies::Crossing);
+        assert_eq!(StoredBodies::derive(3, true), StoredBodies::Crossing);
+
+        assert!(StoredBodies::None.relays());
+        assert!(!StoredBodies::Crossing.relays());
+        assert!(StoredBodies::All.hydrates_everything());
+        assert!(!StoredBodies::Crossing.hydrates_everything());
+    }
+
+    #[test]
+    fn a_removed_key_is_refused_by_name_with_its_replacement() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            left.imap.server = "imaps://imap.example.org:993"
+            right.imap.server = "imaps://imap.other.org:993"
+            "#,
+        )
+        .unwrap();
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("sources.left"), "got {err}");
+        assert!(err.contains("collection.namespace"), "got {err}");
+
+        let account: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            collection.filter.include = ["INBOX"]
+            "#,
+        )
+        .unwrap();
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("collection.filter"), "got {err}");
+
+        let account: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            store.retention = "retain"
+            "#,
+        )
+        .unwrap();
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("derived per kind"), "got {err}");
+
+        let account: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            store.hydration = "full"
+            "#,
+        )
+        .unwrap();
+        assert!(account.validate().is_err());
+    }
+
+    #[test]
+    fn an_account_with_no_source_is_refused() {
+        let account: AccountConfig = toml::from_str("default = true").unwrap();
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("no source"), "got {err}");
+    }
+
+    #[test]
+    fn one_source_at_most_carries_the_send_channel() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.a.imap.server = "imaps://a.example.org:993"
+            sources.a.smtp.server = "smtps://a.example.org:465"
+            sources.b.imap.server = "imaps://b.example.org:993"
+            sources.b.smtp.server = "smtps://b.example.org:465"
+            "#,
+        )
+        .unwrap();
+
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("a, b"), "got {err}");
+
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.a.imap.server = "imaps://a.example.org:993"
+            sources.a.smtp.server = "smtps://a.example.org:465"
+            sources.b.imap.server = "imaps://b.example.org:993"
+            "#,
+        )
+        .unwrap();
+        account.validate().unwrap();
+    }
+
+    /// The flat `smtp` table completes the one direct mail backend. With none
+    /// or several it names nothing, and guessing would be worse than refusing.
+    #[test]
+    fn the_flat_send_channel_needs_one_direct_mail_backend() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            carddav.server = "https://dav.example.org/"
+            carddav.auth.bearer.token.raw = "tok"
+            smtp.server = "smtps://smtp.example.org:465"
+            "#,
+        )
+        .unwrap();
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("exactly one direct mail backend"), "got {err}");
+
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.a.imap.server = "imaps://a.example.org:993"
+            smtp.server = "smtps://a.example.org:465"
+            "#,
+        )
+        .unwrap();
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("exactly one direct mail backend"), "got {err}");
     }
 
     #[test]
     fn the_pre_generic_pim_sync_spellings_still_load() {
         let account: AccountConfig = toml::from_str(
             r#"
-            mailbox.filter.include = ["INBOX"]
-            left.imap.server = "imaps://imap.example.org:993"
-            left.imap.mailbox.create = false
-            left.imap.mailbox.delete = false
-            left.imap.message.create = true
-            left.imap.message.delete = false
+            imap.server = "imaps://imap.example.org:993"
+            imap.mailbox.create = false
+            imap.mailbox.delete = false
+            imap.message.create = true
+            imap.message.delete = false
             "#,
         )
         .unwrap();
 
-        assert_eq!(
-            account.collection.filter,
-            CollectionFilter::Include(vec![String::from("INBOX")])
-        );
-
-        let perms = account.left.expect("a left side").permissions();
+        let sources = account.sources().unwrap();
+        let perms = sources["imap"].permissions();
         assert!(!perms.collection.create);
         assert!(!perms.collection.delete);
         assert!(perms.item.create);
@@ -1134,20 +1753,21 @@ left.msgraph.user-id = "me"
 
         let account: AccountConfig = toml::from_str(
             r#"
-            collection.filter.include = ["INBOX"]
-            left.imap.server = "imaps://imap.example.org:993"
-            left.imap.collection.create = false
-            left.imap.collection.delete = false
-            left.imap.item.create = true
-            left.imap.item.delete = false
+            imap.server = "imaps://imap.example.org:993"
+            imap.collection.create = false
+            imap.collection.delete = false
+            imap.collection.filter.include = ["INBOX"]
+            imap.item.create = true
+            imap.item.delete = false
             "#,
         )
         .unwrap();
+        let sources = account.sources().unwrap();
         assert_eq!(
-            account.collection.filter,
+            sources["imap"].collection().filter,
             CollectionFilter::Include(vec![String::from("INBOX")])
         );
-        let perms = account.left.expect("a left side").permissions();
+        let perms = sources["imap"].permissions();
         assert!(!perms.collection.create);
         assert!(!perms.collection.delete);
         assert!(perms.item.create);
@@ -1158,27 +1778,29 @@ left.msgraph.user-id = "me"
     fn item_update_is_denied_only_when_asked_for() {
         let account: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
-            left.imap.item.create = true
-            left.imap.item.delete = true
-            left.imap.item.update = false
+            imap.server = "imaps://imap.example.org:993"
+            imap.item.create = true
+            imap.item.delete = true
+            imap.item.update = false
             "#,
         )
         .unwrap();
-        let perms = account.left.expect("a left side").permissions();
+        let sources = account.sources().unwrap();
+        let perms = sources["imap"].permissions();
         assert!(perms.item.create);
         assert!(perms.item.delete);
         assert!(!perms.item.update);
 
         let account: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
-            left.imap.item.create = true
-            left.imap.item.delete = true
+            imap.server = "imaps://imap.example.org:993"
+            imap.item.create = true
+            imap.item.delete = true
             "#,
         )
         .unwrap();
-        assert!(account.left.expect("a left side").permissions().item.update);
+        let sources = account.sources().unwrap();
+        assert!(sources["imap"].permissions().item.update);
     }
 
     #[test]
@@ -1188,7 +1810,8 @@ left.msgraph.user-id = "me"
         let config: Config = toml::from_str(&raw).expect("the sample must parse");
 
         let account = config.accounts.get("example").expect("the sample account");
-        assert!(account.left.as_ref().expect("a left side").is_imap());
+        account.validate().expect("the sample must validate");
+        assert!(account.sources().unwrap()["imap"].is_imap());
     }
 
     #[test]
@@ -1197,7 +1820,7 @@ left.msgraph.user-id = "me"
 
         let account: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
+            imap.server = "imaps://imap.example.org:993"
             "#,
         )
         .unwrap();
@@ -1206,7 +1829,7 @@ left.msgraph.user-id = "me"
 
         let account: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
+            imap.server = "imaps://imap.example.org:993"
             store.purge-after = "90d"
             "#,
         )
@@ -1218,7 +1841,7 @@ left.msgraph.user-id = "me"
 
         let account: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
+            imap.server = "imaps://imap.example.org:993"
             store.purge-after = "0"
             "#,
         )
@@ -1230,7 +1853,7 @@ left.msgraph.user-id = "me"
 
         let err = toml::from_str::<AccountConfig>(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
+            imap.server = "imaps://imap.example.org:993"
             store.purge-after = "90 days"
             "#,
         )
@@ -1267,69 +1890,95 @@ left.msgraph.user-id = "me"
     }
 
     #[test]
-    fn a_side_pairs_one_backend_with_its_send_channel() {
+    fn a_source_pairs_one_backend_with_its_send_channel() {
         let account: AccountConfig = toml::from_str(
             r#"
-            left.msgraph.auth.token.raw = "tok"
+            msgraph.auth.token.raw = "tok"
             "#,
         )
         .unwrap();
-        let left = account.left.expect("a left side");
-        assert!(left.sends_natively());
-        assert!(left.smtp.is_none());
+        let sources = account.sources().unwrap();
+        assert!(sources["msgraph"].sends_natively());
+        assert!(sources["msgraph"].smtp.is_none());
 
         let err = toml::from_str::<AccountConfig>(
             r#"
-            left.imapp.server = "imaps://imap.example.org:993"
+            sources.a.imapp.server = "imaps://imap.example.org:993"
             "#,
         )
         .unwrap_err();
         assert!(
             err.to_string()
-                .contains("no variant of enum SideBackendConfig")
+                .contains("no variant of enum SourceBackendConfig")
         );
 
-        // NOTE: with two backends on one side the first wins, which is all the
-        // flattened enum can express: a side talks one protocol.
+        // NOTE: with two backends on one source the first wins, which is all
+        // the flattened enum can express: a source talks one protocol.
         let account: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
-            left.msgraph.auth.token.raw = "tok"
+            sources.a.imap.server = "imaps://imap.example.org:993"
+            sources.a.msgraph.auth.token.raw = "tok"
             "#,
         )
         .unwrap();
-        assert!(account.left.expect("a left side").is_imap());
+        assert!(account.sources().unwrap()["a"].is_imap());
     }
 
-    /// A CardDAV side is the first non-mail one, so it is where the account
+    /// A CardDAV source is the first non-mail one, so it is where the account
     /// shape stops being mail-shaped.
     #[cfg(feature = "carddav")]
     #[test]
-    fn a_carddav_side_carries_no_send_channel() {
+    fn a_carddav_source_carries_no_send_channel() {
         let account: AccountConfig = toml::from_str(
             r#"
-            left.carddav.server = "https://dav.example.org/"
-            left.carddav.auth.basic.username = "user"
-            left.carddav.auth.basic.password.raw = "pw"
+            carddav.server = "https://dav.example.org/"
+            carddav.auth.basic.username = "user"
+            carddav.auth.basic.password.raw = "pw"
             "#,
         )
         .unwrap();
 
-        let left = account.left.as_ref().expect("a left side");
-        assert!(!left.carries_mail(), "contacts do not submit");
-        assert!(!left.sends_natively());
+        let sources = account.sources().unwrap();
+        assert!(!sources["carddav"].carries_mail(), "contacts do not submit");
+        assert!(!sources["carddav"].sends_natively());
         account.validate().unwrap();
 
         let account: AccountConfig = toml::from_str(
             r#"
-            left.carddav.server = "https://dav.example.org/"
-            left.carddav.auth.bearer.token.raw = "tok"
-            left.smtp.server = "smtps://smtp.example.org:465"
+            sources.dav.carddav.server = "https://dav.example.org/"
+            sources.dav.carddav.auth.bearer.token.raw = "tok"
+            sources.dav.smtp.server = "smtps://smtp.example.org:465"
             "#,
         )
         .unwrap();
 
         let err = account.validate().unwrap_err().to_string();
-        assert!(err.contains("`left.smtp`"), "got {err}");
+        assert!(err.contains("`sources.dav.smtp`"), "got {err}");
+    }
+
+    /// A CardDAV book and a mailbox may both be named `Default`; only the kind
+    /// in the hub collection key keeps them apart.
+    #[cfg(feature = "carddav")]
+    #[test]
+    fn a_streamable_pairing_is_imap_to_imap_only() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.a.carddav.server = "https://a.example.org/"
+            sources.a.carddav.auth.bearer.token.raw = "tok"
+            sources.a.carddav.collection.namespace = "cards"
+            sources.b.carddav.server = "https://b.example.org/"
+            sources.b.carddav.auth.bearer.token.raw = "tok"
+            sources.b.carddav.collection.namespace = "cards"
+            "#,
+        )
+        .unwrap();
+
+        let sources = account.sources().unwrap();
+        assert!(!sources["a"].is_streamable());
+        assert_eq!(
+            StoredBodies::derive(2, sources["a"].is_streamable()),
+            StoredBodies::Crossing,
+            "a DAV pairing cannot stream, so it keeps what crossed",
+        );
     }
 }

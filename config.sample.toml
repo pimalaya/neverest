@@ -11,12 +11,18 @@
 # rest are deep-merged on top of it.
 #
 # Run bare `neverest` (no subcommand) to launch the wizard: it discovers a
-# provider from your email address, tests it, and writes a one-side account
-# here. A `right` side (remote-to-remote mirror) is added by hand.
+# provider from your email address, tests it, and writes a one-account,
+# one-source configuration here, in the flat spelling below. Everything else on
+# this page is written by hand.
 #
-# A side is always a REMOTE. The local replica is the pimdir store itself: one
-# side syncs that remote against the store, two sides mirror one remote onto
-# the other through it.
+# An account is one pimdir STORE, fed by one or more named SOURCES, each a
+# remote. A backend written directly under the account (`imap.server = …`) is
+# sugar for a source named after its protocol; the `sources` table at the bottom
+# is what you reach for when you need two of one protocol.
+#
+# Sources of one kind sharing a `collection.namespace` bind the same hub
+# collections, which is what makes them mirror each other. Left on their own
+# names they sit side by side in one store and never push to one another.
 # ================================================================================
 
 [accounts.example]
@@ -25,21 +31,16 @@
 default = true
 
 # --------------------------------------------------------------------------------
-# Collection sync filters
-# --------------------------------------------------------------------------------
-
-# Applied symmetrically to both sides. Pick exactly one variant; omit for `all`.
-collection.filter = "all"
-#collection.filter.include = ["INBOX", "Sent"]
-#collection.filter.exclude = ["[Gmail]/All Mail", "Trash"]
-
-# --------------------------------------------------------------------------------
-# Per-side overview
+# Per-source overview
 # --------------------------------------------------------------------------------
 #
-# Each side picks exactly one backend: `<side>.imap.*`, `<side>.jmap.*`,
-# `<side>.gmail.*` or `<side>.msgraph.*`. Permissions and pool size live inside
-# that backend table:
+# Each source picks exactly one backend: `imap.*`, `jmap.*`, `gmail.*`,
+# `msgraph.*` or `carddav.*`. Its filter, namespace, permissions and pool size
+# live inside that backend table:
+#   - `collection.filter`: which collections this source syncs (per source, since
+#     an `include = ["INBOX"]` means nothing to a contacts source)
+#   - `collection.namespace`: which hub collections it binds into; defaults to
+#     the source name, so sources are isolated unless you say otherwise
 #   - `collection.{create,delete}`, `flag.update`, `item.update`: default true
 #   - `item.{create,delete}`: both required when the block is declared
 #   - `pool-size`: default 8 (IMAP), 4 (JMAP, Gmail, Graph)
@@ -47,71 +48,76 @@ collection.filter = "all"
 # `item.update` gates in-place body edits, so it is inert for mail (immutable
 # bodies) and meaningful for CardDAV and CalDAV.
 
+# Which collections this source syncs. Pick exactly one variant; omit for `all`.
+imap.collection.filter = "all"
+#imap.collection.filter.include = ["INBOX", "Sent"]
+#imap.collection.filter.exclude = ["[Gmail]/All Mail", "Trash"]
+
 # --------------------------------------------------------------------------------
 # IMAP config
 # https://www.iana.org/go/rfc9051
 # --------------------------------------------------------------------------------
 
 # Bare authority (implicit `imaps://`), or a full `imap://` / `imaps://` URL.
-left.imap.server = "imap.fastmail.com"
-#left.imap.server = "imap.example.com:143"
-#left.imap.server = "imap://example.com:143"
-#left.imap.server = "imaps://example.com:993"
+imap.server = "imap.fastmail.com"
+#imap.server = "imap.example.com:143"
+#imap.server = "imap://example.com:143"
+#imap.server = "imaps://example.com:993"
 
 # TLS and crypto providers, defaulting to the first available at runtime.
-#left.imap.tls.provider = "rustls"
-#left.imap.tls.provider = "native-tls"
-#left.imap.tls.rustls.crypto = "ring"
-#left.imap.tls.rustls.crypto = "aws"
+#imap.tls.provider = "rustls"
+#imap.tls.provider = "native-tls"
+#imap.tls.rustls.crypto = "ring"
+#imap.tls.rustls.crypto = "aws"
 
 # Extra root certificate, PEM-encoded.
-#left.imap.tls.cert = "/path/to/custom/cert.pem"
+#imap.tls.cert = "/path/to/custom/cert.pem"
 
 # Upgrade a cleartext `imap://` connection.
-#left.imap.starttls = false
+#imap.starttls = false
 
 # Offered during the TLS handshake (rustls only). Defaults to ["imap"], `[]`
 # skips ALPN.
-#left.imap.alpn = ["imap"]
-#left.imap.alpn = []
+#imap.alpn = ["imap"]
+#imap.alpn = []
 
 # Pick exactly one SASL mechanism. Omit the whole `sasl` table to skip
 # authentication (no `AUTHENTICATE` command sent).
 
 # ANONYMOUS: https://datatracker.ietf.org/doc/html/rfc4505
-#left.imap.sasl.anonymous.message = "neverest"
+#imap.sasl.anonymous.message = "neverest"
 
 # PLAIN: https://datatracker.ietf.org/doc/html/rfc4616
-left.imap.sasl.plain.username = "pimalaya@fastmail.org"
-left.imap.sasl.plain.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
-#left.imap.sasl.plain.password.command = "pass show example"
+imap.sasl.plain.username = "pimalaya@fastmail.org"
+imap.sasl.plain.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
+#imap.sasl.plain.password.command = "pass show example"
 
 # LOGIN: https://datatracker.ietf.org/doc/html/draft-murchison-sasl-login-00
-#left.imap.sasl.login.username = "user@example.com"
-#left.imap.sasl.login.password.raw = "***"
+#imap.sasl.login.username = "user@example.com"
+#imap.sasl.login.password.raw = "***"
 
 # OAUTHBEARER (GS2 host and port derived from the server URL):
 # https://datatracker.ietf.org/doc/html/rfc7628
-#left.imap.sasl.oauthbearer.username = "user@example.com"
-#left.imap.sasl.oauthbearer.token.raw = "***"
-#left.imap.sasl.oauthbearer.token.command = ["ortie", "token", "read", "example"]
+#imap.sasl.oauthbearer.username = "user@example.com"
+#imap.sasl.oauthbearer.token.raw = "***"
+#imap.sasl.oauthbearer.token.command = ["ortie", "token", "read", "example"]
 
 # XOAUTH2: https://developers.google.com/gmail/imap/xoauth2-protocol
-#left.imap.sasl.xoauth2.username = "user@example.com"
-#left.imap.sasl.xoauth2.token.raw = "***"
+#imap.sasl.xoauth2.username = "user@example.com"
+#imap.sasl.xoauth2.token.raw = "***"
 
 # SCRAM-SHA-256: https://datatracker.ietf.org/doc/html/rfc7677
-#left.imap.sasl.scram-sha-256.username = "user@example.com"
-#left.imap.sasl.scram-sha-256.password.raw = "***"
+#imap.sasl.scram-sha-256.username = "user@example.com"
+#imap.sasl.scram-sha-256.password.raw = "***"
 
 # Keep the server read-mostly, so a buggy sync cannot destroy its state.
-left.imap.collection.create = false
-left.imap.collection.delete = false
-left.imap.item.create = true
-left.imap.item.delete = false
+imap.collection.create = false
+imap.collection.delete = false
+imap.item.create = true
+imap.item.delete = false
 
 # Narrow the pool when the server's `LIMIT` advertises less than 8.
-#left.imap.pool-size = 8
+#imap.pool-size = 8
 
 # --------------------------------------------------------------------------------
 # JMAP config (alternative to the IMAP block above)
@@ -123,26 +129,26 @@ left.imap.item.delete = false
 # declaring it is refused when the sync opens it.
 
 # Bare authority (discovered through `GET /.well-known/jmap`) or session URL.
-#right.jmap.server = "fastmail.com"
-#right.jmap.server = "https://api.fastmail.com/jmap/session"
+#jmap.server = "fastmail.com"
+#jmap.server = "https://api.fastmail.com/jmap/session"
 
 # TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
-#right.jmap.tls.provider = "rustls"
-#right.jmap.tls.rustls.crypto = "ring"
-#right.jmap.tls.cert = "/path/to/custom/cert.pem"
-#right.jmap.alpn = ["http/1.1"]
-#right.jmap.alpn = []
+#jmap.tls.provider = "rustls"
+#jmap.tls.rustls.crypto = "ring"
+#jmap.tls.cert = "/path/to/custom/cert.pem"
+#jmap.alpn = ["http/1.1"]
+#jmap.alpn = []
 
 # Pick exactly one of `header`, `bearer`, `basic`.
-#right.jmap.auth.header.raw = "Bearer eyJhbGciOiJ..."
-#right.jmap.auth.header.command = "pass show fastmail-token"
-#right.jmap.auth.bearer.token.raw = "***"
-#right.jmap.auth.bearer.token.command = ["ortie", "access-token", "read", "fastmail-api"]
-#right.jmap.auth.basic.username = "user@example.com"
-#right.jmap.auth.basic.password.raw = "***"
-#right.jmap.auth.basic.password.command = "pass show fastmail"
+#jmap.auth.header.raw = "Bearer eyJhbGciOiJ..."
+#jmap.auth.header.command = "pass show fastmail-token"
+#jmap.auth.bearer.token.raw = "***"
+#jmap.auth.bearer.token.command = ["ortie", "access-token", "read", "fastmail-api"]
+#jmap.auth.basic.username = "user@example.com"
+#jmap.auth.basic.password.raw = "***"
+#jmap.auth.basic.password.command = "pass show fastmail"
 
-#right.jmap.pool-size = 4
+#jmap.pool-size = 4
 
 # --------------------------------------------------------------------------------
 # Gmail config (alternative to the IMAP / JMAP blocks above)
@@ -154,20 +160,20 @@ left.imap.item.delete = false
 
 # Labels are exposed as collections; the API host is fixed, so only the owner,
 # TLS and the credential are configurable.
-#right.gmail.user-id = "me"
-#right.gmail.tls.provider = "rustls"
-#right.gmail.tls.rustls.crypto = "ring"
-#right.gmail.tls.cert = "/path/to/custom/cert.pem"
-#right.gmail.alpn = ["http/1.1"]
-#right.gmail.alpn = []
+#gmail.user-id = "me"
+#gmail.tls.provider = "rustls"
+#gmail.tls.rustls.crypto = "ring"
+#gmail.tls.cert = "/path/to/custom/cert.pem"
+#gmail.alpn = ["http/1.1"]
+#gmail.alpn = []
 
 # Bearer tokens only. Refreshing one is the command's job, typically ortie.
-#right.gmail.auth.token.raw = "***"
-#right.gmail.auth.token.command = ["ortie", "access-token", "read", "gmail"]
+#gmail.auth.token.raw = "***"
+#gmail.auth.token.command = ["ortie", "access-token", "read", "gmail"]
 
-#right.gmail.item.create = true
-#right.gmail.item.delete = false
-#right.gmail.pool-size = 4
+#gmail.item.create = true
+#gmail.item.delete = false
+#gmail.pool-size = 4
 
 # --------------------------------------------------------------------------------
 # Microsoft Graph config (alternative to the blocks above)
@@ -176,23 +182,23 @@ left.imap.item.delete = false
 
 # Mail folders are exposed as collections; the API host is fixed, so only the
 # owner, TLS and the credential are configurable.
-#right.msgraph.user-id = "me"
-#right.msgraph.tls.provider = "rustls"
-#right.msgraph.tls.rustls.crypto = "ring"
-#right.msgraph.tls.cert = "/path/to/custom/cert.pem"
-#right.msgraph.alpn = ["http/1.1"]
-#right.msgraph.alpn = []
+#msgraph.user-id = "me"
+#msgraph.tls.provider = "rustls"
+#msgraph.tls.rustls.crypto = "ring"
+#msgraph.tls.cert = "/path/to/custom/cert.pem"
+#msgraph.alpn = ["http/1.1"]
+#msgraph.alpn = []
 
 # Bearer tokens only: neverest runs no OAuth flow. The command runs once per
 # opened connection, typically ortie serving a cached, auto-refreshed token.
-#right.msgraph.auth.token.raw = "***"
-#right.msgraph.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
+#msgraph.auth.token.raw = "***"
+#msgraph.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
 
 # NOTE: Graph pushes flags and deletes only; appends and moves are rejected
 # whatever the permissions say.
-#right.msgraph.item.create = true
-#right.msgraph.item.delete = false
-#right.msgraph.pool-size = 4
+#msgraph.item.create = true
+#msgraph.item.delete = false
+#msgraph.pool-size = 4
 
 # --------------------------------------------------------------------------------
 # CardDAV config (contacts, not mail)
@@ -207,24 +213,24 @@ left.imap.item.delete = false
 # The URL is the entry point only; the principal and the address book home set
 # are discovered from it, and each address book becomes a collection keyed by
 # its path segment.
-#left.carddav.server = "https://dav.example.org/"
+#carddav.server = "https://dav.example.org/"
 
 # Pick exactly one of `basic` (the common case) or `bearer`.
-#left.carddav.auth.basic.username = "user"
-#left.carddav.auth.basic.password.command = ["pass", "show", "example/dav"]
-#left.carddav.auth.bearer.token.command = ["ortie", "-a", "dav", "token", "show", "-r"]
+#carddav.auth.basic.username = "user"
+#carddav.auth.basic.password.command = ["pass", "show", "example/dav"]
+#carddav.auth.bearer.token.command = ["ortie", "-a", "dav", "token", "show", "-r"]
 
 # TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
-#left.carddav.tls.provider = "rustls"
-#left.carddav.alpn = ["http/1.1"]
+#carddav.tls.provider = "rustls"
+#carddav.alpn = ["http/1.1"]
 
 # Cards are mutable, unlike mail: `item.update` gates in-place edits here, and
 # a conditional write means a card edited on both sides is reported as a
 # conflict rather than overwritten.
-#left.carddav.item.update = true
-#left.carddav.item.create = true
-#left.carddav.item.delete = false
-#left.carddav.pool-size = 4
+#carddav.item.update = true
+#carddav.item.create = true
+#carddav.item.delete = false
+#carddav.pool-size = 4
 
 # --------------------------------------------------------------------------------
 # Store options
@@ -233,13 +239,16 @@ left.imap.item.delete = false
 # Where `pimdir.db` and `objects/` live. Defaults to the XDG state directory.
 #store.root = "~/.local/state/neverest/example"
 
-# Whether a two-side sync keeps crossing bodies: `relay` (the IMAP to IMAP
-# default) streams them through, `retain` keeps them. A one-side sync retains.
-#store.retention = "retain"
-
-# How far a two-side retain sync hydrates: `crossing` (default) fetches only
-# the bodies about to cross, `full` mirrors every body in. One side is full.
-#store.hydration = "full"
+# What the store KEEPS is not configured. It is derived per kind from how many
+# sources share a namespace, and reported on every run and by `neverest check`:
+#
+#   one source                            every body (the offline replica)
+#   two sharing a namespace, IMAP to IMAP  no body; each crossing is streamed
+#   anything else                          the bodies that crossed
+#
+# Adding a second source to a namespace therefore flips it from keeping every
+# body to keeping none. Bodies already stored are NOT deleted by that: they stay,
+# unreferenced, until an explicit `pimdir gc` or `neverest sync --reset`.
 
 # The store never truly deletes: an item whose last binding vanishes (a remote
 # expunge) is retained instead, hidden but kept with its body. This is how long
@@ -249,36 +258,83 @@ left.imap.item.delete = false
 # retained items with the `pimdir` CLI.
 #store.purge-after = "90d"
 
-# BACKUP RECIPE: a read-only side plus no purge, so a remote expunge cannot
+# BACKUP RECIPE: a read-only source plus no purge, so a remote expunge cannot
 # lose anything. The expunge still propagates, but the item stays in the store,
 # restorable, until you purge on purpose:
 #
-#   left.imap.item.delete = false
-#   left.imap.collection.delete = false
+#   imap.item.delete = false
+#   imap.collection.delete = false
 #   # store.purge-after left unset
 
 # --------------------------------------------------------------------------------
 # Submission send channel (SMTP)
 # --------------------------------------------------------------------------------
 
-# The server a side's queued `submit` intents are sent through at the start of
+# The server a source's queued `submit` intents are sent through at the start of
 # every sync. A frontend enqueues one through the store's action queue (a
 # `v: 1` payload naming the body blob plus the envelope); there is no reserved
-# Outbox collection. The channel belongs to the side it completes: a side
-# either sends by itself (Graph, through sendMail) or needs this. When both
-# sides offer one, `left` wins.
+# Outbox collection. The channel belongs to the source it completes: a source
+# either sends by itself (Graph, through sendMail) or needs this. AT MOST ONE
+# source per account may declare it; two is refused at load.
 #
 # An SMTP 4xx leaves the intent pending for the next run, a 5xx parks it.
 # Sending is at-least-once, so `Message-ID` deduplication is the provider's job.
 #
 # Omit `login` and `password` together for an unauthenticated relay.
-#left.smtp.server = "smtps://smtp.fastmail.com:465"
-#left.smtp.server = "smtp://smtp.example.com:587"
-#left.smtp.starttls = true
-#left.smtp.login = "pimalaya@fastmail.org"
-#left.smtp.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
+#smtp.server = "smtps://smtp.fastmail.com:465"
+#smtp.server = "smtp://smtp.example.com:587"
+#smtp.starttls = true
+#smtp.login = "pimalaya@fastmail.org"
+#smtp.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
 
 # Offered during the TLS handshake (rustls only). Defaults to ["smtp"], `[]`
 # skips ALPN.
-#left.smtp.alpn = ["smtp"]
-#left.smtp.alpn = []
+#smtp.alpn = ["smtp"]
+#smtp.alpn = []
+
+# --------------------------------------------------------------------------------
+# Named sources (the explicit form)
+# --------------------------------------------------------------------------------
+#
+# Everything above is the sugar: `imap.server` is `sources.imap.imap.server`, the
+# source taking its protocol as its name. The two spellings are the same
+# configuration, source id included, so expanding one by hand changes nothing in
+# the store.
+#
+# Reach for the explicit table when you need two sources of one protocol, which
+# the sugar cannot express. The map key is the source name, and the source name
+# is the pimdir source id every binding it owns is recorded under: RENAMING ONE
+# ORPHANS THEM, so pick a name you can live with.
+#
+# MIRROR (the old `left` / `right` pair): two sources sharing a namespace bind
+# the same hub collections, so an item on one is pushed to the other. On an IMAP
+# to IMAP pairing the store keeps no body and streams each crossing through.
+#
+#   [accounts.migrate]
+#   sources.old.imap.server = "imap.old-provider.com"
+#   sources.old.imap.sasl.plain.username = "user@old-provider.com"
+#   sources.old.imap.sasl.plain.password.command = "pass show old"
+#   sources.old.imap.collection.namespace = "mail"
+#   sources.new.imap.server = "imap.new-provider.com"
+#   sources.new.imap.sasl.plain.username = "user@new-provider.com"
+#   sources.new.imap.sasl.plain.password.command = "pass show new"
+#   sources.new.imap.collection.namespace = "mail"
+#
+# SIDE BY SIDE: leave the namespaces alone and the same two sources cache into
+# one store without ever writing to each other, for a frontend to union at
+# display time. This is the default, so it is what you get by saying nothing.
+#
+#   [accounts.personal]
+#   sources.fastmail.imap.server = "imap.fastmail.com"
+#   sources.fastmail.imap.sasl.plain.username = "user@fastmail.com"
+#   sources.fastmail.imap.sasl.plain.password.command = "pass show fastmail"
+#   sources.gmail.imap.server = "imap.gmail.com"
+#   sources.gmail.imap.sasl.xoauth2.username = "user@gmail.com"
+#   sources.gmail.imap.sasl.xoauth2.token.command = ["ortie", "token", "read", "gmail"]
+#
+# A namespace of three or more sources is refused: the pairwise relay has no
+# meaning there, and it is not implemented.
+#
+# `neverest sync --source <name>` narrows a run to the namespaces holding that
+# source. It picks namespaces rather than sources, because running half a mirror
+# would push one way and call it done.

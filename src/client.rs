@@ -39,13 +39,13 @@ use url::Url;
 #[cfg(feature = "carddav")]
 use crate::carddav::client::CarddavClient;
 #[cfg(any(feature = "imap", feature = "msgraph", feature = "carddav"))]
-use crate::config::SideBackendConfig;
+use crate::config::SourceBackendConfig;
 #[cfg(feature = "imap")]
 use crate::imap::client::ImapClient;
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::GraphClient;
 use crate::{
-    config::SideConfig,
+    config::SourceConfig,
     item::{collection::Collection, flag::Flag, flag::FlagOp, summary::ItemSummary},
 };
 
@@ -405,10 +405,10 @@ impl Client {
 
 /// Opens the protocol client for `config`, resolving its configured
 /// secrets (passwords, bearer token commands) once per opened client.
-pub fn open(config: SideConfig) -> Result<Client> {
+pub fn open(config: SourceConfig) -> Result<Client> {
     match config.backend {
         #[cfg(feature = "imap")]
-        SideBackendConfig::Imap(config) => {
+        SourceBackendConfig::Imap(config) => {
             let alpn = config.alpn.unwrap_or_else(io_imap::client::default_alpn);
             let tls = config.tls.into_tls(alpn);
 
@@ -439,14 +439,14 @@ pub fn open(config: SideConfig) -> Result<Client> {
             Ok(Client::Imap(client))
         }
         #[cfg(feature = "msgraph")]
-        SideBackendConfig::Msgraph(config) => {
+        SourceBackendConfig::Msgraph(config) => {
             let token = config.auth.token.get()?;
             let tls = config.tls.into_tls(config.alpn);
             let client = GraphClient::connect(&token, &config.user_id, tls)?;
             Ok(Client::Msgraph(Box::new(client)))
         }
         #[cfg(feature = "carddav")]
-        SideBackendConfig::Carddav(config) => {
+        SourceBackendConfig::Carddav(config) => {
             let tls = config.tls.into_tls(config.alpn);
             let server = Url::parse(&config.server)
                 .context("The CardDAV `server` must be a full URL (https://dav.example.org/)")?;
@@ -463,7 +463,7 @@ pub fn open(config: SideConfig) -> Result<Client> {
 
 /// Same as [`open`] plus any side-local bootstrap. No compiled-in
 /// backend needs one.
-pub fn init(config: SideConfig) -> Result<Client> {
+pub fn init(config: SourceConfig) -> Result<Client> {
     open(config)
 }
 
@@ -476,7 +476,7 @@ pub fn init(config: SideConfig) -> Result<Client> {
 /// account's connection budget (default 4), kept under the server's per-account
 /// cap.
 pub struct Pool {
-    config: SideConfig,
+    config: SourceConfig,
     clients: Vec<Client>,
     max: usize,
 }
@@ -484,7 +484,7 @@ pub struct Pool {
 impl Pool {
     /// Opens the pool with its primary connection; `max` is clamped to at least
     /// one.
-    pub fn open(config: SideConfig, max: usize) -> Result<Self> {
+    pub fn open(config: SourceConfig, max: usize) -> Result<Self> {
         let primary = open(config.clone())?;
         Ok(Self {
             config,

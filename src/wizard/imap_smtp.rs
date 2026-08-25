@@ -26,8 +26,8 @@ use crate::{
     client,
     config::{
         ImapConfig, SaslAnonymousConfig, SaslConfig, SaslLoginConfig, SaslOauthbearerConfig,
-        SaslPlainConfig, SaslScramSha256Config, SaslXoauth2Config, SideBackendConfig, SideConfig,
-        SmtpConfig, TlsConfig,
+        SaslPlainConfig, SaslScramSha256Config, SaslXoauth2Config, SmtpConfig, SourceBackendConfig,
+        SourceConfig, TlsConfig,
     },
     wizard::{
         search::{AuthCaps, Discovered, DiscoveredKind, TcpEndpoint},
@@ -68,7 +68,7 @@ pub fn configure_discovered(
     )?;
     let imap = imap_config(imap, imap_sasl.clone());
     test_connection("IMAP", || {
-        client::open(SideConfig::new(SideBackendConfig::Imap(imap.clone()))).map(|_| ())
+        client::open(SourceConfig::new(SourceBackendConfig::Imap(imap.clone()))).map(|_| ())
     })?;
 
     let smtp = configure_smtp(

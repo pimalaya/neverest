@@ -5,15 +5,17 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::{
-    side::Side,
-    sync::hunk::{CollectionHunk, ItemHunk},
-};
+use crate::sync::hunk::{CollectionHunk, ItemHunk};
 
 #[derive(Debug, Default, Serialize)]
 pub struct SyncReport {
     pub account: String,
     pub dry_run: bool,
+    /// What the store keeps, per namespace. Always reported, including on a
+    /// run that wrote nothing: it is derived rather than configured, so the
+    /// report is the only place it is ever stated.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub namespaces: Vec<NamespaceReport>,
     pub collection: PatchOutcome<CollectionHunk>,
     pub item: PatchOutcome<ItemHunk>,
     /// Content-key collisions surfaced this sync (first envelope kept,
@@ -45,6 +47,53 @@ pub struct SyncReport {
     pub ambiguous: Vec<AmbiguousIdentity>,
 }
 
+/// What one hub namespace holds, and what the store keeps for it.
+///
+/// Reported on every run because nothing else states it: `store.retention` and
+/// `store.hydration` are gone, and the value is derived from how many sources
+/// share the namespace. Someone who set up a two-source backup expecting the
+/// store to *be* the backup learns it here, on run one, rather than on the day
+/// they need it.
+#[derive(Debug, Serialize)]
+pub struct NamespaceReport {
+    /// The kind every source in the namespace syncs.
+    pub media_type: String,
+    pub namespace: String,
+    /// The namespace's source names, sorted.
+    pub sources: Vec<String>,
+    /// What the store keeps: `none`, `crossing` or `all`.
+    pub bodies: String,
+    /// The value the previous run derived, when it differed. A namespace that
+    /// gained a source flips from keeping every body to keeping none, so the
+    /// change is named rather than left to be noticed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub was: Option<String>,
+}
+
+impl fmt::Display for NamespaceReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            media_type,
+            namespace,
+            sources,
+            bodies,
+            was,
+        } = self;
+
+        let list = sources.join(", ");
+        write!(f, "{media_type} / {namespace} ({list}): bodies {bodies}")?;
+
+        if let Some(was) = was {
+            write!(
+                f,
+                " (was {was}; bodies already stored are kept, unreferenced, until `pimdir gc`)"
+            )?;
+        }
+
+        Ok(())
+    }
+}
+
 /// One identity a side's collection holds more than once: two items carrying
 /// the same link id, two messages with one `Message-ID`, so which copy a
 /// change belongs to cannot be decided.
@@ -63,7 +112,7 @@ pub struct SyncReport {
 /// warning they will not act on once.
 #[derive(Debug, Serialize)]
 pub struct AmbiguousIdentity {
-    pub side: Side,
+    pub side: String,
     pub collection: String,
     /// Every handle the side holds the identity under, the bound one first.
     pub ids: Vec<String>,
@@ -101,7 +150,7 @@ impl fmt::Display for AmbiguousIdentity {
 /// so a mail sync never reports a conflict.
 #[derive(Debug, Serialize)]
 pub struct ItemConflict {
-    pub side: Side,
+    pub side: String,
     pub collection: String,
     /// The item's handle on that side.
     pub id: String,
@@ -235,7 +284,7 @@ impl fmt::Display for PurgedItems {
 /// One content-key collision group; first id in `ids` is the kept one.
 #[derive(Debug, Serialize)]
 pub struct MessageCollision {
-    pub side: Side,
+    pub side: String,
     pub collection: String,
     /// Shared `Message-ID:` when every envelope carried one; `None`
     /// when the legacy `(subject, date, from)` fallback collapsed
@@ -315,6 +364,14 @@ impl fmt::Display for SyncReport {
         let errors = mailbox_errors + item_errors + submit_errors;
         let warnings =
             self.collisions.len() + self.parked.len() + self.conflicts.len() + self.ambiguous.len();
+
+        if !self.namespaces.is_empty() {
+            writeln!(f, "Store ({n}):", n = self.namespaces.len())?;
+            for entry in &self.namespaces {
+                writeln!(f, " - {entry}")?;
+            }
+            writeln!(f)?;
+        }
 
         if !self.drained.is_empty() {
             writeln!(f, "Queue ({n}):", n = self.drained.len())?;

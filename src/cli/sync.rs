@@ -28,8 +28,12 @@ const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the waiter retries the lock.
 const LOCK_POLL: Duration = Duration::from_millis(500);
 
-/// Synchronizes collections and items between the configured left and
-/// right sides.
+/// Synchronizes the account's collections and items through its pimdir store.
+///
+/// Every source of one kind sharing a `collection.namespace` is reconciled
+/// against one set of hub collections: alone, that is the offline replica; as a
+/// pair, a mirror. Namespaces never meet, so a mail source and a contacts
+/// source under one account stay apart.
 ///
 /// The three filter flags keep their pre-`generic-pim-sync` spellings
 /// (`--include-mailbox`, `--exclude-mailbox`, `--all-mailboxes`) as hidden
@@ -84,6 +88,14 @@ pub struct SyncCommand {
     /// whatever `store.purge-after` says.
     #[arg(long)]
     pub no_purge: bool,
+
+    /// Synchronize only the namespaces holding the given sources (repeatable).
+    ///
+    /// Narrowing picks namespaces rather than sources: two sources sharing one
+    /// are a mirror, and running half of a mirror pushes one way and calls it
+    /// done.
+    #[arg(long, short = 's', value_name = "SOURCE", action = ArgAction::Append)]
+    pub source: Vec<String>,
 }
 
 impl SyncCommand {
@@ -133,6 +145,7 @@ impl SyncCommand {
             self.dry_run,
             connections,
             self.no_purge,
+            &self.source,
         )?;
 
         printer.out(report)

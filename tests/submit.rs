@@ -82,11 +82,11 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
         &config,
         format!(
             "[accounts.submit]\n\
-             left.imap.server = \"{IMAP_ROOT}\"\n\
-             left.imap.starttls = false\n\
-             left.imap.sasl.plain.username = \"{USER}\"\n\
-             left.imap.sasl.plain.password.raw = \"{PASS}\"\n\
-             left.smtp.server = \"{SMTP}\"\n",
+             imap.server = \"{IMAP_ROOT}\"\n\
+             imap.starttls = false\n\
+             imap.sasl.plain.username = \"{USER}\"\n\
+             imap.sasl.plain.password.raw = \"{PASS}\"\n\
+             smtp.server = \"{SMTP}\"\n",
         ),
     )
     .unwrap();

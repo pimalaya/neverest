@@ -10,7 +10,7 @@ use pimalaya_cli::{prompt, spinner::Spinner};
 
 use crate::{
     client,
-    config::{MsgraphAuthConfig, MsgraphConfig, SideBackendConfig, SideConfig},
+    config::{MsgraphAuthConfig, MsgraphConfig, SourceBackendConfig, SourceConfig},
     wizard::secret,
 };
 
@@ -39,7 +39,9 @@ pub fn configure(account_name: &str) -> Result<MsgraphConfig> {
     };
 
     let spinner = Spinner::start("Testing Microsoft Graph connection");
-    if let Err(err) = client::open(SideConfig::new(SideBackendConfig::Msgraph(config.clone()))) {
+    if let Err(err) = client::open(SourceConfig::new(SourceBackendConfig::Msgraph(
+        config.clone(),
+    ))) {
         spinner.failure("Microsoft Graph connection failed");
         return Err(err);
     }

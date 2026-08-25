@@ -67,6 +67,9 @@ pub struct PimRemote<'a> {
     kind: Kind,
     pool: &'a mut Pool,
     blob: PimdirBlobs,
+    /// The hub namespace this source binds into, stripped off a collection id
+    /// before it reaches the wire. See [`PimRemote::wire_name`].
+    namespace: String,
     /// Called once per body streamed at the `Full` tier, so the driver can tick
     /// a per-item progress counter. `Sync` because the fetch pool calls it from
     /// several worker threads at once.
@@ -80,12 +83,13 @@ pub struct PimRemote<'a> {
 }
 
 impl<'a> PimRemote<'a> {
-    pub fn new(pool: &'a mut Pool, blob: PimdirBlobs) -> Self {
+    pub fn new(pool: &'a mut Pool, blob: PimdirBlobs, namespace: impl Into<String>) -> Self {
         let kind = resolve_kind(pool);
         Self {
             kind,
             pool,
             blob,
+            namespace: namespace.into(),
             on_body: None,
             sizes: HashMap::new(),
         }
@@ -97,6 +101,7 @@ impl<'a> PimRemote<'a> {
     pub fn with_progress(
         pool: &'a mut Pool,
         blob: PimdirBlobs,
+        namespace: impl Into<String>,
         on_body: &'a (dyn Fn() + Sync),
         sizes: HashMap<String, u64>,
     ) -> Self {
@@ -105,9 +110,25 @@ impl<'a> PimRemote<'a> {
             kind,
             pool,
             blob,
+            namespace: namespace.into(),
             on_body: Some(on_body),
             sizes,
         }
+    }
+
+    /// The name the backend knows a hub collection by.
+    ///
+    /// A hub collection id is `<namespace>/<name>`, which is what keeps a
+    /// mailbox and an address book both called `Default` apart in one store,
+    /// and what keeps two providers cached side by side from meeting. The
+    /// server knows nothing of that: this is the one seam where the id becomes
+    /// a name again, so every wire call goes through it and no other code has
+    /// to carry two spellings of the same collection.
+    fn wire_name<'n>(&self, collection: &'n str) -> &'n str {
+        collection
+            .strip_prefix(self.namespace.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+            .unwrap_or(collection)
     }
 }
 
@@ -156,7 +177,7 @@ impl ReplicaRemote for PimRemote<'_> {
         collection: &ReplicaCollectionId,
         cursor: Option<ReplicaCheckpoint>,
     ) -> Result<ReplicaRemoteSnapshot, Self::Error> {
-        let collection = collection.as_str();
+        let collection = self.wire_name(collection.as_str());
         let cursor = cursor.as_ref().map(|c| c.0.as_slice());
         let enumeration = self
             .pool
@@ -191,7 +212,7 @@ impl ReplicaRemote for PimRemote<'_> {
         handles: Vec<ReplicaHandle>,
         tier: ReplicaTier,
     ) -> Result<Vec<ReplicaFetchedItem>, Self::Error> {
-        let collection = collection.as_str();
+        let collection = self.wire_name(collection.as_str());
 
         match tier {
             ReplicaTier::Meta => self.fetch_meta(collection, handles),
@@ -204,7 +225,7 @@ impl ReplicaRemote for PimRemote<'_> {
         collection: &ReplicaCollectionId,
         changes: Vec<ReplicaChange>,
     ) -> Result<Vec<ReplicaPushResult>, Self::Error> {
-        let collection = collection.as_str().to_string();
+        let collection = self.wire_name(collection.as_str()).to_string();
         let mut results = Vec::with_capacity(changes.len());
 
         for change in changes {

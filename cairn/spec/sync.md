@@ -6,54 +6,235 @@ status: current
 
 # Sync
 
-`neverest sync` reconciles two sides (`left` / `right`) of an account through the
-io-replica engine over a pimdir store. It is sync-on-demand: one reconcile per
+`neverest sync` reconciles an account's named sources through the io-replica
+engine over one pimdir store. It is sync-on-demand: one reconcile per
 invocation, no daemon.
 
-### Requirement: Side count selects the sync mode
-An account SHALL configure one or two sides (`left`/`right`, each optional; at
-least one required). **One** configured side is a *local sync*: that remote is
-reconciled against the retained pimdir store, which is the local replica an app
-reads and edits. **Two** configured sides is the remote-to-remote sync through the
-store. The store is otherwise implicit (per-account state dir) and customised only
-by an account-root `store` config (`root` override), never as a side.
+### Requirement: An account holds named sources
+An account SHALL hold a map of named sources (`sources.<name>`), each declaring
+exactly one remote backend, and SHALL require at least one. The map key SHALL be
+the pimdir source id, so a source's name is what every binding it owns in the
+store is recorded against. Renaming a source orphans its bindings, so a rename
+SHALL be treated as a new source.
 
-### Requirement: Two sources over one store
-When two sides are configured, they SHALL be two source handles (`"left"` /
-`"right"`) of one pimdir store, the mailbox name as the bare collection id. The
-shared database is the cross-side hub; cross-side propagation of messages, flags
-and deletions falls out of the hub's project/absorb, with no hand-rolled
-cross-merge.
+An account SHALL NOT constrain its sources to one kind: mail, contacts and
+calendar sources may sit under one account, and their collections never meet
+(see the collection key requirement).
 
-### Requirement: A two-source sync may relay instead of retain
-Relay is a **mail** mode. A two-side sync SHALL support a `store.retention`
-mode. Under `Retain` it keeps every body in the store. Under `Relay` a
-cross-copy body SHALL be streamed directly from its holding side to the other
-through a bounded in-memory pipe — the store keeping only the spine (the item is
-never hydrated, no object blob at rest; the target's next enumerate binds the
-relayed message). The target APPEND length comes from the item's `v:1` meta
-`size`, so no body is buffered to discover it. Relay is the **default for an
-IMAP↔IMAP pairing** and unavailable otherwise (any other pairing, including
-every DAV pairing, retains; an explicit `relay` there falls back to retain).
-Relay trades away dedup / cheap retry / resumability, so it is the pass-through
-mirror; retain stays the default wherever a local reader exists.
+`left` and `right` SHALL NOT survive in any form, as keys, as aliases, or as
+source ids. A configuration carrying them SHALL be refused at load, naming
+`sources` and the namespace needed to keep a mirror mirroring.
 
-### Requirement: A local sync retains every body
-A one-side sync SHALL hydrate every synced item to `Full` (fetch its body into the
-store), because the store is the app's offline copy — distinct from the two-source
-path, which hydrates only bodies about to cross. It SHALL pull before pushing so an
-edit the app staged locally stays pending and is reported (and pushed) rather than
-swallowed, and it SHALL open the store as the one side's source so an app writing
-as that same source stages edits the sync pushes.
+A store written before collection ids carried their namespace SHALL NOT be read.
+Neverest keeps its own state beside the store (`neverest.json`) recording the
+collection-id layout, and a store directory holding a database but no such file
+SHALL be refused, naming `sync --reset`. Without that guard every collection
+would be looked up under a key nothing was written to and the run would report a
+healthy sync over an empty replica.
 
-The item a hydration pass picks up SHALL be selected by the **absence of a
-stored body**, not by its detail level. A remote content change drops the stale
-body while the hub keeps the level the item had reached, so a pass keyed on the
-level would leave an edited item bodiless for good.
+#### Scenario: Mail and contacts under one account
+- GIVEN an account declaring an IMAP source and a CardDAV source
+- WHEN it is synced
+- THEN both run against the same store, and neither is refused for disagreeing on its kind
+
+#### Scenario: A two-side config is refused with its replacement
+- GIVEN a configuration written with `left` and `right`
+- WHEN it is loaded
+- THEN it is refused, naming `sources.left` / `sources.right` and the shared `collection.namespace` that preserves the mirror
+
+### Requirement: A backend under the account is a source named after its protocol
+A backend table written directly under the account (`imap`, `carddav`, `caldav`,
+`jmap`, `gmail`, `msgraph`) SHALL be sugar for `sources.<protocol>.<protocol>`,
+the source taking the protocol as its name. The sugar SHALL produce a
+configuration indistinguishable from the expanded form, source id included, so
+expanding it by hand is a no-op on the store.
+
+Declaring the same protocol both directly and under `sources` SHALL be a
+configuration error rather than a merge.
+
+#### Scenario: Expanding the sugar changes nothing
+- GIVEN an account written as `imap.server = "..."`
+- WHEN it is rewritten as `sources.imap.imap.server = "..."`
+- THEN the sync opens the same source id and reuses every existing binding
+
+### Requirement: A collection is keyed by kind, namespace and name
+A hub collection SHALL be keyed by the triple `(kind, namespace, name)`: the
+source's media type, the source's `collection.namespace`, and the collection
+name the backend enumerates. The bare collection name SHALL NOT be the id,
+because a CardDAV address book and a mailbox may carry the same name in one
+store. The id is spelled `<namespace>/<name>` with the kind on the collection
+row, and the namespace prefix SHALL be stripped back off before any call reaches
+a server, at one seam, so a backend only ever sees the name it gave. A report
+SHALL name a collection the way its server does, not the way the store keys it.
+
+`collection.namespace` SHALL default to the source's own name, so sources are
+isolated unless configured otherwise. A namespace SHALL NOT be shared by two
+kinds: the two would key onto the same collection ids, which is the collision
+the triple exists to prevent, and mirroring across kinds means nothing.
+
+The source's `collection` table SHALL keep `create` and `delete` optional,
+defaulting to granting, unlike the `item` table which requires its pair to be
+declared in full. The table now also carries `namespace` and `filter`, so it is
+declared for reasons that have nothing to do with permissions, and demanding a
+permission pair from someone writing a namespace would be a trap.
+
+### Requirement: Sources sharing a namespace share bindings
+Two sources of the same kind SHALL share a hub collection when, and only when,
+they declare the same `collection.namespace`. Propagation is not a mode and
+SHALL NOT be configured as one: it is the engine filling a binding gap, an item
+present in a collection a source participates in with no binding for that source.
+
+Sources sharing a namespace therefore mirror each other, subject to their own
+permissions. Sources isolated by the default namespace sit side by side in one
+store and never push to one another, which is the merged read view a frontend
+unions at display time.
+
+A local create SHALL attribute itself through the same mechanism, with no owner
+field: created in an isolated source's collection it lands on that source alone;
+created in a shared collection it goes to every source in that namespace whose
+permissions allow it.
+
+Isolated is the default because its failure mode is a mirror that did nothing,
+visible in the report, where merged-by-default fails by copying one real
+provider's mailbox into another.
+
+A namespace of three or more sources SHALL be refused, naming the namespace, its
+sources and the two ways out (give one of them a namespace of its own, or split
+it into another account). The hub reconciles any number of sources, but the
+paths that move a body between them are written for a pair, and refusing is
+honest where quietly syncing three sources pairwise would not be.
+
+#### Scenario: Isolated sources do not push to one another
+- GIVEN two IMAP sources in one account, both with an `INBOX`, both on their default namespace
+- WHEN the account is synced
+- THEN the store holds two `INBOX` collections and neither source is written to on behalf of the other
+
+#### Scenario: A shared namespace propagates a delete
+- GIVEN two IMAP sources sharing a namespace, an item bound to both
+- WHEN the item is deleted on one source and the account is synced
+- THEN the delete is pushed to the other source, subject to its `item.delete` permission
+
+### Requirement: One account is one hub and one database
+An account SHALL be exactly one pimdir store: one hub, one database, one blob
+directory. `sync` SHALL take one account, so the database it opens is never
+ambiguous, and SHALL accept `--source <name>` to narrow which sources run inside
+that same database. Narrowing SHALL select whole namespaces rather than
+individual sources: two sources sharing one are a mirror, and running half of a
+mirror pushes one way and calls it done.
+
+Two sources of one kind in one account are merged or isolated by their
+namespace, never by which command invoked them. Two genuinely independent
+replicas SHALL be two accounts.
+
+A namespace whose sync fails SHALL be reported and SHALL NOT stop the others:
+they share nothing but the file the store lives in.
+
+### Requirement: N sources over one store
+Every configured source SHALL be one source handle of the account's pimdir
+store, keyed by its name. Cross-source propagation of items, flags and deletions
+falls out of each source's project/absorb against the shared hub, with no
+hand-rolled cross-merge and no special case for the two-source shape.
+
+### Requirement: What the store keeps is derived, never configured
+`store.retention` and `store.hydration` SHALL NOT exist. What the store keeps
+SHALL be derived per kind from the namespace's source count and pairing:
+
+- one source in the namespace: **every** body, the store being that source's
+  offline replica;
+- exactly two sources sharing a namespace on a pairing that can stream (mail,
+  IMAP to IMAP): **no** body, each crossing streamed from its holding source to
+  the target through a bounded in-memory pipe, the store keeping only the spine,
+  with the target's APPEND length taken from the item's `v:1` meta `size` so no
+  body is buffered to discover it;
+- anything else, every DAV pairing included: **the bodies that crossed**.
+
+A configuration still carrying `store.retention` or `store.hydration` SHALL be
+refused at load, naming the derived value that replaces it for that kind.
+Accepting and ignoring `retention = "retain"` on a pairing that derives "keep
+nothing" would hand the user the opposite of what they wrote, so a removed key is
+refused rather than tolerated, on the same terms as `left` and `right`.
+
+Deriving removes two expressible configurations, a mirror that also keeps a local
+offline copy and a single source kept as an envelope-only index. Both are given
+up deliberately: an override may be added later without breaking a
+configuration, where removing one could not.
+
+#### Scenario: An unstreamable pairing is not silently substituted
+- GIVEN two CardDAV sources sharing a namespace
+- WHEN the account is synced
+- THEN the derived value is "bodies that crossed", and no configuration was honoured or overridden to get there
+
+### Requirement: A derived change never drops what is stored
+The derived value SHALL govern only what a sync fetches and keeps from that run
+on. It SHALL NOT retroactively remove bodies already in the store. A kind
+flipping from keeping every body to keeping none, which is what adding a second
+source to a namespace does, SHALL leave every stored object in place,
+unreferenced, to be reclaimed only by an explicit `pimdir gc` or `sync --reset`.
+
+A one-shot tool cannot prompt, so the transition is made non-destructive rather
+than confirmed.
+
+#### Scenario: Adding a mirror target does not erase the offline copy
+- GIVEN an account with one IMAP source and a fully hydrated store
+- WHEN a second IMAP source is added to the same namespace and the account is synced
+- THEN the sync stops fetching new bodies for that kind, every already-stored body is still on disk, and the report names them as unreferenced with the command that reclaims them
+
+### Requirement: Every run reports what the store keeps
+A sync SHALL report, per kind and namespace, the number of sources it holds and
+what the store keeps for them, in text and `--json`, whether or not the run wrote
+anything. Where bodies are kept it SHALL report the objects and bytes held, so a
+store expected to *be* a backup is seen to be one on the first run rather than on
+the day it is needed.
+
+A run whose derived value differs from the previous run's SHALL say so
+explicitly, naming the old value, the new value and what became unreferenced. The
+previous value SHALL be persisted beside the store, since nothing else can tell a
+transition from a steady state.
+
+`check` SHALL report the same derivation, and SHALL derive it without contacting
+a server, so it answers before a first sync has ever run and while a remote is
+down.
+
+#### Scenario: A relaying account says it keeps nothing
+- GIVEN two IMAP sources sharing a namespace
+- WHEN the account is synced, and again when `check` runs
+- THEN both state that the store keeps no bodies for `message/rfc822`
+
+### Requirement: A source alone in its namespace retains every body
+A source alone in its namespace SHALL hydrate every synced item to `Full`,
+because the store is the app's offline copy. It SHALL pull before pushing so an
+edit the app staged locally stays pending and is reported rather than swallowed,
+and it SHALL open the store as that source so an app writing under the same id
+stages edits the sync pushes.
+
+The item a hydration pass picks up SHALL be selected by the absence of a stored
+body, not by its detail level. A remote content change drops the stale body while
+the hub keeps the level the item had reached, so a pass keyed on the level would
+leave an edited item bodiless for good.
+
+### Requirement: A send channel belongs to at most one source
+At most one source per account SHALL declare `smtp`. Two or more SHALL be a
+configuration error, reported at load, rather than a silent tiebreak on source
+order. A source that sends by itself (Microsoft Graph, through `sendMail`) needs
+none. The account root MAY carry the `smtp` table when its mail backend is the
+direct-backend sugar, in which case it completes that one source; with no direct
+mail backend, or several, it SHALL be refused.
+
+### Requirement: A collection filter belongs to the source
+`collection.filter` SHALL be declared per source rather than per account, because
+an account may hold sources of several kinds and a mailbox include list means
+nothing to a contacts source. An account-level `collection` table SHALL be
+refused, naming its replacement.
+
+Filters are consequently asymmetric: a collection may be synced on one source and
+skipped on another, which the documentation SHALL state, since the previous
+account-level filter guaranteed symmetry. A pair sharing a namespace SHALL apply
+one filter to both, since they bind one set of hub collections and filtering them
+apart would read as a delete on the next pass.
 
 ### Requirement: Bodies are content-addressed and deduped
 An item body SHALL be stored once per content hash; an item present on both
-sides or in several collections is stored once and copied by reference. The link
+sources or in several collections is stored once and copied by reference. The link
 id is per-kind (see the link-id requirement above). Where a kind resolves its
 link id at more than one tier — `message/rfc822`, from the IMAP ENVELOPE at
 `Meta` and from the parsed body at `Full` — the two derivations MUST produce the
@@ -89,27 +270,33 @@ summary (mail's IMAP `ENVELOPE`), `Full` where only the body carries the
 identity. Raising a DAV item to `Meta` asks its backend for a summary tier it
 does not have, which fails the scan of every DAV collection.
 
-### Requirement: Sides are remote backends only
-A sync side SHALL be a remote backend: IMAP and Microsoft Graph for
+### Requirement: Sources are remote backends only
+A sync source SHALL be a remote backend: IMAP and Microsoft Graph for
 `message/rfc822`, CardDAV for `text/vcard`, CalDAV for `text/calendar` (JMAP and
 Gmail as their backends land). Local file backends (m2dir, maildir, vdir) SHALL
-NOT be sync sides — the pimdir store is the local replica, so a local file store
-is redundant as a side and belongs on the import/export path, which neverest
-documents rather than syncing directly. The wizard SHALL produce one-side
-(local-sync) remote accounts only: it writes `left` plus the implicit store and
-never a `right`, so a remote-to-remote mirror is always configured by hand.
+NOT be sync sources: the pimdir store is the local replica, so a local file store
+is redundant as a source and belongs on the import/export path, which neverest
+documents rather than syncing directly.
 
 ### Requirement: The wizard discovers in parallel and proposes what it found
-Unchanged in shape, extended in what it proposes: the discovery fan-out already
-resolves CalDAV and CardDAV services alongside IMAP and submission, and the
-wizard SHALL offer every reachable service whose backend is compiled into the
-running build, not only the mail ones. A run that finds services of several
-kinds SHALL offer them as separate entries, one per kind, and the picked one
-writes an account of that kind; pairing two kinds against one `store.root` is a
-hand-written setup. All other
-wizard rules (the single email-address prompt, the derived account name, the
-fan-out deadline, the capability-narrowed credential prompts, the connection
-test before writing, the save confirmations) are unchanged.
+The discovery fan-out already resolves CalDAV and CardDAV services alongside
+IMAP and submission, and the wizard SHALL offer every reachable service whose
+backend is compiled into the running build, not only the mail ones. A run that
+finds services of several kinds SHALL offer them as separate entries, one per
+kind.
+
+The wizard SHALL write **one account with one source**, the offline replica,
+which is the common case and the only one worth automating. Everything beyond
+it, a second kind, a mirror, a fan-in, is configured by hand against
+config.sample.toml. The picked service is written through the direct-backend
+sugar (`imap.server = …`), and a single source shares its namespace with nobody,
+so the account keeps every body and reads offline with no further setting. The
+wizard SHALL NOT write a collection namespace at all: a namespace only matters
+when two sources of one kind meet, and the wizard never writes two.
+
+All other wizard rules (the single email-address prompt, the derived account
+name, the fan-out deadline, the capability-narrowed credential prompts, the
+connection test before writing, the save confirmations) are unchanged.
 
 ### Requirement: A bare invocation runs the wizard
 Running `neverest` with no subcommand SHALL run the configuration wizard
@@ -138,7 +325,7 @@ nothing. The saved file and the document printed on stdout SHALL be identical.
 
 The document SHALL hold only what was actually decided: every field equal to
 its default SHALL be omitted (the account `default` flag when false, the
-per-side collection / flag / item permissions, the per-side pool size, the
+per-source collection / flag / item permissions, the per-source pool size, the
 collection filter, the HTTP-backend ALPN list, `starttls`). Omitting
 a field SHALL be lossless: every skipped field keeps a deserialization default
 equal to the value that was skipped.
@@ -148,16 +335,16 @@ Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend,
 `msgraph` for the Microsoft Graph backend, `smtp` for the SMTP submission
 channel. All three SHALL ship in the default feature set. A missing backend
 SHALL surface at runtime, never at build time: every feature combination
-compiles, the configuration surface stays whole (every side config still
-parses), and an unavailable backend fails when the side is *opened*, as the
-JMAP and Gmail sides already do. A build with neither `smtp` nor `msgraph` has
+compiles, the configuration surface stays whole (every source config still
+parses), and an unavailable backend fails when the source is *opened*, as the
+JMAP and Gmail sources already do. A build with neither `smtp` nor `msgraph` has
 no send channel and SHALL warn rather than perform a submit intent. Each
 optional backend crate SHALL take its TLS provider from neverest's own
 `native-tls` / `rustls-aws` / `rustls-ring` / `vendored` features rather than
 pinning one.
 
 ### Requirement: A backend owns its ALPN default
-The `alpn` field of a side or channel config that has a backend crate SHALL be
+The `alpn` field of a source or channel config that has a backend crate SHALL be
 optional, and unset SHALL mean that crate's own default (io-imap's `["imap"]`,
 io-smtp's `["smtp"]`), resolved where the connection is opened. An explicit `[]`
 SHALL skip ALPN. Neverest SHALL NOT restate a backend's default, in the config
@@ -166,10 +353,11 @@ place.
 
 ### Requirement: The pimdir store is the sole local copy
 A message body SHALL be held locally exactly once — content-addressed in the pimdir
-blob store (under retain), deduped across sides and mailboxes — and Neverest SHALL
-keep no parallel local copy in another format. Sync sides are remote backends only;
+blob store (where the derivation keeps bodies), deduped across sources and
+collections, and Neverest SHALL keep no parallel local copy in another format.
+Sync sources are remote backends only;
 an existing on-disk store (maildir/m2dir) is brought in through io-pimdir's
-conversion tooling, not synced as a side. The store lives per account as
+conversion tooling, not synced as a source. The store lives per account as
 `pimdir.db` plus an `objects/` blob directory.
 
 ### Requirement: The collection kind is declared
@@ -179,10 +367,11 @@ store is self-describing and ready to carry other item kinds.
 
 ### Requirement: A collection records the account that syncs it
 Every store handle SHALL be opened for the account being synced, so each
-collection it writes is grouped under that account (pimdir SPEC §9.2). Two
-hand-written accounts may share one `store.root`, and a reader of such a store
-SHALL be able to tell whose collection is whose without inferring it from the
-collection naming.
+collection it writes is grouped under that account (pimdir SPEC §9.2). Within
+the account, a collection is further keyed by its source's namespace, so two
+sources of one kind are told apart without inferring it from the collection
+naming. Two hand-written accounts may still share one `store.root`, and a reader
+of such a store SHALL be able to tell whose collection is whose.
 
 ### Requirement: A store the format outgrew is refused with its remedy
 A store an earlier draft of the pimdir format wrote cannot be migrated in place.
@@ -261,25 +450,17 @@ ticks and connector-triggered scoped runs serialize instead of failing or
 corrupting.
 
 ### Requirement: An IMAP handle-space change rebuilds the collection and bumps its generation
-For an IMAP side, the driver SHALL compare the stored checkpoint's UIDVALIDITY
+For an IMAP source, the driver SHALL compare the stored checkpoint's UIDVALIDITY
 before and after the pull; on a change it SHALL drive io-replica's rekey
 (carrying cached bodies, summaries and pending state over by link id) and route
 the rebuild write batch through `write_rekeyed`, so `collections.generation`
 bumps atomically with the rebuild and a frontend derives its epoch (an IMAP
 UIDVALIDITY) from the store alone. Ordinary syncs and full resyncs never bump.
-Graph sides never rebuild: Graph message ids survive a delta reset (an expired
+Graph sources never rebuild: Graph message ids survive a delta reset (an expired
 delta link restarts a full round without changing identity).
 
-### Requirement: A two-source sync may mirror every body
-`store.hydration = "full"` SHALL make a two-source retain sync hydrate every
-non-tombstone placement to `Full` on both sides (bodies mirrored in the store),
-reusing the body dedup so a shared body is fetched once. The default stays
-per-mode: a one-source sync always retains every body, a two-source sync
-hydrates only bodies about to cross (`"crossing"`). Full hydration forces
-retain; combined with an explicit `relay` it warns and retains.
-
-### Requirement: Microsoft Graph is a first-class side
-An `msgraph` side SHALL open protocol-direct over io-msgraph (never through a
+### Requirement: Microsoft Graph is a first-class source
+An `msgraph` source SHALL open protocol-direct over io-msgraph (never through a
 frozen aggregator): folders listed two levels deep (`Parent/Child` naming),
 enumeration through the messages delta query carrying the `@odata.deltaLink`
 as the engine's opaque checkpoint (HTTP 410 = expired link, restarting a fresh
@@ -299,7 +480,7 @@ through `message_delete`; appends, moves and content updates are rejected
 ### Requirement: A queued submission is a `submit` queue intent
 Neverest SHALL NOT reserve a collection for queued sends. Submission is a
 **mail** capability: a `submit` intent belongs to a `message/rfc822` account,
-and an `<side>.smtp` channel declared on a side of any other kind SHALL be
+and an `smtp` channel declared on a source of any other kind SHALL be
 refused before any connection is made, rather than silently ignored. A submission SHALL be
 a **queue action** whose kind (`submit`) is defined by neverest, not by pimdir:
 the format carries an action kind and a versioned JSON payload, and which kinds
@@ -316,10 +497,10 @@ GC can sweep it between the enqueue and the send); it belongs to no collection.
 The intent SHALL anchor on whatever collection the producer chose: neverest
 scans every collection's pending actions, so there is no anchor rule.
 
-Neverest SHALL perform each pending intent through the first side offering a
-send channel: its own `<side>.smtp` table (`server` `smtps://host:465` or
+Neverest SHALL perform each pending intent through the one source offering a
+send channel: its own `smtp` table (`server` `smtps://host:465` or
 `smtp://host:587` + `starttls`, optional login/password), else its native send
-(the Graph `sendMail` action, which files the message in Sent itself), sides
+(the Graph `sendMail` action, which files the message in Sent itself), sources
 walked in configuration order (`left`, then `right`). On success the row SHALL
 be acknowledged, releasing the body's pin. A **transient** failure (an SMTP 4xx,
 a transport error) SHALL leave the row pending; a **permanent** one (an SMTP
@@ -339,7 +520,7 @@ as `store.purge-after`, a human duration (one integer plus `s`/`m`/`h`/`d`/`w`).
 terminal delete. There SHALL be no boolean beside it: the delay is the switch.
 
 A sync run SHALL sweep **after** the sync and before the report is finalised, on
-both the two-side and the single-source paths, never in a dry run, purging every
+both the pair and the solo paths, never in a dry run, purging every
 retained item whose `retained_at` precedes `now - purge-after` (RFC 3339, the
 shape the store stamps). Sweeping after the sync means an item this run retired
 starts its delay now rather than being reclaimed by the run that retired it. The
@@ -347,22 +528,15 @@ sweep SHALL warn rather than fail the run, as the send channel does, and `sync
 --no-purge` SHALL skip it. The report SHALL carry what was reclaimed (items and
 bytes) in both the text and `--json` output.
 
-A read-only remote side (`<side>.<backend>.item.delete = false`,
+A read-only source (`<protocol>.item.delete = false`,
 `collection.delete = false`) with no purge delay is therefore a backup: a remote
 expunge retires the local row without losing the item or its body.
-
-### Requirement: A side pairs one backend with its send channel
-A side SHALL be a table naming exactly one backend (`<side>.imap`,
-`<side>.jmap`, `<side>.gmail`, `<side>.msgraph`) and, optionally, the
-`<side>.smtp` channel completing it. A backend key that matches no backend
-SHALL be refused. The account root SHALL carry no `smtp` table: a configuration
-keeping one SHALL fail to parse rather than silently stop sending.
 
 ### Requirement: The checkpoint is opaque to the shared client seam
 The backend-neutral enumeration seam SHALL carry the incremental-sync cursor as
 opaque checkpoint bytes and string member handles: the IMAP adapter encodes its
 `(UIDVALIDITY, HIGHESTMODSEQ)` pair, the Graph adapter its delta link, and the
-engine stores whichever bytes the side produced. (Supersedes the IMAP-shaped
+engine stores whichever bytes the source produced. (Supersedes the IMAP-shaped
 `(u32, u64)` cursor on the shared seam; the QRESYNC behaviour itself is
 unchanged and stays specified under "IMAP enumeration is incremental".)
 
@@ -445,7 +619,7 @@ falls back to per-message fetches rather than misroute. In the one-source sync,
 hydration is a single account-wide phase (see the three phases above): bodies are
 ordered **largest-first** globally using each item's size from the store meta (no
 size probe), chunked into per-mailbox batches, biggest first, and work-stolen
-across the pool over one queue with no per-mailbox barrier; the cross-side copy
+across the pool over one queue with no per-mailbox barrier; the cross-source copy
 path, lacking sizes, falls back to UID order. On any batch error the fetch SHALL
 fall back to per-message fetches; content-addressing makes the partial retry
 idempotent.
@@ -462,22 +636,23 @@ the store meta, never a server size probe.
 > to spell out as they are touched.
 
 
-### Requirement: A side's backend declares the kind it syncs
+### Requirement: A source's backend declares the kind it syncs
 Every sync backend SHALL declare the IANA media type of the items it syncs, and
 that type SHALL be recorded as the pimdir collection's `kind`. The kind SHALL be
-derived from the side's backend, never declared in the configuration: the
-account schema stays `left` / `right`, one backend per side, and gains no
-per-kind nesting.
+derived from the source's backend, never declared in the configuration: one
+backend per source, and no per-kind nesting.
 
-An account's two sides SHALL therefore be checked **at runtime**, not at config
-load: when the sides open and report their media types, a pair that disagrees
-SHALL fail with a clear error before any store write, since a mailbox cannot
-reconcile against an address book. A store MAY hold collections of several
-kinds, which is what pimdir is built for.
+The media type SHALL also be knowable from the protocol alone, without opening a
+connection, since that is what lets a namespace be grouped and its derivation
+reported before a first sync and while a remote is down. A pair that disagrees
+SHALL still fail with a clear error before any store write, since a mailbox
+cannot reconcile against an address book. A store MAY hold collections of
+several kinds, which is what pimdir is built for, and an account MAY now feed it
+several.
 
 ### Requirement: Link id and meta are per-kind, resolved at one seam
 The cross-collection link id and the `v:1` meta summary SHALL be produced by one
-implementation per media type, selected from the side's declared kind at a single
+implementation per media type, selected from the source's declared kind at a single
 dispatch point. `message/rfc822` keeps the `Message-ID` (`mid:`) identity with
 its `(subject, date, sender)` (`alt:`) fallback. `text/vcard` and `text/calendar`
 SHALL use the vCard / iCalendar `UID` (`uid:`), falling back to the content hash
@@ -519,18 +694,18 @@ duplicate rule of its own.
 A run that wrote to a remote SHALL report it. `already in sync` SHALL mean the
 run wrote nothing, and an append performed by the sync SHALL appear as a hunk,
 so a report can be read as the record of what happened rather than a summary
-that may omit it. A relayed copy (streamed side to side, never reaching the
+that may omit it. A relayed copy (streamed source to source, never reaching the
 projection the report is otherwise built from) SHALL therefore be itemized where
 it is performed.
 
-### Requirement: A side may be denied item updates
-The per-side permission set SHALL gate item updates (`item.update`, default
+### Requirement: A source may be denied item updates
+The per-source permission set SHALL gate item updates (`item.update`, default
 true) beside the existing collection and item create/delete and flag gates. An
-update hunk a side's policy forbids SHALL be dropped from the patch and surfaced
-in the report, so a mutable-content side can be made read-only.
+update hunk a source's policy forbids SHALL be dropped from the patch and surfaced
+in the report, so a mutable-content source can be made read-only.
 
 ### Requirement: DAV collections enumerate by sync token and resolve at Full
-A CardDAV or CalDAV side SHALL enumerate through `REPORT sync-collection`,
+A CardDAV or CalDAV source SHALL enumerate through `REPORT sync-collection`,
 storing the returned sync token verbatim as the collection's opaque checkpoint,
 and SHALL fall back to a tokenless report (the whole member
 set, reported complete) when the server rejects the stored token. Because that report returns hrefs and ETags but
@@ -540,7 +715,7 @@ cannot differ between tiers. Bodies SHALL be fetched in batches through
 `addressbook-multiget` / `calendar-multiget`.
 
 ### Requirement: A DAV connection survives a server that closes it
-A DAV side SHALL reopen its connection and run the exchange again when the
+A DAV source SHALL reopen its connection and run the exchange again when the
 server closed it between requests (an HTTP/1.0 answer, a `Connection: close`),
 carrying the discovery it already paid for over to the new connection. Only an
 end-of-stream or reset failure SHALL be retried, being the shape of a request
@@ -555,19 +730,19 @@ re-probe the item on every run.
 
 
 ### Requirement: A refused delete is held, never reverted
-Every side SHALL sync under `ReplicaDeletePolicy::Keep`. Both refusals (`push`
-off, or `item.delete = false`) run through that one disposition, and each side
+Every source SHALL sync under `ReplicaDeletePolicy::Keep`. Both refusals (`push`
+off, or `item.delete = false`) run through that one disposition, and each source
 here is bound to the store's hub, which fixes the answer: reverting a tombstone
 states that the source still holds the member, and a hub reads that as the item
 being alive (add-beats-delete across sources), so it clears the deletion for
-every side and mirrors the item back to the one it was deleted on.
+every source and mirrors the item back to the one it was deleted on.
 
-A side configured to take no deletes would then resurrect on both what the user
+A source configured to take no deletes would then resurrect on both what the user
 removed on one, which is the opposite of what that setting is for.
 
-#### Scenario: A read-only side keeps the removal
-- GIVEN a staged delete on a side whose `item.delete` is false
-- WHEN the side is synced
+#### Scenario: A read-only source keeps the removal
+- GIVEN a staged delete on a source whose `item.delete` is false
+- WHEN the source is synced
 - THEN nothing is pushed and the tombstone stays, rather than being undone into a clean row
 
 ### Requirement: A purge is followed by a collection

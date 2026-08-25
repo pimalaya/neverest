@@ -6,21 +6,24 @@
 //! existing account by `neverest configure` (see [`super::edit`]). It
 //! opens with a welcome banner on stderr, then asks for **one** input:
 //! an email address. A bare domain is accepted too (it is synthesized as
-//! `@domain`); a side is always a remote, so there is no server URL or
+//! `@domain`); a source is always a remote, so there is no server URL or
 //! folder path to type here.
 //!
 //! The address feeds io-pim-discovery's parallel discovery (see
 //! [`super::search`]) and every reachable service becomes one selectable
 //! configuration; picking one then prompts its authentication method and
 //! credentials, and tests the connection. Only backends compiled into
-//! this build are proposed, so the wizard never writes a side
+//! this build are proposed, so the wizard never writes a source
 //! [`crate::client::open`] would refuse. When discovery finds nothing the
 //! wizard stops and points at the documented sample, rather than
 //! prompting for a hand-entered config.
 //!
-//! The wizard configures a **local sync** only: the discovered remote as
-//! `left`, reconciled against the implicit pimdir store. A
-//! remote-to-remote mirror (a `right` side) is written by hand.
+//! The wizard writes **one account with one source**, in the
+//! direct-backend sugar (`imap.server = …`): the offline replica, which is
+//! the common case. A source alone in its namespace makes the store keep
+//! every body, so that account reads offline with no further setting. A
+//! second kind, a mirror and a fan-in are all written by hand against
+//! config.sample.toml.
 //!
 //! The generated configuration is offered for saving when writing to a
 //! terminal; when stdout is redirected (`neverest > config.toml`) or in
@@ -35,7 +38,7 @@ use pimalaya_config::toml as config_toml;
 use serde::{Serialize, Serializer};
 
 #[cfg(any(feature = "imap", feature = "msgraph", feature = "carddav"))]
-use crate::config::SideBackendConfig;
+use crate::config::SourceBackendConfig;
 #[cfg(feature = "carddav")]
 use crate::wizard::carddav;
 #[cfg(feature = "imap")]
@@ -45,7 +48,7 @@ use crate::wizard::msgraph;
 #[cfg(any(feature = "imap", feature = "msgraph", feature = "carddav"))]
 use crate::wizard::search::DiscoveredKind;
 use crate::{
-    config::{AccountConfig, Config, SideConfig},
+    config::{AccountConfig, Config, SourceConfig},
     wizard::search::{self, Discovered},
 };
 
@@ -72,17 +75,13 @@ pub fn run(printer: &mut impl Printer, target: &Path) -> Result<Config> {
     // NOTE: the account name is just the TOML table key, so it is derived from
     // the email rather than prompted, and the user renames it by hand.
     let account_name = default_account_name(&email);
-    let side = configure(&account_name, &email)?;
+    let source = configure(&account_name, &email)?;
 
-    let account = AccountConfig {
-        default: true,
-        left: Some(side),
-        right: None,
-        store: Default::default(),
-        collection: Default::default(),
-        item: Default::default(),
-        connections: None,
-    };
+    // NOTE: one source, written as the direct-backend sugar. A single source
+    // shares its namespace with nobody, so the store keeps every body and the
+    // account is the offline replica the wizard is for. A mirror, a fan-in and
+    // a second kind are all hand-written.
+    let account = AccountConfig::with_source(true, source);
 
     let config = Config {
         accounts: HashMap::from([(account_name.clone(), account)]),
@@ -188,7 +187,7 @@ pub fn prompt_email_with(default: Option<&str>) -> Result<String> {
 /// build supports, lets the user pick one, then configures its backend
 /// (the authentication method is picked in a second, service-specific
 /// prompt) and tests the connection.
-pub fn configure(account_name: &str, email: &str) -> Result<SideConfig> {
+pub fn configure(account_name: &str, email: &str) -> Result<SourceConfig> {
     let spinner = Spinner::start("Searching for server settings");
     let mut found = search::search(email)?;
     search::retain_supported(&mut found);
@@ -211,24 +210,24 @@ pub fn configure(account_name: &str, email: &str) -> Result<SideConfig> {
     allow(unreachable_patterns)
 )]
 #[cfg_attr(not(feature = "imap"), allow(unused_variables))]
-fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<SideConfig> {
+fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<SourceConfig> {
     match &choice.kind {
         #[cfg(feature = "imap")]
         DiscoveredKind::ImapSmtp { .. } => {
             let (imap, smtp) = imap_smtp::configure_discovered(account_name, email, &choice)?;
-            Ok(SideConfig {
-                backend: SideBackendConfig::Imap(imap),
+            Ok(SourceConfig {
+                backend: SourceBackendConfig::Imap(imap),
                 smtp,
             })
         }
         #[cfg(feature = "msgraph")]
         // NOTE: Graph sends through its own `sendMail` action, so this side
         // needs no channel of its own.
-        DiscoveredKind::Msgraph => Ok(SideConfig::new(SideBackendConfig::Msgraph(
+        DiscoveredKind::Msgraph => Ok(SourceConfig::new(SourceBackendConfig::Msgraph(
             msgraph::configure(account_name)?,
         ))),
         #[cfg(feature = "carddav")]
-        DiscoveredKind::Carddav { url } => Ok(SideConfig::new(SideBackendConfig::Carddav(
+        DiscoveredKind::Carddav { url } => Ok(SourceConfig::new(SourceBackendConfig::Carddav(
             carddav::configure(account_name, url, &choice)?,
         ))),
         kind => bail!("Configuration `{kind:?}` is not supported by this build"),
@@ -240,7 +239,7 @@ fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<SideC
 /// from the documented sample) and errors out, rather than dropping into
 /// a hand-entry flow. The wizard only ever configures what it can
 /// discover automatically.
-fn stop_undiscovered(email: &str) -> Result<SideConfig> {
+fn stop_undiscovered(email: &str) -> Result<SourceConfig> {
     bail!(
         "Could not automatically discover a configuration for `{email}`.\n\n\
          Write your account configuration by hand instead, starting from the \

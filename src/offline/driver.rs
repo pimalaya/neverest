@@ -50,37 +50,59 @@ use io_replica::{
 use log::{info, warn};
 use pimalaya_cli::spinner::Spinner;
 
+#[cfg(any(feature = "smtp", feature = "msgraph"))]
+use crate::sync::report::SubmitEntry;
 use crate::{
     client::{Client, Pool},
-    config::{
-        AccountConfig, CollectionFilter, Hydration, Retention, SideConfig, SideName,
-        SidePermissions,
-    },
+    config::{AccountConfig, CollectionFilter, SourceConfig, SourceGroup, SourcePermissions},
     item::flag::Flag,
     kind::Kind,
     offline::{
         drive, pipe,
         remote::{BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, hydrate_batch, resolve_kind},
-        source_id,
+        state::StoreState,
         storage::{hydration_targets, load_side, projection_view},
         submit,
     },
-    side::Side,
     sync::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
-            AmbiguousIdentity, DrainedQueue, ItemConflict, ParkedQueueAction, PatchEntry,
-            PurgedItems, SyncReport,
+            AmbiguousIdentity, DrainedQueue, ItemConflict, NamespaceReport, ParkedQueueAction,
+            PatchEntry, PurgedItems, SyncReport,
         },
     },
 };
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
-use crate::{config::SmtpConfig, sync::report::SubmitEntry};
 
 /// How many extra sync passes to run after the first, propagating and settling
 /// cross-side changes. Two or three passes converge a collection in practice,
 /// so the cap only guards against a pathological loop.
 const MAX_EXTRA_PASSES: usize = 4;
+
+/// The remote name behind a hub collection id, for a report the user reads.
+///
+/// A report names the collection the way its server does, not the way the store
+/// keys it: that is the name the user typed into `--include-collection` and the
+/// one they see in their client.
+fn display_name<'a>(namespace: &str, collection: &'a str) -> &'a str {
+    collection
+        .strip_prefix(namespace)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(collection)
+}
+
+/// The hub collection id a remote collection name binds to in `namespace`.
+///
+/// A hub collection is keyed by its kind, its namespace and its name, and this
+/// is where the last two meet: a mailbox and an address book both called
+/// `Default` land on different ids, and two providers cached side by side never
+/// share one. The kind rides on the collection row, declared by
+/// `ensure_collection`.
+///
+/// [`crate::offline::remote::PimRemote`] strips the prefix back off before any
+/// call reaches the wire, so a server only ever sees the name it gave.
+fn hub_id(namespace: &str, name: &str) -> String {
+    format!("{namespace}/{name}")
+}
 
 /// Resolves `<state_dir>/neverest/<account>/`, the default replica root.
 pub fn replica_dir(account: &str) -> Result<PathBuf> {
@@ -100,7 +122,7 @@ pub fn store_dir(account: &str, config: &AccountConfig) -> Result<PathBuf> {
 /// How many connections a side may open. An HTTP backend keeps one: extra
 /// connections only pay extra token acquisitions, the API being
 /// request/response anyway.
-fn connection_budget(config: &SideConfig, connections: usize) -> usize {
+fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
     if config.is_imap() {
         connections.max(1)
     } else {
@@ -135,18 +157,27 @@ fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceSto
 /// this check is the enforcement point. It runs after the sides open, the
 /// earliest moment their media types are known, and before the first store
 /// write, so a mismatched account fails with nothing half-written.
-fn check_kinds(left: &mut SideCtx, right: &mut SideCtx) -> Result<Kind> {
-    let left = (left.side, left.pool.primary().media_type());
-    let right = (right.side, right.pool.primary().media_type());
+fn check_kinds(left: &mut SourceCtx, right: &mut SourceCtx) -> Result<Kind> {
+    let left = (
+        left.name.clone(),
+        left.pool.primary().media_type().to_string(),
+    );
+    let right = (
+        right.name.clone(),
+        right.pool.primary().media_type().to_string(),
+    );
+    let left = (left.0.as_str(), left.1.as_str());
+    let right = (right.0.as_str(), right.1.as_str());
     pair_kind(left, right)
 }
 
 /// The pure half of [`check_kinds`]: the two sides' media types in, the one
 /// kind they agree on out.
-fn pair_kind(left: (Side, &str), right: (Side, &str)) -> Result<Kind> {
-    let resolve = |(side, raw): (Side, &str)| -> Result<Kind> {
-        Kind::from_media_type(raw)
-            .with_context(|| format!("This build cannot sync items of type `{raw}` ({side} side)"))
+fn pair_kind(left: (&str, &str), right: (&str, &str)) -> Result<Kind> {
+    let resolve = |(source, raw): (&str, &str)| -> Result<Kind> {
+        Kind::from_media_type(raw).with_context(|| {
+            format!("This build cannot sync items of type `{raw}` (source {source})")
+        })
     };
 
     let left_kind = resolve(left)?;
@@ -170,12 +201,12 @@ fn pair_kind(left: (Side, &str), right: (Side, &str)) -> Result<Kind> {
 /// Live per-collection progress: the collection spinner and its base label, so
 /// an inner phase such as body hydration or relay can append a percentage to
 /// the `[2/7] Syncing INBOX` line.
-struct MailboxProgress<'a> {
+struct CollectionProgress<'a> {
     spinner: &'a Spinner,
     label: &'a str,
 }
 
-impl MailboxProgress<'_> {
+impl CollectionProgress<'_> {
     /// Updates the spinner to `<label> <percent>%` of `done`/`total`.
     fn tick(&self, done: usize, total: usize) {
         let percent = (done * 100).checked_div(total).unwrap_or(100);
@@ -184,14 +215,19 @@ impl MailboxProgress<'_> {
     }
 }
 
-/// One connected side plus its permissions and whether it may push.
-struct SideCtx {
-    side: Side,
+/// One connected source plus its permissions and whether it may push.
+struct SourceCtx {
+    /// The source's configured name, which is its pimdir source id and the
+    /// name every hunk this run reports carries.
+    name: String,
+    /// The hub namespace it binds into, stripped back off a collection id
+    /// before any call reaches the wire.
+    namespace: String,
     pool: Pool,
-    perms: SidePermissions,
+    perms: SourcePermissions,
 }
 
-impl SideCtx {
+impl SourceCtx {
     /// A side pushes unless it forbids every item and flag mutation (a fully
     /// read-only source, e.g. the remote leg of a backup).
     fn writable(&self) -> bool {
@@ -216,75 +252,31 @@ impl SideCtx {
     }
 }
 
-/// Runs the whole account sync and returns the report. Dispatches on the number
-/// of configured sides: one is a local sync, that remote against the retained
-/// pimdir store the app reads, two is a remote-to-remote sync through the
-/// store, cross-side propagation falling out of the shared hub.
+/// Runs the whole account sync and returns the report.
+///
+/// An account is one hub, so the sync walks its namespaces (see
+/// [`AccountConfig::groups`]): every source of one kind sharing a
+/// `collection.namespace` is one group, binding one set of hub collections.
+/// A group of one is the local sync, that remote against the store the app
+/// reads. A group of two is the remote-to-remote sync, cross-source
+/// propagation falling out of the shared hub. Groups never see each other:
+/// their collection ids differ, which is exactly what keeps a mail source and
+/// a contacts source, or two providers cached side by side, from meeting.
+///
+/// What the store keeps per group is derived here, never configured, and
+/// reported whether or not the run wrote anything.
 pub fn run(
     account_name: impl Into<String>,
     account_config: &AccountConfig,
-    mailbox_filter: Option<CollectionFilter>,
+    collection_filter: Option<CollectionFilter>,
     dry_run: bool,
     connections: usize,
     no_purge: bool,
+    only_sources: &[String],
 ) -> Result<SyncReport> {
     let account_name = account_name.into();
-    match (account_config.left.clone(), account_config.right.clone()) {
-        (None, None) => {
-            bail!("Account `{account_name}` has no side configured (set `left` and/or `right`)")
-        }
-        (Some(side), None) => run_single(
-            account_name,
-            account_config,
-            SideName::Left,
-            side,
-            mailbox_filter,
-            dry_run,
-            connections,
-            no_purge,
-        ),
-        (None, Some(side)) => run_single(
-            account_name,
-            account_config,
-            SideName::Right,
-            side,
-            mailbox_filter,
-            dry_run,
-            connections,
-            no_purge,
-        ),
-        (Some(left), Some(right)) => run_dual(
-            account_name,
-            account_config,
-            left,
-            right,
-            mailbox_filter,
-            dry_run,
-            connections,
-            no_purge,
-        ),
-    }
-}
-
-/// The remote-to-remote (two-source) sync.
-#[allow(clippy::too_many_arguments)]
-fn run_dual(
-    account_name: String,
-    account_config: &AccountConfig,
-    left_config: SideConfig,
-    right_config: SideConfig,
-    mailbox_filter: Option<CollectionFilter>,
-    dry_run: bool,
-    connections: usize,
-    no_purge: bool,
-) -> Result<SyncReport> {
-    let mailbox_filter = mailbox_filter.unwrap_or_else(|| account_config.collection.filter.clone());
-
-    let mut report = SyncReport {
-        account: account_name.clone(),
-        dry_run,
-        ..Default::default()
-    };
+    let sources = account_config.sources()?;
+    let groups = select_groups(account_config, only_sources)?;
 
     let real_dir = store_dir(&account_name, account_config)?;
     let work_dir = if dry_run {
@@ -295,45 +287,194 @@ fn run_dual(
     fs::create_dir_all(&work_dir)
         .with_context(|| format!("Create replica dir `{}` error", work_dir.display()))?;
 
-    let mut left_store = open_store(&work_dir, "left", &account_name)?;
-    let mut right_store = open_store(&work_dir, "right", &account_name)?;
+    let mut state = StoreState::load(&work_dir)?;
+
+    let mut report = SyncReport {
+        account: account_name.clone(),
+        dry_run,
+        ..Default::default()
+    };
+
+    for group in &groups {
+        let key = format!("{}/{}", group.media_type, group.namespace);
+        let bodies = group.bodies.to_string();
+
+        report.namespaces.push(NamespaceReport {
+            media_type: group.media_type.to_string(),
+            namespace: group.namespace.clone(),
+            sources: group.sources.clone(),
+            was: state.previous(&key, &bodies),
+            bodies,
+        });
+
+        state.record(key, group.bodies.to_string());
+    }
+
+    for group in &groups {
+        let configs: Vec<SourceConfig> = group
+            .sources
+            .iter()
+            .map(|name| sources[name].clone())
+            .collect();
+
+        let outcome = match configs.as_slice() {
+            [only] => run_solo(
+                &account_name,
+                account_config,
+                group,
+                only.clone(),
+                collection_filter.clone(),
+                &work_dir,
+                dry_run,
+                connections,
+                &mut report,
+            ),
+            [a, b] => run_pair(
+                &account_name,
+                account_config,
+                group,
+                a.clone(),
+                b.clone(),
+                collection_filter.clone(),
+                &work_dir,
+                dry_run,
+                connections,
+                &mut report,
+            ),
+            _ => bail!(
+                "Namespace `{}` holds {} sources ({}), and a namespace of three or more is not \
+                 implemented yet. Give one of them a `collection.namespace` of its own, or split \
+                 it into another account.",
+                group.namespace,
+                group.sources.len(),
+                group.sources.join(", "),
+            ),
+        };
+
+        // A namespace that fails is reported and the next one still runs: they
+        // share nothing but the file the store lives in, so one broken remote
+        // is no reason to leave the others unsynced.
+        if let Err(err) = outcome {
+            warn!("namespace `{}` sync error: {err:#}", group.namespace);
+            report.collection.patch.push(PatchEntry::new(
+                CollectionHunk::Create {
+                    side: group.sources.join(", "),
+                    collection: group.namespace.clone(),
+                },
+                Some(err),
+            ));
+        }
+    }
+
+    if !dry_run {
+        let sweeper = groups
+            .first()
+            .and_then(|group| group.sources.first())
+            .expect("a validated account has at least one source");
+        let mut store = open_store(&work_dir, sweeper, &account_name)?;
+
+        if !no_purge {
+            sweep_retained(account_config, &mut store, &mut report);
+        }
+
+        state.save(&work_dir)?;
+    }
+
+    if dry_run {
+        let _ = fs::remove_dir_all(&work_dir);
+    }
+
+    crate::offline::prof::report();
+    Ok(report)
+}
+
+/// The namespaces this run touches: every one of them, or only those holding a
+/// source `--source` named.
+///
+/// Narrowing picks *namespaces*, not sources: a mirror whose two sources share
+/// a namespace is reconciled as a pair or not at all, since running half of it
+/// would push one way and call it done.
+fn select_groups(account_config: &AccountConfig, only: &[String]) -> Result<Vec<SourceGroup>> {
+    let groups = account_config.groups()?;
+
+    if only.is_empty() {
+        return Ok(groups);
+    }
+
+    let known: HashSet<&String> = groups.iter().flat_map(|group| &group.sources).collect();
+
+    if let Some(unknown) = only.iter().find(|name| !known.contains(name)) {
+        bail!(
+            "This account has no source named `{unknown}`. It declares {}.",
+            known
+                .iter()
+                .map(|name| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+
+    Ok(groups
+        .into_iter()
+        .filter(|group| group.sources.iter().any(|name| only.contains(name)))
+        .collect())
+}
+
+/// The two-source sync of one namespace: both sources against the shared hub,
+/// cross-source propagation falling out of it.
+#[allow(clippy::too_many_arguments)]
+fn run_pair(
+    account_name: &str,
+    account_config: &AccountConfig,
+    group: &SourceGroup,
+    left_config: SourceConfig,
+    right_config: SourceConfig,
+    collection_filter: Option<CollectionFilter>,
+    work_dir: &Path,
+    dry_run: bool,
+    connections: usize,
+    report: &mut SyncReport,
+) -> Result<()> {
+    let left_name = group.sources[0].clone();
+    let right_name = group.sources[1].clone();
+
+    // NOTE: the filter is the left source's. It belongs to a source now, but a
+    // pair binds one set of hub collections, so applying two different filters
+    // to one namespace would mean syncing a collection on one source and not
+    // the other, which reads as a delete on the second pass.
+    let left_filter = left_config.collection().filter.clone();
+
+    let mut left_store = open_store(work_dir, &left_name, account_name)?;
+    let mut right_store = open_store(work_dir, &right_name, account_name)?;
     let blobs = left_store.blobs();
 
-    drain_queues(&mut left_store, &mut report);
+    drain_queues(&mut left_store, report);
 
-    let hydrate_full = account_config.store.hydration == Some(Hydration::Full);
-
-    let relay_capable = left_config.is_imap() && right_config.is_imap();
-    let relay = match account_config.store.retention {
-        Some(Retention::Retain) => false,
-        Some(Retention::Relay) => {
-            if !relay_capable {
-                warn!("relay requested but a side is not IMAP; retaining instead");
-            }
-            if hydrate_full {
-                warn!("relay requested but hydration is full; retaining instead");
-            }
-            relay_capable && !hydrate_full
-        }
-        None => relay_capable && !hydrate_full,
-    };
+    // Derived, never configured: a pair on a streamable pairing keeps no body
+    // and streams each crossing; anything else keeps what crossed. `all` cannot
+    // occur here, a pair never being alone in its namespace.
+    let relay = group.bodies.relays();
+    let hydrate_full = group.bodies.hydrates_everything();
 
     let left_budget = connection_budget(&left_config, connections);
     let right_budget = connection_budget(&right_config, connections);
 
-    let s = Spinner::start("Opening sides…");
-    let mut left = SideCtx {
-        side: Side::Left,
+    let s = Spinner::start("Opening sources…");
+    let mut left = SourceCtx {
+        name: left_name.clone(),
+        namespace: group.namespace.clone(),
         perms: left_config.permissions(),
-
-        pool: Pool::open(left_config, left_budget).context("Open left side")?,
+        pool: Pool::open(left_config, left_budget)
+            .with_context(|| format!("Open source {left_name}"))?,
     };
-    let mut right = SideCtx {
-        side: Side::Right,
+    let mut right = SourceCtx {
+        name: right_name.clone(),
+        namespace: group.namespace.clone(),
         perms: right_config.permissions(),
-        pool: Pool::open(right_config, right_budget).context("Open right side")?,
+        pool: Pool::open(right_config, right_budget)
+            .with_context(|| format!("Open source {right_name}"))?,
     };
-    s.success("Opened sides");
+    s.success("Opened sources");
 
     let kind = check_kinds(&mut left, &mut right)?;
     let media_type = kind.media_type();
@@ -344,28 +485,29 @@ fn run_dual(
             &mut [&mut left, &mut right],
             &mut left_store,
             &blobs,
-            &mut report,
+            report,
         );
     }
 
     let s = Spinner::start("Listing collections…");
-    let left_mailboxes = list_collections(left.pool.primary())?;
-    let right_mailboxes = list_collections(right.pool.primary())?;
+    let left_collections = list_collections(left.pool.primary())?;
+    let right_collections = list_collections(right.pool.primary())?;
     s.success(format!(
-        "Listed collections ({} left, {} right)",
-        left_mailboxes.len(),
-        right_mailboxes.len()
+        "Listed collections ({} on {left_name}, {} on {right_name})",
+        left_collections.len(),
+        right_collections.len()
     ));
 
-    let left_filtered = filter_mailboxes(&left_mailboxes, &mailbox_filter);
-    let right_filtered = filter_mailboxes(&right_mailboxes, &mailbox_filter);
+    let filter = collection_filter.unwrap_or(left_filter);
+    let left_filtered = filter_collections(&left_collections, &filter);
+    let right_filtered = filter_collections(&right_collections, &filter);
 
-    let mailbox_hunks = diff_mailboxes(&left_filtered, &right_filtered, &left, &right);
-    for hunk in mailbox_hunks {
+    let collection_hunks = diff_collections(&left_filtered, &right_filtered, &left, &right);
+    for hunk in collection_hunks {
         let error = if dry_run {
             None
         } else {
-            apply_mailbox_hunk(&hunk, &mut left, &mut right).err()
+            apply_collection_hunk(&hunk, &mut left, &mut right).err()
         };
         report.collection.patch.push(PatchEntry::new(hunk, error));
     }
@@ -377,24 +519,26 @@ fn run_dual(
             continue;
         }
         if let CollectionHunk::Create { side, collection } = &entry.hunk {
-            match side {
-                Side::Left => present_left.insert(collection.clone()),
-                Side::Right => present_right.insert(collection.clone()),
-            };
+            if *side == left_name {
+                present_left.insert(collection.clone());
+            } else if *side == right_name {
+                present_right.insert(collection.clone());
+            }
         }
     }
     let common: BTreeSet<String> = present_left.intersection(&present_right).cloned().collect();
 
     let total = common.len();
-    for (index, collection) in common.iter().enumerate() {
-        let label = format!("[{}/{total}] Syncing {collection}", index + 1);
+    for (index, name) in common.iter().enumerate() {
+        let collection = &hub_id(&group.namespace, name);
+        let label = format!("[{}/{total}] Syncing {name}", index + 1);
         let s = Spinner::start(label.clone());
-        let progress = MailboxProgress {
+        let progress = CollectionProgress {
             spinner: &s,
             label: &label,
         };
 
-        if let Err(err) = sync_mailbox(
+        if let Err(err) = sync_collection(
             collection,
             media_type,
             &mut left,
@@ -405,16 +549,16 @@ fn run_dual(
             dry_run,
             relay,
             &progress,
-            &mut report,
+            report,
         ) {
-            warn!("`{collection}` sync error: {err:#}");
-            s.success(format!("{collection}: error ({err:#})"));
+            warn!("`{name}` sync error: {err:#}");
+            s.success(format!("{name}: error ({err:#})"));
             continue;
         }
 
         if hydrate_full
             && !dry_run
-            && let Err(err) = hydrate_full_mailbox(
+            && let Err(err) = hydrate_full_collection(
                 collection,
                 &mut left,
                 &mut right,
@@ -424,27 +568,18 @@ fn run_dual(
                 &progress,
             )
         {
-            warn!("`{collection}` full hydration error: {err:#}");
+            warn!("`{name}` full hydration error: {err:#}");
         }
 
-        s.success(format!("{collection}: done"));
+        s.success(format!("{name}: done"));
     }
 
-    if !dry_run && !no_purge {
-        sweep_retained(account_config, &mut left_store, &mut report);
-    }
-
-    if dry_run {
-        let _ = fs::remove_dir_all(&work_dir);
-    }
-
-    crate::offline::prof::report();
-    Ok(report)
+    Ok(())
 }
 
 /// A collection's spine result: its name and the bodies to hydrate (handle + size),
 /// carried from Phase 1 (spine) into Phase 2 (hydrate) and Phase 3 (apply).
-type MailboxPlan = (String, Vec<(ReplicaHandle, u64)>);
+type CollectionPlan = (String, Vec<(ReplicaHandle, u64)>);
 
 /// The local, one-source sync, run as three account-wide phases so the
 /// connection pool stays saturated end to end rather than idling at collection
@@ -455,53 +590,35 @@ type MailboxPlan = (String, Vec<(ReplicaHandle, u64)>);
 /// per collection from cache, with no network. The store is the single local
 /// copy the app reads, so there is no cross-side hydration.
 #[allow(clippy::too_many_arguments)]
-fn run_single(
-    account_name: String,
+fn run_solo(
+    account_name: &str,
     account_config: &AccountConfig,
-    side_name: SideName,
-    side_config: SideConfig,
-    mailbox_filter: Option<CollectionFilter>,
+    group: &SourceGroup,
+    source_config: SourceConfig,
+    collection_filter: Option<CollectionFilter>,
+    work_dir: &Path,
     dry_run: bool,
     connections: usize,
-    no_purge: bool,
-) -> Result<SyncReport> {
-    let mailbox_filter = mailbox_filter.unwrap_or_else(|| account_config.collection.filter.clone());
+    report: &mut SyncReport,
+) -> Result<()> {
+    let source = group.sources[0].clone();
+    let source_filter = source_config.collection().filter.clone();
 
-    let mut report = SyncReport {
-        account: account_name.clone(),
-        dry_run,
-        ..Default::default()
-    };
-
-    let real_dir = store_dir(&account_name, account_config)?;
-    let work_dir = if dry_run {
-        dry_run_replica(&real_dir)?
-    } else {
-        real_dir.clone()
-    };
-    fs::create_dir_all(&work_dir)
-        .with_context(|| format!("Create replica dir `{}` error", work_dir.display()))?;
-
-    // NOTE: the store is opened as the one side's source, so an app writing as
-    // that same source (himalaya auto-detects it) stages edits this sync
-    // pushes. One store handle per connection: Phase 1 fans the spine across
-    // them, their writes serialising on the store's single-writer lock while
-    // the network overlaps.
-    let side = match side_name {
-        SideName::Left => Side::Left,
-        SideName::Right => Side::Right,
-    };
-    let source = side_name.to_string();
-    let workers = connection_budget(&side_config, connections);
+    // NOTE: the store is opened as the one source, so an app writing under the
+    // same id (himalaya auto-detects it) stages edits this sync pushes. One
+    // store handle per connection: Phase 1 fans the spine across them, their
+    // writes serialising on the store's single-writer lock while the network
+    // overlaps.
+    let workers = connection_budget(&source_config, connections);
     let s = Spinner::start("Opening connections…");
-    let mut ctxs = open_side_contexts(side, &side_config, workers)?;
+    let mut ctxs = open_source_contexts(&source, &group.namespace, &source_config, workers)?;
     let mut stores: Vec<PimdirSourceStore> = (0..workers)
-        .map(|_| open_store(&work_dir, &source, &account_name))
+        .map(|_| open_store(work_dir, &source, account_name))
         .collect::<Result<_>>()?;
     let blobs = stores[0].blobs();
     s.success(format!("Opened {} connection(s)", ctxs.len()));
 
-    drain_queues(&mut stores[0], &mut report);
+    drain_queues(&mut stores[0], report);
 
     let raw = ctxs[0].pool.primary().media_type();
     let kind = Kind::from_media_type(raw)
@@ -510,20 +627,17 @@ fn run_single(
 
     if !dry_run {
         let (first, _) = ctxs.split_first_mut().expect("at least one connection");
-        drain_submits(
-            account_config,
-            &mut [first],
-            &mut stores[0],
-            &blobs,
-            &mut report,
-        );
+        drain_submits(account_config, &mut [first], &mut stores[0], &blobs, report);
     }
 
     let s = Spinner::start("Listing collections…");
     let collections = list_collections(ctxs[0].pool.primary())?;
     s.success(format!("Listed collections ({})", collections.len()));
-    let filtered: Vec<String> = filter_mailboxes(&collections, &mailbox_filter)
+
+    let filter = collection_filter.unwrap_or(source_filter);
+    let filtered: Vec<String> = filter_collections(&collections, &filter)
         .into_iter()
+        .map(|name| hub_id(&group.namespace, &name))
         .collect();
 
     // NOTE: pre-created serially so no Phase-1 worker races on lazy collection
@@ -534,35 +648,26 @@ fn run_single(
             .with_context(|| format!("Declare kind for `{collection}`"))?;
     }
 
-    let plans = phase1_spine(
-        &filtered,
-        &mut ctxs,
-        &mut stores,
-        &blobs,
-        dry_run,
-        &mut report,
-    )?;
+    let plans = phase1_spine(&filtered, &mut ctxs, &mut stores, &blobs, dry_run, report)?;
 
     if dry_run {
-        let _ = fs::remove_dir_all(&work_dir);
-        crate::offline::prof::report();
-        return Ok(report);
+        return Ok(());
     }
 
     let cache = phase2_hydrate(&plans, &mut ctxs, &blobs)?;
     phase3_apply(&plans, &mut ctxs[0], &mut stores[0], &blobs, &cache)?;
 
-    if !no_purge {
-        sweep_retained(account_config, &mut stores[0], &mut report);
-    }
-
-    crate::offline::prof::report();
-    Ok(report)
+    Ok(())
 }
 
-/// Opens `count` independent single-connection [`SideCtx`]s in parallel, so the
+/// Opens `count` independent single-connection [`SourceCtx`]s in parallel, so the
 /// connection handshakes overlap instead of paying them one after another.
-fn open_side_contexts(side: Side, config: &SideConfig, count: usize) -> Result<Vec<SideCtx>> {
+fn open_source_contexts(
+    name: &str,
+    namespace: &str,
+    config: &SourceConfig,
+    count: usize,
+) -> Result<Vec<SourceCtx>> {
     let perms = config.permissions();
     let opened: Vec<Result<Pool>> = thread::scope(|scope| {
         let handles: Vec<_> = (0..count)
@@ -578,8 +683,9 @@ fn open_side_contexts(side: Side, config: &SideConfig, count: usize) -> Result<V
     });
     let mut ctxs = Vec::with_capacity(count);
     for pool in opened {
-        ctxs.push(SideCtx {
-            side,
+        ctxs.push(SourceCtx {
+            name: name.to_string(),
+            namespace: namespace.to_string(),
             perms,
             pool: pool.context("Open connection")?,
         });
@@ -595,18 +701,18 @@ fn open_side_contexts(side: Side, config: &SideConfig, count: usize) -> Result<V
 /// is logged and skipped, its bodies never entering the plan.
 fn phase1_spine(
     filtered: &[String],
-    ctxs: &mut [SideCtx],
+    ctxs: &mut [SourceCtx],
     stores: &mut [PimdirSourceStore],
     blobs: &PimdirBlobs,
     dry_run: bool,
     report: &mut SyncReport,
-) -> Result<Vec<MailboxPlan>> {
+) -> Result<Vec<CollectionPlan>> {
     let total = filtered.len();
     let queue: SegQueue<String> = SegQueue::new();
     for collection in filtered {
         queue.push(collection.clone());
     }
-    let plans: Mutex<Vec<MailboxPlan>> = Mutex::new(Vec::new());
+    let plans: Mutex<Vec<CollectionPlan>> = Mutex::new(Vec::new());
     let merged: Mutex<SyncReport> = Mutex::new(SyncReport::default());
     let scanned = AtomicUsize::new(0);
     let s = Spinner::start(format!("Scanning collections (0/{total})"));
@@ -621,7 +727,7 @@ fn phase1_spine(
         for (ctx, store) in ctxs.iter_mut().zip(stores.iter_mut()) {
             scope.spawn(move || {
                 while let Some(collection) = queue_ref.pop() {
-                    match mailbox_spine(&collection, ctx, store, blobs, dry_run) {
+                    match collection_spine(&collection, ctx, store, blobs, dry_run) {
                         Ok((targets, rep)) => {
                             plans_ref.lock().unwrap().push((collection, targets));
                             merged_ref.lock().unwrap().item.patch.extend(rep.item.patch);
@@ -649,9 +755,9 @@ fn phase1_spine(
 /// settle. Returns the not-yet-`Full` bodies to hydrate, each with the size its
 /// local envelope meta carries so the download can run largest-first, plus the
 /// report patches. A dry run stops after itemizing, leaving the targets empty.
-fn mailbox_spine(
+fn collection_spine(
     collection: &str,
-    ctx: &mut SideCtx,
+    ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     dry_run: bool,
@@ -661,22 +767,24 @@ fn mailbox_spine(
     // NOTE: flags are snapshotted before the pull because the pull applies
     // remote changes silently, leaving the item Clean: they can only be
     // itemized from the sync events, not from the post-pull projection.
-    let before = flag_snapshot(store, collection, ctx.side)?;
+    let before = flag_snapshot(store, collection, &ctx.name)?;
 
     // NOTE: pull only first, so the projection still carries any edit the app
     // staged locally, kept dirty because it was not pushed yet.
     let pull = sync_side_rebuilding(collection, ctx, store, blobs, false)?;
+    let display = display_name(&ctx.namespace, collection);
     itemize_pulled(
         &pull.events,
         &before,
         store,
         collection,
-        ctx.side,
+        display,
+        &ctx.name,
         &mut report,
     )?;
     upgrade_probed(collection, ctx, store, blobs)?;
     itemize_single(collection, store, ctx, &mut report)?;
-    itemize_fetches(collection, store, ctx.side, &mut report)?;
+    itemize_fetches(collection, display, store, &ctx.name, &mut report)?;
     if dry_run {
         return Ok((Vec::new(), report));
     }
@@ -694,8 +802,8 @@ fn mailbox_spine(
     // it had reached (a level never falls back there), so keying on the level
     // would leave the edited item bodiless forever.
     let mut targets: Vec<(ReplicaHandle, u64)> = Vec::new();
-    for placement in projection_view(store, collection, ctx.side)
-        .with_context(|| format!("Project {} `{collection}`", ctx.side))?
+    for placement in projection_view(store, collection, &ctx.name)
+        .with_context(|| format!("Project {} `{collection}`", &ctx.name))?
     {
         if placement.status == ReplicaStatus::Tombstone || placement.object.is_some() {
             continue;
@@ -715,8 +823,8 @@ fn mailbox_spine(
 /// into the blob store, and the fetched items are cached by collection and
 /// handle for Phase 3.
 fn phase2_hydrate(
-    plans: &[MailboxPlan],
-    ctxs: &mut [SideCtx],
+    plans: &[CollectionPlan],
+    ctxs: &mut [SourceCtx],
     blobs: &PimdirBlobs,
 ) -> Result<HashMap<FetchKey, ReplicaFetchedItem>> {
     let mut batches: Vec<(u64, String, Vec<ReplicaHandle>)> = Vec::new();
@@ -813,8 +921,8 @@ fn phase2_hydrate(
 /// [`CachedFetchRemote`] serving each body from the Phase 2 cache, a miss
 /// falling back to a real fetch. Only store writes happen here.
 fn phase3_apply(
-    plans: &[MailboxPlan],
-    ctx: &mut SideCtx,
+    plans: &[CollectionPlan],
+    ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     cache: &HashMap<FetchKey, ReplicaFetchedItem>,
@@ -836,13 +944,13 @@ fn phase3_apply(
 /// app to read offline.
 fn apply_full(
     collection: &str,
-    ctx: &mut SideCtx,
+    ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     cache: &HashMap<FetchKey, ReplicaFetchedItem>,
 ) -> Result<()> {
-    let handles: Vec<ReplicaHandle> = projection_view(store, collection, ctx.side)
-        .with_context(|| format!("Project {} `{collection}`", ctx.side))?
+    let handles: Vec<ReplicaHandle> = projection_view(store, collection, &ctx.name)
+        .with_context(|| format!("Project {} `{collection}`", &ctx.name))?
         .into_iter()
         .filter(|p| p.status != ReplicaStatus::Tombstone && p.level < ReplicaLevel::Full)
         .map(|p| p.handle)
@@ -850,7 +958,7 @@ fn apply_full(
     if handles.is_empty() {
         return Ok(());
     }
-    let fallback = PimRemote::new(&mut ctx.pool, blobs.clone());
+    let fallback = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
     let mut remote = CachedFetchRemote::new(cache, fallback);
     drive(
         store,
@@ -866,10 +974,10 @@ fn apply_full(
 fn flag_snapshot(
     store: &PimdirSourceStore,
     collection: &str,
-    side: Side,
+    source: &str,
 ) -> Result<HashMap<String, ReplicaFlags>> {
     Ok(load_side(store, collection)
-        .with_context(|| format!("Load {side} `{collection}`"))?
+        .with_context(|| format!("Load {source} `{collection}`"))?
         .into_iter()
         .map(|placement| (placement.handle.0, placement.flags))
         .collect())
@@ -886,10 +994,11 @@ fn itemize_pulled(
     before: &HashMap<String, ReplicaFlags>,
     store: &PimdirSourceStore,
     collection: &str,
-    side: Side,
+    display: &str,
+    source: &str,
     report: &mut SyncReport,
 ) -> Result<()> {
-    let after = flag_snapshot(store, collection, side)?;
+    let after = flag_snapshot(store, collection, source)?;
     for event in events {
         match event {
             ReplicaEvent::FlagsChanged(handle) => {
@@ -901,8 +1010,8 @@ fn itemize_pulled(
                 if !added.is_empty() {
                     report.item.patch.push(PatchEntry::new(
                         ItemHunk::AddFlags {
-                            side,
-                            collection: collection.to_string(),
+                            side: source.to_string(),
+                            collection: display.to_string(),
                             id: handle.0.clone(),
                             flags: added,
                             content_key: 0,
@@ -913,8 +1022,8 @@ fn itemize_pulled(
                 if !removed.is_empty() {
                     report.item.patch.push(PatchEntry::new(
                         ItemHunk::RemoveFlags {
-                            side,
-                            collection: collection.to_string(),
+                            side: source.to_string(),
+                            collection: display.to_string(),
                             id: handle.0.clone(),
                             flags: removed,
                             content_key: 0,
@@ -926,8 +1035,8 @@ fn itemize_pulled(
             ReplicaEvent::Vanished(handle) => {
                 report.item.patch.push(PatchEntry::new(
                     ItemHunk::Delete {
-                        side,
-                        collection: collection.to_string(),
+                        side: source.to_string(),
+                        collection: display.to_string(),
                         id: handle.0.clone(),
                         content_key: 0,
                     },
@@ -936,8 +1045,8 @@ fn itemize_pulled(
             }
             ReplicaEvent::Conflicted(handle) => {
                 report.conflicts.push(ItemConflict {
-                    side,
-                    collection: collection.to_string(),
+                    side: source.to_string(),
+                    collection: display.to_string(),
                     id: handle.0.clone(),
                 });
             }
@@ -952,16 +1061,19 @@ fn itemize_pulled(
 fn itemize_single(
     collection: &str,
     store: &PimdirStore,
-    ctx: &SideCtx,
+    ctx: &SourceCtx,
     report: &mut SyncReport,
 ) -> Result<()> {
-    let view = projection_view(store, collection, ctx.side)
-        .with_context(|| format!("Project {} `{collection}`", ctx.side))?;
+    let display = display_name(&ctx.namespace, collection);
+    let view = projection_view(store, collection, &ctx.name)
+        .with_context(|| format!("Project {} `{display}`", ctx.name))?;
     for placement in view {
         report
             .ambiguous
-            .extend(ambiguity(ctx.side, collection, &placement));
-        for hunk in placement_hunks(ctx.side, collection, &placement) {
+            .extend(ambiguity(&ctx.name, display, &placement));
+        // NOTE: a solo source has nobody to copy from, so a `Created`
+        // placement cannot arise and the other name is never rendered.
+        for hunk in placement_hunks(&ctx.name, &ctx.name, display, &placement) {
             report.item.patch.push(PatchEntry::new(hunk, None));
         }
     }
@@ -972,12 +1084,13 @@ fn itemize_single(
 /// not-yet-`Full`, non-tombstone item is a body a real run would fetch.
 fn itemize_fetches(
     collection: &str,
+    display: &str,
     store: &PimdirStore,
-    side: Side,
+    source: &str,
     report: &mut SyncReport,
 ) -> Result<()> {
-    let view = projection_view(store, collection, side)
-        .with_context(|| format!("Project {side} `{collection}`"))?;
+    let view = projection_view(store, collection, source)
+        .with_context(|| format!("Project {source} `{collection}`"))?;
     for placement in view {
         if placement.status == ReplicaStatus::Tombstone || placement.level >= ReplicaLevel::Full {
             continue;
@@ -989,8 +1102,8 @@ fn itemize_fetches(
             .unwrap_or_else(|| placement.handle.0.clone());
         report.item.patch.push(PatchEntry::new(
             ItemHunk::Fetch {
-                side,
-                collection: collection.to_string(),
+                side: source.to_string(),
+                collection: display.to_string(),
                 id,
                 content_key: 0,
             },
@@ -1004,17 +1117,17 @@ fn itemize_fetches(
 /// pulling both servers into the hub, a hydration of the bodies about to cross,
 /// then extra passes pushing the projected propagations until quiescent.
 #[allow(clippy::too_many_arguments)]
-fn sync_mailbox(
+fn sync_collection(
     collection: &str,
     media_type: &str,
-    left: &mut SideCtx,
-    right: &mut SideCtx,
+    left: &mut SourceCtx,
+    right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     dry_run: bool,
     relay: bool,
-    progress: &MailboxProgress,
+    progress: &CollectionProgress,
     report: &mut SyncReport,
 ) -> Result<()> {
     // NOTE: one call suffices, both handles sharing the database, and the
@@ -1085,13 +1198,13 @@ fn sync_mailbox(
 #[allow(clippy::too_many_arguments)]
 fn propagate(
     collection: &str,
-    left: &mut SideCtx,
-    right: &mut SideCtx,
+    left: &mut SourceCtx,
+    right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     relay: bool,
-    progress: &MailboxProgress,
+    progress: &CollectionProgress,
     report: &mut SyncReport,
 ) -> Result<usize> {
     if relay {
@@ -1114,7 +1227,8 @@ fn propagate(
 /// length-prefixed without buffering the body, the link id, the flags and the
 /// Message-ID.
 struct RelayTarget {
-    holding: Side,
+    /// The name of the source holding the body.
+    holding: String,
     handle: ReplicaHandle,
     /// The cross-side identity, carried so the relayed append can be itemized
     /// under the same id the hydrating path reports a copy under.
@@ -1129,8 +1243,8 @@ struct RelayTarget {
 fn relay_targets(
     store: &PimdirStore,
     collection: &str,
-    left_creates: bool,
-    right_creates: bool,
+    left: (&str, bool),
+    right: (&str, bool),
 ) -> Result<Vec<RelayTarget>> {
     let hub = store.load_hub(collection)?;
     let mut out = Vec::new();
@@ -1139,15 +1253,8 @@ fn relay_targets(
             continue;
         }
         let (held, binding) = item.sources.iter().next().expect("one source");
-        let holding = if *held == source_id(Side::Left) {
-            Side::Left
-        } else {
-            Side::Right
-        };
-        let target_creates = match holding {
-            Side::Left => right_creates,
-            Side::Right => left_creates,
-        };
+        let holding = held.0.clone();
+        let target_creates = if holding == left.0 { right.1 } else { left.1 };
         if !target_creates {
             continue;
         }
@@ -1187,32 +1294,43 @@ fn meta_size(meta: &Option<ReplicaMeta>) -> Option<usize> {
 /// run that relayed would report having written nothing.
 fn relay_copies(
     collection: &str,
-    left: &mut SideCtx,
-    right: &mut SideCtx,
+    left: &mut SourceCtx,
+    right: &mut SourceCtx,
     store: &mut PimdirSourceStore,
-    progress: &MailboxProgress,
+    progress: &CollectionProgress,
     report: &mut SyncReport,
 ) -> Result<usize> {
     let targets = relay_targets(
         store,
         collection,
-        left.perms.item.create,
-        right.perms.item.create,
+        (&left.name, left.perms.item.create),
+        (&right.name, right.perms.item.create),
     )?;
+    let display = display_name(&left.namespace, collection).to_string();
     let total = targets.len();
     let mut count = 0;
+
     for target in targets {
-        let (holding_pool, target_pool) = match target.holding {
-            Side::Left => (&mut left.pool, &mut right.pool),
-            Side::Right => (&mut right.pool, &mut left.pool),
+        let holds_left = target.holding == left.name;
+        let (holding_pool, target_pool) = if holds_left {
+            (&mut left.pool, &mut right.pool)
+        } else {
+            (&mut right.pool, &mut left.pool)
         };
+        let target_name = if holds_left {
+            right.name.clone()
+        } else {
+            left.name.clone()
+        };
+
         relay_one(holding_pool, target_pool, collection, &target)
-            .with_context(|| format!("Relay `{}` in `{collection}`", target.handle.0))?;
+            .with_context(|| format!("Relay `{}` in `{display}`", target.handle.0))?;
+
         report.item.patch.push(PatchEntry::new(
             ItemHunk::Copy {
-                source_side: target.holding,
-                target_side: target.holding.other(),
-                collection: collection.to_string(),
+                source_side: target.holding.clone(),
+                target_side: target_name,
+                collection: display.clone(),
                 source_id: target.link.clone(),
                 flags: target.flags.iter().cloned().collect(),
                 content_key: content_key(&target.link),
@@ -1261,8 +1379,8 @@ fn relay_one(
 #[allow(clippy::too_many_arguments)]
 fn reconcile_pass(
     collection: &str,
-    left: &mut SideCtx,
-    right: &mut SideCtx,
+    left: &mut SourceCtx,
+    right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
@@ -1308,7 +1426,7 @@ fn moved(report: &ReplicaSyncReport) -> bool {
 /// generation bump; content still converges through link ids on the next sync.
 fn sync_side_rebuilding(
     collection: &str,
-    ctx: &mut SideCtx,
+    ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     push: bool,
@@ -1362,11 +1480,11 @@ fn stored_epoch(
 /// the rekey report and the new generation.
 fn rebuild_collection(
     collection: &str,
-    ctx: &mut SideCtx,
+    ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
 ) -> Result<(ReplicaRekeyReport, i64)> {
-    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone());
+    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
     drive_rekey(store, &mut remote, collection)
 }
 
@@ -1458,19 +1576,19 @@ fn sync_options(push: bool, rights: ReplicaPushRights) -> ReplicaSyncOptions {
 /// Runs one side's `sync` against its server and returns its report.
 fn sync_side(
     collection: &str,
-    ctx: &mut SideCtx,
+    ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     push: bool,
 ) -> Result<ReplicaSyncReport> {
     let opts = sync_options(push, ctx.push_rights());
-    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone());
+    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
     drive(
         store,
         &mut remote,
         ReplicaSync::new(collection.to_string(), opts),
     )
-    .with_context(|| format!("Sync {} `{collection}`", ctx.side))
+    .with_context(|| format!("Sync {} `{collection}`", &ctx.name))
 }
 
 /// Raises every freshly probed placement to the tier its kind resolves at
@@ -1479,12 +1597,12 @@ fn sync_side(
 /// kind whose body is the only thing that does.
 fn upgrade_probed(
     collection: &str,
-    ctx: &mut SideCtx,
+    ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
 ) -> Result<()> {
     let probed: Vec<ReplicaHandle> = load_side(store, collection)
-        .with_context(|| format!("Load {} `{collection}`", ctx.side))?
+        .with_context(|| format!("Load {} `{collection}`", &ctx.name))?
         .into_iter()
         .filter(|p| p.level == ReplicaLevel::Probed && p.status != ReplicaStatus::Tombstone)
         .map(|p| p.handle)
@@ -1493,13 +1611,13 @@ fn upgrade_probed(
         return Ok(());
     }
     let tier = resolve_kind(&mut ctx.pool).probe_tier();
-    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone());
+    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
     drive(
         store,
         &mut remote,
         ReplicaUpgrade::new(collection.to_string(), probed, tier),
     )
-    .with_context(|| format!("Upgrade probed {} `{collection}`", ctx.side))?;
+    .with_context(|| format!("Upgrade probed {} `{collection}`", &ctx.name))?;
     Ok(())
 }
 
@@ -1508,18 +1626,18 @@ fn upgrade_probed(
 /// the copy. Returns how many bodies were fetched.
 fn hydrate_copies(
     collection: &str,
-    left: &mut SideCtx,
-    right: &mut SideCtx,
+    left: &mut SourceCtx,
+    right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
-    progress: &MailboxProgress,
+    progress: &CollectionProgress,
 ) -> Result<usize> {
     let targets = hydration_targets(
         left_store,
         collection,
-        left.perms.item.create,
-        right.perms.item.create,
+        (&left.name, left.perms.item.create),
+        (&right.name, right.perms.item.create),
     )
     .with_context(|| format!("Hydration targets `{collection}`"))?;
     if targets.is_empty() {
@@ -1528,10 +1646,11 @@ fn hydrate_copies(
 
     let mut left_handles = Vec::new();
     let mut right_handles = Vec::new();
-    for (side, handle) in &targets {
-        match side {
-            Side::Left => left_handles.push(handle.clone()),
-            Side::Right => right_handles.push(handle.clone()),
+    for (source, handle) in &targets {
+        if *source == left.name {
+            left_handles.push(handle.clone());
+        } else {
+            right_handles.push(handle.clone());
         }
     }
     let total = targets.len();
@@ -1541,24 +1660,34 @@ fn hydrate_copies(
     if !left_handles.is_empty() {
         // NOTE: cross-side hydration orders by handle, the empty size map, since
         // largest-first is the local-sync retain path's concern.
-        let mut remote =
-            PimRemote::with_progress(&mut left.pool, blobs.clone(), &tick, HashMap::new());
+        let mut remote = PimRemote::with_progress(
+            &mut left.pool,
+            blobs.clone(),
+            left.namespace.clone(),
+            &tick,
+            HashMap::new(),
+        );
         drive(
             left_store,
             &mut remote,
             ReplicaUpgrade::new(collection.to_string(), left_handles, ReplicaTier::Full),
         )
-        .with_context(|| format!("Hydrate bodies left `{collection}`"))?;
+        .with_context(|| format!("Hydrate bodies for {} `{collection}`", left.name))?;
     }
     if !right_handles.is_empty() {
-        let mut remote =
-            PimRemote::with_progress(&mut right.pool, blobs.clone(), &tick, HashMap::new());
+        let mut remote = PimRemote::with_progress(
+            &mut right.pool,
+            blobs.clone(),
+            right.namespace.clone(),
+            &tick,
+            HashMap::new(),
+        );
         drive(
             right_store,
             &mut remote,
             ReplicaUpgrade::new(collection.to_string(), right_handles, ReplicaTier::Full),
         )
-        .with_context(|| format!("Hydrate bodies right `{collection}`"))?;
+        .with_context(|| format!("Hydrate bodies for {} `{collection}`", right.name))?;
     }
     Ok(total)
 }
@@ -1569,18 +1698,19 @@ fn hydrate_copies(
 fn itemize(
     collection: &str,
     store: &PimdirStore,
-    left: &SideCtx,
-    right: &SideCtx,
+    left: &SourceCtx,
+    right: &SourceCtx,
     report: &mut SyncReport,
 ) -> Result<()> {
-    for ctx in [left, right] {
-        let view = projection_view(store, collection, ctx.side)
-            .with_context(|| format!("Project {} `{collection}`", ctx.side))?;
+    for (ctx, other) in [(left, right), (right, left)] {
+        let display = display_name(&ctx.namespace, collection);
+        let view = projection_view(store, collection, &ctx.name)
+            .with_context(|| format!("Project {} `{display}`", ctx.name))?;
         for placement in view {
             report
                 .ambiguous
-                .extend(ambiguity(ctx.side, collection, &placement));
-            for hunk in placement_hunks(ctx.side, collection, &placement) {
+                .extend(ambiguity(&ctx.name, display, &placement));
+            for hunk in placement_hunks(&ctx.name, &other.name, display, &placement) {
                 report.item.patch.push(PatchEntry::new(hunk, None));
             }
         }
@@ -1590,7 +1720,12 @@ fn itemize(
 
 /// Maps a projected placement to its report hunks. A flag change can surface as
 /// both an add and a remove.
-fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -> Vec<ItemHunk> {
+fn placement_hunks(
+    source: &str,
+    other: &str,
+    collection: &str,
+    placement: &ReplicaPlacement,
+) -> Vec<ItemHunk> {
     match placement.status {
         ReplicaStatus::Created => {
             let link = placement
@@ -1599,8 +1734,8 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
                 .map(|l| l.0.clone())
                 .unwrap_or_default();
             vec![ItemHunk::Copy {
-                source_side: side.other(),
-                target_side: side,
+                source_side: other.to_string(),
+                target_side: source.to_string(),
                 collection: collection.to_string(),
                 source_id: link.clone(),
                 flags: to_email_flag_set(&placement.flags),
@@ -1608,7 +1743,7 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
             }]
         }
         ReplicaStatus::Tombstone => vec![ItemHunk::Delete {
-            side,
+            side: source.to_string(),
             collection: collection.to_string(),
             id: placement.handle.0.clone(),
             content_key: 0,
@@ -1623,7 +1758,7 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
             let mut hunks = Vec::new();
             if !added.is_empty() {
                 hunks.push(ItemHunk::AddFlags {
-                    side,
+                    side: source.to_string(),
                     collection: collection.to_string(),
                     id: placement.handle.0.clone(),
                     flags: added,
@@ -1632,7 +1767,7 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
             }
             if !removed.is_empty() {
                 hunks.push(ItemHunk::RemoveFlags {
-                    side,
+                    side: source.to_string(),
                     collection: collection.to_string(),
                     id: placement.handle.0.clone(),
                     flags: removed,
@@ -1646,7 +1781,7 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
             let base_object = placement.base.as_ref().and_then(|b| b.object.as_ref());
             if placement.object.as_ref() != base_object {
                 hunks.push(ItemHunk::Update {
-                    side,
+                    side: source.to_string(),
                     collection: collection.to_string(),
                     id: placement.handle.0.clone(),
                     content_key: 0,
@@ -1671,7 +1806,7 @@ fn placement_hunks(side: Side, collection: &str, placement: &ReplicaPlacement) -
 /// the state is what makes the warning come back on every run, since the second
 /// copy appears in exactly one enumeration.
 fn ambiguity(
-    side: Side,
+    source: &str,
     collection: &str,
     placement: &ReplicaPlacement,
 ) -> Option<AmbiguousIdentity> {
@@ -1683,17 +1818,19 @@ fn ambiguity(
     ids.extend(placement.ambiguous_handles.iter().map(|h| h.0.clone()));
 
     Some(AmbiguousIdentity {
-        side,
+        side: source.to_string(),
         collection: collection.to_string(),
         ids,
     })
 }
 
-fn side_ctx<'a>(side: Side, left: &'a mut SideCtx, right: &'a mut SideCtx) -> &'a mut SideCtx {
-    match side {
-        Side::Left => left,
-        Side::Right => right,
-    }
+/// The context of the named source in a pair.
+fn source_ctx<'a>(
+    name: &str,
+    left: &'a mut SourceCtx,
+    right: &'a mut SourceCtx,
+) -> &'a mut SourceCtx {
+    if left.name == name { left } else { right }
 }
 
 fn list_collections(client: &mut Client) -> Result<HashSet<String>> {
@@ -1705,7 +1842,10 @@ fn list_collections(client: &mut Client) -> Result<HashSet<String>> {
         .collect())
 }
 
-fn filter_mailboxes(collections: &HashSet<String>, filter: &CollectionFilter) -> BTreeSet<String> {
+fn filter_collections(
+    collections: &HashSet<String>,
+    filter: &CollectionFilter,
+) -> BTreeSet<String> {
     let matches = |name: &str, list: &[String]| list.iter().any(|f| f.eq_ignore_ascii_case(name));
     collections
         .iter()
@@ -1720,17 +1860,17 @@ fn filter_mailboxes(collections: &HashSet<String>, filter: &CollectionFilter) ->
 
 /// Create-only collection diff: make each side hold the union of filtered
 /// collections, gated by the target side's create permission.
-fn diff_mailboxes(
+fn diff_collections(
     left: &BTreeSet<String>,
     right: &BTreeSet<String>,
-    left_ctx: &SideCtx,
-    right_ctx: &SideCtx,
+    left_ctx: &SourceCtx,
+    right_ctx: &SourceCtx,
 ) -> Vec<CollectionHunk> {
     let mut hunks = Vec::new();
     for collection in left.difference(right) {
         if right_ctx.perms.collection.create {
             hunks.push(CollectionHunk::Create {
-                side: Side::Right,
+                side: right_ctx.name.clone(),
                 collection: collection.clone(),
             });
         }
@@ -1738,30 +1878,29 @@ fn diff_mailboxes(
     for collection in right.difference(left) {
         if left_ctx.perms.collection.create {
             hunks.push(CollectionHunk::Create {
-                side: Side::Left,
+                side: left_ctx.name.clone(),
                 collection: collection.clone(),
             });
         }
     }
-    let _ = (left_ctx.side, right_ctx.side);
     hunks
 }
 
-fn apply_mailbox_hunk(
+fn apply_collection_hunk(
     hunk: &CollectionHunk,
-    left: &mut SideCtx,
-    right: &mut SideCtx,
+    left: &mut SourceCtx,
+    right: &mut SourceCtx,
 ) -> Result<()> {
     match hunk {
         CollectionHunk::Create { side, collection } => {
-            side_ctx(*side, left, right)
+            source_ctx(side, left, right)
                 .pool
                 .primary()
                 .create_collection(collection)
                 .with_context(|| format!("Create collection `{collection}` on {side}"))?;
         }
         CollectionHunk::Delete { side, collection } => {
-            side_ctx(*side, left, right)
+            source_ctx(side, left, right)
                 .pool
                 .primary()
                 .delete_collection(collection)
@@ -1869,7 +2008,7 @@ fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
 /// parked, since another build or another host can perform them.
 fn drain_submits(
     account_config: &AccountConfig,
-    sides: &mut [&mut SideCtx],
+    sides: &mut [&mut SourceCtx],
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     report: &mut SyncReport,
@@ -2016,41 +2155,44 @@ fn sweep_retained(
     });
 }
 
-/// Resolves the account's send channel. The channel belongs to a side: its own
-/// `smtp` table when it carries one, else its native send. Sides are walked in
-/// configuration order, so `left` wins when both offer one. `None` warns and
-/// leaves the queued intents pending.
+/// Resolves the account's send channel. It belongs to a source: its own `smtp`
+/// table when it carries one, else its native send. At most one source may
+/// declare an `smtp` table (the account refuses more at load), so there is no
+/// tiebreak here. `None` warns and leaves the queued intents pending.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 fn open_send_channel<'a>(
     account_config: &AccountConfig,
-    sides: &'a mut [&mut SideCtx],
+    sides: &'a mut [&mut SourceCtx],
     queued: usize,
 ) -> Option<submit::SendChannel<'a>> {
     // NOTE: decided before any borrow of `sides`, so the Graph arm can hand out
     // the live session of the side it picked.
-    let pick = account_config
-        .sides()
-        .into_iter()
-        .zip(0..sides.len())
-        .find_map(|((_, side), index)| match &side.smtp {
-            Some(smtp) => Some(SendChannelPick::Smtp(smtp)),
-            None if side.sends_natively() => Some(SendChannelPick::Native(index)),
+    let configured = account_config.sources().ok()?;
+    let pick = sides.iter().enumerate().find_map(|(index, ctx)| {
+        let source = configured.get(&ctx.name)?;
+        match &source.smtp {
+            Some(_) => Some(SendChannelPick::Smtp(ctx.name.clone())),
+            None if source.sends_natively() => Some(SendChannelPick::Native(index)),
             None => None,
-        });
+        }
+    });
 
     match pick {
         #[cfg(feature = "smtp")]
-        Some(SendChannelPick::Smtp(config)) => match submit::connect_smtp(config) {
-            Ok(client) => Some(submit::SendChannel::Smtp(client)),
-            Err(err) => {
-                warn!("cannot open the smtp channel, {queued} intent(s) stay pending: {err:#}");
-                None
+        Some(SendChannelPick::Smtp(name)) => {
+            match submit::connect_smtp(configured[&name].smtp.as_ref().expect("the pick found one"))
+            {
+                Ok(client) => Some(submit::SendChannel::Smtp(client)),
+                Err(err) => {
+                    warn!("cannot open the smtp channel, {queued} intent(s) stay pending: {err:#}");
+                    None
+                }
             }
-        },
+        }
         #[cfg(not(feature = "smtp"))]
         Some(SendChannelPick::Smtp(_)) => {
             warn!(
-                "the side's `smtp` table needs the `smtp` cargo feature, {queued} intent(s) stay pending"
+                "the source's `smtp` table needs the `smtp` cargo feature, {queued} intent(s) stay pending"
             );
             None
         }
@@ -2085,8 +2227,11 @@ fn open_send_channel<'a>(
 /// the walk per feature combination.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 #[allow(dead_code)]
-enum SendChannelPick<'a> {
-    Smtp(&'a SmtpConfig),
+/// Which source completes the account's submission, and how.
+enum SendChannelPick {
+    /// The name of the source whose `smtp` table the intents leave through.
+    Smtp(String),
+    /// The index of the source that sends by itself.
     Native(usize),
 }
 
@@ -2096,19 +2241,19 @@ enum SendChannelPick<'a> {
 /// already-stored body by link id without a fetch. Returns how many placements
 /// were raised.
 #[allow(clippy::too_many_arguments)]
-fn hydrate_full_mailbox(
+fn hydrate_full_collection(
     collection: &str,
-    left: &mut SideCtx,
-    right: &mut SideCtx,
+    left: &mut SourceCtx,
+    right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
-    progress: &MailboxProgress,
+    progress: &CollectionProgress,
 ) -> Result<usize> {
     let mut raised = 0;
     for (ctx, store) in [(left, left_store), (right, right_store)] {
         let targets: Vec<ReplicaHandle> = load_side(store, collection)
-            .with_context(|| format!("Load {} `{collection}`", ctx.side))?
+            .with_context(|| format!("Load {} `{collection}`", &ctx.name))?
             .into_iter()
             .filter(|p| p.status != ReplicaStatus::Tombstone && p.level < ReplicaLevel::Full)
             .map(|p| p.handle)
@@ -2119,14 +2264,19 @@ fn hydrate_full_mailbox(
         let total = targets.len();
         let done = AtomicUsize::new(0);
         let tick = || progress.tick(done.fetch_add(1, Ordering::Relaxed) + 1, total);
-        let mut remote =
-            PimRemote::with_progress(&mut ctx.pool, blobs.clone(), &tick, HashMap::new());
+        let mut remote = PimRemote::with_progress(
+            &mut ctx.pool,
+            blobs.clone(),
+            ctx.namespace.clone(),
+            &tick,
+            HashMap::new(),
+        );
         drive(
             store,
             &mut remote,
             ReplicaUpgrade::new(collection.to_string(), targets, ReplicaTier::Full),
         )
-        .with_context(|| format!("Hydrate all bodies {} `{collection}`", ctx.side))?;
+        .with_context(|| format!("Hydrate all bodies {} `{collection}`", &ctx.name))?;
         raised += total;
     }
     Ok(raised)
@@ -2180,23 +2330,24 @@ mod tests {
     };
 
     use super::*;
+    use crate::config::StoredBodies;
 
     #[test]
     fn a_side_pair_must_agree_on_its_kind() {
         let mail = "message/rfc822";
 
         assert_eq!(
-            pair_kind((Side::Left, mail), (Side::Right, mail)).unwrap(),
+            pair_kind(("left", mail), ("right", mail)).unwrap(),
             Kind::Mail
         );
 
-        let err = pair_kind((Side::Left, mail), (Side::Right, "text/vcard"))
+        let err = pair_kind(("left", mail), ("right", "text/vcard"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("text/vcard"), "{err}");
         assert!(err.contains("right"), "{err}");
 
-        let err = pair_kind((Side::Left, ""), (Side::Right, mail))
+        let err = pair_kind(("left", ""), ("right", mail))
             .unwrap_err()
             .to_string();
         assert!(err.contains("left"), "{err}");
@@ -2431,11 +2582,11 @@ mod tests {
     fn no_collection_name_is_reserved() {
         let collections: HashSet<String> = ["INBOX", "Outbox", "Sent"].map(String::from).into();
 
-        let filtered = filter_mailboxes(&collections, &CollectionFilter::All);
+        let filtered = filter_collections(&collections, &CollectionFilter::All);
         assert_eq!(filtered.len(), 3);
         assert!(filtered.contains("Outbox"));
 
-        let filtered = filter_mailboxes(
+        let filtered = filter_collections(
             &collections,
             &CollectionFilter::Include(vec![String::from("Outbox")]),
         );
@@ -2933,10 +3084,10 @@ mod tests {
 
     #[test]
     fn permissions_map_onto_io_replica_push_rights() {
-        let perms = SidePermissions {
-            collection: crate::config::CollectionSidePermissions::default(),
-            flag: crate::config::FlagSidePermissions { update: false },
-            item: crate::config::ItemSidePermissions {
+        let perms = SourcePermissions {
+            collection: crate::config::CollectionPermissions::default(),
+            flag: crate::config::FlagSourcePermissions { update: false },
+            item: crate::config::ItemSourcePermissions {
                 create: true,
                 delete: false,
                 update: true,
@@ -2993,10 +3144,10 @@ mod tests {
             .write(vec![ReplicaWriteOp::UpsertPlacement(placement)])
             .unwrap();
 
-        let view = projection_view(&store, "INBOX", Side::Left).unwrap();
+        let view = projection_view(&store, "INBOX", "left").unwrap();
         assert_eq!(view.len(), 1);
         assert_eq!(view[0].status, ReplicaStatus::Ambiguous);
-        assert!(placement_hunks(Side::Left, "INBOX", &view[0]).is_empty());
+        assert!(placement_hunks("left", "right", "INBOX", &view[0]).is_empty());
 
         let mut report = SyncReport {
             account: "dup".into(),
@@ -3004,7 +3155,7 @@ mod tests {
         };
         report
             .ambiguous
-            .extend(ambiguity(Side::Left, "INBOX", &view[0]));
+            .extend(ambiguity("left", "INBOX", &view[0]));
         assert_eq!(report.ambiguous.len(), 1);
         assert_eq!(report.ambiguous[0].ids, ["145", "146"]);
 
@@ -3035,9 +3186,9 @@ mod tests {
             ))])
             .unwrap();
 
-        let targets = relay_targets(&store, "INBOX", false, true).unwrap();
+        let targets = relay_targets(&store, "INBOX", ("left", false), ("right", true)).unwrap();
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].holding, Side::Left);
+        assert_eq!(targets[0].holding, "left");
         assert_eq!(targets[0].link, "mid:a@x");
 
         let target = &targets[0];
@@ -3047,8 +3198,8 @@ mod tests {
         };
         report.item.patch.push(PatchEntry::new(
             ItemHunk::Copy {
-                source_side: target.holding,
-                target_side: target.holding.other(),
+                source_side: target.holding.clone(),
+                target_side: String::from("right"),
                 collection: "INBOX".into(),
                 source_id: target.link.clone(),
                 flags: target.flags.iter().cloned().collect(),
@@ -3061,5 +3212,127 @@ mod tests {
         assert!(!text.contains("already in sync"), "{text}");
         assert!(text.contains("synchronized: 1 hunks"), "{text}");
         assert!(text.contains("from left to right"), "{text}");
+    }
+
+    /// A hub collection id carries its namespace and the wire name does not.
+    /// Getting this backwards is how a mailbox and an address book both called
+    /// `Default` would end up as one collection.
+    #[test]
+    fn a_hub_id_carries_its_namespace_and_the_display_name_does_not() {
+        assert_eq!(hub_id("mail", "INBOX"), "mail/INBOX");
+        assert_eq!(display_name("mail", "mail/INBOX"), "INBOX");
+
+        // An IMAP hierarchy survives: only the first segment is the namespace.
+        assert_eq!(hub_id("mail", "Archive/2026"), "mail/Archive/2026");
+        assert_eq!(display_name("mail", "mail/Archive/2026"), "Archive/2026");
+
+        // A name that merely starts with the namespace is not stripped.
+        assert_eq!(display_name("mail", "mailbox/INBOX"), "mailbox/INBOX");
+
+        // An id from another namespace is left whole rather than mangled.
+        assert_eq!(display_name("cards", "mail/INBOX"), "mail/INBOX");
+    }
+
+    /// Two sources of one kind land in one group only when they say so, and the
+    /// derivation follows from the group, not from a setting.
+    #[test]
+    fn namespaces_group_the_sources_that_share_one() {
+        let isolated: AccountConfig = toml::from_str(
+            r#"
+            sources.fastmail.imap.server = "imaps://imap.fastmail.com:993"
+            sources.gmail.imap.server = "imaps://imap.gmail.com:993"
+            "#,
+        )
+        .unwrap();
+
+        let groups = isolated.groups().unwrap();
+        assert_eq!(groups.len(), 2, "two namespaces, so no propagation");
+        assert!(groups.iter().all(|g| g.bodies == StoredBodies::All));
+
+        let merged: AccountConfig = toml::from_str(
+            r#"
+            sources.fastmail.imap.server = "imaps://imap.fastmail.com:993"
+            sources.fastmail.imap.collection.namespace = "mail"
+            sources.gmail.imap.server = "imaps://imap.gmail.com:993"
+            sources.gmail.imap.collection.namespace = "mail"
+            "#,
+        )
+        .unwrap();
+
+        let groups = merged.groups().unwrap();
+        assert_eq!(groups.len(), 1, "one namespace, so they mirror");
+        assert_eq!(groups[0].sources, vec!["fastmail", "gmail"]);
+        assert_eq!(groups[0].bodies, StoredBodies::None);
+    }
+
+    /// A namespace names the sources that mirror each other, and only one kind
+    /// can do that. Sharing one across kinds would key their collections onto
+    /// the same ids.
+    #[cfg(feature = "carddav")]
+    #[test]
+    fn a_namespace_claimed_by_two_kinds_is_refused() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.fastmail.com:993"
+            imap.collection.namespace = "shared"
+            carddav.server = "https://carddav.fastmail.com/"
+            carddav.auth.bearer.token.raw = "tok"
+            carddav.collection.namespace = "shared"
+            "#,
+        )
+        .unwrap();
+
+        let err = account.groups().unwrap_err().to_string();
+        assert!(err.contains("claimed by two kinds"), "got {err}");
+
+        // On their own namespaces the two sit under one account happily, which
+        // is the case this whole change exists for.
+        let account: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.fastmail.com:993"
+            carddav.server = "https://carddav.fastmail.com/"
+            carddav.auth.bearer.token.raw = "tok"
+            "#,
+        )
+        .unwrap();
+
+        let groups = account.groups().unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].media_type, "message/rfc822");
+        assert_eq!(groups[1].media_type, "text/vcard");
+        assert!(
+            groups.iter().all(|g| g.bodies == StoredBodies::All),
+            "each is alone in its kind, so each keeps every body",
+        );
+    }
+
+    /// `--source` picks namespaces, not sources: half a mirror pushes one way
+    /// and calls it done.
+    #[test]
+    fn narrowing_by_source_selects_whole_namespaces() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.a.imap.server = "imaps://a.example.org:993"
+            sources.a.imap.collection.namespace = "mail"
+            sources.b.imap.server = "imaps://b.example.org:993"
+            sources.b.imap.collection.namespace = "mail"
+            sources.c.imap.server = "imaps://c.example.org:993"
+            "#,
+        )
+        .unwrap();
+
+        let picked = select_groups(&account, &[String::from("a")]).unwrap();
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].sources, vec!["a", "b"], "the pair runs whole");
+
+        let picked = select_groups(&account, &[String::from("c")]).unwrap();
+        assert_eq!(picked[0].sources, vec!["c"]);
+
+        assert_eq!(select_groups(&account, &[]).unwrap().len(), 2);
+
+        let err = select_groups(&account, &[String::from("nope")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no source named `nope`"), "got {err}");
     }
 }

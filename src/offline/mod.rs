@@ -5,19 +5,23 @@
 //! [io-pimdir](https://github.com/pimalaya/io-pimdir) store (a SQLite index plus
 //! a content-addressed blob directory).
 //!
-//! A collection's two sides are the two *sources* of one shared collection in the
-//! store: one [`PimdirSourceStore`](io_pimdir::PimdirSourceStore) handle per
-//! side (`"left"` / `"right"`) over the same files, the collection name as the bare collection id.
-//! `load` projects that source's view of the shared hub, `write` absorbs the
-//! engine's writes back into that source's bindings, so cross-side propagation
-//! of items, flags and deletions falls out of the per-side reconcile with no
-//! hand-rolled cross-merge.
+//! An account's sources are the *sources* of its shared collections: one
+//! [`PimdirSourceStore`](io_pimdir::PimdirSourceStore) handle per source, named
+//! after it, over the same files. `load` projects that source's view of the
+//! shared hub, `write` absorbs the engine's writes back into its bindings, so
+//! cross-source propagation of items, flags and deletions falls out of the
+//! per-source reconcile with no hand-rolled cross-merge.
+//!
+//! Sources meet only inside a namespace: a hub collection id is
+//! `<namespace>/<name>`, so a mail source and a contacts source under one
+//! account, or two providers cached side by side, never share a collection.
 //!
 //! Layout:
-//! - [`storage`] the per-side projection and hydration helpers over a
+//! - [`storage`] the per-source projection and hydration helpers over a
 //!   [`PimdirSourceStore`](io_pimdir::PimdirSourceStore);
 //! - [`remote`] [`remote::PimRemote`], the [`ReplicaRemote`] over one client;
-//! - [`driver`] per-account/per-collection orchestration and the report.
+//! - [`driver`] per-account, per-namespace and per-collection orchestration,
+//!   including the derivation of what the store keeps, and the report.
 
 use anyhow::{Result, anyhow};
 use io_replica::{
@@ -26,23 +30,23 @@ use io_replica::{
     hub::ReplicaSourceId,
 };
 
-use crate::side::Side;
-
 pub mod driver;
 pub mod pipe;
 pub mod prof;
 pub mod remote;
+pub mod state;
 pub mod storage;
 pub mod submit;
 
-/// The pimdir source id for a side: the axis that distinguishes the two sides'
-/// bindings of one shared item in the store. `"left"` / `"right"` match the
-/// pimdir spec's documented source examples.
-pub fn source_id(side: Side) -> ReplicaSourceId {
-    match side {
-        Side::Left => ReplicaSourceId("left".to_string()),
-        Side::Right => ReplicaSourceId("right".to_string()),
-    }
+/// The pimdir source id of a configured source: its name, verbatim.
+///
+/// The axis that distinguishes each source's bindings of one shared item in the
+/// store. It is the name from the configuration and nothing derived, so the id
+/// a binding was written under is the one the configuration still shows, and
+/// renaming a source in the configuration orphans its bindings rather than
+/// quietly rebinding them.
+pub fn source_id(name: &str) -> ReplicaSourceId {
+    ReplicaSourceId(name.to_string())
 }
 
 /// Drives any standard-shape io-replica coroutine to completion over borrowed

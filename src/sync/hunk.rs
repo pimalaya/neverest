@@ -11,7 +11,7 @@ use std::{collections::BTreeSet, fmt};
 
 use serde::Serialize;
 
-use crate::{item::flag::Flag, side::Side};
+use crate::item::flag::Flag;
 
 /// Collection-level change: create or delete a collection on one side.
 ///
@@ -21,8 +21,8 @@ use crate::{item::flag::Flag, side::Side};
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[allow(dead_code)]
 pub enum CollectionHunk {
-    Create { side: Side, collection: String },
-    Delete { side: Side, collection: String },
+    Create { side: String, collection: String },
+    Delete { side: String, collection: String },
 }
 
 impl fmt::Display for CollectionHunk {
@@ -44,8 +44,8 @@ impl fmt::Display for CollectionHunk {
 pub enum ItemHunk {
     /// Copy an item from `source_side` to `target_side`.
     Copy {
-        source_side: Side,
-        target_side: Side,
+        source_side: String,
+        target_side: String,
         collection: String,
         source_id: String,
         flags: BTreeSet<Flag>,
@@ -54,7 +54,7 @@ pub enum ItemHunk {
     },
     /// Add `flags` on `side`'s copy of the item.
     AddFlags {
-        side: Side,
+        side: String,
         collection: String,
         id: String,
         flags: BTreeSet<Flag>,
@@ -63,7 +63,7 @@ pub enum ItemHunk {
     },
     /// Remove `flags` from `side`'s copy of the item.
     RemoveFlags {
-        side: Side,
+        side: String,
         collection: String,
         id: String,
         flags: BTreeSet<Flag>,
@@ -72,7 +72,7 @@ pub enum ItemHunk {
     },
     /// Delete `side`'s copy of the item.
     Delete {
-        side: Side,
+        side: String,
         collection: String,
         id: String,
         #[serde(skip)]
@@ -82,7 +82,7 @@ pub enum ItemHunk {
     /// plan of a one-source local sync (reported by a dry run; a real run just
     /// hydrates it).
     Fetch {
-        side: Side,
+        side: String,
         collection: String,
         id: String,
         #[serde(skip)]
@@ -91,7 +91,7 @@ pub enum ItemHunk {
     /// Replace `side`'s copy of the item's body in place — a mutable-content
     /// edit. Never emitted for mail, whose bodies are immutable.
     Update {
-        side: Side,
+        side: String,
         collection: String,
         id: String,
         #[serde(skip)]

@@ -37,17 +37,33 @@
 //! one remote, through a three-way merge against a per-placement base. Its
 //! sync verb ties one collection to one remote's enumerate, and never
 //! propagates an item from one collection to another. neverest is
-//! peer-to-peer: two remote sides, reconciled so a change on either one
-//! reaches the other.
+//! peer-to-peer: several remote sources, reconciled so a change on any one
+//! reaches the others.
 //!
 //! So calling sync twice cannot produce bidirectional replication. The
-//! resolution is io-replica's multi-source hub. The two sides are two sources
-//! of one shared collection in one pimdir store, and a load projects the
-//! shared item against that source's own base. A change one side folds into
-//! the hub therefore reads as locally dirty for the other, whose ordinary
-//! reconcile pushes it. Cross-side propagation of items, flags and deletions
-//! falls out of the per-side merge, with no hand-rolled cross-merge, leaving
+//! resolution is io-replica's multi-source hub. An account's sources are the
+//! sources of one shared collection in one pimdir store, and a load projects
+//! the shared item against that source's own base. A change one source folds
+//! into the hub therefore reads as locally dirty for the others, whose ordinary
+//! reconcile pushes it. Cross-source propagation of items, flags and deletions
+//! falls out of the per-source merge, with no hand-rolled cross-merge, leaving
 //! neverest to sequence the coroutines until quiescent.
+//!
+//! ## Namespaces
+//!
+//! An account is one hub, but not one collection space. Sources of one kind
+//! sharing a `collection.namespace` bind the same hub collections, and that
+//! sharing is what propagation is: an item sitting in a collection a source
+//! participates in, with no binding for that source, is pushed to it. A
+//! namespace defaults to the source's own name, so sources are isolated until
+//! someone points two at the same one. That is the whole difference between a
+//! mirror and two providers cached side by side, and it is why mail, contacts
+//! and calendar live under one account without meeting.
+//!
+//! What the store keeps follows from the same fact and is never configured: a
+//! source alone in its namespace keeps every body, a streamable pair keeps
+//! none and streams each crossing, anything else keeps what crossed. Every run
+//! and `neverest check` report it.
 //!
 //! ## The kind seam
 //!
@@ -56,7 +72,7 @@
 //! implements the same surface, while each adapter keeps its own protocol
 //! nouns behind it: an IMAP mailbox stays a mailbox inside [`imap`]. Exactly
 //! two things vary per media type, and both live in [`kind`], an item's link
-//! id and its versioned summary. The kind a side syncs comes from the
+//! id and its versioned summary. The kind a source syncs comes from the
 //! backend's media type and is recorded on the pimdir collection, so one store
 //! may hold several.
 //!
@@ -64,12 +80,13 @@
 //!
 //! The [`cli`] module holds the clap parser and one module per subcommand.
 //! [`config`] is the TOML schema, [`client`] the kind-neutral backend seam
-//! opening one side, [`item`] the vocabulary above that seam, and [`kind`] the
-//! per-media-type derivations. [`side`] tags a side left or right.
+//! opening one source, [`item`] the vocabulary above that seam, and [`kind`]
+//! the per-media-type derivations.
 //!
-//! [`offline`] is the sync engine: `mod` maps sides onto pimdir source ids and
-//! drives the coroutines, `hash` content-addresses bodies, `storage` projects
-//! and hydrates one side over a pimdir store, `remote` implements io-replica's
+//! [`offline`] is the sync engine: `mod` maps sources onto pimdir source ids
+//! and drives the coroutines, `state` records what the last run derived,
+//! `storage` projects and hydrates one source over a pimdir store, `remote`
+//! implements io-replica's
 //! remote seam over one client, `submit` holds the queued submit intent and
 //! its send channel (mail alone), and `driver` orchestrates an account and builds
 //! the report. [`sync`] keeps only the report types, the engine having moved
@@ -87,7 +104,6 @@ mod kind;
 #[cfg(feature = "msgraph")]
 mod msgraph;
 mod offline;
-mod side;
 mod sync;
 mod wizard;
 

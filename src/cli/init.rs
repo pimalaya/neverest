@@ -42,14 +42,10 @@ impl InitCommand {
             );
         }
 
-        let sides = account_config.sides();
-        if sides.is_empty() {
-            bail!("Account `{name}` has no side configured (set `left` and/or `right`)");
-        }
-        for (side, config) in sides {
-            let s = Spinner::start(format!("Initializing {side} side…"));
-            client::init(config.clone()).with_context(|| format!("Initialize {side} side"))?;
-            s.success(format!("Initialized {side} side"));
+        for (source, config) in account_config.sources()? {
+            let s = Spinner::start(format!("Initializing source {source}…"));
+            client::init(config).with_context(|| format!("Initialize source {source}"))?;
+            s.success(format!("Initialized source {source}"));
         }
 
         let s = Spinner::start("Creating replica store…");

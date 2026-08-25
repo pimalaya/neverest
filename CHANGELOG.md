@@ -18,7 +18,7 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - Added the `init` command, run once per account before the first sync.
 
-  It opens every configured side so credential and network errors surface up front, then creates the empty store. `sync` refuses to run without it, and `init` refuses to run over it.
+  It opens every configured source so credential and network errors surface up front, then creates the empty store. `sync` refuses to run without it, and `init` refuses to run over it.
 
 - Added **Microsoft Graph** backend support via `io-msgraph`.
 
@@ -28,33 +28,47 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   Address books are collections, keyed by their path segment rather than their display name, which is optional, mutable and free to collide. Enumeration is RFC 6578 `sync-collection`, the server's token riding as the engine's opaque checkpoint: a rejected token falls back to a full report and a truncated one is drained. Bodies come from `addressbook-multiget`, and writes are `PUT` and `DELETE` conditional on the last-synced ETag.
 
-  This is the first non-mail kind and the first mutable-content backend. Cards are edited in place, so it is the first backend to exercise the revision plumbing, the conditional-write path and the conflict handling that mail leaves inert. A card's link id is its vCard `UID`, falling back to a digest of the body for a card carrying none, and its summary carries the `UID`, `FN` and every `EMAIL` so a reader renders a contact list without fetching bodies. Cards cross neverest as opaque bytes, so a property it does not understand cannot be lost. A contacts account pairs with another contacts side or with the store alone, and an `<side>.smtp` table on a DAV side is refused.
+  This is the first non-mail kind and the first mutable-content backend. Cards are edited in place, so it is the first backend to exercise the revision plumbing, the conditional-write path and the conflict handling that mail leaves inert. A card's link id is its vCard `UID`, falling back to a digest of the body for a card carrying none, and its summary carries the `UID`, `FN` and every `EMAIL` so a reader renders a contact list without fetching bodies. Cards cross neverest as opaque bytes, so a property it does not understand cannot be lost. A contacts source pairs with another contacts source or with the store alone, and an `smtp` table on a DAV source is refused.
 
   The feature is out of the default set until its live suite runs in CI.
 
 - Added the queued **`submit` intent** and its send channel.
 
-  A frontend enqueues a submission through the store's action queue, naming the body blob and the envelope, and the queue row pins the body until the send. Every run performs the pending ones through the first side offering a channel: its own `<side>.smtp` table, else its native send. A sent intent is acknowledged, which releases its body; a transient failure leaves it pending for the next run and a permanent one parks it with its error. A build with no send channel leaves the intents pending rather than parking them. Submission is at-least-once, so deduplication is the receiving provider's job.
+  A frontend enqueues a submission through the store's action queue, naming the body blob and the envelope, and the queue row pins the body until the send. Every run performs the pending ones through the one source offering a channel: its own `smtp` table, else its native send. A sent intent is acknowledged, which releases its body; a transient failure leaves it pending for the next run and a permanent one parks it with its error. A build with no send channel leaves the intents pending rather than parking them. Submission is at-least-once, so deduplication is the receiving provider's job.
 
 - Added `store.purge-after`, the retention sweep.
 
-  The store retains an item instead of deleting it when its last binding vanishes: hidden from the sync and from listings, body kept. After each sync neverest purges every retained item older than this human delay (`"90d"`, `"12h"`, `"0"`), runs the store's garbage collector, and reports the items, objects and bytes it reclaimed. Unset means never purge, `"0"` reproduces a terminal delete, and `sync --no-purge` skips the sweep for one run. Combined with a read-only remote side it makes a backup a remote expunge cannot lose.
+  The store retains an item instead of deleting it when its last binding vanishes: hidden from the sync and from listings, body kept. After each sync neverest purges every retained item older than this human delay (`"90d"`, `"12h"`, `"0"`), runs the store's garbage collector, and reports the items, objects and bytes it reclaimed. Unset means never purge, `"0"` reproduces a terminal delete, and `sync --no-purge` skips the sweep for one run. Combined with a read-only source it makes a backup a remote expunge cannot lose.
 
-- Added `store.hydration = "full"`, mirroring every body into the store instead of only the crossing ones.
+- Added **named sources**: an account holds a `sources` table over one pimdir store, rather than a `left` and a `right`.
 
-- Added the **relay** path: a body crossing two IMAP sides is streamed server-to-server, the store keeping only the spine.
+  The map key is the pimdir source id, so a source's name is what every binding it owns is recorded under. A backend written directly under the account (`imap.server = "…"`) is sugar for a source named after its protocol, which is the whole configuration for a single-provider account and the only shape the wizard writes; the explicit table is what a mirror or a fan-in reaches for, since those need two sources of one protocol. The sugar and its expansion produce the same source id, so expanding one by hand changes nothing on disk. An account may now hold sources of several kinds: mail, contacts and calendar under one account and one store.
 
-  It is the default for a two-IMAP account. Any other pairing, or `store.retention = "retain"`, retains instead.
+- Added **collection namespaces**, which decide whether two sources of one kind meet.
+
+  A hub collection is keyed by its kind, its `collection.namespace` and its name, so a mailbox and an address book both called `Default` stay apart. Two sources sharing a namespace bind the same hub collections, and that sharing is what propagation is: an item in a collection a source participates in, with no binding for that source, is pushed to it. The namespace defaults to the source's own name, so sources are isolated unless pointed at the same one deliberately. Isolated is the default because its failure mode is a mirror that did nothing, visible in the report, where merging by default fails by copying one real provider's mailbox into another.
+
+- Added the **store report**: every run and `neverest check` state what the store keeps, per kind and namespace.
+
+  What the store keeps is derived, not configured: one source keeps every body, two sources sharing a namespace on an IMAP to IMAP pairing keep none and stream each crossing, anything else keeps what crossed. The report is therefore the only place the value is stated, and it is printed even on a run that wrote nothing. A run whose derivation moved names the old value and what became unreferenced. `check` derives it from the configuration alone, so it answers before a first sync and while a remote is down.
+
+- Added the **relay** path: a body crossing two IMAP sources is streamed server-to-server, the store keeping only the spine.
+
+  It is what an IMAP to IMAP pair sharing a namespace derives. Any other pairing keeps the bodies that crossed.
+
+- Added `sync --source <name>`, narrowing a run to the namespaces holding that source.
+
+  It picks namespaces rather than sources: two sources sharing one are a mirror, and running half of a mirror pushes one way and calls it done.
 
 - Added the **handle-space rebuild**: an IMAP `UIDVALIDITY` change detected across a pull drives io-replica's rekey.
 
-  Cached bodies, summaries and pending state are carried over by link id, and the collection's `generation` bumps atomically with the rebuild, so a store frontend derives its epoch from the store alone. Graph sides never bump, their message ids surviving a delta reset.
+  Cached bodies, summaries and pending state are carried over by link id, and the collection's `generation` bumps atomically with the rebuild, so a store frontend derives its epoch from the store alone. Graph sources never bump, their message ids surviving a delta reset.
 
 - Added a warnings section for an identity a collection holds twice, in the text report and under `ambiguous` in `--json`.
 
   It names the collection and every id involved, and is re-reported on every run until the collection holds the identity once. Neverest repairs nothing: which copy to keep is the user's call, with their own client. Detection, the derive-nothing rules and the persistence live in io-replica and io-pimdir.
 
-- Added the `<side>.<backend>.item.update` permission, gating in-place body edits.
+- Added the `<protocol>.item.update` permission, gating in-place body edits.
 
   It defaults to `true` and is optional, so an existing configuration parses unchanged. It only bites on a mutable-content backend.
 
@@ -70,21 +84,29 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - **BREAKING**: the sync engine runs on the [io-replica](https://github.com/pimalaya/io-replica) replica engine instead of a hand-rolled three-way diff.
 
-  The two sides of an account are two sources of one shared collection in the store, so cross-side propagation of items, flags and deletions falls out of the shared hub rather than a hand-rolled cross-merge.
+  An account's sources are the sources of one shared collection in the store, so cross-source propagation of items, flags and deletions falls out of the shared hub rather than a hand-rolled cross-merge.
 
 - **BREAKING**: the sync vocabulary is kind-neutral, turning neverest from a mail sync into a generic PIM sync.
 
-  Everything above the backend seam speaks collections and items rather than mailboxes and messages; each protocol adapter keeps its own nouns behind the seam. The per-account `mailbox` and `message` tables became `collection` and `item`, and so did the per-side permission tables. Both old spellings keep working as serde aliases for one release. The `--include-mailbox`, `--exclude-mailbox` and `--all-mailboxes` flags became `--include-collection`, `--exclude-collection` and `--all-collections`, keeping the old long names as aliases and the `-m`, `-x` and `-A` short flags. The `--json` report's `mailbox` and `email` patch sections are now `collection` and `item`, with no alias.
+  Everything above the backend seam speaks collections and items rather than mailboxes and messages; each protocol adapter keeps its own nouns behind the seam. The per-account `mailbox` and `message` tables became `collection` and `item`, and so did the per-source permission tables. Both old spellings keep working as serde aliases for one release. The `--include-mailbox`, `--exclude-mailbox` and `--all-mailboxes` flags became `--include-collection`, `--exclude-collection` and `--all-collections`, keeping the old long names as aliases and the `-m`, `-x` and `-A` short flags. The `--json` report's `mailbox` and `email` patch sections are now `collection` and `item`, with no alias.
 
 - **BREAKING**: the reserved `Outbox` collection is gone, a queued submission being a `submit` action now.
 
   Neverest no longer creates an `Outbox` collection, no longer matches that name case-insensitively, and no longer hides it from listings, so a remote folder called `Outbox` syncs like any other. Anything that wrote a message into a local `Outbox` to have it sent must enqueue a `submit` action instead. The `--json` report renames the `outbox` section to `submitted` and the text report renames it to `Submissions`.
 
-- **BREAKING**: the SMTP submission channel moved from the account root into the side it completes, `<side>.smtp.*` instead of `smtp.*`.
+- **BREAKING**: the SMTP submission channel belongs to the source it completes.
 
-  The channel is a property of one provider, not of the account, and whether a side needs one at all depends on its backend. Queued intents are performed through the first side offering a channel, its own `smtp` table before its native send. A configuration keeping `smtp` at the root now fails to parse.
+  The channel is a property of one provider, not of the account, and whether a source needs one at all depends on its backend. It is written `sources.<name>.smtp.*`, or `smtp.*` under an account whose mail backend is the direct-backend sugar. At most one source per account may declare one, and two are refused at load rather than silently resolved by configuration order.
 
-- **BREAKING**: per-side permissions are enforced per operation.
+- **BREAKING**: `collection.filter` moved from the account onto the source it filters.
+
+  An account may hold sources of several kinds, and an `include = ["INBOX"]` means nothing to a contacts source. Filters are consequently asymmetric: a collection may be synced on one source and skipped on another. An account-level `collection` table is refused, naming its replacement.
+
+- **BREAKING**: `store.retention` and `store.hydration` are removed; what the store keeps is derived per kind and reported.
+
+  They encoded three states in two settings, one combination of which meant nothing, and the value they set is a consequence of how many sources share a namespace rather than a choice. Deriving also deletes a silent substitution: an explicit `relay` on a pairing that cannot stream used to fall back to retaining, handing back the opposite of the disk guarantee it asked for. A configuration carrying either key is refused rather than ignored, naming the derived value that replaces it. A derivation that moves never drops what is already stored: bodies stay, unreferenced, until an explicit `pimdir gc` or `sync --reset`.
+
+- **BREAKING**: per-source permissions are enforced per operation.
 
   They map onto io-replica's per-kind push rights one to one, and a forbidden kind is kept pending by the engine while the others still propagate. If you relied on a tightened permission block, it takes effect now where it previously did not.
 
@@ -112,11 +134,11 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - The IMAP and SMTP `alpn` fields are optional rather than defaulted in place, so io-imap and io-smtp own their own default.
 
-  The SMTP channel therefore offers the `smtp` ALPN token (RFC 7595) where it previously offered none; set `<side>.smtp.alpn = []` to restore the old behaviour.
+  The SMTP channel therefore offers the `smtp` ALPN token (RFC 7595) where it previously offered none; set `smtp.alpn = []` to restore the old behaviour.
 
 - Every remote is a cargo feature: `imap`, `msgraph`, `carddav`, plus `smtp` for the submission channel.
 
-  All but `carddav` ship in the default set. Every side config parses in every build, and opening a side whose backend was not compiled in reports it at runtime.
+  All but `carddav` ship in the default set. Every source config parses in every build, and opening a source whose backend was not compiled in reports it at runtime.
 
 - Relicensed from `AGPL-3.0-only` to `MIT OR Apache-2.0`, aligning with the rest of the Pimalaya ecosystem.
 
@@ -128,17 +150,17 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   The SMTP session greeted with `EHLO localhost`, which RFC 5321 §4.1.4 entitles a server to reject, and one that does answers `550 5.5.0 Invalid EHLO domain`, so the session died before `MAIL FROM`. The failure being transient, the intent stayed pending behind a warning: the queue filled and no mail ever left. The greeting is now the loopback address literal RFC 5321 §4.1.3 reserves for a client with no resolvable name.
 
-- A side that may not delete no longer resurrects the item on every side.
+- A source that may not delete no longer resurrects the item on every source.
 
-  A refused delete was undone rather than held, which states that the side still holds the member; the shared store reads that as the item being alive and clears the deletion everywhere, so removing an item once brought it back. The tombstone now stays until a run that may push delivers it.
+  A refused delete was undone rather than held, which states that the source still holds the member; the shared store reads that as the item being alive and clears the deletion everywhere, so removing an item once brought it back. The tombstone now stays until a run that may push delivers it.
 
 - A store's disk is now reclaimed.
 
   The store deliberately collects nothing by itself, leaving reclamation to its owner, which is neverest. Nothing ran it, so every dereferenced body stayed on disk for ever while `store.purge-after` reported bytes it had merely released. The sweep now runs the collector after a purge that took something, and a store that has been running for a while reclaims its backlog on the next sweep. Orphan blobs left by a crash are still `pimdir gc`'s to take.
 
-- An identity a collection holds twice no longer costs the other side its copy.
+- An identity a collection holds twice no longer costs the other source its copy.
 
-  Two messages with the same `Message-ID` used to pair arbitrarily: deleting the paired copy propagated a delete that removed the only copy on the other side, and a later checkpoint loss revived the retained row and re-appended it while reporting `already in sync`. The engine now freezes such an identity and derives nothing for it in either direction.
+  Two messages with the same `Message-ID` used to pair arbitrarily: deleting the paired copy propagated a delete that removed the only copy on the other source, and a later checkpoint loss revived the retained row and re-appended it while reporting `already in sync`. The engine now freezes such an identity and derives nothing for it in either direction.
 
 - A relayed copy is now reported.
 
@@ -148,21 +170,21 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   A `UIDVALIDITY` bump renumbers every message, and the store read the rebuild as one server reporting each identity under a second handle: it kept the voided handles, marked every item ambiguous and stopped syncing in both directions. Fixed in io-pimdir.
 
-- A CardDAV side no longer dies after its first request.
+- A CardDAV source no longer dies after its first request.
 
   A server that closes the connection between requests left every later exchange writing into a socket the peer had hung up on, so discovery itself failed. The connection is reopened and the exchange run again, carrying the discovered principal and home-set URLs over. Only an end-of-stream or reset failure is retried, so a create or a delete is never replayed against a server that acted on it.
 
 - A DAV collection no longer fails its scan.
 
-  Freshly probed items were raised to the `Meta` tier whatever the kind, which asks a CardDAV side for a summary tier it has none of. The tier is now the kind's.
+  Freshly probed items were raised to the `Meta` tier whatever the kind, which asks a CardDAV source for a summary tier it has none of. The tier is now the kind's.
 
 - A body is hydrated by the absence of a stored body rather than by the item's detail level, so an item whose stale body was dropped is picked up again.
 
 ### Removed
 
-- **BREAKING**: removed local file backends as sync sides (Maildir, then m2dir).
+- **BREAKING**: removed local file backends as sync sources (Maildir, then m2dir).
 
-  A side is a remote, and the pimdir store is the local replica, so a local file store beside it would be a second local copy. An existing on-disk tree is brought in through io-pimdir's conversion tooling instead.
+  A source is a remote, and the pimdir store is the local replica, so a local file store beside it would be a second local copy. An existing on-disk tree is brought in through io-pimdir's conversion tooling instead.
 
 - **BREAKING**: removed the **Notmuch** backend, with no replacement in the `io-*` ecosystem yet.
 
@@ -174,7 +196,7 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   Secrets come from a command instead, so any secret manager works, and [ortie](https://github.com/pimalaya/ortie) issues and refreshes OAuth access tokens.
 
-- **BREAKING**: removed `envelope.filter`, the per-side folder aliases, the `-o` output flag and the `--color` flag. Color now follows the terminal, and `--json` replaces `-o json`.
+- **BREAKING**: removed `envelope.filter`, the per-source folder aliases, the `-o` output flag and the `--color` flag. Color now follows the terminal, and `--json` replaces `-o json`.
 
 ## [1.0.0-beta] - 2024-04-15
 

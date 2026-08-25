@@ -55,9 +55,9 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
         &config,
         format!(
             "[accounts.contacts]\n\
-             left.carddav.server = \"{DAV}/\"\n\
-             left.carddav.auth.basic.username = \"{USER}\"\n\
-             left.carddav.auth.basic.password.raw = \"{PASS}\"\n",
+             carddav.server = \"{DAV}/\"\n\
+             carddav.auth.basic.username = \"{USER}\"\n\
+             carddav.auth.basic.password.raw = \"{PASS}\"\n",
         ),
     )
     .unwrap();

@@ -1,5 +1,6 @@
-//! `neverest check` command: opens both sides and lists their collections
-//! to surface credential, network or config errors before a real sync.
+//! `neverest check` command: reports what the store keeps, then opens every
+//! source and lists its collections to surface credential, network or config
+//! errors before a real sync.
 
 use std::path::PathBuf;
 
@@ -15,11 +16,12 @@ use pimalaya_config::toml::TomlConfig;
 
 use crate::{
     client,
-    config::{Config, SideConfig},
+    config::{Config, SourceConfig},
 };
 
-/// Opens every configured side and lists their collections, surfacing
-/// credential, network or config errors before a real sync.
+/// Reports the account's namespaces, then opens every configured source and
+/// lists its collections, surfacing credential, network or config errors
+/// before a real sync.
 #[derive(Debug, Parser)]
 pub struct CheckCommand {
     #[command(flatten)]
@@ -38,25 +40,30 @@ impl CheckCommand {
         account_config.validate()?;
 
         info!("checking account `{name}`");
-        let sides = account_config.sides();
-        if sides.is_empty() {
-            bail!("Account `{name}` has no side configured (set `left` and/or `right`)");
+
+        // NOTE: the derivation comes off the configuration alone, so this
+        // answers before a first sync has ever run and while a remote is down,
+        // which is the point: what the store keeps is otherwise only visible
+        // once it is too late to be surprised cheaply.
+        for group in account_config.groups()? {
+            printer.out(Message::new(group.to_string()))?;
         }
-        for (side, config) in sides {
-            check_side(&side.to_string(), config.clone())?;
+
+        for (source_name, source) in account_config.sources()? {
+            check_source(&source_name, source)?;
         }
 
         printer.out(Message::new(format!("Account `{name}` looks healthy")))
     }
 }
 
-/// Opens the side and probes it with a `list_collections` call.
-fn check_side(label: &str, config: SideConfig) -> Result<()> {
-    let s = Spinner::start(format!("Checking {label} side…"));
+/// Opens the source and probes it with a `list_collections` call.
+fn check_source(label: &str, config: SourceConfig) -> Result<()> {
+    let s = Spinner::start(format!("Checking source {label}…"));
     let mut client = client::open(config)?;
     let collections = client.list_collections(false)?;
     s.success(format!(
-        "Checked {label} side ({} collections)",
+        "Checked source {label} ({} collections)",
         collections.len()
     ));
     Ok(())

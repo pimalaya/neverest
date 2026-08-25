@@ -11,7 +11,7 @@ use pimalaya_cli::{prompt, spinner::Spinner};
 
 use crate::{
     client,
-    config::{CarddavConfig, DavAuthConfig, SideBackendConfig, SideConfig},
+    config::{CarddavConfig, DavAuthConfig, SourceBackendConfig, SourceConfig},
     wizard::{search::Discovered, secret},
 };
 
@@ -47,7 +47,9 @@ pub fn configure(account_name: &str, url: &str, choice: &Discovered) -> Result<C
     };
 
     let spinner = Spinner::start("Testing CardDAV connection");
-    if let Err(err) = client::open(SideConfig::new(SideBackendConfig::Carddav(config.clone()))) {
+    if let Err(err) = client::open(SourceConfig::new(SourceBackendConfig::Carddav(
+        config.clone(),
+    ))) {
         spinner.failure("CardDAV connection failed");
         return Err(err);
     }

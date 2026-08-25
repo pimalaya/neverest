@@ -36,7 +36,7 @@
 - **Local pimdir store** <sup>[specs](https://github.com/pimalaya/pimdir)</sup>, the single local copy an app reads
 - **Retention**: a removed item is kept, never lost, and reclaimed on a schedule
 - **Relay** mode: a body crossing two IMAP servers is streamed server-to-server, never stored
-- **Queued submission**: a message a frontend enqueued leaves through the side's send channel
+- **Queued submission**: a message a frontend enqueued leaves through the source's send channel
 - **Simple auth** support for IMAP: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256
 - **HTTP auth** support for CardDAV: basic, bearer
 - **OAuth 2.0 bearer token** auth for Microsoft Graph
@@ -49,7 +49,7 @@
   - Autoconfiguration (Thunderbird) <sup>[specs](https://wiki.mozilla.org/Thunderbird:Autoconfiguration)</sup>
   - SRV DNS lookups <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup>
   - DAV service discovery <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup> (requires the `carddav` feature)
-- **Collection filters** and **per-side permissions**, gating what a run is allowed to mutate
+- **Collection filters** and **per-source permissions**, gating what a run is allowed to mutate
 - **TOML configuration** with multi-account support
 - **JSON** output via `--json`
 
@@ -119,7 +119,13 @@ nix run
 
 Run `neverest`. With no configuration file on disk the wizard asks for a single input, your email address, runs provider discovery in parallel (fixed provider rules, PACC, Thunderbird Autoconfiguration, RFC 6186 SRV, RFC 6764 DAV) and proposes every configuration it found. Picking one prompts the authentication mechanism the server actually advertises and its credentials, tests the connection, and offers to save the result. Declining prints the configuration on stdout instead, and a redirected stdout skips the prompts altogether, so `neverest > config.toml` writes the file itself. The account name is derived from your email domain, and renaming the TOML table renames the account.
 
-The wizard writes a one-side account: the discovered remote as `left`, reconciled against the local store. A remote-to-remote mirror, a second `right` side, is written by hand. `neverest configure` runs the same flow again over an existing account, replacing its `left` side and keeping everything else. Only the backends compiled into your build are proposed.
+The wizard writes one account with one source, the discovered remote reconciled against the local store, which is the offline replica most setups want. A second kind, a mirror and a fan-in are written by hand against [config.sample.toml](./config.sample.toml). `neverest configure` runs the same flow again over an existing account, replacing its direct backend and keeping everything else. Only the backends compiled into your build are proposed.
+
+An account is one pimdir store fed by one or more named **sources**, each a remote. A backend written directly under the account (`imap.server = "…"`) is sugar for a source named after its protocol; `sources.<name>.<protocol>.*` is the explicit form, and the only one able to express two sources of one protocol.
+
+Sources of one kind sharing a `collection.namespace` bind the same hub collections, and that sharing is what makes a change on one reach the other. Left on their default namespaces, which are their own names, they cache side by side in one store and never push to one another. That is the whole difference between a mirror and two providers read together, and it is why mail, contacts and calendar sit under one account without meeting.
+
+What the store keeps follows from that and is never configured: a source alone in its namespace keeps every body, two sharing one on an IMAP to IMAP pairing keep none and stream each crossing, anything else keeps what crossed. Every run and `neverest check` report it.
 
 A persistent configuration is loaded from the first valid path among:
 
@@ -131,25 +137,25 @@ Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`. Multiple paths c
 
 ### Microsoft Graph
 
-Graph is bearer-token-only, and neverest runs no OAuth flow itself: the token comes from an external command, typically [ortie](https://github.com/pimalaya/ortie), since tokens expire and need refreshing. The wizard offers Graph on a Microsoft account and asks for that command. Graph sends through its own `sendMail` action, so a Graph side needs no `smtp` channel.
+Graph is bearer-token-only, and neverest runs no OAuth flow itself: the token comes from an external command, typically [ortie](https://github.com/pimalaya/ortie), since tokens expire and need refreshing. The wizard offers Graph on a Microsoft account and asks for that command. Graph sends through its own `sendMail` action, so a Graph source needs no `smtp` channel.
 
 ```toml
 [accounts.outlook]
-left.msgraph.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
+msgraph.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
 ```
 
 ### CardDAV
 
-A CardDAV side syncs contacts rather than mail, so it pairs with another contacts side or with the store alone. The two sides of an account must agree on their kind, and a mixed pair is refused before any connection is made. Pair each kind with its own account; they may share a `store.root`, since a pimdir store records each collection's kind and holds several.
+A CardDAV source syncs contacts rather than mail. It may sit beside a mail source under one account: a hub collection is keyed by its kind, so their collections never meet, and one pimdir store holds both. Two contacts sources mirror each other only if they share a `collection.namespace`.
 
 ```toml
 [accounts.contacts]
-left.carddav.server = "https://dav.example.org/"
-left.carddav.auth.basic.username = "user"
-left.carddav.auth.basic.password.command = ["pass", "show", "example/dav"]
+carddav.server = "https://dav.example.org/"
+carddav.auth.basic.username = "user"
+carddav.auth.basic.password.command = ["pass", "show", "example/dav"]
 ```
 
-Cards are the first mutable items neverest syncs: unlike a mail body, a card is edited in place. A write is conditional on the revision last synced, so a card edited on both sides is reported as a conflict and left alone rather than overwritten. Setting `<side>.carddav.item.update = false` turns in-place edits off for that side. The backend needs the `carddav` cargo feature.
+Cards are the first mutable items neverest syncs: unlike a mail body, a card is edited in place. A write is conditional on the revision last synced, so a card edited on both sides is reported as a conflict and left alone rather than overwritten. Setting `carddav.item.update = false` turns in-place edits off for that source. The backend needs the `carddav` cargo feature.
 
 ## Usage
 
@@ -162,30 +168,30 @@ neverest sync -a <account> --include-collection INBOX
 neverest check -a <account>
 ```
 
-An account is initialized once, which opens every side so credential and network errors surface up front, then creates the empty store. `sync` refuses to run without it, and `init` refuses to run over it. `--reset` drops the cached state before a run, rebuilding it as a first sync would.
+An account is initialized once, which opens every source so credential and network errors surface up front, then creates the empty store. `sync` refuses to run without it, and `init` refuses to run over it. `--reset` drops the cached state before a run, rebuilding it as a first sync would.
 
 ### Retention and backup
 
 The store never truly deletes an item. When its last binding vanishes the row is retained: hidden from the sync and from listings, but kept with its body. Reclaiming is explicit and time-based, and neverest is the sweeper: after each sync it purges every retained item older than `store.purge-after`, then reports how many items and bytes it freed. Leaving the delay unset means never purge, `"0"` reproduces a terminal delete, and `sync --no-purge` skips the sweep for one run.
 
-This is what turns a sync into a backup. Make the remote side read-only and leave `store.purge-after` unset: a remote expunge still retires the local row, but the item and its body stay in the store, restorable, and neverest never pushes a deletion back to the server.
+This is what turns a sync into a backup. Make the source read-only and leave `store.purge-after` unset: a remote expunge still retires the local row, but the item and its body stay in the store, restorable, and neverest never pushes a deletion back to the server.
 
 ```toml
 [accounts.backup]
-left.imap.server = "imaps://imap.example.org:993"
-left.imap.item.delete = false
-left.imap.collection.delete = false
+imap.server = "imaps://imap.example.org:993"
+imap.item.delete = false
+imap.collection.delete = false
 ```
 
 ### Duplicated identities
 
 A collection may hold one identity twice: two messages carrying the same `Message-ID`, two cards carrying the same `UID`. Neverest cannot tell such copies apart, so it syncs neither of them and reports the collection and every id involved, on every run until the collection holds the identity once. Which copy to keep is a decision only you can make, with your own client.
 
-This is not an invalid mailbox, and nothing is wrong with your server. RFC 5322 binds the generator of a `Message-ID`, not what a store may hold: a copy legitimately carries the identifier of the message it copies, and a migration commonly produces such a pair. Reporting is what neverest does instead of guessing, because guessing costs mail. Propagating a delete of the copy it happened to pick removes the only copy on the other side while the first side still holds the message.
+This is not an invalid mailbox, and nothing is wrong with your server. RFC 5322 binds the generator of a `Message-ID`, not what a store may hold: a copy legitimately carries the identifier of the message it copies, and a migration commonly produces such a pair. Reporting is what neverest does instead of guessing, because guessing costs mail. Propagating a delete of the copy it happened to pick removes the only copy on the other source while the first still holds the message.
 
 ### Coming from Maildir
 
-Neverest ships no Maildir converter, and a local file store is not a sync side: the pimdir store is the local replica. Keyword storage is not standardized across Maildir consumers (info-section letters, dovecot-keywords, `X-Keywords` and `X-Label` headers), so a local migration would silently lose or mangle flags depending on which tool wrote the source tree. Initialize a fresh account and resync from the authoritative server instead: flags re-converge cleanly and the store reflects the actual server state. An existing on-disk tree is brought in through io-pimdir's conversion tooling rather than synced as a side.
+Neverest ships no Maildir converter, and a local file store is not a sync source: the pimdir store is the local replica. Keyword storage is not standardized across Maildir consumers (info-section letters, dovecot-keywords, `X-Keywords` and `X-Label` headers), so a local migration would silently lose or mangle flags depending on which tool wrote the source tree. Initialize a fresh account and resync from the authoritative server instead: flags re-converge cleanly and the store reflects the actual server state. An existing on-disk tree is brought in through io-pimdir's conversion tooling rather than synced as a source.
 
 ## License
 

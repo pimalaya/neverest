@@ -27,7 +27,7 @@ use io_replica::{
     storage::ReplicaLoadScope,
 };
 
-use crate::{offline::source_id, side::Side};
+use crate::offline::source_id;
 
 /// The placements one side's coroutines see for a collection: its hub projection
 /// plus this source handle's residual (freshly probed items not yet linked).
@@ -44,33 +44,33 @@ pub fn load_side(
         .placements)
 }
 
-/// The cross-side propagation `side` owes for a collection: the hub projection
-/// alone (a `Created` copy in, a `Dirty` flag change, a `Tombstone` delete),
-/// without the residual probes. Drives the itemized report. Reads the whole
-/// hub, so any source handle serves it.
+/// The cross-source propagation the source named `source` owes for a
+/// collection: the hub projection alone (a `Created` copy in, a `Dirty` flag
+/// change, a `Tombstone` delete), without the residual probes. Drives the
+/// itemized report. Reads the whole hub, so any source handle serves it.
 pub fn projection_view(
     store: &PimdirStore,
     collection: &str,
-    side: Side,
+    source: &str,
 ) -> Result<Vec<ReplicaPlacement>, PimdirError> {
     let hub = store.load_hub(collection)?;
     Ok(hub.project(
         &ReplicaCollectionId(collection.to_string()),
-        &source_id(side),
+        &source_id(source),
     ))
 }
 
 /// The one-sided, bodiless items whose body must be hydrated (`Full`) so the
-/// other side can receive a copy: for each shared item held by exactly one
-/// source, with no body yet, whose *other* side may create items, the
-/// holding [`Side`] and the item's handle there. Reads the whole hub, so any
-/// source handle serves it.
+/// other source can receive a copy: for each shared item held by exactly one
+/// of the pair, with no body yet, whose *other* source may create items, the
+/// holding source's name and the item's handle there. Reads the whole hub, so
+/// any source handle serves it.
 pub fn hydration_targets(
     store: &PimdirStore,
     collection: &str,
-    left_creates: bool,
-    right_creates: bool,
-) -> Result<Vec<(Side, ReplicaHandle)>, PimdirError> {
+    left: (&str, bool),
+    right: (&str, bool),
+) -> Result<Vec<(String, ReplicaHandle)>, PimdirError> {
     let hub = store.load_hub(collection)?;
     let mut out = Vec::new();
     for item in hub.items.values() {
@@ -78,19 +78,17 @@ pub fn hydration_targets(
             continue;
         }
         let (held, binding) = item.sources.iter().next().expect("one source");
-        let held_side = if *held == source_id(Side::Left) {
-            Side::Left
-        } else {
-            Side::Right
-        };
-        // NOTE: hydrate only when the far side (the one lacking the item) may
+
+        // NOTE: hydrate only when the far source (the one lacking the item) may
         // create it, so the fetched body has somewhere to land.
-        let target_creates = match held_side {
-            Side::Left => right_creates,
-            Side::Right => left_creates,
+        let target_creates = if *held == source_id(left.0) {
+            right.1
+        } else {
+            left.1
         };
+
         if target_creates {
-            out.push((held_side, binding.handle.clone()));
+            out.push((held.0.clone(), binding.handle.clone()));
         }
     }
     Ok(out)
@@ -159,7 +157,7 @@ mod tests {
         ])
         .unwrap();
 
-        let right_view = projection_view(&left, "INBOX", Side::Right).unwrap();
+        let right_view = projection_view(&left, "INBOX", "right").unwrap();
         assert_eq!(right_view.len(), 1);
         assert_eq!(right_view[0].status, ReplicaStatus::Created);
         assert_eq!(right_view[0].object, Some(ReplicaHash("abcd0000".into())));
@@ -175,13 +173,13 @@ mod tests {
         ))])
         .unwrap();
 
-        let targets = hydration_targets(&left, "INBOX", false, true).unwrap();
+        let targets = hydration_targets(&left, "INBOX", ("left", false), ("right", true)).unwrap();
         assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].0, Side::Left);
+        assert_eq!(targets[0].0, "left");
         assert_eq!(targets[0].1.0, "1");
 
         assert!(
-            hydration_targets(&left, "INBOX", false, false)
+            hydration_targets(&left, "INBOX", ("left", false), ("right", false))
                 .unwrap()
                 .is_empty()
         );

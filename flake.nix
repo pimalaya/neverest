@@ -1,9 +1,8 @@
 {
-  description = "CLI to synchronize emails, written in Rust";
+  description = "CLI to synchronize PIM collections: mail, contact, calendar…";
 
   inputs = {
     nixpkgs = {
-      # until crates.io fix fully backported
       url = "github:nixos/nixpkgs/nixos-25.11";
     };
     fenix = {

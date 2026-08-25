@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./logo.svg" alt="Logo" width="128" height="128" />
   <h1>📫 Neverest</h1>
-  <p>CLI to synchronize emails and contacts, written in Rust</p>
+  <p>CLI to synchronize PIM collections: mail, contact, calendar…</p>
   <p>
     <a href="https://matrix.to/#/#pimalaya:matrix.org"><img alt="Matrix" src="https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white"/></a>
     <a href="https://fosstodon.org/@pimalaya"><img alt="Mastodon" src="https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white"/></a>
@@ -19,19 +19,8 @@
 
 - [Features](#features)
 - [Installation](#installation)
-  - [Pre-built binary](#pre-built-binary)
-  - [Cargo](#cargo)
-  - [Nix](#nix)
-  - [Sources](#sources)
 - [Configuration](#configuration)
-  - [Contacts accounts (CardDAV)](#contacts-accounts-carddav)
-  - [Retention and purging](#retention-and-purging)
 - [Usage](#usage)
-  - [Initializing an account](#initializing-an-account)
-  - [Running a sync](#running-a-sync)
-  - [Collection filters and per-side permissions](#collection-filters-and-per-side-permissions)
-  - [Migrating from Maildir](#migrating-from-maildir)
-  - [Checking a configuration](#checking-a-configuration)
 - [License](#license)
 - [AI policy](https://github.com/pimalaya/.github/blob/master/AI_POLICY.md)
 - [Social](#social)

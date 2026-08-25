@@ -151,7 +151,7 @@ impl Serialize for GeneratedConfig<'_> {
 /// so the first run explains itself before dropping into prompts.
 fn print_welcome() {
     eprintln!();
-    eprintln!("Welcome to Neverest, the CLI to synchronize emails.");
+    eprintln!("Welcome to Neverest, the CLI to synchronize PIM collections.");
     eprintln!();
     eprintln!("Neverest reconciles your existing mailbox, over IMAP or Microsoft");
     eprintln!("Graph, with a local pimdir store the apps read and edit. Before it");

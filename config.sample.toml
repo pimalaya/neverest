@@ -10,7 +10,8 @@
 # can be passed at once, separated by `:`; the first one is the base and the
 # rest are deep-merged on top of it.
 #
-# Run bare `neverest` (no subcommand) to launch the wizard: it discovers a
+# Run bare `neverest` (no subcommand) with no configuration file on disk and it
+# offers the wizard, which prints the help otherwise: the wizard discovers a
 # provider from your email address, tests it, and writes a one-account,
 # one-source configuration here, in the flat spelling below. Everything else on
 # this page is written by hand.

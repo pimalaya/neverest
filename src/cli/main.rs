@@ -24,8 +24,9 @@ use crate::cli::{
 #[command(long_version = long_version!())]
 #[command(propagate_version = true, infer_subcommands = true)]
 pub struct Cli {
-    /// The command to run; a bare `neverest` (no subcommand) runs the
-    /// configuration wizard instead.
+    /// The command to run; a bare `neverest` (no subcommand) prints the
+    /// help, or offers the configuration wizard when no configuration
+    /// file is found.
     #[command(subcommand)]
     pub command: Option<Command>,
 

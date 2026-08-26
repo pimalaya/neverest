@@ -298,11 +298,20 @@ All other wizard rules (the single email-address prompt, the derived account
 name, the fan-out deadline, the capability-narrowed credential prompts, the
 connection test before writing, the save confirmations) are unchanged.
 
-### Requirement: A bare invocation runs the wizard
-Running `neverest` with no subcommand SHALL run the configuration wizard
-against the target configuration path (the first `--config` path when given,
-else the default one), as a bare `himalaya` does. The command list SHALL stay
-reachable through `--help`.
+### Requirement: A bare invocation offers the wizard only on a first run
+Running `neverest` with no subcommand SHALL print the help, except on a machine
+with no configuration, where it SHALL offer the wizard first, as a bare
+`himalaya` does. The wizard targets the first `--config` path when given, else
+the default one. A configuration that fails to parse counts as present, so the
+offer never proposes to write over a broken file; the parse error surfaces when
+a real command reads it. A declined offer SHALL fall back to the help, a bare
+invocation having nothing else to run.
+
+The offer SHALL be skipped, and the help printed, in JSON mode and when stdin
+is not a terminal, neither being able to answer a prompt. It SHALL also be
+skipped when `--account` names an account: with no subcommand that is a
+half-typed command rather than a first run, and the help is what points at the
+commands.
 
 The wizard SHALL NOT write a configuration file unconditionally: it SHALL ask
 for confirmation before saving, SHALL ask again before overwriting an existing
@@ -313,9 +322,11 @@ stdout without the save prompts, so `neverest > config.toml` and scripted runs
 keep working.
 
 A command that finds no configuration file SHALL propose the wizard ("No
-configuration found, create one at `<path>`?") and SHALL exit when the proposal
-is declined; the confirmation belongs to that proposal, not to the wizard, so a
-bare invocation never asks it.
+configuration found, create one at `<path>`?"), under the same two guards, and
+SHALL then read the configuration again rather than trust the wizard's result,
+which is only printed when the save is declined. A command still finding none
+SHALL fail naming the path it looked at and the documented sample; it SHALL NOT
+exit reporting success.
 
 ### Requirement: The generated configuration is a dotted document
 A configuration neverest writes or prints SHALL render as Himalaya's does: one

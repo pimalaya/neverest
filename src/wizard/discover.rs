@@ -1,10 +1,13 @@
 //! Configuration wizard.
 //!
-//! Run on bare `neverest` (no subcommand), proposed when no
-//! configuration file is found (see
+//! Offered when no configuration file is found, either by a bare
+//! `neverest` (no subcommand) or by a command that needs an account (see
+//! [`offer_configuration`] and
 //! [`crate::config::Config::load_or_wizard`]), and re-run over an
-//! existing account by `neverest configure` (see [`super::edit`]). It
-//! opens with a welcome banner on stderr, then asks for **one** input:
+//! existing account by `neverest configure` (see [`super::edit`]). A
+//! configuration that already exists is never met with the wizard: a bare
+//! `neverest` gets the help instead. It opens with a welcome banner on
+//! stderr, then asks for **one** input:
 //! an email address. A bare domain is accepted too (it is synthesized as
 //! `@domain`); a source is always a remote, so there is no server URL or
 //! folder path to type here.
@@ -58,8 +61,31 @@ const EMAIL_PROMPT: &str = "Email address:";
 
 /// The documented sample configuration, shown in the welcome banner and
 /// pointed at when discovery finds nothing to configure automatically.
-const CONFIG_SAMPLE_URL: &str =
+pub const CONFIG_SAMPLE_URL: &str =
     "https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
+
+/// Offers to generate a configuration at `target`, running the wizard
+/// when accepted, and reports whether it ran.
+///
+/// This is the only place the wizard introduces itself to someone who did
+/// not ask for it: a bare `neverest` on a machine with no configuration,
+/// or a command that needs an account and finds none. Callers guard the
+/// offer on a terminal and on the human output, since neither a script
+/// nor a JSON consumer can answer a prompt.
+pub fn offer_configuration(printer: &mut impl Printer, target: &Path) -> Result<bool> {
+    let prompt = format!(
+        "No configuration found, create one at {}?",
+        target.display()
+    );
+
+    if !prompt::bool(&prompt, true)? {
+        return Ok(false);
+    }
+
+    run(printer, target)?;
+
+    Ok(true)
+}
 
 /// Runs the wizard and either saves the resulting [`Config`] to
 /// `target` or prints it as a ready-to-save TOML document, then returns

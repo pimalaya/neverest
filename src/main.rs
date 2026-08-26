@@ -107,9 +107,18 @@ mod offline;
 mod sync;
 mod wizard;
 
+use std::{
+    io::{IsTerminal, stdin},
+    path::PathBuf,
+};
+
 use anyhow::Result;
-use clap::Parser;
-use pimalaya_cli::{error::ErrorReport, log::Logger, printer::StdoutPrinter};
+use clap::{CommandFactory, Parser};
+use pimalaya_cli::{
+    error::ErrorReport,
+    log::Logger,
+    printer::{Printer, StdoutPrinter},
+};
 use pimalaya_config::toml::TomlConfig;
 
 use crate::{cli::main::Cli, config::Config, wizard::discover};
@@ -127,9 +136,44 @@ fn execute(printer: &mut StdoutPrinter, cli: Cli) -> Result<()> {
 
     match cli.command {
         Some(command) => command.execute(printer, config_paths, cli.account.name.as_deref()),
-        None => {
-            discover::run(printer, &Config::target_path(config_paths)?)?;
-            Ok(())
+        None => meet_bare_invocation(printer, config_paths, cli.account.name.is_some()),
+    }
+}
+
+/// Meets a bare `neverest`, which is where a newcomer lands.
+///
+/// With no command there is nothing to run: a missing configuration
+/// raises the offer, and an existing one gets the help, which is also
+/// what a script or a JSON caller gets since neither can answer a prompt.
+/// A file that exists but fails to parse counts as a configuration, so
+/// the offer never proposes to write over a broken one: the parse error
+/// surfaces when a real command reads it.
+///
+/// `--account` names an account to act on, so with no subcommand it is a
+/// half-typed command rather than a first run: it gets the help, which
+/// points at the commands, instead of an offer to create an account.
+fn meet_bare_invocation(
+    printer: &mut StdoutPrinter,
+    config_paths: &[PathBuf],
+    named_account: bool,
+) -> Result<()> {
+    let configured = Config::from_paths_or_default(config_paths)
+        .ok()
+        .flatten()
+        .is_some();
+
+    if !configured && !named_account && !printer.is_json() && stdin().is_terminal() {
+        let target = Config::target_path(config_paths)?;
+
+        // NOTE: a bare invocation has nothing to run after the offer, so a
+        // declined one falls back to the help. The wizard already says
+        // what to run next when it ran.
+        if discover::offer_configuration(printer, &target)? {
+            return Ok(());
         }
     }
+
+    Cli::command().print_help()?;
+
+    Ok(())
 }

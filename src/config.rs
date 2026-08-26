@@ -2,7 +2,11 @@
 //! pimdir store, plus that store's settings.
 
 use std::{
-    collections::HashMap, fmt, fs, path::Path, path::PathBuf, process::exit, time::Duration,
+    collections::HashMap,
+    fmt, fs,
+    io::{IsTerminal, stdin},
+    path::{Path, PathBuf},
+    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -12,7 +16,7 @@ use io_sasl::{
     rfc4616::plain::SaslPlainCreds, rfc5801::SaslGs2ChannelBinding, rfc5802::SaslScramCreds,
     rfc7628::oauthbearer::SaslOauthbearerCreds, xoauth2::SaslXoauth2Creds,
 };
-use pimalaya_cli::{printer::Printer, prompt};
+use pimalaya_cli::printer::Printer;
 use pimalaya_config::{
     secret::Secret,
     toml as config_toml,
@@ -21,7 +25,7 @@ use pimalaya_config::{
 use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider};
 use serde::{Deserialize, Serialize};
 
-use crate::wizard;
+use crate::wizard::discover::{CONFIG_SAMPLE_URL, offer_configuration};
 
 /// `skip_serializing_if` predicate skipping a field equal to its type's
 /// default, so a generated config omits defaulted values (the only
@@ -131,25 +135,42 @@ impl TomlConfig for Config {
 }
 
 impl Config {
-    /// Loads `Config` from `config_paths`, or proposes the wizard when
-    /// no file exists. Declining the proposal exits: a command has
-    /// nothing to run against without an account.
+    /// Loads `Config` from `config_paths`, or offers the wizard when no
+    /// file exists.
+    ///
+    /// A missing configuration is met with the wizard rather than with an
+    /// error: the welcome frames what neverest is and offers to generate
+    /// an account, then the command carries on either way. Accepting is
+    /// what gives it a chance to work; declining leaves it to fail on the
+    /// configuration it still has not got.
     pub fn load_or_wizard(printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<Config> {
         if let Some(config) = Config::from_paths_or_default(config_paths)? {
             return Ok(config);
         }
 
+        // NOTE: the target path is where `-c` pointed, or the default
+        // location when it named none, so a mistyped path shows up as
+        // itself rather than as a generic first run.
         let target = Config::target_path(config_paths)?;
-        let prompt = format!(
-            "No configuration found, create one at {}?",
-            target.display(),
-        );
 
-        if !prompt::bool(&prompt, true)? {
-            exit(0);
+        // NOTE: nobody is there to answer a prompt in a script or a cron
+        // job, and a JSON consumer wants a failure it can read, so both
+        // skip the offer and fail below.
+        if !printer.is_json() && stdin().is_terminal() {
+            offer_configuration(printer, &target)?;
         }
 
-        wizard::discover::run(printer, &target)
+        // NOTE: the wizard also prints the configuration instead of
+        // writing it, so having run it proves nothing: the file is looked
+        // up again, and the command fails the ordinary way when nothing
+        // landed.
+        match Config::from_paths_or_default(config_paths)? {
+            Some(config) => Ok(config),
+            None => bail!(
+                "No configuration found at {}, run `neverest` to generate one or write it by hand: {CONFIG_SAMPLE_URL}",
+                target.display(),
+            ),
+        }
     }
 
     /// Serializes `self` to TOML at `path`, creating missing parent

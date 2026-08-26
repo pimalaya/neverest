@@ -6,7 +6,7 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use pimalaya_cli::{
     clap::{
-        args::{JsonFlag, LogFlags},
+        args::{AccountFlag, JsonFlag, LogFlags},
         commands::{CompletionCommand, ManualCommand},
         parsers::path_parser,
     },
@@ -39,6 +39,8 @@ pub struct Cli {
     #[arg(value_name = "PATH", value_parser = path_parser, value_delimiter = ':')]
     pub config_paths: Vec<PathBuf>,
     #[command(flatten)]
+    pub account: AccountFlag,
+    #[command(flatten)]
     pub json: JsonFlag,
     #[command(flatten)]
     pub log: LogFlags,
@@ -60,12 +62,24 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
+    /// Runs the subcommand against the account `-a` names, or the default one
+    /// when it names none.
+    ///
+    /// The flag is global and declared once, on [`Cli`], as it is in every
+    /// other pimalaya CLI: which account a command runs against is a property
+    /// of the invocation, not of the subcommand, and repeating it per
+    /// subcommand is how the same option ends up documented four ways.
+    pub fn execute(
+        self,
+        printer: &mut impl Printer,
+        config_paths: &[PathBuf],
+        account: Option<&str>,
+    ) -> Result<()> {
         match self {
-            Self::Check(cmd) => cmd.execute(printer, config_paths),
-            Self::Init(cmd) => cmd.execute(printer, config_paths),
-            Self::Sync(cmd) => cmd.execute(printer, config_paths),
-            Self::Configure(cmd) => cmd.execute(printer, config_paths),
+            Self::Check(cmd) => cmd.execute(printer, config_paths, account),
+            Self::Init(cmd) => cmd.execute(printer, config_paths, account),
+            Self::Sync(cmd) => cmd.execute(printer, config_paths, account),
+            Self::Configure(cmd) => cmd.execute(printer, config_paths, account),
             Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
             Self::Completion(cmd) => cmd.execute(printer, Cli::command()),
         }

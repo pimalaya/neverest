@@ -20,8 +20,6 @@
 - [Features](#features)
 - [Installation](#installation)
 - [Configuration](#configuration)
-  - [Microsoft Graph](#microsoft-graph)
-  - [CardDAV](#carddav)
 - [Usage](#usage)
 - [AI policy](https://github.com/pimalaya/.github/blob/master/AI_POLICY.md)
 - [License](#license)
@@ -31,27 +29,16 @@
 
 ## Features
 
-- **Mail** backend support: **IMAP**, **Microsoft Graph** (**JMAP** and **Gmail** configure but have no backend yet)
-- **Contacts** backend support: **CardDAV** <sup>[rfc6352](https://www.iana.org/go/rfc6352)</sup> (requires the `carddav` feature)
-- **Local pimdir store** <sup>[specs](https://github.com/pimalaya/pimdir)</sup>, the single local copy an app reads
+- **PIM domain** support: **mail** via IMAP and Microsoft Graph (JMAP and Gmail configure but have no backend yet), **contacts** via CardDAV <sup>[rfc6352](https://www.iana.org/go/rfc6352)</sup> (requires the `carddav` feature); one account syncs several at once
+- **Local pimdir store** <sup>[specs](https://github.com/pimalaya/pimdir)</sup>: the single local copy an app reads, holding every domain an account syncs
 - **Retention**: a removed item is kept, never lost, and reclaimed on a schedule
 - **Relay** mode: a body crossing two IMAP servers is streamed server-to-server, never stored
-- **Queued submission**: a message a frontend enqueued leaves through the source's send channel
-- **Simple auth** support for IMAP: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256
-- **HTTP auth** support for CardDAV: basic, bearer
-- **OAuth 2.0 bearer token** auth for Microsoft Graph
-- **TLS** support:
-  - [Rustls](https://crates.io/crates/rustls) with ring crypto
-  - [Rustls](https://crates.io/crates/rustls) with aws crypto (requires `rustls-aws` feature)
-  - [Native TLS](https://crates.io/crates/native-tls) (requires `native-tls` feature)
-- **Discovery** support:
-  - PACC <sup>[specs](https://datatracker.ietf.org/doc/html/draft-ietf-mailmaint-pacc)</sup>
-  - Autoconfiguration (Thunderbird) <sup>[specs](https://wiki.mozilla.org/Thunderbird:Autoconfiguration)</sup>
-  - SRV DNS lookups <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup>
-  - DAV service discovery <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup> (requires the `carddav` feature)
-- **Collection filters** and **per-source permissions**, gating what a run is allowed to mutate
-- **TOML configuration** with multi-account support
-- **JSON** output via `--json`
+- **Queued submission**: a message a frontend enqueued leaves through its source's send channel
+- **Auth** support: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256 for IMAP; basic and bearer for CardDAV; OAuth 2.0 bearer tokens for Microsoft Graph
+- **TLS** support: [Rustls](https://crates.io/crates/rustls) with ring or aws crypto (`rustls-aws` feature), [Native TLS](https://crates.io/crates/native-tls) (`native-tls` feature)
+- **Discovery** support: known provider rules, PACC <sup>[specs](https://datatracker.ietf.org/doc/html/draft-ietf-mailmaint-pacc)</sup>, Autoconfiguration <sup>[specs](https://wiki.mozilla.org/Thunderbird:Autoconfiguration)</sup>, SRV <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup>, DAV <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup>
+- **Interactive wizard** turning an email address into a tested account
+- **TOML configuration** with multi-account support, and **JSON** output via `--json`
 
 > [!TIP]
 > Neverest is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support. The default feature set is declared in [Cargo.toml](./Cargo.toml).
@@ -117,54 +104,26 @@ nix run
 
 ## Configuration
 
-Run `neverest`. With no configuration file on disk the wizard asks for a single input, your email address, runs provider discovery in parallel (fixed provider rules, PACC, Thunderbird Autoconfiguration, RFC 6186 SRV, RFC 6764 DAV) and proposes every configuration it found. Picking one prompts the authentication mechanism the server actually advertises and its credentials, tests the connection, and offers to save the result. Declining prints the configuration on stdout instead, and a redirected stdout skips the prompts altogether, so `neverest > config.toml` writes the file itself. The account name is derived from your email domain, and renaming the TOML table renames the account.
+A configuration is loaded from the first valid path among:
 
-The wizard writes one account with one source, the discovered remote reconciled against the local store, which is the offline replica most setups want. A second kind, a mirror and a fan-in are written by hand against [config.sample.toml](./config.sample.toml). `neverest configure` runs the same flow again over an existing account, replacing its direct backend and keeping everything else. Only the backends compiled into your build are proposed.
+- `$XDG_CONFIG_HOME/neverest/config.toml`
+- `$HOME/.config/neverest/config.toml`
+- `$HOME/.neverestrc`
 
-An account is one pimdir store fed by one or more named **sources**, each a remote. A backend written directly under the account (`imap.server = "…"`) is sugar for a source named after its protocol; `sources.<name>.<protocol>.*` is the explicit form, and the only one able to express two sources of one protocol.
+Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths can be passed at once, separated by `:`. The first one is the base and the rest are deep-merged on top. The full field reference lives in [config.sample.toml](./config.sample.toml).
 
-Sources of one kind sharing a `collection.namespace` bind the same hub collections, and that sharing is what makes a change on one reach the other. Left on their default namespaces, which are their own names, they cache side by side in one store and never push to one another. That is the whole difference between a mirror and two providers read together, and it is why mail, contacts and calendar sit under one account without meeting.
+Run `neverest` with no configuration file on disk and a minimal wizard asks for an email address, searches the services reachable from it, prompts the authentication the chosen one advertises, tests the connection, then offers to write the result. It sets up **one account with one backend**, the offline replica most setups want, and nothing more: a second kind, a mirror between two providers, a fan-in are all written by hand against [config.sample.toml](./config.sample.toml). `neverest configure` runs the same flow again over an existing account. Declining the save prints the configuration on stdout, and a redirected stdout skips the prompts altogether, so `neverest > config.toml` writes the file itself.
 
-What the store keeps follows from that and is never configured: a source alone in its namespace keeps every body, two sharing one on an IMAP to IMAP pairing keep none and stream each crossing, anything else keeps what crossed. Every run and `neverest check` report it.
-
-A persistent configuration is loaded from the first valid path among:
-
-- $XDG_CONFIG_HOME/neverest/config.toml
-- $HOME/.config/neverest/config.toml
-- $HOME/.neverestrc
-
-Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`. Multiple paths can be passed at once, separated by `:`. The first one is the base and the rest are deep-merged on top. The full field reference lives in [config.sample.toml](./config.sample.toml).
-
-### Microsoft Graph
-
-Graph is bearer-token-only, and neverest runs no OAuth flow itself: the token comes from an external command, typically [ortie](https://github.com/pimalaya/ortie), since tokens expire and need refreshing. The wizard offers Graph on a Microsoft account and asks for that command. Graph sends through its own `sendMail` action, so a Graph source needs no `smtp` channel.
-
-```toml
-[accounts.outlook]
-msgraph.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
-```
-
-### CardDAV
-
-A CardDAV source syncs contacts rather than mail. It may sit beside a mail source under one account: a hub collection is keyed by its kind, so their collections never meet, and one pimdir store holds both. Two contacts sources mirror each other only if they share a `collection.namespace`.
-
-```toml
-[accounts.contacts]
-carddav.server = "https://dav.example.org/"
-carddav.auth.basic.username = "user"
-carddav.auth.basic.password.command = ["pass", "show", "example/dav"]
-```
-
-Cards are the first mutable items neverest syncs: unlike a mail body, a card is edited in place. A write is conditional on the revision last synced, so a card edited on both sides is reported as a conflict and left alone rather than overwritten. Setting `carddav.item.update = false` turns in-place edits off for that source. The backend needs the `carddav` cargo feature.
+An account is one pimdir store fed by one or more named **sources**, each a remote, and it may hold several kinds at once. Two sources of one kind mirror each other only where they share a `collection.namespace`; left alone they cache side by side and never push to one another. What the store keeps follows from that and is never configured, so every run and `neverest check` report it.
 
 ## Usage
 
 Every command carries its own `--help`, the source of truth for its flags and syntax.
 
 ```sh
-neverest init -a <account>
-neverest sync -a <account> --dry-run
-neverest sync -a <account> --include-collection INBOX
+neverest init  -a <account>
+neverest sync  -a <account> --dry-run
+neverest sync  -a <account> --include-collection INBOX
 neverest check -a <account>
 ```
 

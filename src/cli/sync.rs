@@ -12,7 +12,7 @@ use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser};
 use io_pimdir::PimdirStore;
 use log::{debug, info};
-use pimalaya_cli::{clap::args::AccountFlag, printer::Printer};
+use pimalaya_cli::printer::Printer;
 use pimalaya_config::toml::TomlConfig;
 
 use crate::{
@@ -40,9 +40,6 @@ const LOCK_POLL: Duration = Duration::from_millis(500);
 /// aliases, so existing scripts and the connector contract keep working.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
-    #[command(flatten)]
-    pub account: AccountFlag,
-
     /// Run the synchronization without applying any changes; only
     /// prints the patch that would have been applied.
     #[arg(long, short = 'd')]
@@ -99,10 +96,14 @@ pub struct SyncCommand {
 }
 
 impl SyncCommand {
-    pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
+    pub fn execute(
+        self,
+        printer: &mut impl Printer,
+        config_paths: &[PathBuf],
+        account_name: Option<&str>,
+    ) -> Result<()> {
         let mut config = Config::load_or_wizard(printer, config_paths)?;
 
-        let account_name = self.account.name.as_deref();
         let Some((name, account_config)) = config.take_account(account_name)? else {
             bail!("Cannot find account");
         };

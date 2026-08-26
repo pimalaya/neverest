@@ -7,7 +7,6 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use io_pimdir::PimdirStore;
 use pimalaya_cli::{
-    clap::args::AccountFlag,
     printer::{Message, Printer},
     spinner::Spinner,
 };
@@ -17,16 +16,17 @@ use crate::{client, config::Config, offline::driver};
 
 /// Initializes an account's replica; refuses to run if it already exists.
 #[derive(Debug, Parser)]
-pub struct InitCommand {
-    #[command(flatten)]
-    pub account: AccountFlag,
-}
+pub struct InitCommand {}
 
 impl InitCommand {
-    pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
+    pub fn execute(
+        self,
+        printer: &mut impl Printer,
+        config_paths: &[PathBuf],
+        account_name: Option<&str>,
+    ) -> Result<()> {
         let mut config = Config::load_or_wizard(printer, config_paths)?;
 
-        let account_name = self.account.name.as_deref();
         let Some((name, account_config)) = config.take_account(account_name)? else {
             bail!("Cannot find account");
         };

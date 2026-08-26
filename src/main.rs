@@ -126,7 +126,7 @@ fn execute(printer: &mut StdoutPrinter, cli: Cli) -> Result<()> {
     let config_paths = cli.config_paths.as_ref();
 
     match cli.command {
-        Some(command) => command.execute(printer, config_paths),
+        Some(command) => command.execute(printer, config_paths, cli.account.name.as_deref()),
         None => {
             discover::run(printer, &Config::target_path(config_paths)?)?;
             Ok(())

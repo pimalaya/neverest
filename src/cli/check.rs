@@ -8,7 +8,6 @@ use anyhow::{Result, bail};
 use clap::Parser;
 use log::info;
 use pimalaya_cli::{
-    clap::args::AccountFlag,
     printer::{Message, Printer},
     spinner::Spinner,
 };
@@ -23,16 +22,17 @@ use crate::{
 /// lists its collections, surfacing credential, network or config errors
 /// before a real sync.
 #[derive(Debug, Parser)]
-pub struct CheckCommand {
-    #[command(flatten)]
-    pub account: AccountFlag,
-}
+pub struct CheckCommand {}
 
 impl CheckCommand {
-    pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
+    pub fn execute(
+        self,
+        printer: &mut impl Printer,
+        config_paths: &[PathBuf],
+        account_name: Option<&str>,
+    ) -> Result<()> {
         let mut config = Config::load_or_wizard(printer, config_paths)?;
 
-        let account_name = self.account.name.as_deref();
         let Some((name, account_config)) = config.take_account(account_name)? else {
             bail!("Cannot find account");
         };

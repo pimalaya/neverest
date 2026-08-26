@@ -13,6 +13,19 @@
 //! this crate as opaque bytes, byte-for-byte, so a property this scanner does
 //! not understand cannot be lost. Rendering a card is the frontend's job, and
 //! that is where a full parser (vcard-rs) belongs.
+//!
+//! Unlike [mail](super::mail), this scanner is **not** yet
+//! [`io_pimdir::conventions::card`]. The link id and the summary shape are the
+//! format's, but io-pimdir's own scanner reads two properties differently, and
+//! both ways round it is the one that loses: it splits a property on the first
+//! colon, so a quoted parameter holding one (`FN;LANGUAGE="x:y":Jane Doe`,
+//! legal under RFC 6350 §3.3) cuts the value in half, and it leaves RFC 6350
+//! §3.4 escaping in place, so a reader displays `Doe\, Jane`. Delegating today
+//! would regress both, which
+//! `a_parameter_may_hold_a_colon_of_its_own` and
+//! `display_values_are_unescaped_but_the_body_is_not_touched` below would
+//! catch. They stay here until io-pimdir's card conventions read a card the
+//! same way, at which point this file becomes the delegation mail already is.
 
 use io_replica::placement::{ReplicaLinkId, ReplicaMeta, ReplicaSortKey};
 use serde::Serialize;
@@ -75,8 +88,12 @@ fn sort_key(full_name: &str) -> ReplicaSortKey {
     ReplicaSortKey(full_name.trim().to_lowercase())
 }
 
-/// The link id for a card: its `UID` (`uid:`), else a digest of the whole
-/// body (`hash:`).
+/// The link id for a card: its bare `UID`, else a digest of the whole body
+/// (`hash:`).
+///
+/// pimdir SPEC Annex A.2 gives the identity as the `UID` verbatim, with
+/// nothing prepended; only the fallback is marked, since it names nothing any
+/// server has heard of.
 ///
 /// A card without a `UID` is legal but unaddressable across servers, so the
 /// fallback only has to be stable and collision-resistant enough to keep two
@@ -86,7 +103,7 @@ fn sort_key(full_name: &str) -> ReplicaSortKey {
 /// such card and store its body twice.
 fn link_id(uid: Option<&str>, raw: &[u8]) -> ReplicaLinkId {
     match uid {
-        Some(uid) if !uid.is_empty() => ReplicaLinkId::from(format!("uid:{uid}")),
+        Some(uid) if !uid.is_empty() => ReplicaLinkId::from(uid.to_owned()),
         _ => ReplicaLinkId::from(format!("hash:{:016x}", fnv1a64(raw))),
     }
 }
@@ -212,7 +229,7 @@ mod tests {
     #[test]
     fn the_uid_is_the_link_id_even_when_it_holds_colons() {
         let (link, _, _) = parse_body(CARD.as_bytes(), CARD.len() as u64);
-        assert_eq!(link.0, "uid:urn:uuid:4fbe8971-0bc3-424c-9c26-36c3e1eff6b1");
+        assert_eq!(link.0, "urn:uuid:4fbe8971-0bc3-424c-9c26-36c3e1eff6b1");
     }
 
     #[test]
@@ -250,7 +267,7 @@ mod tests {
              END:VCARD\r\n";
 
         let (link, _, _) = parse_body(raw.as_bytes(), raw.len() as u64);
-        assert_eq!(link.0, "uid:card-1234");
+        assert_eq!(link.0, "card-1234");
         assert_eq!(meta(raw)["fn"], "Jane Doe");
     }
 

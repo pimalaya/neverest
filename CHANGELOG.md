@@ -48,6 +48,8 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   A hub collection is keyed by its kind, its `collection.namespace` and its name, so a mailbox and an address book both called `Default` stay apart. Two sources sharing a namespace bind the same hub collections, and that sharing is what propagation is: an item in a collection a source participates in, with no binding for that source, is pushed to it. The namespace defaults to the source's own name, so sources are isolated unless pointed at the same one deliberately. Isolated is the default because its failure mode is a mirror that did nothing, visible in the report, where merging by default fails by copying one real provider's mailbox into another.
 
+  The id is spelled `<namespace>/<name>` and the namespace comes back off at one seam, so a server only ever sees the name it gave. Every wire call goes through it, the solo sync's body-hydration pool included, and so does a move destination: a hub id reaching an IMAP server is not even a legal mailbox name where the delimiter is `.`.
+
 - Added the **store report**: every run and `neverest check` state what the store keeps, per kind and namespace.
 
   What the store keeps is derived, not configured: one source keeps every body, two sources sharing a namespace on an IMAP to IMAP pairing keep none and stream each crossing, anything else keeps what crossed. The report is therefore the only place the value is stated, and it is printed even on a run that wrote nothing. A run whose derivation moved names the old value and what became unreferenced. `check` derives it from the configuration alone, so it answers before a first sync and while a remote is down.
@@ -119,6 +121,12 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 - The sync seam carries content revisions end to end and implements conditional in-place updates.
 
   An edit is written `If-Match` the last-synced revision, and a remote that moved since is rejected rather than overwritten, so the engine re-merges and records a conflict instead of destroying someone's edit. Conflicts are reported in both output modes and re-reported every run until resolved; neverest never resolves one by itself.
+
+- Link ids, dates and summaries are the pimdir format's, not neverest's.
+
+  A message links by its bare `Message-ID` and a card by its bare `UID`, as pimdir SPEC Annex A and the format's own vectors give them; the `mid:` and `uid:` prefixes are gone, and only a kind's own fallback stays marked (`alt:`, `hash:`), that being the one case a prefix is for. `meta.date` is the UTC instant rather than the sender's offset, so two writers of one store record a message the same way. The summary types come from `io_pimdir::conventions`, so the schema cannot drift by a field, which also gives a card the `emails` list it was missing. **An existing store re-links on the next sync: run `neverest sync --reset -a <account>`.**
+
+  The per-kind readers stay neverest's for now. io-pimdir's read headers raw, so an RFC 2047 subject reaches a reader as `=?utf-8?q?…?=`, and its vCard scanner cuts the value of a legal quoted parameter holding a colon and leaves RFC 6350 escaping in place. Each gap is held by a test here until io-pimdir closes it.
 
 - Every summarised item carries a sort key (pimdir SPEC §9.3), so a reader pages a collection in its natural order.
 

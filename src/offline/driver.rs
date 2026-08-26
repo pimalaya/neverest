@@ -59,7 +59,10 @@ use crate::{
     kind::Kind,
     offline::{
         drive, pipe,
-        remote::{BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, hydrate_batch, resolve_kind},
+        remote::{
+            BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, hydrate_batch, resolve_kind,
+            wire_name,
+        },
         state::StoreState,
         storage::{hydration_targets, load_side, projection_view},
         submit,
@@ -84,10 +87,7 @@ const MAX_EXTRA_PASSES: usize = 4;
 /// keys it: that is the name the user typed into `--include-collection` and the
 /// one they see in their client.
 fn display_name<'a>(namespace: &str, collection: &'a str) -> &'a str {
-    collection
-        .strip_prefix(namespace)
-        .and_then(|rest| rest.strip_prefix('/'))
-        .unwrap_or(collection)
+    wire_name(namespace, collection)
 }
 
 /// The hub collection id a remote collection name binds to in `namespace`.
@@ -857,6 +857,15 @@ fn phase2_hydrate(
         .map(|ctx| resolve_kind(&mut ctx.pool))
         .unwrap_or(Kind::Mail);
 
+    // NOTE: a group is one namespace, so every context here strips the same
+    // prefix. These workers fetch on their own connections rather than through
+    // `PimRemote`, so this is where the hub id becomes a name the server knows;
+    // the cache stays keyed by the id, which is what Phase 3 looks up.
+    let namespace = ctxs
+        .first()
+        .map(|ctx| ctx.namespace.clone())
+        .unwrap_or_default();
+
     let cache: Mutex<HashMap<FetchKey, ReplicaFetchedItem>> =
         Mutex::new(HashMap::with_capacity(total_bodies));
     let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
@@ -870,6 +879,7 @@ fn phase2_hydrate(
     let stop_ref = &stop;
     let done_ref = &done;
     let s_ref = &s;
+    let namespace_ref = namespace.as_str();
 
     thread::scope(|scope| {
         for ctx in ctxs.iter_mut() {
@@ -886,7 +896,7 @@ fn phase2_hydrate(
                     match hydrate_batch(
                         kind,
                         ctx.pool.primary(),
-                        &collection,
+                        wire_name(namespace_ref, &collection),
                         &handles,
                         blobs,
                         Some(&on_body),

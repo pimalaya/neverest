@@ -116,20 +116,31 @@ impl<'a> PimRemote<'a> {
         }
     }
 
-    /// The name the backend knows a hub collection by.
-    ///
-    /// A hub collection id is `<namespace>/<name>`, which is what keeps a
-    /// mailbox and an address book both called `Default` apart in one store,
-    /// and what keeps two providers cached side by side from meeting. The
-    /// server knows nothing of that: this is the one seam where the id becomes
-    /// a name again, so every wire call goes through it and no other code has
-    /// to carry two spellings of the same collection.
+    /// [`wire_name`] against this side's namespace.
     fn wire_name<'n>(&self, collection: &'n str) -> &'n str {
-        collection
-            .strip_prefix(self.namespace.as_str())
-            .and_then(|rest| rest.strip_prefix('/'))
-            .unwrap_or(collection)
+        wire_name(&self.namespace, collection)
     }
+}
+
+/// The name the backend knows a hub collection by.
+///
+/// A hub collection id is `<namespace>/<name>`, which is what keeps a mailbox
+/// and an address book both called `Default` apart in one store, and what keeps
+/// two providers cached side by side from meeting. The server knows nothing of
+/// that: this is the seam where the id becomes a name again, and every wire call
+/// goes through it, including the ones the driver's fetch pool makes on its own
+/// connections rather than through [`PimRemote`]. A leak reaches the server as a
+/// collection it has no name for, which IMAP rejects outright (`/` is not legal
+/// in a mailbox name on a server whose delimiter is `.`) and a path-addressed
+/// backend would look up under a directory that does not exist.
+///
+/// A name that merely starts with the namespace keeps its own spelling: only the
+/// `<namespace>/` prefix is a namespace.
+pub(crate) fn wire_name<'n>(namespace: &str, collection: &'n str) -> &'n str {
+    collection
+        .strip_prefix(namespace)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .unwrap_or(collection)
 }
 
 /// The [`Kind`] a pool's backend syncs.
@@ -256,11 +267,15 @@ impl ReplicaRemote for PimRemote<'_> {
                     if_match,
                 } => match to {
                     Some(target) => {
-                        let dest = target.as_str();
+                        // NOTE: the destination is a hub collection id like the
+                        // source, so it goes through the same seam: a server
+                        // asked to move into `<namespace>/<name>` has no such
+                        // collection.
+                        let dest = wire_name(&self.namespace, target.as_str()).to_string();
                         match self
                             .pool
                             .primary()
-                            .move_items(&collection, dest, &[handle.as_str()])
+                            .move_items(&collection, &dest, &[handle.as_str()])
                         {
                             Ok(()) => accepted(handle, None),
                             Err(err) => rejected(handle, "move item", err),
@@ -810,4 +825,30 @@ fn header_boundary(buf: &[u8]) -> Option<usize> {
         .position(|w| w == b"\r\n\r\n")
         .map(|i| i + 4)
         .or_else(|| buf.windows(2).position(|w| w == b"\n\n").map(|i| i + 2))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every wire call goes through this seam, the driver's own fetch pool
+    /// included. A hub id that reaches a server is rejected outright on IMAP,
+    /// whose mailbox names cannot hold the `/` a namespace prefix ends on.
+    #[test]
+    fn a_hub_id_becomes_the_name_its_server_knows() {
+        assert_eq!(
+            wire_name("imap", "imap/Archives.Charlie"),
+            "Archives.Charlie"
+        );
+        assert_eq!(wire_name("mail", "mail/INBOX"), "INBOX");
+
+        // An IMAP hierarchy survives: only the first segment is the namespace.
+        assert_eq!(wire_name("mail", "mail/Archive/2026"), "Archive/2026");
+
+        // A name that merely starts with the namespace keeps its spelling.
+        assert_eq!(wire_name("mail", "mailbox/INBOX"), "mailbox/INBOX");
+
+        // An id from another namespace is left whole rather than mangled.
+        assert_eq!(wire_name("cards", "mail/INBOX"), "mail/INBOX");
+    }
 }

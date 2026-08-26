@@ -81,14 +81,20 @@ impl Kind {
     /// `Message-ID` an IMAP server without UIDPLUS needs to recover the UID
     /// it assigned, the `UID` a DAV backend builds the new href from.
     ///
-    /// `None` when the link id is one of the kind's own fallbacks (mail's
-    /// `alt:` digest, a card's `hash:`), which names nothing on the server.
+    /// A link id *is* that identity, pimdir SPEC Annex A prepending nothing
+    /// to it, so the hint is the id itself. `None` only for the kind's own
+    /// fallback (mail's `alt:`, a card's `hash:`), which the server has never
+    /// heard of: those are the one case a prefix marks, and a real
+    /// `Message-ID` or `UID` cannot be mistaken for one, RFC 5322 `atext`
+    /// admitting no colon before the `@`.
     pub fn link_hint(self, link_id: &ReplicaLinkId) -> Option<&str> {
-        match self {
-            Self::Mail => link_id.0.strip_prefix("mid:"),
+        let fallback = match self {
+            Self::Mail => "alt:",
             #[cfg(feature = "carddav")]
-            Self::Vcard => link_id.0.strip_prefix("uid:"),
-        }
+            Self::Vcard => "hash:",
+        };
+
+        (!link_id.0.starts_with(fallback)).then_some(link_id.0.as_str())
     }
 
     /// The tier a freshly probed item is raised to so its link id and summary

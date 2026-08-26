@@ -82,6 +82,18 @@ impl StoreState {
         Ok(state)
     }
 
+    /// Stamps a store this version has just created, and clears whatever a
+    /// previous store in the same directory derived.
+    ///
+    /// Whoever materializes `pimdir.db` owes the sidecar: [`StoreState::load`]
+    /// reads a store directory holding one without the other as the
+    /// unnamespaced ancestor, so a store created without this stamp is refused
+    /// on the next run, and refused again after the `--reset` the refusal asks
+    /// for, since resetting recreates the store the same way.
+    pub fn stamp(dir: &Path) -> Result<()> {
+        Self::default().save(dir)
+    }
+
     /// Writes the sidecar back, stamping the current layout.
     pub fn save(&mut self, dir: &Path) -> Result<()> {
         self.layout = LAYOUT;
@@ -123,6 +135,29 @@ mod tests {
 
         let err = StoreState::load(dir.path()).unwrap_err().to_string();
         assert!(err.contains("--reset"), "got {err}");
+    }
+
+    #[test]
+    fn a_store_this_version_created_is_not_taken_for_the_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pimdir.db"), b"").unwrap();
+        StoreState::stamp(dir.path()).unwrap();
+
+        let state = StoreState::load(dir.path()).unwrap();
+        assert_eq!(state.layout, LAYOUT);
+    }
+
+    #[test]
+    fn stamping_forgets_what_the_previous_store_derived() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StoreState::default();
+        state.record(String::from("message/rfc822/mail"), String::from("all"));
+        state.save(dir.path()).unwrap();
+
+        StoreState::stamp(dir.path()).unwrap();
+
+        let state = StoreState::load(dir.path()).unwrap();
+        assert_eq!(state.previous("message/rfc822/mail", "none"), None);
     }
 
     #[test]

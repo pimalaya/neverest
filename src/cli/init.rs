@@ -12,7 +12,11 @@ use pimalaya_cli::{
 };
 use pimalaya_config::toml::TomlConfig;
 
-use crate::{client, config::Config, offline::driver};
+use crate::{
+    client,
+    config::Config,
+    offline::{driver, state::StoreState},
+};
 
 /// Initializes an account's replica; refuses to run if it already exists.
 #[derive(Debug, Parser)]
@@ -55,6 +59,8 @@ impl InitCommand {
         // handle is dropped immediately, the sync opening its own.
         PimdirStore::open(&replica)
             .with_context(|| format!("Create pimdir store `{}`", replica.display()))?;
+        StoreState::stamp(&replica)
+            .with_context(|| format!("Stamp store state `{}`", replica.display()))?;
         s.success("Created replica store");
 
         printer.out(Message::new(format!(

@@ -17,7 +17,7 @@ use pimalaya_config::toml::TomlConfig;
 
 use crate::{
     config::{CollectionFilter, Config},
-    offline::driver,
+    offline::{driver, state::StoreState},
 };
 
 /// How long a run waits for another run's store lock before giving up:
@@ -223,8 +223,11 @@ fn reset_replica(replica: &std::path::Path, include: &[String]) -> Result<()> {
         fs::remove_dir_all(&objects)
             .with_context(|| format!("Remove `{}` for reset", objects.display()))?;
     }
-    // NOTE: the empty store is recreated so the account stays initialized.
+    // NOTE: the empty store is recreated so the account stays initialized, and
+    // stamped like a fresh one: a reset that left no sidecar would be refused
+    // by the next run, which asks for the reset that just ran.
     PimdirStore::open(replica).context("Recreate pimdir store after reset")?;
+    StoreState::stamp(replica).context("Stamp store state after reset")?;
     Ok(())
 }
 
@@ -245,5 +248,17 @@ mod tests {
 
         drop(held);
         acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap();
+    }
+
+    /// The refusal a sidecar-less store raises names `--reset` as its remedy,
+    /// so a reset leaving the store sidecar-less would raise it again.
+    #[test]
+    fn a_reset_leaves_a_store_the_next_run_can_read() {
+        let dir = tempfile::tempdir().unwrap();
+
+        reset_replica(dir.path(), &[]).unwrap();
+
+        assert!(dir.path().join("pimdir.db").exists());
+        StoreState::load(dir.path()).unwrap();
     }
 }

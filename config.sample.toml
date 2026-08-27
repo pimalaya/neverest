@@ -208,13 +208,17 @@ imap.item.delete = false
 
 # A CardDAV side syncs **contacts**, so it pairs with another contacts side or
 # with the store alone, never with a mailbox: an account's two sides must agree
-# on their kind. Requires the `carddav` cargo feature, which is not in the
-# default set until the backend has a live suite behind it.
+# on their kind. Requires the `carddav` cargo feature, which is in the default
+# set.
 #
 # The URL is the entry point only; the principal and the address book home set
 # are discovered from it, and each address book becomes a collection keyed by
 # its path segment.
-#carddav.server = "https://dav.example.org/"
+#
+# Bare authority (implicit `https://`), or a full `http://` / `https://` URL.
+#carddav.server = "dav.example.org"
+#carddav.server = "posteo.de:8843"
+#carddav.server = "https://dav.example.org/dav/"
 
 # Pick exactly one of `basic` (the common case) or `bearer`.
 #carddav.auth.basic.username = "user"

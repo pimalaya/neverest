@@ -24,6 +24,7 @@ use pimalaya_config::{
 };
 use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider};
 use serde::{Deserialize, Serialize};
+use url::Url;
 
 use crate::wizard::discover::{CONFIG_SAMPLE_URL, offer_configuration};
 
@@ -1094,8 +1095,10 @@ source_config! {
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct CarddavConfig {
-        /// The DAV entry point, a full URL
-        /// (`https://dav.example.org/`, `https://dav.example.org/dav/`).
+        /// The DAV entry point: a bare authority
+        /// (`dav.example.org[:port]`, read as `https://<authority>`) or a
+        /// full URL (`https://dav.example.org/dav/`, or an `http://` one
+        /// for a server on a trusted network).
         pub server: String,
         #[serde(default)]
         pub tls: TlsConfig,
@@ -1278,6 +1281,31 @@ pub struct SmtpConfig {
     /// table of [`SaslConfig`]. Omit it for an unauthenticated relay,
     /// which stops after `EHLO` and sends no `AUTH` at all.
     pub sasl: Option<SaslConfig>,
+}
+
+/// Resolves a configured `server` into a URL, `scheme` filling in for a
+/// value carrying none, so every backend accepts a bare authority
+/// (`dav.example.org`, `imap.example.org:143`) as readily as a full URL.
+///
+/// The presence of `://` is what tells them apart, and it has to be:
+/// a bare authority is **not** a relative URL. `url` reads
+/// `posteo.de:8843` as the scheme `posteo.de` with the path `8843`,
+/// which parses cleanly and carries no host, so a caller matching on
+/// [`ParseError::RelativeUrlWithoutBase`] catches the portless spelling
+/// and hands the ported one straight to a backend, which then rejects it
+/// for having no host.
+#[cfg_attr(
+    not(any(feature = "imap", feature = "smtp", feature = "carddav")),
+    allow(dead_code)
+)]
+pub fn server_url(server: &str, scheme: &str) -> Result<Url> {
+    let url = if server.contains("://") {
+        Url::parse(server)
+    } else {
+        Url::parse(&format!("{scheme}://{server}"))
+    };
+
+    url.with_context(|| format!("Cannot parse `{server}` as a server URL"))
 }
 
 fn default_gmail_user_id() -> String {
@@ -1789,6 +1817,42 @@ msgraph.user-id = "me"
         .to_string();
 
         assert!(err.contains("login"), "got {err}");
+    }
+
+    /// A bare authority carrying a port is the case that used to reach a
+    /// backend as a hostless URL: `url` reads `posteo.de:8843` as the
+    /// scheme `posteo.de`, so it parses and only the backend notices.
+    #[test]
+    fn a_server_resolves_from_an_authority_with_or_without_a_port() {
+        for (server, scheme, host, port) in [
+            ("posteo.de:8843", "https", "posteo.de", Some(8843)),
+            ("dav.example.org", "https", "dav.example.org", None),
+            (
+                "imap.example.org:143",
+                "imaps",
+                "imap.example.org",
+                Some(143),
+            ),
+            ("smtp.example.org", "smtps", "smtp.example.org", None),
+        ] {
+            let url = server_url(server, scheme).unwrap();
+            assert_eq!(url.scheme(), scheme, "{server}");
+            assert_eq!(url.host_str(), Some(host), "{server}");
+            assert_eq!(url.port(), port, "{server}");
+        }
+    }
+
+    /// A value carrying a scheme is used verbatim, so an explicit
+    /// cleartext or non-default port survives the resolution.
+    #[test]
+    fn a_server_carrying_a_scheme_is_left_alone() {
+        let url = server_url("http://127.0.0.1:5232/dav/", "https").unwrap();
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.port(), Some(5232));
+        assert_eq!(url.path(), "/dav/");
+
+        let url = server_url("imap://example.org:143", "imaps").unwrap();
+        assert_eq!(url.scheme(), "imap");
     }
 
     #[test]

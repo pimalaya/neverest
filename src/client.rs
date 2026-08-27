@@ -28,18 +28,14 @@ use std::{
     io::{Read, Write},
 };
 
-#[cfg(feature = "carddav")]
-use anyhow::Context;
 use anyhow::{Result, bail};
-#[cfg(feature = "imap")]
-use url::ParseError;
-#[cfg(any(feature = "imap", feature = "carddav"))]
-use url::Url;
 
 #[cfg(feature = "carddav")]
 use crate::carddav::client::CarddavClient;
 #[cfg(any(feature = "imap", feature = "msgraph", feature = "carddav"))]
 use crate::config::SourceBackendConfig;
+#[cfg(any(feature = "imap", feature = "carddav"))]
+use crate::config::server_url;
 #[cfg(feature = "imap")]
 use crate::imap::client::ImapClient;
 #[cfg(feature = "msgraph")]
@@ -412,13 +408,7 @@ pub fn open(config: SourceConfig) -> Result<Client> {
             let alpn = config.alpn.unwrap_or_else(io_imap::client::default_alpn);
             let tls = config.tls.into_tls(alpn);
 
-            let server = match Url::parse(&config.server) {
-                Ok(url) => url,
-                Err(ParseError::RelativeUrlWithoutBase) => {
-                    Url::parse(&format!("imaps://{}", &config.server))?
-                }
-                Err(err) => return Err(err.into()),
-            };
+            let server = server_url(&config.server, "imaps")?;
 
             let sasl = config
                 .sasl
@@ -448,8 +438,7 @@ pub fn open(config: SourceConfig) -> Result<Client> {
         #[cfg(feature = "carddav")]
         SourceBackendConfig::Carddav(config) => {
             let tls = config.tls.into_tls(config.alpn);
-            let server = Url::parse(&config.server)
-                .context("The CardDAV `server` must be a full URL (https://dav.example.org/)")?;
+            let server = server_url(&config.server, "https")?;
             let auth = config.auth.try_into_dav_auth()?;
             let client = CarddavClient::connect(&server, &tls, auth)?;
             Ok(Client::Carddav(Box::new(client)))

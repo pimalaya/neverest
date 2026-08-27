@@ -576,7 +576,9 @@ scans every collection's pending actions, so there is no anchor rule.
 Neverest SHALL perform each pending intent through the one source offering a
 send channel: its own `smtp` table, else its native send
 (the Graph `sendMail` action, which files the message in Sent itself), sources
-walked in configuration order (`left`, then `right`). On success the row SHALL
+walked in the order a run groups them, by kind then namespace. At most one
+source may declare an `smtp` table, so the only pick that order decides is
+between a declared channel and a natively-sending source. On success the row SHALL
 be acknowledged, releasing the body's pin. A **transient** failure (an SMTP 4xx,
 a transport error) SHALL leave the row pending; a **permanent** one (an SMTP
 5xx, an undecodable payload, a missing body) SHALL park it with its error. A
@@ -870,3 +872,17 @@ the scanner rather than be mirrored beside it.
 - GIVEN a message whose `Subject:` is RFC 2047 encoded
 - WHEN either tier summarises it
 - THEN `meta.subject` holds the decoded text, not the encoded-word
+
+### Requirement: A `server` is an authority or a URL, resolved at one seam
+Every backend's `server` SHALL accept either a bare authority, with or without a
+port, or a full URL, and both SHALL resolve through one shared function rather
+than per backend. The scheme a bare authority takes is the backend's own:
+`imaps` for IMAP, `smtps` for SMTP, `https` for a DAV entry point.
+
+The presence of `://` SHALL be what tells the two forms apart. A value carrying
+it SHALL be parsed verbatim, so an explicit cleartext scheme or a non-default
+port survives; a value without it SHALL take the default scheme. Resolution
+SHALL NOT be decided by a parse error: a bare authority carrying a port parses
+as a URL whose scheme is the hostname and whose path is the port, so it reports
+no error and carries no host, and a backend handed one rejects it for a reason
+that names neither the value the user wrote nor the field it came from.

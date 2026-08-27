@@ -30,8 +30,6 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   This is the first non-mail kind and the first mutable-content backend. Cards are edited in place, so it is the first backend to exercise the revision plumbing, the conditional-write path and the conflict handling that mail leaves inert. A card's link id is its vCard `UID`, falling back to a digest of the body for a card carrying none, and its summary carries the `UID`, `FN` and every `EMAIL` so a reader renders a contact list without fetching bodies. Cards cross neverest as opaque bytes, so a property it does not understand cannot be lost. A contacts source pairs with another contacts source or with the store alone, and an `smtp` table on a DAV source is refused.
 
-  The feature is out of the default set until its live suite runs in CI.
-
 - Added the queued **`submit` intent** and its send channel.
 
   A frontend enqueues a submission through the store's action queue, naming the body blob and the envelope, and the queue row pins the body until the send. Every run performs the pending ones through the one source offering a channel: its own `smtp` table, else its native send. A sent intent is acknowledged, which releases its body; a transient failure leaves it pending for the next run and a permanent one parks it with its error. A build with no send channel leaves the intents pending rather than parking them. Submission is at-least-once, so deduplication is the receiving provider's job.
@@ -150,13 +148,17 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - Every remote is a cargo feature: `imap`, `msgraph`, `carddav`, plus `smtp` for the submission channel.
 
-  All but `carddav` ship in the default set. Every source config parses in every build, and opening a source whose backend was not compiled in reports it at runtime.
+  All of them ship in the default set. Every source config parses in every build, and opening a source whose backend was not compiled in reports it at runtime.
 
 - Relicensed from `AGPL-3.0-only` to `MIT OR Apache-2.0`, aligning with the rest of the Pimalaya ecosystem.
 
 - Bumped the Pimalaya libraries: io-replica 0.4, io-pimdir 0.3, io-imap 0.6, io-smtp 0.3, io-webdav 0.2, io-http 0.5, io-pim-discovery 0.7, io-msgraph 0.3, pimalaya-stream 0.3, pimalaya-cli 0.2 and pimalaya-config 0.1. SASL moved out of pimalaya-stream into the new io-sasl crate, so the SCRAM-SHA-256 the configuration has always offered is now runnable. The minimum supported Rust version is 1.89.
 
 ### Fixed
+
+- Every `server` accepts a bare authority, port included, not just the portless spelling.
+
+  A bare authority is not a relative URL: `url` reads `posteo.de:8843` as the scheme `posteo.de` with the path `8843`, which parses cleanly and carries no host. Resolution decided when to prepend a scheme by matching on the parse error, so `imap.example.com` worked and `imap.example.com:143`, which config.sample.toml documents, reached io-imap hostless; a CardDAV `server` required a full URL outright and reported `posteo.de:8843 has no host` from inside io-webdav. All three backends now resolve through one function that splits on `://`, so an authority takes the backend's default scheme (`imaps`, `smtps`, `https`) and a value carrying a scheme is used verbatim.
 
 - Queued submissions no longer fail against a server that checks the greeting.
 

@@ -16,10 +16,10 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["rustls-ring", "imap", "smtp", "msgraph"]
+default = ["rustls-ring", "imap", "smtp", "msgraph", "carddav"]
 carddav = ["dep:io-webdav", "dep:io-http", "io-pim-discovery/rfc6764"]
 imap = ["dep:io-imap", "io-imap/client", "io-imap/scram"]
-smtp = ["dep:io-smtp", "io-smtp/client"]
+smtp = ["dep:io-smtp", "io-smtp/client", "io-smtp/scram"]
 msgraph = ["dep:io-msgraph", "io-msgraph/client"]
 native-tls = ["pimalaya-stream/native-tls", "io-pim-discovery/native-tls", "io-webdav?/native-tls", "io-imap?/native-tls", "io-msgraph?/native-tls", "io-smtp?/native-tls"]
 rustls-aws = ["pimalaya-stream/rustls-aws", "io-pim-discovery/rustls-aws", "io-webdav?/rustls-aws", "io-imap?/rustls-aws", "io-msgraph?/rustls-aws", "io-smtp?/rustls-aws"]

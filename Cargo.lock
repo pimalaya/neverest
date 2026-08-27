@@ -1163,7 +1163,7 @@ dependencies = [
 [[package]]
 name = "io-pimdir"
 version = "0.3.0"
-source = "git+https://github.com/pimalaya/io-pimdir#568f35b940e85e458beb89cbd900aab75d43566b"
+source = "git+https://github.com/pimalaya/io-pimdir#8a11663b60b485e94a567ff50fe3a5617166bb11"
 dependencies = [
  "blake3",
  "fs4",
@@ -1224,6 +1224,7 @@ dependencies = [
  "io-sasl",
  "log",
  "pimalaya-stream",
+ "rand",
  "secrecy",
  "thiserror",
  "url",

@@ -80,7 +80,7 @@ The positional `<account>` argument becomes an optional `-a` / `--account <NAME>
 | `left` / `right` | `sources.<name>.<protocol>.*`, plus the same `collection.namespace` on both to keep them mirroring |
 | account-level `collection.filter` | `<protocol>.collection.filter`, on the source it filters |
 | `store.retention`, `store.hydration` | removed; derived per kind and reported |
-| `smtp.*` at the account root | `smtp.*` again, or `sources.<name>.smtp.*`; at most one source per account may declare it |
+| `smtp.*` at the account root | `smtp.*` again (`smtp.server` plus `smtp.tls.*` and `smtp.sasl.*`, spelled exactly as the IMAP ones), or `sources.<name>.smtp.*`; at most one source per account may declare it |
 | keyring entries | `{ command = ["pass", "show", "..."] }`, or any other secret manager |
 | `auth.type = "oauth2"` | SASL `oauthbearer` or `xoauth2`, the token coming from [ortie](https://github.com/pimalaya/ortie) |
 | `envelope.filter.{before,after}` | removed |

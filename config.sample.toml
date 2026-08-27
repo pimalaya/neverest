@@ -281,17 +281,38 @@ imap.item.delete = false
 # An SMTP 4xx leaves the intent pending for the next run, a 5xx parks it.
 # Sending is at-least-once, so `Message-ID` deduplication is the provider's job.
 #
-# Omit `login` and `password` together for an unauthenticated relay.
+# The block mirrors the `imap` one above field for field, submission being the
+# other half of the same mail account: a bare authority (implicit `smtps://`) or
+# a full URL, the same `tls` table, and one `sasl` mechanism.
+#smtp.server = "smtp.fastmail.com"
 #smtp.server = "smtps://smtp.fastmail.com:465"
 #smtp.server = "smtp://smtp.example.com:587"
 #smtp.starttls = true
-#smtp.login = "pimalaya@fastmail.org"
-#smtp.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
+
+# TLS mirrors the imap.tls block above.
+#smtp.tls.provider = "rustls"
+#smtp.tls.rustls.crypto = "ring"
+#smtp.tls.cert = "/path/to/custom/cert.pem"
 
 # Offered during the TLS handshake (rustls only). Defaults to ["smtp"], `[]`
 # skips ALPN.
 #smtp.alpn = ["smtp"]
 #smtp.alpn = []
+
+# Pick exactly one SASL mechanism, spelled as under `imap.sasl`. Omit the whole
+# `sasl` table for an unauthenticated relay, which stops after EHLO and sends no
+# AUTH at all.
+#smtp.sasl.anonymous.message = "neverest"
+#smtp.sasl.plain.username = "pimalaya@fastmail.org"
+#smtp.sasl.plain.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
+#smtp.sasl.login.username = "user@example.com"
+#smtp.sasl.login.password.raw = "***"
+#smtp.sasl.oauthbearer.username = "user@example.com"
+#smtp.sasl.oauthbearer.token.command = ["ortie", "token", "read", "example"]
+#smtp.sasl.xoauth2.username = "user@example.com"
+#smtp.sasl.xoauth2.token.raw = "***"
+#smtp.sasl.scram-sha-256.username = "user@example.com"
+#smtp.sasl.scram-sha-256.password.raw = "***"
 
 # --------------------------------------------------------------------------------
 # Named sources (the explicit form)

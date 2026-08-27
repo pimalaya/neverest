@@ -72,8 +72,6 @@ use io_pimdir::PimdirBlobs;
 use io_pimdir::{PimdirStore, codec::PimdirAction};
 use io_replica::object::ReplicaHash;
 #[cfg(feature = "smtp")]
-use io_sasl::{login::SaslLoginCreds, mechanism::Sasl};
-#[cfg(feature = "smtp")]
 use io_smtp::{
     client::{SmtpClient as _, SmtpClientError, SmtpClientStd},
     message::SmtpMessageSendError,
@@ -86,7 +84,7 @@ use io_smtp::{
 use log::warn;
 use serde::Deserialize;
 #[cfg(feature = "smtp")]
-use url::Url;
+use url::{ParseError, Url};
 
 #[cfg(feature = "smtp")]
 use crate::config::SmtpConfig;
@@ -275,24 +273,43 @@ impl SendChannel<'_> {
 }
 
 /// Connects the SMTP submission session: TCP or implicit TLS per the URL
-/// scheme, the optional STARTTLS upgrade, then the LOGIN SASL exchange when
-/// a login is configured.
+/// scheme, the optional STARTTLS upgrade, then the SASL exchange the
+/// `sasl` table names, if any.
+///
+/// The server string is resolved exactly as the IMAP one is (see
+/// [`crate::client::open`]): a value with no scheme is a bare authority
+/// and takes `smtps://`, submission over implicit TLS being the modern
+/// default and the one RFC 8314 §3.3 asks for.
 #[cfg(feature = "smtp")]
 pub fn connect_smtp(config: &SmtpConfig) -> Result<SmtpClientStd> {
-    let url = Url::parse(&config.server).context("Cannot parse the SMTP submission URL")?;
+    let url = match Url::parse(&config.server) {
+        Ok(url) => url,
+        Err(ParseError::RelativeUrlWithoutBase) => {
+            Url::parse(&format!("smtps://{}", config.server))
+                .context("Cannot parse the SMTP submission authority")?
+        }
+        Err(err) => return Err(err).context("Cannot parse the SMTP submission URL"),
+    };
     let alpn = config
         .alpn
         .clone()
         .unwrap_or_else(SmtpClientStd::default_alpn);
     let tls = config.tls.clone().into_tls(alpn);
-    let sasl = match (&config.login, &config.password) {
-        (Some(login), Some(password)) => Some(Sasl::Login(SaslLoginCreds {
-            username: login.clone(),
-            password: password.clone().get()?,
-        })),
-        (None, None) => None,
-        _ => anyhow::bail!("SMTP channel needs both `login` and `password`, or neither"),
-    };
+    let sasl = config
+        .sasl
+        .clone()
+        .map(|sasl| {
+            let host = url.host_str().unwrap_or_default();
+            // NOTE: url does not know the smtp and smtps default ports, so
+            // gating on port_or_known_default() would drop the whole SASL
+            // config for a portless URL and open an unauthenticated session.
+            let port = url
+                .port()
+                .unwrap_or_else(|| SmtpClientStd::default_port(url.scheme()));
+
+            sasl.try_into_sasl(host, port)
+        })
+        .transpose()?;
     let opts = SmtpSessionOpenOptions {
         starttls: config.starttls,
     };

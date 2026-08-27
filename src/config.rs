@@ -1253,38 +1253,31 @@ pub struct MsgraphAuthConfig {
 
 /// The SMTP submission server a side's queued sends are flushed
 /// through (`<side>.smtp`).
+///
+/// The shape mirrors [`ImapConfig`] field for field, submission being the
+/// other half of the same mail account: a bare authority or a URL, the
+/// same TLS block, and a `sasl` table naming one mechanism.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SmtpConfig {
-    /// Submission URL: `smtps://host:465` (implicit TLS) or
-    /// `smtp://host:587` (plain, usually with `starttls`).
+    /// Submission server: a bare authority (`smtp.example.org[:port]`,
+    /// read as `smtps://<authority>`), a full `smtp://` URL (cleartext,
+    /// usually with `starttls`) or an `smtps://` URL (implicit TLS).
     pub server: String,
+    #[serde(default)]
+    pub tls: TlsConfig,
     /// Upgrades a plain `smtp://` connection via STARTTLS.
     #[serde(default, skip_serializing_if = "is_default")]
     pub starttls: bool,
-    #[serde(default)]
-    pub tls: TlsConfig,
     /// ALPN protocol identifiers offered during the TLS handshake.
     /// Unset takes io-smtp's own default (`["smtp"]`, the token RFC
     /// 7595 registers), which owns it; set it to `[]` to skip ALPN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpn: Option<Vec<String>>,
-    /// The SMTP LOGIN username; omit both `login` and `password` for an
-    /// unauthenticated relay.
-    #[serde(default, deserialize_with = "shell_expanded_string_opt")]
-    pub login: Option<String>,
-    /// The SMTP password source.
-    #[serde(default)]
-    pub password: Option<Secret>,
-}
-
-/// `serde` helper: shell-expand an optional string.
-fn shell_expanded_string_opt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw: Option<String> = Option::deserialize(deserializer)?;
-    Ok(raw.map(|s| shellexpand::tilde(&s).into_owned()))
+    /// The mechanism the submission session authenticates with, one
+    /// table of [`SaslConfig`]. Omit it for an unauthenticated relay,
+    /// which stops after `EHLO` and sends no `AUTH` at all.
+    pub sasl: Option<SaslConfig>,
 }
 
 fn default_gmail_user_id() -> String {
@@ -1419,7 +1412,7 @@ pub struct SaslScramSha256Config {
     pub password: Secret,
 }
 
-#[cfg_attr(not(feature = "imap"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "imap", feature = "smtp")), allow(dead_code))]
 impl SaslConfig {
     /// Resolves the SASL config into a runtime [`Sasl`]. `host` and `port` come
     /// from the live server URL, and only OAUTHBEARER uses them, echoing them
@@ -1446,9 +1439,9 @@ impl SaslConfig {
                 username: c.username,
                 token: c.token.get()?,
             }),
-            // NOTE: the nonce is left empty, io-imap filling it with one it
-            // draws when opening the session, an I/O-free coroutine being
-            // unable to generate randomness.
+            // NOTE: the nonce is left empty, io-imap and io-smtp filling it
+            // with one they draw when opening the session, an I/O-free
+            // coroutine being unable to generate randomness.
             SaslConfig::ScramSha256(c) => Sasl::ScramSha256(SaslScramCreds {
                 username: c.username,
                 password: c.password.get()?,
@@ -1748,6 +1741,54 @@ msgraph.user-id = "me"
         .unwrap();
         let err = account.validate().unwrap_err().to_string();
         assert!(err.contains("exactly one direct mail backend"), "got {err}");
+    }
+
+    /// The send channel spells its credentials exactly as the sync side
+    /// does, token mechanisms included, and omits the table for a relay
+    /// that takes no `AUTH`.
+    #[test]
+    fn the_send_channel_names_a_sasl_mechanism() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            smtp.server = "smtp.example.org"
+            smtp.sasl.xoauth2.username = "user@example.org"
+            smtp.sasl.xoauth2.token.command = ["ortie", "token", "read", "example"]
+            "#,
+        )
+        .unwrap();
+
+        let smtp = account.smtp.as_ref().expect("a declared channel");
+        assert_eq!(smtp.server, "smtp.example.org");
+        assert!(matches!(smtp.sasl, Some(SaslConfig::Xoauth2(_))));
+
+        let relay: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            smtp.server = "smtp://127.0.0.1:2525"
+            "#,
+        )
+        .unwrap();
+        assert!(relay.smtp.expect("a declared channel").sasl.is_none());
+    }
+
+    /// The retired flat spelling is refused rather than silently ignored,
+    /// which would open an unauthenticated session against a server that
+    /// requires one.
+    #[test]
+    fn the_flat_login_and_password_spelling_is_refused() {
+        let err = toml::from_str::<AccountConfig>(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            smtp.server = "smtps://smtp.example.org:465"
+            smtp.login = "user@example.org"
+            smtp.password.raw = "pw"
+            "#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("login"), "got {err}");
     }
 
     #[test]

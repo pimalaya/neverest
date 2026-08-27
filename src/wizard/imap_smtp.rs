@@ -4,23 +4,26 @@
 //! picks the SASL mechanism, prompts its credentials and tests the IMAP
 //! connection, then, when discovery also found a submission endpoint,
 //! asks whether the account's send channel shares them: if so the same
-//! login and password back both, otherwise they are prompted again (IMAP
+//! `sasl` table backs both, otherwise a mechanism is picked again (IMAP
 //! and SMTP may advertise different auth), and the SMTP connection is
 //! tested last. The wizard never invents an SMTP host: with no discovered
 //! submission endpoint the account has no send channel, and the user adds
 //! one by hand.
 //!
 //! IMAP is the sync side; SMTP is only the channel the queued submit
-//! intents are performed through, and neverest
-//! authenticates it with SASL LOGIN, so it carries a login and a password
-//! rather than a mechanism of its own.
+//! intents are performed through. Both configure one `sasl` table of the
+//! same six mechanisms, so reuse is a copy of the IMAP one whatever it
+//! names, an OAuth token included.
+//!
+//! Only IMAP is probed for its advertised mechanisms. io-imap reads them
+//! off `CAPABILITY` as [`SaslMechanism`] values; io-smtp exposes the
+//! `AUTH` line as strings and no such reader, so the SMTP prompt offers
+//! the list discovery advertised rather than one the server confirmed.
 
 use anyhow::{Result, bail};
 use io_pim_discovery::compose::config::DiscoverySecurity;
 use io_sasl::mechanism::SaslMechanism;
 use pimalaya_cli::{prompt, spinner::Spinner};
-#[cfg(feature = "smtp")]
-use pimalaya_config::secret::Secret;
 
 use crate::{
     client,
@@ -44,10 +47,10 @@ const XOAUTH2: &str = "XOAUTH2 (username + API token)";
 
 /// Configures the IMAP side and the SMTP send channel from a discovered
 /// entry: pick the SASL mechanism and credentials for IMAP, test the
-/// connection, then ask whether SMTP reuses them (prompting a dedicated
-/// login and password when it does not) and test SMTP last. Both
-/// connections are validated here, so the caller writes a configuration
-/// that is known to connect.
+/// connection, then ask whether SMTP reuses them (prompting a mechanism
+/// of its own when it does not) and test SMTP last. Both connections are
+/// validated here, so the caller writes a configuration that is known to
+/// connect.
 pub fn configure_discovered(
     account_name: &str,
     email: &str,
@@ -62,6 +65,7 @@ pub fn configure_discovered(
     let probed = probe_mechanisms(imap);
     let imap_sasl = prompt_sasl(
         account_name,
+        "imap",
         login_hint.as_deref(),
         discovered.auth,
         probed.as_deref(),
@@ -74,6 +78,7 @@ pub fn configure_discovered(
     let smtp = configure_smtp(
         account_name,
         login_hint.as_deref(),
+        discovered.auth,
         &imap_sasl,
         smtp.as_ref(),
     )?;
@@ -82,12 +87,17 @@ pub fn configure_discovered(
 }
 
 /// Configures and tests the send channel from the discovered submission
-/// endpoint, reusing the IMAP credentials on confirmation. `None` when
+/// endpoint, reusing the IMAP `sasl` table on confirmation. `None` when
 /// discovery found no endpoint: neverest never invents a submission host.
+///
+/// Declining reuse asks whether the server authenticates at all before
+/// offering a mechanism, since a submission relay on a trusted network
+/// takes no `AUTH`, which the config spells by omitting `sasl`.
 #[cfg(feature = "smtp")]
 fn configure_smtp(
     account_name: &str,
     login_hint: Option<&str>,
+    caps: AuthCaps,
     imap_sasl: &SaslConfig,
     endpoint: Option<&TcpEndpoint>,
 ) -> Result<Option<SmtpConfig>> {
@@ -95,21 +105,18 @@ fn configure_smtp(
         return Ok(None);
     };
 
-    // NOTE: the send channel authenticates with SASL LOGIN, so the IMAP
-    // credentials are reusable only when they carry a login and a password. A
-    // token mechanism has nothing to hand over.
-    let credentials = match login_password(imap_sasl) {
-        Some(pair) if prompt::bool("Use the same credentials for SMTP?", true)? => Some(pair),
-        Some(_) => prompt_credentials(account_name, login_hint)?,
-        None => {
-            eprintln!(
-                "The SMTP send channel authenticates with LOGIN (username + password), so the IMAP token cannot back it."
-            );
-            prompt_credentials(account_name, login_hint)?
-        }
+    let sasl = if prompt::bool("Use the same credentials for SMTP?", true)? {
+        Some(imap_sasl.clone())
+    } else if prompt::bool("Does the submission server authenticate?", true)? {
+        // NOTE: no probed list, io-smtp exposing the `AUTH` line as strings
+        // and no mechanism reader, so the discovered capabilities key the
+        // menu instead.
+        Some(prompt_sasl(account_name, "smtp", login_hint, caps, None)?)
+    } else {
+        None
     };
 
-    let smtp = smtp_config(endpoint, credentials);
+    let smtp = smtp_config(endpoint, sasl);
     test_connection("SMTP", || {
         crate::offline::submit::connect_smtp(&smtp).map(|_| ())
     })?;
@@ -123,6 +130,7 @@ fn configure_smtp(
 fn configure_smtp(
     _account_name: &str,
     _login_hint: Option<&str>,
+    _caps: AuthCaps,
     _imap_sasl: &SaslConfig,
     endpoint: Option<&TcpEndpoint>,
 ) -> Result<Option<SmtpConfig>> {
@@ -131,39 +139,6 @@ fn configure_smtp(
     }
 
     Ok(None)
-}
-
-/// Prompts a dedicated SMTP login and password. A blank login means an
-/// unauthenticated relay, which the config expresses by omitting both.
-#[cfg(feature = "smtp")]
-fn prompt_credentials(
-    account_name: &str,
-    login_hint: Option<&str>,
-) -> Result<Option<(String, Secret)>> {
-    let login = prompt::text(
-        "SMTP login (blank for an unauthenticated relay):",
-        login_hint,
-    )?;
-    let login = login.trim().to_string();
-
-    if login.is_empty() {
-        return Ok(None);
-    }
-
-    let password = secret::configure_password("SMTP password", &format!("{account_name}-smtp"))?;
-    Ok(Some((login, password)))
-}
-
-/// The login and password an IMAP mechanism carries, or `None` for the
-/// token and credential-less mechanisms.
-#[cfg(feature = "smtp")]
-fn login_password(sasl: &SaslConfig) -> Option<(String, Secret)> {
-    match sasl {
-        SaslConfig::Plain(c) => Some((c.authcid.clone(), c.passwd.clone())),
-        SaslConfig::Login(c) => Some((c.username.clone(), c.password.clone())),
-        SaslConfig::ScramSha256(c) => Some((c.username.clone(), c.password.clone())),
-        SaslConfig::Anonymous(_) | SaslConfig::Oauthbearer(_) | SaslConfig::Xoauth2(_) => None,
-    }
 }
 
 /// Runs a connection `test` behind a labelled spinner, surfacing a
@@ -187,14 +162,18 @@ fn test_connection(label: &str, test: impl FnOnce() -> Result<()>) -> Result<()>
 /// keyed on `caps` is offered, so a failed probe never leaves the user
 /// stuck. The token mechanisms' OAuth brokers appear only when a token
 /// or OAuth grant was advertised.
+///
+/// `service` names the protocol the credentials are for, so a keyring
+/// entry says which of an account's two it holds.
 fn prompt_sasl(
     account_name: &str,
+    service: &str,
     login_hint: Option<&str>,
     caps: AuthCaps,
     probed: Option<&[SaslMechanism]>,
 ) -> Result<SaslConfig> {
     let mechanism = prompt_mechanism(caps, probed)?;
-    build_sasl(mechanism, account_name, login_hint, caps)
+    build_sasl(mechanism, account_name, service, login_hint, caps)
 }
 
 /// Prompts the authentication mechanism: the probed list when the server
@@ -235,6 +214,7 @@ fn prompt_mechanism(caps: AuthCaps, probed: Option<&[SaslMechanism]>) -> Result<
 fn build_sasl(
     mechanism: SaslMechanism,
     account_name: &str,
+    service: &str,
     login_hint: Option<&str>,
     caps: AuthCaps,
 ) -> Result<SaslConfig> {
@@ -245,7 +225,7 @@ fn build_sasl(
     }
 
     let login = prompt::text("Login:", login_hint)?;
-    let key = format!("{account_name}-imap");
+    let key = format!("{account_name}-{service}");
 
     Ok(match mechanism {
         SaslMechanism::Plain => {
@@ -388,29 +368,29 @@ fn imap_config(endpoint: &TcpEndpoint, sasl: SaslConfig) -> ImapConfig {
 }
 
 #[cfg(feature = "smtp")]
-fn smtp_config(endpoint: &TcpEndpoint, credentials: Option<(String, Secret)>) -> SmtpConfig {
+fn smtp_config(endpoint: &TcpEndpoint, sasl: Option<SaslConfig>) -> SmtpConfig {
     let scheme = if endpoint.security == DiscoverySecurity::Tls {
         "smtps"
     } else {
         "smtp"
     };
-    let (login, password) = match credentials {
-        Some((login, password)) => (Some(login), Some(password)),
-        None => (None, None),
-    };
 
     SmtpConfig {
         server: format!("{scheme}://{}:{}", endpoint.host, endpoint.port),
-        starttls: endpoint.security == DiscoverySecurity::Starttls,
         tls: Default::default(),
+        starttls: endpoint.security == DiscoverySecurity::Starttls,
+        // NOTE: unset, so io-smtp keeps owning the default rather than the
+        // value being frozen into the written config.
         alpn: None,
-        login,
-        password,
+        sasl,
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "smtp")]
+    use pimalaya_config::secret::Secret;
+
     use super::*;
 
     fn endpoint(security: DiscoverySecurity, port: u16) -> TcpEndpoint {
@@ -470,31 +450,28 @@ mod tests {
         assert_eq!(unknown.last(), Some(&LOGIN));
     }
 
+    /// Reuse is a copy of the IMAP table, so a token mechanism backs the
+    /// send channel as readily as a password one: the case the old
+    /// LOGIN-only channel had to refuse.
     #[cfg(feature = "smtp")]
     #[test]
-    fn only_a_password_mechanism_backs_the_send_channel() {
-        let password = SaslConfig::Plain(SaslPlainConfig {
-            authzid: None,
-            authcid: "user@example.org".into(),
-            passwd: Secret::Raw(String::from("pw").into()),
-        });
-        let (login, _) = login_password(&password).expect("a reusable pair");
-        assert_eq!(login, "user@example.org");
-
+    fn any_mechanism_backs_the_send_channel() {
         let token = SaslConfig::Xoauth2(SaslXoauth2Config {
             username: "user@example.org".into(),
             token: Secret::Raw(String::from("tok").into()),
         });
-        assert!(login_password(&token).is_none());
+
+        let smtp = smtp_config(&endpoint(DiscoverySecurity::Tls, 465), Some(token));
+        assert!(matches!(smtp.sasl, Some(SaslConfig::Xoauth2(_))));
     }
 
     #[cfg(feature = "smtp")]
     #[test]
-    fn a_credential_less_send_channel_omits_both_fields() {
+    fn a_credential_less_send_channel_omits_the_sasl_table() {
         let relay = smtp_config(&endpoint(DiscoverySecurity::Starttls, 587), None);
         assert_eq!(relay.server, "smtp://imap.example.org:587");
         assert!(relay.starttls);
-        assert!(relay.login.is_none());
-        assert!(relay.password.is_none());
+        assert!(relay.sasl.is_none());
+        assert!(relay.alpn.is_none());
     }
 }

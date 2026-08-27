@@ -165,9 +165,6 @@ fn meet_bare_invocation(
     if !configured && !named_account && !printer.is_json() && stdin().is_terminal() {
         let target = Config::target_path(config_paths)?;
 
-        // NOTE: a bare invocation has nothing to run after the offer, so a
-        // declined one falls back to the help. The wizard already says
-        // what to run next when it ran.
         if discover::offer_configuration(printer, &target)? {
             return Ok(());
         }

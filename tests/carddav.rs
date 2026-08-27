@@ -68,6 +68,18 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
     put(root, "card-2", &card("card-2", "John Doe"));
 
     neverest(&["init", "-a", "contacts"], &config, &state);
+
+    // A dry run over a store that has never synced must name the cards it
+    // would fetch. A DAV kind resolves its link id only at `Full`, so
+    // upgrading the probe would download every body to print a plan and leave
+    // the placements looking complete, which reported an empty patch and
+    // "already in sync" for an account holding nothing.
+    let plan = neverest(&["sync", "-a", "contacts", "-d", "--json"], &config, &state);
+    assert!(
+        plan.contains("card-1") && plan.contains("card-2"),
+        "a first dry run names both cards; report was:\n{plan}",
+    );
+
     neverest(&["sync", "-a", "contacts"], &config, &state);
 
     let items = store_items(&state, BOOK);
@@ -83,6 +95,16 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
     // 2. An in-place edit on the server: the ETag moves, so the sync must
     //    re-fetch the body rather than trust what it cached.
     put(root, "card-1", &card("card-1", "Jane Rewritten"));
+
+    // The re-fetch is reportable. A content change drops the stale object
+    // while the hub keeps the level the item had reached, so a plan keyed on
+    // the level would call an item whose body is about to be re-fetched done.
+    let plan = neverest(&["sync", "-a", "contacts", "-d", "--json"], &config, &state);
+    assert!(
+        plan.contains("card-1"),
+        "a dry run names the body it would re-fetch; report was:\n{plan}",
+    );
+
     neverest(&["sync", "-a", "contacts"], &config, &state);
 
     let items = store_items(&state, BOOK);

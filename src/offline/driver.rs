@@ -42,8 +42,8 @@ use io_replica::{
     remote::{ReplicaFetchedItem, ReplicaTier},
     storage::ReplicaLoadScope,
     sync::{
-        ReplicaDeletePolicy, ReplicaEvent, ReplicaPushRights, ReplicaSync, ReplicaSyncOptions,
-        ReplicaSyncReport,
+        ReplicaConflictPolicy, ReplicaDeletePolicy, ReplicaEvent, ReplicaPushRights, ReplicaSync,
+        ReplicaSyncOptions, ReplicaSyncReport,
     },
     upgrade::ReplicaUpgrade,
 };
@@ -54,7 +54,7 @@ use pimalaya_cli::spinner::Spinner;
 use crate::sync::report::SubmitEntry;
 use crate::{
     client::{Client, Pool},
-    config::{AccountConfig, CollectionFilter, SourceConfig, SourceGroup, SourcePermissions},
+    config::{AccountConfig, AccountMode, CollectionFilter, SourceConfig, SourcePermissions},
     item::flag::Flag,
     kind::Kind,
     offline::{
@@ -70,8 +70,8 @@ use crate::{
     sync::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
-            AmbiguousIdentity, DrainedQueue, ItemConflict, NamespaceReport, ParkedQueueAction,
-            PatchEntry, PurgedItems, SyncReport,
+            AmbiguousIdentity, DrainedQueue, ItemConflict, ParkedQueueAction, PatchEntry,
+            PurgedItems, SyncReport,
         },
     },
 };
@@ -215,9 +215,52 @@ impl CollectionProgress<'_> {
     }
 }
 
-/// One connected source plus its permissions and whether it may push.
+/// Which side wins when an endpoint and the store disagree about one item.
+///
+/// This is the whole of `one-way`. A namespace could say which endpoints met
+/// and never which way, so both sides were authoritative and every divergence
+/// had to become a conflict; declaring an authority is what removes the
+/// conflict rather than resolving it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Authority {
+    /// Neither side wins: a divergence is recorded as a conflict for the user
+    /// to resolve. The two-way default.
+    Shared,
+    /// The endpoint wins: its version replaces the store's, and the store never
+    /// writes back. The `sources` side under `one-way`.
+    Endpoint,
+    /// The store wins: its version is pushed over the endpoint's, and what the
+    /// endpoint changed on its own is overwritten. The `targets` side under
+    /// `one-way`.
+    Store,
+}
+
+impl Authority {
+    /// How a divergence between the endpoint and the store resolves.
+    ///
+    /// `remote` is the endpoint and `local` is the store, so an authoritative
+    /// endpoint prefers the remote and an authoritative store prefers the
+    /// local. Neither records a conflict, which is the point: under `one-way`
+    /// there is nothing for a user to resolve.
+    fn conflict_policy(self) -> ReplicaConflictPolicy {
+        match self {
+            Self::Shared => ReplicaConflictPolicy::Manual,
+            Self::Endpoint => ReplicaConflictPolicy::PreferRemote,
+            Self::Store => ReplicaConflictPolicy::PreferLocal,
+        }
+    }
+
+    /// Whether anything is ever written back to the endpoint. False for an
+    /// authoritative one: what it holds is the truth.
+    fn writes_back(self) -> bool {
+        !matches!(self, Self::Endpoint)
+    }
+}
+
+/// One connected endpoint plus its permissions, its authority, and whether it
+/// may push.
 struct SourceCtx {
-    /// The source's configured name, which is its pimdir source id and the
+    /// The endpoint's configured name, which is its pimdir source id and the
     /// name every hunk this run reports carries.
     name: String,
     /// The hub namespace it binds into, stripped back off a collection id
@@ -225,14 +268,21 @@ struct SourceCtx {
     namespace: String,
     pool: Pool,
     perms: SourcePermissions,
+    authority: Authority,
 }
 
 impl SourceCtx {
+    fn conflict_policy(&self) -> ReplicaConflictPolicy {
+        self.authority.conflict_policy()
+    }
+
     /// A side pushes unless it forbids every item and flag mutation (a fully
-    /// read-only source, e.g. the remote leg of a backup).
+    /// read-only source), or unless it is authoritative, which is the same
+    /// statement made by the account rather than by a permission table.
     fn writable(&self) -> bool {
         let rights = self.push_rights();
-        rights.flags || rights.content || rights.add || rights.remove
+        self.authority.writes_back()
+            && (rights.flags || rights.content || rights.add || rights.remove)
     }
 
     /// The side's configured permissions as io-replica's per-kind push rights.
@@ -254,17 +304,16 @@ impl SourceCtx {
 
 /// Runs the whole account sync and returns the report.
 ///
-/// An account is one hub, so the sync walks its namespaces (see
-/// [`AccountConfig::groups`]): every source of one kind sharing a
-/// `collection.namespace` is one group, binding one set of hub collections.
-/// A group of one is the local sync, that remote against the store the app
-/// reads. A group of two is the remote-to-remote sync, cross-source
-/// propagation falling out of the shared hub. Groups never see each other:
-/// their collection ids differ, which is exactly what keeps a mail source and
-/// a contacts source, or two providers cached side by side, from meeting.
+/// An account is one hub and one mode (see [`AccountConfig::mode`]). With no
+/// target each source is reconciled against the store the app reads; with
+/// targets each source is reconciled against every one of them, propagation
+/// falling out of the shared hub. Sources never see each other: their
+/// collection ids differ, which is what keeps a mail source and a contacts
+/// source, or two providers cached side by side, from meeting.
 ///
-/// What the store keeps per group is derived here, never configured, and
-/// reported whether or not the run wrote anything.
+/// What the store keeps is declared by `retain` rather than derived here, so
+/// nothing about it is reported: the configuration already says it.
+#[allow(clippy::too_many_arguments)]
 pub fn run(
     account_name: impl Into<String>,
     account_config: &AccountConfig,
@@ -273,10 +322,12 @@ pub fn run(
     connections: usize,
     no_purge: bool,
     only_sources: &[String],
+    accept_mode: bool,
 ) -> Result<SyncReport> {
     let account_name = account_name.into();
-    let sources = account_config.sources()?;
-    let groups = select_groups(account_config, only_sources)?;
+    let endpoints = account_config.endpoints()?;
+    let mode = account_config.mode()?;
+    let running = select_sources(&mode, only_sources)?;
 
     let real_dir = store_dir(&account_name, account_config)?;
     let work_dir = if dry_run {
@@ -295,71 +346,55 @@ pub fn run(
         ..Default::default()
     };
 
-    for group in &groups {
-        let key = format!("{}/{}", group.media_type, group.namespace);
-        let bodies = group.bodies.to_string();
+    // Refuses a mode change that would discard what the previous one kept,
+    // before any endpoint is opened.
+    state.check_mode(&mode)?;
 
-        report.namespaces.push(NamespaceReport {
-            media_type: group.media_type.to_string(),
-            namespace: group.namespace.clone(),
-            sources: group.sources.clone(),
-            was: state.previous(&key, &bodies),
-            bodies,
-        });
+    for source_name in &running {
+        let source = endpoints[source_name].clone();
 
-        state.record(key, group.bodies.to_string());
-    }
-
-    for group in &groups {
-        let configs: Vec<SourceConfig> = group
-            .sources
-            .iter()
-            .map(|name| sources[name].clone())
-            .collect();
-
-        let outcome = match configs.as_slice() {
-            [only] => run_solo(
+        // A source is reconciled against the local store, then, where the
+        // account names targets, what it holds crosses to each of them. Sources
+        // never meet: an item held by one is pushed to the targets, never to
+        // another source.
+        let outcome = if mode.is_local() {
+            run_local(
                 &account_name,
                 account_config,
-                group,
-                only.clone(),
+                &mode,
+                source_name,
+                source,
                 collection_filter.clone(),
                 &work_dir,
                 dry_run,
                 connections,
                 &mut report,
-            ),
-            [a, b] => run_pair(
+            )
+        } else {
+            run_targets(
                 &account_name,
                 account_config,
-                group,
-                a.clone(),
-                b.clone(),
+                &mode,
+                &endpoints,
+                source_name,
+                source,
                 collection_filter.clone(),
                 &work_dir,
                 dry_run,
                 connections,
                 &mut report,
-            ),
-            _ => bail!(
-                "Namespace `{}` holds {} sources ({}), and a namespace of three or more is not \
-                 implemented yet. Give one of them a `collection.namespace` of its own, or split \
-                 it into another account.",
-                group.namespace,
-                group.sources.len(),
-                group.sources.join(", "),
-            ),
+            )
         };
 
-        // A namespace that fails is reported and the next one still runs: they
+        // A source that fails is reported and the next one still runs: they
         // share nothing but the file the store lives in, so one broken remote
         // is no reason to leave the others unsynced.
         if let Err(err) = outcome {
-            warn!("namespace `{}` sync error: {err:#}", group.namespace);
+            warn!("source `{source_name}` sync error: {err:#}");
             report.collection.patch.push(PatchEntry::new(
-                CollectionHunk::Create {
-                    side: group.sources.join(", "),
-                    collection: group.namespace.clone(),
+                CollectionHunk::Scan {
+                    side: source_name.clone(),
+                    collection: String::from("*"),
                 },
                 Some(err),
             ));
@@ -367,9 +402,10 @@ pub fn run(
     }
 
     if !dry_run {
-        let sweeper = groups
+        state.record_mode(&mode, accept_mode);
+
+        let sweeper = running
             .first()
-            .and_then(|group| group.sources.first())
             .expect("a validated account has at least one source");
         let mut store = open_store(&work_dir, sweeper, &account_name)?;
 
@@ -388,60 +424,97 @@ pub fn run(
     Ok(report)
 }
 
-/// The namespaces this run touches: every one of them, or only those holding a
-/// source `--source` named.
+/// The sources this run touches: every one of them, or those `--source` named.
 ///
-/// Narrowing picks *namespaces*, not sources: a mirror whose two sources share
-/// a namespace is reconciled as a pair or not at all, since running half of it
-/// would push one way and call it done.
-fn select_groups(account_config: &AccountConfig, only: &[String]) -> Result<Vec<SourceGroup>> {
-    let groups = account_config.groups()?;
-
+/// Narrowing picks sources rather than namespaces, there being none: an account
+/// is one mode, and a source is reconciled on its own against the store and
+/// whatever targets the account declares.
+fn select_sources(mode: &AccountMode, only: &[String]) -> Result<Vec<String>> {
     if only.is_empty() {
-        return Ok(groups);
+        return Ok(mode.sources.clone());
     }
 
-    let known: HashSet<&String> = groups.iter().flat_map(|group| &group.sources).collect();
-
-    if let Some(unknown) = only.iter().find(|name| !known.contains(name)) {
+    if let Some(unknown) = only.iter().find(|name| !mode.sources.contains(name)) {
         bail!(
             "This account has no source named `{unknown}`. It declares {}.",
-            known
-                .iter()
-                .map(|name| name.as_str())
-                .collect::<Vec<_>>()
-                .join(", "),
+            mode.sources.join(", "),
         );
     }
 
-    Ok(groups
-        .into_iter()
-        .filter(|group| group.sources.iter().any(|name| only.contains(name)))
+    Ok(mode
+        .sources
+        .iter()
+        .filter(|name| only.contains(name))
+        .cloned()
         .collect())
 }
 
-/// The two-source sync of one namespace: both sources against the shared hub,
-/// cross-source propagation falling out of it.
+/// One source against every target the account names, each pairing run on its
+/// own.
+///
+/// Both endpoints bind the source's namespace, which is what makes them meet:
+/// an item the source holds with no binding for the target is pushed to it.
+/// Targets are run in turn rather than together, because under `one-way` the
+/// source is authoritative and no target can influence another, so a pairing
+/// is complete on its own. The source is therefore enumerated once per target,
+/// which the single-target migration this exists for never notices.
 #[allow(clippy::too_many_arguments)]
-fn run_pair(
+fn run_targets(
     account_name: &str,
     account_config: &AccountConfig,
-    group: &SourceGroup,
-    left_config: SourceConfig,
-    right_config: SourceConfig,
+    mode: &AccountMode,
+    endpoints: &HashMap<String, SourceConfig>,
+    source_name: &str,
+    source_config: SourceConfig,
     collection_filter: Option<CollectionFilter>,
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
     report: &mut SyncReport,
 ) -> Result<()> {
-    let left_name = group.sources[0].clone();
-    let right_name = group.sources[1].clone();
+    let relay = mode.streams(endpoints);
 
-    // NOTE: the filter is the left source's. It belongs to a source now, but a
-    // pair binds one set of hub collections, so applying two different filters
-    // to one namespace would mean syncing a collection on one source and not
-    // the other, which reads as a delete on the second pass.
+    for target_name in &mode.targets {
+        run_pair(
+            account_name,
+            account_config,
+            mode,
+            source_name,
+            source_name.to_string(),
+            source_config.clone(),
+            target_name.clone(),
+            endpoints[target_name].clone(),
+            collection_filter.clone(),
+            relay,
+            work_dir,
+            dry_run,
+            connections,
+            report,
+        )?;
+    }
+
+    Ok(())
+}
+
+/// One source against one target over the shared hub, cross-endpoint
+/// propagation falling out of it.
+#[allow(clippy::too_many_arguments)]
+fn run_pair(
+    account_name: &str,
+    account_config: &AccountConfig,
+    mode: &AccountMode,
+    namespace: &str,
+    left_name: String,
+    left_config: SourceConfig,
+    right_name: String,
+    right_config: SourceConfig,
+    collection_filter: Option<CollectionFilter>,
+    relay: bool,
+    work_dir: &Path,
+    dry_run: bool,
+    connections: usize,
+    report: &mut SyncReport,
+) -> Result<()> {
     let left_filter = left_config.collection().filter.clone();
 
     let mut left_store = open_store(work_dir, &left_name, account_name)?;
@@ -450,31 +523,41 @@ fn run_pair(
 
     drain_queues(&mut left_store, report);
 
-    // Derived, never configured: a pair on a streamable pairing keeps no body
-    // and streams each crossing; anything else keeps what crossed. `all` cannot
-    // occur here, a pair never being alone in its namespace.
-    let relay = group.bodies.relays();
-    let hydrate_full = group.bodies.hydrates_everything();
+    // Declared, not derived: `retain` says whether the store is a replica, and
+    // `relay` is only how a crossing gets there when it is not.
+    let hydrate_full = mode.retain;
 
     let left_budget = connection_budget(&left_config, connections);
     let right_budget = connection_budget(&right_config, connections);
 
-    let s = Spinner::start("Opening sources…");
+    // Under `one-way` the source is the truth and the target follows it, so
+    // neither side records a conflict: the store takes the source's version and
+    // pushes it over the target's. Without it both sides are shared and a
+    // divergence is a conflict, which is the two-way mirror.
+    let (left_authority, right_authority) = if mode.one_way {
+        (Authority::Endpoint, Authority::Store)
+    } else {
+        (Authority::Shared, Authority::Shared)
+    };
+
+    let s = Spinner::start("Opening endpoints…");
     let mut left = SourceCtx {
         name: left_name.clone(),
-        namespace: group.namespace.clone(),
+        namespace: namespace.to_string(),
         perms: left_config.permissions(),
+        authority: left_authority,
         pool: Pool::open(left_config, left_budget)
             .with_context(|| format!("Open source {left_name}"))?,
     };
     let mut right = SourceCtx {
         name: right_name.clone(),
-        namespace: group.namespace.clone(),
+        namespace: namespace.to_string(),
         perms: right_config.permissions(),
+        authority: right_authority,
         pool: Pool::open(right_config, right_budget)
-            .with_context(|| format!("Open source {right_name}"))?,
+            .with_context(|| format!("Open target {right_name}"))?,
     };
-    s.success("Opened sources");
+    s.success("Opened endpoints");
 
     let kind = check_kinds(&mut left, &mut right)?;
     let media_type = kind.media_type();
@@ -530,7 +613,7 @@ fn run_pair(
 
     let total = common.len();
     for (index, name) in common.iter().enumerate() {
-        let collection = &hub_id(&group.namespace, name);
+        let collection = &hub_id(namespace, name);
         let label = format!("[{}/{total}] Syncing {name}", index + 1);
         let s = Spinner::start(label.clone());
         let progress = CollectionProgress {
@@ -590,10 +673,11 @@ type CollectionPlan = (String, Vec<(ReplicaHandle, u64)>);
 /// per collection from cache, with no network. The store is the single local
 /// copy the app reads, so there is no cross-side hydration.
 #[allow(clippy::too_many_arguments)]
-fn run_solo(
+fn run_local(
     account_name: &str,
     account_config: &AccountConfig,
-    group: &SourceGroup,
+    mode: &AccountMode,
+    source_name: &str,
     source_config: SourceConfig,
     collection_filter: Option<CollectionFilter>,
     work_dir: &Path,
@@ -601,17 +685,21 @@ fn run_solo(
     connections: usize,
     report: &mut SyncReport,
 ) -> Result<()> {
-    let source = group.sources[0].clone();
+    let source = source_name.to_string();
     let source_filter = source_config.collection().filter.clone();
 
-    // NOTE: the store is opened as the one source, so an app writing under the
-    // same id (himalaya auto-detects it) stages edits this sync pushes. One
-    // store handle per connection: Phase 1 fans the spine across them, their
-    // writes serialising on the store's single-writer lock while the network
-    // overlaps.
     let workers = connection_budget(&source_config, connections);
     let s = Spinner::start("Opening connections…");
-    let mut ctxs = open_source_contexts(&source, &group.namespace, &source_config, workers)?;
+    // With no target the store is the destination: `one-way` makes the source
+    // the truth and discards what was staged locally, leaving it off merges the
+    // two, which is the offline replica an app writes into.
+    let authority = if mode.one_way {
+        Authority::Endpoint
+    } else {
+        Authority::Shared
+    };
+
+    let mut ctxs = open_source_contexts(&source, source_name, &source_config, authority, workers)?;
     let mut stores: Vec<PimdirSourceStore> = (0..workers)
         .map(|_| open_store(work_dir, &source, account_name))
         .collect::<Result<_>>()?;
@@ -637,11 +725,9 @@ fn run_solo(
     let filter = collection_filter.unwrap_or(source_filter);
     let filtered: Vec<String> = filter_collections(&collections, &filter)
         .into_iter()
-        .map(|name| hub_id(&group.namespace, &name))
+        .map(|name| hub_id(source_name, &name))
         .collect();
 
-    // NOTE: pre-created serially so no Phase-1 worker races on lazy collection
-    // creation, and each carries its declared media type.
     for collection in &filtered {
         stores[0]
             .ensure_collection(collection, media_type)
@@ -666,6 +752,7 @@ fn open_source_contexts(
     name: &str,
     namespace: &str,
     config: &SourceConfig,
+    authority: Authority,
     count: usize,
 ) -> Result<Vec<SourceCtx>> {
     let perms = config.permissions();
@@ -687,6 +774,7 @@ fn open_source_contexts(
             name: name.to_string(),
             namespace: namespace.to_string(),
             perms,
+            authority,
             pool: pool.context("Open connection")?,
         });
     }
@@ -732,7 +820,22 @@ fn phase1_spine(
                             plans_ref.lock().unwrap().push((collection, targets));
                             merged_ref.lock().unwrap().item.patch.extend(rep.item.patch);
                         }
-                        Err(err) => warn!("`{collection}` scan error: {err:#}"),
+                        Err(err) => {
+                            warn!("`{collection}` scan error: {err:#}");
+                            let display = display_name(&ctx.namespace, &collection).to_string();
+                            merged_ref
+                                .lock()
+                                .unwrap()
+                                .collection
+                                .patch
+                                .push(PatchEntry::new(
+                                    CollectionHunk::Scan {
+                                        side: ctx.name.clone(),
+                                        collection: display,
+                                    },
+                                    Some(err),
+                                ));
+                        }
                     }
                     let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
                     s_ref.set_message(format!("Scanning collections ({n}/{total})"));
@@ -742,10 +845,9 @@ fn phase1_spine(
     });
 
     let plans = plans.into_inner().unwrap();
-    report
-        .item
-        .patch
-        .extend(merged.into_inner().unwrap().item.patch);
+    let merged = merged.into_inner().unwrap();
+    report.item.patch.extend(merged.item.patch);
+    report.collection.patch.extend(merged.collection.patch);
     s.success(format!("Scanned {} collection(s)", total));
     Ok(plans)
 }
@@ -764,13 +866,8 @@ fn collection_spine(
 ) -> Result<(Vec<(ReplicaHandle, u64)>, SyncReport)> {
     let mut report = SyncReport::default();
 
-    // NOTE: flags are snapshotted before the pull because the pull applies
-    // remote changes silently, leaving the item Clean: they can only be
-    // itemized from the sync events, not from the post-pull projection.
     let before = flag_snapshot(store, collection, &ctx.name)?;
 
-    // NOTE: pull only first, so the projection still carries any edit the app
-    // staged locally, kept dirty because it was not pushed yet.
     let pull = sync_side_rebuilding(collection, ctx, store, blobs, false)?;
     let display = display_name(&ctx.namespace, collection);
     itemize_pulled(
@@ -782,7 +879,7 @@ fn collection_spine(
         &ctx.name,
         &mut report,
     )?;
-    upgrade_probed(collection, ctx, store, blobs)?;
+    upgrade_probed(collection, ctx, store, blobs, dry_run)?;
     itemize_single(collection, store, ctx, &mut report)?;
     itemize_fetches(collection, display, store, &ctx.name, &mut report)?;
     if dry_run {
@@ -791,16 +888,12 @@ fn collection_spine(
 
     for _ in 0..=MAX_EXTRA_PASSES {
         let pass = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable())?;
-        upgrade_probed(collection, ctx, store, blobs)?;
+        upgrade_probed(collection, ctx, store, blobs, false)?;
         if !moved(&pass) {
             break;
         }
     }
 
-    // NOTE: the body is what is asked for, so the body is what is tested. A
-    // remote content change drops the stale one while the hub keeps the level
-    // it had reached (a level never falls back there), so keying on the level
-    // would leave the edited item bodiless forever.
     let mut targets: Vec<(ReplicaHandle, u64)> = Vec::new();
     for placement in projection_view(store, collection, &ctx.name)
         .with_context(|| format!("Project {} `{collection}`", &ctx.name))?
@@ -849,18 +942,11 @@ fn phase2_hydrate(
         queue.push((collection, handles));
     }
 
-    // NOTE: the kind is a property of the backend, so every connection of this
-    // side reports the same one. Resolve it before the workers borrow the
-    // contexts.
     let kind = ctxs
         .first_mut()
         .map(|ctx| resolve_kind(&mut ctx.pool))
         .unwrap_or(Kind::Mail);
 
-    // NOTE: a group is one namespace, so every context here strips the same
-    // prefix. These workers fetch on their own connections rather than through
-    // `PimRemote`, so this is where the hub id becomes a name the server knows;
-    // the cache stays keyed by the id, which is what Phase 3 looks up.
     let namespace = ctxs
         .first()
         .map(|ctx| ctx.namespace.clone())
@@ -1081,8 +1167,6 @@ fn itemize_single(
         report
             .ambiguous
             .extend(ambiguity(&ctx.name, display, &placement));
-        // NOTE: a solo source has nobody to copy from, so a `Created`
-        // placement cannot arise and the other name is never rendered.
         for hunk in placement_hunks(&ctx.name, &ctx.name, display, &placement) {
             report.item.patch.push(PatchEntry::new(hunk, None));
         }
@@ -1095,14 +1179,14 @@ fn itemize_single(
 fn itemize_fetches(
     collection: &str,
     display: &str,
-    store: &PimdirStore,
+    store: &PimdirSourceStore,
     source: &str,
     report: &mut SyncReport,
 ) -> Result<()> {
-    let view = projection_view(store, collection, source)
-        .with_context(|| format!("Project {source} `{collection}`"))?;
+    let view =
+        load_side(store, collection).with_context(|| format!("Load {source} `{collection}`"))?;
     for placement in view {
-        if placement.status == ReplicaStatus::Tombstone || placement.level >= ReplicaLevel::Full {
+        if placement.status == ReplicaStatus::Tombstone || placement.object.is_some() {
             continue;
         }
         let id = placement
@@ -1140,8 +1224,6 @@ fn sync_collection(
     progress: &CollectionProgress,
     report: &mut SyncReport,
 ) -> Result<()> {
-    // NOTE: one call suffices, both handles sharing the database, and the
-    // sync's lazy collection creation never clobbers the declared media type.
     left_store
         .ensure_collection(collection, media_type)
         .with_context(|| format!("Declare kind for `{collection}`"))?;
@@ -1403,7 +1485,7 @@ fn reconcile_pass(
         blobs,
         !dry_run && left.writable(),
     )?;
-    upgrade_probed(collection, left, left_store, blobs)?;
+    upgrade_probed(collection, left, left_store, blobs, dry_run)?;
     let right_report = sync_side_rebuilding(
         collection,
         right,
@@ -1411,7 +1493,7 @@ fn reconcile_pass(
         blobs,
         !dry_run && right.writable(),
     )?;
-    upgrade_probed(collection, right, right_store, blobs)?;
+    upgrade_probed(collection, right, right_store, blobs, dry_run)?;
     Ok(moved(&left_report) || moved(&right_report))
 }
 
@@ -1430,7 +1512,7 @@ fn moved(report: &ReplicaSyncReport) -> bool {
 /// atomically with the rebuild. Ordinary syncs and full resyncs never bump.
 /// Graph sides never rebuild, their message ids surviving a delta reset.
 ///
-/// NOTE: the guard is pre/post within one run, neverest keeping no
+/// The guard is pre/post within one run, neverest keeping no
 /// per-collection state beside the store. A crash between the sync's checkpoint
 /// write and the rekey loses the pre value, so that window can miss one
 /// generation bump; content still converges through link ids on the next sync.
@@ -1537,7 +1619,7 @@ where
             ReplicaCoroutineState::Yielded(ReplicaYield::WantsEnumerate { collection, cursor }) => {
                 let snapshot = remote
                     .enumerate(&collection, cursor)
-                    .map_err(|err| anyhow!("Remote enumerate error: {err}"))?;
+                    .map_err(|err| anyhow!("Remote enumerate error: {err:#}"))?;
                 arg = Some(ReplicaArg::Enumerate(snapshot));
             }
             ReplicaCoroutineState::Yielded(ReplicaYield::WantsFetch {
@@ -1547,7 +1629,7 @@ where
             }) => {
                 let items = remote
                     .fetch(&collection, handles, tier)
-                    .map_err(|err| anyhow!("Remote fetch error: {err}"))?;
+                    .map_err(|err| anyhow!("Remote fetch error: {err:#}"))?;
                 arg = Some(ReplicaArg::Fetch(items));
             }
             ReplicaCoroutineState::Yielded(ReplicaYield::WantsWrite(ops)) => {
@@ -1574,11 +1656,16 @@ where
 /// delete across sources: it clears the deletion for every side and mirrors the
 /// item back to the one it was deleted on. A backup side configured to take no
 /// deletes would then resurrect on both what the user removed on one.
-fn sync_options(push: bool, rights: ReplicaPushRights) -> ReplicaSyncOptions {
+fn sync_options(
+    push: bool,
+    rights: ReplicaPushRights,
+    conflict: ReplicaConflictPolicy,
+) -> ReplicaSyncOptions {
     ReplicaSyncOptions {
         push,
         rights,
         delete: ReplicaDeletePolicy::Keep,
+        conflict,
         ..Default::default()
     }
 }
@@ -1591,7 +1678,7 @@ fn sync_side(
     blobs: &PimdirBlobs,
     push: bool,
 ) -> Result<ReplicaSyncReport> {
-    let opts = sync_options(push, ctx.push_rights());
+    let opts = sync_options(push, ctx.push_rights(), ctx.conflict_policy());
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
     drive(
         store,
@@ -1610,6 +1697,7 @@ fn upgrade_probed(
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
+    dry_run: bool,
 ) -> Result<()> {
     let probed: Vec<ReplicaHandle> = load_side(store, collection)
         .with_context(|| format!("Load {} `{collection}`", &ctx.name))?
@@ -1621,6 +1709,11 @@ fn upgrade_probed(
         return Ok(());
     }
     let tier = resolve_kind(&mut ctx.pool).probe_tier();
+
+    if dry_run && tier == ReplicaTier::Full {
+        return Ok(());
+    }
+
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
     drive(
         store,
@@ -1668,8 +1761,6 @@ fn hydrate_copies(
     let tick = || progress.tick(done.fetch_add(1, Ordering::Relaxed) + 1, total);
 
     if !left_handles.is_empty() {
-        // NOTE: cross-side hydration orders by handle, the empty size map, since
-        // largest-first is the local-sync retain path's concern.
         let mut remote = PimRemote::with_progress(
             &mut left.pool,
             blobs.clone(),
@@ -1784,10 +1875,6 @@ fn placement_hunks(
                     content_key: 0,
                 });
             }
-            // NOTE: Dirty covers a flag change and a body edit alike, so the
-            // body pointer is compared against the base's too: a mutable-content
-            // item whose object moved is a pending in-place update. Mail never
-            // trips this, its bodies being immutable.
             let base_object = placement.base.as_ref().and_then(|b| b.object.as_ref());
             if placement.object.as_ref() != base_object {
                 hunks.push(ItemHunk::Update {
@@ -1799,9 +1886,6 @@ fn placement_hunks(
             }
             hunks
         }
-        // NOTE: an Ambiguous placement derives nothing on any axis, the engine
-        // refusing to guess which copy a change belongs to, so it has no hunk.
-        // It surfaces through [`ambiguity`] instead.
         ReplicaStatus::Clean | ReplicaStatus::Conflict | ReplicaStatus::Ambiguous => Vec::new(),
     }
 }
@@ -1908,6 +1992,9 @@ fn apply_collection_hunk(
                 .primary()
                 .create_collection(collection)
                 .with_context(|| format!("Create collection `{collection}` on {side}"))?;
+        }
+        CollectionHunk::Scan { .. } => {
+            unreachable!("a scan hunk reports a failure and is never applied")
         }
         CollectionHunk::Delete { side, collection } => {
             source_ctx(side, left, right)
@@ -2046,8 +2133,6 @@ fn drain_submits(
             let subject = intent.subject();
             let entry = match submit::send_one(&mut channel, blobs, intent) {
                 Ok(()) => {
-                    // NOTE: at-least-once, since a crash between the server's
-                    // acceptance and this acknowledgement resends next run.
                     match store.drop_action(intent.id) {
                         Ok(true) => {}
                         Ok(false) => warn!(
@@ -2072,8 +2157,6 @@ fn drain_submits(
                     let error = format!("{:#}", failure.error());
                     let parked = failure.parks();
                     warn!("submit intent #{} failed: {error}", intent.id);
-                    // NOTE: `None` bumps the attempt counter and leaves the row
-                    // pending for the next run; `Some` parks it.
                     let outcome = parked.then_some(error.as_str());
                     if let Err(err) = store.fail_action(intent.id, outcome) {
                         warn!("cannot record submit intent #{} failure: {err}", intent.id);
@@ -2098,8 +2181,6 @@ fn drain_submits(
 
     #[cfg(not(any(feature = "smtp", feature = "msgraph")))]
     {
-        // NOTE: skipped, never parked: parking means permanently unappliable,
-        // and a build with a send channel performs these.
         let _ = (account_config, sides, blobs, store, report);
         warn!(
             "this build has no send channel (needs the `smtp` or the `msgraph` cargo feature), {} submit intent(s) stay pending",
@@ -2141,9 +2222,6 @@ fn sweep_retained(
         0 => Default::default(),
         _ => match store.collect_garbage() {
             Ok(collected) => collected,
-            // NOTE: a producer mid-append holds the staging lock the collector
-            // takes exclusively. Nothing was purged in vain: the bodies stay
-            // released and the next run, or `pimdir gc`, takes them.
             Err(err) => {
                 warn!("purged items but collected nothing: {err}");
                 Default::default()
@@ -2175,8 +2253,6 @@ fn open_send_channel<'a>(
     sides: &'a mut [&mut SourceCtx],
     queued: usize,
 ) -> Option<submit::SendChannel<'a>> {
-    // NOTE: decided before any borrow of `sides`, so the Graph arm can hand out
-    // the live session of the side it picked.
     let configured = account_config.sources().ok()?;
     let pick = sides.iter().enumerate().find_map(|(index, ctx)| {
         let source = configured.get(&ctx.name)?;
@@ -2232,7 +2308,7 @@ fn open_send_channel<'a>(
 /// Which side performs the submit intents, and how: its own SMTP channel, or
 /// the live session of the side at that index, a native sender.
 ///
-/// NOTE: each variant is consumed by the arm its cargo feature gates, so a
+/// Each variant is consumed by the arm its cargo feature gates, so a
 /// build with only one of them carries the other unread rather than duplicating
 /// the walk per feature combination.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
@@ -2340,7 +2416,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::config::StoredBodies;
 
     #[test]
     fn a_side_pair_must_agree_on_its_kind() {
@@ -2361,17 +2436,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("left"), "{err}");
-
-        // NOTE: the mismatch branch, two kinds this build knows but different
-        // ones, cannot be exercised while every known media type is mail: an
-        // unknown one trips the resolve step first.
     }
 
     #[test]
     fn the_pre_sync_drain_applies_queued_actions_and_reports_parked_ones() {
         let dir = tempfile::tempdir().unwrap();
-        // NOTE: the owner opens the store first, as the real driver does; only
-        // then can a producer attach.
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
@@ -2784,8 +2853,6 @@ mod tests {
                     .iter()
                     .map(|(handle, (revision, _))| ReplicaRemoteItem {
                         handle: ReplicaHandle(handle.clone()),
-                        // NOTE: a backend with no flag concept reports
-                        // known-empty, never unknown.
                         flags: ReplicaFlags::default(),
                         revision: Some(revision.clone()),
                     })
@@ -2833,9 +2900,6 @@ mod tests {
                         if_match,
                     } => {
                         let current = self.items.get(&handle.0).map(|(rev, _)| rev.clone());
-                        // NOTE: the whole contract: write only if the caller's
-                        // base still matches, else reject so the engine
-                        // re-merges.
                         if if_match.is_some() && if_match.as_deref() == current.as_deref() {
                             let revision = self.next_revision.clone();
                             self.items
@@ -2955,7 +3019,10 @@ mod tests {
         drive(
             store,
             remote,
-            ReplicaSync::new(String::from("contacts"), sync_options(true, rights)),
+            ReplicaSync::new(
+                String::from("contacts"),
+                sync_options(true, rights, ReplicaConflictPolicy::Manual),
+            ),
         )
         .unwrap()
     }
@@ -3052,11 +3119,6 @@ mod tests {
             report.events
         );
 
-        // NOTE: the conflict must survive the round trip through the store, not
-        // only be reported by the run. Otherwise the placement reads back Dirty
-        // and the next run re-derives the same push, re-conflicts and
-        // re-reports forever, with no way for a frontend to tell which items
-        // need a human.
         let placements = load_side(&store, "contacts").unwrap();
         assert_eq!(
             placements[0].status,
@@ -3145,9 +3207,6 @@ mod tests {
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
-        // NOTE: the shape the engine leaves behind when a source holds one
-        // identity under two handles: the copy it bound, carrying the one it
-        // did not.
         let mut placement = linked("145", "mid:a@x", r#"{"v":1}"#);
         placement.ambiguous_handles = vec![ReplicaHandle("146".into())];
         store
@@ -3243,106 +3302,145 @@ mod tests {
         assert_eq!(display_name("cards", "mail/INBOX"), "mail/INBOX");
     }
 
-    /// Two sources of one kind land in one group only when they say so, and the
-    /// derivation follows from the group, not from a setting.
+    /// `--source` picks sources, there being no namespace to pick instead.
     #[test]
-    fn namespaces_group_the_sources_that_share_one() {
-        let isolated: AccountConfig = toml::from_str(
-            r#"
-            sources.fastmail.imap.server = "imaps://imap.fastmail.com:993"
-            sources.gmail.imap.server = "imaps://imap.gmail.com:993"
-            "#,
-        )
-        .unwrap();
-
-        let groups = isolated.groups().unwrap();
-        assert_eq!(groups.len(), 2, "two namespaces, so no propagation");
-        assert!(groups.iter().all(|g| g.bodies == StoredBodies::All));
-
-        let merged: AccountConfig = toml::from_str(
-            r#"
-            sources.fastmail.imap.server = "imaps://imap.fastmail.com:993"
-            sources.fastmail.imap.collection.namespace = "mail"
-            sources.gmail.imap.server = "imaps://imap.gmail.com:993"
-            sources.gmail.imap.collection.namespace = "mail"
-            "#,
-        )
-        .unwrap();
-
-        let groups = merged.groups().unwrap();
-        assert_eq!(groups.len(), 1, "one namespace, so they mirror");
-        assert_eq!(groups[0].sources, vec!["fastmail", "gmail"]);
-        assert_eq!(groups[0].bodies, StoredBodies::None);
-    }
-
-    /// A namespace names the sources that mirror each other, and only one kind
-    /// can do that. Sharing one across kinds would key their collections onto
-    /// the same ids.
-    #[cfg(feature = "carddav")]
-    #[test]
-    fn a_namespace_claimed_by_two_kinds_is_refused() {
-        let account: AccountConfig = toml::from_str(
-            r#"
-            imap.server = "imaps://imap.fastmail.com:993"
-            imap.collection.namespace = "shared"
-            carddav.server = "https://carddav.fastmail.com/"
-            carddav.auth.bearer.token.raw = "tok"
-            carddav.collection.namespace = "shared"
-            "#,
-        )
-        .unwrap();
-
-        let err = account.groups().unwrap_err().to_string();
-        assert!(err.contains("claimed by two kinds"), "got {err}");
-
-        // On their own namespaces the two sit under one account happily, which
-        // is the case this whole change exists for.
-        let account: AccountConfig = toml::from_str(
-            r#"
-            imap.server = "imaps://imap.fastmail.com:993"
-            carddav.server = "https://carddav.fastmail.com/"
-            carddav.auth.bearer.token.raw = "tok"
-            "#,
-        )
-        .unwrap();
-
-        let groups = account.groups().unwrap();
-        assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].media_type, "message/rfc822");
-        assert_eq!(groups[1].media_type, "text/vcard");
-        assert!(
-            groups.iter().all(|g| g.bodies == StoredBodies::All),
-            "each is alone in its kind, so each keeps every body",
-        );
-    }
-
-    /// `--source` picks namespaces, not sources: half a mirror pushes one way
-    /// and calls it done.
-    #[test]
-    fn narrowing_by_source_selects_whole_namespaces() {
+    fn narrowing_selects_the_named_sources() {
         let account: AccountConfig = toml::from_str(
             r#"
             sources.a.imap.server = "imaps://a.example.org:993"
-            sources.a.imap.collection.namespace = "mail"
             sources.b.imap.server = "imaps://b.example.org:993"
-            sources.b.imap.collection.namespace = "mail"
             sources.c.imap.server = "imaps://c.example.org:993"
             "#,
         )
         .unwrap();
+        let mode = account.mode().unwrap();
 
-        let picked = select_groups(&account, &[String::from("a")]).unwrap();
-        assert_eq!(picked.len(), 1);
-        assert_eq!(picked[0].sources, vec!["a", "b"], "the pair runs whole");
+        let picked = select_sources(&mode, &[String::from("a")]).unwrap();
+        assert_eq!(picked, vec!["a"]);
 
-        let picked = select_groups(&account, &[String::from("c")]).unwrap();
-        assert_eq!(picked[0].sources, vec!["c"]);
+        assert_eq!(select_sources(&mode, &[]).unwrap().len(), 3);
 
-        assert_eq!(select_groups(&account, &[]).unwrap().len(), 2);
-
-        let err = select_groups(&account, &[String::from("nope")])
+        let err = select_sources(&mode, &[String::from("nope")])
             .unwrap_err()
             .to_string();
         assert!(err.contains("no source named `nope`"), "got {err}");
+    }
+
+    /// The authority is the whole of `one-way`, and it is what stops a
+    /// divergence from becoming a conflict nobody can resolve.
+    #[test]
+    fn the_authority_decides_the_conflict_and_the_push() {
+        assert_eq!(
+            Authority::Shared.conflict_policy(),
+            ReplicaConflictPolicy::Manual,
+        );
+        assert!(
+            Authority::Shared.writes_back(),
+            "both sides write in a two-way mirror",
+        );
+
+        assert_eq!(
+            Authority::Endpoint.conflict_policy(),
+            ReplicaConflictPolicy::PreferRemote,
+        );
+        assert!(
+            !Authority::Endpoint.writes_back(),
+            "what the source holds is the truth, so nothing is written back to it",
+        );
+
+        assert_eq!(
+            Authority::Store.conflict_policy(),
+            ReplicaConflictPolicy::PreferLocal,
+        );
+        assert!(
+            Authority::Store.writes_back(),
+            "the target takes what the store pushes",
+        );
+    }
+
+    /// A freshly probed item carries no link id, so it sits in the source's
+    /// residual and never enters the hub. The pull plan has to read the side,
+    /// not the projection, or a first sync of a kind whose identity lives in
+    /// the body reports nothing at all.
+    #[test]
+    fn the_pull_plan_names_an_item_that_has_no_link_id_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("dav");
+        store
+            .ensure_collection("dav/contacts", "text/vcard")
+            .unwrap();
+
+        store
+            .write(vec![ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+                collection: ReplicaCollectionId("dav/contacts".into()),
+                handle: ReplicaHandle("card-1.vcf".into()),
+                link_id: None,
+                object: None,
+                level: ReplicaLevel::Probed,
+                meta: None,
+                sort_key: ReplicaSortKey::default(),
+                flags: ReplicaFlags::default(),
+                status: ReplicaStatus::Clean,
+                conflict_revision: None,
+                base: None,
+                origin: None,
+                ambiguous_handles: Vec::new(),
+            })])
+            .unwrap();
+
+        assert!(
+            projection_view(&store, "dav/contacts", "dav")
+                .unwrap()
+                .is_empty(),
+            "the projection drops the residual, which is why it was the wrong read",
+        );
+
+        let mut report = SyncReport::default();
+        itemize_fetches("dav/contacts", "contacts", &store, "dav", &mut report).unwrap();
+
+        assert_eq!(report.item.patch.len(), 1);
+        assert!(
+            matches!(&report.item.patch[0].hunk, ItemHunk::Fetch { id, .. } if id == "card-1.vcf"),
+            "named by its handle, the only name it has before its body arrives",
+        );
+    }
+
+    /// A content change drops the stale object and leaves the level where it
+    /// was, so a plan keyed on the level calls an item about to be re-fetched
+    /// done.
+    #[test]
+    fn the_pull_plan_names_a_body_dropped_by_a_content_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("dav");
+        store
+            .ensure_collection("dav/contacts", "text/vcard")
+            .unwrap();
+
+        store
+            .write(vec![ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+                collection: ReplicaCollectionId("dav/contacts".into()),
+                handle: ReplicaHandle("card-1.vcf".into()),
+                link_id: Some(ReplicaLinkId("uid:card-1".into())),
+                object: None,
+                level: ReplicaLevel::Full,
+                meta: Some(ReplicaMeta(r#"{"v":1,"fn":"Jane"}"#.into())),
+                sort_key: ReplicaSortKey::default(),
+                flags: ReplicaFlags::default(),
+                status: ReplicaStatus::Clean,
+                conflict_revision: None,
+                base: None,
+                origin: None,
+                ambiguous_handles: Vec::new(),
+            })])
+            .unwrap();
+
+        let mut report = SyncReport::default();
+        itemize_fetches("dav/contacts", "contacts", &store, "dav", &mut report).unwrap();
+
+        assert_eq!(
+            report.item.patch.len(),
+            1,
+            "Full with no object is a body to re-fetch, not a finished item",
+        );
     }
 }

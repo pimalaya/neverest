@@ -30,10 +30,10 @@ const LOCK_POLL: Duration = Duration::from_millis(500);
 
 /// Synchronizes the account's collections and items through its pimdir store.
 ///
-/// Every source of one kind sharing a `collection.namespace` is reconciled
-/// against one set of hub collections: alone, that is the offline replica; as a
-/// pair, a mirror. Namespaces never meet, so a mail source and a contacts
-/// source under one account stay apart.
+/// Each source is reconciled against the store, then against every target the
+/// account names. Sources never meet: an item one holds crosses to the targets,
+/// never to another source, so a mail source and a contacts source under one
+/// account stay apart.
 ///
 /// The three filter flags keep their pre-`generic-pim-sync` spellings
 /// (`--include-mailbox`, `--exclude-mailbox`, `--all-mailboxes`) as hidden
@@ -86,13 +86,18 @@ pub struct SyncCommand {
     #[arg(long)]
     pub no_purge: bool,
 
-    /// Synchronize only the namespaces holding the given sources (repeatable).
-    ///
-    /// Narrowing picks namespaces rather than sources: two sources sharing one
-    /// are a mirror, and running half of a mirror pushes one way and calls it
-    /// done.
+    /// Synchronize only the given sources (repeatable).
     #[arg(long, short = 's', value_name = "SOURCE", action = ArgAction::Append)]
     pub source: Vec<String>,
+
+    /// Accept a mode change that discards data, and remember the answer.
+    ///
+    /// Turning `one-way` on makes the sources authoritative, so the next run
+    /// discards whatever the other side changed on its own rather than merging
+    /// it. That first run is the one that loses them, which is why it is
+    /// refused until this says otherwise.
+    #[arg(long)]
+    pub accept_mode: bool,
 }
 
 impl SyncCommand {
@@ -147,6 +152,7 @@ impl SyncCommand {
             connections,
             self.no_purge,
             &self.source,
+            self.accept_mode,
         )?;
 
         printer.out(report)
@@ -202,8 +208,6 @@ fn reset_replica(replica: &std::path::Path, include: &[String]) -> Result<()> {
     if !include.is_empty() {
         info!("reset: per-collection scope not yet supported, resetting whole replica");
     }
-    // NOTE: the JSON files are the pre-pimdir layouts, removed so an upgraded
-    // install resets cleanly.
     for name in [
         "pimdir.db",
         "pimdir.db-wal",
@@ -223,11 +227,8 @@ fn reset_replica(replica: &std::path::Path, include: &[String]) -> Result<()> {
         fs::remove_dir_all(&objects)
             .with_context(|| format!("Remove `{}` for reset", objects.display()))?;
     }
-    // NOTE: the empty store is recreated so the account stays initialized, and
-    // stamped like a fresh one: a reset that left no sidecar would be refused
-    // by the next run, which asks for the reset that just ran.
     PimdirStore::open(replica).context("Recreate pimdir store after reset")?;
-    StoreState::stamp(replica).context("Stamp store state after reset")?;
+    StoreState::stamp(replica, None).context("Stamp store state after reset")?;
     Ok(())
 }
 

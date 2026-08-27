@@ -281,9 +281,6 @@ impl ImapClient {
             return Ok(uid.to_string());
         }
 
-        // NOTE: without UIDPLUS the UID is recovered by searching the message's
-        // own Message-ID, carried from the link id since the body streamed past
-        // without being parsed.
         let message_id = message_id.map(str::trim).filter(|id| !id.is_empty());
         let Some(message_id) = message_id else {
             bail!(
@@ -380,9 +377,6 @@ fn is_selectable(row: &ListRow) -> bool {
 /// Converts one IMAP LIST row into the shared [`Collection`] shape.
 fn mailbox_from(row: ListRow) -> Collection {
     let name = match row.0 {
-        // NOTE: the RFC 3501 canonical spelling is uppercase. Sync pairs
-        // mailboxes by name across backends, so the IMAP INBOX must match the
-        // conventional one.
         ImapMailbox::Inbox => "INBOX".to_string(),
         ImapMailbox::Other(other) => String::from_utf8_lossy(other.inner().as_ref()).into_owned(),
     };

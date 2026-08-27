@@ -38,8 +38,6 @@ pub fn edit_account(target: &Path, mut config: Config, account_name: &str) -> Re
     let email = discover::prompt_email_with(default_email.as_deref())?;
     let mut source = discover::configure(account_name, &email)?;
 
-    // NOTE: the wizard never invents a submission server, so a run that
-    // discovered none keeps the channel the account already carried.
     if source.smtp.is_none() {
         source.smtp = existing.as_ref().and_then(|account| account.smtp.clone());
     }
@@ -73,8 +71,6 @@ fn source_email(source: &SourceConfig) -> Option<String> {
             _ => None,
         },
         SourceBackendConfig::Gmail(_) | SourceBackendConfig::Msgraph(_) => None,
-        // NOTE: a DAV account authenticates with a username rather than an
-        // email address, and the two differ often enough not to seed a prompt.
         SourceBackendConfig::Carddav(_) => None,
     }
 }

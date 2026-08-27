@@ -46,25 +46,30 @@ impl InitCommand {
             );
         }
 
-        for (source, config) in account_config.sources()? {
-            let s = Spinner::start(format!("Initializing source {source}…"));
-            client::init(config).with_context(|| format!("Initialize source {source}"))?;
-            s.success(format!("Initialized source {source}"));
+        let mode = account_config.mode()?;
+
+        for (endpoint, config) in account_config.endpoints()? {
+            let s = Spinner::start(format!("Initializing {endpoint}…"));
+            client::init(config).with_context(|| format!("Initialize {endpoint}"))?;
+            s.success(format!("Initialized {endpoint}"));
         }
 
         let s = Spinner::start("Creating replica store…");
         fs::create_dir_all(&replica)
             .with_context(|| format!("Create replica dir `{}`", replica.display()))?;
-        // NOTE: opening the store materializes `pimdir.db` and its schema. The
-        // handle is dropped immediately, the sync opening its own.
         PimdirStore::open(&replica)
             .with_context(|| format!("Create pimdir store `{}`", replica.display()))?;
-        StoreState::stamp(&replica)
+        // The mode is stamped here, so the first sync compares against what
+        // `init` opened rather than against nothing.
+        StoreState::stamp(&replica, Some(&mode))
             .with_context(|| format!("Stamp store state `{}`", replica.display()))?;
         s.success("Created replica store");
 
+        // A first run under `one-way` has no recorded mode to compare against,
+        // so nothing can refuse it. Saying what the account will do is what
+        // stands in for the confirmation a one-shot tool cannot ask for.
         printer.out(Message::new(format!(
-            "Account `{name}` successfully initialized"
+            "Account `{name}` successfully initialized: {mode}"
         )))
     }
 }

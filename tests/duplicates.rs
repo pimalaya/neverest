@@ -153,12 +153,10 @@ fn config_toml() -> String {
          sources.left.imap.starttls = false\n\
          sources.left.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
          sources.left.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
-         sources.left.imap.collection.namespace = \"mail\"\n\
-         sources.right.imap.server = \"{B}\"\n\
-         sources.right.imap.starttls = false\n\
-         sources.right.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
-         sources.right.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
-         sources.right.imap.collection.namespace = \"mail\"\n",
+         targets.right.imap.server = \"{B}\"\n\
+         targets.right.imap.starttls = false\n\
+         targets.right.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
+         targets.right.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n",
     )
 }
 
@@ -181,9 +179,7 @@ fn drop_checkpoint(state: &Path, source: &str) {
     io_replica::client::ReplicaStorage::write(
         &mut store,
         vec![ReplicaWriteOp::SetCheckpoint {
-            // NOTE: the hub collection id carries its namespace; the bare name
-            // is what the server knows it by.
-            collection: ReplicaCollectionId("mail/INBOX".into()),
+            collection: ReplicaCollectionId("left/INBOX".into()),
             checkpoint: ReplicaCheckpoint(Vec::new()),
         }],
     )

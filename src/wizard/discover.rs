@@ -98,23 +98,15 @@ pub fn run(printer: &mut impl Printer, target: &Path) -> Result<Config> {
 
     let email = prompt_email()?;
 
-    // NOTE: the account name is just the TOML table key, so it is derived from
-    // the email rather than prompted, and the user renames it by hand.
     let account_name = default_account_name(&email);
     let source = configure(&account_name, &email)?;
 
-    // NOTE: one source, written as the direct-backend sugar. A single source
-    // shares its namespace with nobody, so the store keeps every body and the
-    // account is the offline replica the wizard is for. A mirror, a fan-in and
-    // a second kind are all hand-written.
     let account = AccountConfig::with_source(true, source);
 
     let config = Config {
         accounts: HashMap::from([(account_name.clone(), account)]),
     };
 
-    // NOTE: JSON mode and a redirected stdout stay non-interactive, so the
-    // document goes straight to stdout and `neverest > config.toml` works.
     if printer.is_json() || !std::io::stdout().is_terminal() {
         printer.out(GeneratedConfig(&config))?;
         return Ok(config);
@@ -247,8 +239,6 @@ fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<Sourc
             })
         }
         #[cfg(feature = "msgraph")]
-        // NOTE: Graph sends through its own `sendMail` action, so this side
-        // needs no channel of its own.
         DiscoveredKind::Msgraph => Ok(SourceConfig::new(SourceBackendConfig::Msgraph(
             msgraph::configure(account_name)?,
         ))),

@@ -149,22 +149,12 @@ impl Config {
             return Ok(config);
         }
 
-        // NOTE: the target path is where `-c` pointed, or the default
-        // location when it named none, so a mistyped path shows up as
-        // itself rather than as a generic first run.
         let target = Config::target_path(config_paths)?;
 
-        // NOTE: nobody is there to answer a prompt in a script or a cron
-        // job, and a JSON consumer wants a failure it can read, so both
-        // skip the offer and fail below.
         if !printer.is_json() && stdin().is_terminal() {
             offer_configuration(printer, &target)?;
         }
 
-        // NOTE: the wizard also prints the configuration instead of
-        // writing it, so having run it proves nothing: the file is looked
-        // up again, and the command fails the ordinary way when nothing
-        // landed.
         match Config::from_paths_or_default(config_paths)? {
             Some(config) => Ok(config),
             None => bail!(
@@ -214,6 +204,36 @@ pub struct AccountConfig {
     /// Named sources, the map key being the pimdir source id.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sources: HashMap<String, SourceConfig>,
+
+    /// Named targets, on the same terms as [`sources`](Self::sources): the map
+    /// key is the pimdir source id every binding a target owns is recorded
+    /// under. A positional list would reassign them all on a reorder, which is
+    /// why `left` and `right` were removed and are not worth reintroducing.
+    ///
+    /// Absent means the local store is the destination.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub targets: HashMap<String, SourceConfig>,
+
+    /// Makes the `sources` side authoritative: a difference resolves in its
+    /// favour and the other side's change is discarded rather than merged, so
+    /// no conflict is recorded.
+    ///
+    /// It does not mean the other side goes unread. Every run still enumerates
+    /// it, or every item would be re-pushed; its state decides what the run has
+    /// left to do and never who wins. Changes are **overwritten, not merged**.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub one_way: bool,
+
+    /// Whether the store holds bodies and is readable by a frontend, rather
+    /// than being only the ledger of spines and checkpoints.
+    ///
+    /// Unset takes the destination's answer: true with no targets, the store
+    /// being what the account syncs into, false with targets, a configuration
+    /// naming sources and targets having asked to copy between them rather
+    /// than to fill a disk. Set it explicitly to keep a local copy of a
+    /// migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retain: Option<bool>,
 
     /// Direct-backend sugar: each is a source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -381,64 +401,71 @@ impl AccountConfig {
         !self.sources.contains_key(name)
     }
 
-    /// The account's sources grouped into hub namespaces, ordered by kind then
-    /// namespace so a report reads the same twice.
+    /// Every endpoint the account opens, sources and targets alike, keyed by
+    /// its pimdir source id.
     ///
-    /// This is the one place [`StoredBodies`] is decided. Both `check` and the
-    /// sync go through it, so what a run reports and what it does cannot drift
-    /// apart.
-    pub fn groups(&self) -> Result<Vec<SourceGroup>> {
+    /// A target is a source handle of the same store: it enumerates, it holds
+    /// bindings, and it is written to. What separates the two is direction,
+    /// which is [`AccountMode`], not the seam that opens them.
+    pub fn endpoints(&self) -> Result<HashMap<String, SourceConfig>> {
+        let mut endpoints = self.sources()?;
+        endpoints.extend(self.targets.clone());
+        Ok(endpoints)
+    }
+
+    /// The account's mode: which endpoints it holds, which way changes flow,
+    /// and whether the store keeps bodies.
+    ///
+    /// Both `check` and the sync go through it, so what a run reports and what
+    /// it does cannot drift apart. Every illegal arity is refused here, naming
+    /// the cell reached and the nearest legal one.
+    pub fn mode(&self) -> Result<AccountMode> {
         let sources = self.sources()?;
-        let mut grouped: HashMap<(&'static str, String), Vec<String>> = HashMap::new();
+        let mut source_names: Vec<String> = sources.keys().cloned().collect();
+        let mut target_names: Vec<String> = self.targets.keys().cloned().collect();
+        source_names.sort();
+        target_names.sort();
 
-        for (name, source) in &sources {
-            let key = (
-                source.backend.media_type(),
-                source.namespace(name).to_string(),
+        match (source_names.len(), target_names.len(), self.one_way) {
+            (0, _, _) => bail!(
+                "This account declares no source. Write a backend directly under it \
+                 (`imap.server = \"…\"`), or name one in its `sources` table."
+            ),
+            (_, 0, _) => {}
+            (1, 1, _) => {}
+            (1, _, true) => {}
+            (1, n, false) => bail!(
+                "One source and {n} targets is a one-way copy: add `one-way = true`. Without it \
+                 each target would also write back, and propagating between {} endpoints has no \
+                 resolution order for neverest to pick.",
+                n + 1,
+            ),
+            (n, _, _) => bail!(
+                "{n} sources and {} targets is not a shape neverest syncs. Either drop the \
+                 targets, so every source syncs into the local store, or keep one source and \
+                 copy it to the targets with `one-way = true`.",
+                target_names.len(),
+            ),
+        }
+
+        if target_names.is_empty() && self.retain == Some(false) {
+            bail!(
+                "`retain = false` with no target would sync to nowhere: the local store is this \
+                 account's destination. Drop the key, or name the targets to copy to."
             );
-            grouped.entry(key).or_default().push(name.clone());
         }
 
-        let mut groups: Vec<_> = grouped
-            .into_iter()
-            .map(|((media_type, namespace), mut names)| {
-                names.sort();
+        // The destination answers it: the store with no target, the targets
+        // otherwise, a migration having asked to copy rather than to fill a
+        // disk.
+        let retain = self.retain.unwrap_or(target_names.is_empty());
 
-                // A group streams only when every source in it can, which today
-                // means an IMAP to IMAP pairing and nothing else.
-                let streamable = names.iter().all(|name| sources[name].is_streamable());
-
-                SourceGroup {
-                    media_type,
-                    namespace,
-                    bodies: StoredBodies::derive(names.len(), streamable),
-                    sources: names,
-                }
-            })
-            .collect();
-
-        groups.sort_by(|a, b| (a.media_type, &a.namespace).cmp(&(b.media_type, &b.namespace)));
-
-        // A hub collection id is `<namespace>/<name>` with the kind on the
-        // collection row, so two kinds under one namespace would key onto the
-        // same ids: a mailbox and an address book both named `Default` would
-        // become one collection. Mirroring across kinds means nothing anyway.
-        for pair in groups.windows(2) {
-            let [previous, group] = pair else { continue };
-
-            if previous.namespace == group.namespace {
-                bail!(
-                    "Namespace `{}` is claimed by two kinds, `{}` and `{}`, whose collections \
-                     would collide. A namespace names the sources that mirror each other, which \
-                     only one kind can do; give one of them a namespace of its own.",
-                    group.namespace,
-                    previous.media_type,
-                    group.media_type,
-                );
-            }
-        }
-
-        Ok(groups)
+        Ok(AccountMode {
+            sources: source_names,
+            targets: target_names,
+            one_way: self.one_way,
+            retain,
+        })
     }
 
     /// Rejects an account a command cannot run: a removed key, no source at all,
@@ -459,9 +486,21 @@ impl AccountConfig {
             );
         }
 
-        for (name, source) in &sources {
+        for (name, source) in sources.iter().chain(&self.targets) {
             source.validate(name)?;
         }
+
+        if let Some(name) = sources.keys().find(|name| self.targets.contains_key(*name)) {
+            bail!(
+                "`{name}` is both a source and a target. A name is the pimdir source id every \
+                 binding it owns is recorded under, so one name cannot be two endpoints; rename \
+                 one of them."
+            );
+        }
+
+        // Refuses every illegal arity, and is what `check` and the sync both
+        // read, so a configuration that loads is one they agree on.
+        self.mode()?;
 
         let mut senders: Vec<_> = sources
             .iter()
@@ -488,10 +527,10 @@ impl AccountConfig {
     fn reject_removed_keys(&self) -> Result<()> {
         if self.left.is_some() || self.right.is_some() {
             bail!(
-                "`left` and `right` are gone: an account holds named sources. Write them as \
-                 `sources.left` and `sources.right`, and give both the same \
-                 `collection.namespace` to keep them mirroring each other (without it they sync \
-                 side by side into the store and never push to one another)."
+                "`left` and `right` are gone: an account names its endpoints and the direction \
+                 between them. Write the authoritative one under `sources` and the other under \
+                 `targets`, and add `one-way = true` to copy rather than merge; leaving it off \
+                 keeps them syncing both ways, which is what the pair used to do."
             );
         }
 
@@ -501,6 +540,23 @@ impl AccountConfig {
                  filters, since an account may hold sources of several kinds. Write it as \
                  `sources.<name>.collection.filter`, or `<protocol>.collection.filter` under the \
                  account."
+            );
+        }
+
+        let namespaced: Vec<_> = self
+            .sources
+            .iter()
+            .chain(&self.targets)
+            .filter(|(_, source)| source.declares_namespace())
+            .map(|(name, _)| name.as_str())
+            .collect();
+
+        if !namespaced.is_empty() {
+            bail!(
+                "`collection.namespace` is gone, on {}: it said which sources met, which is now \
+                 whether they sit under `sources` or `targets`, and it never said which way, \
+                 which is now `one-way`. Drop it.",
+                namespaced.join(", "),
             );
         }
 
@@ -560,25 +616,25 @@ pub struct StoreConfig {
 }
 
 impl StoreConfig {
-    /// Refuses `retention` and `hydration`, which no longer exist: what the
-    /// store keeps is derived per kind from how many sources share a namespace
-    /// (see [`StoredBodies::derive`]) and reported on every run.
+    /// Refuses `retention` and `hydration`, whose one answer is now the
+    /// account's `retain`.
     ///
-    /// Accepting and ignoring `retention = "retain"` on a pairing that derives
-    /// [`StoredBodies::None`] would hand back the opposite of what was written,
-    /// so the key is refused rather than tolerated.
+    /// A three-point retention scale described a store that could hold only the
+    /// bodies that happened to cross, which is neither a replica nor a relay
+    /// and which nothing asked for. Accepting either key and mapping it onto
+    /// `retain` would guess, so both are refused by name.
     fn reject_removed_keys(&self) -> Result<()> {
         if self.retention.is_some() || self.hydration.is_some() {
             bail!(
-                "`store.retention` and `store.hydration` are gone: what the store keeps is \
-                 derived per kind and reported on every run. One source keeps every body, two \
-                 sources sharing a `collection.namespace` on a streamable pairing keep none, \
-                 anything else keeps what crossed. Run `neverest check` to see the value in force."
+                "`store.retention` and `store.hydration` are gone: whether the store keeps \
+                 bodies is the account's `retain`, which is true when the store is the \
+                 destination and false when targets are named."
             );
         }
 
         Ok(())
     }
+
     /// The RFC 3339 purge cutoff of a run starting at `now`: a retained item
     /// whose `retained_at` is strictly older is reclaimed. `None` when
     /// `purge-after` is unset (never purge) or so large that no instant can
@@ -680,59 +736,76 @@ impl Serialize for HumanDuration {
     }
 }
 
-/// Which item bodies the store keeps for one kind.
+/// What an account does: which endpoints it holds, which way changes flow, and
+/// whether the store keeps bodies.
 ///
-/// Not configured: derived by [`StoredBodies::derive`] from how many sources
-/// share a collection namespace and whether their pairing can stream, then
-/// reported on every run. The three points replace the old `store.retention`
-/// and `store.hydration` pair, whose fourth combination (relay every body) meant
-/// nothing.
-#[derive(Clone, Copy, Debug, Serialize, Eq, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum StoredBodies {
-    /// No body at rest: each crossing is streamed from its holding source to
-    /// the target and the store keeps only the spine. The pass-through mirror,
-    /// which trades away dedup, cheap retry and resumability.
-    None,
-    /// Only the bodies that had to cross, kept once they have.
-    Crossing,
-    /// Every body, the store being the offline replica an app reads.
-    All,
+/// Declared, never derived. The mode is the arity of `sources` and `targets`
+/// plus the two flags, so nothing about an account's behaviour depends on a
+/// coincidence between two of its sources.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AccountMode {
+    /// The source names, sorted, so a report reads the same twice.
+    pub sources: Vec<String>,
+    /// The target names, sorted. Empty means the local store is the
+    /// destination.
+    pub targets: Vec<String>,
+    /// Whether the `sources` side is authoritative.
+    pub one_way: bool,
+    /// Whether the store holds bodies, resolved from the destination when the
+    /// configuration left it unset.
+    pub retain: bool,
 }
 
-impl StoredBodies {
-    /// What the store keeps for a namespace holding `sources` sources, given
-    /// whether that pairing can stream a body server to server.
+impl AccountMode {
+    /// Whether the local store is the destination, every source merging or
+    /// overwriting into it rather than into another remote.
+    pub fn is_local(&self) -> bool {
+        self.targets.is_empty()
+    }
+
+    /// Whether a crossing between two remotes may be streamed rather than
+    /// staged in the store.
     ///
-    /// One source keeps everything, because nothing crosses and anything less
-    /// makes the store an index rather than a replica. Exactly two on a
-    /// streamable pairing keep nothing, which is the pass-through migrate. Three
-    /// or more, and every pairing that cannot stream, keep what crossed.
-    pub fn derive(sources: usize, streamable: bool) -> Self {
-        match sources {
-            0 | 1 => Self::All,
-            2 if streamable => Self::None,
-            _ => Self::Crossing,
-        }
-    }
-
-    /// Whether a body crossing to another source is streamed rather than stored.
-    pub fn relays(self) -> bool {
-        matches!(self, Self::None)
-    }
-
-    /// Whether every item is hydrated, rather than only those about to cross.
-    pub fn hydrates_everything(self) -> bool {
-        matches!(self, Self::All)
+    /// An internal choice, not a mode: what the user declared is `retain`, and
+    /// both answers honour it. Streaming is possible only where both endpoints
+    /// speak a protocol that can take a body straight from the other, which
+    /// today means IMAP to IMAP.
+    pub fn streams(&self, sources: &HashMap<String, SourceConfig>) -> bool {
+        !self.retain
+            && !self.is_local()
+            && self
+                .sources
+                .iter()
+                .chain(&self.targets)
+                .all(|name| sources.get(name).is_some_and(SourceConfig::is_streamable))
     }
 }
 
-impl fmt::Display for StoredBodies {
+impl fmt::Display for AccountMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::None => f.write_str("none"),
-            Self::Crossing => f.write_str("crossing"),
-            Self::All => f.write_str("all"),
+        let sources = self.sources.join(", ");
+
+        if self.is_local() {
+            let verb = if self.one_way {
+                "overwrite the local store, discarding local edits"
+            } else {
+                "sync both ways with the local store"
+            };
+
+            return write!(f, "{sources} {verb}");
+        }
+
+        let targets = self.targets.join(", ");
+        let body = if self.retain {
+            ", keeping a local copy"
+        } else {
+            ", keeping no local copy"
+        };
+
+        if self.one_way {
+            write!(f, "{sources} overwrites {targets}{body}")
+        } else {
+            write!(f, "{sources} and {targets} sync both ways{body}")
         }
     }
 }
@@ -792,57 +865,8 @@ impl SourceBackendConfig {
             Self::Msgraph(_) => "msgraph",
         }
     }
-
-    /// The media type this backend syncs, known from the protocol alone.
-    ///
-    /// The open client answers the same question (`Client::media_type`), and
-    /// has to, since that is what the collection kind is written from. Knowing
-    /// it here too is what lets a namespace be grouped, and its
-    /// [`StoredBodies`] derivation reported, before a single connection is
-    /// opened: `check` answers while a remote is down, and a first `sync`
-    /// answers before it fetches anything.
-    pub fn media_type(&self) -> &'static str {
-        match self {
-            Self::Imap(_) | Self::Jmap(_) | Self::Gmail(_) | Self::Msgraph(_) => "message/rfc822",
-            Self::Carddav(_) => "text/vcard",
-        }
-    }
 }
 
-/// One hub namespace: every source of one kind sharing one collection
-/// namespace, and what the store consequently keeps for them.
-///
-/// Sources meet here and nowhere else. Two of them in one group bind the same
-/// hub collections, which is what makes them mirror; two in different groups
-/// sit side by side in the store and never push to one another.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SourceGroup {
-    /// The kind every source in the group syncs.
-    pub media_type: &'static str,
-    /// The shared `collection.namespace`.
-    pub namespace: String,
-    /// The group's source names, sorted, so a report reads the same twice.
-    pub sources: Vec<String>,
-    /// What the store keeps for this group, derived and never configured.
-    pub bodies: StoredBodies,
-}
-
-impl fmt::Display for SourceGroup {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{} / {} ({}): bodies {}",
-            self.media_type,
-            self.namespace,
-            self.sources.join(", "),
-            self.bodies,
-        )
-    }
-}
-
-// NOTE: `pool_size`, `is_imap` and `is_http` describe the config surface and
-// may be unused until pools return; `new` is called from the wizard paths their
-// backend feature gates.
 #[allow(dead_code)]
 impl SourceConfig {
     /// Wraps a backend into a source with no send channel of its own.
@@ -858,11 +882,10 @@ impl SourceConfig {
     source_accessor!(item, ItemSourcePermissions);
     source_accessor!(pool_size, Option<usize>);
 
-    /// The hub collection namespace this source binds into: the configured
-    /// value, else its own name, which keeps sources isolated unless two are
-    /// deliberately pointed at the same one.
-    pub fn namespace<'a>(&'a self, name: &'a str) -> &'a str {
-        self.collection().namespace.as_deref().unwrap_or(name)
+    /// Whether this source carries the removed `collection.namespace` key, so
+    /// the account can refuse it by name.
+    fn declares_namespace(&self) -> bool {
+        self.collection().namespace.is_some()
     }
 
     pub fn is_imap(&self) -> bool {
@@ -895,8 +918,9 @@ impl SourceConfig {
     }
 
     /// Whether a body can be streamed straight from this source to another
-    /// rather than stored on the way. Only the IMAP to IMAP pairing can, so
-    /// this gates the [`StoredBodies::None`] derivation.
+    /// rather than staged on the way. Only the IMAP to IMAP pairing can, so
+    /// this gates [`AccountMode::streams`], which is an optimisation of the
+    /// declared `retain` and never a mode of its own.
     pub fn is_streamable(&self) -> bool {
         self.is_imap()
     }
@@ -953,29 +977,20 @@ pub struct CollectionSourceConfig {
     /// Whether the sync may create a collection on this source, and delete one.
     ///
     /// Both default to granting, unlike the `item` block, which requires its
-    /// pair to be declared in full. The asymmetry is deliberate: this table now
-    /// also carries `namespace` and `filter`, so it is declared for reasons that
-    /// have nothing to do with permissions, and demanding a permission pair
-    /// from someone writing a namespace would be a trap.
+    /// pair to be declared in full. The asymmetry is deliberate: this table
+    /// also carries `filter`, so it is declared for reasons that have nothing
+    /// to do with permissions, and demanding a permission pair from someone
+    /// writing a filter would be a trap.
     #[serde(default = "default_true")]
     pub create: bool,
     #[serde(default = "default_true")]
     pub delete: bool,
 
-    /// The hub collection namespace, defaulting to the source's own name.
-    ///
-    /// A hub collection is keyed by `(kind, namespace, name)`, so two sources
-    /// of one kind meet only where they declare the same namespace. Meeting is
-    /// what propagation *is*: an item sitting in a collection a source
-    /// participates in, with no binding for that source, is pushed to it. Two
-    /// sources left on their own names therefore sync side by side into one
-    /// store and never write to one another, which is the merged read view a
-    /// frontend unions at display time.
-    ///
-    /// Sharing a value is the explicit act of saying "these two are the same
-    /// thing", and it is what turns a pair of sources into a mirror.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub namespace: Option<String>,
+    /// Removed key, kept only so a configuration carrying it is refused by
+    /// name. Which endpoints meet is now the account's arity, and which way is
+    /// [`AccountConfig::one_way`].
+    #[serde(default, skip_serializing)]
+    namespace: Option<RemovedKey>,
 
     /// Collection-name filter for this source.
     ///
@@ -1289,7 +1304,8 @@ pub struct SmtpConfig {
 ///
 /// The presence of `://` is what tells them apart, and it has to be:
 /// a bare authority is **not** a relative URL. `url` reads
-/// `posteo.de:8843` as the scheme `posteo.de` with the path `8843`,
+/// `dav.example.org:8443` as the scheme `dav.example.org` with the path
+/// `8443`,
 /// which parses cleanly and carries no host, so a caller matching on
 /// [`ParseError::RelativeUrlWithoutBase`] catches the portless spelling
 /// and hands the ported one straight to a backend, which then rejects it
@@ -1467,9 +1483,6 @@ impl SaslConfig {
                 username: c.username,
                 token: c.token.get()?,
             }),
-            // NOTE: the nonce is left empty, io-imap and io-smtp filling it
-            // with one they draw when opening the session, an I/O-free
-            // coroutine being unable to generate randomness.
             SaslConfig::ScramSha256(c) => Sasl::ScramSha256(SaslScramCreds {
                 username: c.username,
                 password: c.password.get()?,
@@ -1568,8 +1581,6 @@ msgraph.user-id = "me"
         assert_eq!(explicit.keys().collect::<Vec<_>>(), vec!["imap"]);
         assert!(!sugar["imap"].permissions().item.delete);
         assert!(!explicit["imap"].permissions().item.delete);
-        assert_eq!(sugar["imap"].namespace("imap"), "imap");
-        assert_eq!(explicit["imap"].namespace("imap"), "imap");
     }
 
     #[test]
@@ -1591,9 +1602,7 @@ msgraph.user-id = "me"
         let account: AccountConfig = toml::from_str(
             r#"
             sources.fastmail.imap.server = "imaps://imap.fastmail.com:993"
-            sources.fastmail.imap.collection.namespace = "mail"
             sources.gmail.imap.server = "imaps://imap.gmail.com:993"
-            sources.gmail.imap.collection.namespace = "mail"
             sources.dav.carddav.server = "https://carddav.fastmail.com/"
             sources.dav.carddav.auth.basic.username = "user"
             sources.dav.carddav.auth.basic.password.raw = "pw"
@@ -1604,9 +1613,6 @@ msgraph.user-id = "me"
         account.validate().unwrap();
         let sources = account.sources().unwrap();
         assert_eq!(sources.len(), 3);
-        assert_eq!(sources["fastmail"].namespace("fastmail"), "mail");
-        assert_eq!(sources["gmail"].namespace("gmail"), "mail");
-        assert_eq!(sources["dav"].namespace("dav"), "dav");
     }
 
     /// Mail and contacts under one account is the case the whole change exists
@@ -1633,40 +1639,127 @@ msgraph.user-id = "me"
         assert!(sources["carddav"].smtp.is_none());
     }
 
-    /// A source left on its own name is isolated; two pointed at one namespace
-    /// meet, and meeting is what propagation is.
+    /// The legal cells of the matrix, and what each resolves `retain` to.
     #[test]
-    fn a_namespace_defaults_to_the_source_name() {
-        let account: AccountConfig = toml::from_str(
+    fn the_mode_is_the_arity_and_the_two_flags() {
+        let local: AccountConfig = toml::from_str(
             r#"
             sources.fastmail.imap.server = "imaps://imap.fastmail.com:993"
             sources.gmail.imap.server = "imaps://imap.gmail.com:993"
             "#,
         )
         .unwrap();
+        let mode = local.mode().unwrap();
+        assert!(mode.is_local());
+        assert!(!mode.one_way);
+        assert!(mode.retain, "the store is the destination");
 
-        let sources = account.sources().unwrap();
-        assert_eq!(sources["fastmail"].namespace("fastmail"), "fastmail");
-        assert_eq!(sources["gmail"].namespace("gmail"), "gmail");
-        assert_ne!(
-            sources["fastmail"].namespace("fastmail"),
-            sources["gmail"].namespace("gmail"),
-            "isolated by default, so neither pushes to the other",
-        );
+        let mirror: AccountConfig = toml::from_str(
+            r#"
+            sources.a.imap.server = "imaps://a.example.org:993"
+            targets.b.imap.server = "imaps://b.example.org:993"
+            "#,
+        )
+        .unwrap();
+        let mode = mirror.mode().unwrap();
+        assert!(!mode.is_local());
+        assert!(!mode.one_way, "two-way remote to remote is the default");
+        assert!(!mode.retain, "a named target asked to copy, not to store");
+
+        let copy: AccountConfig = toml::from_str(
+            r#"
+            one-way = true
+            retain = true
+            sources.a.imap.server = "imaps://a.example.org:993"
+            targets.b.imap.server = "imaps://b.example.org:993"
+            targets.c.imap.server = "imaps://c.example.org:993"
+            "#,
+        )
+        .unwrap();
+        let mode = copy.mode().unwrap();
+        assert_eq!(mode.targets, vec!["b", "c"]);
+        assert!(mode.one_way);
+        assert!(mode.retain, "migrating while keeping a local copy");
     }
 
+    /// Several targets have no resolution order without an authority, so the
+    /// cell is refused rather than syncing them pairwise in map order.
     #[test]
-    fn what_the_store_keeps_is_derived_from_the_namespace() {
-        assert_eq!(StoredBodies::derive(1, true), StoredBodies::All);
-        assert_eq!(StoredBodies::derive(1, false), StoredBodies::All);
-        assert_eq!(StoredBodies::derive(2, true), StoredBodies::None);
-        assert_eq!(StoredBodies::derive(2, false), StoredBodies::Crossing);
-        assert_eq!(StoredBodies::derive(3, true), StoredBodies::Crossing);
+    fn many_targets_without_one_way_are_refused() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.a.imap.server = "imaps://a.example.org:993"
+            targets.b.imap.server = "imaps://b.example.org:993"
+            targets.c.imap.server = "imaps://c.example.org:993"
+            "#,
+        )
+        .unwrap();
 
-        assert!(StoredBodies::None.relays());
-        assert!(!StoredBodies::Crossing.relays());
-        assert!(StoredBodies::All.hydrates_everything());
-        assert!(!StoredBodies::Crossing.hydrates_everything());
+        let err = account.mode().unwrap_err().to_string();
+        assert!(err.contains("one-way = true"), "got {err}");
+    }
+
+    /// Several sources are the local case, so naming a target alongside them
+    /// is a cell with no meaning rather than a fan-in.
+    #[test]
+    fn many_sources_with_a_target_are_refused() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.a.imap.server = "imaps://a.example.org:993"
+            sources.b.imap.server = "imaps://b.example.org:993"
+            targets.c.imap.server = "imaps://c.example.org:993"
+            "#,
+        )
+        .unwrap();
+
+        let err = account.mode().unwrap_err().to_string();
+        assert!(err.contains("not a shape neverest syncs"), "got {err}");
+    }
+
+    /// With no target the store is the destination, so refusing to keep
+    /// bodies would sync to nowhere.
+    #[test]
+    fn refusing_to_retain_with_no_target_is_refused() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            retain = false
+            imap.server = "imaps://imap.example.org:993"
+            "#,
+        )
+        .unwrap();
+
+        let err = account.mode().unwrap_err().to_string();
+        assert!(err.contains("sync to nowhere"), "got {err}");
+    }
+
+    /// Streaming is an optimisation of `retain = false`, never a mode: it
+    /// needs both endpoints on a protocol that can take a body from the other.
+    #[test]
+    fn only_an_imap_pairing_streams_a_crossing() {
+        let imap: AccountConfig = toml::from_str(
+            r#"
+            one-way = true
+            sources.a.imap.server = "imaps://a.example.org:993"
+            targets.b.imap.server = "imaps://b.example.org:993"
+            "#,
+        )
+        .unwrap();
+        assert!(imap.mode().unwrap().streams(&imap.endpoints().unwrap()));
+
+        let dav: AccountConfig = toml::from_str(
+            r#"
+            one-way = true
+            sources.a.carddav.server = "https://a.example.org/"
+            sources.a.carddav.auth.bearer.token.raw = "tok"
+            targets.b.carddav.server = "https://b.example.org/"
+            targets.b.carddav.auth.bearer.token.raw = "tok"
+            "#,
+        )
+        .unwrap();
+        assert!(
+            !dav.mode().unwrap().streams(&dav.endpoints().unwrap()),
+            "a DAV crossing is staged and released, which `retain` cannot tell apart",
+        );
     }
 
     #[test]
@@ -1679,8 +1772,8 @@ msgraph.user-id = "me"
         )
         .unwrap();
         let err = account.validate().unwrap_err().to_string();
-        assert!(err.contains("sources.left"), "got {err}");
-        assert!(err.contains("collection.namespace"), "got {err}");
+        assert!(err.contains("`targets`"), "got {err}");
+        assert!(err.contains("one-way"), "got {err}");
 
         let account: AccountConfig = toml::from_str(
             r#"
@@ -1700,7 +1793,7 @@ msgraph.user-id = "me"
         )
         .unwrap();
         let err = account.validate().unwrap_err().to_string();
-        assert!(err.contains("derived per kind"), "got {err}");
+        assert!(err.contains("the account's `retain`"), "got {err}");
 
         let account: AccountConfig = toml::from_str(
             r#"
@@ -1820,12 +1913,17 @@ msgraph.user-id = "me"
     }
 
     /// A bare authority carrying a port is the case that used to reach a
-    /// backend as a hostless URL: `url` reads `posteo.de:8843` as the
-    /// scheme `posteo.de`, so it parses and only the backend notices.
+    /// backend as a hostless URL: `url` reads `dav.example.org:8443` as the
+    /// scheme `dav.example.org`, so it parses and only the backend notices.
     #[test]
     fn a_server_resolves_from_an_authority_with_or_without_a_port() {
         for (server, scheme, host, port) in [
-            ("posteo.de:8843", "https", "posteo.de", Some(8843)),
+            (
+                "dav.example.org:8443",
+                "https",
+                "dav.example.org",
+                Some(8443),
+            ),
             ("dav.example.org", "https", "dav.example.org", None),
             (
                 "imap.example.org:143",
@@ -2038,8 +2136,6 @@ msgraph.user-id = "me"
                 .contains("no variant of enum SourceBackendConfig")
         );
 
-        // NOTE: with two backends on one source the first wins, which is all
-        // the flattened enum can express: a source talks one protocol.
         let account: AccountConfig = toml::from_str(
             r#"
             sources.a.imap.server = "imaps://imap.example.org:993"
@@ -2082,29 +2178,36 @@ msgraph.user-id = "me"
         assert!(err.contains("`sources.dav.smtp`"), "got {err}");
     }
 
-    /// A CardDAV book and a mailbox may both be named `Default`; only the kind
-    /// in the hub collection key keeps them apart.
-    #[cfg(feature = "carddav")]
+    /// The removed key is refused by name on whichever endpoint carries it,
+    /// rather than being ignored and leaving the account doing something else.
     #[test]
-    fn a_streamable_pairing_is_imap_to_imap_only() {
+    fn a_declared_namespace_is_refused_by_name() {
         let account: AccountConfig = toml::from_str(
             r#"
-            sources.a.carddav.server = "https://a.example.org/"
-            sources.a.carddav.auth.bearer.token.raw = "tok"
-            sources.a.carddav.collection.namespace = "cards"
-            sources.b.carddav.server = "https://b.example.org/"
-            sources.b.carddav.auth.bearer.token.raw = "tok"
-            sources.b.carddav.collection.namespace = "cards"
+            sources.a.imap.server = "imaps://a.example.org:993"
+            sources.a.imap.collection.namespace = "mail"
             "#,
         )
         .unwrap();
 
-        let sources = account.sources().unwrap();
-        assert!(!sources["a"].is_streamable());
-        assert_eq!(
-            StoredBodies::derive(2, sources["a"].is_streamable()),
-            StoredBodies::Crossing,
-            "a DAV pairing cannot stream, so it keeps what crossed",
-        );
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("`collection.namespace` is gone"), "got {err}");
+        assert!(err.contains("one-way"), "got {err}");
+    }
+
+    /// A name is the pimdir source id its bindings are recorded under, so one
+    /// name cannot be two endpoints.
+    #[test]
+    fn a_name_used_twice_is_refused() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.a.imap.server = "imaps://a.example.org:993"
+            targets.a.imap.server = "imaps://b.example.org:993"
+            "#,
+        )
+        .unwrap();
+
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("both a source and a target"), "got {err}");
     }
 }

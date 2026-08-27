@@ -21,7 +21,7 @@
 //! Graph side propagates flags and deletions but not new messages into
 //! Graph.
 //!
-//! NOTE: Graph message ids (the replica handles) are mutable across
+//! Graph message ids (the replica handles) are mutable across
 //! folder moves (no immutable-id support yet), so a moved message
 //! surfaces as a removal in the old round plus an addition in the new
 //! one. A delta reset (expired link) never changes handle identity —
@@ -438,7 +438,7 @@ impl GraphClient {
     /// HTTP status off it and tell a rejection of this message (permanent)
     /// from a transient failure worth retrying.
     ///
-    /// NOTE: sendMail derives the recipients from the MIME headers (Bcc
+    /// sendMail derives the recipients from the MIME headers (Bcc
     /// included), so envelope recipients beyond the headers are lost;
     /// acceptable for submission clients, whose recipients ride in the
     /// headers.
@@ -541,17 +541,12 @@ fn message_envelope(id: &str, message: &MsgraphMessage) -> ItemSummary {
             .internet_message_id
             .as_deref()
             .and_then(normalize_message_id),
-        // NOTE: Graph carries In-Reply-To only inside `internetMessageHeaders`,
-        // which a listing selection does not return, so the field stays empty
-        // rather than costing one request per row.
         in_reply_to: Vec::new(),
         flags: message_flags(message),
         subject: message.subject.clone().unwrap_or_default(),
         from: message.from.as_ref().map(address).into_iter().collect(),
         to: message.to_recipients.iter().map(address).collect(),
         date: message_date(message),
-        // NOTE: Graph exposes no RFC 5322 octet size, so the meta `size` is
-        // filled from the blob length at the `Full` tier.
         size: 0,
         has_attachment: None,
     }

@@ -79,8 +79,6 @@ pub fn hydration_targets(
         }
         let (held, binding) = item.sources.iter().next().expect("one source");
 
-        // NOTE: hydrate only when the far source (the one lacking the item) may
-        // create it, so the fetched body has somewhere to land.
         let target_creates = if *held == source_id(left.0) {
             right.1
         } else {

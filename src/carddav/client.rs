@@ -19,14 +19,22 @@
 //!   every entry reports an empty set, which the engine reads as "no flags"
 //!   rather than "not fetched".
 //!
-//! Enumeration is RFC 6578 throughout: an initial report (no token) returns
-//! the whole member set plus the token, and a later one returns only what
-//! changed. A server that rejects the stored token
+//! Enumeration is RFC 6578 where the server implements it: an initial report
+//! (no token) returns the whole member set plus the token, and a later one
+//! returns only what changed. A server that rejects the stored token
 //! ([`WebdavSyncCollectionError::InvalidSyncToken`]) is answered with a fresh full
 //! report, which the engine reads as a complete snapshot and reconciles
 //! against, exactly as an expired Graph delta link or an IMAP UIDVALIDITY
 //! bump would be. A truncated report (RFC 6578 §3.6) is drained by running it
 //! again from the token it returned.
+//!
+//! `sync-collection` is an extension, though, and a deployment may implement
+//! none of it: its `supported-report-set` then holds `addressbook-multiget` and
+//! `addressbook-query` alone, and the REPORT comes back with the RFC 3253 §3.6
+//! `DAV:supported-report` precondition. Such a server is enumerated by
+//! `addressbook-query` instead, which yields the same ids and ETags with no
+//! token, so its address books enumerate in full on every run rather than not
+//! syncing at all.
 
 use std::{
     collections::BTreeSet,
@@ -156,25 +164,61 @@ impl CarddavClient {
     }
 
     /// Enumerates an address book through `sync-collection`, carrying the
-    /// server's sync token as the engine's opaque checkpoint.
+    /// server's sync token as the engine's opaque checkpoint, and falling back
+    /// to `addressbook-query` on a server that does not implement the report.
+    ///
+    /// RFC 6578 is an extension: a deployment may advertise a
+    /// `supported-report-set` holding `addressbook-multiget` and
+    /// `addressbook-query` and no `sync-collection`, then answer the REPORT
+    /// with the RFC 3253 §3.6 `DAV:supported-report` precondition. Without the
+    /// fallback that is a hard enumerate failure, so every address book on such
+    /// a server is unsyncable.
     pub fn enumerate(&mut self, collection: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
-        let token = cursor.map(String::from_utf8_lossy).map(String::from);
+        // The fallback keeps no token, so its checkpoint is empty, which means
+        // the same as no cursor at all.
+        let token = cursor
+            .filter(|cursor| !cursor.is_empty())
+            .map(String::from_utf8_lossy)
+            .map(String::from);
 
         match self.sync(collection, token.as_deref()) {
             Ok(enumeration) => Ok(enumeration),
-            // NOTE: the server forgot the token (RFC 6578 §3.2
-            // `valid-sync-token`), so the delta is unrecoverable and a full
-            // snapshot takes over. Handles are hrefs and survive it, so no
-            // rebuild follows.
             Err(err) if is_invalid_sync_token(&err) => {
                 warn!("carddav sync token rejected for `{collection}`, enumerating in full");
                 self.sync(collection, None)
                     .with_context(|| format!("Cannot enumerate `{collection}` in full"))
             }
+            Err(err) if is_unsupported_report(&err) => {
+                debug!("carddav server has no `sync-collection`, querying `{collection}` instead");
+                self.query(collection)
+                    .with_context(|| format!("Cannot query `{collection}`"))
+            }
             Err(err) => {
                 Err(anyhow::Error::new(err).context(format!("Cannot enumerate `{collection}`")))
             }
         }
+    }
+
+    /// One full enumeration through `addressbook-query` (RFC 6352 §8.6), for a
+    /// server with no `sync-collection`. It carries no token, so the checkpoint
+    /// is empty and every run enumerates the whole address book: correct, and
+    /// the price of a server offering nothing incremental.
+    fn query(&mut self, collection: &str) -> Result<Enumeration, WebdavClientStdError> {
+        let refs = self.op(|dav| dav.enum_cards(collection))?;
+
+        Ok(Enumeration {
+            items: refs
+                .into_iter()
+                .map(|card| EnumEntry {
+                    id: card.id,
+                    flags: BTreeSet::new(),
+                    revision: card.etag,
+                })
+                .collect(),
+            vanished: Vec::new(),
+            complete: true,
+            checkpoint: Vec::new(),
+        })
     }
 
     /// One enumeration, draining every truncated round into a single result.
@@ -422,6 +466,49 @@ fn is_invalid_sync_token(err: &WebdavClientStdError) -> bool {
     )
 }
 
+/// Whether the server said it does not implement the report, as opposed to
+/// refusing this particular request.
+///
+/// RFC 3253 §3.6 gives the answer a name: a server that cannot run a report
+/// answers with the `DAV:supported-report` precondition in the error body,
+/// whatever status it wraps it in. That is what is matched, so a permission
+/// `403` still surfaces as the failure it is. `405` and `501` are accepted on
+/// the status alone, both meaning the request was never going to be run.
+fn is_unsupported_report(err: &WebdavClientStdError) -> bool {
+    let Some((status, body)) = http_status(err) else {
+        return false;
+    };
+
+    matches!(status, 405 | 501) || body.contains("supported-report")
+}
+
+/// The HTTP status and body a client error carries, wherever the send it failed
+/// on nested it.
+///
+/// A `sync-collection` REPORT wraps its send one level deeper than a plain one,
+/// so a match written against the outer variants alone silently misses the very
+/// path this crate uses to enumerate.
+fn http_status(err: &WebdavClientStdError) -> Option<(u16, &str)> {
+    match err {
+        WebdavClientStdError::Send(err) => send_status(err),
+        WebdavClientStdError::WebdavSyncCollection(WebdavSyncCollectionError::Send(err)) => {
+            send_status(err)
+        }
+        WebdavClientStdError::WebdavFollowRedirects(WebdavFollowRedirectsError::HttpStatus {
+            status,
+            body,
+        }) => Some((*status, body)),
+        _ => None,
+    }
+}
+
+fn send_status(err: &WebdavSendError) -> Option<(u16, &str)> {
+    match err {
+        WebdavSendError::HttpStatus { status, body } => Some((*status, body)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,5 +545,68 @@ mod tests {
         assert!(!id.starts_with("hash:"), "the prefix is not a path segment");
 
         assert_eq!(id, card_id(None, raw));
+    }
+
+    /// A plain send failure, the shape a `PROPFIND` produces.
+    fn sent(status: u16, body: &str) -> WebdavClientStdError {
+        WebdavClientStdError::Send(WebdavSendError::HttpStatus {
+            status,
+            body: String::from(body),
+        })
+    }
+
+    /// The shape a `sync-collection` REPORT produces, which nests its send one
+    /// level deeper. This is the only path that enumerates, and a classifier
+    /// matching the outer variants alone misses every real refusal.
+    fn reported(status: u16, body: &str) -> WebdavClientStdError {
+        WebdavClientStdError::WebdavSyncCollection(WebdavSyncCollectionError::Send(
+            WebdavSendError::HttpStatus {
+                status,
+                body: String::from(body),
+            },
+        ))
+    }
+
+    /// The body a server without `sync-collection` actually answers with: the
+    /// RFC 3253 §3.6 precondition, wrapped in a 403.
+    const REPORT_NOT_SUPPORTED: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">
+  <s:exception>Sabre_DAV_Exception_ReportNotSupported</s:exception>
+  <s:message/>
+  <d:supported-report/>
+</d:error>"#;
+
+    /// RFC 6578 is an extension, so a server that does not implement the report
+    /// is one to query instead, not an account to give up on. The precondition
+    /// is what says so, since the status it arrives under is the server's
+    /// choice.
+    #[test]
+    fn an_unimplemented_report_is_told_apart_from_a_refused_request() {
+        assert!(
+            is_unsupported_report(&reported(403, REPORT_NOT_SUPPORTED)),
+            "the shape the REPORT actually fails with",
+        );
+        assert!(is_unsupported_report(&sent(403, REPORT_NOT_SUPPORTED)));
+        assert!(is_unsupported_report(&reported(405, "")));
+        assert!(is_unsupported_report(&reported(501, "")));
+
+        assert!(
+            !is_unsupported_report(&reported(403, "<d:error><d:need-privileges/></d:error>")),
+            "a permission problem is not a missing report",
+        );
+        assert!(
+            !is_unsupported_report(&reported(401, "")),
+            "a credential problem must surface, not be retried as a query",
+        );
+        assert!(
+            !is_unsupported_report(&reported(500, "")),
+            "a server fault must surface too",
+        );
+        assert!(
+            !is_unsupported_report(&WebdavClientStdError::WebdavSyncCollection(
+                WebdavSyncCollectionError::InvalidSyncToken
+            )),
+            "a stale token has its own recovery, a fresh full report",
+        );
     }
 }

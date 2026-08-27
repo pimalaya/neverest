@@ -139,8 +139,6 @@ fn properties(raw: &[u8]) -> Vec<(String, String)> {
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
         match line.strip_prefix([' ', '\t']) {
-            // NOTE: a line starting with one whitespace continues the previous
-            // one, that whitespace being the fold marker rather than content.
             Some(rest) => {
                 if let Some(last) = logical.last_mut() {
                     last.push_str(rest);

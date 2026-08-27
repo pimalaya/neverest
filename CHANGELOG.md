@@ -40,27 +40,27 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   The store retains an item instead of deleting it when its last binding vanishes: hidden from the sync and from listings, body kept. After each sync neverest purges every retained item older than this human delay (`"90d"`, `"12h"`, `"0"`), runs the store's garbage collector, and reports the items, objects and bytes it reclaimed. Unset means never purge, `"0"` reproduces a terminal delete, and `sync --no-purge` skips the sweep for one run. Combined with a read-only source it makes a backup a remote expunge cannot lose.
 
-- Added **named sources**: an account holds a `sources` table over one pimdir store, rather than a `left` and a `right`.
+- Added **named endpoints and a declared mode**: an account holds a `sources` table, optionally a `targets` one, and the flags `one-way` and `retain`, rather than a `left` and a `right`.
 
-  The map key is the pimdir source id, so a source's name is what every binding it owns is recorded under. A backend written directly under the account (`imap.server = "…"`) is sugar for a source named after its protocol, which is the whole configuration for a single-provider account and the only shape the wizard writes; the explicit table is what a mirror or a fan-in reaches for, since those need two sources of one protocol. The sugar and its expansion produce the same source id, so expanding one by hand changes nothing on disk. An account may now hold sources of several kinds: mail, contacts and calendar under one account and one store.
+  A map key is the pimdir source id, so an endpoint's name is what every binding it owns is recorded under; a positional list would reassign them all on a reorder. A backend written directly under the account (`imap.server = "…"`) is sugar for a source named after its protocol, which is the whole configuration for a single-provider account and the only shape the wizard writes. The sugar and its expansion produce the same source id, so expanding one by hand changes nothing on disk. An account may hold sources of several kinds: mail, contacts and calendar under one account and one store.
 
-- Added **collection namespaces**, which decide whether two sources of one kind meet.
+  What the account does is its arity plus the two flags, so there is no mode to name and nothing is inferred from a coincidence between two sources. One source and one target sync both ways; adding `one-way` makes the source overwrite the target; one source and several targets is one-way only, bidirectional propagation across more than two endpoints having no resolution order. Several sources and no target is the offline replica, each merging with the local store and isolated from the others, and `one-way` there makes the sources overwrite it. Every other combination is refused at load, naming the cell reached and the nearest legal one.
 
-  A hub collection is keyed by its kind, its `collection.namespace` and its name, so a mailbox and an address book both called `Default` stay apart. Two sources sharing a namespace bind the same hub collections, and that sharing is what propagation is: an item in a collection a source participates in, with no binding for that source, is pushed to it. The namespace defaults to the source's own name, so sources are isolated unless pointed at the same one deliberately. Isolated is the default because its failure mode is a mirror that did nothing, visible in the report, where merging by default fails by copying one real provider's mailbox into another.
+- Added `one-way`, which declares authority rather than leaving both sides to merge.
 
-  The id is spelled `<namespace>/<name>` and the namespace comes back off at one seam, so a server only ever sees the name it gave. Every wire call goes through it, the solo sync's body-hydration pool included, and so does a move destination: a hub id reaching an IMAP server is not even a legal mailbox name where the delimiter is `.`.
+  The `sources` side wins: a difference resolves in its favour and the other side's change is discarded, so no conflict is recorded and no divergence reported. It does not mean the other side goes unread, since it is still enumerated every run or every item would be re-pushed; its state decides what the run has left to do and never who wins. Changes are overwritten, not merged, which is the rsync reading and not the one a two-way account gives.
 
-- Added the **store report**: every run and `neverest check` state what the store keeps, per kind and namespace.
+- Added `retain`, which declares whether the store is a replica or only the ledger.
 
-  What the store keeps is derived, not configured: one source keeps every body, two sources sharing a namespace on an IMAP to IMAP pairing keep none and stream each crossing, anything else keeps what crossed. The report is therefore the only place the value is stated, and it is printed even on a run that wrote nothing. A run whose derivation moved names the old value and what became unreferenced. `check` derives it from the configuration alone, so it answers before a first sync and while a remote is down.
+  The store is the ledger in every mode, holding the item spine and the per-collection checkpoints that make enumeration incremental, and it is required even where no body is kept: a body-less IMAP to IMAP copy still needs to know what it has already copied. `retain` says whether it additionally holds bodies and is readable by a frontend. It defaults from the destination, true with no target and false with one, and `retain = true` alongside targets is honoured rather than refused: migrating while keeping a local copy is a thing to want. Note that it makes the store a backup rather than a cache, so `sync --reset` then destroys data.
 
-- Added the **relay** path: a body crossing two IMAP sources is streamed server-to-server, the store keeping only the spine.
+  Whether a crossing is streamed straight from one remote to the other or staged in the store and released is an internal choice, taken where the pairing allows it, and is invisible in the configuration and in every report. A store holding only the bodies that happened to cross is not a state anyone can be in.
 
-  It is what an IMAP to IMAP pair sharing a namespace derives. Any other pairing keeps the bodies that crossed.
+- Added the **mode guard**: the account's mode is stamped beside the store and compared on every run.
 
-- Added `sync --source <name>`, narrowing a run to the namespaces holding that source.
+  Turning `one-way` on over an account that synced both ways is refused, the run that follows being the one that discards what the previous mode was merging; `sync --accept-mode` records the answer so it does not come back. A `retain` that drops from true to false, and a change in the number of endpoints, are reported and do not block. The comparison is on those transitions and not on configuration change in general, so a rotated credential or a new filter never forces a resync. A first run under `one-way` has no recorded mode to compare against and is not gated; `init` states what the account will do in words instead.
 
-  It picks namespaces rather than sources: two sources sharing one are a mirror, and running half of a mirror pushes one way and calls it done.
+- Added `sync --source <name>`, narrowing a run to the named sources.
 
 - Added the **handle-space rebuild**: an IMAP `UIDVALIDITY` change detected across a pull drives io-replica's rekey.
 
@@ -104,9 +104,15 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   An account may hold sources of several kinds, and an `include = ["INBOX"]` means nothing to a contacts source. Filters are consequently asymmetric: a collection may be synced on one source and skipped on another. An account-level `collection` table is refused, naming its replacement.
 
-- **BREAKING**: `store.retention` and `store.hydration` are removed; what the store keeps is derived per kind and reported.
+- **BREAKING**: `store.retention` and `store.hydration` are removed; whether the store keeps bodies is the account's `retain`.
 
-  They encoded three states in two settings, one combination of which meant nothing, and the value they set is a consequence of how many sources share a namespace rather than a choice. Deriving also deletes a silent substitution: an explicit `relay` on a pairing that cannot stream used to fall back to retaining, handing back the opposite of the disk guarantee it asked for. A configuration carrying either key is refused rather than ignored, naming the derived value that replaces it. A derivation that moves never drops what is already stored: bodies stay, unreferenced, until an explicit `pimdir gc` or `sync --reset`.
+  They encoded three states in two settings, one combination of which meant nothing, and a three-point scale described a store holding only the bodies that happened to cross, which is neither a replica nor a relay and which nothing asked for. A configuration carrying either key is refused rather than mapped onto `retain` by guesswork. Dropping `retain` from true to false never removes what is already stored: bodies stay, unreferenced, until an explicit `pimdir gc` or `sync --reset`.
+
+- **BREAKING**: `collection.namespace` is removed, and with it the per-run store report.
+
+  The namespace decided which sources met, by coincidence rather than by declaration, and could not say which way anything flowed; both jobs are now the account's arity and `one-way`. It is refused by name on whichever endpoint carries it. The hub still keys collections by `(kind, namespace, name)` so an address book and a mailbox called `Default` stay apart, but the namespace is internal and defaulted to the source name.
+
+  The store report goes with it. It existed because what the store kept was derived and therefore unreadable from the configuration; `retain` is written down, so a run that wrote nothing now says nothing. `check` states the account's mode in plain language instead, and the persisted value serves the mode guard rather than a per-run line.
 
 - **BREAKING**: per-source permissions are enforced per operation.
 
@@ -155,6 +161,20 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 - Bumped the Pimalaya libraries: io-replica 0.4, io-pimdir 0.3, io-imap 0.6, io-smtp 0.3, io-webdav 0.2, io-http 0.5, io-pim-discovery 0.7, io-msgraph 0.3, pimalaya-stream 0.3, pimalaya-cli 0.2 and pimalaya-config 0.1. SASL moved out of pimalaya-stream into the new io-sasl crate, so the SCRAM-SHA-256 the configuration has always offered is now runnable. The minimum supported Rust version is 1.89.
 
 ### Fixed
+
+- An address book on a server without RFC 6578 never synced.
+
+  Enumeration is `REPORT sync-collection`, and a server may implement none of it: its `supported-report-set` then holds `addressbook-multiget` and `addressbook-query` alone, and the REPORT comes back with the RFC 3253 §3.6 `DAV:supported-report` precondition. The client recovered from a rejected sync *token* and had nothing for a server that never had the report, so every address book on such a deployment was unsyncable. It now falls back to `addressbook-query`, which yields the same ids and ETags; that carries no token, so those collections enumerate in full on every run. Detection is on the precondition rather than the HTTP status, which the server chooses, so a permission refusal or a server fault still surfaces as the failure it is.
+
+- A run that failed to scan a collection reported itself in sync, and swallowed the reason.
+
+  A collection whose spine failed was logged as a warning and left out of the report, so the run printed "already in sync" about a collection it had never managed to look at. It is now recorded as a failed hunk, so the run reports it and exits non-zero. The engine wrappers also rendered their errors with `Display`, which prints the outermost context and drops every source beneath it, so a backend's HTTP status and response body, kept verbatim precisely so a caller can read them, never reached the operator. Enumerate, fetch and push now render the full chain.
+
+- A dry run over a contacts account reported it already in sync, and downloaded every card to do it.
+
+  First-time discovery reaches the report through the fetch itemizer alone, and it read the hub projection, which drops the residual. The residual is where a freshly probed item sits until its link id is known, and a card has none before its body arrives, a `sync-collection` REPORT returning hrefs and ETags but no `UID`. Every item of a first contacts sync was therefore invisible to the plan, so an account that had never synced was told it was in sync while a mail source beside it reported thousands of hunks; mail escaped only because its probe resolves at `Meta`, which moves it into the hub. The plan now reads the side, projection plus residual. It also keys on the stored object rather than the detail level, so an item whose body a remote content change dropped is named rather than read as complete.
+
+  The probe upgrade also ran before the dry run stopped, so previewing a DAV account fetched its whole address book to print a plan. It is now skipped where a dry run would have to reach `Full`. A cheaper tier still resolves, so a mail preview keeps naming messages by their `Message-ID`; a card stays probed and is named by its href.
 
 - Every `server` accepts a bare authority, port included, not just the portless spelling.
 

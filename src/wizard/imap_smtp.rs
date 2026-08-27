@@ -108,9 +108,6 @@ fn configure_smtp(
     let sasl = if prompt::bool("Use the same credentials for SMTP?", true)? {
         Some(imap_sasl.clone())
     } else if prompt::bool("Does the submission server authenticate?", true)? {
-        // NOTE: no probed list, io-smtp exposing the `AUTH` line as strings
-        // and no mechanism reader, so the discovered capabilities key the
-        // menu instead.
         Some(prompt_sasl(account_name, "smtp", login_hint, caps, None)?)
     } else {
         None
@@ -180,9 +177,6 @@ fn prompt_sasl(
 /// advertised one, otherwise the full fallback list. A single candidate
 /// is selected without prompting.
 fn prompt_mechanism(caps: AuthCaps, probed: Option<&[SaslMechanism]>) -> Result<SaslMechanism> {
-    // NOTE: io-sasl names more mechanisms than [`SaslConfig`] can spell, so a
-    // probed one this wizard cannot write a config for is dropped rather than
-    // offered. A probe left with nothing falls back like a failed one.
     let probed: Vec<SaslMechanism> = probed
         .unwrap_or_default()
         .iter()
@@ -356,8 +350,6 @@ fn imap_config(endpoint: &TcpEndpoint, sasl: SaslConfig) -> ImapConfig {
         server: endpoint_server(endpoint),
         tls: Default::default(),
         starttls: endpoint.security == DiscoverySecurity::Starttls,
-        // NOTE: unset, so io-imap keeps owning the default rather than the
-        // value being frozen into the written config.
         alpn: None,
         sasl: Some(sasl),
         collection: Default::default(),
@@ -379,8 +371,6 @@ fn smtp_config(endpoint: &TcpEndpoint, sasl: Option<SaslConfig>) -> SmtpConfig {
         server: format!("{scheme}://{}:{}", endpoint.host, endpoint.port),
         tls: Default::default(),
         starttls: endpoint.security == DiscoverySecurity::Starttls,
-        // NOTE: unset, so io-smtp keeps owning the default rather than the
-        // value being frozen into the written config.
         alpn: None,
         sasl,
     }

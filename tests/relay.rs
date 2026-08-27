@@ -70,12 +70,10 @@ fn relay_streams_a_to_b_without_retaining() {
          sources.left.imap.starttls = false\n\
          sources.left.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
          sources.left.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
-         sources.right.imap.server = \"{B}\"\n\
-         sources.right.imap.starttls = false\n\
-         sources.right.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
-         sources.right.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
-         sources.left.imap.collection.namespace = \"mail\"\n\
-         sources.right.imap.collection.namespace = \"mail\"\n",
+         targets.right.imap.server = \"{B}\"\n\
+         targets.right.imap.starttls = false\n\
+         targets.right.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
+         targets.right.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n",
     );
     fs::write(&config, config_toml).unwrap();
     neverest(&["init", "-a", "relay"], &config, &state);

@@ -21,9 +21,23 @@
 # sugar for a source named after its protocol; the `sources` table at the bottom
 # is what you reach for when you need two of one protocol.
 #
-# Sources of one kind sharing a `collection.namespace` bind the same hub
-# collections, which is what makes them mirror each other. Left on their own
-# names they sit side by side in one store and never push to one another.
+# WHAT AN ACCOUNT DOES is its arity plus two flags, so there is no mode to name:
+#
+#   sources  targets  one-way  behaviour
+#   -------  -------  -------  ------------------------------------------------
+#         1        1    false  two-way mirror between the two remotes
+#         1        1     true  source overwrites target
+#         1        N     true  source overwrites each target (false is refused)
+#         N        0    false  each source merges two-way with the local store
+#         N        0     true  sources overwrite the store, local edits dropped
+#
+# Anything else is refused at load, naming the nearest legal shape. With no
+# target the local store is the destination, which is the offline replica most
+# people want and what everything below is written for.
+#
+# Sources never meet: an item one holds crosses to the targets, never to another
+# source, so several sources sit side by side in one store for a frontend to
+# union at display time.
 # ================================================================================
 
 [accounts.example]
@@ -31,17 +45,35 @@
 # Use this account when `-a/--account` is not passed.
 default = true
 
+# Make the sources authoritative: a difference resolves in their favour and the
+# other side's change is DISCARDED rather than merged, so nothing is ever
+# reported as a conflict. The other side is still read every run, or every item
+# would be re-pushed; it just never wins. Overwritten, not merged.
+#
+# Turning this on over an account that synced both ways is refused once, since
+# the run that follows is the one that discards: `neverest sync --accept-mode`
+# says you meant it, and neverest remembers.
+#one-way = false
+
+# Whether the store keeps bodies and is readable by a frontend, rather than
+# being only the ledger of item spines and enumeration checkpoints it has to be
+# in every mode.
+#
+# Unset takes the destination's answer: true with no targets, since the store is
+# what the account syncs into, false with targets, a configuration naming both
+# having asked to copy between them rather than to fill a disk. Set it with
+# targets to migrate AND keep a local copy.
+#retain = true
+
 # --------------------------------------------------------------------------------
 # Per-source overview
 # --------------------------------------------------------------------------------
 #
 # Each source picks exactly one backend: `imap.*`, `jmap.*`, `gmail.*`,
-# `msgraph.*` or `carddav.*`. Its filter, namespace, permissions and pool size
-# live inside that backend table:
+# `msgraph.*` or `carddav.*`. Its filter, permissions and pool size live inside
+# that backend table:
 #   - `collection.filter`: which collections this source syncs (per source, since
 #     an `include = ["INBOX"]` means nothing to a contacts source)
-#   - `collection.namespace`: which hub collections it binds into; defaults to
-#     the source name, so sources are isolated unless you say otherwise
 #   - `collection.{create,delete}`, `flag.update`, `item.update`: default true
 #   - `item.{create,delete}`: both required when the block is declared
 #   - `pool-size`: default 8 (IMAP), 4 (JMAP, Gmail, Graph)
@@ -126,7 +158,7 @@ imap.item.delete = false
 # https://www.iana.org/go/rfc8621
 # --------------------------------------------------------------------------------
 #
-# NOTE: this block parses, but no JMAP backend is compiled in yet, so a side
+# This block parses, but no JMAP backend is compiled in yet, so a side
 # declaring it is refused when the sync opens it.
 
 # Bare authority (discovered through `GET /.well-known/jmap`) or session URL.
@@ -156,7 +188,7 @@ imap.item.delete = false
 # https://developers.google.com/gmail/api
 # --------------------------------------------------------------------------------
 #
-# NOTE: this block parses, but no Gmail backend is compiled in yet, so a side
+# This block parses, but no Gmail backend is compiled in yet, so a side
 # declaring it is refused when the sync opens it.
 
 # Labels are exposed as collections; the API host is fixed, so only the owner,
@@ -195,7 +227,7 @@ imap.item.delete = false
 #msgraph.auth.token.raw = "***"
 #msgraph.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
 
-# NOTE: Graph pushes flags and deletes only; appends and moves are rejected
+# Graph pushes flags and deletes only; appends and moves are rejected
 # whatever the permissions say.
 #msgraph.item.create = true
 #msgraph.item.delete = false
@@ -217,7 +249,7 @@ imap.item.delete = false
 #
 # Bare authority (implicit `https://`), or a full `http://` / `https://` URL.
 #carddav.server = "dav.example.org"
-#carddav.server = "posteo.de:8843"
+#carddav.server = "dav.example.org:8443"
 #carddav.server = "https://dav.example.org/dav/"
 
 # Pick exactly one of `basic` (the common case) or `bearer`.
@@ -244,16 +276,17 @@ imap.item.delete = false
 # Where `pimdir.db` and `objects/` live. Defaults to the XDG state directory.
 #store.root = "~/.local/state/neverest/example"
 
-# What the store KEEPS is not configured. It is derived per kind from how many
-# sources share a namespace, and reported on every run and by `neverest check`:
-#
-#   one source                            every body (the offline replica)
-#   two sharing a namespace, IMAP to IMAP  no body; each crossing is streamed
-#   anything else                          the bodies that crossed
-#
-# Adding a second source to a namespace therefore flips it from keeping every
-# body to keeping none. Bodies already stored are NOT deleted by that: they stay,
+# What the store keeps is `retain`, at the top of this account. Dropping it from
+# true to false does NOT delete the bodies already stored: they stay,
 # unreferenced, until an explicit `pimdir gc` or `neverest sync --reset`.
+#
+# Whether a crossing between two remotes is streamed straight through or staged
+# in the store and released is neverest's own business, taken where the pairing
+# allows it (IMAP to IMAP today). Either way `retain = false` means the store
+# holds no body afterwards.
+#
+# CAUTION: with `retain = true` and a target, the store is a backup rather than a
+# cache, and `neverest sync --reset` destroys it along with the rest.
 
 # The store never truly deletes: an item whose last binding vanishes (a remote
 # expunge) is retained instead, hidden but kept with its body. This is how long
@@ -330,25 +363,29 @@ imap.item.delete = false
 # Reach for the explicit table when you need two sources of one protocol, which
 # the sugar cannot express. The map key is the source name, and the source name
 # is the pimdir source id every binding it owns is recorded under: RENAMING ONE
-# ORPHANS THEM, so pick a name you can live with.
+# ORPHANS THEM, so pick a name you can live with. `targets` is the same map on
+# the same terms.
 #
-# MIRROR (the old `left` / `right` pair): two sources sharing a namespace bind
-# the same hub collections, so an item on one is pushed to the other. On an IMAP
-# to IMAP pairing the store keeps no body and streams each crossing through.
+# MIGRATE, one way: the source is the truth and the target is made to match it.
+# Anything changed on the target alone is overwritten on the next run.
 #
 #   [accounts.migrate]
+#   one-way = true
 #   sources.old.imap.server = "imap.old-provider.com"
 #   sources.old.imap.sasl.plain.username = "user@old-provider.com"
 #   sources.old.imap.sasl.plain.password.command = "pass show old"
-#   sources.old.imap.collection.namespace = "mail"
-#   sources.new.imap.server = "imap.new-provider.com"
-#   sources.new.imap.sasl.plain.username = "user@new-provider.com"
-#   sources.new.imap.sasl.plain.password.command = "pass show new"
-#   sources.new.imap.collection.namespace = "mail"
+#   targets.new.imap.server = "imap.new-provider.com"
+#   targets.new.imap.sasl.plain.username = "user@new-provider.com"
+#   targets.new.imap.sasl.plain.password.command = "pass show new"
 #
-# SIDE BY SIDE: leave the namespaces alone and the same two sources cache into
-# one store without ever writing to each other, for a frontend to union at
-# display time. This is the default, so it is what you get by saying nothing.
+# MIRROR, two ways: drop `one-way` and the same pair keeps each other in step,
+# an edit on either side reaching the other. Two authoritative remotes can
+# genuinely disagree, so a divergence is reported as a conflict rather than
+# resolved.
+#
+# SIDE BY SIDE: several sources and no target. They cache into one store without
+# ever writing to each other, for a frontend to union at display time. This is
+# the default, so it is what you get by saying nothing.
 #
 #   [accounts.personal]
 #   sources.fastmail.imap.server = "imap.fastmail.com"
@@ -358,9 +395,4 @@ imap.item.delete = false
 #   sources.gmail.imap.sasl.xoauth2.username = "user@gmail.com"
 #   sources.gmail.imap.sasl.xoauth2.token.command = ["ortie", "token", "read", "gmail"]
 #
-# A namespace of three or more sources is refused: the pairwise relay has no
-# meaning there, and it is not implemented.
-#
-# `neverest sync --source <name>` narrows a run to the namespaces holding that
-# source. It picks namespaces rather than sources, because running half a mirror
-# would push one way and call it done.
+# `neverest sync --source <name>` narrows a run to the named sources.

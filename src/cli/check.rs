@@ -41,16 +41,10 @@ impl CheckCommand {
 
         info!("checking account `{name}`");
 
-        // NOTE: the derivation comes off the configuration alone, so this
-        // answers before a first sync has ever run and while a remote is down,
-        // which is the point: what the store keeps is otherwise only visible
-        // once it is too late to be surprised cheaply.
-        for group in account_config.groups()? {
-            printer.out(Message::new(group.to_string()))?;
-        }
+        printer.out(Message::new(account_config.mode()?.to_string()))?;
 
-        for (source_name, source) in account_config.sources()? {
-            check_source(&source_name, source)?;
+        for (endpoint, config) in account_config.endpoints()? {
+            check_source(&endpoint, config)?;
         }
 
         printer.out(Message::new(format!("Account `{name}` looks healthy")))

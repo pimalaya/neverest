@@ -156,9 +156,6 @@ pub fn search(email: &str) -> Result<Vec<Discovered>> {
     let provider = provider_of(email, &configs);
     let mut found = Vec::new();
 
-    // NOTE: a detected provider restricts IMAP and SMTP to its own configs, so
-    // its own set shows instead of every discovered relay. The two may
-    // advertise different auth, so the entry carries the union of both.
     if let Some(imap) = best(&configs, DiscoveryService::Imap, provider)
         && let Some(endpoint) = tcp_endpoint(imap)
     {
@@ -180,9 +177,6 @@ pub fn search(email: &str) -> Result<Vec<Discovered>> {
         });
     }
 
-    // NOTE: Google has no proprietary entry here, neverest carrying no Gmail
-    // backend, so a Google account is configured over IMAP and SMTP with one of
-    // the token mechanisms.
     if let Some(DiscoveryKnownProvider::Microsoft) = provider {
         found.push(Discovered {
             kind: DiscoveredKind::Msgraph,

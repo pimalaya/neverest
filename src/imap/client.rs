@@ -59,9 +59,6 @@ impl ImapClient {
             capabilities,
             selected: None,
         };
-        // NOTE: QRESYNC implies CONDSTORE (RFC 7162 §3.1), so both are enabled
-        // and a plain SELECT returns HIGHESTMODSEQ while the QRESYNC SELECT
-        // parameter is accepted.
         if client.supports_qresync() {
             let condstore = CapabilityEnable::CondStore;
             let qresync = CapabilityEnable::from(
@@ -87,8 +84,6 @@ impl ImapClient {
         uid_validity: NonZeroU32,
         highest_mod_seq: u64,
     ) -> Result<ImapMailboxSelectData> {
-        // NOTE: this leaves `mailbox` selected, and the caller records it
-        // through `mark_selected`, which holds the name.
         Ok(self
             .inner
             .select_qresync(mailbox, uid_validity, highest_mod_seq, &self.capabilities)?)

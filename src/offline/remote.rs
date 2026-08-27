@@ -253,13 +253,6 @@ impl ReplicaRemote for PimRemote<'_> {
                         Err(err) => rejected(handle, "store flags", err),
                     }
                 }
-                // NOTE: `link_id` is the identity a relocation would deliver,
-                // which a consumer able to ask "does `to` already hold it?"
-                // uses to demote the move to a plain delete. No backend seam
-                // here answers that short of enumerating the destination, so
-                // both halves of a move can deliver and the target may end up
-                // holding the item twice, which the engine freezes and this
-                // crate reports rather than mispairing silently.
                 ReplicaChangeKind::Remove {
                     handle,
                     to,
@@ -267,10 +260,6 @@ impl ReplicaRemote for PimRemote<'_> {
                     if_match,
                 } => match to {
                     Some(target) => {
-                        // NOTE: the destination is a hub collection id like the
-                        // source, so it goes through the same seam: a server
-                        // asked to move into `<namespace>/<name>` has no such
-                        // collection.
                         let dest = wire_name(&self.namespace, target.as_str()).to_string();
                         match self
                             .pool
@@ -281,10 +270,6 @@ impl ReplicaRemote for PimRemote<'_> {
                             Err(err) => rejected(handle, "move item", err),
                         }
                     }
-                    // NOTE: `if_match` is the last-synced revision, so a
-                    // mutable-content backend deletes conditionally on it and
-                    // cannot drop a body the remote changed since. An
-                    // immutable-content backend ignores it.
                     None => match self.pool.primary().delete_item(
                         &collection,
                         handle.as_str(),
@@ -402,8 +387,6 @@ impl PimRemote<'_> {
             let Some(env) = by_id.get(handle.as_str()) else {
                 continue;
             };
-            // NOTE: a kind with no cheap summary tier never reaches here, the
-            // driver upgrading it straight to `Full` instead.
             let Some((link_id, meta, sort_key)) = self.kind.parse_summary(env) else {
                 continue;
             };
@@ -433,8 +416,6 @@ impl PimRemote<'_> {
             return Ok(Vec::new());
         }
         if self.sizes.is_empty() {
-            // NOTE: with no sizes, sorting numerically collapses consecutive
-            // handles into ranges in the fetch command.
             handles.sort_by_key(|h| h.as_str().parse::<u64>().unwrap_or(u64::MAX));
         } else {
             handles.sort_by_key(|h| Reverse(self.sizes.get(h.as_str()).copied().unwrap_or(0)));
@@ -484,8 +465,6 @@ impl PimRemote<'_> {
         let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
         let stop = AtomicBool::new(false);
 
-        // NOTE: copied before the worker borrow, `workers()` taking `self`
-        // mutably.
         let kind = self.kind;
         let blob = self.blob.clone();
         let clients = self.pool.workers(target)?;
@@ -798,8 +777,6 @@ impl Write for HydrateSink {
         self.writer.write_all(buf)?;
         self.hasher.update(buf);
         if !self.header_done {
-            // NOTE: the scan starts a few bytes back so a boundary split across
-            // two chunks is still found.
             let from = self.header.len().saturating_sub(3);
             self.header.extend_from_slice(buf);
             if let Some(end) = header_boundary(&self.header[from..]) {

@@ -21,8 +21,22 @@ use crate::item::flag::Flag;
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[allow(dead_code)]
 pub enum CollectionHunk {
-    Create { side: String, collection: String },
-    Delete { side: String, collection: String },
+    Create {
+        side: String,
+        collection: String,
+    },
+    Delete {
+        side: String,
+        collection: String,
+    },
+    /// The collection could not be reconciled at all, so nothing about its
+    /// items is known this run. Carried as its own kind because reusing a
+    /// create to report one says the sync tried to make a collection it never
+    /// touched.
+    Scan {
+        side: String,
+        collection: String,
+    },
 }
 
 impl fmt::Display for CollectionHunk {
@@ -33,6 +47,9 @@ impl fmt::Display for CollectionHunk {
             }
             Self::Delete { side, collection } => {
                 write!(f, "delete collection `{collection}` on {side}")
+            }
+            Self::Scan { side, collection } => {
+                write!(f, "scan collection `{collection}` on {side}")
             }
         }
     }

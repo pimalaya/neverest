@@ -389,8 +389,6 @@ impl Client {
             }
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => None,
-            // NOTE: a card href survives everything, so there is no handle space
-            // to rebuild and no generation ever bumps on a DAV side.
             #[cfg(feature = "carddav")]
             Client::Carddav(_) => None,
             #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
@@ -414,10 +412,6 @@ pub fn open(config: SourceConfig) -> Result<Client> {
                 .sasl
                 .map(|cfg| {
                     let host = server.host_str().unwrap_or_default();
-                    // NOTE: url does not know the imap and imaps default ports,
-                    // so gating on port_or_known_default() would drop the whole
-                    // SASL config for a portless URL and open an unauthenticated
-                    // session.
                     let port = server
                         .port()
                         .unwrap_or_else(|| io_imap::client::default_port(server.scheme()));

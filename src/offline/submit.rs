@@ -291,9 +291,6 @@ pub fn connect_smtp(config: &SmtpConfig) -> Result<SmtpClientStd> {
         .clone()
         .map(|sasl| {
             let host = url.host_str().unwrap_or_default();
-            // NOTE: url does not know the smtp and smtps default ports, so
-            // gating on port_or_known_default() would drop the whole SASL
-            // config for a portless URL and open an unauthenticated session.
             let port = url
                 .port()
                 .unwrap_or_else(|| SmtpClientStd::default_port(url.scheme()));
@@ -331,9 +328,6 @@ pub fn send_one(
     blobs: &PimdirBlobs,
     intent: &SubmitIntent,
 ) -> Result<(), SubmitFailure> {
-    // NOTE: decoded whatever the channel is, since a payload this build cannot
-    // read is a broken intent and parking it beats sending it blind. A native
-    // sender then takes its addresses from the MIME body itself.
     #[cfg_attr(not(feature = "smtp"), allow(unused_variables))]
     let meta = intent.envelope()?;
     let hash = intent
@@ -342,7 +336,6 @@ pub fn send_one(
         .ok_or_else(|| SubmitFailure::permanent(anyhow!("Submit intent has no stored body")))?;
     let bytes = blobs
         .get(hash)
-        // NOTE: a blob read failure is a filesystem problem, not a bad intent.
         .map_err(|err| SubmitFailure::Transient(anyhow!("Cannot read the queued blob: {err}")))?
         .ok_or_else(|| SubmitFailure::permanent(anyhow!("The queued body is missing")))?;
 
@@ -370,9 +363,6 @@ pub fn send_one(
 /// anything else (a dropped connection, a TLS error) is transient.
 #[cfg(feature = "smtp")]
 fn classify_smtp(err: SmtpClientError) -> SubmitFailure {
-    // NOTE: a `send` runs the composite coroutine, so its rejections arrive
-    // nested under `MessageSend`. The flat variants are the same failures seen
-    // through a single-command call.
     let code = match &err {
         SmtpClientError::MessageSend(SmtpMessageSendError::MailFrom(SmtpMailError::Rejected {
             code,

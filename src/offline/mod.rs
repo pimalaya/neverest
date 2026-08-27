@@ -75,7 +75,7 @@ where
                 let t = std::time::Instant::now();
                 let snapshot = remote
                     .enumerate(&collection, cursor)
-                    .map_err(|err| anyhow!("Remote enumerate error: {err}"))?;
+                    .map_err(|err| anyhow!("Remote enumerate error: {err:#}"))?;
                 prof::ENUMERATE.add(t.elapsed());
                 arg = Some(ReplicaArg::Enumerate(snapshot));
             }
@@ -87,7 +87,7 @@ where
                 let t = std::time::Instant::now();
                 let items = remote
                     .fetch(&collection, handles, tier)
-                    .map_err(|err| anyhow!("Remote fetch error: {err}"))?;
+                    .map_err(|err| anyhow!("Remote fetch error: {err:#}"))?;
                 prof::FETCH.add(t.elapsed());
                 arg = Some(ReplicaArg::Fetch(items));
             }
@@ -98,7 +98,7 @@ where
                 let t = std::time::Instant::now();
                 let results = remote
                     .push(&collection, changes)
-                    .map_err(|err| anyhow!("Remote push error: {err}"))?;
+                    .map_err(|err| anyhow!("Remote push error: {err:#}"))?;
                 prof::PUSH.add(t.elapsed());
                 arg = Some(ReplicaArg::Push(results));
             }

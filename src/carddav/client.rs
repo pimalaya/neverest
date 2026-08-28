@@ -158,13 +158,13 @@ impl CarddavClient {
         };
 
         self.op(|dav| dav.create_addressbook(&book))
-            .with_context(|| format!("Cannot create the address book `{collection}`"))
+            .with_context(|| format!("Cannot create the address book {collection}"))
     }
 
     /// Deletes an address book.
     pub fn delete_collection(&mut self, collection: &str) -> Result<()> {
         self.op(|dav| dav.delete_addressbook(collection))
-            .with_context(|| format!("Cannot delete the address book `{collection}`"))
+            .with_context(|| format!("Cannot delete the address book {collection}"))
     }
 
     /// Enumerates an address book through `sync-collection`, carrying the
@@ -184,10 +184,10 @@ impl CarddavClient {
     /// another.
     pub fn enumerate(&mut self, collection: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
         if !has_sync_collection(self.inner.addressbook_reports.get(collection)) {
-            debug!("carddav server advertises no `sync-collection` for `{collection}`, listing it");
+            debug!("carddav server advertises no `sync-collection` for {collection}, listing it");
             return self
                 .list(collection)
-                .with_context(|| format!("Cannot list `{collection}`"));
+                .with_context(|| format!("Cannot list {collection}"));
         }
 
         // The fallback keeps no token, so its checkpoint is empty, which means
@@ -200,17 +200,17 @@ impl CarddavClient {
         match self.sync(collection, token.as_deref()) {
             Ok(enumeration) => Ok(enumeration),
             Err(err) if is_invalid_sync_token(&err) => {
-                warn!("carddav sync token rejected for `{collection}`, enumerating in full");
+                warn!("carddav sync token rejected for {collection}, enumerating in full");
                 self.sync(collection, None)
-                    .with_context(|| format!("Cannot enumerate `{collection}` in full"))
+                    .with_context(|| format!("Cannot enumerate {collection} in full"))
             }
             Err(err) if err.is_unsupported_report() => {
-                debug!("carddav server has no `sync-collection`, listing `{collection}` instead");
+                debug!("carddav server has no `sync-collection`, listing {collection} instead");
                 self.list(collection)
-                    .with_context(|| format!("Cannot list `{collection}`"))
+                    .with_context(|| format!("Cannot list {collection}"))
             }
             Err(err) => {
-                Err(anyhow::Error::new(err).context(format!("Cannot enumerate `{collection}`")))
+                Err(anyhow::Error::new(err).context(format!("Cannot enumerate {collection}")))
             }
         }
     }
@@ -230,7 +230,7 @@ impl CarddavClient {
         let delta = self.op(|dav| dav.sync_cards(collection, None, opts))?;
 
         if delta.truncated {
-            warn!("carddav server truncated the listing of `{collection}`, reconciling as a delta");
+            warn!("carddav server truncated the listing of {collection}, reconciling as a delta");
         }
 
         Ok(Enumeration {
@@ -280,7 +280,7 @@ impl CarddavClient {
             }
             if round + 1 == MAX_SYNC_ROUNDS {
                 warn!(
-                    "carddav server kept truncating `{collection}` after {MAX_SYNC_ROUNDS} rounds, \
+                    "carddav server kept truncating {collection} after {MAX_SYNC_ROUNDS} rounds, \
                      continuing with what it returned"
                 );
             }
@@ -309,7 +309,7 @@ impl CarddavClient {
 
         let cards = self
             .op(|dav| dav.multiget_cards(collection, ids))
-            .with_context(|| format!("Cannot fetch cards from `{collection}`"))?;
+            .with_context(|| format!("Cannot fetch cards from {collection}"))?;
 
         for card in cards {
             let mut sink = open(&card.id)?;
@@ -330,7 +330,7 @@ impl CarddavClient {
     ) -> Result<Option<String>> {
         let card = self
             .op(|dav| dav.read_card(collection, id))
-            .with_context(|| format!("Cannot read the card `{id}`"))?;
+            .with_context(|| format!("Cannot read the card {id}"))?;
 
         sink.write_all(&card.data)?;
 
@@ -351,7 +351,7 @@ impl CarddavClient {
         let id = card_id(link_hint, &vcard);
         let created = self
             .op(|dav| dav.create_card(collection, &id, vcard.clone()))
-            .with_context(|| format!("Cannot create the card `{id}` in `{collection}`"))?;
+            .with_context(|| format!("Cannot create the card {id} in {collection}"))?;
 
         Ok(WrittenItem {
             id: created.id,
@@ -374,7 +374,7 @@ impl CarddavClient {
 
         let updated = self
             .op(|dav| dav.update_card(collection, id, vcard.clone(), if_match))
-            .with_context(|| format!("Cannot update the card `{id}` in `{collection}`"))?;
+            .with_context(|| format!("Cannot update the card {id} in {collection}"))?;
 
         Ok(updated.etag)
     }
@@ -387,7 +387,7 @@ impl CarddavClient {
         if_match: Option<&str>,
     ) -> Result<()> {
         self.op(|dav| dav.delete_card(collection, id, if_match))
-            .with_context(|| format!("Cannot delete the card `{id}` from `{collection}`"))
+            .with_context(|| format!("Cannot delete the card {id} from {collection}"))
     }
 
     /// Moves cards between address books. CardDAV has no server-side move, so
@@ -398,13 +398,13 @@ impl CarddavClient {
         for id in ids {
             let card = self
                 .op(|dav| dav.read_card(from, id))
-                .with_context(|| format!("Cannot read the card `{id}` for a move"))?;
+                .with_context(|| format!("Cannot read the card {id} for a move"))?;
 
             self.op(|dav| dav.create_card(to, id, card.data.clone()))
-                .with_context(|| format!("Cannot create the card `{id}` in `{to}`"))?;
+                .with_context(|| format!("Cannot create the card {id} in {to}"))?;
 
             self.op(|dav| dav.delete_card(from, id, card.etag.as_deref()))
-                .with_context(|| format!("Cannot delete the moved card `{id}` from `{from}`"))?;
+                .with_context(|| format!("Cannot delete the moved card {id} from {from}"))?;
         }
 
         Ok(())

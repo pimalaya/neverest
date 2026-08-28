@@ -95,7 +95,7 @@ fn relay_streams_a_to_b_without_retaining() {
     let hits = String::from_utf8_lossy(&search.stdout);
     assert!(
         hits.split_whitespace().any(|t| t.parse::<u32>().is_ok()),
-        "server B has the relayed message (SEARCH returned `{}`)",
+        "server B has the relayed message (SEARCH returned {})",
         hits.trim(),
     );
 

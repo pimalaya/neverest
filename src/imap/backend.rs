@@ -238,14 +238,14 @@ impl ImapClient {
             |uid| open(&uid.to_string()),
             |uid, sink| done(&uid.to_string(), None, sink),
         )
-        .with_context(|| format!("Batched body fetch `{mailbox}` error"))?;
+        .with_context(|| format!("Batched body fetch {mailbox} error"))?;
         Ok(())
     }
 
     /// Streams one message's raw RFC 5322 bytes into `sink` without flipping
     /// `\Seen` (BODY.PEEK[]); the body never lands in memory whole.
     pub fn get_message_stream(&mut self, mailbox: &str, id: &str, sink: impl Write) -> Result<()> {
-        let uid: NonZeroU32 = id.parse().map_err(|_| anyhow!("Invalid IMAP UID `{id}`"))?;
+        let uid: NonZeroU32 = id.parse().map_err(|_| anyhow!("Invalid IMAP UID {id}"))?;
 
         self.select_cached(mailbox)?;
         self.fetch_body_stream(uid, true, sink)?;
@@ -606,7 +606,7 @@ fn sanitise_atom(raw: &str) -> String {
 fn parse_mailbox(name: &str) -> Result<ImapMailbox<'static>> {
     String::from(name)
         .try_into()
-        .map_err(|_| anyhow!("Invalid IMAP mailbox `{name}`"))
+        .map_err(|_| anyhow!("Invalid IMAP mailbox {name}"))
 }
 
 /// Parses stringified UIDs into an IMAP [`SequenceSet`].
@@ -619,7 +619,7 @@ fn parse_uids(ids: &[&str]) -> Result<SequenceSet> {
         .iter()
         .map(|s| {
             s.parse::<NonZeroU32>()
-                .map_err(|_| anyhow!("Invalid message UID `{s}`"))
+                .map_err(|_| anyhow!("Invalid message UID {s}"))
         })
         .collect::<Result<_>>()?;
 

@@ -176,7 +176,7 @@ fn check_kinds(left: &mut SourceCtx, right: &mut SourceCtx) -> Result<Kind> {
 fn pair_kind(left: (&str, &str), right: (&str, &str)) -> Result<Kind> {
     let resolve = |(source, raw): (&str, &str)| -> Result<Kind> {
         Kind::from_media_type(raw).with_context(|| {
-            format!("This build cannot sync items of type `{raw}` (source {source})")
+            format!("This build cannot sync items of type {raw} (source {source})")
         })
     };
 
@@ -186,7 +186,7 @@ fn pair_kind(left: (&str, &str), right: (&str, &str)) -> Result<Kind> {
     if left_kind != right_kind {
         bail!(
             "The two sides sync different kinds and cannot be reconciled: \
-             {} is `{}` and {} is `{}`. \
+             {} is {} and {} is {}. \
              Pair each kind with its own account (they may share a `store.root`).",
             left.0,
             left_kind.media_type(),
@@ -336,7 +336,7 @@ pub fn run(
         real_dir.clone()
     };
     fs::create_dir_all(&work_dir)
-        .with_context(|| format!("Create replica dir `{}` error", work_dir.display()))?;
+        .with_context(|| format!("Create replica dir {} error", work_dir.display()))?;
 
     let mut state = StoreState::load(&work_dir)?;
 
@@ -390,7 +390,7 @@ pub fn run(
         // share nothing but the file the store lives in, so one broken remote
         // is no reason to leave the others unsynced.
         if let Err(err) = outcome {
-            warn!("source `{source_name}` sync error: {err:#}");
+            warn!("source {source_name} sync error: {err:#}");
             report.collection.patch.push(PatchEntry::new(
                 CollectionHunk::Scan {
                     side: source_name.clone(),
@@ -436,7 +436,7 @@ fn select_sources(mode: &AccountMode, only: &[String]) -> Result<Vec<String>> {
 
     if let Some(unknown) = only.iter().find(|name| !mode.sources.contains(name)) {
         bail!(
-            "This account has no source named `{unknown}`. It declares {}.",
+            "This account has no source named {unknown}. It declares {}.",
             mode.sources.join(", "),
         );
     }
@@ -634,7 +634,7 @@ fn run_pair(
             &progress,
             report,
         ) {
-            warn!("`{name}` sync error: {err:#}");
+            warn!("{name} sync error: {err:#}");
             s.success(format!("{name}: error ({err:#})"));
             continue;
         }
@@ -651,7 +651,7 @@ fn run_pair(
                 &progress,
             )
         {
-            warn!("`{name}` full hydration error: {err:#}");
+            warn!("{name} full hydration error: {err:#}");
         }
 
         s.success(format!("{name}: done"));
@@ -689,7 +689,7 @@ fn run_local(
     let source_filter = source_config.collection().filter.clone();
 
     let workers = connection_budget(&source_config, connections);
-    let s = Spinner::start(format!("Opening connections to `{source_name}`…"));
+    let s = Spinner::start(format!("Opening connections to {source_name}…"));
     // With no target the store is the destination: `one-way` makes the source
     // the truth and discards what was staged locally, leaving it off merges the
     // two, which is the offline replica an app writes into.
@@ -705,7 +705,7 @@ fn run_local(
         .collect::<Result<_>>()?;
     let blobs = stores[0].blobs();
     s.success(format!(
-        "Opened {} connection(s) to `{source_name}`",
+        "Opened {} connection(s) to {source_name}",
         ctxs.len()
     ));
 
@@ -713,7 +713,7 @@ fn run_local(
 
     let raw = ctxs[0].pool.primary().media_type();
     let kind = Kind::from_media_type(raw)
-        .with_context(|| format!("This build cannot sync items of type `{raw}`"))?;
+        .with_context(|| format!("This build cannot sync items of type {raw}"))?;
     let media_type = kind.media_type();
 
     if !dry_run {
@@ -721,10 +721,10 @@ fn run_local(
         drain_submits(account_config, &mut [first], &mut stores[0], &blobs, report);
     }
 
-    let s = Spinner::start(format!("Listing collections on `{source_name}`…"));
+    let s = Spinner::start(format!("Listing collections on {source_name}…"));
     let collections = list_collections(ctxs[0].pool.primary())?;
     s.success(format!(
-        "Listed {} collection(s) on `{source_name}`",
+        "Listed {} collection(s) on {source_name}",
         collections.len()
     ));
 
@@ -737,7 +737,7 @@ fn run_local(
     for collection in &filtered {
         stores[0]
             .ensure_collection(collection, media_type)
-            .with_context(|| format!("Declare kind for `{collection}`"))?;
+            .with_context(|| format!("Declare kind for {collection}"))?;
     }
 
     let plans = phase1_spine(
@@ -825,7 +825,7 @@ fn phase1_spine(
     let plans: Mutex<Vec<CollectionPlan>> = Mutex::new(Vec::new());
     let merged: Mutex<SyncReport> = Mutex::new(SyncReport::default());
     let scanned = AtomicUsize::new(0);
-    let s = Spinner::start(format!("Scanning `{source}` (0/{total})"));
+    let s = Spinner::start(format!("Scanning {source} (0/{total})"));
 
     let queue_ref = &queue;
     let plans_ref = &plans;
@@ -843,7 +843,7 @@ fn phase1_spine(
                             merged_ref.lock().unwrap().item.patch.extend(rep.item.patch);
                         }
                         Err(err) => {
-                            warn!("`{collection}` scan error: {err:#}");
+                            warn!("{collection} scan error: {err:#}");
                             let display = display_name(&ctx.namespace, &collection).to_string();
                             merged_ref
                                 .lock()
@@ -860,7 +860,7 @@ fn phase1_spine(
                         }
                     }
                     let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
-                    s_ref.set_message(format!("Scanning `{source}` ({n}/{total})"));
+                    s_ref.set_message(format!("Scanning {source} ({n}/{total})"));
                 }
             });
         }
@@ -870,7 +870,7 @@ fn phase1_spine(
     let merged = merged.into_inner().unwrap();
     report.item.patch.extend(merged.item.patch);
     report.collection.patch.extend(merged.collection.patch);
-    s.success(format!("Scanned {total} collection(s) on `{source}`"));
+    s.success(format!("Scanned {total} collection(s) on {source}"));
     Ok(plans)
 }
 
@@ -922,7 +922,7 @@ fn collection_spine(
 
     let mut targets: Vec<(ReplicaHandle, u64)> = Vec::new();
     for placement in projection_view(store, collection, &ctx.name)
-        .with_context(|| format!("Project {} `{collection}`", &ctx.name))?
+        .with_context(|| format!("Project {} {collection}", &ctx.name))?
     {
         if placement.status == ReplicaStatus::Tombstone || placement.object.is_some() {
             continue;
@@ -984,7 +984,7 @@ fn phase2_hydrate(
     let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
     let stop = AtomicBool::new(false);
     let done = AtomicUsize::new(0);
-    let s = Spinner::start(format!("Downloading `{source}` 0% (0/{total_bodies})"));
+    let s = Spinner::start(format!("Downloading {source} 0% (0/{total_bodies})"));
 
     let queue_ref = &queue;
     let cache_ref = &cache;
@@ -1001,7 +1001,7 @@ fn phase2_hydrate(
                     let n = done_ref.fetch_add(1, Ordering::Relaxed) + 1;
                     let percent = (n * 100).checked_div(total_bodies).unwrap_or(100);
                     s_ref.set_message(format!(
-                        "Downloading `{source}` {percent}% ({n}/{total_bodies})"
+                        "Downloading {source} {percent}% ({n}/{total_bodies})"
                     ));
                 };
                 while !stop_ref.load(Ordering::Relaxed) {
@@ -1037,10 +1037,7 @@ fn phase2_hydrate(
         return Err(err);
     }
     let cache = cache.into_inner().unwrap();
-    s.success(format!(
-        "Downloaded {} item(s) from `{source}`",
-        cache.len()
-    ));
+    s.success(format!("Downloaded {} item(s) from {source}", cache.len()));
     Ok(cache)
 }
 
@@ -1057,14 +1054,14 @@ fn phase3_apply(
     cache: &HashMap<FetchKey, ReplicaFetchedItem>,
 ) -> Result<()> {
     let total = plans.len();
-    let s = Spinner::start(format!("Writing `{source}` (0/{total})"));
+    let s = Spinner::start(format!("Writing {source} (0/{total})"));
     for (index, (collection, _)) in plans.iter().enumerate() {
         if let Err(err) = apply_full(collection, ctx, store, blobs, cache) {
-            warn!("`{collection}` write error: {err:#}");
+            warn!("{collection} write error: {err:#}");
         }
-        s.set_message(format!("Writing `{source}` ({}/{total})", index + 1));
+        s.set_message(format!("Writing {source} ({}/{total})", index + 1));
     }
-    s.success(format!("Wrote {total} collection(s) on `{source}`"));
+    s.success(format!("Wrote {total} collection(s) on {source}"));
     Ok(())
 }
 
@@ -1079,7 +1076,7 @@ fn apply_full(
     cache: &HashMap<FetchKey, ReplicaFetchedItem>,
 ) -> Result<()> {
     let handles: Vec<ReplicaHandle> = projection_view(store, collection, &ctx.name)
-        .with_context(|| format!("Project {} `{collection}`", &ctx.name))?
+        .with_context(|| format!("Project {} {collection}", &ctx.name))?
         .into_iter()
         .filter(|p| p.status != ReplicaStatus::Tombstone && p.level < ReplicaLevel::Full)
         .map(|p| p.handle)
@@ -1094,7 +1091,7 @@ fn apply_full(
         &mut remote,
         ReplicaUpgrade::new(collection.to_string(), handles, ReplicaTier::Full),
     )
-    .with_context(|| format!("Apply bodies `{collection}`"))?;
+    .with_context(|| format!("Apply bodies {collection}"))?;
     Ok(())
 }
 
@@ -1106,7 +1103,7 @@ fn flag_snapshot(
     source: &str,
 ) -> Result<HashMap<String, ReplicaFlags>> {
     Ok(load_side(store, collection)
-        .with_context(|| format!("Load {source} `{collection}`"))?
+        .with_context(|| format!("Load {source} {collection}"))?
         .into_iter()
         .map(|placement| (placement.handle.0, placement.flags))
         .collect())
@@ -1195,7 +1192,7 @@ fn itemize_single(
 ) -> Result<()> {
     let display = display_name(&ctx.namespace, collection);
     let view = projection_view(store, collection, &ctx.name)
-        .with_context(|| format!("Project {} `{display}`", ctx.name))?;
+        .with_context(|| format!("Project {} {display}", ctx.name))?;
     for placement in view {
         report
             .ambiguous
@@ -1222,7 +1219,7 @@ fn itemize_fetches(
     report: &mut SyncReport,
 ) -> Result<()> {
     let view =
-        load_side(store, collection).with_context(|| format!("Load {source} `{collection}`"))?;
+        load_side(store, collection).with_context(|| format!("Load {source} {collection}"))?;
     for placement in view {
         if placement.status == ReplicaStatus::Tombstone || placement.object.is_some() {
             continue;
@@ -1264,7 +1261,7 @@ fn sync_collection(
 ) -> Result<()> {
     left_store
         .ensure_collection(collection, media_type)
-        .with_context(|| format!("Declare kind for `{collection}`"))?;
+        .with_context(|| format!("Declare kind for {collection}"))?;
 
     reconcile_pass(
         collection,
@@ -1389,10 +1386,7 @@ fn relay_targets(
             continue;
         }
         let Some(size) = meta_size(&item.meta) else {
-            warn!(
-                "relay skips `{}` in `{collection}`: no size in meta",
-                link.0
-            );
+            warn!("relay skips {} in {collection}: no size in meta", link.0);
             continue;
         };
         out.push(RelayTarget {
@@ -1454,7 +1448,7 @@ fn relay_copies(
         };
 
         relay_one(holding_pool, target_pool, collection, &target)
-            .with_context(|| format!("Relay `{}` in `{display}`", target.handle.0))?;
+            .with_context(|| format!("Relay {} in {display}", target.handle.0))?;
 
         report.item.patch.push(PatchEntry::new(
             ItemHunk::Copy {
@@ -1569,10 +1563,10 @@ fn sync_side_rebuilding(
         && let Some(post) = stored_epoch(ctx.pool.primary(), store, collection)?
         && post != pre
     {
-        info!("handle-space epoch of `{collection}` changed, rebuilding the collection");
+        info!("handle-space epoch of {collection} changed, rebuilding the collection");
         let (rekey, generation) = rebuild_collection(collection, ctx, store, blobs)?;
         info!(
-            "`{collection}` rebuilt under generation {generation}: {} carried, {} pulled, {} pending dropped",
+            "{collection} rebuilt under generation {generation}: {} carried, {} pulled, {} pending dropped",
             rekey.rekeyed, rekey.pulled, rekey.dropped
         );
     }
@@ -1596,7 +1590,7 @@ fn stored_epoch(
             &ReplicaCollectionId(collection.to_string()),
             &ReplicaLoadScope::All,
         )
-        .map_err(|err| anyhow!("Load `{collection}` checkpoint error: {err}"))?;
+        .map_err(|err| anyhow!("Load {collection} checkpoint error: {err}"))?;
     Ok(loaded
         .checkpoint
         .as_ref()
@@ -1723,7 +1717,7 @@ fn sync_side(
         &mut remote,
         ReplicaSync::new(collection.to_string(), opts),
     )
-    .with_context(|| format!("Sync {} `{collection}`", &ctx.name))
+    .with_context(|| format!("Sync {} {collection}", &ctx.name))
 }
 
 /// Raises every freshly probed placement to the tier its kind resolves at
@@ -1738,7 +1732,7 @@ fn upgrade_probed(
     dry_run: bool,
 ) -> Result<()> {
     let probed: Vec<ReplicaHandle> = load_side(store, collection)
-        .with_context(|| format!("Load {} `{collection}`", &ctx.name))?
+        .with_context(|| format!("Load {} {collection}", &ctx.name))?
         .into_iter()
         .filter(|p| p.level == ReplicaLevel::Probed && p.status != ReplicaStatus::Tombstone)
         .map(|p| p.handle)
@@ -1758,7 +1752,7 @@ fn upgrade_probed(
         &mut remote,
         ReplicaUpgrade::new(collection.to_string(), probed, tier),
     )
-    .with_context(|| format!("Upgrade probed {} `{collection}`", &ctx.name))?;
+    .with_context(|| format!("Upgrade probed {} {collection}", &ctx.name))?;
     Ok(())
 }
 
@@ -1780,7 +1774,7 @@ fn hydrate_copies(
         (&left.name, left.perms.item.create),
         (&right.name, right.perms.item.create),
     )
-    .with_context(|| format!("Hydration targets `{collection}`"))?;
+    .with_context(|| format!("Hydration targets {collection}"))?;
     if targets.is_empty() {
         return Ok(0);
     }
@@ -1811,7 +1805,7 @@ fn hydrate_copies(
             &mut remote,
             ReplicaUpgrade::new(collection.to_string(), left_handles, ReplicaTier::Full),
         )
-        .with_context(|| format!("Hydrate bodies for {} `{collection}`", left.name))?;
+        .with_context(|| format!("Hydrate bodies for {} {collection}", left.name))?;
     }
     if !right_handles.is_empty() {
         let mut remote = PimRemote::with_progress(
@@ -1826,7 +1820,7 @@ fn hydrate_copies(
             &mut remote,
             ReplicaUpgrade::new(collection.to_string(), right_handles, ReplicaTier::Full),
         )
-        .with_context(|| format!("Hydrate bodies for {} `{collection}`", right.name))?;
+        .with_context(|| format!("Hydrate bodies for {} {collection}", right.name))?;
     }
     Ok(total)
 }
@@ -1844,7 +1838,7 @@ fn itemize(
     for (ctx, other) in [(left, right), (right, left)] {
         let display = display_name(&ctx.namespace, collection);
         let view = projection_view(store, collection, &ctx.name)
-            .with_context(|| format!("Project {} `{display}`", ctx.name))?;
+            .with_context(|| format!("Project {} {display}", ctx.name))?;
         for placement in view {
             report
                 .ambiguous
@@ -2029,7 +2023,7 @@ fn apply_collection_hunk(
                 .pool
                 .primary()
                 .create_collection(collection)
-                .with_context(|| format!("Create collection `{collection}` on {side}"))?;
+                .with_context(|| format!("Create collection {collection} on {side}"))?;
         }
         CollectionHunk::Scan { .. } => {
             unreachable!("a scan hunk reports a failure and is never applied")
@@ -2039,7 +2033,7 @@ fn apply_collection_hunk(
                 .pool
                 .primary()
                 .delete_collection(collection)
-                .with_context(|| format!("Delete collection `{collection}` on {side}"))?;
+                .with_context(|| format!("Delete collection {collection} on {side}"))?;
         }
     }
     Ok(())
@@ -2101,7 +2095,7 @@ fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
             Ok(drained) => {
                 if drained.applied > 0 || drained.parked > 0 {
                     info!(
-                        "drained {} queued action(s) in `{collection}` ({} parked)",
+                        "drained {} queued action(s) in {collection} ({} parked)",
                         drained.applied, drained.parked
                     );
                 }
@@ -2112,7 +2106,7 @@ fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
                     });
                 }
             }
-            Err(err) => warn!("drain of `{collection}` failed, actions stay queued: {err}"),
+            Err(err) => warn!("drain of {collection} failed, actions stay queued: {err}"),
         }
     }
 
@@ -2377,7 +2371,7 @@ fn hydrate_full_collection(
     let mut raised = 0;
     for (ctx, store) in [(left, left_store), (right, right_store)] {
         let targets: Vec<ReplicaHandle> = load_side(store, collection)
-            .with_context(|| format!("Load {} `{collection}`", &ctx.name))?
+            .with_context(|| format!("Load {} {collection}", &ctx.name))?
             .into_iter()
             .filter(|p| p.status != ReplicaStatus::Tombstone && p.level < ReplicaLevel::Full)
             .map(|p| p.handle)
@@ -2400,7 +2394,7 @@ fn hydrate_full_collection(
             &mut remote,
             ReplicaUpgrade::new(collection.to_string(), targets, ReplicaTier::Full),
         )
-        .with_context(|| format!("Hydrate all bodies {} `{collection}`", &ctx.name))?;
+        .with_context(|| format!("Hydrate all bodies {} {collection}", &ctx.name))?;
         raised += total;
     }
     Ok(raised)
@@ -2414,11 +2408,11 @@ fn dry_run_replica(real_dir: &Path) -> Result<PathBuf> {
     tmp.push(format!("neverest-dry-{}", std::process::id()));
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp)
-        .with_context(|| format!("Create dry-run dir `{}` error", tmp.display()))?;
+        .with_context(|| format!("Create dry-run dir {} error", tmp.display()))?;
 
     if real_dir.exists() {
         copy_dir_all(real_dir, &tmp)
-            .with_context(|| format!("Copy `{}` for dry-run", real_dir.display()))?;
+            .with_context(|| format!("Copy {} for dry-run", real_dir.display()))?;
     }
     Ok(tmp)
 }
@@ -3268,8 +3262,8 @@ mod tests {
 
         let text = report.to_string();
         assert!(text.contains("Warnings (1)"), "{text}");
-        assert!(text.contains("`INBOX`"), "{text}");
-        assert!(text.contains("`145`") && text.contains("`146`"), "{text}");
+        assert!(text.contains("INBOX"), "{text}");
+        assert!(text.contains("145") && text.contains("146"), "{text}");
 
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["ambiguous"][0]["collection"], "INBOX");
@@ -3361,7 +3355,7 @@ mod tests {
         let err = select_sources(&mode, &[String::from("nope")])
             .unwrap_err()
             .to_string();
-        assert!(err.contains("no source named `nope`"), "got {err}");
+        assert!(err.contains("no source named nope"), "got {err}");
     }
 
     /// The authority is the whole of `one-way`, and it is what stops a

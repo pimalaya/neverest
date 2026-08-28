@@ -212,7 +212,7 @@ pub fn pending(store: &PimdirStore) -> Result<Vec<SubmitIntent>> {
         let rows = match store.pending_actions(&collection) {
             Ok(rows) => rows,
             Err(err) => {
-                warn!("cannot read the queue of `{collection}`, skipping it: {err}");
+                warn!("cannot read the queue of {collection}, skipping it: {err}");
                 continue;
             }
         };

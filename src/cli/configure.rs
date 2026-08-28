@@ -40,6 +40,6 @@ impl ConfigureCommand {
         let target = Config::target_path(config_paths)?;
         edit_account(&target, config, &name)?;
 
-        printer.out(Message::new(format!("Account `{name}` configured")))
+        printer.out(Message::new(format!("Account {name} configured")))
     }
 }

@@ -90,7 +90,7 @@ impl StoreState {
         if !path.exists() {
             if dir.join("pimdir.db").exists() {
                 bail!(
-                    "The store at `{}` was written before collection ids carried their \
+                    "The store at {} was written before collection ids carried their \
                      namespace, and is not read. Drop it with `neverest sync --reset` and let it \
                      resync.",
                     dir.display(),
@@ -103,14 +103,14 @@ impl StoreState {
             });
         }
 
-        let raw = fs::read_to_string(&path)
-            .with_context(|| format!("Read `{}` error", path.display()))?;
+        let raw =
+            fs::read_to_string(&path).with_context(|| format!("Read {} error", path.display()))?;
         let state: Self = serde_json::from_str(&raw)
-            .with_context(|| format!("Parse `{}` error", path.display()))?;
+            .with_context(|| format!("Parse {} error", path.display()))?;
 
         if state.layout != LAYOUT {
             bail!(
-                "The store at `{}` uses collection-id layout {} and this neverest writes {LAYOUT}; \
+                "The store at {} uses collection-id layout {} and this neverest writes {LAYOUT}; \
                  drop it with `neverest sync --reset` and let it resync.",
                 dir.display(),
                 state.layout,
@@ -147,7 +147,7 @@ impl StoreState {
         let path = Self::path(dir);
         let raw = serde_json::to_string_pretty(self).context("Serialize store state error")?;
 
-        fs::write(&path, raw).with_context(|| format!("Write `{}` error", path.display()))
+        fs::write(&path, raw).with_context(|| format!("Write {} error", path.display()))
     }
 
     /// Refuses a run whose mode would discard what the previous one kept, and

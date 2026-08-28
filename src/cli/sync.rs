@@ -117,15 +117,15 @@ impl SyncCommand {
 
         let replica = driver::store_dir(&name, &account_config)?;
         if !replica.join("pimdir.db").exists() {
-            bail!("Account `{name}` not initialized, run `init -a {name}` first");
+            bail!("Account {name} not initialized, run `init -a {name}` first");
         }
 
         let _sync_lock = acquire_store_lock(&replica, LOCK_TIMEOUT)
-            .with_context(|| format!("Acquire the store lock of account `{name}`"))?;
+            .with_context(|| format!("Acquire the store lock of account {name}"))?;
 
         if self.reset {
             reset_replica(&replica, &self.include_collection)?;
-            info!("reset: dropped replica state for `{name}`");
+            info!("reset: dropped replica state for {name}");
         }
 
         let cli_filter = if !self.include_collection.is_empty() {
@@ -172,7 +172,7 @@ fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
         .create(true)
         .truncate(false)
         .open(&lock_path)
-        .with_context(|| format!("Open sync lock `{}` error", lock_path.display()))?;
+        .with_context(|| format!("Open sync lock {} error", lock_path.display()))?;
 
     let deadline = Instant::now() + timeout;
     let mut waiting = false;
@@ -182,7 +182,7 @@ fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
             Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
                     bail!(
-                        "Another sync still holds `{}` after {}s",
+                        "Another sync still holds {} after {}s",
                         lock_path.display(),
                         timeout.as_secs()
                     );
@@ -195,7 +195,7 @@ fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
             }
             Err(TryLockError::Error(err)) => {
                 return Err(err)
-                    .with_context(|| format!("Acquire sync lock `{}` error", lock_path.display()));
+                    .with_context(|| format!("Acquire sync lock {} error", lock_path.display()));
             }
         }
     }
@@ -219,13 +219,13 @@ fn reset_replica(replica: &std::path::Path, include: &[String]) -> Result<()> {
         let path = replica.join(name);
         if path.exists() {
             fs::remove_file(&path)
-                .with_context(|| format!("Remove `{}` for reset", path.display()))?;
+                .with_context(|| format!("Remove {} for reset", path.display()))?;
         }
     }
     let objects = replica.join("objects");
     if objects.exists() {
         fs::remove_dir_all(&objects)
-            .with_context(|| format!("Remove `{}` for reset", objects.display()))?;
+            .with_context(|| format!("Remove {} for reset", objects.display()))?;
     }
     PimdirStore::open(replica).context("Recreate pimdir store after reset")?;
     StoreState::stamp(replica, None).context("Stamp store state after reset")?;

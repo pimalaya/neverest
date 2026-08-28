@@ -39,7 +39,7 @@ impl CheckCommand {
 
         account_config.validate()?;
 
-        info!("checking account `{name}`");
+        info!("checking account {name}");
 
         printer.out(Message::new(account_config.mode()?.to_string()))?;
 
@@ -47,7 +47,7 @@ impl CheckCommand {
             check_source(&endpoint, config)?;
         }
 
-        printer.out(Message::new(format!("Account `{name}` looks healthy")))
+        printer.out(Message::new(format!("Account {name} looks healthy")))
     }
 }
 

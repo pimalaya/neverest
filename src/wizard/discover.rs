@@ -124,7 +124,7 @@ fn save_or_print(printer: &mut impl Printer, target: &Path, config: Config) -> R
     let save = prompt::bool(&prompt, true)?
         && (!target.exists()
             || prompt::bool(
-                format!("`{}` already exists. Overwrite it?", target.display()),
+                format!("{} already exists. Overwrite it?", target.display()),
                 false,
             )?);
 
@@ -246,7 +246,7 @@ fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<Sourc
         DiscoveredKind::Carddav { url } => Ok(SourceConfig::new(SourceBackendConfig::Carddav(
             carddav::configure(account_name, url, &choice)?,
         ))),
-        kind => bail!("Configuration `{kind:?}` is not supported by this build"),
+        kind => bail!("Configuration {kind:?} is not supported by this build"),
     }
 }
 
@@ -257,7 +257,7 @@ fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<Sourc
 /// discover automatically.
 fn stop_undiscovered(email: &str) -> Result<SourceConfig> {
     bail!(
-        "Could not automatically discover a configuration for `{email}`.\n\n\
+        "Could not automatically discover a configuration for {email}.\n\n\
          Write your account configuration by hand instead, starting from the \
          documented sample:\n  {CONFIG_SAMPLE_URL}"
     )

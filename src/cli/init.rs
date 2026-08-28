@@ -41,7 +41,7 @@ impl InitCommand {
         let store_db = replica.join("pimdir.db");
         if store_db.exists() {
             bail!(
-                "Account `{name}` already initialized, delete `{}` to reset",
+                "Account {name} already initialized, delete {} to reset",
                 replica.display()
             );
         }
@@ -56,20 +56,20 @@ impl InitCommand {
 
         let s = Spinner::start("Creating replica store…");
         fs::create_dir_all(&replica)
-            .with_context(|| format!("Create replica dir `{}`", replica.display()))?;
+            .with_context(|| format!("Create replica dir {}", replica.display()))?;
         PimdirStore::open(&replica)
-            .with_context(|| format!("Create pimdir store `{}`", replica.display()))?;
+            .with_context(|| format!("Create pimdir store {}", replica.display()))?;
         // The mode is stamped here, so the first sync compares against what
         // `init` opened rather than against nothing.
         StoreState::stamp(&replica, Some(&mode))
-            .with_context(|| format!("Stamp store state `{}`", replica.display()))?;
+            .with_context(|| format!("Stamp store state {}", replica.display()))?;
         s.success("Created replica store");
 
         // A first run under `one-way` has no recorded mode to compare against,
         // so nothing can refuse it. Saying what the account will do is what
         // stands in for the confirmation a one-shot tool cannot ask for.
         printer.out(Message::new(format!(
-            "Account `{name}` successfully initialized: {mode}"
+            "Account {name} successfully initialized: {mode}"
         )))
     }
 }

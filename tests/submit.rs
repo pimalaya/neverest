@@ -158,7 +158,7 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     let items = pimdir(&state, &["item", "list", &delivered, "--json"]);
     assert!(
         items.contains(&marker),
-        "the submitted message came back into the store; `{delivered}` held:\n{items}",
+        "the submitted message came back into the store; {delivered} held:\n{items}",
     );
 }
 

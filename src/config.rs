@@ -172,13 +172,12 @@ impl Config {
         let toml = config_toml::to_string(self).context("Serialize TOML config error")?;
 
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Create TOML config parent `{}` error", parent.display())
-            })?;
+            fs::create_dir_all(parent)
+                .with_context(|| format!("Create TOML config parent {} error", parent.display()))?;
         }
 
         fs::write(path, toml)
-            .with_context(|| format!("Write TOML config `{}` error", path.display()))?;
+            .with_context(|| format!("Write TOML config {} error", path.display()))?;
 
         Ok(())
     }
@@ -349,7 +348,7 @@ impl AccountConfig {
 
             if sources.contains_key(&name) {
                 bail!(
-                    "Source `{name}` is declared both directly under the account and in the \
+                    "Source {name} is declared both directly under the account and in the \
                      `sources` table; the direct form is sugar for `sources.{name}`, so keep one."
                 );
             }
@@ -492,7 +491,7 @@ impl AccountConfig {
 
         if let Some(name) = sources.keys().find(|name| self.targets.contains_key(*name)) {
             bail!(
-                "`{name}` is both a source and a target. A name is the pimdir source id every \
+                "{name} is both a source and a target. A name is the pimdir source id every \
                  binding it owns is recorded under, so one name cannot be two endpoints; rename \
                  one of them."
             );
@@ -672,7 +671,7 @@ impl HumanDuration {
         let unit = &raw[digits.len()..];
         let count: u64 = digits
             .parse()
-            .map_err(|_| format!("`{raw}` is not a `<number><unit>` duration (e.g. `90d`)"))?;
+            .map_err(|_| format!("{raw} is not a `<number><unit>` duration (e.g. `90d`)"))?;
 
         let seconds = match unit {
             "s" => 1,
@@ -683,19 +682,19 @@ impl HumanDuration {
             "" if count == 0 => 1,
             "" => {
                 return Err(format!(
-                    "duration `{raw}` misses its unit (`s`, `m`, `h`, `d` or `w`)"
+                    "duration {raw} misses its unit (`s`, `m`, `h`, `d` or `w`)"
                 ));
             }
             other => {
                 return Err(format!(
-                    "unknown duration unit `{other}` in `{raw}` (expected `s`, `m`, `h`, `d` or `w`)"
+                    "unknown duration unit {other} in {raw} (expected `s`, `m`, `h`, `d` or `w`)"
                 ));
             }
         };
 
         let total = count
             .checked_mul(seconds)
-            .ok_or_else(|| format!("duration `{raw}` overflows"))?;
+            .ok_or_else(|| format!("duration {raw} overflows"))?;
         Ok(Self(Duration::from_secs(total)))
     }
 }
@@ -1321,7 +1320,7 @@ pub fn server_url(server: &str, scheme: &str) -> Result<Url> {
         Url::parse(&format!("{scheme}://{server}"))
     };
 
-    url.with_context(|| format!("Cannot parse `{server}` as a server URL"))
+    url.with_context(|| format!("Cannot parse {server} as a server URL"))
 }
 
 fn default_gmail_user_id() -> String {

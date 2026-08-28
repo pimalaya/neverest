@@ -76,12 +76,12 @@ impl fmt::Display for AmbiguousIdentity {
         let count = ids.len();
         let list = ids
             .iter()
-            .map(|id| format!("`{id}`"))
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ");
         write!(
             f,
-            "{count} copies of one item in `{collection}` on {side} ({list}): neverest cannot tell them apart, so none of them syncs until one is removed"
+            "{count} copies of one item in {collection} on {side} ({list}): neverest cannot tell them apart, so none of them syncs until one is removed"
         )
     }
 }
@@ -113,7 +113,7 @@ impl fmt::Display for ItemConflict {
         } = self;
         write!(
             f,
-            "item `{id}` in `{collection}` on {side} changed on both sides and is left conflicted"
+            "item {id} in {collection} on {side} changed on both sides and is left conflicted"
         )
     }
 }
@@ -132,7 +132,7 @@ impl fmt::Display for DrainedQueue {
             collection,
             applied,
         } = self;
-        write!(f, "applied {applied} queued action(s) in `{collection}`")
+        write!(f, "applied {applied} queued action(s) in {collection}")
     }
 }
 
@@ -163,7 +163,7 @@ impl fmt::Display for ParkedQueueAction {
         } = self;
         write!(
             f,
-            "parked queue action #{id} (`{action}` in `{collection}` from `{producer}`): {error}"
+            "parked queue action #{id} ({action} in {collection} from {producer}): {error}"
         )
     }
 }
@@ -190,9 +190,9 @@ impl fmt::Display for SubmitEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let subject = self.subject.as_deref().unwrap_or("<no subject>");
         match (&self.error, self.parked) {
-            (None, _) => write!(f, "submitted `{subject}`"),
-            (Some(err), true) => write!(f, "`{subject}` parked, never retried: {err}"),
-            (Some(err), false) => write!(f, "`{subject}` not submitted, retried next run: {err}"),
+            (None, _) => write!(f, "submitted {subject}"),
+            (Some(err), true) => write!(f, "{subject} parked, never retried: {err}"),
+            (Some(err), false) => write!(f, "{subject} not submitted, retried next run: {err}"),
         }
     }
 }
@@ -253,17 +253,17 @@ impl fmt::Display for MessageCollision {
         let skipped = ids
             .iter()
             .skip(1)
-            .map(|id| format!("`{id}`"))
+            .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ");
         match message_id {
             Some(mid) => write!(
                 f,
-                "skip {skipped} on {side} `{collection}`: same Message-ID `{mid}` as `{kept}`"
+                "skip {skipped} on {side} {collection}: same Message-ID {mid} as {kept}"
             ),
             None => write!(
                 f,
-                "skip {skipped} on {side} `{collection}`: same subject/date/sender as `{kept}` (no Message-ID header)"
+                "skip {skipped} on {side} {collection}: same subject/date/sender as {kept} (no Message-ID header)"
             ),
         }
     }
@@ -397,33 +397,31 @@ impl fmt::Display for SyncReport {
 
         let account = &self.account;
         match (total, errors, warnings, self.dry_run) {
-            (0, 0, 0, _) => writeln!(f, "Account `{account}` is already in sync"),
-            (0, 0, w, _) => writeln!(f, "Account `{account}` is already in sync ({w} warnings)"),
-            (n, 0, 0, true) => writeln!(f, "Account `{account}` would apply {n} hunks"),
-            (n, 0, w, true) => writeln!(
-                f,
-                "Account `{account}` would apply {n} hunks ({w} warnings)"
-            ),
+            (0, 0, 0, _) => writeln!(f, "Account {account} is already in sync"),
+            (0, 0, w, _) => writeln!(f, "Account {account} is already in sync ({w} warnings)"),
+            (n, 0, 0, true) => writeln!(f, "Account {account} would apply {n} hunks"),
+            (n, 0, w, true) => {
+                writeln!(f, "Account {account} would apply {n} hunks ({w} warnings)")
+            }
             (n, e, 0, true) => writeln!(
                 f,
-                "Account `{account}` would apply {n} hunks ({e} would fail)"
+                "Account {account} would apply {n} hunks ({e} would fail)"
             ),
             (n, e, w, true) => writeln!(
                 f,
-                "Account `{account}` would apply {n} hunks ({e} would fail, {w} warnings)"
+                "Account {account} would apply {n} hunks ({e} would fail, {w} warnings)"
             ),
-            (n, 0, 0, false) => writeln!(f, "Account `{account}` synchronized: {n} hunks"),
-            (n, 0, w, false) => writeln!(
-                f,
-                "Account `{account}` synchronized: {n} hunks, {w} warnings"
-            ),
+            (n, 0, 0, false) => writeln!(f, "Account {account} synchronized: {n} hunks"),
+            (n, 0, w, false) => {
+                writeln!(f, "Account {account} synchronized: {n} hunks, {w} warnings")
+            }
             (n, e, 0, false) => writeln!(
                 f,
-                "Account `{account}` partially synchronized: {n} hunks, {e} errors"
+                "Account {account} partially synchronized: {n} hunks, {e} errors"
             ),
             (n, e, w, false) => writeln!(
                 f,
-                "Account `{account}` partially synchronized: {n} hunks, {e} errors, {w} warnings"
+                "Account {account} partially synchronized: {n} hunks, {e} errors, {w} warnings"
             ),
         }
     }

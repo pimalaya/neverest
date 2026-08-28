@@ -133,7 +133,7 @@ fn warned_handles(report: &serde_json::Value, side: &str) -> Vec<String> {
         .expect("the report carries the warnings")
         .iter()
         .find(|warning| warning["side"] == side)
-        .unwrap_or_else(|| panic!("`{side}` is reported as ambiguous"));
+        .unwrap_or_else(|| panic!("{side} is reported as ambiguous"));
     assert_eq!(warning["collection"], "INBOX");
 
     let mut handles: Vec<String> = warning["ids"]
@@ -240,7 +240,7 @@ fn expunge(url: &str, uid: &str) {
             .expect("spawn curl store/expunge");
         assert!(
             output.status.success(),
-            "curl `{request}` on {url} failed: {}",
+            "curl {request} on {url} failed: {}",
             String::from_utf8_lossy(&output.stderr),
         );
     }

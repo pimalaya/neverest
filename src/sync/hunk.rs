@@ -43,13 +43,13 @@ impl fmt::Display for CollectionHunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Create { side, collection } => {
-                write!(f, "create collection `{collection}` on {side}")
+                write!(f, "create collection {collection} on {side}")
             }
             Self::Delete { side, collection } => {
-                write!(f, "delete collection `{collection}` on {side}")
+                write!(f, "delete collection {collection} on {side}")
             }
             Self::Scan { side, collection } => {
-                write!(f, "scan collection `{collection}` on {side}")
+                write!(f, "scan collection {collection} on {side}")
             }
         }
     }
@@ -127,7 +127,7 @@ impl fmt::Display for ItemHunk {
                 ..
             } => write!(
                 f,
-                "copy item `{source_id}` in `{collection}` from {source_side} to {target_side}"
+                "copy item {source_id} in {collection} from {source_side} to {target_side}"
             ),
             Self::AddFlags {
                 side,
@@ -137,7 +137,7 @@ impl fmt::Display for ItemHunk {
                 ..
             } => write!(
                 f,
-                "add {flags} to item `{id}` in `{collection}` on {side}",
+                "add {flags} to item {id} in {collection} on {side}",
                 flags = format_flag_list(flags),
             ),
             Self::RemoveFlags {
@@ -148,7 +148,7 @@ impl fmt::Display for ItemHunk {
                 ..
             } => write!(
                 f,
-                "remove {flags} from item `{id}` in `{collection}` on {side}",
+                "remove {flags} from item {id} in {collection} on {side}",
                 flags = format_flag_list(flags),
             ),
             Self::Delete {
@@ -157,7 +157,7 @@ impl fmt::Display for ItemHunk {
                 id,
                 ..
             } => {
-                write!(f, "delete item `{id}` in `{collection}` on {side}")
+                write!(f, "delete item {id} in {collection} on {side}")
             }
             Self::Fetch {
                 side,
@@ -165,7 +165,7 @@ impl fmt::Display for ItemHunk {
                 id,
                 ..
             } => {
-                write!(f, "fetch item `{id}` in `{collection}` from {side}")
+                write!(f, "fetch item {id} in {collection} from {side}")
             }
             Self::Update {
                 side,
@@ -173,7 +173,7 @@ impl fmt::Display for ItemHunk {
                 id,
                 ..
             } => {
-                write!(f, "update item `{id}` in `{collection}` on {side}")
+                write!(f, "update item {id} in {collection} on {side}")
             }
         }
     }

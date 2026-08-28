@@ -152,7 +152,7 @@ pub(crate) fn wire_name<'n>(namespace: &str, collection: &'n str) -> &'n str {
 pub(crate) fn resolve_kind(pool: &mut Pool) -> Kind {
     let media_type = pool.primary().media_type();
     Kind::from_media_type(media_type).unwrap_or_else(|| {
-        warn!("unknown media type `{media_type}`, deriving link ids as mail");
+        warn!("unknown media type {media_type}, deriving link ids as mail");
         Kind::Mail
     })
 }
@@ -194,7 +194,7 @@ impl ReplicaRemote for PimRemote<'_> {
             .pool
             .primary()
             .enumerate(collection, cursor)
-            .with_context(|| format!("Enumerate `{collection}` error"))?;
+            .with_context(|| format!("Enumerate {collection} error"))?;
         let items = enumeration
             .items
             .into_iter()
@@ -378,7 +378,7 @@ impl PimRemote<'_> {
             .pool
             .primary()
             .fetch_summaries(collection, &ids)
-            .with_context(|| format!("Fetch envelopes `{collection}` error"))?;
+            .with_context(|| format!("Fetch envelopes {collection} error"))?;
         let by_id: HashMap<&str, &ItemSummary> =
             envelopes.iter().map(|e| (e.id.as_str(), e)).collect();
 
@@ -518,10 +518,10 @@ fn fetch_one_full(
     let mut sink = HydrateSink::new(writer, blob.hasher());
     let revision = client
         .get_item_stream(collection, handle.as_str(), &mut sink)
-        .with_context(|| format!("Stream item `{}` in `{collection}` error", handle.as_str()))?;
+        .with_context(|| format!("Stream item {} in {collection} error", handle.as_str()))?;
     let (hash, size, header) = sink
         .finish()
-        .with_context(|| format!("Commit body `{}` in `{collection}` error", handle.as_str()))?;
+        .with_context(|| format!("Commit body {} in {collection} error", handle.as_str()))?;
 
     // No kind this syncs has an empty body: a message carries headers and a
     // card carries at least its BEGIN and END lines. Storing one anyway mints
@@ -529,7 +529,7 @@ fn fetch_one_full(
     // server hands back collapses onto that same identity and freezes it.
     if size == 0 {
         bail!(
-            "Server returned an empty body for `{}` in `{collection}`",
+            "Server returned an empty body for {} in {collection}",
             handle.as_str(),
         );
     }
@@ -607,7 +607,7 @@ pub(crate) fn hydrate_batch(
 
             if !missing.is_empty() {
                 warn!(
-                    "batched fetch `{collection}` returned {} of {} bodies; \
+                    "batched fetch {collection} returned {} of {} bodies; \
                      fetching the rest one by one",
                     items.len(),
                     handles.len(),
@@ -625,7 +625,7 @@ pub(crate) fn hydrate_batch(
             Ok(items)
         }
         Err(err) => {
-            warn!("batched fetch `{collection}` failed ({err:#}); falling back to per-item");
+            warn!("batched fetch {collection} failed ({err:#}); falling back to per-item");
             items.clear();
             let blob = blob.clone();
             for handle in handles {
@@ -659,7 +659,7 @@ impl PimRemote<'_> {
     ) -> ReplicaPushResult {
         let Some(hash) = object else {
             warn!(
-                "append with no stored body for `{}`, rejecting",
+                "append with no stored body for {}, rejecting",
                 handle.as_str()
             );
             return rejected_bare(handle);
@@ -668,7 +668,7 @@ impl PimRemote<'_> {
         let reader = match self.blob.reader(&hash) {
             Ok(Some(file)) => file,
             Ok(None) => {
-                warn!("append body `{}` missing from blob store", hash.as_str());
+                warn!("append body {} missing from blob store", hash.as_str());
                 return rejected_bare(handle);
             }
             Err(err) => {
@@ -697,7 +697,7 @@ impl PimRemote<'_> {
                 revision: written.revision,
             },
             Err(err) => {
-                warn!("append to `{collection}` error: {err:#}");
+                warn!("append to {collection} error: {err:#}");
                 rejected_bare(handle)
             }
         }
@@ -721,7 +721,7 @@ impl PimRemote<'_> {
         let reader = match self.blob.reader(&object) {
             Ok(Some(file)) => file,
             Ok(None) => {
-                warn!("update body `{}` missing from blob store", object.as_str());
+                warn!("update body {} missing from blob store", object.as_str());
                 return rejected_bare(handle);
             }
             Err(err) => {
@@ -751,7 +751,7 @@ impl PimRemote<'_> {
                 revision,
             },
             Err(err) => {
-                warn!("update `{}` in `{collection}` rejected: {err:#}", handle.0);
+                warn!("update {} in {collection} rejected: {err:#}", handle.0);
                 rejected_bare(handle)
             }
         }
@@ -768,7 +768,7 @@ fn accepted(handle: ReplicaHandle, assigned: Option<ReplicaHandle>) -> ReplicaPu
 }
 
 fn rejected(handle: ReplicaHandle, what: &str, err: anyhow::Error) -> ReplicaPushResult {
-    warn!("{what} `{}` rejected: {err:#}", handle.as_str());
+    warn!("{what} {} rejected: {err:#}", handle.as_str());
     rejected_bare(handle)
 }
 

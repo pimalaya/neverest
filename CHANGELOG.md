@@ -162,9 +162,21 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 ### Fixed
 
+- A contacts run that downloaded an address book reported itself already in sync.
+
+  The pull plan is the set of items carrying no body yet, and it was read after the probe that resolves link ids. A card's link id is its vCard `UID` and cards have no cheap summary tier, so the probe downloads the whole card to resolve it: by the time the plan was read every card was hydrated and the plan was empty. Mail resolves its link id from an `ENVELOPE`, leaves its bodies for the hydration phase, and reported them, which is why the two kinds disagreed — and `--dry-run`, which does not hydrate during the probe, reported what the real run stayed silent about. The plan is now read before the probe, so both kinds and both run modes name the same bodies.
+
+- A run whose bodies never arrived reported itself in sync, forever.
+
+  A batched fetch that answered for fewer members than it was asked about counted as a success: 2 cards came back for 64 handles, the engine recorded those 2, heard nothing about the other 62, and could not tell them from handles it had never asked about. So it asked again on the next run, and the next. Every run enumerated the collection, fetched it, stored nothing and printed "already in sync", while a dry run beside it counted the same hunks each time. A shortfall now falls back to per-item fetches, as a batch error already did, and names the count.
+
+- An empty body poisoned the store.
+
+  A zero-byte body hashes to the digest of nothing, so every empty item a server returned resolved to the same link id; the second collided with the first, the duplicate-link-id floor froze that identity, and the collection stayed frozen on every later run. A zero-length body is now refused with the item named. No kind neverest syncs has an empty body: a message carries headers and a card carries at least its `BEGIN` and `END` lines.
+
 - An address book on a server without RFC 6578 never synced.
 
-  Enumeration is `REPORT sync-collection`, and a server may implement none of it: its `supported-report-set` then holds `addressbook-multiget` and `addressbook-query` alone, and the REPORT comes back with the RFC 3253 §3.6 `DAV:supported-report` precondition. The client recovered from a rejected sync *token* and had nothing for a server that never had the report, so every address book on such a deployment was unsyncable. It now falls back to `addressbook-query`, which yields the same ids and ETags; that carries no token, so those collections enumerate in full on every run. Detection is on the precondition rather than the HTTP status, which the server chooses, so a permission refusal or a server fault still surfaces as the failure it is.
+  Enumeration is `REPORT sync-collection`, and a server may implement none of it: its `supported-report-set` then holds `addressbook-multiget` and `addressbook-query` alone, and the REPORT comes back with the RFC 3253 §3.6 `DAV:supported-report` precondition. The client recovered from a rejected sync *token* and had nothing for a server that never had the report, so every address book on such a deployment was unsyncable. Such an address book is now listed with a `PROPFIND` at Depth 1, which yields the same ids and ETags; that carries no token, so those collections enumerate in full on every run. A `PROPFIND` rather than the `addressbook-query` the same server does advertise: a query carries a filter the server evaluates by parsing every card, so one card it cannot parse fails the whole enumeration, where a `PROPFIND` reads names and ETags out of the store and lists the collection past it. The choice is made from the advertised report set, which a sync run already pays for when it lists the address books, and from the precondition otherwise, never from the HTTP status the server chooses, so a permission refusal or a server fault still surfaces as the failure it is. A listing the server truncates is reconciled as a delta rather than as a snapshot, an incomplete member set read as the whole address book being a mass deletion.
 
 - A run that failed to scan a collection reported itself in sync, and swallowed the reason.
 

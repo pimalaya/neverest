@@ -19,7 +19,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     io::{self, Write},
     sync::{
         Mutex,
@@ -28,7 +28,7 @@ use std::{
     thread,
 };
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use crossbeam_queue::SegQueue;
 use io_pimdir::{PimdirBlobWriter, PimdirBlobs, hash::PimdirHasher};
 use io_replica::{
@@ -523,6 +523,17 @@ fn fetch_one_full(
         .finish()
         .with_context(|| format!("Commit body `{}` in `{collection}` error", handle.as_str()))?;
 
+    // No kind this syncs has an empty body: a message carries headers and a
+    // card carries at least its BEGIN and END lines. Storing one anyway mints
+    // an item whose link id is the digest of nothing, so every empty body a
+    // server hands back collapses onto that same identity and freezes it.
+    if size == 0 {
+        bail!(
+            "Server returned an empty body for `{}` in `{collection}`",
+            handle.as_str(),
+        );
+    }
+
     let (link, meta, sort_key) = kind.parse_body(&header, size as u64);
     Ok(ReplicaFetchedItem {
         handle,
@@ -537,7 +548,8 @@ fn fetch_one_full(
 /// Fetches a batch of bodies in one command, each streamed straight into its own
 /// blob so memory stays bounded, returning one fetched item per body. The
 /// handle the server echoes keys each body back, so out-of-order responses
-/// still route correctly. Any batch error falls back to per-item fetches, which
+/// still route correctly. A batch error, and a batch answering for fewer
+/// members than it was asked about, both fall back to per-item fetches, which
 /// content-addressing makes idempotent. Ticks `on_body` per body, and runs on
 /// one connection so nothing inside is shared across threads.
 pub(crate) fn hydrate_batch(
@@ -577,7 +589,41 @@ pub(crate) fn hydrate_batch(
     );
 
     match batched {
-        Ok(()) => Ok(items),
+        Ok(()) => {
+            // A batch answering for fewer members than it was asked about is
+            // not a batch that succeeded: the engine would record nothing for
+            // the rest and ask for them again on every later run. A CardDAV
+            // server was found doing exactly that, returning the ETag of each
+            // card and its body as `404 Not Found`.
+            let fetched: BTreeSet<String> = items
+                .iter()
+                .map(|item| item.handle.as_str().to_owned())
+                .collect();
+            let missing: Vec<ReplicaHandle> = handles
+                .iter()
+                .filter(|handle| !fetched.contains(handle.as_str()))
+                .cloned()
+                .collect();
+
+            if !missing.is_empty() {
+                warn!(
+                    "batched fetch `{collection}` returned {} of {} bodies; \
+                     fetching the rest one by one",
+                    items.len(),
+                    handles.len(),
+                );
+
+                let blob = blob.clone();
+                for handle in missing {
+                    items.push(fetch_one_full(kind, client, collection, handle, &blob)?);
+                    if let Some(cb) = on_body {
+                        cb();
+                    }
+                }
+            }
+
+            Ok(items)
+        }
         Err(err) => {
             warn!("batched fetch `{collection}` failed ({err:#}); falling back to per-item");
             items.clear();

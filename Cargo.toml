@@ -71,3 +71,4 @@ url = { version = "2.2", features = ["serde"] }
 [patch.crates-io]
 io-pimdir.git = "https://github.com/pimalaya/io-pimdir"
 io-replica.git = "https://github.com/pimalaya/io-replica"
+io-webdav.git = "https://github.com/pimalaya/io-webdav"

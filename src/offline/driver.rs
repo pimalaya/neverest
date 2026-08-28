@@ -689,7 +689,7 @@ fn run_local(
     let source_filter = source_config.collection().filter.clone();
 
     let workers = connection_budget(&source_config, connections);
-    let s = Spinner::start("Opening connections…");
+    let s = Spinner::start(format!("Opening connections to `{source_name}`…"));
     // With no target the store is the destination: `one-way` makes the source
     // the truth and discards what was staged locally, leaving it off merges the
     // two, which is the offline replica an app writes into.
@@ -704,7 +704,10 @@ fn run_local(
         .map(|_| open_store(work_dir, &source, account_name))
         .collect::<Result<_>>()?;
     let blobs = stores[0].blobs();
-    s.success(format!("Opened {} connection(s)", ctxs.len()));
+    s.success(format!(
+        "Opened {} connection(s) to `{source_name}`",
+        ctxs.len()
+    ));
 
     drain_queues(&mut stores[0], report);
 
@@ -718,9 +721,12 @@ fn run_local(
         drain_submits(account_config, &mut [first], &mut stores[0], &blobs, report);
     }
 
-    let s = Spinner::start("Listing collections…");
+    let s = Spinner::start(format!("Listing collections on `{source_name}`…"));
     let collections = list_collections(ctxs[0].pool.primary())?;
-    s.success(format!("Listed collections ({})", collections.len()));
+    s.success(format!(
+        "Listed {} collection(s) on `{source_name}`",
+        collections.len()
+    ));
 
     let filter = collection_filter.unwrap_or(source_filter);
     let filtered: Vec<String> = filter_collections(&collections, &filter)
@@ -734,14 +740,29 @@ fn run_local(
             .with_context(|| format!("Declare kind for `{collection}`"))?;
     }
 
-    let plans = phase1_spine(&filtered, &mut ctxs, &mut stores, &blobs, dry_run, report)?;
+    let plans = phase1_spine(
+        source_name,
+        &filtered,
+        &mut ctxs,
+        &mut stores,
+        &blobs,
+        dry_run,
+        report,
+    )?;
 
     if dry_run {
         return Ok(());
     }
 
-    let cache = phase2_hydrate(&plans, &mut ctxs, &blobs)?;
-    phase3_apply(&plans, &mut ctxs[0], &mut stores[0], &blobs, &cache)?;
+    let cache = phase2_hydrate(source_name, &plans, &mut ctxs, &blobs)?;
+    phase3_apply(
+        source_name,
+        &plans,
+        &mut ctxs[0],
+        &mut stores[0],
+        &blobs,
+        &cache,
+    )?;
 
     Ok(())
 }
@@ -788,6 +809,7 @@ fn open_source_contexts(
 /// lock. Report patches are merged after the barrier. A collection that errors
 /// is logged and skipped, its bodies never entering the plan.
 fn phase1_spine(
+    source: &str,
     filtered: &[String],
     ctxs: &mut [SourceCtx],
     stores: &mut [PimdirSourceStore],
@@ -803,7 +825,7 @@ fn phase1_spine(
     let plans: Mutex<Vec<CollectionPlan>> = Mutex::new(Vec::new());
     let merged: Mutex<SyncReport> = Mutex::new(SyncReport::default());
     let scanned = AtomicUsize::new(0);
-    let s = Spinner::start(format!("Scanning collections (0/{total})"));
+    let s = Spinner::start(format!("Scanning `{source}` (0/{total})"));
 
     let queue_ref = &queue;
     let plans_ref = &plans;
@@ -838,7 +860,7 @@ fn phase1_spine(
                         }
                     }
                     let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
-                    s_ref.set_message(format!("Scanning collections ({n}/{total})"));
+                    s_ref.set_message(format!("Scanning `{source}` ({n}/{total})"));
                 }
             });
         }
@@ -848,7 +870,7 @@ fn phase1_spine(
     let merged = merged.into_inner().unwrap();
     report.item.patch.extend(merged.item.patch);
     report.collection.patch.extend(merged.collection.patch);
-    s.success(format!("Scanned {} collection(s)", total));
+    s.success(format!("Scanned {total} collection(s) on `{source}`"));
     Ok(plans)
 }
 
@@ -879,9 +901,13 @@ fn collection_spine(
         &ctx.name,
         &mut report,
     )?;
+    // NOTE: before the probe, which resolves link ids and, for a kind that
+    // carries no cheap `Meta` tier, does so by downloading the whole body. Read
+    // after it, a card is already hydrated and reports nothing, so a run that
+    // pulled a whole address book called itself quiescent.
+    itemize_fetches(collection, display, store, &ctx.name, &mut report)?;
     upgrade_probed(collection, ctx, store, blobs, dry_run)?;
     itemize_single(collection, store, ctx, &mut report)?;
-    itemize_fetches(collection, display, store, &ctx.name, &mut report)?;
     if dry_run {
         return Ok((Vec::new(), report));
     }
@@ -916,6 +942,7 @@ fn collection_spine(
 /// into the blob store, and the fetched items are cached by collection and
 /// handle for Phase 3.
 fn phase2_hydrate(
+    source: &str,
     plans: &[CollectionPlan],
     ctxs: &mut [SourceCtx],
     blobs: &PimdirBlobs,
@@ -957,7 +984,7 @@ fn phase2_hydrate(
     let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
     let stop = AtomicBool::new(false);
     let done = AtomicUsize::new(0);
-    let s = Spinner::start(format!("Downloading 0% (0/{total_bodies})"));
+    let s = Spinner::start(format!("Downloading `{source}` 0% (0/{total_bodies})"));
 
     let queue_ref = &queue;
     let cache_ref = &cache;
@@ -973,7 +1000,9 @@ fn phase2_hydrate(
                 let on_body = || {
                     let n = done_ref.fetch_add(1, Ordering::Relaxed) + 1;
                     let percent = (n * 100).checked_div(total_bodies).unwrap_or(100);
-                    s_ref.set_message(format!("Downloading {percent}% ({n}/{total_bodies})"));
+                    s_ref.set_message(format!(
+                        "Downloading `{source}` {percent}% ({n}/{total_bodies})"
+                    ));
                 };
                 while !stop_ref.load(Ordering::Relaxed) {
                     let Some((collection, handles)) = queue_ref.pop() else {
@@ -1008,7 +1037,10 @@ fn phase2_hydrate(
         return Err(err);
     }
     let cache = cache.into_inner().unwrap();
-    s.success(format!("Downloaded {} item(s)", cache.len()));
+    s.success(format!(
+        "Downloaded {} item(s) from `{source}`",
+        cache.len()
+    ));
     Ok(cache)
 }
 
@@ -1017,6 +1049,7 @@ fn phase2_hydrate(
 /// [`CachedFetchRemote`] serving each body from the Phase 2 cache, a miss
 /// falling back to a real fetch. Only store writes happen here.
 fn phase3_apply(
+    source: &str,
     plans: &[CollectionPlan],
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
@@ -1024,14 +1057,14 @@ fn phase3_apply(
     cache: &HashMap<FetchKey, ReplicaFetchedItem>,
 ) -> Result<()> {
     let total = plans.len();
-    let s = Spinner::start(format!("Writing (0/{total})"));
+    let s = Spinner::start(format!("Writing `{source}` (0/{total})"));
     for (index, (collection, _)) in plans.iter().enumerate() {
         if let Err(err) = apply_full(collection, ctx, store, blobs, cache) {
             warn!("`{collection}` write error: {err:#}");
         }
-        s.set_message(format!("Writing ({}/{total})", index + 1));
+        s.set_message(format!("Writing `{source}` ({}/{total})", index + 1));
     }
-    s.success(format!("Wrote {total} collection(s)"));
+    s.success(format!("Wrote {total} collection(s) on `{source}`"));
     Ok(())
 }
 
@@ -1174,8 +1207,13 @@ fn itemize_single(
     Ok(())
 }
 
-/// Reports the pull plan of a one-source local sync under a dry run: each
-/// not-yet-`Full`, non-tombstone item is a body a real run would fetch.
+/// Reports the pull plan of a one-source local sync: each not-yet-`Full`,
+/// non-tombstone item is a body this run fetches, named the same way whether or
+/// not the run is a dry one.
+///
+/// Runs before the probe rather than after it. A kind with no cheap `Meta` tier
+/// resolves its link id from the body, so the probe hydrates it, and a plan read
+/// afterwards would be empty for exactly the items the run is about to pull.
 fn itemize_fetches(
     collection: &str,
     display: &str,

@@ -6,9 +6,9 @@
 //! reachable service becomes one selectable entry carrying the
 //! authentication capabilities it advertised (the concrete method is
 //! picked once the service is chosen). A detected Microsoft account also
-//! offers the Graph API, matching the backends neverest actually has:
-//! only IMAP + SMTP and Microsoft Graph are proposed, so the wizard
-//! never writes a side [`crate::client::open`] would refuse.
+//! offers the Graph API. Only the services neverest has a backend for are
+//! proposed, IMAP + SMTP, Microsoft Graph, CardDAV and CalDAV, so the
+//! wizard never writes a source [`crate::client::open`] would refuse.
 
 #![cfg_attr(not(feature = "imap"), allow(dead_code, unused_imports))]
 
@@ -65,8 +65,11 @@ pub enum DiscoveredKind {
     /// The Microsoft Graph API (Microsoft accounts only).
     Msgraph,
     /// A CardDAV endpoint (RFC 6352), discovered through RFC 6764: the
-    /// contacts kind, synced as its own account.
+    /// contacts kind.
     Carddav { url: String },
+    /// A CalDAV endpoint (RFC 4791), discovered the same way: the calendar
+    /// kind.
+    Caldav { url: String },
 }
 
 /// A discovered TCP service endpoint (IMAP or SMTP).
@@ -115,6 +118,7 @@ impl fmt::Display for Discovered {
             DiscoveredKind::ImapSmtp { imap, .. } => write!(f, "IMAP + SMTP {}", imap.host),
             DiscoveredKind::Msgraph => write!(f, "Microsoft Graph API"),
             DiscoveredKind::Carddav { url } => write!(f, "CardDAV (contacts) {url}"),
+            DiscoveredKind::Caldav { url } => write!(f, "CalDAV (calendar) {url}"),
         }
     }
 }
@@ -138,6 +142,7 @@ impl Discovered {
             DiscoveredKind::ImapSmtp { .. } => 0,
             DiscoveredKind::Msgraph => 1,
             DiscoveredKind::Carddav { .. } => 2,
+            DiscoveredKind::Caldav { .. } => 3,
         }
     }
 }
@@ -150,6 +155,7 @@ pub fn search(email: &str) -> Result<Vec<Discovered>> {
         DiscoveryService::Imap,
         DiscoveryService::Smtp,
         DiscoveryService::Carddav,
+        DiscoveryService::Caldav,
     ]);
     let configs = client.compose_all_within(email, services, DISCOVERY_TIMEOUT)?;
 
@@ -198,6 +204,16 @@ pub fn search(email: &str) -> Result<Vec<Discovered>> {
         });
     }
 
+    if let Some(caldav) = best(&configs, DiscoveryService::Caldav, provider)
+        && let Some(url) = http_endpoint(caldav)
+    {
+        found.push(Discovered {
+            kind: DiscoveredKind::Caldav { url },
+            username: caldav.username.clone(),
+            auth: caps_of(&caldav.auth),
+        });
+    }
+
     found.sort_by_key(Discovered::rank);
     Ok(found)
 }
@@ -209,7 +225,7 @@ pub fn retain_supported(found: &mut Vec<Discovered>) {
     found.retain(|entry| match entry.kind {
         DiscoveredKind::ImapSmtp { .. } => cfg!(feature = "imap"),
         DiscoveredKind::Msgraph => cfg!(feature = "msgraph"),
-        DiscoveredKind::Carddav { .. } => cfg!(feature = "carddav"),
+        DiscoveredKind::Carddav { .. } | DiscoveredKind::Caldav { .. } => cfg!(feature = "dav"),
     });
 }
 

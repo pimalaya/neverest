@@ -413,12 +413,19 @@ equal to the value that was skipped.
 
 ### Requirement: Every remote backend is a cargo feature
 Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend,
-`msgraph` for the Microsoft Graph backend, `smtp` for the SMTP submission
-channel. All three SHALL ship in the default feature set. A missing backend
-SHALL surface at runtime, never at build time: every feature combination
-compiles, the configuration surface stays whole (every source config still
-parses), and an unavailable backend fails when the source is *opened*, as the
-JMAP and Gmail sources already do. A build with neither `smtp` nor `msgraph` has
+`msgraph` for the Microsoft Graph backend, `dav` for the CardDAV and CalDAV
+backends, `smtp` for the SMTP submission channel. All of them SHALL ship in the
+default feature set.
+
+CardDAV and CalDAV SHALL share one feature rather than take one each: they are
+one dependency, one adapter and one discovery mechanism, so separate features
+would gate nothing that is separately compiled. A feature that merely aliases
+another is not introduced for the older spelling.
+
+A missing backend SHALL surface at runtime, never at build time: every feature
+combination compiles, the configuration surface stays whole (every source config
+still parses), and an unavailable backend fails when the source is *opened*, as
+the JMAP and Gmail sources already do. A build with neither `smtp` nor `msgraph` has
 no send channel and SHALL warn rather than perform a submit intent. Each
 optional backend crate SHALL take its TLS provider from neverest's own
 `native-tls` / `rustls-aws` / `rustls-ring` / `vendored` features rather than
@@ -490,6 +497,43 @@ add/remove flag hunks, and a `Vanished` into a delete hunk. A newly-pulled messa
 (`Added`) is already reported by the pull plan (a `Fetch` hunk) and is not
 re-itemized.
 
+### Requirement: A dry run works on a replica that shares the bodies
+A dry run SHALL work on a throwaway replica of the pimdir store, so that no
+checkpoint advances and nothing reaches a server.
+
+The replica SHALL be built beside the real store rather than under the temporary
+directory, so the two share a filesystem, and its bodies SHALL be hardlinked
+rather than copied. Bodies are content-addressed and therefore immutable, and a
+dry run neither rewrites nor purges one, so the replica needs the same bytes and
+not its own: a store whose blob tree is gigabytes SHALL cost a dry run some
+directory entries, never a read and a write of the whole tree, and never that
+much memory on a machine whose temporary directory is a tmpfs.
+
+Everything the run writes to, the index above all, SHALL be copied. A file this
+rule misjudges SHALL be copied rather than shared, so being wrong costs a slower
+dry run and never a write reaching the real store. A link the filesystem refuses
+SHALL fall back to a copy.
+
+The replica SHALL be removed however the run ends, an early return included, and
+a run SHALL clear what an earlier one left behind: a release build aborts on a
+panic and runs no destructor, so a leftover is a state to meet rather than one to
+rule out. Two runs of one account cannot race for it, the store lock being held
+for the whole run.
+
+The preparation SHALL be logged with the time it took, and a blob tree that could
+not be shared SHALL say so, that being the slow case the sharing exists to avoid.
+
+#### Scenario: A dry run over a mail account's store
+- GIVEN an account whose store holds gigabytes of bodies
+- WHEN `sync --dry-run` runs
+- THEN the bodies are shared rather than copied, and the run starts without
+  reading and writing the whole tree
+
+#### Scenario: A dry run that fails leaves nothing behind
+- GIVEN a dry run whose credentials fail to resolve
+- WHEN it returns
+- THEN its replica is gone
+
 ### Requirement: The report shows the one-source pull plan
 A one-source sync SHALL report its pull plan, each non-tombstone item whose body
 it would download into the store, as `Fetch` hunks, in both a dry run (which
@@ -532,6 +576,45 @@ link ids or to order a download. This mirrors the lean, targeted `enumerate`
 (QRESYNC delta); a first sync stays inherently heavy (every new message's link
 id is fetched once), but the redundant second sweep is gone.
 
+### Requirement: Credentials are resolved once per run
+A run SHALL resolve every configured secret once, up front, into a runtime
+account holding the values themselves, and SHALL open every connection from
+that account. Nothing below that seam may spawn a process to authenticate: a
+second connection to a side, whether opened eagerly for the connection budget or
+lazily for a concurrent fetch, SHALL cost a handshake and no credential read.
+
+Resolution SHALL memoize the commands it spawns, keyed on the command as the
+configuration wrote it, so a configuration naming one password entry from
+several tables SHALL spawn it once per run rather than once per table.
+
+The key SHALL be the configured shape itself, a shell line or a program with
+its arguments, compared as written and never across the two: a shell line and
+the argv spelling that runs it through the platform shell SHALL resolve on
+their own. Reading one as the other means guessing what a configuration meant,
+and handing a credential to a field that did not ask for it is the failure that
+guess would cause.
+
+A credential that fails to resolve SHALL fail its endpoint, not the account: the
+error SHALL be raised when that endpoint is read, and reported where a source
+that could not be opened is already reported, so the account's other sources
+still sync.
+
+The wait SHALL be visible. A credential store answers in seconds when its agent
+is locked, so the resolution SHALL be reported while it runs, and each spawned
+command SHALL be logged with the time it took. Neither the resolved value nor
+the command arguments SHALL be logged, a command line being free to carry the
+secret itself.
+
+An account is resolved once and never re-read within a run. This is exact for a
+one-shot sync and SHALL NOT be relied on by a long-lived caller, which would
+resolve a new account rather than refresh this one.
+
+#### Scenario: One entry named by four tables
+- GIVEN an account whose `imap`, `smtp`, `carddav` and `caldav` tables name one
+  `password.command`
+- WHEN a run resolves it
+- THEN the command runs once, whatever connection budget the sources carry
+
 ### Requirement: Sync is one-shot
 A `sync` run SHALL perform a bounded number of reconcile passes until quiescent
 and exit. Watch and real-time triggers are out of scope: watching belongs to
@@ -544,11 +627,23 @@ enqueue mutations through io-pimdir's producer queue. At the start of every sync
 run, before any network work, each collection with pending queue work SHALL be
 drained (`drain_collection`: exactly-once apply-and-delete per action,
 permanently bad actions parked, transient failures left queued in order). The
-applied counts SHALL be logged (info when nonzero) and reported, and every
-parked action SHALL surface in the run report until repaired. The subsequent
-sync of a drained collection pushes the resulting dirty state. An action kind
-the drain cannot apply itself (a capability-bound intent such as `submit`)
-SHALL be left pending for the phase that can, never parked.
+applied counts SHALL be logged (info when nonzero) and reported.
+
+Every parked action SHALL surface in the run report until repaired, and SHALL
+surface **once per run**. A parked row belongs to the store rather than to a
+source, the queue recording none, so reading them where the drain runs reports
+each of them once per source that ran: one row read as three problems on an
+account syncing mail, contacts and calendar. They SHALL therefore be read once,
+after every source has drained, in a dry run as much as in a real one.
+
+The subsequent sync of a drained collection pushes the resulting dirty state. An
+action kind the drain cannot apply itself (a capability-bound intent such as
+`submit`) SHALL be left pending for the phase that can, never parked.
+
+#### Scenario: One parked row on a three-source account
+- GIVEN an account whose mail, contacts and calendar sources all drain
+- WHEN one queue action is parked
+- THEN the run reports one warning, not one per source
 
 ### Requirement: A run holds the store lock, waiting bounded
 A sync run SHALL hold an advisory `sync.lock` in the **actual** store directory
@@ -577,8 +672,8 @@ delta rows (`mid:`/`alt:` link ids, meta v1), the `Full` tier from the raw MIME
 content streamed into the blob store. Flags map to the IANA wire spellings
 (`isRead` = `\Seen`, a flagged follow-up = `\Flagged`, `isDraft` = `\Draft`).
 Auth SHALL be a bearer access token only, resolved through the standard
-secret-command idiom (`auth.token.raw` / `auth.token.command`) once per opened
-client; neverest SHALL NOT run any OAuth flow itself (no device sign-in, no
+secret-command idiom (`auth.token.raw` / `auth.token.command`) once per run with
+every other credential; neverest SHALL NOT run any OAuth flow itself (no device sign-in, no
 client credentials, no token persistence): acquiring and refreshing the token
 is delegated to an external command, typically ortie. No token is ever logged.
 Push scope is honest: flag changes push through `message_update` and deletes
@@ -761,12 +856,17 @@ several.
 ### Requirement: Link id and meta are per-kind, resolved at one seam
 The cross-collection link id and the `v:1` meta summary SHALL be produced by one
 implementation per media type, selected from the source's declared kind at a single
-dispatch point. `message/rfc822` keeps the `Message-ID` (`mid:`) identity with
+dispatch point. `message/rfc822` keeps the bare `Message-ID` identity with
 its `(subject, date, sender)` (`alt:`) fallback. `text/vcard` and `text/calendar`
-SHALL use the vCard / iCalendar `UID` (`uid:`), falling back to the content hash
+SHALL use the bare vCard / iCalendar `UID`, falling back to the content hash
 (`hash:`) for a body carrying no `UID`; an iCalendar `RECURRENCE-ID` SHALL NOT
 enter the link id, so a recurrence override stays the same item. Each kind's meta
 schema SHALL follow the pimdir SPEC Annex A convention registered for it.
+
+The `text/calendar` sort key SHALL be the item's start resolved to RFC 3339 in
+UTC (`DUE` then `DTSTART` for a `VTODO`, `DTSTART` otherwise), read through the
+`VTIMEZONE` the resource itself carries, so an agenda reads chronologically
+without the store holding a time zone database.
 
 ### Requirement: Mutable-content backends carry a revision and push updates
 A backend whose item bodies change in place SHALL report a content revision (an
@@ -785,18 +885,60 @@ run until it is resolved. Neverest SHALL NOT resolve a content conflict by
 itself; resolution is an edit, staged through the pimdir queue by whoever owns
 the decision.
 
-### Requirement: An ambiguous identity is reported, never judged
-An identity the engine marked ambiguous (a collection holding two items with one
-link id, two messages with the same `Message-ID`) SHALL appear in the sync
-report, text and `--json`, naming its collection and every handle involved, and
-SHALL keep appearing on every run until the collection holds the identity once.
+### Requirement: A new resource name never collides with a stored one
+A resource name derived for an item being appended SHALL be unique within its
+collection. Where the item's link id was minted because its identity was already
+taken (pimdir SPEC §9), the name SHALL carry the same distinguishing part, so two
+items sharing a `UID` are pushed to two hrefs.
 
-Neverest SHALL NOT repair a duplicated collection, and SHALL NOT report it as an
-invalid mailbox: RFC 5322 §3.6.4 binds the generator of a `Message-ID` and says
-nothing about what a store may hold, so the report states what neverest cannot
-tell apart rather than what the user did wrong. Detection, policy and state
-belong to the engine and the store; this crate surfaces them and derives no
-duplicate rule of its own.
+The fallback that derives a name from the body is the trap: a duplicate's body
+carries the same `UID` as its twin, so a name derived from it collides by
+construction, and a colliding `PUT` is not refused by the server but applied to
+the resource already there. The copy that was already synced is overwritten by
+the copy being appended, which loses an event and reports success.
+
+#### Scenario: Two copies are pushed to two names
+- GIVEN two items of one collection sharing a `UID`, one keyed bare and one minted
+- WHEN both are appended to a source that holds neither
+- THEN they are created under two distinct resource names
+
+### Requirement: A create is refused when the server hands back a bound handle
+A create whose assigned handle is already bound by that source in that collection
+SHALL be recorded as a rejected push, never as a binding. The engine binds one
+handle per item per source, and two items pointing at one handle make the next
+enumeration read one of them as vanished, which propagates a delete of a resource
+nobody removed.
+
+A server answering a create by updating the resource that already holds the
+`UID`, rather than refusing it, is what produces the collision. That behaviour is
+out of spec (RFC 6352 §6.3.2) and cannot be prevented from here, so it is
+detected on the way back instead.
+
+#### Scenario: A merging server is caught
+- GIVEN an append of an item whose `UID` the target already holds
+- WHEN the server answers with the href of the existing resource
+- THEN the push is reported as rejected and no second binding is written
+
+### Requirement: A refused duplicate names itself
+A push refused with the CalDAV or CardDAV no-uid-conflict precondition SHALL be
+reported as a duplicate `UID` refusal, naming the source, the collection and the
+`UID`, in the text and `--json` reports alike. It SHALL keep appearing on every
+run until the source stops holding the identity twice.
+
+The repetition is the point: the run wrote nothing, the state is unresolved, and
+the line carries the one action that resolves it. That is what separates it from
+the phantom fetch this change removes, which named work no run could ever
+complete.
+
+#### Scenario: The refusal is actionable
+- GIVEN a target that refuses a duplicate `UID`
+- WHEN a run pushes the second copy
+- THEN the report names the refusal, the `UID` and the collection, and the run reports having written nothing
+
+### Requirement: A duplicated identity is mirrored, not reported
+A collection holding two resources under one identity SHALL be mirrored as two
+items, and SHALL produce no report entry of its own. The store holds what the
+source holds, and a report entry is for work a run could not do.
 
 ### Requirement: The report accounts for every write the run made
 A run that wrote to a remote SHALL report it. `already in sync` SHALL mean the
@@ -929,12 +1071,12 @@ and leaving every intent pending behind a warning.
 ### Requirement: The conventions are the format's, the readers are not
 A link id, a summary and a sort key SHALL be what pimdir SPEC Annex A and the
 format's `vectors/meta.json` give, and the summary SHALL be
-`io_pimdir::conventions`'s own type (`PimdirMailMeta`, `PimdirCardMeta`), so the
-schema cannot drift from the format's by a field or a spelling. This crate SHALL
-NOT define a summary struct of its own.
+`io_pimdir::conventions`'s own type (`PimdirMailMeta`, `PimdirCardMeta`,
+`PimdirCalendarMeta`), so the schema cannot drift from the format's by a field or
+a spelling. This crate SHALL NOT define a summary struct of its own.
 
-The **scanners** that read those fields off a body stay here while io-pimdir's
-lose data these do not, and each gap SHALL be held by a test naming it:
+A **scanner** stays here only while io-pimdir's loses data this one does not, and
+each gap SHALL be held by a test naming it:
 
 - `conventions::mail` reads headers raw, so an RFC 2047 encoded-word subject
   reaches a reader as `=?utf-8?q?…?=`;
@@ -943,13 +1085,22 @@ lose data these do not, and each gap SHALL be held by a test naming it:
   §3.4 escaping in place.
 
 The format's vectors are ASCII-only and cover neither, so nothing upstream
-reports the difference. When io-pimdir closes a gap, its `derive` SHALL replace
-the scanner rather than be mirrored beside it.
+reports the difference. `conventions::calendar` has no such gap and SHALL be
+delegated to outright: it reads the summary fields verbatim, which is how Annex
+A.3 spells them, and it resolves the sort key through the resource's own
+`VTIMEZONE`, which is the answer two writers of one store must not give
+differently. When io-pimdir closes a gap, its `derive` SHALL likewise replace the
+scanner rather than be mirrored beside it.
 
 #### Scenario: A non-ASCII subject reaches a reader readable
 - GIVEN a message whose `Subject:` is RFC 2047 encoded
 - WHEN either tier summarises it
 - THEN `meta.subject` holds the decoded text, not the encoded-word
+
+#### Scenario: A calendar resource longer than the streamed prefix is sized whole
+- GIVEN a calendar resource whose body exceeds the header prefix the stream captures
+- WHEN it is summarised
+- THEN `meta.size` holds the octet count the stream reported, not the prefix's
 
 ### Requirement: A `server` is an authority or a URL, resolved at one seam
 Every backend's `server` SHALL accept either a bare authority, with or without a
@@ -1027,3 +1178,38 @@ quiescent having downloaded a collection.
 - GIVEN an empty store and an address book holding one card
 - WHEN `sync` runs without `--dry-run`
 - THEN it reports fetching that card, as `--dry-run` said it would, rather than reporting itself already in sync
+
+### Requirement: A CalDAV source syncs calendars
+A source MAY declare a `caldav` backend, whose items are `text/calendar`
+calendar object resources and whose collections are the calendars under the
+principal's calendar home set (RFC 4791 §6.2.1), keyed by their path segment.
+It SHALL accept the same `server`, `tls`, `alpn` and `auth` fields as a CardDAV
+source, and SHALL carry no send channel, submission being a mail capability.
+
+The item SHALL be the calendar object **resource**, never the component: RFC
+4791 §4.1 keeps every component sharing a `UID` in one resource, so a recurring
+series and its modified instances are one item under one link id, and an
+override is a body edit rather than an item of its own. A new resource SHALL be
+named `<UID>.ics`, the `UID` sanitised to one path segment, so the href stays
+derivable from the body, unless its key was minted, which the name then carries
+too.
+
+A calendar SHALL be synced whole. Restricting it to a component type is an
+item-level filter, which no kind has.
+
+#### Scenario: A calendar syncs, follows a server edit and retains a delete
+- GIVEN a CalDAV server holding two events in one calendar
+- WHEN the account is synced, one event is edited on the server and another deleted, and it is synced again
+- THEN the store holds both events keyed by their `UID`, follows the edited body, and keeps the deleted one as retained
+
+### Requirement: One adapter serves both DAV protocols
+CardDAV and CalDAV SHALL be implemented by one client adapter, parameterised by
+which of the two a session speaks. The difference between them SHALL be confined
+to the home set it discovers, the collection listing it runs and the resource
+extension it names a new item with; enumeration, multiget, conditional writes,
+flag handling and the reconnect repair are RFC 4918 and RFC 6578 and SHALL NOT
+be written twice.
+
+The adapter SHALL report its own media type to the client seam, so one backend
+variant still declares two kinds and the store records the right one per
+collection.

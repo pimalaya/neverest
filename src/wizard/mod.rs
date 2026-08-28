@@ -2,8 +2,8 @@
 //! per-backend credential prompts, and the converters from wizard
 //! answers to on-disk [`crate::config`] types.
 
-#[cfg(feature = "carddav")]
-pub mod carddav;
+#[cfg(feature = "dav")]
+pub mod dav;
 pub mod discover;
 pub mod edit;
 #[cfg(feature = "imap")]

@@ -1062,9 +1062,9 @@ dependencies = [
 
 [[package]]
 name = "indexmap"
-version = "2.14.0"
+version = "2.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d466e9454f08e4a911e14806c24e16fba1b4c121d1ea474396f396069cf949d9"
+checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
  "hashbrown 0.17.1",
@@ -1163,7 +1163,7 @@ dependencies = [
 [[package]]
 name = "io-pimdir"
 version = "0.3.0"
-source = "git+https://github.com/pimalaya/io-pimdir#8a11663b60b485e94a567ff50fe3a5617166bb11"
+source = "git+https://github.com/pimalaya/io-pimdir#92a4d437659fb21b5e5fbca4210b2d58d796d349"
 dependencies = [
  "blake3",
  "fs4",
@@ -1188,7 +1188,7 @@ dependencies = [
 [[package]]
 name = "io-replica"
 version = "0.4.2"
-source = "git+https://github.com/pimalaya/io-replica#a3cfdff0ff76536ce53198ac9133cb193861bdfc"
+source = "git+https://github.com/pimalaya/io-replica#9f87264dad7e5746bca17bbb01f2e56f692eee8d"
 dependencies = [
  "log",
  "thiserror",
@@ -1233,7 +1233,7 @@ dependencies = [
 [[package]]
 name = "io-webdav"
 version = "0.2.1"
-source = "git+https://github.com/pimalaya/io-webdav#aefaba385a0e98432d71ff63daa8fbf831ec7ca1"
+source = "git+https://github.com/pimalaya/io-webdav#c569f81259746ea5744b2cb374582680a4ac82a2"
 dependencies = [
  "anyhow",
  "io-http",
@@ -1756,8 +1756,7 @@ dependencies = [
 [[package]]
 name = "pimalaya-config"
 version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2119c2109d8aef16260615552a6d57d111fc5efab87f9e9b15a1fba514e05522"
+source = "git+https://github.com/pimalaya/config#cb5cdca092b666350babccc9584254cf8e956371"
 dependencies = [
  "anyhow",
  "dirs",

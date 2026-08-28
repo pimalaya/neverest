@@ -13,6 +13,7 @@ use pimalaya_cli::{
 use pimalaya_config::toml::TomlConfig;
 
 use crate::{
+    account::Account,
     client,
     config::Config,
     offline::{driver, state::StoreState},
@@ -48,9 +49,12 @@ impl InitCommand {
 
         let mode = account_config.mode()?;
 
-        for (endpoint, config) in account_config.endpoints()? {
+        let account = Account::resolve(&account_config)?;
+
+        for endpoint in account_config.endpoints()?.keys() {
             let s = Spinner::start(format!("Initializing {endpoint}…"));
-            client::init(config).with_context(|| format!("Initialize {endpoint}"))?;
+            client::init(&account.get(endpoint)?)
+                .with_context(|| format!("Initialize {endpoint}"))?;
             s.success(format!("Initialized {endpoint}"));
         }
 

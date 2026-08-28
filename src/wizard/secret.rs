@@ -10,11 +10,9 @@
 
 #![cfg_attr(not(feature = "imap"), allow(dead_code, unused_imports))]
 
-use std::process::Command;
-
 use anyhow::{Result, bail};
 use pimalaya_cli::wizard::keyring::{self, SecretChoice};
-use pimalaya_config::{command::shell, secret::Secret};
+use pimalaya_config::{command::CommandConfig, secret::Secret};
 
 /// Prompts for a password [`Secret`] through the shared keyring picker.
 ///
@@ -52,9 +50,10 @@ fn command_secret(argv: Vec<String>) -> Result<Secret> {
         bail!("Empty command for secret");
     };
 
-    let mut cmd = Command::new(program);
-    cmd.args(args);
-    Ok(Secret::Command(cmd))
+    Ok(Secret::Command(CommandConfig::Argv {
+        program: program.clone(),
+        args: args.to_vec(),
+    }))
 }
 
 /// Builds a [`Secret::Command`] from a shell command line, the fallback
@@ -65,7 +64,7 @@ fn shell_secret(line: &str) -> Result<Secret> {
         bail!("Empty shell command for secret");
     }
 
-    Ok(Secret::Command(shell(line)))
+    Ok(Secret::Command(CommandConfig::Shell(line.to_owned())))
 }
 
 #[cfg(test)]

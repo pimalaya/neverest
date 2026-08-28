@@ -85,7 +85,7 @@ use log::warn;
 use serde::Deserialize;
 
 #[cfg(feature = "smtp")]
-use crate::config::{SmtpConfig, server_url};
+use crate::account::SmtpAccount;
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::GraphClient;
 
@@ -274,36 +274,27 @@ impl SendChannel<'_> {
 /// scheme, the optional STARTTLS upgrade, then the SASL exchange the
 /// `sasl` table names, if any.
 ///
-/// The server string goes through [`server_url`], as the IMAP and DAV
-/// ones do: a value carrying no scheme is a bare authority and takes
-/// `smtps://`, submission over implicit TLS being the modern default and
-/// the one RFC 8314 §3.3 asks for.
+/// It takes the resolved [`SmtpAccount`] rather than the configuration
+/// it came from, so a send channel sharing its password entry with the
+/// source it belongs to costs no second unlock. The URL is already
+/// resolved too: a configured value carrying no scheme is a bare
+/// authority and takes `smtps://`, submission over implicit TLS being
+/// the modern default and the one RFC 8314 §3.3 asks for.
 #[cfg(feature = "smtp")]
-pub fn connect_smtp(config: &SmtpConfig) -> Result<SmtpClientStd> {
-    let url = server_url(&config.server, "smtps")?;
-    let alpn = config
-        .alpn
-        .clone()
-        .unwrap_or_else(SmtpClientStd::default_alpn);
-    let tls = config.tls.clone().into_tls(alpn);
-    let sasl = config
-        .sasl
-        .clone()
-        .map(|sasl| {
-            let host = url.host_str().unwrap_or_default();
-            let port = url
-                .port()
-                .unwrap_or_else(|| SmtpClientStd::default_port(url.scheme()));
-
-            sasl.try_into_sasl(host, port)
-        })
-        .transpose()?;
+pub fn connect_smtp(account: &SmtpAccount) -> Result<SmtpClientStd> {
     let opts = SmtpSessionOpenOptions {
-        starttls: config.starttls,
+        starttls: account.starttls,
     };
 
-    let (client, _capabilities) = SmtpClientStd::connect(&url, &tls, ehlo_domain(), sasl, opts)
-        .context("Cannot connect to the SMTP submission server")?;
+    let (client, _capabilities) = SmtpClientStd::connect(
+        &account.server,
+        &account.tls,
+        ehlo_domain(),
+        account.sasl.clone(),
+        opts,
+    )
+    .context("Cannot connect to the SMTP submission server")?;
+
     Ok(client)
 }
 
@@ -440,6 +431,7 @@ mod tests {
     use io_pimdir::{PimdirBlobs, hash::PimdirHashAlgo};
 
     use super::*;
+    use crate::config::SmtpConfig;
 
     /// What the scripted SMTP sink captured from one session: the envelope
     /// command lines and the DATA payload.
@@ -537,7 +529,8 @@ mod tests {
             "server = \"smtp://127.0.0.1:{port}\"\nstarttls = false\n"
         ))
         .unwrap();
-        SendChannel::Smtp(connect_smtp(&config).expect("connect sink"))
+        let account = SmtpAccount::resolve(&config).expect("resolve sink");
+        SendChannel::Smtp(connect_smtp(&account).expect("connect sink"))
     }
 
     #[test]

@@ -21,6 +21,7 @@ use std::{
     cmp::Reverse,
     collections::{BTreeSet, HashMap},
     io::{self, Write},
+    mem,
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -44,14 +45,24 @@ use io_replica::{
 };
 use log::warn;
 
+#[cfg(feature = "dav")]
+use crate::dav::client::is_duplicate_uid;
 use crate::{
     client::{Client, Pool},
     item::{
         flag::{Flag, FlagOp},
         summary::ItemSummary,
     },
-    kind::Kind,
+    kind::{Kind, LinkId},
 };
+
+/// No DAV backend is compiled in, so no write can be refused with the
+/// `no-uid-conflict` precondition: it is the only refusal named that way, mail
+/// carrying no identity a server enforces.
+#[cfg(not(feature = "dav"))]
+fn is_duplicate_uid(_err: &anyhow::Error) -> bool {
+    false
+}
 
 /// One side's remote seam over its connection [`Pool`].
 ///
@@ -80,6 +91,67 @@ pub struct PimRemote<'a> {
     /// accelerates to a smooth finish rather than stalling on a big body that
     /// happened to land last.
     sizes: HashMap<String, u64>,
+    /// What this side is known to hold, so a create answered with a handle it
+    /// already holds is caught before it becomes a second binding.
+    held: HeldHandles,
+    /// The creates this side refused because it already holds the item's
+    /// identity, drained into the report by the driver, which names the
+    /// source. Filled in push order, one entry per refused create, and never
+    /// deduplicated: two copies refused are two lines.
+    refused: Vec<RefusedCreate>,
+}
+
+/// The handles one side is known to hold, per collection: everything its
+/// enumerations named this run, less what they reported vanished, plus every
+/// handle a create was assigned.
+///
+/// It is a floor rather than a proof of what the side holds. A full
+/// enumeration (a DAV collection with no `sync-collection`, an IMAP resync)
+/// makes it the whole collection; an incremental one narrows it to what
+/// changed plus this run's own creates. That is enough for what it guards,
+/// a server answering a create with a resource it already had.
+#[derive(Default)]
+struct HeldHandles(HashMap<String, BTreeSet<String>>);
+
+impl HeldHandles {
+    /// Folds one enumeration of `collection` in.
+    fn remember(
+        &mut self,
+        collection: &str,
+        items: &[ReplicaRemoteItem],
+        vanished: &[ReplicaHandle],
+    ) {
+        let held = self.0.entry(collection.to_string()).or_default();
+        held.extend(items.iter().map(|item| item.handle.0.clone()));
+        for handle in vanished {
+            held.remove(handle.as_str());
+        }
+    }
+
+    /// Claims `handle` for a create, answering whether it was free. A handle
+    /// the side already holds is not a new member: the server answered the
+    /// create with a resource it had, and binding the item to it would leave
+    /// two items on one handle.
+    fn claim(&mut self, collection: &str, handle: &str) -> bool {
+        self.0
+            .entry(collection.to_string())
+            .or_default()
+            .insert(handle.to_string())
+    }
+}
+
+/// One create a side refused with the CalDAV or CardDAV `no-uid-conflict`
+/// precondition, as the remote knows it.
+///
+/// It carries the collection as the wire names it and the identity the two
+/// copies share; the source's name is the driver's to add, this seam knowing
+/// the namespace a collection binds into rather than the name the report
+/// speaks of it by.
+pub struct RefusedCreate {
+    /// The collection the create was refused in, as the server names it.
+    pub collection: String,
+    /// The identity the refused copy shares with the resource already there.
+    pub uid: String,
 }
 
 impl<'a> PimRemote<'a> {
@@ -92,6 +164,8 @@ impl<'a> PimRemote<'a> {
             namespace: namespace.into(),
             on_body: None,
             sizes: HashMap::new(),
+            held: HeldHandles::default(),
+            refused: Vec::new(),
         }
     }
 
@@ -113,12 +187,20 @@ impl<'a> PimRemote<'a> {
             namespace: namespace.into(),
             on_body: Some(on_body),
             sizes,
+            held: HeldHandles::default(),
+            refused: Vec::new(),
         }
     }
 
     /// [`wire_name`] against this side's namespace.
     fn wire_name<'n>(&self, collection: &'n str) -> &'n str {
         wire_name(&self.namespace, collection)
+    }
+
+    /// The creates this side refused because it already holds the identity,
+    /// taken off the remote so the driver can name them in the report.
+    pub fn take_refused(&mut self) -> Vec<RefusedCreate> {
+        mem::take(&mut self.refused)
     }
 }
 
@@ -195,7 +277,7 @@ impl ReplicaRemote for PimRemote<'_> {
             .primary()
             .enumerate(collection, cursor)
             .with_context(|| format!("Enumerate {collection} error"))?;
-        let items = enumeration
+        let items: Vec<ReplicaRemoteItem> = enumeration
             .items
             .into_iter()
             .map(|entry| ReplicaRemoteItem {
@@ -204,11 +286,12 @@ impl ReplicaRemote for PimRemote<'_> {
                 revision: entry.revision,
             })
             .collect();
-        let vanished = enumeration
+        let vanished: Vec<ReplicaHandle> = enumeration
             .vanished
             .into_iter()
             .map(ReplicaHandle::from)
             .collect();
+        self.held.remember(collection, &items, &vanished);
         Ok(ReplicaRemoteSnapshot {
             items,
             vanished,
@@ -286,8 +369,11 @@ impl ReplicaRemote for PimRemote<'_> {
                     object,
                     ..
                 } => {
-                    let hint = link_id.as_ref().and_then(|l| self.kind.link_hint(l));
-                    self.append(&collection, handle, &flags, object, hint)
+                    let link = link_id
+                        .as_ref()
+                        .map(|link| self.kind.split_link_id(link))
+                        .unwrap_or_default();
+                    self.append(&collection, handle, &flags, object, link)
                 }
                 ReplicaChangeKind::Update {
                     handle,
@@ -524,9 +610,10 @@ fn fetch_one_full(
         .with_context(|| format!("Commit body {} in {collection} error", handle.as_str()))?;
 
     // No kind this syncs has an empty body: a message carries headers and a
-    // card carries at least its BEGIN and END lines. Storing one anyway mints
-    // an item whose link id is the digest of nothing, so every empty body a
-    // server hands back collapses onto that same identity and freezes it.
+    // card carries at least its BEGIN and END lines. Storing one anyway gives
+    // it a link id that is the digest of nothing, so every empty body a server
+    // hands back resolves to that one identity, and each after the first is
+    // filed as another copy of it.
     if size == 0 {
         bail!(
             "Server returned an empty body for {} in {collection}",
@@ -649,13 +736,34 @@ impl PimRemote<'_> {
     /// Appends a stored body as a genuine new member. The two sides are
     /// different servers, so no server-side copy is possible and the deduped
     /// body is uploaded.
+    ///
+    /// Two things about the answer are checked before it becomes a binding.
+    ///
+    /// A server may refuse the create outright because it already holds the
+    /// item's `UID` (RFC 4791 §5.3.2, RFC 6352 §6.3.2), which is reported as
+    /// what it is rather than as a status, and comes back every run until that
+    /// side stops holding the identity twice.
+    ///
+    /// A server may instead answer a create by *updating* the resource that
+    /// already holds the `UID` and handing back its href, which RFC 6352
+    /// §6.3.2 forbids and nothing here can prevent, so it is caught on the way
+    /// back: an assigned handle this side is already known to hold is recorded
+    /// as a rejected push and never bound. The engine binds one handle per
+    /// item per source, and two items pointing at one handle make the next
+    /// enumeration read one of them as vanished, which propagates a delete of
+    /// a resource nobody removed.
+    ///
+    /// What this side is known to hold is a floor rather than a proof: a full
+    /// enumeration (a DAV collection with no `sync-collection`, an IMAP
+    /// resync) makes it the whole collection, an incremental one narrows it to
+    /// what changed plus this run's own creates.
     fn append(
         &mut self,
         collection: &str,
         handle: ReplicaHandle,
         flags: &ReplicaFlags,
         object: Option<ReplicaHash>,
-        message_id: Option<&str>,
+        link: LinkId<'_>,
     ) -> ReplicaPushResult {
         let Some(hash) = object else {
             warn!(
@@ -685,21 +793,42 @@ impl PimRemote<'_> {
         };
 
         let item_flags = to_item_flags(flags);
-        match self
-            .pool
-            .primary()
-            .add_item_stream(collection, &item_flags, reader, len, message_id)
-        {
-            Ok(written) => ReplicaPushResult {
-                handle,
-                outcome: ReplicaPushOutcome::Accepted,
-                assigned: Some(ReplicaHandle::from(written.id)),
-                revision: written.revision,
-            },
+        let written =
+            self.pool
+                .primary()
+                .add_item_stream(collection, &item_flags, reader, len, link);
+
+        let written = match written {
+            Ok(written) => written,
             Err(err) => {
-                warn!("append to {collection} error: {err:#}");
-                rejected_bare(handle)
+                if is_duplicate_uid(&err) {
+                    let uid = link.hint.unwrap_or(handle.as_str());
+                    warn!("append to {collection} refused: it already holds UID {uid}");
+                    self.refused.push(RefusedCreate {
+                        collection: collection.to_string(),
+                        uid: uid.to_string(),
+                    });
+                } else {
+                    warn!("append to {collection} error: {err:#}");
+                }
+                return rejected_bare(handle);
             }
+        };
+
+        let assigned = ReplicaHandle::from(written.id);
+        if !self.held.claim(collection, assigned.as_str()) {
+            warn!(
+                "append to {collection} was answered with {}, which it already holds; rejecting",
+                assigned.as_str(),
+            );
+            return rejected_bare(handle);
+        }
+
+        ReplicaPushResult {
+            handle,
+            outcome: ReplicaPushOutcome::Accepted,
+            assigned: Some(assigned),
+            revision: written.revision,
         }
     }
 
@@ -873,5 +1002,55 @@ mod tests {
 
         // An id from another namespace is left whole rather than mangled.
         assert_eq!(wire_name("cards", "mail/INBOX"), "mail/INBOX");
+    }
+
+    /// One enumerated member, the shape [`HeldHandles::remember`] folds in.
+    fn member(handle: &str) -> ReplicaRemoteItem {
+        ReplicaRemoteItem {
+            handle: ReplicaHandle(handle.into()),
+            flags: ReplicaFlags::default(),
+            revision: None,
+        }
+    }
+
+    /// A server that answers a create by updating the resource already
+    /// holding the `UID` hands back an href this side is known to hold. Two
+    /// items on one handle make the next enumeration read one of them as
+    /// vanished, which propagates a delete of a resource nobody removed, so
+    /// the create is rejected instead of bound.
+    #[test]
+    fn a_create_answered_with_a_handle_the_side_holds_is_refused() {
+        let mut held = HeldHandles::default();
+        held.remember("agenda", &[member("event-1.ics")], &[]);
+
+        assert!(
+            !held.claim("agenda", "event-1.ics"),
+            "the server answered with a resource it already had",
+        );
+        assert!(
+            held.claim("agenda", "event-2.ics"),
+            "a genuinely new member is bound",
+        );
+        assert!(
+            !held.claim("agenda", "event-2.ics"),
+            "and is held from then on, so a second create onto it is refused too",
+        );
+
+        assert!(
+            held.claim("contacts", "event-1.ics"),
+            "handles are per collection, two collections never colliding",
+        );
+    }
+
+    /// A member the server reported gone is free again: its href may be
+    /// reused, and refusing a create onto a resource nobody holds would keep
+    /// an item unwritable for the rest of the run.
+    #[test]
+    fn a_vanished_handle_stops_being_held() {
+        let mut held = HeldHandles::default();
+        held.remember("agenda", &[member("event-1.ics")], &[]);
+        held.remember("agenda", &[], &[ReplicaHandle("event-1.ics".into())]);
+
+        assert!(held.claim("agenda", "event-1.ics"));
     }
 }

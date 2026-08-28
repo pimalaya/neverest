@@ -1,13 +1,14 @@
 //! The dispatching sync client and its per-side construction.
 //!
-//! [`Client`] is a thin enum over the compiled-in backends (IMAP and
-//! Microsoft Graph); it exposes the narrow method surface the sync
-//! engine needs and forwards each call to the active backend's adapter
-//! (the `crate::imap` and `crate::msgraph` submodules).
+//! [`Client`] is a thin enum over the compiled-in backends (IMAP,
+//! Microsoft Graph and DAV); it exposes the narrow method surface the
+//! sync engine needs and forwards each call to the active backend's
+//! adapter (the `crate::imap`, `crate::msgraph` and `crate::dav`
+//! submodules).
 //!
 //! **This seam is kind-neutral**: it speaks collections and items, never
-//! mailboxes and messages, so a contacts or calendar backend implements
-//! the same surface. Each adapter keeps its own protocol vocabulary
+//! mailboxes and messages, which is what lets one DAV adapter serve
+//! contacts and calendar alike. Each adapter keeps its own protocol vocabulary
 //! behind it (an IMAP mailbox stays a mailbox inside `crate::imap`) and
 //! converts at the edge. Which kind a backend syncs is reported by
 //! [`Client::media_type`].
@@ -30,19 +31,16 @@ use std::{
 
 use anyhow::{Result, bail};
 
-#[cfg(feature = "carddav")]
-use crate::carddav::client::CarddavClient;
-#[cfg(any(feature = "imap", feature = "msgraph", feature = "carddav"))]
-use crate::config::SourceBackendConfig;
-#[cfg(any(feature = "imap", feature = "carddav"))]
-use crate::config::server_url;
+#[cfg(feature = "dav")]
+use crate::dav::client::DavClient;
 #[cfg(feature = "imap")]
 use crate::imap::client::ImapClient;
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::GraphClient;
 use crate::{
-    config::SourceConfig,
+    account::{SourceAccount, SourceAccountBackend},
     item::{collection::Collection, flag::Flag, flag::FlagOp, summary::ItemSummary},
+    kind::LinkId,
 };
 
 /// A backend-neutral collection enumeration: the member+flag spine plus the
@@ -88,25 +86,26 @@ pub struct WrittenItem {
 pub enum Client {
     #[cfg(feature = "imap")]
     Imap(ImapClient),
-    #[cfg(feature = "carddav")]
-    Carddav(Box<CarddavClient>),
+    #[cfg(feature = "dav")]
+    Dav(Box<DavClient>),
     #[cfg(feature = "msgraph")]
     Msgraph(Box<GraphClient>),
     /// Keeps the type inhabited when no backend is compiled in. It is
     /// never constructed: [`open`] refuses every side first, so a build
     /// with no backend fails when it opens a side, not when it builds.
-    #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+    #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
     #[allow(dead_code)]
     Unavailable,
 }
 
 /// The error every method reports in a build with no backend at all.
 /// Unreachable in practice, [`open`] having refused the side already.
-#[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
-const NO_BACKEND: &str = "No sync backend is compiled in (rebuild with the `imap`, `msgraph` or `carddav` cargo feature)";
+#[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+const NO_BACKEND: &str =
+    "No sync backend is compiled in (rebuild with the `imap`, `msgraph` or `dav` cargo feature)";
 
 #[cfg_attr(
-    not(all(feature = "imap", feature = "msgraph", feature = "carddav")),
+    not(all(feature = "imap", feature = "msgraph", feature = "dav")),
     allow(unused_variables)
 )]
 impl Client {
@@ -118,9 +117,9 @@ impl Client {
             Client::Imap(c) => c.list_mailboxes(with_counts),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.list_mailboxes(with_counts),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.list_collections(with_counts),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.list_collections(with_counts),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -132,9 +131,9 @@ impl Client {
             Client::Imap(c) => c.create_mailbox(collection),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => bail!("Graph mailboxes are pull-only (create not supported)"),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.create_collection(collection),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.create_collection(collection),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -146,9 +145,9 @@ impl Client {
             Client::Imap(c) => c.delete_mailbox(collection),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => bail!("Graph mailboxes are pull-only (delete not supported)"),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.delete_collection(collection),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.delete_collection(collection),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -161,9 +160,9 @@ impl Client {
             Client::Imap(c) => c.enumerate(collection, cursor),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.enumerate(collection, cursor),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.enumerate(collection, cursor),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.enumerate(collection, cursor),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -176,11 +175,9 @@ impl Client {
             Client::Imap(c) => c.fetch_envelopes(collection, ids),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.fetch_envelopes(collection, ids),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(_) => {
-                bail!("CardDAV cards have no summary tier (they resolve at Full)")
-            }
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(_) => bail!("DAV items have no summary tier (they resolve at Full)"),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -206,9 +203,9 @@ impl Client {
             Client::Imap(c) => c.fetch_bodies(collection, ids, open, done),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.fetch_bodies(collection, ids, open, done),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.fetch_bodies(collection, ids, open, done),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.fetch_bodies(collection, ids, open, done),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -228,37 +225,41 @@ impl Client {
             Client::Imap(c) => c.get_message_stream(collection, id, sink).map(|()| None),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.get_message_stream(collection, id, sink).map(|()| None),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.get_item_stream(collection, id, sink),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.get_item_stream(collection, id, sink),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
 
     /// Adds an item streamed from `source` (`len` octets) to `collection` with
-    /// `flags`, returning the handle (and revision) the server assigned;
-    /// `link_hint` recovers the UID on IMAP servers lacking UIDPLUS, and is the
-    /// `UID` a DAV backend builds the new href from. Pull-only on Graph
-    /// (rejected, so the engine records the push as rejected rather than
-    /// mutating Graph).
+    /// `flags`, returning the handle (and revision) the server assigned.
+    ///
+    /// `link` is the item's key as
+    /// [`Kind::split_link_id`](crate::kind::Kind::split_link_id) reads it: its
+    /// hint recovers the UID on IMAP servers lacking UIDPLUS, and is the `UID`
+    /// a DAV backend builds the new href from, while its mint is what keeps
+    /// the href of a second copy off the href its twin already holds.
+    /// Pull-only on Graph (rejected, so the engine records the push as rejected
+    /// rather than mutating Graph).
     pub fn add_item_stream(
         &mut self,
         collection: &str,
         flags: &[Flag],
         source: impl Read,
         len: usize,
-        link_hint: Option<&str>,
+        link: LinkId<'_>,
     ) -> Result<WrittenItem> {
         match self {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c
-                .add_message_stream(collection, flags, source, len, link_hint)
+                .add_message_stream(collection, flags, source, len, link.hint)
                 .map(|id| WrittenItem { id, revision: None }),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => bail!("Graph messages are pull-only (append not supported)"),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.add_item_stream(collection, source, link_hint),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.add_item_stream(collection, source, link),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -284,9 +285,9 @@ impl Client {
             Client::Imap(_) => bail!("IMAP message bodies are immutable (in-place update)"),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => bail!("Graph message bodies are immutable (in-place update)"),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.update_item_stream(collection, id, source, if_match),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.update_item_stream(collection, id, source, if_match),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -306,9 +307,9 @@ impl Client {
             Client::Imap(c) => c.delete_message(collection, id),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.delete_message(id),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.delete_item(collection, id, if_match),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.delete_item(collection, id, if_match),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -320,9 +321,9 @@ impl Client {
             Client::Imap(c) => c.move_messages(from, to, ids),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => bail!("Graph messages are pull-only (move not supported)"),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.move_items(from, to, ids),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.move_items(from, to, ids),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -341,9 +342,9 @@ impl Client {
             Client::Imap(c) => c.store_flags(collection, ids, flags, op),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.store_flags(ids, flags, op),
-            #[cfg(feature = "carddav")]
-            Client::Carddav(c) => c.store_flags(ids, flags, op),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.store_flags(ids, flags, op),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -352,18 +353,18 @@ impl Client {
     /// collection's `kind` in the pimdir store so the store is self-describing
     /// and one store may hold several item kinds.
     ///
-    /// Every backend compiled in today is mail (`message/rfc822`); a future
-    /// contacts or calendar backend returns `text/vcard` / `text/calendar` from
-    /// its own arm and the store records it with no further plumbing.
+    /// The mail backends answer it outright; the DAV one answers the flavour
+    /// its session speaks, `text/vcard` for CardDAV and `text/calendar` for
+    /// CalDAV, so one adapter still describes two kinds.
     pub fn media_type(&self) -> &'static str {
         match self {
             #[cfg(feature = "imap")]
             Client::Imap(_) => "message/rfc822",
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => "message/rfc822",
-            #[cfg(feature = "carddav")]
-            Client::Carddav(_) => "text/vcard",
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.media_type(),
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => "",
         }
     }
@@ -389,65 +390,52 @@ impl Client {
             }
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => None,
-            #[cfg(feature = "carddav")]
-            Client::Carddav(_) => None,
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "carddav")))]
+            #[cfg(feature = "dav")]
+            Client::Dav(_) => None,
+            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
             Client::Unavailable => None,
         }
     }
 }
 
-/// Opens the protocol client for `config`, resolving its configured
-/// secrets (passwords, bearer token commands) once per opened client.
-pub fn open(config: SourceConfig) -> Result<Client> {
-    match config.backend {
+/// Opens the protocol client `account` describes.
+///
+/// It spawns no process and reads no configuration: the credential is
+/// already in hand, resolved once for the run by [`crate::account`], so
+/// opening a second connection to a side costs a handshake and nothing
+/// else.
+#[cfg_attr(
+    not(any(feature = "imap", feature = "msgraph", feature = "dav")),
+    allow(unused_variables)
+)]
+pub fn open(account: &SourceAccount) -> Result<Client> {
+    match &account.backend {
         #[cfg(feature = "imap")]
-        SourceBackendConfig::Imap(config) => {
-            let alpn = config.alpn.unwrap_or_else(io_imap::client::default_alpn);
-            let tls = config.tls.into_tls(alpn);
-
-            let server = server_url(&config.server, "imaps")?;
-
-            let sasl = config
-                .sasl
-                .map(|cfg| {
-                    let host = server.host_str().unwrap_or_default();
-                    let port = server
-                        .port()
-                        .unwrap_or_else(|| io_imap::client::default_port(server.scheme()));
-                    cfg.try_into_sasl(host, port)
-                })
-                .transpose()?;
-
-            let client = ImapClient::connect(&server, &tls, config.starttls, sasl)?;
+        SourceAccountBackend::Imap(imap) => {
+            let client =
+                ImapClient::connect(&imap.server, &imap.tls, imap.starttls, imap.sasl.clone())?;
             Ok(Client::Imap(client))
         }
         #[cfg(feature = "msgraph")]
-        SourceBackendConfig::Msgraph(config) => {
-            let token = config.auth.token.get()?;
-            let tls = config.tls.into_tls(config.alpn);
-            let client = GraphClient::connect(&token, &config.user_id, tls)?;
+        SourceAccountBackend::Msgraph(msgraph) => {
+            let client =
+                GraphClient::connect(&msgraph.token, &msgraph.user_id, msgraph.tls.clone())?;
             Ok(Client::Msgraph(Box::new(client)))
         }
-        #[cfg(feature = "carddav")]
-        SourceBackendConfig::Carddav(config) => {
-            let tls = config.tls.into_tls(config.alpn);
-            let server = server_url(&config.server, "https")?;
-            let auth = config.auth.try_into_dav_auth()?;
-            let client = CarddavClient::connect(&server, &tls, auth)?;
-            Ok(Client::Carddav(Box::new(client)))
+        #[cfg(feature = "dav")]
+        SourceAccountBackend::Dav(dav) => {
+            let client = DavClient::connect(dav.kind, &dav.server, &dav.tls, dav.auth.clone())?;
+            Ok(Client::Dav(Box::new(client)))
         }
-        #[allow(unreachable_patterns)]
-        _ => bail!(
-            "This side's backend is not available in this build (rebuild with the matching cargo feature; only imap, msgraph and carddav have a backend for now)"
-        ),
+        #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+        SourceAccountBackend::Unavailable => bail!(NO_BACKEND),
     }
 }
 
 /// Same as [`open`] plus any side-local bootstrap. No compiled-in
 /// backend needs one.
-pub fn init(config: SourceConfig) -> Result<Client> {
-    open(config)
+pub fn init(account: &SourceAccount) -> Result<Client> {
+    open(account)
 }
 
 /// A side's persistent connection pool.
@@ -458,8 +446,13 @@ pub fn init(config: SourceConfig) -> Result<Client> {
 /// the rest of the run so their auth is paid once, not per batch. `max` is the
 /// account's connection budget (default 4), kept under the server's per-account
 /// cap.
+///
+/// The pool holds the resolved [`SourceAccount`] rather than the
+/// configuration it came from, which is what makes a lazily-opened
+/// connection free of everything but its handshake: there is no command
+/// left to spawn.
 pub struct Pool {
-    config: SourceConfig,
+    account: SourceAccount,
     clients: Vec<Client>,
     max: usize,
 }
@@ -467,10 +460,10 @@ pub struct Pool {
 impl Pool {
     /// Opens the pool with its primary connection; `max` is clamped to at least
     /// one.
-    pub fn open(config: SourceConfig, max: usize) -> Result<Self> {
-        let primary = open(config.clone())?;
+    pub fn open(account: SourceAccount, max: usize) -> Result<Self> {
+        let primary = open(&account)?;
         Ok(Self {
-            config,
+            account,
             clients: vec![primary],
             max: max.max(1),
         })
@@ -491,7 +484,7 @@ impl Pool {
     pub fn workers(&mut self, n: usize) -> Result<&mut [Client]> {
         let want = n.min(self.max);
         while self.clients.len() < want {
-            self.clients.push(open(self.config.clone())?);
+            self.clients.push(open(&self.account)?);
         }
         let take = want.min(self.clients.len());
         Ok(&mut self.clients[..take])

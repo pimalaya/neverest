@@ -25,7 +25,10 @@ use io_pim_discovery::compose::config::DiscoverySecurity;
 use io_sasl::mechanism::SaslMechanism;
 use pimalaya_cli::{prompt, spinner::Spinner};
 
+#[cfg(feature = "smtp")]
+use crate::account::SmtpAccount;
 use crate::{
+    account::SourceAccount,
     client,
     config::{
         ImapConfig, SaslAnonymousConfig, SaslConfig, SaslLoginConfig, SaslOauthbearerConfig,
@@ -72,7 +75,9 @@ pub fn configure_discovered(
     )?;
     let imap = imap_config(imap, imap_sasl.clone());
     test_connection("IMAP", || {
-        client::open(SourceConfig::new(SourceBackendConfig::Imap(imap.clone()))).map(|_| ())
+        let config = SourceConfig::new(SourceBackendConfig::Imap(imap.clone()));
+        SourceAccount::resolve("imap", &config).and_then(|account| client::open(&account))?;
+        Ok(())
     })?;
 
     let smtp = configure_smtp(
@@ -115,7 +120,8 @@ fn configure_smtp(
 
     let smtp = smtp_config(endpoint, sasl);
     test_connection("SMTP", || {
-        crate::offline::submit::connect_smtp(&smtp).map(|_| ())
+        let account = SmtpAccount::resolve(&smtp)?;
+        crate::offline::submit::connect_smtp(&account).map(|_| ())
     })?;
 
     Ok(Some(smtp))

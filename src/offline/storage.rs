@@ -134,7 +134,6 @@ mod tests {
                 object: object.map(|h| ReplicaHash(h.into())),
             }),
             origin: None,
-            ambiguous_handles: Vec::new(),
         }
     }
 

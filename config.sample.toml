@@ -70,13 +70,13 @@ default = true
 # --------------------------------------------------------------------------------
 #
 # Each source picks exactly one backend: `imap.*`, `jmap.*`, `gmail.*`,
-# `msgraph.*` or `carddav.*`. Its filter, permissions and pool size live inside
+# `msgraph.*`, `carddav.*` or `caldav.*`. Its filter, permissions and pool size live inside
 # that backend table:
 #   - `collection.filter`: which collections this source syncs (per source, since
 #     an `include = ["INBOX"]` means nothing to a contacts source)
 #   - `collection.{create,delete}`, `flag.update`, `item.update`: default true
 #   - `item.{create,delete}`: both required when the block is declared
-#   - `pool-size`: default 8 (IMAP), 4 (JMAP, Gmail, Graph)
+#   - `pool-size`: default 8 (IMAP), 4 (JMAP, Gmail, Graph, DAV)
 #
 # `item.update` gates in-place body edits, so it is inert for mail (immutable
 # bodies) and meaningful for CardDAV and CalDAV.
@@ -240,8 +240,8 @@ imap.item.delete = false
 
 # A CardDAV side syncs **contacts**, so it pairs with another contacts side or
 # with the store alone, never with a mailbox: an account's two sides must agree
-# on their kind. Requires the `carddav` cargo feature, which is in the default
-# set.
+# on their kind. Requires the `dav` cargo feature, which is in the default set
+# and covers CalDAV too.
 #
 # The URL is the entry point only; the principal and the address book home set
 # are discovered from it, and each address book becomes a collection keyed by
@@ -268,6 +268,45 @@ imap.item.delete = false
 #carddav.item.create = true
 #carddav.item.delete = false
 #carddav.pool-size = 4
+
+# --------------------------------------------------------------------------------
+# CalDAV config (calendar, not mail)
+# https://www.iana.org/go/rfc4791
+# --------------------------------------------------------------------------------
+
+# A CalDAV side syncs **calendar**, on exactly the terms the CardDAV block above
+# describes: same fields, same `dav` cargo feature, same adapter underneath. It
+# pairs with another calendar side or with the store alone.
+#
+# The URL is the entry point only; the principal and the calendar home set are
+# discovered from it, and each calendar becomes a collection keyed by its path
+# segment.
+#
+# The item is the calendar object **resource**, not the component: RFC 4791
+# keeps every component sharing a `UID` in one resource, so a recurring series
+# and its overrides are one item and an override is a body edit.
+#
+# Bare authority (implicit `https://`), or a full `http://` / `https://` URL.
+#caldav.server = "dav.example.org"
+#caldav.server = "dav.example.org:8443"
+#caldav.server = "https://dav.example.org/dav/"
+
+# Pick exactly one of `basic` (the common case) or `bearer`.
+#caldav.auth.basic.username = "user"
+#caldav.auth.basic.password.command = ["pass", "show", "example/dav"]
+#caldav.auth.bearer.token.command = ["ortie", "-a", "dav", "token", "show", "-r"]
+
+# TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
+#caldav.tls.provider = "rustls"
+#caldav.alpn = ["http/1.1"]
+
+# Calendar resources are mutable, like cards: `item.update` gates in-place
+# edits, and a conditional write means an event edited on both sides is
+# reported as a conflict rather than overwritten.
+#caldav.item.update = true
+#caldav.item.create = true
+#caldav.item.delete = false
+#caldav.pool-size = 4
 
 # --------------------------------------------------------------------------------
 # Store options

@@ -16,8 +16,8 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["rustls-ring", "imap", "smtp", "msgraph", "carddav"]
-carddav = ["dep:io-webdav", "dep:io-http", "io-pim-discovery/rfc6764"]
+default = ["rustls-ring", "imap", "smtp", "msgraph", "dav"]
+dav = ["dep:io-webdav", "dep:io-http", "io-pim-discovery/rfc6764"]
 imap = ["dep:io-imap", "io-imap/client", "io-imap/scram"]
 smtp = ["dep:io-smtp", "io-smtp/client", "io-smtp/scram"]
 msgraph = ["dep:io-msgraph", "io-msgraph/client"]
@@ -72,3 +72,4 @@ url = { version = "2.2", features = ["serde"] }
 io-pimdir.git = "https://github.com/pimalaya/io-pimdir"
 io-replica.git = "https://github.com/pimalaya/io-replica"
 io-webdav.git = "https://github.com/pimalaya/io-webdav"
+pimalaya-config.git = "https://github.com/pimalaya/config"

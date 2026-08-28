@@ -13,10 +13,7 @@ use pimalaya_cli::{
 };
 use pimalaya_config::toml::TomlConfig;
 
-use crate::{
-    client,
-    config::{Config, SourceConfig},
-};
+use crate::{account::Account, client, config::Config};
 
 /// Reports the account's namespaces, then opens every configured source and
 /// lists its collections, surfacing credential, network or config errors
@@ -43,8 +40,12 @@ impl CheckCommand {
 
         printer.out(Message::new(account_config.mode()?.to_string()))?;
 
-        for (endpoint, config) in account_config.endpoints()? {
-            check_source(&endpoint, config)?;
+        // Every credential at once, so a check costs one unlock per
+        // distinct password command rather than one per endpoint.
+        let account = Account::resolve(&account_config)?;
+
+        for endpoint in account_config.endpoints()?.keys() {
+            check_source(endpoint, &account)?;
         }
 
         printer.out(Message::new(format!("Account {name} looks healthy")))
@@ -52,9 +53,9 @@ impl CheckCommand {
 }
 
 /// Opens the source and probes it with a `list_collections` call.
-fn check_source(label: &str, config: SourceConfig) -> Result<()> {
+fn check_source(label: &str, account: &Account) -> Result<()> {
     let s = Spinner::start(format!("Checking source {label}…"));
-    let mut client = client::open(config)?;
+    let mut client = client::open(&account.get(label)?)?;
     let collections = client.list_collections(false)?;
     s.success(format!(
         "Checked source {label} ({} collections)",

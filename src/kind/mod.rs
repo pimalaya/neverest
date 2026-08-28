@@ -9,8 +9,9 @@
 //! - the **summary**, the `v:1` JSON blob a reader renders a list from
 //!   without fetching a body (pimdir SPEC Annex A);
 //! - the **sort key**, the item's place in its collection's natural order
-//!   (newest first for mail, A to Z for cards), which the store orders a
-//!   page by and never parses out of the summary (pimdir SPEC §9.3).
+//!   (newest first for mail, A to Z for cards, chronological for calendar
+//!   items), which the store orders a page by and never parses out of the
+//!   summary (pimdir SPEC §9.3).
 //!
 //! All three are derived from a raw body by [`Kind::parse_body`], the single
 //! dispatch point the sync goes through. A kind that also has a cheap
@@ -24,8 +25,10 @@
 //! [`crate::client::Client`] already dispatches over its backends. A
 //! trait would buy dynamic dispatch nobody needs.
 
+#[cfg(feature = "dav")]
+pub mod ical;
 pub mod mail;
-#[cfg(feature = "carddav")]
+#[cfg(feature = "dav")]
 pub mod vcard;
 
 use io_replica::{
@@ -35,14 +38,43 @@ use io_replica::{
 
 use crate::item::summary::ItemSummary;
 
+/// The prefix a minted link id carries, followed by the identity hint
+/// (pimdir SPEC §9).
+const MINT_PREFIX: &str = "dup:";
+
+/// What separates a minted key's hint from the handle it was minted on
+/// (pimdir SPEC §9).
+const MINT_SEPARATOR: char = '#';
+
+/// A link id read as its parts by [`Kind::split_link_id`].
+///
+/// Both parts are absent for a key the item's content never stated (a kind
+/// fallback with nothing minted onto it), which is the shape a write has no
+/// identity to offer a server for.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LinkId<'a> {
+    /// The identity the item states and a backend can address it by: the
+    /// `Message-ID` an IMAP server without UIDPLUS needs to recover the UID
+    /// it assigned, the `UID` a DAV backend builds the new href from. `None`
+    /// for the kind's own fallback, which no server has heard of.
+    pub hint: Option<&'a str>,
+    /// The handle the key was minted on, for a second copy of an identity the
+    /// collection holds twice. `None` for an ordinary key. It is what a name
+    /// derived from the identity must carry to stay distinct from the twin's.
+    pub mint: Option<&'a str>,
+}
+
 /// The media types neverest can sync, one variant per kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Kind {
     /// `message/rfc822`: mail, over IMAP or Microsoft Graph.
     Mail,
     /// `text/vcard`: contact cards, over CardDAV.
-    #[cfg(feature = "carddav")]
+    #[cfg(feature = "dav")]
     Vcard,
+    /// `text/calendar`: calendar object resources, over CalDAV.
+    #[cfg(feature = "dav")]
+    Ical,
 }
 
 impl Kind {
@@ -51,8 +83,10 @@ impl Kind {
     pub fn from_media_type(media_type: &str) -> Option<Self> {
         match media_type {
             "message/rfc822" => Some(Self::Mail),
-            #[cfg(feature = "carddav")]
+            #[cfg(feature = "dav")]
             "text/vcard" => Some(Self::Vcard),
+            #[cfg(feature = "dav")]
+            "text/calendar" => Some(Self::Ical),
             _ => None,
         }
     }
@@ -61,8 +95,10 @@ impl Kind {
     pub fn media_type(self) -> &'static str {
         match self {
             Self::Mail => "message/rfc822",
-            #[cfg(feature = "carddav")]
+            #[cfg(feature = "dav")]
             Self::Vcard => "text/vcard",
+            #[cfg(feature = "dav")]
+            Self::Ical => "text/calendar",
         }
     }
 
@@ -72,29 +108,63 @@ impl Kind {
     pub fn parse_body(self, raw: &[u8], size: u64) -> (ReplicaLinkId, ReplicaMeta, ReplicaSortKey) {
         match self {
             Self::Mail => mail::parse_body(raw, size),
-            #[cfg(feature = "carddav")]
+            #[cfg(feature = "dav")]
             Self::Vcard => vcard::parse_body(raw, size),
+            #[cfg(feature = "dav")]
+            Self::Ical => ical::parse_body(raw, size),
         }
     }
 
-    /// The part of a link id a backend can address a new item by: the
-    /// `Message-ID` an IMAP server without UIDPLUS needs to recover the UID
-    /// it assigned, the `UID` a DAV backend builds the new href from.
+    /// Splits a link id into the two things a write needs from it: the
+    /// identity a backend can address the item by, and what tells this copy
+    /// from the one already holding that identity.
     ///
-    /// A link id *is* that identity, pimdir SPEC Annex A prepending nothing
-    /// to it, so the hint is the id itself. `None` only for the kind's own
-    /// fallback (mail's `alt:`, a card's `hash:`), which the server has never
-    /// heard of: those are the one case a prefix marks, and a real
-    /// `Message-ID` or `UID` cannot be mistaken for one, RFC 5322 `atext`
-    /// admitting no colon before the `@`.
-    pub fn link_hint(self, link_id: &ReplicaLinkId) -> Option<&str> {
-        let fallback = match self {
-            Self::Mail => "alt:",
-            #[cfg(feature = "carddav")]
-            Self::Vcard => "hash:",
+    /// **The one legitimate place a link id is parsed.** The store never
+    /// parses one, and neither does anything else here: a key is opaque to
+    /// every reader (pimdir SPEC §9), and the single exception is the write
+    /// side, which has to hand a server an identity it can act on. Every
+    /// backend therefore takes its hint and its mint from here rather than
+    /// reading the string itself.
+    ///
+    /// An ordinary key *is* the identity, pimdir SPEC Annex A prepending
+    /// nothing to it. A minted key (`dup:<hint>#<handle>`, SPEC §9) is the
+    /// second copy of an identity one collection holds twice: its hint is the
+    /// identity both copies genuinely carry, so an append resolves against the
+    /// server by it, and its mint is the handle it was minted from, which is
+    /// what keeps the two copies apart in anything named after them.
+    pub fn split_link_id<'l>(self, link_id: &'l ReplicaLinkId) -> LinkId<'l> {
+        let Some(minted) = link_id.0.strip_prefix(MINT_PREFIX) else {
+            return LinkId {
+                hint: self.hint(&link_id.0),
+                mint: None,
+            };
         };
 
-        (!link_id.0.starts_with(fallback)).then_some(link_id.0.as_str())
+        // The last separator, not the first: a `Message-ID` may legally carry
+        // a `#` (RFC 5322 `atext` admits it) and a handle addressed as one
+        // path segment or a UID may not.
+        let (hint, mint) = minted.rsplit_once(MINT_SEPARATOR).unwrap_or(("", minted));
+
+        LinkId {
+            hint: self.hint(hint),
+            mint: Some(mint),
+        }
+    }
+
+    /// The identity in a key, or `None` for the kind's own fallback (mail's
+    /// `alt:`, a DAV item's `hash:`), which the server has never heard of.
+    ///
+    /// Those are the one case a prefix marks, and a real `Message-ID` or `UID`
+    /// cannot be mistaken for one, RFC 5322 `atext` admitting no colon before
+    /// the `@`.
+    fn hint(self, key: &str) -> Option<&str> {
+        let fallback = match self {
+            Self::Mail => "alt:",
+            #[cfg(feature = "dav")]
+            Self::Vcard | Self::Ical => "hash:",
+        };
+
+        (!key.is_empty() && !key.starts_with(fallback)).then_some(key)
     }
 
     /// The tier a freshly probed item is raised to so its link id and summary
@@ -105,8 +175,8 @@ impl Kind {
     pub fn probe_tier(self) -> ReplicaTier {
         match self {
             Self::Mail => ReplicaTier::Meta,
-            #[cfg(feature = "carddav")]
-            Self::Vcard => ReplicaTier::Full,
+            #[cfg(feature = "dav")]
+            Self::Vcard | Self::Ical => ReplicaTier::Full,
         }
     }
 
@@ -123,8 +193,90 @@ impl Kind {
     ) -> Option<(ReplicaLinkId, ReplicaMeta, ReplicaSortKey)> {
         match self {
             Self::Mail => Some(mail::parse_summary(summary)),
-            #[cfg(feature = "carddav")]
-            Self::Vcard => None,
+            #[cfg(feature = "dav")]
+            Self::Vcard | Self::Ical => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_ordinary_key_is_its_own_hint_and_mints_nothing() {
+        let link = ReplicaLinkId::from("a@example.org");
+        assert_eq!(
+            Kind::Mail.split_link_id(&link),
+            LinkId {
+                hint: Some("a@example.org"),
+                mint: None,
+            },
+        );
+    }
+
+    #[test]
+    fn a_kind_fallback_offers_no_hint() {
+        let link = ReplicaLinkId::from("alt:subject|date|from");
+        assert_eq!(Kind::Mail.split_link_id(&link), LinkId::default());
+    }
+
+    /// The second copy of an identity keeps the identity, which is what an
+    /// append resolves against, and gains the part that tells it from the
+    /// copy holding that identity bare.
+    #[test]
+    fn a_minted_key_splits_into_the_shared_identity_and_the_copys_own_part() {
+        let link = ReplicaLinkId::from("dup:a@example.org#146");
+        assert_eq!(
+            Kind::Mail.split_link_id(&link),
+            LinkId {
+                hint: Some("a@example.org"),
+                mint: Some("146"),
+            },
+        );
+    }
+
+    /// A `Message-ID` may carry a `#`, a handle addressed as one path segment
+    /// may not, so the mint is what follows the last one.
+    #[test]
+    fn a_hint_carrying_the_separator_survives_the_split() {
+        let link = ReplicaLinkId::from("dup:a#b@example.org#146");
+        assert_eq!(
+            Kind::Mail.split_link_id(&link),
+            LinkId {
+                hint: Some("a#b@example.org"),
+                mint: Some("146"),
+            },
+        );
+    }
+
+    /// Two copies of a resource carrying no `UID` are minted over the kind's
+    /// fallback, so the mint is the only part a write can name them by.
+    #[test]
+    #[cfg(feature = "dav")]
+    fn a_mint_over_a_fallback_keeps_the_mint_and_no_hint() {
+        let link = ReplicaLinkId::from("dup:hash:cbf29ce484222325#card-2.vcf");
+        assert_eq!(
+            Kind::Vcard.split_link_id(&link),
+            LinkId {
+                hint: None,
+                mint: Some("card-2.vcf"),
+            },
+        );
+    }
+
+    /// The reported shape: one iCalendar `UID` under two hrefs, the second
+    /// minted on the href it came from.
+    #[test]
+    #[cfg(feature = "dav")]
+    fn a_minted_calendar_key_names_the_href_it_came_from() {
+        let link = ReplicaLinkId::from("dup:event-1@google.com#event-1%2540google.com.ics");
+        assert_eq!(
+            Kind::Ical.split_link_id(&link),
+            LinkId {
+                hint: Some("event-1@google.com"),
+                mint: Some("event-1%2540google.com.ics"),
+            },
+        );
     }
 }

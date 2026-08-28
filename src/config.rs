@@ -18,7 +18,7 @@ use io_sasl::{
 };
 use pimalaya_cli::printer::Printer;
 use pimalaya_config::{
-    secret::Secret,
+    secret::{Secret, SecretResolver},
     toml as config_toml,
     toml::{TomlConfig, shell_expanded_string},
 };
@@ -85,6 +85,7 @@ macro_rules! source_accessor {
             match &self.backend {
                 SourceBackendConfig::Imap(c) => c.$name,
                 SourceBackendConfig::Carddav(c) => c.$name,
+                SourceBackendConfig::Caldav(c) => c.$name,
                 SourceBackendConfig::Jmap(c) => c.$name,
                 SourceBackendConfig::Gmail(c) => c.$name,
                 SourceBackendConfig::Msgraph(c) => c.$name,
@@ -100,6 +101,7 @@ macro_rules! source_ref_accessor {
             match &self.backend {
                 SourceBackendConfig::Imap(c) => &c.$name,
                 SourceBackendConfig::Carddav(c) => &c.$name,
+                SourceBackendConfig::Caldav(c) => &c.$name,
                 SourceBackendConfig::Jmap(c) => &c.$name,
                 SourceBackendConfig::Gmail(c) => &c.$name,
                 SourceBackendConfig::Msgraph(c) => &c.$name,
@@ -240,6 +242,8 @@ pub struct AccountConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carddav: Option<CarddavConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub caldav: Option<CaldavConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jmap: Option<JmapConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gmail: Option<GmailConfig>,
@@ -301,6 +305,7 @@ impl AccountConfig {
         match backend {
             SourceBackendConfig::Imap(config) => self.imap = Some(config),
             SourceBackendConfig::Carddav(config) => self.carddav = Some(config),
+            SourceBackendConfig::Caldav(config) => self.caldav = Some(config),
             SourceBackendConfig::Jmap(config) => self.jmap = Some(config),
             SourceBackendConfig::Gmail(config) => self.gmail = Some(config),
             SourceBackendConfig::Msgraph(config) => self.msgraph = Some(config),
@@ -314,6 +319,7 @@ impl AccountConfig {
         [
             self.imap.clone().map(SourceBackendConfig::Imap),
             self.carddav.clone().map(SourceBackendConfig::Carddav),
+            self.caldav.clone().map(SourceBackendConfig::Caldav),
             self.jmap.clone().map(SourceBackendConfig::Jmap),
             self.gmail.clone().map(SourceBackendConfig::Gmail),
             self.msgraph.clone().map(SourceBackendConfig::Msgraph),
@@ -338,6 +344,7 @@ impl AccountConfig {
         let sugar = [
             self.imap.clone().map(SourceBackendConfig::Imap),
             self.carddav.clone().map(SourceBackendConfig::Carddav),
+            self.caldav.clone().map(SourceBackendConfig::Caldav),
             self.jmap.clone().map(SourceBackendConfig::Jmap),
             self.gmail.clone().map(SourceBackendConfig::Gmail),
             self.msgraph.clone().map(SourceBackendConfig::Msgraph),
@@ -847,6 +854,7 @@ pub struct SourceConfig {
 pub enum SourceBackendConfig {
     Imap(ImapConfig),
     Carddav(CarddavConfig),
+    Caldav(CaldavConfig),
     Jmap(JmapConfig),
     Gmail(GmailConfig),
     Msgraph(MsgraphConfig),
@@ -859,6 +867,7 @@ impl SourceBackendConfig {
         match self {
             Self::Imap(_) => "imap",
             Self::Carddav(_) => "carddav",
+            Self::Caldav(_) => "caldav",
             Self::Jmap(_) => "jmap",
             Self::Gmail(_) => "gmail",
             Self::Msgraph(_) => "msgraph",
@@ -900,6 +909,7 @@ impl SourceConfig {
                 | SourceBackendConfig::Gmail(_)
                 | SourceBackendConfig::Msgraph(_)
                 | SourceBackendConfig::Carddav(_)
+                | SourceBackendConfig::Caldav(_)
         )
     }
 
@@ -913,7 +923,10 @@ impl SourceConfig {
     /// calendar source cannot: submission is a mail capability, so an `smtp`
     /// table there is a configuration error rather than a dead option.
     pub fn carries_mail(&self) -> bool {
-        !matches!(self.backend, SourceBackendConfig::Carddav(_))
+        !matches!(
+            self.backend,
+            SourceBackendConfig::Carddav(_) | SourceBackendConfig::Caldav(_)
+        )
     }
 
     /// Whether a body can be streamed straight from this source to another
@@ -1127,8 +1140,33 @@ source_config! {
     }
 }
 
-/// CardDAV authentication: HTTP Basic (the common case) or a bearer token
-/// for a provider fronting DAV with OAuth 2.0.
+source_config! {
+    /// CalDAV side (RFC 4791). The server URL is the entry point only:
+    /// the principal and the calendar home set are discovered from it, and
+    /// each calendar becomes a collection.
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    pub struct CaldavConfig {
+        /// The DAV entry point: a bare authority
+        /// (`dav.example.org[:port]`, read as `https://<authority>`) or a
+        /// full URL (`https://dav.example.org/dav/`, or an `http://` one
+        /// for a server on a trusted network).
+        pub server: String,
+        #[serde(default)]
+        pub tls: TlsConfig,
+        /// ALPN protocol identifiers offered during the TLS handshake.
+        /// Defaults to `["http/1.1"]`; set to `[]` to skip ALPN.
+        #[serde(
+            default = "default_http_alpn",
+            skip_serializing_if = "is_default_http_alpn"
+        )]
+        pub alpn: Vec<String>,
+        pub auth: DavAuthConfig,
+    }
+}
+
+/// DAV authentication, shared by CardDAV and CalDAV: HTTP Basic (the common
+/// case) or a bearer token for a provider fronting DAV with OAuth 2.0.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DavAuthConfig {
@@ -1142,12 +1180,19 @@ pub enum DavAuthConfig {
     },
 }
 
-#[cfg(feature = "carddav")]
+#[cfg(feature = "dav")]
 impl DavAuthConfig {
-    /// Resolves the configured secret and converts to io-webdav's auth. The
-    /// secret is read here, once per opened connection, so a broken command
-    /// fails at connect time rather than mid-enumeration.
-    pub fn try_into_dav_auth(self) -> Result<io_webdav::rfc4918::WebdavAuth> {
+    /// Resolves the configured secret through `resolver` and converts to
+    /// io-webdav's auth.
+    ///
+    /// The resolver is what keeps an account's CardDAV and CalDAV sides,
+    /// which usually name one password entry, from unlocking it twice.
+    /// Resolution happens where a runtime account is built (see
+    /// [`crate::account`]), never per opened connection.
+    pub fn try_into_dav_auth(
+        self,
+        resolver: &mut SecretResolver,
+    ) -> Result<io_webdav::rfc4918::WebdavAuth> {
         use io_http::{rfc6750::bearer::HttpAuthBearer, rfc7617::basic::HttpAuthBasic};
         use io_webdav::rfc4918::WebdavAuth;
         use secrecy::ExposeSecret;
@@ -1155,11 +1200,11 @@ impl DavAuthConfig {
         Ok(match self {
             Self::Basic { username, password } => WebdavAuth::Basic(HttpAuthBasic::new(
                 username,
-                password.get()?.expose_secret(),
+                resolver.resolve(password)?.expose_secret(),
             )),
-            Self::Bearer { token } => {
-                WebdavAuth::Bearer(HttpAuthBearer::new(token.get()?.expose_secret()))
-            }
+            Self::Bearer { token } => WebdavAuth::Bearer(HttpAuthBearer::new(
+                resolver.resolve(token)?.expose_secret(),
+            )),
         })
     }
 }
@@ -1310,7 +1355,7 @@ pub struct SmtpConfig {
 /// and hands the ported one straight to a backend, which then rejects it
 /// for having no host.
 #[cfg_attr(
-    not(any(feature = "imap", feature = "smtp", feature = "carddav")),
+    not(any(feature = "imap", feature = "smtp", feature = "dav")),
     allow(dead_code)
 )]
 pub fn server_url(server: &str, scheme: &str) -> Result<Url> {
@@ -1457,34 +1502,44 @@ pub struct SaslScramSha256Config {
 
 #[cfg_attr(not(any(feature = "imap", feature = "smtp")), allow(dead_code))]
 impl SaslConfig {
-    /// Resolves the SASL config into a runtime [`Sasl`]. `host` and `port` come
-    /// from the live server URL, and only OAUTHBEARER uses them, echoing them
-    /// in the GS2 header.
-    pub fn try_into_sasl(self, host: impl ToString, port: u16) -> Result<Sasl> {
+    /// Resolves the SASL config into a runtime [`Sasl`], reading its secret
+    /// through `resolver`. `host` and `port` come from the live server URL,
+    /// and only OAUTHBEARER uses them, echoing them in the GS2 header.
+    ///
+    /// The resolver is what keeps an account's IMAP and SMTP tables, which
+    /// usually name one password entry, from unlocking it twice. Resolution
+    /// happens where a runtime account is built (see [`crate::account`]),
+    /// never per opened connection.
+    pub fn try_into_sasl(
+        self,
+        host: impl ToString,
+        port: u16,
+        resolver: &mut SecretResolver,
+    ) -> Result<Sasl> {
         Ok(match self {
             SaslConfig::Anonymous(c) => Sasl::Anonymous(SaslAnonymousCreds { message: c.message }),
             SaslConfig::Login(c) => Sasl::Login(SaslLoginCreds {
                 username: c.username,
-                password: c.password.get()?,
+                password: resolver.resolve(c.password)?,
             }),
             SaslConfig::Plain(c) => Sasl::Plain(SaslPlainCreds {
                 authzid: c.authzid,
                 authcid: c.authcid,
-                passwd: c.passwd.get()?,
+                passwd: resolver.resolve(c.passwd)?,
             }),
             SaslConfig::Oauthbearer(c) => Sasl::Oauthbearer(SaslOauthbearerCreds {
                 username: c.username,
                 host: host.to_string(),
                 port,
-                token: c.token.get()?,
+                token: resolver.resolve(c.token)?,
             }),
             SaslConfig::Xoauth2(c) => Sasl::Xoauth2(SaslXoauth2Creds {
                 username: c.username,
-                token: c.token.get()?,
+                token: resolver.resolve(c.token)?,
             }),
             SaslConfig::ScramSha256(c) => Sasl::ScramSha256(SaslScramCreds {
                 username: c.username,
-                password: c.password.get()?,
+                password: resolver.resolve(c.password)?,
                 nonce: Vec::new(),
                 channel_binding: SaslGs2ChannelBinding::Unsupported,
             }),
@@ -2145,23 +2200,28 @@ msgraph.user-id = "me"
         assert!(account.sources().unwrap()["a"].is_imap());
     }
 
-    /// A CardDAV source is the first non-mail one, so it is where the account
+    /// The DAV sources are the non-mail ones, so they are where the account
     /// shape stops being mail-shaped.
-    #[cfg(feature = "carddav")]
+    #[cfg(feature = "dav")]
     #[test]
-    fn a_carddav_source_carries_no_send_channel() {
+    fn a_dav_source_carries_no_send_channel() {
         let account: AccountConfig = toml::from_str(
             r#"
             carddav.server = "https://dav.example.org/"
             carddav.auth.basic.username = "user"
             carddav.auth.basic.password.raw = "pw"
+            caldav.server = "https://dav.example.org/"
+            caldav.auth.basic.username = "user"
+            caldav.auth.basic.password.raw = "pw"
             "#,
         )
         .unwrap();
 
         let sources = account.sources().unwrap();
-        assert!(!sources["carddav"].carries_mail(), "contacts do not submit");
-        assert!(!sources["carddav"].sends_natively());
+        for name in ["carddav", "caldav"] {
+            assert!(!sources[name].carries_mail(), "{name} does not submit");
+            assert!(!sources[name].sends_natively());
+        }
         account.validate().unwrap();
 
         let account: AccountConfig = toml::from_str(

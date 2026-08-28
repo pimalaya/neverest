@@ -17,7 +17,7 @@
 
 set -eu
 
-NAME="neverest-carddav-tests"
+NAME="neverest-dav-tests"
 USER="test"
 PASS="test"
 PORT=5232

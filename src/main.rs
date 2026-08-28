@@ -79,9 +79,11 @@
 //! ## Layout
 //!
 //! The [`cli`] module holds the clap parser and one module per subcommand.
-//! [`config`] is the TOML schema, [`client`] the kind-neutral backend seam
-//! opening one source, [`item`] the vocabulary above that seam, and [`kind`]
-//! the per-media-type derivations.
+//! [`config`] is the TOML schema and [`account`] its runtime counterpart, the
+//! endpoints of one account with every secret already resolved, which is what
+//! [`client`], the kind-neutral backend seam, opens a connection from.
+//! [`item`] is the vocabulary above that seam, and [`kind`] the per-media-type
+//! derivations.
 //!
 //! [`offline`] is the sync engine: `mod` maps sources onto pimdir source ids
 //! and drives the coroutines, `state` records what the last run derived,
@@ -92,11 +94,12 @@
 //! the report. [`sync`] keeps only the report types, the engine having moved
 //! to [`offline`]. [`wizard`] bootstraps a first configuration.
 
-#[cfg(feature = "carddav")]
-mod carddav;
+mod account;
 mod cli;
 mod client;
 mod config;
+#[cfg(feature = "dav")]
+mod dav;
 #[cfg(feature = "imap")]
 mod imap;
 mod item;

@@ -35,53 +35,45 @@ pub struct SyncReport {
     /// Re-reported by every run until resolved (counted as warnings).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<ItemConflict>,
-    /// Identities a side holds under more than one handle, which the engine
-    /// froze. Re-reported by every run until the collection holds each once
-    /// (counted as warnings).
+    /// Creates a side refused because it already holds the item's `UID`.
+    /// Re-reported by every run until that side stops holding the identity
+    /// twice (counted as warnings).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ambiguous: Vec<AmbiguousIdentity>,
+    pub refused: Vec<RefusedDuplicate>,
 }
 
-/// One identity a side's collection holds more than once: two items carrying
-/// the same link id, two messages with one `Message-ID`, so which copy a
-/// change belongs to cannot be decided.
+/// One create a side refused with the CalDAV or CardDAV `no-uid-conflict`
+/// precondition (RFC 4791 §5.3.2, RFC 6352 §6.3.2): the collection the copy
+/// was going into already holds a resource carrying that `UID`.
 ///
-/// Neverest reports the coordinates and repairs nothing. Which copy to keep is
-/// the user's call, made with their own client, and the report says what
-/// neverest cannot tell apart rather than that the collection is invalid: RFC
-/// 5322 §3.6.4 binds the *generator* of a `Message-ID` and says nothing about
-/// what a store may hold, a copy legitimately carries the identifier of the
-/// message it copies, and a migration (this tool's own use case) commonly
-/// produces such a pair.
+/// A collection holding one identity twice is mirrored as two items and says
+/// nothing (the store holds what a source holds), so this is not about the
+/// duplicate. It is about the write that could not land: the other side will
+/// not take the second copy, so the run wrote nothing for it and will try
+/// again next run.
 ///
-/// Detection, policy and state belong to the engine and the store, which
-/// persist the freeze, so this comes back on every run until the collection
-/// holds the identity once. A warning the user cannot act on twice is a
-/// warning they will not act on once.
+/// The repetition is the point. It is an unresolved state with an action
+/// attached, namely giving one of the two copies a `UID` of its own on the
+/// side that holds them both, and neverest performs none of it: which copy is
+/// which is the user's call, made with their own client.
 #[derive(Debug, Serialize)]
-pub struct AmbiguousIdentity {
+pub struct RefusedDuplicate {
     pub side: String,
     pub collection: String,
-    /// Every handle the side holds the identity under, the bound one first.
-    pub ids: Vec<String>,
+    /// The identity the refused copy shares with the resource already there.
+    pub uid: String,
 }
 
-impl fmt::Display for AmbiguousIdentity {
+impl fmt::Display for RefusedDuplicate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
             side,
             collection,
-            ids,
+            uid,
         } = self;
-        let count = ids.len();
-        let list = ids
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
         write!(
             f,
-            "{count} copies of one item in {collection} on {side} ({list}): neverest cannot tell them apart, so none of them syncs until one is removed"
+            "{side} refused a copy in {collection}: it already holds UID {uid}, so the second copy stays unwritten until one of the two carries a UID of its own"
         )
     }
 }
@@ -311,7 +303,7 @@ impl fmt::Display for SyncReport {
         let submit_errors = self.submitted.iter().filter(|e| e.error.is_some()).count();
         let errors = mailbox_errors + item_errors + submit_errors;
         let warnings =
-            self.collisions.len() + self.parked.len() + self.conflicts.len() + self.ambiguous.len();
+            self.collisions.len() + self.parked.len() + self.conflicts.len() + self.refused.len();
 
         if !self.drained.is_empty() {
             writeln!(f, "Queue ({n}):", n = self.drained.len())?;
@@ -365,8 +357,8 @@ impl fmt::Display for SyncReport {
             for c in &self.conflicts {
                 writeln!(f, " - {c}")?;
             }
-            for a in &self.ambiguous {
-                writeln!(f, " - {a}")?;
+            for r in &self.refused {
+                writeln!(f, " - {r}")?;
             }
             for p in &self.parked {
                 writeln!(f, " - {p}")?;

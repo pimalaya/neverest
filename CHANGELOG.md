@@ -24,11 +24,11 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   Delta-query enumeration (the `@odata.deltaLink` as the sync checkpoint, an expired link restarting a full round), bodies through the raw MIME endpoint, and flag and delete pushes. Appends and moves into Graph are pull-only. Authentication is a bearer access token, resolved through the standard secret-command idiom; neverest runs no OAuth flow itself.
 
-- Added **CardDAV** backend support via [io-webdav](https://github.com/pimalaya/io-webdav), behind the `carddav` cargo feature.
+- Added **CardDAV** and **CalDAV** backend support via [io-webdav](https://github.com/pimalaya/io-webdav), behind the `dav` cargo feature.
 
-  Address books are collections, keyed by their path segment rather than their display name, which is optional, mutable and free to collide. Enumeration is RFC 6578 `sync-collection`, the server's token riding as the engine's opaque checkpoint: a rejected token falls back to a full report and a truncated one is drained. Bodies come from `addressbook-multiget`, and writes are `PUT` and `DELETE` conditional on the last-synced ETag.
+  Address books and calendars are collections, keyed by their path segment rather than their display name, which is optional, mutable and free to collide. Enumeration is RFC 6578 `sync-collection`, the server's token riding as the engine's opaque checkpoint: a rejected token falls back to a full report and a truncated one is drained, and a server implementing no `sync-collection` at all is listed with a `PROPFIND` instead. Bodies come from `addressbook-multiget` / `calendar-multiget`, and writes are `PUT` and `DELETE` conditional on the last-synced ETag. One adapter serves both protocols: they differ in the home set they discover, the collection they list and the extension a new resource is named with, and in nothing else the sync sees.
 
-  This is the first non-mail kind and the first mutable-content backend. Cards are edited in place, so it is the first backend to exercise the revision plumbing, the conditional-write path and the conflict handling that mail leaves inert. A card's link id is its vCard `UID`, falling back to a digest of the body for a card carrying none, and its summary carries the `UID`, `FN` and every `EMAIL` so a reader renders a contact list without fetching bodies. Cards cross neverest as opaque bytes, so a property it does not understand cannot be lost. A contacts source pairs with another contacts source or with the store alone, and an `smtp` table on a DAV source is refused.
+  These are the non-mail kinds and the first mutable-content backends. A card or an event is edited in place, so they are the first to exercise the revision plumbing, the conditional-write path and the conflict handling that mail leaves inert. Their link id is the vCard or iCalendar `UID`, falling back to a digest of the body for a resource carrying none. A collection holding one `UID` under two resources syncs as two items, and a new resource is named after the item's key rather than its `UID` alone, so the second copy is pushed beside its twin rather than over it. A card's summary carries the `UID`, `FN` and every `EMAIL`; a calendar resource's carries its component, `SUMMARY`, `LOCATION` and start, and it sorts by that start resolved to UTC through the `VTIMEZONE` the resource itself carries. Both cross neverest as opaque bytes, so a property it does not understand cannot be lost. A calendar item is the object **resource**, not the component, so a recurring series and its overrides are one item (RFC 4791 §4.1). A DAV source pairs with another source of its own kind or with the store alone, and an `smtp` table on one is refused.
 
 - Added the queued **`submit` intent** and its send channel.
 
@@ -66,9 +66,9 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   Cached bodies, summaries and pending state are carried over by link id, and the collection's `generation` bumps atomically with the rebuild, so a store frontend derives its epoch from the store alone. Graph sources never bump, their message ids surviving a delta reset.
 
-- Added a warnings section for an identity a collection holds twice, in the text report and under `ambiguous` in `--json`.
+- Added a warnings section for a copy a side refused because it already holds the item's `UID`, in the text report and under `refused` in `--json`.
 
-  It names the collection and every id involved, and is re-reported on every run until the collection holds the identity once. Neverest repairs nothing: which copy to keep is the user's call, with their own client. Detection, the derive-nothing rules and the persistence live in io-replica and io-pimdir.
+  It names the side, the collection and the `UID`, and is re-reported on every run until that side stops holding the identity twice: the run wrote nothing for that item, and the line carries the one action that resolves it. Neverest repairs nothing, which copy to keep being the user's call, with their own client. A collection holding one identity under two resources is mirrored as two items and reported nowhere: the store holds what the source holds.
 
 - Added the `<protocol>.item.update` permission, gating in-place body edits.
 
@@ -83,6 +83,12 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
   Each action a frontend enqueued is applied exactly once, and the run reports per-collection applied counts plus any permanently unappliable action, until repaired. The sync then pushes the resulting dirty state.
 
 ### Changed
+
+- Resolved every configured secret once per run instead of once per opened connection.
+
+  A `password.command` is a command until something runs it, and that used to happen inside the connection layer: opening a connection took the configuration and spawned the command, so an IMAP source at the default `-j 4` ran it four times, concurrently, before its first request. An account naming one `pass` entry from its `imap`, `smtp`, `carddav` and `caldav` tables paid six `gpg` invocations per sync, each one a key unlock. A run now resolves them all up front into a runtime account holding the values themselves, memoizing identical commands, so that same account resolves once. Opening a second connection to a side costs a handshake and nothing else.
+
+  A credential that fails to resolve fails its own endpoint rather than the account, so a stale entry for calendars no longer leaves mail unsynced. The wait is also visible now: the resolution has a spinner of its own, and each spawned command is logged at `debug` with the time it took. Neither the value nor the command arguments are ever logged.
 
 - **BREAKING**: the sync engine runs on the [io-replica](https://github.com/pimalaya/io-replica) replica engine instead of a hand-rolled three-way diff.
 
@@ -152,7 +158,7 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   The SMTP channel therefore offers the `smtp` ALPN token (RFC 7595) where it previously offered none; set `smtp.alpn = []` to restore the old behaviour.
 
-- Every remote is a cargo feature: `imap`, `msgraph`, `carddav`, plus `smtp` for the submission channel.
+- Every remote is a cargo feature: `imap`, `msgraph`, `dav` (CardDAV and CalDAV together), plus `smtp` for the submission channel.
 
   All of them ship in the default set. Every source config parses in every build, and opening a source whose backend was not compiled in reports it at runtime.
 
@@ -161,6 +167,16 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 - Bumped the Pimalaya libraries: io-replica 0.4, io-pimdir 0.3, io-imap 0.6, io-smtp 0.3, io-webdav 0.2, io-http 0.5, io-pim-discovery 0.7, io-msgraph 0.3, pimalaya-stream 0.3, pimalaya-cli 0.2 and pimalaya-config 0.1. SASL moved out of pimalaya-stream into the new io-sasl crate, so the SCRAM-SHA-256 the configuration has always offered is now runnable. The minimum supported Rust version is 1.89.
 
 ### Fixed
+
+- A parked queue action was reported once per source instead of once per run.
+
+  A queue action the drain cannot apply parks, and every run re-reports it until it is repaired. The parked rows were read where the drain runs, which is once per source, while the read itself is of the whole store: the queue records no source. An account syncing mail, contacts and calendar therefore showed one parked row as three identical warnings, the shared `#1` being the only hint that they were one problem. They are now read once, after every source has drained.
+
+- A dry run copied the account's whole store before it started, and left the copy behind when it failed.
+
+  A dry run works on a throwaway replica so that no checkpoint advances and nothing reaches a server, and that replica was a deep copy of the store into the temporary directory, taken before the first spinner and logged at no level. For a mail account that is the blob tree: 2.5 GB over 9511 files for a real account, of which 13 MB is the index and the rest is bodies. Every dry run read and wrote all of it, several silent seconds before anything appeared on screen, and spent that as memory rather than disk wherever `/tmp` is a tmpfs. The replica is now built beside the real store, so the two share a filesystem and the bodies are hardlinked rather than copied: what is copied drops to the index, and the preparation is logged with the time it took. Bodies are content-addressed and a dry run neither rewrites nor purges one, so sharing them is sound; everything the run writes to is still its own, and a file that rule misjudges is copied rather than shared, so being wrong costs speed and never the real store.
+
+  Removing the replica was the last line of the run, so any earlier failure, a credential that would not resolve, a refused mode change, a store that would not open, returned before it and left the copy behind. It is now removed however the run ends, and a run clears what an earlier one left, a release build aborting on a panic without running destructors.
 
 - A contacts run that downloaded an address book reported itself already in sync.
 

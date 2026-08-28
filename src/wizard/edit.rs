@@ -71,7 +71,7 @@ fn source_email(source: &SourceConfig) -> Option<String> {
             _ => None,
         },
         SourceBackendConfig::Gmail(_) | SourceBackendConfig::Msgraph(_) => None,
-        SourceBackendConfig::Carddav(_) => None,
+        SourceBackendConfig::Carddav(_) | SourceBackendConfig::Caldav(_) => None,
     }
 }
 

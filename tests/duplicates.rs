@@ -1,20 +1,25 @@
-//! End-to-end proof of the duplicate-link-id freeze, against TWO local
-//! Stalwart IMAP servers (A :143, B :144) spawned by `tests/stalwart2.sh`.
-//! Ignored by default.
+//! End-to-end proof that a collection holding one identity twice syncs both
+//! copies, against TWO local Stalwart IMAP servers (A :143, B :144) spawned by
+//! `tests/stalwart2.sh`. Ignored by default.
 //!
-//! One collection may hold two messages with the same `Message-ID`. Before the
-//! freeze that cost mail on a side the user never touched, in three steps, and
-//! this test replays all three:
-//!   1. Seed one copy on A and two on B, then sync. The identity is frozen:
-//!      no hunk is derived for it, and the report warns naming both UIDs.
-//!   2. Delete one copy on B and sync. A's copy survives, and no delete is
-//!      pushed to it.
-//!   3. Drop B's checkpoint (a UIDVALIDITY bump, a server without QRESYNC, a
-//!      reset) and sync. The full enumeration must not re-append to A.
+//! One collection may hold two messages with the same `Message-ID`, and a copy
+//! legitimately carries the identifier of the message it copies. The engine
+//! mints a key of its own for the second copy (pimdir SPEC §9) instead of
+//! freezing the identity, so what this replays is the write side of that:
+//!   1. Seed one copy on A and two on B, then sync. Both copies cross: A ends
+//!      up holding the message twice, and the report warns about nothing.
+//!   2. Sync again with nothing changed. The run is quiescent, which is what
+//!      the freeze could never be: a frozen twin had no row, so every run
+//!      reported it as a body still to fetch.
+//!   3. Delete one copy on B and sync. Exactly that copy goes on A, and the
+//!      other survives, which is what two rows buy over one frozen pair.
+//!   4. Drop B's checkpoint (a UIDVALIDITY bump, a server without QRESYNC, a
+//!      reset) and sync. The full enumeration must re-append nothing: a bound
+//!      handle keeps the key it was given and is never minted a second one.
 //!
-//! Detection, the derive-nothing rules and the persistence are upstream
-//! (io-replica and io-pimdir, same change id); what is proved here is that
-//! they hold end to end through this crate, and that the user is told.
+//! The minting and the keys are upstream (io-replica and io-pimdir, same
+//! change id); what is proved here is that they hold end to end through this
+//! crate, and that no copy is lost on the way.
 //!
 //! Seeding and verifying use `curl` rather than a backend of this crate, as
 //! the other live tests do.
@@ -56,7 +61,7 @@ fn marker() -> String {
 
 /// The one message both sides hold, twice on B. A copy legitimately carries
 /// the identifier of the message it copies, which is why this is a duplicate
-/// to report rather than a fault to blame.
+/// to mirror rather than a fault to blame.
 fn message(marker: &str) -> Vec<u8> {
     format!(
         "Message-ID: <{marker}@pimalaya.org>\r\n\
@@ -72,7 +77,7 @@ fn message(marker: &str) -> Vec<u8> {
 
 #[test]
 #[ignore = "requires two Stalwart instances (./tests/stalwart2.sh) on :143/:144 and --ignored"]
-fn a_duplicated_identity_is_frozen_reported_and_never_costs_the_other_side_its_copy() {
+fn a_duplicated_identity_syncs_both_copies_and_settles() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
     let state = root.join("state");
@@ -91,32 +96,49 @@ fn a_duplicated_identity_is_frozen_reported_and_never_costs_the_other_side_its_c
     fs::write(&config, config_toml()).unwrap();
     neverest(&["init", "-a", ACCOUNT], &config, &state);
 
-    // The identity is frozen: nothing is derived for it, and the report names
-    // the collection and both UIDs on B.
+    // Both copies are items, so the one A lacks crosses like any other, and
+    // nothing about the pair is worth a warning.
+    let report = sync(&config, &state);
+    assert!(
+        report.get("ambiguous").is_none(),
+        "nothing is ambiguous any more: {report}"
+    );
+    assert!(
+        report.get("refused").is_none(),
+        "an IMAP server holds no UID to refuse: {report}"
+    );
+    assert_eq!(
+        uids(A, &marker).len(),
+        2,
+        "the second copy was appended to A: {report}"
+    );
+
+    // 2. Nothing changed, so nothing is reported. This is the run the freeze
+    //    could never reach: a copy with no row was read as a body still to
+    //    fetch, and named again on every run for ever.
     let report = sync(&config, &state);
     assert_eq!(
-        report["item"]["patch"].as_array().map_or(0, Vec::len),
+        report["item"][""].as_array().map_or(0, Vec::len),
         0,
-        "no hunk is derived for a frozen identity: {report}"
+        "a settled collection reports nothing: {report}"
     );
+
+    // 3. One copy goes on B. It is an item of its own now, so its delete says
+    //    something exact: that copy goes on A too, and the other stays.
     let mut expected = uids(B, &marker);
     expected.sort();
-    assert_eq!(warned_handles(&report, "right"), expected, "{report}");
-
-    // 2. One copy goes on B. The delete must not propagate: the copy that
-    //    vanished says nothing about the one that did not, and acting on that
-    //    reading is what used to remove the only copy on A.
     expunge(B, &expected[0]);
     assert_eq!(uids(B, &marker).len(), 1, "B now holds the message once");
     let report = sync(&config, &state);
-    assert!(
-        !mentions_delete(&report),
-        "no delete is pushed on the word of a source that held the identity twice: {report}"
+    assert_eq!(
+        uids(A, &marker).len(),
+        1,
+        "exactly the deleted copy went: {report}"
     );
-    assert_eq!(uids(A, &marker).len(), 1, "A still holds its copy");
 
-    // 3. B loses its checkpoint, so its next enumeration is full. A retained
-    //    row must not be revived into an append to A.
+    // 4. B loses its checkpoint, so its next enumeration is full. A bound
+    //    handle keeps the key it was given, so nothing is minted twice and
+    //    nothing is re-appended.
     drop_checkpoint(&state, "right");
     let report = sync(&config, &state);
     assert_eq!(
@@ -124,26 +146,7 @@ fn a_duplicated_identity_is_frozen_reported_and_never_costs_the_other_side_its_c
         1,
         "the full enumeration re-appended nothing to A: {report}"
     );
-}
-
-/// The handles the report's warning for `side` names, sorted.
-fn warned_handles(report: &serde_json::Value, side: &str) -> Vec<String> {
-    let warning = report["ambiguous"]
-        .as_array()
-        .expect("the report carries the warnings")
-        .iter()
-        .find(|warning| warning["side"] == side)
-        .unwrap_or_else(|| panic!("{side} is reported as ambiguous"));
-    assert_eq!(warning["collection"], "INBOX");
-
-    let mut handles: Vec<String> = warning["ids"]
-        .as_array()
-        .expect("the warning names every handle")
-        .iter()
-        .map(|id| id.as_str().unwrap().to_string())
-        .collect();
-    handles.sort();
-    handles
+    assert_eq!(uids(B, &marker).len(), 1, "nor to B: {report}");
 }
 
 fn config_toml() -> String {
@@ -158,13 +161,6 @@ fn config_toml() -> String {
          targets.right.imap.sasl.plain.username = \"test@pimalaya.org\"\n\
          targets.right.imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n",
     )
-}
-
-/// Whether the report carries any item hunk deleting a copy.
-fn mentions_delete(report: &serde_json::Value) -> bool {
-    report["item"]["patch"]
-        .as_array()
-        .is_some_and(|patch| patch.iter().any(|entry| entry["hunk"]["kind"] == "delete"))
 }
 
 /// Empties one side's stored sync cursor, which the IMAP backend reads as an

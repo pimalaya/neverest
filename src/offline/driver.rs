@@ -19,13 +19,15 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeSet, HashMap, HashSet},
-    fs,
+    fs, mem,
     path::{Path, PathBuf},
+    process,
     sync::{
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
+    time::Instant,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -47,21 +49,22 @@ use io_replica::{
     },
     upgrade::ReplicaUpgrade,
 };
-use log::{info, warn};
+use log::{debug, info, warn};
 use pimalaya_cli::spinner::Spinner;
 
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 use crate::sync::report::SubmitEntry;
 use crate::{
+    account::{Account, SourceAccount},
     client::{Client, Pool},
     config::{AccountConfig, AccountMode, CollectionFilter, SourceConfig, SourcePermissions},
     item::flag::Flag,
-    kind::Kind,
+    kind::{Kind, LinkId},
     offline::{
         drive, pipe,
         remote::{
-            BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, hydrate_batch, resolve_kind,
-            wire_name,
+            BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, RefusedCreate, hydrate_batch,
+            resolve_kind, wire_name,
         },
         state::StoreState,
         storage::{hydration_targets, load_side, projection_view},
@@ -70,8 +73,8 @@ use crate::{
     sync::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
-            AmbiguousIdentity, DrainedQueue, ItemConflict, ParkedQueueAction, PatchEntry,
-            PurgedItems, SyncReport,
+            DrainedQueue, ItemConflict, ParkedQueueAction, PatchEntry, PurgedItems,
+            RefusedDuplicate, SyncReport,
         },
     },
 };
@@ -269,6 +272,10 @@ struct SourceCtx {
     pool: Pool,
     perms: SourcePermissions,
     authority: Authority,
+    /// The creates this endpoint refused because it already holds the item's
+    /// identity, collected by the remote each pass pushes and drained into the
+    /// report by [`itemize_refused`].
+    refused: Vec<RefusedCreate>,
 }
 
 impl SourceCtx {
@@ -330,10 +337,12 @@ pub fn run(
     let running = select_sources(&mode, only_sources)?;
 
     let real_dir = store_dir(&account_name, account_config)?;
-    let work_dir = if dry_run {
-        dry_run_replica(&real_dir)?
-    } else {
-        real_dir.clone()
+    // Held for the whole run: dropping it is what removes the replica, so
+    // an early return cannot leave one behind.
+    let dry_replica = dry_run.then(|| DryRunReplica::new(&real_dir)).transpose()?;
+    let work_dir = match &dry_replica {
+        Some(replica) => replica.dir.clone(),
+        None => real_dir.clone(),
     };
     fs::create_dir_all(&work_dir)
         .with_context(|| format!("Create replica dir {} error", work_dir.display()))?;
@@ -350,6 +359,10 @@ pub fn run(
     // before any endpoint is opened.
     state.check_mode(&mode)?;
 
+    // Every credential the run needs, read once here rather than once per
+    // opened connection.
+    let account = Account::resolve(account_config)?;
+
     for source_name in &running {
         let source = endpoints[source_name].clone();
 
@@ -361,6 +374,7 @@ pub fn run(
             run_local(
                 &account_name,
                 account_config,
+                &account,
                 &mode,
                 source_name,
                 source,
@@ -374,6 +388,7 @@ pub fn run(
             run_targets(
                 &account_name,
                 account_config,
+                &account,
                 &mode,
                 &endpoints,
                 source_name,
@@ -401,6 +416,14 @@ pub fn run(
         }
     }
 
+    // Once for the run, whatever the sources did and whether or not this is a
+    // dry run: the parked rows are the store's, and a source-by-source read
+    // would report each of them once per source.
+    match PimdirStore::open(&work_dir) {
+        Ok(store) => report_parked(&store, &mut report),
+        Err(err) => warn!("cannot open the store to list parked actions: {err}"),
+    }
+
     if !dry_run {
         state.record_mode(&mode, accept_mode);
 
@@ -414,10 +437,6 @@ pub fn run(
         }
 
         state.save(&work_dir)?;
-    }
-
-    if dry_run {
-        let _ = fs::remove_dir_all(&work_dir);
     }
 
     crate::offline::prof::report();
@@ -462,6 +481,7 @@ fn select_sources(mode: &AccountMode, only: &[String]) -> Result<Vec<String>> {
 fn run_targets(
     account_name: &str,
     account_config: &AccountConfig,
+    account: &Account,
     mode: &AccountMode,
     endpoints: &HashMap<String, SourceConfig>,
     source_name: &str,
@@ -478,6 +498,7 @@ fn run_targets(
         run_pair(
             account_name,
             account_config,
+            account,
             mode,
             source_name,
             source_name.to_string(),
@@ -502,6 +523,7 @@ fn run_targets(
 fn run_pair(
     account_name: &str,
     account_config: &AccountConfig,
+    account: &Account,
     mode: &AccountMode,
     namespace: &str,
     left_name: String,
@@ -540,22 +562,27 @@ fn run_pair(
         (Authority::Shared, Authority::Shared)
     };
 
+    let left_account = account.get(&left_name)?;
+    let right_account = account.get(&right_name)?;
+
     let s = Spinner::start("Opening endpoints…");
     let mut left = SourceCtx {
         name: left_name.clone(),
         namespace: namespace.to_string(),
         perms: left_config.permissions(),
         authority: left_authority,
-        pool: Pool::open(left_config, left_budget)
+        pool: Pool::open(left_account, left_budget)
             .with_context(|| format!("Open source {left_name}"))?,
+        refused: Vec::new(),
     };
     let mut right = SourceCtx {
         name: right_name.clone(),
         namespace: namespace.to_string(),
         perms: right_config.permissions(),
         authority: right_authority,
-        pool: Pool::open(right_config, right_budget)
+        pool: Pool::open(right_account, right_budget)
             .with_context(|| format!("Open target {right_name}"))?,
+        refused: Vec::new(),
     };
     s.success("Opened endpoints");
 
@@ -565,6 +592,7 @@ fn run_pair(
     if !dry_run {
         drain_submits(
             account_config,
+            account,
             &mut [&mut left, &mut right],
             &mut left_store,
             &blobs,
@@ -676,6 +704,7 @@ type CollectionPlan = (String, Vec<(ReplicaHandle, u64)>);
 fn run_local(
     account_name: &str,
     account_config: &AccountConfig,
+    account: &Account,
     mode: &AccountMode,
     source_name: &str,
     source_config: SourceConfig,
@@ -699,7 +728,15 @@ fn run_local(
         Authority::Shared
     };
 
-    let mut ctxs = open_source_contexts(&source, source_name, &source_config, authority, workers)?;
+    let source_account = account.get(source_name)?;
+    let mut ctxs = open_source_contexts(
+        &source,
+        source_name,
+        &source_config,
+        source_account,
+        authority,
+        workers,
+    )?;
     let mut stores: Vec<PimdirSourceStore> = (0..workers)
         .map(|_| open_store(work_dir, &source, account_name))
         .collect::<Result<_>>()?;
@@ -718,7 +755,14 @@ fn run_local(
 
     if !dry_run {
         let (first, _) = ctxs.split_first_mut().expect("at least one connection");
-        drain_submits(account_config, &mut [first], &mut stores[0], &blobs, report);
+        drain_submits(
+            account_config,
+            account,
+            &mut [first],
+            &mut stores[0],
+            &blobs,
+            report,
+        );
     }
 
     let s = Spinner::start(format!("Listing collections on {source_name}…"));
@@ -773,6 +817,7 @@ fn open_source_contexts(
     name: &str,
     namespace: &str,
     config: &SourceConfig,
+    account: SourceAccount,
     authority: Authority,
     count: usize,
 ) -> Result<Vec<SourceCtx>> {
@@ -780,8 +825,8 @@ fn open_source_contexts(
     let opened: Vec<Result<Pool>> = thread::scope(|scope| {
         let handles: Vec<_> = (0..count)
             .map(|_| {
-                let cfg = config.clone();
-                scope.spawn(move || Pool::open(cfg, 1))
+                let account = account.clone();
+                scope.spawn(move || Pool::open(account, 1))
             })
             .collect();
         handles
@@ -797,6 +842,7 @@ fn open_source_contexts(
             perms,
             authority,
             pool: pool.context("Open connection")?,
+            refused: Vec::new(),
         });
     }
     Ok(ctxs)
@@ -919,6 +965,7 @@ fn collection_spine(
             break;
         }
     }
+    itemize_refused(&ctx.name, mem::take(&mut ctx.refused), &mut report);
 
     let mut targets: Vec<(ReplicaHandle, u64)> = Vec::new();
     for placement in projection_view(store, collection, &ctx.name)
@@ -1194,9 +1241,6 @@ fn itemize_single(
     let view = projection_view(store, collection, &ctx.name)
         .with_context(|| format!("Project {} {display}", ctx.name))?;
     for placement in view {
-        report
-            .ambiguous
-            .extend(ambiguity(&ctx.name, display, &placement));
         for hunk in placement_hunks(&ctx.name, &ctx.name, display, &placement) {
             report.item.patch.push(PatchEntry::new(hunk, None));
         }
@@ -1315,6 +1359,9 @@ fn sync_collection(
         }
     }
 
+    itemize_refused(&left.name, mem::take(&mut left.refused), report);
+    itemize_refused(&right.name, mem::take(&mut right.refused), report);
+
     Ok(())
 }
 
@@ -1351,8 +1398,7 @@ fn propagate(
 
 /// One cross-copy body to relay: its holding side and fetch handle, the exact
 /// octet length taken from the item's meta so the target append is
-/// length-prefixed without buffering the body, the link id, the flags and the
-/// Message-ID.
+/// length-prefixed without buffering the body, the link id and the flags.
 struct RelayTarget {
     /// The name of the source holding the body.
     holding: String,
@@ -1360,15 +1406,23 @@ struct RelayTarget {
     /// The cross-side identity, carried so the relayed append can be itemized
     /// under the same id the hydrating path reports a copy under.
     link: String,
+    /// The identity the target addresses the new item by, from
+    /// [`Kind::split_link_id`], owned because the link id it points into is
+    /// dropped with the hub.
+    hint: Option<String>,
+    /// The minted part of the key, where the copy shares its identity with
+    /// another item of the same collection, so the target names it apart from
+    /// the copy already holding that identity.
+    mint: Option<String>,
     size: usize,
     flags: Vec<Flag>,
-    message_id: Option<String>,
 }
 
 /// Reads the relay targets from the hub: an item held by exactly one side,
 /// never hydrated so with no stored object, whose far side may create it.
 fn relay_targets(
     store: &PimdirStore,
+    kind: Kind,
     collection: &str,
     left: (&str, bool),
     right: (&str, bool),
@@ -1389,13 +1443,15 @@ fn relay_targets(
             warn!("relay skips {} in {collection}: no size in meta", link.0);
             continue;
         };
+        let split = kind.split_link_id(link);
         out.push(RelayTarget {
             holding,
             handle: binding.handle.clone(),
             link: link.0.clone(),
+            hint: split.hint.map(str::to_string),
+            mint: split.mint.map(str::to_string),
             size,
             flags: to_email_flag_set(&item.flags).into_iter().collect(),
-            message_id: link.0.strip_prefix("mid:").map(str::to_string),
         });
     }
     Ok(out)
@@ -1426,6 +1482,7 @@ fn relay_copies(
 ) -> Result<usize> {
     let targets = relay_targets(
         store,
+        resolve_kind(&mut left.pool),
         collection,
         (&left.name, left.perms.item.create),
         (&right.name, right.perms.item.create),
@@ -1488,7 +1545,10 @@ fn relay_one(
             &target.flags,
             reader,
             target.size,
-            target.message_id.as_deref(),
+            LinkId {
+                hint: target.hint.as_deref(),
+                mint: target.mint.as_deref(),
+            },
         );
         (fetch.join().unwrap(), append)
     });
@@ -1712,12 +1772,17 @@ fn sync_side(
 ) -> Result<ReplicaSyncReport> {
     let opts = sync_options(push, ctx.push_rights(), ctx.conflict_policy());
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-    drive(
+    let report = drive(
         store,
         &mut remote,
         ReplicaSync::new(collection.to_string(), opts),
-    )
-    .with_context(|| format!("Sync {} {collection}", &ctx.name))
+    );
+    // Kept whether the pass succeeded or not: a refusal is something the run
+    // did learn, and a later failure does not unlearn it.
+    let refused = remote.take_refused();
+    ctx.refused.extend(refused);
+
+    report.with_context(|| format!("Sync {} {collection}", &ctx.name))
 }
 
 /// Raises every freshly probed placement to the tier its kind resolves at
@@ -1840,9 +1905,6 @@ fn itemize(
         let view = projection_view(store, collection, &ctx.name)
             .with_context(|| format!("Project {} {display}", ctx.name))?;
         for placement in view {
-            report
-                .ambiguous
-                .extend(ambiguity(&ctx.name, display, &placement));
             for hunk in placement_hunks(&ctx.name, &other.name, display, &placement) {
                 report.item.patch.push(PatchEntry::new(hunk, None));
             }
@@ -1918,36 +1980,25 @@ fn placement_hunks(
             }
             hunks
         }
-        ReplicaStatus::Clean | ReplicaStatus::Conflict | ReplicaStatus::Ambiguous => Vec::new(),
+        ReplicaStatus::Clean | ReplicaStatus::Conflict => Vec::new(),
     }
 }
 
-/// The warning an [`ReplicaStatus::Ambiguous`] placement carries: the
-/// collection and every handle the side holds the identity under, the bound one
-/// first. `None` for any other status.
+/// Names the creates a side refused because it already holds the identity, in
+/// the terms the report speaks: the source's configured name, the collection
+/// as its server names it, and the shared `UID`.
 ///
-/// The freeze itself is upstream: io-replica marks the identity and derives
-/// nothing for it, io-pimdir persists the losing handles on the binding. This
-/// crate reads what they marked and names it in the user's terms. Persisting
-/// the state is what makes the warning come back on every run, since the second
-/// copy appears in exactly one enumeration.
-fn ambiguity(
-    source: &str,
-    collection: &str,
-    placement: &ReplicaPlacement,
-) -> Option<AmbiguousIdentity> {
-    if placement.status != ReplicaStatus::Ambiguous {
-        return None;
-    }
-
-    let mut ids = vec![placement.handle.0.clone()];
-    ids.extend(placement.ambiguous_handles.iter().map(|h| h.0.clone()));
-
-    Some(AmbiguousIdentity {
-        side: source.to_string(),
-        collection: collection.to_string(),
-        ids,
-    })
+/// The remote collects them as it pushes ([`PimRemote::take_refused`]) and
+/// leaves them on the side's context; what is added here is the side's name,
+/// which the remote does not know it by.
+fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &mut SyncReport) {
+    report
+        .refused
+        .extend(refused.into_iter().map(|refused| RefusedDuplicate {
+            side: side.to_string(),
+            collection: refused.collection,
+            uid: refused.uid,
+        }));
 }
 
 /// The context of the named source in a pair.
@@ -2078,9 +2129,9 @@ fn content_key(link: &str) -> u64 {
 /// sync, neverest being the store's sole owner. Each collection is applied
 /// exactly once by io-pimdir's
 /// [`drain_collection`](PimdirSourceStore::drain_collection). A permanently bad
-/// action parks and is reported until repaired; a transient failure leaves the
-/// collection queued for the next run and only warns, the sync itself still
-/// running offline-first.
+/// action parks, for [`report_parked`] to surface until it is repaired; a
+/// transient failure leaves the collection queued for the next run and only
+/// warns, the sync itself still running offline-first.
 fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
     let collections = match store.queued_collections() {
         Ok(collections) => collections,
@@ -2109,7 +2160,18 @@ fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
             Err(err) => warn!("drain of {collection} failed, actions stay queued: {err}"),
         }
     }
+}
 
+/// Surfaces the store's parked queue actions, once for the run.
+///
+/// A parked row belongs to the store, not to a source: it is whatever a
+/// frontend enqueued and the drain found permanently unappliable, and the
+/// queue records no source. Reading it where the drain runs would report it
+/// once per source that ran, so a mail account syncing contacts and calendar
+/// beside its mail would show the same row three times.
+///
+/// They are re-reported by every run, until the row is repaired or dropped.
+fn report_parked(store: &PimdirStore, report: &mut SyncReport) {
     match store.parked_actions() {
         Ok(parked) => {
             for action in parked {
@@ -2137,6 +2199,7 @@ fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
 /// parked, since another build or another host can perform them.
 fn drain_submits(
     account_config: &AccountConfig,
+    account: &Account,
     sides: &mut [&mut SourceCtx],
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
@@ -2156,7 +2219,8 @@ fn drain_submits(
 
     #[cfg(any(feature = "smtp", feature = "msgraph"))]
     {
-        let Some(mut channel) = open_send_channel(account_config, sides, intents.len()) else {
+        let Some(mut channel) = open_send_channel(account_config, account, sides, intents.len())
+        else {
             return;
         };
 
@@ -2213,7 +2277,7 @@ fn drain_submits(
 
     #[cfg(not(any(feature = "smtp", feature = "msgraph")))]
     {
-        let _ = (account_config, sides, blobs, store, report);
+        let _ = (account_config, account, sides, blobs, store, report);
         warn!(
             "this build has no send channel (needs the `smtp` or the `msgraph` cargo feature), {} submit intent(s) stay pending",
             intents.len()
@@ -2280,8 +2344,10 @@ fn sweep_retained(
 /// declare an `smtp` table (the account refuses more at load), so there is no
 /// tiebreak here. `None` warns and leaves the queued intents pending.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg_attr(not(feature = "smtp"), allow(unused_variables))]
 fn open_send_channel<'a>(
     account_config: &AccountConfig,
+    account: &Account,
     sides: &'a mut [&mut SourceCtx],
     queued: usize,
 ) -> Option<submit::SendChannel<'a>> {
@@ -2298,8 +2364,12 @@ fn open_send_channel<'a>(
     match pick {
         #[cfg(feature = "smtp")]
         Some(SendChannelPick::Smtp(name)) => {
-            match submit::connect_smtp(configured[&name].smtp.as_ref().expect("the pick found one"))
-            {
+            let opened = account.get(&name).and_then(|source| {
+                let smtp = source.smtp.expect("the pick found a configured channel");
+                submit::connect_smtp(&smtp)
+            });
+
+            match opened {
                 Ok(client) => Some(submit::SendChannel::Smtp(client)),
                 Err(err) => {
                     warn!("cannot open the smtp channel, {queued} intent(s) stay pending: {err:#}");
@@ -2400,36 +2470,140 @@ fn hydrate_full_collection(
     Ok(raised)
 }
 
-/// Builds a throwaway copy of the pimdir store for a dry run, so no checkpoint
-/// advances and no server is written: the SQLite database, its sidecar files
-/// and the blob directory.
-fn dry_run_replica(real_dir: &Path) -> Result<PathBuf> {
-    let mut tmp = std::env::temp_dir();
-    tmp.push(format!("neverest-dry-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp)
-        .with_context(|| format!("Create dry-run dir {} error", tmp.display()))?;
+/// The blob subdirectory of a pimdir store (SPEC §5), the one part of it
+/// a dry run shares with the real store rather than copying.
+const BLOBS_DIR: &str = "objects";
 
-    if real_dir.exists() {
-        copy_dir_all(real_dir, &tmp)
-            .with_context(|| format!("Copy {} for dry-run", real_dir.display()))?;
-    }
-    Ok(tmp)
+/// A throwaway replica of the pimdir store, so a dry run advances no
+/// checkpoint and writes to no server, removed however the run ends.
+///
+/// It is built **beside** the real store rather than under the temporary
+/// directory, so the two share a filesystem and the bodies can be
+/// hardlinked instead of copied. That is the difference between reading
+/// a mail account's whole blob tree and creating a few thousand
+/// directory entries, and on a machine whose `/tmp` is a tmpfs it is
+/// also the difference between spending gigabytes of memory and
+/// spending none.
+///
+/// Only the blob tree is shared. Everything else, the SQLite database
+/// above all, is copied, because a dry run writes to it and a hardlink
+/// would carry those writes into the real store. A file this misjudges
+/// is copied rather than shared, so the cost of the rule being wrong is
+/// a slower dry run and never a corrupted store.
+struct DryRunReplica {
+    /// Where the replica lives, which is the run's `work_dir`.
+    dir: PathBuf,
 }
 
-/// Recursively copies `src`'s contents into `dst`, created on demand.
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+impl DryRunReplica {
+    /// Clones the store at `real_dir` into a sibling directory, first
+    /// clearing whatever an earlier run left behind: a panic aborts a
+    /// release build, where no destructor runs, so a leftover is a state
+    /// this has to meet rather than one it can rule out.
+    fn new(real_dir: &Path) -> Result<Self> {
+        let parent = real_dir.parent().unwrap_or(Path::new("."));
+        let name = real_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("store"));
+        let prefix = format!(".{name}-dry-");
+
+        clear_stale_replicas(parent, &prefix);
+
+        let dir = parent.join(format!("{prefix}{}", process::id()));
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("Create dry-run replica {} error", dir.display()))?;
+
+        if real_dir.exists() {
+            let start = Instant::now();
+            let mut counts = CloneCounts::default();
+            let blobs = real_dir.join(BLOBS_DIR);
+
+            clone_dir(real_dir, &dir, &blobs, &mut counts)
+                .with_context(|| format!("Clone {} for dry-run", real_dir.display()))?;
+
+            debug!(
+                "dry-run replica prepared in {:?} ({} linked, {} copied)",
+                start.elapsed(),
+                counts.linked,
+                counts.copied
+            );
+
+            // A blob tree that could not be shared was read and written
+            // whole, which is the slow dry run this exists to avoid.
+            if counts.linked == 0 && counts.copied > 0 {
+                info!(
+                    "dry-run replica copied {} file(s), links unavailable",
+                    counts.copied
+                );
+            }
+        }
+
+        Ok(Self { dir })
+    }
+}
+
+impl Drop for DryRunReplica {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_dir_all(&self.dir) {
+            warn!(
+                "cannot remove the dry-run replica {}: {err}",
+                self.dir.display()
+            );
+        }
+    }
+}
+
+/// What [`clone_dir`] did, for the line reporting it.
+#[derive(Default)]
+struct CloneCounts {
+    linked: usize,
+    copied: usize,
+}
+
+/// Removes the replicas of earlier runs, named by `prefix` under `dir`.
+/// A directory that will not go is left with a warning: it costs disk,
+/// never correctness, the run about to start writing under a name of its
+/// own.
+fn clear_stale_replicas(dir: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(prefix) {
+            continue;
+        }
+
+        let stale = entry.path();
+        match fs::remove_dir_all(&stale) {
+            Ok(()) => warn!("removed a dry-run replica an earlier run left behind"),
+            Err(err) => warn!("cannot remove {}: {err}", stale.display()),
+        }
+    }
+}
+
+/// Clones `src`'s contents into `dst`, created on demand: a file under
+/// `blobs` is hardlinked, anything else is copied, and a link the
+/// filesystem refuses falls back to a copy.
+fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> Result<()> {
     fs::create_dir_all(dst)?;
+
     for entry in fs::read_dir(src)? {
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
+
         if entry.file_type()?.is_dir() {
-            copy_dir_all(&from, &to)?;
+            clone_dir(&from, &to, blobs, counts)?;
+        } else if from.starts_with(blobs) && fs::hard_link(&from, &to).is_ok() {
+            counts.linked += 1;
         } else {
             fs::copy(&from, &to)?;
+            counts.copied += 1;
         }
     }
+
     Ok(())
 }
 
@@ -2442,12 +2616,102 @@ mod tests {
         object::{ReplicaHash, ReplicaObject},
         placement::{ReplicaBase, ReplicaLinkId, ReplicaSortKey},
         remote::{
-            ReplicaFetchedItem, ReplicaPushOutcome, ReplicaPushResult, ReplicaRemoteItem,
-            ReplicaRemoteSnapshot,
+            ReplicaFetchedBody, ReplicaFetchedItem, ReplicaPushOutcome, ReplicaPushResult,
+            ReplicaRemoteItem, ReplicaRemoteSnapshot,
         },
     };
 
     use super::*;
+
+    /// A store with one body and the files a dry run writes to.
+    fn stub_store(dir: &Path) {
+        let body = dir.join(BLOBS_DIR).join("ab").join("cd");
+        fs::create_dir_all(&body).unwrap();
+        fs::write(body.join("abcd"), b"body").unwrap();
+        fs::write(dir.join("pimdir.db"), b"index").unwrap();
+        fs::write(dir.join("neverest.json"), b"{}").unwrap();
+    }
+
+    /// The rule the replica rests on: a body is shared, so a mail
+    /// account's blob tree is not read and written whole, and everything
+    /// a dry run writes to is its own, so those writes cannot reach the
+    /// real store.
+    #[cfg(unix)]
+    #[test]
+    fn a_dry_run_replica_shares_the_bodies_and_copies_the_rest() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("account");
+        stub_store(&store);
+
+        let replica = DryRunReplica::new(&store).unwrap();
+
+        let body = |dir: &Path| dir.join(BLOBS_DIR).join("ab").join("cd").join("abcd");
+        assert_eq!(
+            fs::metadata(body(&store)).unwrap().ino(),
+            fs::metadata(body(&replica.dir)).unwrap().ino(),
+        );
+        assert_ne!(
+            fs::metadata(store.join("pimdir.db")).unwrap().ino(),
+            fs::metadata(replica.dir.join("pimdir.db")).unwrap().ino(),
+        );
+        assert_eq!(
+            fs::read(replica.dir.join("pimdir.db")).unwrap(),
+            b"index".to_vec()
+        );
+    }
+
+    /// Writing to the replica's index leaves the real one alone, which is
+    /// what a dry run means and what a shared index would break.
+    #[test]
+    fn writing_to_a_dry_run_replica_leaves_the_store_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("account");
+        stub_store(&store);
+
+        let replica = DryRunReplica::new(&store).unwrap();
+        fs::write(replica.dir.join("pimdir.db"), b"advanced").unwrap();
+
+        assert_eq!(
+            fs::read(store.join("pimdir.db")).unwrap(),
+            b"index".to_vec()
+        );
+    }
+
+    /// The replica goes however the run ends, an early return included,
+    /// which is why it is a guard rather than a line on the way out.
+    #[test]
+    fn a_dry_run_replica_is_removed_when_the_run_ends() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("account");
+        stub_store(&store);
+
+        let dir = {
+            let replica = DryRunReplica::new(&store).unwrap();
+            replica.dir.clone()
+        };
+
+        assert!(!dir.exists());
+        assert!(store.join("pimdir.db").exists());
+    }
+
+    /// A release build aborts on a panic, running no destructor, so the
+    /// next run is what clears what the aborted one left.
+    #[test]
+    fn a_replica_an_earlier_run_left_behind_is_cleared() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("account");
+        stub_store(&store);
+
+        let stale = root.path().join(".account-dry-424242");
+        fs::create_dir_all(&stale).unwrap();
+        fs::write(stale.join("pimdir.db"), b"leftover").unwrap();
+
+        let _replica = DryRunReplica::new(&store).unwrap();
+
+        assert!(!stale.exists());
+    }
 
     #[test]
     fn a_side_pair_must_agree_on_its_kind() {
@@ -2468,6 +2732,39 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("left"), "{err}");
+    }
+
+    /// A parked row belongs to the store, and an account's sources each
+    /// drain it: reading the parked rows where the drain runs reported one
+    /// row once per source, so a mail account syncing contacts and calendar
+    /// beside its mail showed the same warning three times.
+    #[test]
+    fn a_parked_action_is_reported_once_however_many_sources_drained() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+        store.ensure_collection("INBOX", "message/rfc822").unwrap();
+
+        let mut producer = PimdirProducer::open(dir.path(), "himalaya").unwrap();
+        producer
+            .enqueue(
+                "INBOX",
+                &PimdirAction::SetFlags {
+                    seq: 6951,
+                    flags: ReplicaFlags::from_iter(["\\Seen"]),
+                },
+                None,
+                "2026-08-28T00:00:00Z",
+            )
+            .unwrap();
+
+        let mut report = SyncReport::default();
+        for _ in 0..3 {
+            drain_queues(&mut store, &mut report);
+        }
+        report_parked(&store, &mut report);
+
+        assert_eq!(report.parked.len(), 1);
+        assert_eq!(report.parked[0].producer, "himalaya");
     }
 
     #[test]
@@ -2519,6 +2816,7 @@ mod tests {
 
         let mut report = SyncReport::default();
         drain_queues(&mut store, &mut report);
+        report_parked(&store, &mut report);
 
         assert_eq!(report.drained.len(), 1);
         assert_eq!(report.drained[0].collection, "INBOX");
@@ -2537,6 +2835,7 @@ mod tests {
 
         let mut second = SyncReport::default();
         drain_queues(&mut store, &mut second);
+        report_parked(&store, &mut second);
         assert!(second.drained.is_empty());
         assert_eq!(second.parked.len(), 1);
     }
@@ -2660,7 +2959,6 @@ mod tests {
                         object: Some(ReplicaHash("beef0001".into())),
                     }),
                     origin: None,
-                    ambiguous_handles: Vec::new(),
                 }),
                 ReplicaWriteOp::SetCheckpoint {
                     collection: ReplicaCollectionId("INBOX".into()),
@@ -2809,7 +3107,6 @@ mod tests {
                         object: Some(ReplicaHash("beef0002".into())),
                     }),
                     origin: None,
-                    ambiguous_handles: Vec::new(),
                 }),
             ])
             .unwrap();
@@ -2825,6 +3122,12 @@ mod tests {
             }])
             .unwrap();
         assert!(body.is_file(), "retention keeps the body");
+
+        // A `0s` delay purges what was retained *strictly* before the
+        // cutoff, and the cutoff carries milliseconds, so an item dropped
+        // and swept within one of them is not old enough to go. Real
+        // delays are days; this test has to age the item itself.
+        thread::sleep(std::time::Duration::from_millis(5));
 
         let mut store = PimdirStore::open(dir.path()).unwrap();
         let config: AccountConfig = toml::from_str(
@@ -2998,7 +3301,6 @@ mod tests {
                         object: Some(ReplicaHash("0rig".into())),
                     }),
                     origin: None,
-                    ambiguous_handles: Vec::new(),
                 }),
             ])
             .unwrap();
@@ -3036,7 +3338,6 @@ mod tests {
                         object: Some(ReplicaHash("0rig".into())),
                     }),
                     origin: None,
-                    ambiguous_handles: Vec::new(),
                 }),
             ])
             .unwrap();
@@ -3229,48 +3530,76 @@ mod tests {
                 object: None,
             }),
             origin: None,
-            ambiguous_handles: Vec::new(),
         }
     }
 
+    /// Where the freeze this change reverses left one of two copies out of the
+    /// store and warned about it, both copies are ordinary items now: the
+    /// second carries the key the engine minted for it, projects a copy to the
+    /// other side like any other item, and the run says nothing of its own
+    /// about the pair.
     #[test]
-    fn a_frozen_identity_derives_no_hunk_and_is_reported_with_every_handle() {
+    fn a_duplicated_identity_is_two_items_and_no_warning() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
-        let mut placement = linked("145", "mid:a@x", r#"{"v":1}"#);
-        placement.ambiguous_handles = vec![ReplicaHandle("146".into())];
         store
-            .write(vec![ReplicaWriteOp::UpsertPlacement(placement)])
+            .write(vec![
+                ReplicaWriteOp::UpsertPlacement(linked("145", "a@x", r#"{"v":1}"#)),
+                ReplicaWriteOp::UpsertPlacement(linked("146", "dup:a@x#146", r#"{"v":1}"#)),
+            ])
             .unwrap();
 
         let view = projection_view(&store, "INBOX", "left").unwrap();
-        assert_eq!(view.len(), 1);
-        assert_eq!(view[0].status, ReplicaStatus::Ambiguous);
-        assert!(placement_hunks("left", "right", "INBOX", &view[0]).is_empty());
+        assert_eq!(view.len(), 2, "both copies are stored and projected");
 
         let mut report = SyncReport {
             account: "dup".into(),
             ..Default::default()
         };
-        report
-            .ambiguous
-            .extend(ambiguity("left", "INBOX", &view[0]));
-        assert_eq!(report.ambiguous.len(), 1);
-        assert_eq!(report.ambiguous[0].ids, ["145", "146"]);
+        for placement in &view {
+            for hunk in placement_hunks("left", "right", "INBOX", placement) {
+                report.item.patch.push(PatchEntry::new(hunk, None));
+            }
+        }
+
+        let text = report.to_string();
+        assert!(!text.contains("Warnings"), "{text}");
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("ambiguous").is_none(), "{json}");
+        assert!(json.get("refused").is_none(), "{json}");
+    }
+
+    /// A target refusing the second copy is the one thing worth a line: the
+    /// run wrote nothing for that item, and the line carries the `UID` and the
+    /// collection the user repairs it by.
+    #[test]
+    fn a_refused_duplicate_is_named_with_its_uid() {
+        let refused = vec![RefusedCreate {
+            collection: String::from("agenda"),
+            uid: String::from("event-1@google.com"),
+        }];
+
+        let mut report = SyncReport {
+            account: "dup".into(),
+            ..Default::default()
+        };
+        itemize_refused("right", refused, &mut report);
+
+        assert_eq!(report.refused.len(), 1);
+        assert_eq!(report.refused[0].side, "right");
 
         let text = report.to_string();
         assert!(text.contains("Warnings (1)"), "{text}");
-        assert!(text.contains("INBOX"), "{text}");
-        assert!(text.contains("145") && text.contains("146"), "{text}");
+        assert!(text.contains("agenda"), "{text}");
+        assert!(text.contains("event-1@google.com"), "{text}");
 
         let json = serde_json::to_value(&report).unwrap();
-        assert_eq!(json["ambiguous"][0]["collection"], "INBOX");
-        assert_eq!(
-            json["ambiguous"][0]["ids"],
-            serde_json::json!(["145", "146"])
-        );
+        assert_eq!(json["refused"][0]["side"], "right");
+        assert_eq!(json["refused"][0]["collection"], "agenda");
+        assert_eq!(json["refused"][0]["uid"], "event-1@google.com");
     }
 
     #[test]
@@ -3287,7 +3616,14 @@ mod tests {
             ))])
             .unwrap();
 
-        let targets = relay_targets(&store, "INBOX", ("left", false), ("right", true)).unwrap();
+        let targets = relay_targets(
+            &store,
+            Kind::Mail,
+            "INBOX",
+            ("left", false),
+            ("right", true),
+        )
+        .unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].holding, "left");
         assert_eq!(targets[0].link, "mid:a@x");
@@ -3416,7 +3752,6 @@ mod tests {
                 conflict_revision: None,
                 base: None,
                 origin: None,
-                ambiguous_handles: Vec::new(),
             })])
             .unwrap();
 
@@ -3462,7 +3797,6 @@ mod tests {
                 conflict_revision: None,
                 base: None,
                 origin: None,
-                ambiguous_handles: Vec::new(),
             })])
             .unwrap();
 
@@ -3473,6 +3807,223 @@ mod tests {
             report.item.patch.len(),
             1,
             "Full with no object is a body to re-fetch, not a finished item",
+        );
+    }
+
+    /// A calendar whose server implements no `sync-collection`: every
+    /// enumeration is the whole member set, complete, under an empty
+    /// checkpoint, and an identity is resolved only by downloading the body.
+    /// The reported Posteo shape, with one `UID` under two hrefs.
+    struct FullListingRemote {
+        /// `handle -> (uid, body)`, in the order the listing returns them.
+        items: Vec<(String, String, Vec<u8>)>,
+        /// Every handle a body was fetched for, in order, so a re-run that
+        /// downloads the same resource again is visible.
+        fetched: Vec<String>,
+    }
+
+    impl ReplicaRemote for FullListingRemote {
+        type Error = anyhow::Error;
+
+        fn enumerate(
+            &mut self,
+            _collection: &ReplicaCollectionId,
+            _cursor: Option<ReplicaCheckpoint>,
+        ) -> Result<ReplicaRemoteSnapshot, Self::Error> {
+            Ok(ReplicaRemoteSnapshot {
+                items: self
+                    .items
+                    .iter()
+                    .map(|(handle, _, _)| ReplicaRemoteItem {
+                        handle: ReplicaHandle(handle.clone()),
+                        flags: ReplicaFlags::from_iter([] as [String; 0]),
+                        revision: Some(String::from("etag-1")),
+                    })
+                    .collect(),
+                vanished: Vec::new(),
+                complete: true,
+                checkpoint: ReplicaCheckpoint(Vec::new()),
+            })
+        }
+
+        fn fetch(
+            &mut self,
+            _collection: &ReplicaCollectionId,
+            handles: Vec<ReplicaHandle>,
+            _tier: ReplicaTier,
+        ) -> Result<Vec<ReplicaFetchedItem>, Self::Error> {
+            let mut items = Vec::new();
+            for handle in handles {
+                let Some((_, uid, body)) = self
+                    .items
+                    .iter()
+                    .find(|(id, _, _)| *id == handle.0)
+                    .cloned()
+                else {
+                    continue;
+                };
+                self.fetched.push(handle.0.clone());
+                items.push(ReplicaFetchedItem {
+                    handle,
+                    link_id: ReplicaLinkId(uid),
+                    meta: ReplicaMeta(format!(r#"{{"v":1,"size":{}}}"#, body.len())),
+                    sort_key: ReplicaSortKey::default(),
+                    body: Some(ReplicaFetchedBody::Inline {
+                        hash: ReplicaHash(format!("{:016x}", digest(&body))),
+                        bytes: body,
+                    }),
+                    revision: Some(String::from("etag-1")),
+                });
+            }
+            Ok(items)
+        }
+
+        fn push(
+            &mut self,
+            _collection: &ReplicaCollectionId,
+            _changes: Vec<ReplicaChange>,
+        ) -> Result<Vec<ReplicaPushResult>, Self::Error> {
+            anyhow::bail!("the listing remote is never pushed to")
+        }
+    }
+
+    /// A content hash for a fake body, standing in for the store's own
+    /// hasher: distinct bodies must name distinct objects or a test proves
+    /// deduplication rather than storage.
+    fn digest(body: &[u8]) -> u64 {
+        body.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+    }
+
+    /// One collection's spine as `collection_spine` runs it for a source with
+    /// no counterpart: pull, report the bodies still to fetch, then raise the
+    /// probed items to `Full`, which is where a DAV identity resolves.
+    fn spine(
+        store: &mut PimdirSourceStore,
+        remote: &mut FullListingRemote,
+        collection: &str,
+    ) -> SyncReport {
+        let mut report = SyncReport::default();
+        drive(
+            store,
+            remote,
+            ReplicaSync::new(
+                collection.to_string(),
+                sync_options(
+                    false,
+                    ReplicaPushRights::all(),
+                    ReplicaConflictPolicy::Manual,
+                ),
+            ),
+        )
+        .unwrap();
+        itemize_fetches(collection, "agenda", store, "caldav", &mut report).unwrap();
+
+        let probed: Vec<ReplicaHandle> = load_side(store, collection)
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.level == ReplicaLevel::Probed)
+            .map(|p| p.handle)
+            .collect();
+        if !probed.is_empty() {
+            drive(
+                store,
+                remote,
+                ReplicaUpgrade::new(collection.to_string(), probed, ReplicaTier::Full),
+            )
+            .unwrap();
+        }
+        report
+    }
+
+    /// The reported case, end to end: a calendar holding one `UID` under two
+    /// hrefs mirrors as two items with two bodies, and the run after it says
+    /// nothing at all.
+    ///
+    /// The second run is the bug the user saw. The frozen twin never got a
+    /// row, so the pull plan read it as an unfetched body and named it on
+    /// every run; the collection is listed in full every run here, exactly as
+    /// that server lists it, so nothing but a row of its own could ever stop
+    /// the line coming back.
+    #[test]
+    fn one_identity_under_two_hrefs_mirrors_as_two_items_and_settles() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("caldav");
+        store
+            .ensure_collection("caldav/agenda", "text/calendar")
+            .unwrap();
+
+        let uid = "event-1@google.com";
+        let mut remote = FullListingRemote {
+            items: vec![
+                (
+                    String::from("event-1%40google.com.ics"),
+                    String::from(uid),
+                    b"BEGIN:VCALENDAR:one".to_vec(),
+                ),
+                (
+                    String::from("event-1%2540google.com.ics"),
+                    String::from(uid),
+                    b"BEGIN:VCALENDAR:two".to_vec(),
+                ),
+            ],
+            fetched: Vec::new(),
+        };
+
+        let first = spine(&mut store, &mut remote, "caldav/agenda");
+        assert_eq!(
+            first.item.patch.len(),
+            2,
+            "both resources are bodies to fetch on the first run",
+        );
+        assert_eq!(remote.fetched.len(), 2, "each body is downloaded once");
+
+        let mut placements = load_side(&store, "caldav/agenda").unwrap();
+        placements.sort_by(|a, b| a.handle.0.cmp(&b.handle.0));
+        assert_eq!(placements.len(), 2, "the twin has a row of its own");
+        assert!(
+            placements.iter().all(|p| p.object.is_some()),
+            "each copy holds its own body",
+        );
+        assert_ne!(
+            placements[0].object, placements[1].object,
+            "two resources, two bodies",
+        );
+
+        let keys: Vec<String> = placements
+            .iter()
+            .map(|p| p.link_id.clone().unwrap().0)
+            .collect();
+        let bare = keys
+            .iter()
+            .position(|key| key == uid)
+            .expect("one copy keeps the identity bare");
+        let minted = 1 - bare;
+        assert_eq!(
+            keys[minted],
+            format!("dup:{uid}#{}", placements[minted].handle.0),
+            "the other is minted on the href it came from",
+        );
+
+        // The run the user actually complained about: the same full listing,
+        // and nothing left to say about it.
+        let second = spine(&mut store, &mut remote, "caldav/agenda");
+        assert!(
+            second.item.patch.is_empty(),
+            "a settled collection reports nothing: {:?}",
+            second
+                .item
+                .patch
+                .iter()
+                .map(|e| e.hunk.to_string())
+                .collect::<Vec<_>>(),
+        );
+        assert!(second.refused.is_empty());
+        assert_eq!(
+            remote.fetched.len(),
+            2,
+            "no body is downloaded twice, so no blob is orphaned",
         );
     }
 }

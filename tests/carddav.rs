@@ -19,7 +19,7 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
-//! cargo test --features carddav --test carddav -- --ignored
+//! cargo test --features dav --test carddav -- --ignored
 //! ```
 
 use std::{fs, path::Path, process::Command};
@@ -28,6 +28,10 @@ const DAV: &str = "http://127.0.0.1:5232";
 const USER: &str = "test";
 const PASS: &str = "test";
 const BOOK: &str = "contacts";
+/// The address book as the store keys it: pimdir groups a collection under the
+/// id of the source that syncs it, which for the direct-backend sugar is the
+/// protocol name.
+const COLLECTION: &str = "carddav/contacts";
 
 /// A card, addressed on the server by `<uid>.vcf` (the same resource name the
 /// CardDAV adapter derives from a `UID`).
@@ -82,9 +86,9 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
 
     neverest(&["sync", "-a", "contacts"], &config, &state);
 
-    let items = store_items(&state, BOOK);
+    let items = store_items(&state, COLLECTION);
     assert!(
-        items.contains("uid:card-1") && items.contains("uid:card-2"),
+        items.contains(r#""link_id":"card-1""#) && items.contains(r#""link_id":"card-2""#),
         "both cards landed, keyed by their UID; store held:\n{items}",
     );
     assert!(
@@ -107,7 +111,7 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
 
     neverest(&["sync", "-a", "contacts"], &config, &state);
 
-    let items = store_items(&state, BOOK);
+    let items = store_items(&state, COLLECTION);
     assert!(
         items.contains("Jane Rewritten"),
         "the edited body reached the store; store held:\n{items}",
@@ -117,14 +121,17 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
     delete(root, "card-2");
     neverest(&["sync", "-a", "contacts"], &config, &state);
 
-    let live = store_items(&state, BOOK);
+    let live = store_items(&state, COLLECTION);
     assert!(
-        !live.contains("uid:card-2"),
+        !live.contains(r#""link_id":"card-2""#),
         "the deleted card left the live listing; store held:\n{live}",
     );
-    let retained = pimdir(&state, &["item", "list", BOOK, "--retained", "--json"]);
+    let retained = pimdir(
+        &state,
+        &["item", "list", COLLECTION, "--retained", "--json"],
+    );
     assert!(
-        retained.contains("uid:card-2"),
+        retained.contains(r#""link_id":"card-2""#),
         "the deleted card is retained, not lost; retained listing:\n{retained}",
     );
 

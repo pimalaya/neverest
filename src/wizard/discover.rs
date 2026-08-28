@@ -40,15 +40,17 @@ use pimalaya_cli::{printer::Printer, prompt, spinner::Spinner};
 use pimalaya_config::toml as config_toml;
 use serde::{Serialize, Serializer};
 
-#[cfg(any(feature = "imap", feature = "msgraph", feature = "carddav"))]
+#[cfg(any(feature = "imap", feature = "msgraph"))]
 use crate::config::SourceBackendConfig;
-#[cfg(feature = "carddav")]
-use crate::wizard::carddav;
+#[cfg(feature = "dav")]
+use crate::dav::client::DavKind;
+#[cfg(feature = "dav")]
+use crate::wizard::dav;
 #[cfg(feature = "imap")]
 use crate::wizard::imap_smtp;
 #[cfg(feature = "msgraph")]
 use crate::wizard::msgraph;
-#[cfg(any(feature = "imap", feature = "msgraph", feature = "carddav"))]
+#[cfg(any(feature = "imap", feature = "msgraph", feature = "dav"))]
 use crate::wizard::search::DiscoveredKind;
 use crate::{
     config::{AccountConfig, Config, SourceConfig},
@@ -166,9 +168,10 @@ fn print_welcome() {
     eprintln!();
     eprintln!("Welcome to Neverest, the CLI to synchronize PIM collections.");
     eprintln!();
-    eprintln!("Neverest reconciles your existing mailbox, over IMAP or Microsoft");
-    eprintln!("Graph, with a local pimdir store the apps read and edit. Before it");
-    eprintln!("can sync, it needs to know about one account.");
+    eprintln!("Neverest reconciles what you already have, mail over IMAP or");
+    eprintln!("Microsoft Graph and contacts and calendar over DAV, with a local");
+    eprintln!("pimdir store the apps read and edit. Before it can sync, it needs");
+    eprintln!("to know about one account.");
     eprintln!();
     eprintln!("This wizard discovers a provider's settings from your email address,");
     eprintln!("tests the connection and generates a ready-to-use configuration it");
@@ -242,10 +245,20 @@ fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<Sourc
         DiscoveredKind::Msgraph => Ok(SourceConfig::new(SourceBackendConfig::Msgraph(
             msgraph::configure(account_name)?,
         ))),
-        #[cfg(feature = "carddav")]
-        DiscoveredKind::Carddav { url } => Ok(SourceConfig::new(SourceBackendConfig::Carddav(
-            carddav::configure(account_name, url, &choice)?,
-        ))),
+        #[cfg(feature = "dav")]
+        DiscoveredKind::Carddav { url } => Ok(SourceConfig::new(dav::configure(
+            account_name,
+            DavKind::Card,
+            url,
+            &choice,
+        )?)),
+        #[cfg(feature = "dav")]
+        DiscoveredKind::Caldav { url } => Ok(SourceConfig::new(dav::configure(
+            account_name,
+            DavKind::Cal,
+            url,
+            &choice,
+        )?)),
         kind => bail!("Configuration {kind:?} is not supported by this build"),
     }
 }

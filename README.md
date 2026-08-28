@@ -29,12 +29,12 @@
 
 ## Features
 
-- **PIM domain** support: **mail** via IMAP and Microsoft Graph (JMAP and Gmail configure but have no backend yet), **contacts** via CardDAV <sup>[rfc6352](https://www.iana.org/go/rfc6352)</sup> (requires the `carddav` feature); one account syncs several at once
+- **PIM domain** support: **mail** via IMAP and Microsoft Graph (JMAP and Gmail configure but have no backend yet), **contacts** via CardDAV <sup>[rfc6352](https://www.iana.org/go/rfc6352)</sup> and **calendar** via CalDAV <sup>[rfc4791](https://www.iana.org/go/rfc4791)</sup> (both require the `dav` feature); one account syncs several at once
 - **Local pimdir store** <sup>[specs](https://github.com/pimalaya/pimdir)</sup>: the single local copy an app reads, holding every domain an account syncs
 - **Retention**: a removed item is kept, never lost, and reclaimed on a schedule
 - **Relay** mode: a body crossing two IMAP servers is streamed server-to-server, never stored
 - **Queued submission**: a message a frontend enqueued leaves through its source's send channel
-- **Auth** support: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256 for IMAP; basic and bearer for CardDAV; OAuth 2.0 bearer tokens for Microsoft Graph
+- **Auth** support: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256 for IMAP; basic and bearer for CardDAV and CalDAV; OAuth 2.0 bearer tokens for Microsoft Graph
 - **TLS** support: [Rustls](https://crates.io/crates/rustls) with ring or aws crypto (`rustls-aws` feature), [Native TLS](https://crates.io/crates/native-tls) (`native-tls` feature)
 - **Discovery** support: known provider rules, PACC <sup>[specs](https://datatracker.ietf.org/doc/html/draft-ietf-mailmaint-pacc)</sup>, Autoconfiguration <sup>[specs](https://wiki.mozilla.org/Thunderbird:Autoconfiguration)</sup>, SRV <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup>, DAV <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup>
 - **Interactive wizard** turning an email address into a tested account

@@ -302,6 +302,10 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 ### Removed
 
+- Removed the `notify` cargo feature and the `conflict.notify` key; neverest raises no desktop notification of its own.
+
+  The once-only rule it existed for is already in the report: `conflicts` is what a run marked and `outstanding_conflicts` is what the store holds waiting, so a caller reading `--json` notifies on entry, once, with no state to keep, and can name the item, which a fixed summary and body could not. The exit code is not that signal, being wider: it means the run left something waiting, a refused duplicate or a rejected write included. `dbus` leaves the devshell and the package with it, along with an rpath workaround and an aarch64 atomics override. `conflict.merger` is unaffected. The README and config.sample.toml carry the replacement recipe.
+
 - Removed the `merge` cargo feature; the three-way merge now rides on `dav`.
 
   The sync spec requires without condition that a run merges a marked conflict, and that the merge is "built in rather than configured". A feature gating it made that false in the builds that omitted it. It could not earn its keep either: it was declared `merge = ["dav", ...]`, so it enabled another feature, and every mutable-content kind is already `dav`-gated, so it was co-extensive with `dav` across everything it could act on. `dep:ical-rs` and `dep:vcard-rs` moved into `dav`, and no build anyone would have made changes behaviour: `default` carried `merge`, and `--features merge` pulled `dav` in regardless.

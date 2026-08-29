@@ -437,7 +437,7 @@ pub fn run(
         Err(err) => warn!("cannot open the store to read what it left behind: {err}"),
     }
 
-    announce_conflicts(account_config, &report);
+    warn_conflicts(&report);
 
     if !dry_run {
         state.record_mode(&mode, accept_mode);
@@ -2672,40 +2672,27 @@ fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncReport) 
     }
 }
 
-/// Announces the conflicts this run marked: a warning per item in the log,
-/// then the account's notification once, if it declares one.
+/// Warns about the conflicts this run marked, one line per item.
 ///
-/// The log is the default and the notification is the opt-in, so an
-/// unattended run never shells out unasked. Only what this run marked is
-/// announced, which is the whole of the once-only rule: the engine returns
-/// early for a placement it already parked, so a five-minute schedule over one
-/// unresolved card raises one notification rather than nearly three hundred a
-/// day, all naming the same card. An unattended tool that repeats itself is
-/// one a user silences.
+/// Only what this run marked, which is the whole of the once-only rule: the
+/// engine returns early for a placement it already parked, so a five-minute
+/// schedule over one unresolved card warns once rather than nearly three
+/// hundred times a day, all naming the same card. An unattended tool that
+/// repeats itself is one a user silences.
 ///
-/// One notification carries the run rather than one per item, a dozen popups
-/// answering the same question being a dozen too many. What it says is the
-/// configuration's to write, the items themselves being in the report and in
-/// the log.
+/// Neverest raises no desktop notification of its own. The distinction the
+/// once-only rule rests on is in the report rather than buried in a popup:
+/// `conflicts` is what this run marked and `outstanding_conflicts` is what
+/// the store holds waiting, so a caller reading `--json` notifies on entry
+/// by testing the first, with no state of its own to keep. It can also name
+/// the item, which a static summary and body could never do.
 ///
-/// Returns how many items it announced, which is the length of the parked
+/// Returns how many items it warned about, which is the length of the parked
 /// list and never more: the report notes a divergence once however many
 /// passes over however many endpoints marked it.
-fn announce_conflicts(account_config: &AccountConfig, report: &SyncReport) -> usize {
-    if report.conflicts.is_empty() {
-        return 0;
-    }
-
+fn warn_conflicts(report: &SyncReport) -> usize {
     for conflict in &report.conflicts {
         warn!("{conflict}");
-    }
-
-    let Some(notification) = &account_config.conflict.notify else {
-        return report.conflicts.len();
-    };
-
-    if let Err(err) = notification.0.show() {
-        warn!("cannot show the conflict notification: {err}");
     }
 
     report.conflicts.len()
@@ -3978,7 +3965,7 @@ mod tests {
     /// collection report travels back through. Merging only the item patch
     /// left the account report with an empty `conflicts`, so the warning
     /// block never named what the run had just parked and
-    /// [`announce_conflicts`], which returns early on exactly that
+    /// [`warn_conflicts`], which returns early on exactly that
     /// emptiness, could not fire the account's notification at all.
     #[test]
     fn a_conflict_the_engine_marked_survives_the_report_merge() {
@@ -4411,9 +4398,8 @@ mod tests {
             .collect();
         assert_eq!(sides, ["left", "right"]);
 
-        let config = AccountConfig::default();
         assert_eq!(
-            announce_conflicts(&config, &report),
+            warn_conflicts(&report),
             2,
             "and one announcement per item entering conflict",
         );
@@ -4440,7 +4426,7 @@ mod tests {
 
         assert!(later.conflicts.is_empty());
         assert_eq!(
-            announce_conflicts(&config, &later),
+            warn_conflicts(&later),
             0,
             "a conflict an earlier run parked is announced by no later one",
         );

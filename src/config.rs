@@ -19,7 +19,6 @@ use io_sasl::{
 use pimalaya_cli::printer::Printer;
 use pimalaya_config::{
     command::CommandConfig,
-    notify::Notification,
     secret::{Secret, SecretResolver},
     toml as config_toml,
     toml::{TomlConfig, shell_expanded_string},
@@ -604,17 +603,6 @@ impl<'de> Deserialize<'de> for RemovedKey {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ConflictConfig {
-    /// The desktop notification a run shows when an item enters conflict,
-    /// written as `conflict.notify = { summary = "…", body = "…" }`.
-    ///
-    /// Unset, the default, leaves the warning in the log and the entry in
-    /// the report: an unattended tool never shells out unasked. A run that
-    /// observes a conflict an earlier one parked notifies nothing either
-    /// way, so a five-minute schedule over one unresolved card raises one
-    /// notification rather than three hundred a day.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub notify: Option<ConflictNotification>,
-
     /// The interactive merger `neverest conflict resolve --interactive`
     /// hands a collision to, written as `conflict.merger = "tcal merge"`.
     ///
@@ -639,18 +627,6 @@ pub struct ConflictConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merger: Option<CommandConfig>,
 }
-
-/// A desktop notification as a configuration writes it.
-///
-/// A newtype rather than the bare notification, so the key can be left out:
-/// the serde adapter reads one notification and has nothing to say about
-/// absence, which is what an opt-in needs.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub struct ConflictNotification(
-    /// What the daemon renders: a summary and an optional body.
-    #[serde(with = "pimalaya_config::notify")]
-    pub Notification,
-);
 
 /// The local pimdir store an account syncs through — the retained cache the app
 /// reads. Implicit per account; this only customises it.

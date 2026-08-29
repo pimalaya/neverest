@@ -321,12 +321,16 @@ imap.item.delete = false
 # That code is what a run leaving anything waiting exits with, a write the other
 # side would not take included.
 #
-# This is the desktop notification shown when an item enters conflict. UNSET,
-# the default, leaves the warning in the log and the entry in the report: a run
-# under cron never shells out unasked. A conflict an earlier run already parked
-# is announced by no later one, so a five-minute schedule raises one
-# notification rather than three hundred a day.
-#conflict.notify = { summary = "neverest", body = "A contact needs a decision" }
+# Neverest raises no desktop notification of its own. Every run warns in the
+# log, and `--json` carries both halves a notifier needs: `conflicts` is what
+# this run marked, `outstanding_conflicts` is what the store holds waiting. So
+# a five-minute schedule notifies on entry, once, by testing the first, with
+# no state of its own to keep:
+#
+#   neverest sync --json | jq -e '.conflicts | length > 0' >/dev/null \
+#     && notify-send "neverest" "an item needs a decision"
+#
+# A wrapper can also name the item, which a fixed summary and body could not.
 
 # The interactive merger `neverest conflict resolve --interactive` hands a
 # collision to. UNSET by default, which leaves that flag with nothing to run.

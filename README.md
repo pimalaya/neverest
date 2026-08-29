@@ -38,7 +38,7 @@
 - **TLS** support: [Rustls](https://crates.io/crates/rustls) with ring or aws crypto (`rustls-aws` feature), [Native TLS](https://crates.io/crates/native-tls) (`native-tls` feature)
 - **Discovery** support: known provider rules, PACC <sup>[specs](https://datatracker.ietf.org/doc/html/draft-ietf-mailmaint-pacc)</sup>, Autoconfiguration <sup>[specs](https://wiki.mozilla.org/Thunderbird:Autoconfiguration)</sup>, SRV <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup>, DAV <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup>
 - **Interactive wizard** turning an email address into a tested account
-- **TOML configuration** with multi-account support, and **JSON** output via `--json`
+- **TOML configuration** with multi-account support, and **JSON** output via `--json`, described by `neverest json-schema`
 
 > [!TIP]
 > Neverest is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support. The default feature set is declared in [Cargo.toml](./Cargo.toml).

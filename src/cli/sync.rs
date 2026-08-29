@@ -1,7 +1,7 @@
 //! # Sync command
 //!
 //! Runs the io-replica-based reconcile and prints the resulting
-//! [`crate::sync::report::SyncReport`].
+//! [`crate::sync::report::SyncOutput`].
 
 use std::{
     fs::{self, File, TryLockError},

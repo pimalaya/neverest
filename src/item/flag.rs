@@ -11,10 +11,11 @@
 
 use std::{cmp::Ordering, hash::Hash};
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// A flag attached to an item, keeping its wire spelling and IANA tag.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Flag {
     raw: String,
     iana: Option<IanaFlag>,
@@ -25,7 +26,9 @@ pub struct Flag {
 ///
 /// Declaration order is the derived [`Ord`], which is what gives stable
 /// per-keyword sorting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum IanaFlag {
     Seen,

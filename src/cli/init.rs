@@ -3,16 +3,15 @@
 //! Probes both sides and creates the pimdir replica store whose `pimdir.db`
 //! marks the account initialized.
 
-use std::{fs, path::PathBuf};
+use std::{fmt, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use io_pimdir::PimdirStore;
-use pimalaya_cli::{
-    printer::{Message, Printer},
-    spinner::Spinner,
-};
+use pimalaya_cli::{printer::Printer, spinner::Spinner};
 use pimalaya_config::toml::TomlConfig;
+use schemars::JsonSchema;
+use serde::Serialize;
 
 use crate::{
     account::Account,
@@ -53,12 +52,17 @@ impl InitCommand {
 
         let account = Account::resolve(&account_config)?;
 
+        let mut sources = Vec::new();
+
         for endpoint in account_config.endpoints()?.keys() {
             let s = Spinner::start(format!("Initializing {endpoint}…"));
             client::init(&account.get(endpoint)?)
                 .with_context(|| format!("Initialize {endpoint}"))?;
             s.success(format!("Initialized {endpoint}"));
+            sources.push(endpoint.clone());
         }
+
+        sources.sort();
 
         let s = Spinner::start("Creating replica store…");
         fs::create_dir_all(&replica)
@@ -73,8 +77,38 @@ impl InitCommand {
 
         // Nothing can refuse a first `one-way` run, so saying what the
         // account will do stands in for a confirmation.
-        printer.out(Message::new(format!(
-            "Account {name} successfully initialized: {mode}"
-        )))
+        printer.out(InitOutput {
+            account: name,
+            mode: mode.to_string(),
+            store: replica,
+            sources,
+        })
+    }
+}
+
+/// What `neverest init` reports: the store it created, and what the account
+/// will do once a sync runs against it.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct InitOutput {
+    /// The account that was initialized.
+    pub account: String,
+    /// What the account will do, as its mode reads.
+    pub mode: String,
+    /// The replica store directory that was created.
+    pub store: PathBuf,
+    /// The endpoints that were opened, sorted.
+    pub sources: Vec<String>,
+}
+
+impl fmt::Display for InitOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            account,
+            mode,
+            store,
+            ..
+        } = self;
+        writeln!(f, "Account {account} successfully initialized: {mode}")?;
+        writeln!(f, "Store created at {store}", store = store.display())
     }
 }

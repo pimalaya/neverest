@@ -1,19 +1,30 @@
-//! # Sync report
+//! # Sync output
 //!
 //! The end-of-run summary the sync engine returns: `Display` for the
-//! terminal, `Serialize` for `--json`.
+//! terminal, `Serialize` for `--json`, `JsonSchema` for `json-schema`.
 
 use std::fmt;
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::sync::hunk::{CollectionHunk, ItemHunk};
 
-#[derive(Debug, Default, Serialize)]
-pub struct SyncReport {
+/// What `neverest sync` reports: every change the run applied, plus the
+/// work it left for a person to settle.
+///
+/// The exit code reads off it rather than off the process: a run that
+/// reconciled its collections and still parked something is neither a
+/// success nor a failure.
+#[derive(Debug, Default, Serialize, JsonSchema)]
+pub struct SyncOutput {
+    /// The account the run reconciled.
     pub account: String,
+    /// Whether the run only planned the patch instead of applying it.
     pub dry_run: bool,
+    /// The collection-level patch, one entry per hunk.
     pub collection: PatchOutcome<CollectionHunk>,
+    /// The item-level patch, one entry per hunk.
     pub item: PatchOutcome<ItemHunk>,
     /// Content-key collisions this sync surfaced; the first entry is kept.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -59,7 +70,7 @@ pub struct SyncReport {
     pub rejected: Vec<RejectedWrite>,
 }
 
-impl SyncReport {
+impl SyncOutput {
     /// Folds a collection-scoped report into this account-wide one.
     ///
     /// Every arm a collection can fill travels: merging back only the item
@@ -129,9 +140,11 @@ impl SyncReport {
 /// Not about the duplicate, which the store mirrors as two items, but about
 /// the write that could not land, retried and re-reported every run. Giving
 /// one copy a `UID` of its own is the user's call, made in their own client.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct RefusedDuplicate {
+    /// The side that refused the write.
     pub side: String,
+    /// The collection the copy was headed for.
     pub collection: String,
     /// The identity the refused copy shares with the resource already there.
     pub uid: String,
@@ -156,9 +169,11 @@ impl fmt::Display for RefusedDuplicate {
 /// Carried here rather than among the applied hunks, so `already in sync`
 /// keeps meaning the run wrote nothing. The store still holds the change and
 /// the next run retries; a refusal repeated forever is one a person acts on.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct RejectedWrite {
+    /// The side that refused the write.
     pub side: String,
+    /// The collection the item sits in.
     pub collection: String,
     /// The item's handle on that side.
     pub id: String,
@@ -189,9 +204,11 @@ impl fmt::Display for RejectedWrite {
 /// The residue of the three-way merge, which already took both sides where
 /// they touched different fields; whose edit wins is itself an edit, staged
 /// through the pimdir queue. Only mutable-content kinds reach this state.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct ItemConflict {
+    /// The side the divergence is against.
     pub side: String,
+    /// The collection the item sits in.
     pub collection: String,
     /// The item's handle on that side.
     pub id: String,
@@ -212,8 +229,9 @@ impl fmt::Display for ItemConflict {
 }
 
 /// One collection's applied count from the pre-sync queue drain.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct DrainedQueue {
+    /// The collection the drained actions were anchored on.
     pub collection: String,
     /// Actions applied to the store and deleted from the queue.
     pub applied: usize,
@@ -233,10 +251,11 @@ impl fmt::Display for DrainedQueue {
 ///
 /// It stays queryable in the store until repaired, and every run reports it
 /// again.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct ParkedQueueAction {
     /// The queue row's global append id.
     pub id: i64,
+    /// The collection the action was anchored on.
     pub collection: String,
     /// The raw action kind (`add`, `set_flags`, …).
     pub action: String,
@@ -266,7 +285,7 @@ impl fmt::Display for ParkedQueueAction {
 ///
 /// Acknowledged when `error` is `None`, its queue row dropped and the body's
 /// pin released; parked when the failure is permanent, pending otherwise.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SubmitEntry {
     /// The queue row's global append id.
     pub id: i64,
@@ -296,7 +315,7 @@ impl fmt::Display for SubmitEntry {
 /// Two operations, because a purge releases a body without reclaiming one:
 /// the row goes with its reference, and the bytes are the collector's to take
 /// once nothing else points at them, so `bytes` is what this run freed.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct PurgedItems {
     /// Retained items deleted for good.
     pub items: usize,
@@ -321,15 +340,18 @@ impl fmt::Display for PurgedItems {
 }
 
 /// One content-key collision group; first id in `ids` is the kept one.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct MessageCollision {
+    /// The side the colliding envelopes were read from.
     pub side: String,
+    /// The collection they sit in.
     pub collection: String,
     /// Shared `Message-ID:` when every envelope carried one.
     ///
     /// `None` when the legacy `(subject, date, from)` fallback collapsed
     /// envelopes without a header.
     pub message_id: Option<String>,
+    /// The colliding handles, the kept one first.
     pub ids: Vec<String>,
 }
 
@@ -361,8 +383,11 @@ impl fmt::Display for MessageCollision {
     }
 }
 
-#[derive(Debug, Serialize)]
+/// One level of the patch a run applied, collection or item.
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct PatchOutcome<H> {
+    /// The hunks the run applied at that level, in the order it applied
+    /// them.
     pub patch: Vec<PatchEntry<H>>,
 }
 
@@ -372,8 +397,10 @@ impl<H> Default for PatchOutcome<H> {
     }
 }
 
-#[derive(Debug, Serialize)]
+/// One hunk of a patch, and whether applying it worked.
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct PatchEntry<H> {
+    /// The change the run tried to make.
     pub hunk: H,
     /// Formatted apply error (`{e:#}`); `None` on success.
     pub error: Option<String>,
@@ -388,7 +415,7 @@ impl<H> PatchEntry<H> {
     }
 }
 
-impl fmt::Display for SyncReport {
+impl fmt::Display for SyncOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f)?;
 

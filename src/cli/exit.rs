@@ -4,7 +4,7 @@
 
 use std::process::ExitCode;
 
-use crate::sync::report::SyncReport;
+use crate::sync::report::SyncOutput;
 
 /// How a command ended, beyond the success or failure its `Result` carries.
 ///
@@ -24,9 +24,9 @@ pub enum Exit {
     Conflicted,
 }
 
-impl From<&SyncReport> for Exit {
+impl From<&SyncOutput> for Exit {
     /// A run ends the way its report reads: delivered, or still waiting.
-    fn from(report: &SyncReport) -> Self {
+    fn from(report: &SyncOutput) -> Self {
         match report.left_waiting() {
             false => Self::Success,
             true => Self::Conflicted,

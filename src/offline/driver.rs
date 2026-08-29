@@ -80,7 +80,7 @@ use crate::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
             DrainedQueue, ItemConflict, ParkedQueueAction, PatchEntry, PurgedItems,
-            RefusedDuplicate, RejectedWrite, SyncReport,
+            RefusedDuplicate, RejectedWrite, SyncOutput,
         },
     },
 };
@@ -311,7 +311,7 @@ pub fn run(
     no_purge: bool,
     only_sources: &[String],
     accept_mode: bool,
-) -> Result<SyncReport> {
+) -> Result<SyncOutput> {
     let account_name = account_name.into();
     let endpoints = account_config.endpoints()?;
     let mode = account_config.mode()?;
@@ -330,7 +330,7 @@ pub fn run(
 
     let mut state = StoreState::load(&work_dir)?;
 
-    let mut report = SyncReport {
+    let mut report = SyncOutput {
         account: account_name.clone(),
         dry_run,
         ..Default::default()
@@ -463,7 +463,7 @@ fn run_targets(
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<()> {
     let relay = mode.streams(endpoints);
 
@@ -507,7 +507,7 @@ fn run_pair(
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<()> {
     let left_filter = left_config.collection().filter.clone();
 
@@ -681,7 +681,7 @@ fn run_local(
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<()> {
     let source = source_name.to_string();
     let source_filter = source_config.collection().filter.clone();
@@ -831,7 +831,7 @@ fn phase1_spine(
     blobs: &PimdirBlobs,
     store_dir: &Path,
     dry_run: bool,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<Vec<CollectionPlan>> {
     let total = filtered.len();
     let queue: SegQueue<String> = SegQueue::new();
@@ -839,7 +839,7 @@ fn phase1_spine(
         queue.push(collection.clone());
     }
     let plans: Mutex<Vec<CollectionPlan>> = Mutex::new(Vec::new());
-    let merged: Mutex<SyncReport> = Mutex::new(SyncReport::default());
+    let merged: Mutex<SyncOutput> = Mutex::new(SyncOutput::default());
     let scanned = AtomicUsize::new(0);
     let s = Spinner::start(format!("Scanning {source} (0/{total})"));
 
@@ -900,8 +900,8 @@ fn collection_spine(
     blobs: &PimdirBlobs,
     store_dir: &Path,
     dry_run: bool,
-) -> Result<(Vec<(ReplicaHandle, u64)>, SyncReport)> {
-    let mut report = SyncReport::default();
+) -> Result<(Vec<(ReplicaHandle, u64)>, SyncOutput)> {
+    let mut report = SyncOutput::default();
 
     let before = flag_snapshot(store, collection, &ctx.name)?;
 
@@ -1138,7 +1138,7 @@ fn itemize_pulled(
     collection: &str,
     display: &str,
     source: &str,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<()> {
     let after = flag_snapshot(store, collection, source)?;
     itemize_conflicted(events, store, collection, display, source, report)?;
@@ -1204,7 +1204,7 @@ fn itemize_conflicted(
     collection: &str,
     display: &str,
     source: &str,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<()> {
     if !events
         .iter()
@@ -1242,7 +1242,7 @@ fn itemize_single(
     collection: &str,
     store: &PimdirStore,
     ctx: &SourceCtx,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<()> {
     let display = display_name(&ctx.namespace, collection);
     let view = projection_view(store, collection, &ctx.name)
@@ -1265,7 +1265,7 @@ fn itemize_fetches(
     display: &str,
     store: &PimdirSourceStore,
     source: &str,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<()> {
     let view =
         load_side(store, collection).with_context(|| format!("Load {source} {collection}"))?;
@@ -1294,7 +1294,7 @@ fn itemize_fetches(
 /// Reconciles one collection until quiescent.
 ///
 /// The collection fills a report of its own, folded into the account's through
-/// [`SyncReport::absorb`], the same fold the one-source path makes at its
+/// [`SyncOutput::absorb`], the same fold the one-source path makes at its
 /// barrier. One fold keeps an arm from being dropped on just one path.
 #[allow(clippy::too_many_arguments)]
 fn sync_collection(
@@ -1309,13 +1309,13 @@ fn sync_collection(
     dry_run: bool,
     relay: bool,
     progress: &CollectionProgress,
-    account: &mut SyncReport,
+    account: &mut SyncOutput,
 ) -> Result<()> {
     left_store
         .ensure_collection(collection, media_type)
         .with_context(|| format!("Declare kind for {collection}"))?;
 
-    let mut report = SyncReport::default();
+    let mut report = SyncOutput::default();
     let outcome = sync_collection_into(
         collection,
         left,
@@ -1350,7 +1350,7 @@ fn sync_collection_into(
     dry_run: bool,
     relay: bool,
     progress: &CollectionProgress,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<()> {
     reconcile_pass(
         collection,
@@ -1430,7 +1430,7 @@ fn propagate(
     blobs: &PimdirBlobs,
     relay: bool,
     progress: &CollectionProgress,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<usize> {
     if relay {
         relay_copies(collection, left, right, left_store, progress, report)
@@ -1523,7 +1523,7 @@ fn relay_copies(
     right: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     progress: &CollectionProgress,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<usize> {
     let targets = relay_targets(
         store,
@@ -1617,7 +1617,7 @@ fn reconcile_pass(
     blobs: &PimdirBlobs,
     store_dir: &Path,
     dry_run: bool,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<bool> {
     let left_report = sync_side_rebuilding(
         collection,
@@ -2133,7 +2133,7 @@ fn itemize(
     store: &PimdirStore,
     left: &SourceCtx,
     right: &SourceCtx,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) -> Result<()> {
     for (ctx, other) in [(left, right), (right, left)] {
         let display = display_name(&ctx.namespace, collection);
@@ -2225,7 +2225,7 @@ fn placement_hunks(
 /// A collection reconciles until quiescent, so a create the other side will not
 /// take is re-refused every pass. Two copies of one identity are still two
 /// refusals, which is what the handle tells apart from a repeated one.
-fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &mut SyncReport) {
+fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &mut SyncOutput) {
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
 
     for refused in refused {
@@ -2252,7 +2252,7 @@ fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &mut SyncRep
 /// The item patch is a plan, itemized before anything is pushed, so a refused
 /// write left in it counts as one the run made and comes back as a phantom on
 /// every later run, as a rejected `PUT` did against a real CardDAV server.
-fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncReport) {
+fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncOutput) {
     let mut seen: HashSet<(String, String, &'static str)> = HashSet::new();
 
     for rejected in rejected {
@@ -2442,7 +2442,7 @@ fn content_key(link: &str) -> u64 {
 /// The queue is the whole store's and records no source, so a source drains its
 /// own namespace and nothing else: draining another's robs the drain that could
 /// have applied it, and the first source alphabetically would answer for all.
-fn drain_queues(store: &mut PimdirSourceStore, namespace: &str, report: &mut SyncReport) {
+fn drain_queues(store: &mut PimdirSourceStore, namespace: &str, report: &mut SyncOutput) {
     let collections = match store.queued_collections() {
         Ok(collections) => collections,
         Err(err) => {
@@ -2482,7 +2482,7 @@ fn drain_queues(store: &mut PimdirSourceStore, namespace: &str, report: &mut Syn
 /// A parked row belongs to the store, not to a source, so reading it where the
 /// drain runs reports it once per source: an account syncing mail, contacts and
 /// calendar showed the same row three times. Every run re-reports them.
-fn report_parked(store: &PimdirStore, report: &mut SyncReport) {
+fn report_parked(store: &PimdirStore, report: &mut SyncOutput) {
     match store.parked_actions() {
         Ok(parked) => {
             for action in parked {
@@ -2504,7 +2504,7 @@ fn report_parked(store: &PimdirStore, report: &mut SyncReport) {
 /// Read from the store rather than from the run's own tally: the engine says
 /// nothing about a placement it already parked, so a run itemizes only what it
 /// newly marked, which is why that tally cannot count what is waiting.
-fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncReport) {
+fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
     match store.list_conflicts(Some(account)) {
         Ok(conflicts) => report.outstanding_conflicts = conflicts.len(),
         Err(err) => warn!("cannot count the conflicts waiting for a decision: {err}"),
@@ -2516,7 +2516,7 @@ fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncReport) 
 /// Only what this run marked, which is the whole of the once-only rule: a
 /// five-minute schedule over one unresolved card warns once, not three hundred
 /// times a day. A `--json` caller notifies off `conflicts`, keeping no state.
-fn warn_conflicts(report: &SyncReport) -> usize {
+fn warn_conflicts(report: &SyncOutput) -> usize {
     for conflict in &report.conflicts {
         warn!("{conflict}");
     }
@@ -2535,7 +2535,7 @@ fn drain_submits(
     sides: &mut [&mut SourceCtx],
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) {
     let intents = match submit::pending(store) {
         Ok(intents) => intents,
@@ -2625,7 +2625,7 @@ fn drain_submits(
 fn sweep_retained(
     account_config: &AccountConfig,
     store: &mut PimdirStore,
-    report: &mut SyncReport,
+    report: &mut SyncOutput,
 ) {
     let Some(cutoff) = account_config.store.purge_cutoff(Utc::now()) else {
         return;
@@ -3076,7 +3076,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         drain_queues(&mut store, "caldav", &mut report);
         assert!(
             report.drained.is_empty(),
@@ -3115,7 +3115,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         for source in ["caldav", "carddav", "imap"] {
             drain_queues(&mut store, source, &mut report);
         }
@@ -3174,7 +3174,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         drain_queues(&mut store, "left", &mut report);
         report_parked(&store, &mut report);
 
@@ -3196,7 +3196,7 @@ mod tests {
             Some("mid:q1@x")
         );
 
-        let mut second = SyncReport::default();
+        let mut second = SyncOutput::default();
         drain_queues(&mut store, "left", &mut second);
         report_parked(&store, &mut second);
         assert!(second.drained.is_empty());
@@ -3394,7 +3394,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         drain_queues(&mut store, "left", &mut report);
         assert!(report.drained.is_empty());
         assert!(report.parked.is_empty());
@@ -3420,7 +3420,7 @@ mod tests {
         let mut config: AccountConfig =
             toml::from_str(r#"left.imap.server = "imaps://imap.example.org:993""#).unwrap();
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         sweep_retained(&config, &mut store, &mut report);
         assert!(report.purged.is_none());
         assert!(config.store.purge_cutoff(Utc::now()).is_none());
@@ -3502,7 +3502,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         drop(source);
         sweep_retained(&config, &mut store, &mut report);
 
@@ -3734,7 +3734,7 @@ mod tests {
         assert!(body.contains("TEL:+2"), "{body}");
         assert!(body.contains("NOTE:new"), "{body}");
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         itemize_pulled(
             &[ReplicaEvent::Conflicted(ReplicaHandle("card1".into()))],
             &HashMap::new(),
@@ -3756,7 +3756,7 @@ mod tests {
 
     /// A conflict the engine marked reaches the report the account prints.
     ///
-    /// The fold is [`SyncReport::absorb`], the one a worker's collection report
+    /// The fold is [`SyncOutput::absorb`], the one a worker's collection report
     /// travels back through. Merging only the item patch left the account
     /// report with an empty `conflicts`, so nothing named what it had parked.
     #[test]
@@ -3769,7 +3769,7 @@ mod tests {
         let sync = sync_with(&mut store, &mut remote, ReplicaPushRights::all());
         assert_eq!(sync.conflicts, 1, "the engine parked it");
 
-        let mut collection = SyncReport::default();
+        let mut collection = SyncOutput::default();
         itemize_pulled(
             &sync.events,
             &before,
@@ -3782,7 +3782,7 @@ mod tests {
         .unwrap();
         assert_eq!(collection.conflicts.len(), 1, "the collection names it");
 
-        let mut account = SyncReport::default();
+        let mut account = SyncOutput::default();
         account.absorb(collection);
         assert_eq!(
             account.conflicts.len(),
@@ -3828,7 +3828,7 @@ mod tests {
         assert_eq!(placement.status, ReplicaStatus::Conflict);
         assert_eq!(placement.object, Some(local), "the local side is untouched");
 
-        let mut collection = SyncReport::default();
+        let mut collection = SyncOutput::default();
         itemize_pulled(
             &[ReplicaEvent::Conflicted(ReplicaHandle("card1".into()))],
             &HashMap::new(),
@@ -3843,7 +3843,7 @@ mod tests {
 
         // A worker fills the collection's report, the account's is printed:
         // asserting the first alone is how the arm went missing.
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         report.absorb(collection);
         assert_eq!(report.conflicts.len(), 1);
 
@@ -3862,7 +3862,7 @@ mod tests {
     /// `synchronized: 1 hunks`, exit 0, and the same phantom on every run.
     #[test]
     fn a_refused_write_is_reported_instead_of_counted_as_a_hunk() {
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         for id in ["card1", "card2"] {
             report.item.patch.push(PatchEntry::new(
                 ItemHunk::Update {
@@ -3916,7 +3916,7 @@ mod tests {
             &card("+3", "old"),
         );
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         itemize_pulled(
             &[],
             &HashMap::new(),
@@ -4120,7 +4120,7 @@ mod tests {
         let mut left_remote = MutableRemote::at("card1", "l9");
         let mut right_remote = MutableRemote::at("card1", "r9");
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         for pass in 0..2 {
             let left_pass = sync_with(&mut left, &mut left_remote, ReplicaPushRights::all());
             itemize_conflicted(
@@ -4178,7 +4178,7 @@ mod tests {
         );
 
         // A later run: both are parked already, so the engine says nothing.
-        let mut later = SyncReport::default();
+        let mut later = SyncOutput::default();
         for (store, remote, side) in [
             (&mut left, &mut left_remote, "left"),
             (&mut right, &mut right_remote, "right"),
@@ -4446,7 +4446,7 @@ mod tests {
         let view = projection_view(&store, "INBOX", "left").unwrap();
         assert_eq!(view.len(), 2, "both copies are stored and projected");
 
-        let mut report = SyncReport {
+        let mut report = SyncOutput {
             account: "dup".into(),
             ..Default::default()
         };
@@ -4476,7 +4476,7 @@ mod tests {
             handle: String::from("copy-1.ics"),
         }];
 
-        let mut report = SyncReport {
+        let mut report = SyncOutput {
             account: "dup".into(),
             ..Default::default()
         };
@@ -4509,7 +4509,7 @@ mod tests {
             handle: String::from(handle),
         };
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         itemize_refused(
             "right",
             vec![
@@ -4537,7 +4537,7 @@ mod tests {
             reason: String::from("HTTP 403: Resource is not a vCard object"),
         };
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         report.item.patch.push(PatchEntry::new(
             ItemHunk::Update {
                 side: String::from("dav"),
@@ -4584,7 +4584,7 @@ mod tests {
         assert_eq!(targets[0].link, "mid:a@x");
 
         let target = &targets[0];
-        let mut report = SyncReport {
+        let mut report = SyncOutput {
             account: "relay".into(),
             ..Default::default()
         };
@@ -4715,7 +4715,7 @@ mod tests {
             "the projection drops the residual, which is why it was the wrong read",
         );
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         itemize_fetches("dav/contacts", "contacts", &store, "dav", &mut report).unwrap();
 
         assert_eq!(report.item.patch.len(), 1);
@@ -4755,7 +4755,7 @@ mod tests {
             })])
             .unwrap();
 
-        let mut report = SyncReport::default();
+        let mut report = SyncOutput::default();
         itemize_fetches("dav/contacts", "contacts", &store, "dav", &mut report).unwrap();
 
         assert_eq!(
@@ -4860,8 +4860,8 @@ mod tests {
         store: &mut PimdirSourceStore,
         remote: &mut FullListingRemote,
         collection: &str,
-    ) -> SyncReport {
-        let mut report = SyncReport::default();
+    ) -> SyncOutput {
+        let mut report = SyncOutput::default();
         drive(
             store,
             remote,

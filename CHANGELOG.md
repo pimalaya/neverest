@@ -110,7 +110,15 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   `conflict resolve` records the revision the divergence was recorded at and re-reads the store before staging anything. An unresolved conflict tracks the newest remote revision on every run, so a decision left in an editor for an hour can be a decision about a version nobody holds any more, and pushing it would overwrite everything that arrived meanwhile. A revision that moved is reported as moved; under `--interactive` the fresh bodies are exported again and the merger asked once more. The store lock is deliberately not held across the merger, so a sync is never blocked behind a person sitting in an editor.
 
+- Added the `json-schema` command, aliased `json-schemas`, describing what each data command prints under `--json`.
+
+  One schema per command path (`neverest-sync`, `neverest-check`, `neverest-init`, `neverest-conflict-list`, `neverest-conflict-show`, `neverest-conflict-resolve`), printed to the standard output for a single command or written as one file per command with `--dir`. The sync payload is the substantial one: a consumer reading `conflicts` or `outstanding_conflicts` out of it now has the shape written down rather than inferred from a sample run.
+
 ### Changed
+
+- `check` and `init` now print one payload instead of a run of prose lines.
+
+  Both said their piece in two or three separate messages, which under `--json` meant two or three JSON documents on the standard output and nothing a parser could read. `check` now reports the account's mode with one entry per endpoint it opened and how many collections it listed, and `init` the store it created with the endpoints it opened; the text output is unchanged in substance.
 
 - A run that could not deliver a write now exits 2 rather than 0, and so does a run holding a duplicate `UID` a side refuses.
 
@@ -299,6 +307,10 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
   Freshly probed items were raised to the `Meta` tier whatever the kind, which asks a CardDAV source for a summary tier it has none of. The tier is now the kind's.
 
 - A body is hydrated by the absence of a stored body rather than by the item's detail level, so an item whose stale body was dropped is picked up again.
+
+- `tls.cert = "~/ca.pem"` now reads the certificate in your home directory rather than a literal `./~/ca.pem`.
+
+  The key was the one path in the schema declared bare, so it reached the TLS layer exactly as written while `store.root` beside it was expanded at deserialize. Every path key now expands in the same place, which is where a call site cannot forget it.
 
 ### Removed
 

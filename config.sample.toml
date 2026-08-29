@@ -91,7 +91,7 @@ imap.server = "imap.fastmail.com"
 #imap.tls.rustls.crypto = "ring"
 #imap.tls.rustls.crypto = "aws"
 
-# Extra root certificate, PEM-encoded.
+# Extra root certificate, PEM-encoded. The path is shell-expanded.
 #imap.tls.cert = "/path/to/custom/cert.pem"
 
 # Upgrade a cleartext `imap://` connection.

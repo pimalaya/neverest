@@ -10,6 +10,7 @@
 
 use std::{collections::BTreeSet, fmt};
 
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::item::flag::Flag;
@@ -18,7 +19,7 @@ use crate::item::flag::Flag;
 ///
 /// `Delete` is kept for the report and `--json` shape, though collection
 /// deletion is not propagated yet.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[allow(dead_code)]
 pub enum CollectionHunk {
@@ -58,7 +59,7 @@ impl fmt::Display for CollectionHunk {
 }
 
 /// Item-level change.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum ItemHunk {
     /// Copy an item from `source_side` to `target_side`.

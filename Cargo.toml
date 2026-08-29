@@ -59,6 +59,7 @@ pimalaya-cli = { version = "0.2", default-features = false, features = ["termina
 pimalaya-config = { version = "0.2", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.3", default-features = false }
 rfc2047-decoder = "1"
+schemars = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

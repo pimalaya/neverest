@@ -9,16 +9,19 @@ use clap::{CommandFactory, Parser, Subcommand};
 use pimalaya_cli::{
     clap::{
         args::{AccountFlag, JsonFlag, LogFlags},
-        commands::{CompletionCommand, ManualCommand},
+        commands::{CompletionCommand, JsonSchemaCommand, ManualCommand},
         parsers::path_parser,
     },
     long_version,
     printer::Printer,
 };
 
-use crate::cli::{
-    check::CheckCommand, configure::ConfigureCommand, conflict::ConflictCommand, exit::Exit,
-    init::InitCommand, sync::SyncCommand,
+use crate::{
+    cli::{
+        check::CheckCommand, configure::ConfigureCommand, conflict::ConflictCommand, exit::Exit,
+        init::InitCommand, sync::SyncCommand,
+    },
+    json_schema,
 };
 
 #[derive(Parser, Debug)]
@@ -64,6 +67,8 @@ pub enum Command {
     #[command(arg_required_else_help = true)]
     #[command(alias = "completions")]
     Completion(CompletionCommand),
+    #[command(alias = "json-schemas")]
+    JsonSchema(JsonSchemaCommand),
 }
 
 impl Command {
@@ -87,6 +92,7 @@ impl Command {
             Self::Configure(cmd) => cmd.execute(printer, config_paths, account),
             Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
             Self::Completion(cmd) => cmd.execute(printer, Cli::command()),
+            Self::JsonSchema(cmd) => cmd.execute(printer, json_schema::schemas()),
         };
 
         done.map(|()| Exit::Success)

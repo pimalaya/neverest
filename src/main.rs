@@ -89,8 +89,12 @@
 //! hydrates one source, `remote` implements io-replica's remote seam,
 //! `submit` holds the queued send, and `driver` builds the report.
 //!
-//! [`sync`] keeps the report types alone, the engine having moved to
+//! [`sync`] keeps the output types alone, the engine having moved to
 //! [`offline`], and [`wizard`] bootstraps a first configuration.
+//!
+//! [`json_schema`] is the registry behind `neverest json-schema`: one entry
+//! per data command, mapping its invocation path to the schema of what it
+//! prints under `--json`.
 //!
 //! [io-replica]: https://github.com/pimalaya/io-replica
 //! [io-pimdir]: https://github.com/pimalaya/io-pimdir
@@ -106,6 +110,7 @@ mod dav;
 #[cfg(feature = "imap")]
 mod imap;
 mod item;
+mod json_schema;
 mod kind;
 #[cfg(feature = "msgraph")]
 mod msgraph;

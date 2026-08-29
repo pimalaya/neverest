@@ -810,6 +810,11 @@ impl fmt::Display for AccountMode {
 }
 
 /// `serde` helper: shell-expand an optional path.
+///
+/// TODO: replace with `pimalaya_config::toml::shell_expanded_path_opt`, the
+/// optional twin of the `shell_expanded_path` and `shell_expanded_string`
+/// the crate already ships. ortie hand-rolls the same function, so the two
+/// copies exist only because the shared one does not.
 fn shell_expanded_path_opt<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1371,6 +1376,8 @@ pub struct TlsConfig {
     pub provider: Option<TlsProviderConfig>,
     #[serde(default)]
     pub rustls: RustlsConfig,
+    /// Path to an extra CA certificate to trust, shell-expanded.
+    #[serde(default, deserialize_with = "shell_expanded_path_opt")]
     pub cert: Option<PathBuf>,
 }
 
@@ -2055,6 +2062,28 @@ msgraph.user-id = "me"
         .unwrap();
         let sources = account.sources().unwrap();
         assert!(sources["imap"].permissions().item.update);
+    }
+
+    /// Every path key expands once, at deserialize, so no call site can read
+    /// a literal `./~/…` directory. A document re-serialized after that
+    /// carries the expansion and reloads to the same value.
+    #[test]
+    fn a_tilde_path_is_expanded_at_deserialize() {
+        let home = PathBuf::from(shellexpand::tilde("~").into_owned());
+
+        let store: StoreConfig = toml::from_str(r#"root = "~/store""#).unwrap();
+        assert_eq!(store.root, Some(home.join("store")));
+
+        let tls: TlsConfig = toml::from_str(r#"cert = "~/ca.pem""#).unwrap();
+        assert_eq!(tls.cert, Some(home.join("ca.pem")));
+
+        let reloaded: TlsConfig = toml::from_str(&toml::to_string(&tls).unwrap()).unwrap();
+        assert_eq!(reloaded.cert, tls.cert);
+
+        // An absent key never reaches the deserializer, so it stays absent
+        // rather than expanding an empty path.
+        let tls: TlsConfig = toml::from_str("").unwrap();
+        assert_eq!(tls.cert, None);
     }
 
     #[test]

@@ -135,7 +135,9 @@ An account is initialized once, which opens every source so credential and netwo
 
 A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What is left is both sides setting one field two ways, which no merge settles: the item parks, everything else keeps syncing, and the run exits 2 rather than failing over one contact. `conflict.notify` shows a desktop notification when that happens, and unset, the default, it stays in the log.
 
-Deciding is a command and never a run, whatever is attached to the terminal. `conflict list` names what is waiting, `conflict show <id>` prints the three bodies, and `conflict resolve <id>` settles one, either by taking a side with `--prefer-local` or `--prefer-remote` or by handing the bodies to the merger `conflict.merger` names. A decision is refused when the remote moved while it was being made, since pushing it would overwrite whatever arrived meanwhile.
+Deciding is a command and never a run, whatever is attached to the terminal. `conflict list` names what is waiting, `conflict show <id>` prints the three bodies, and `conflict resolve <id>` settles one, either by taking a side with `--prefer-local` or `--prefer-remote` or by handing the bodies to the merger `conflict.merger` names. A settled body has to be a body of that item, so one no parser reads and one stating another `UID` are both refused. A decision is refused when the remote moved while it was being made, since pushing it would overwrite whatever arrived meanwhile, and nothing here holds the store, so a sync stays free to run while a merger is open.
+
+Exit 2 is wider than conflicts: it means the run reconciled its collections and left something waiting for a person, which is a parked conflict, a duplicate `UID` the other side refuses, or a write it would not take. The report names which. A write that did not land is never counted among the hunks a run applied, so `already in sync` means the run wrote nothing.
 
 ### Retention and backup
 

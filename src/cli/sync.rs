@@ -41,10 +41,11 @@ const LOCK_POLL: Duration = Duration::from_millis(500);
 /// aliases, so existing scripts and the connector contract keep working.
 ///
 /// Exit code 0 means the run reconciled everything and left nothing waiting,
-/// 1 that it failed, and 2 that it reconciled its collections and parked
-/// conflicts a person has to settle. A conflict is one item wide and halts
-/// nothing, so it is not a failure: under a supervisor restarting on failure
-/// it would loop over a state no supervisor can fix.
+/// 1 that it failed, and 2 that it reconciled its collections and left
+/// something waiting: a parked conflict, a duplicate `UID` the other side
+/// refuses, or a write it would not take. Each is one item wide and halts
+/// nothing, so none is a failure: under a supervisor restarting on failure
+/// they would loop over a state no supervisor can fix.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
     /// Run the synchronization without applying any changes; only
@@ -163,13 +164,10 @@ impl SyncCommand {
         )?;
 
         // Read before the report is printed, which consumes it.
-        let outstanding = report.outstanding_conflicts;
+        let exit = Exit::from(&report);
         printer.out(report)?;
 
-        Ok(match outstanding {
-            0 => Exit::Success,
-            _ => Exit::Conflicted,
-        })
+        Ok(exit)
     }
 }
 

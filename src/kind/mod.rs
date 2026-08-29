@@ -35,6 +35,7 @@ pub mod merge;
 #[cfg(feature = "dav")]
 pub mod vcard;
 
+use anyhow::{Result, bail};
 use io_replica::{
     placement::{ReplicaLinkId, ReplicaMeta, ReplicaSortKey},
     remote::ReplicaTier,
@@ -132,6 +133,68 @@ impl Kind {
         }
     }
 
+    /// Refuses a body that is not one of this kind, or not one of *this*
+    /// item.
+    ///
+    /// A settled conflict body is the one body reaching the store that
+    /// nothing here derived: a person wrote it, or the merger they named
+    /// did. Two things are asked of it. It has to read as the kind the
+    /// collection declares, which is what keeps a half-written template, a
+    /// tool that wrote its error message to the output path, or a merger
+    /// that crashed mid-write from replacing a contact with something that
+    /// is not one. And it has to keep the identity the item is bound by: a
+    /// body stating another `UID`, or none, is a resolution of some other
+    /// item, and taking it leaves the store holding a row whose link id has
+    /// nothing to do with its content.
+    ///
+    /// The reading is the kind's own scanner rather than the merge's parser,
+    /// so a build without the `merge` cargo feature, where an interactive
+    /// resolution is the only way a divergence is ever settled, is guarded
+    /// the same way.
+    pub fn validate_body(self, body: &[u8], link_id: &ReplicaLinkId) -> Result<()> {
+        let Some(component) = self.component() else {
+            bail!("Mail bodies are immutable, so no body settles a message");
+        };
+
+        if !wrapped_in(body, component) {
+            bail!(
+                "A {} body opens with BEGIN:{component} and closes with END:{component}",
+                self.media_type()
+            );
+        }
+
+        let (derived, _, _) = self.parse_body(body, body.len() as u64);
+        let stated = self.split_link_id(&derived).hint;
+        let bound = self.split_link_id(link_id).hint;
+
+        match (bound, stated) {
+            (bound, stated) if bound == stated => Ok(()),
+            (Some(bound), Some(stated)) => {
+                bail!("A settled body keeps the item's UID {bound}, and this one states {stated}")
+            }
+            (Some(bound), None) => {
+                bail!("A settled body keeps the item's UID {bound}, and this one states none")
+            }
+            (None, Some(stated)) => bail!(
+                "The item states no UID of its own, and a settled body cannot give it {stated}"
+            ),
+            (None, None) => unreachable!("two absent hints compare equal"),
+        }
+    }
+
+    /// The component a body of this kind is wrapped in (RFC 6350 §6.1.1, RFC
+    /// 5545 §3.4), or `None` for a kind whose bodies are opaque to every
+    /// reader here.
+    fn component(self) -> Option<&'static str> {
+        match self {
+            Self::Mail => None,
+            #[cfg(feature = "dav")]
+            Self::Vcard => Some("VCARD"),
+            #[cfg(feature = "dav")]
+            Self::Ical => Some("VCALENDAR"),
+        }
+    }
+
     /// Splits a link id into the two things a write needs from it: the
     /// identity a backend can address the item by, and what tells this copy
     /// from the one already holding that identity.
@@ -214,6 +277,26 @@ impl Kind {
             Self::Vcard | Self::Ical => None,
         }
     }
+}
+
+/// Whether `body`'s first and last content lines are the `BEGIN` and the
+/// `END` of `component`.
+///
+/// Blank lines are skipped at both ends, a trailing line terminator being
+/// optional in what the store holds, and the comparison is ASCII
+/// case-insensitive because both formats spell their delimiters that way.
+fn wrapped_in(body: &[u8], component: &str) -> bool {
+    let text = String::from_utf8_lossy(body);
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+
+    let opens = lines
+        .next()
+        .is_some_and(|line| line.eq_ignore_ascii_case(&format!("BEGIN:{component}")));
+    let closes = lines
+        .next_back()
+        .is_some_and(|line| line.eq_ignore_ascii_case(&format!("END:{component}")));
+
+    opens && closes
 }
 
 #[cfg(test)]

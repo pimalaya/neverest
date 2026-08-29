@@ -904,12 +904,51 @@ there is still rejected as impossible.
 ### Requirement: Conflicts are surfaced in the run report
 A placement the engine marked `conflicted` SHALL appear in the sync report (text
 and `--json`), naming its collection and item, and SHALL keep appearing on every
-run until it is resolved.
+run until it is resolved. This SHALL hold whatever the account's topology is: a
+source reconciled against the store alone and a source reconciled against a
+target report a parked divergence the same way.
+
+A run SHALL name a divergence once. A collection is reconciled until it is
+quiescent, so a pass runs several times over it and every endpoint reports into
+one report; a divergence the run's own merge settles and a later pass marks again
+is one divergence, one line and one notification. A create a side refused and a
+write a side would not take SHALL likewise be named once per item, however many
+passes met the same answer, while two copies of one identity stay two refusals.
 
 A run SHALL first merge the three bodies and resolve the conflict where the merge
 reports no collision, so only a genuine disagreement is surfaced. Neverest SHALL
 NOT decide a collision by itself; that decision is an edit, staged through the
 pimdir queue by whoever owns it.
+
+#### Scenario: A mirrored pair names the endpoint that parked it
+- GIVEN an account naming one source and one target
+- WHEN a run parks a divergence on either of them
+- THEN the report names the item, its collection and that endpoint, and the notification is raised
+
+#### Scenario: A convergence loop does not multiply the report
+- GIVEN a collection whose reconcile takes several passes
+- WHEN a divergence the run settled is marked again by a later pass
+- THEN it is reported once
+
+### Requirement: A collection's report reaches the account's whole
+A report filled while reconciling one collection SHALL be merged into the
+account's report entire. Every arm a collection fills SHALL travel: the item and
+collection patches, the divergences it parked, the duplicates a side refused, the
+writes a side would not take and the collisions it skipped. Only what a
+collection never had an opinion about SHALL stay behind, namely the account's own
+name and dry-run flag, the retention sweep, which runs once for the account, and
+the outstanding conflict count, which is read from the store rather than summed.
+
+Collections are reconciled across a worker pool and their reports merged at a
+barrier, so this is the one place the account's report is assembled. A merge that
+carries the patch alone leaves the run saying how many items it touched and never
+what it left behind: no warning block, and no notification, the announcement
+being raised from the parked list and returning early when it is empty.
+
+#### Scenario: A conflict parked in a worker reaches the printed report
+- GIVEN a run whose worker parks a divergence while reconciling a collection
+- WHEN the account's report is printed
+- THEN the warnings block names the item, its collection and its source, and the notification is raised
 
 ### Requirement: A run merges what nobody disagreed about
 A run SHALL three-way merge the base, local and diverging bodies of a marked
@@ -939,24 +978,34 @@ background tool asking to be switched off.
 - THEN the conflict stays parked and the run reports it
 
 ### Requirement: A conflicted run succeeds, with its own exit code
-A run that reconciled its collections and left conflicts behind SHALL exit with a
-code distinct from both success and failure, and SHALL report the outstanding
+A run that reconciled its collections and left work behind SHALL exit with a code
+distinct from both success and failure, and SHALL report the outstanding conflict
 count read from the store rather than the count the run itself marked.
 
-A conflict is one item wide. Failing the run would stop every other item over one
-divergence, and under a supervisor restarting on failure it would loop over a
-state no supervisor can resolve. The distinct code says the same thing without
-pretending the run broke.
+Three states are that code, and they are one class: a divergence waiting for a
+decision, a duplicate `UID` a side refuses, and a write a side would not take.
+Each leaves something the store holds and could not deliver, each is re-reported
+on every run until a person acts, and a rerun on its own changes none of them.
 
-The two counts differ and the difference matters: the engine emits nothing for a
-placement already parked, which is what keeps notifications quiet across repeated
-runs, and which is also why the run's own tally is not the number of decisions
-waiting.
+A conflict is one item wide, and so is a refusal. Failing the run would stop
+every other item over one divergence, and under a supervisor restarting on
+failure it would loop over a state no supervisor can resolve. The distinct code
+says the same thing without pretending the run broke.
+
+The two conflict counts differ and the difference matters: the engine emits
+nothing for a placement already parked, which is what keeps notifications quiet
+across repeated runs, and which is also why the run's own tally is not the number
+of decisions waiting.
 
 #### Scenario: A parked conflict does not fail the run
 - GIVEN a collection holding one parked conflict beside ordinary items
 - WHEN it is synced
 - THEN the ordinary items reconcile, the run exits with the conflict code, and the outstanding count is reported
+
+#### Scenario: A run that could not deliver a write says so
+- GIVEN a source that refuses the only write a run had to make
+- WHEN the run ends
+- THEN it exits with the same code, rather than reporting success over a change that stayed in the store
 
 ### Requirement: Entering a conflict notifies once
 A run SHALL notify when a placement enters conflict, through the configured
@@ -1001,6 +1050,34 @@ every remaining collection behind a human who may not exist.
 - WHEN it returns
 - THEN the conflict is unchanged and nothing is pushed
 
+### Requirement: A settled body is a body of its item
+A body a resolution settles on SHALL be read before it is staged, and refused
+unless it is a body of the collection's kind and of that item. It SHALL open and
+close with the kind's component delimiters (`VCARD`, `VCALENDAR`), and it SHALL
+state the identity the item is bound by: a body stating another `UID`, or none
+where the item states one, SHALL be refused. Mail SHALL be refused outright, its
+bodies being immutable.
+
+A refusal SHALL leave the divergence exactly as it was, which is what an aborted
+merger already does.
+
+The three bodies a run merges by itself are the store's own, and the merge
+refuses a side no parser reads. A settled body is the one body reaching the store
+that nothing derived: a merger that crashed after a partial write, a template
+saved half-finished and a tool writing its error message to the output path all
+produce bytes that are not a contact, and the item keeps its link id while losing
+every field that identity came from.
+
+#### Scenario: A merger writes something that is not a card
+- GIVEN an interactive resolution whose merger writes bytes no parser reads and exits zero
+- WHEN the decision is applied
+- THEN it is refused naming the delimiters, nothing is staged, and the conflict is still parked
+
+#### Scenario: A resolution may not rename the item
+- GIVEN a settled body that reads as a card but states another `UID`
+- WHEN the decision is applied
+- THEN it is refused naming both identities
+
 ### Requirement: A resolution is refused when the remote moved under it
 `neverest conflict resolve` SHALL record the revision the resolution was computed
 against and SHALL refuse to push when the store has since observed a newer one,
@@ -1016,6 +1093,25 @@ of the first.
 - GIVEN a resolution computed against one revision
 - WHEN the store has observed a newer one before it is applied
 - THEN the push is refused and the conflict is reported as moved
+
+### Requirement: Deciding never owns the store
+A conflict command SHALL read the store through a handle that owns nothing and
+takes no lock (pimdir SPEC §8), and SHALL NOT hold the store's owner lock across
+a decision. A resolution SHALL re-read the divergence and its bodies for each
+attempt, release the store before the merger runs, and take the store again,
+under the run lock, only to apply what came back.
+
+The store's owner lock lives on the handle, so a handle kept for a command's
+lifetime refuses every sync of that store for as long as a person sits in an
+editor. That is the window the staleness guard exists for, and holding the lock
+across it makes the guard unreachable: the only thing that moves a placement's
+conflict revision is a sync of that store, so the revision cannot move, and the
+refusal, the retry and the re-export never run.
+
+#### Scenario: A sync writes the store while the merger is up
+- GIVEN an interactive resolution whose merger is still running
+- WHEN a sync of that store records a newer conflict revision
+- THEN the write is not refused, and the decision the merger returns is exported again against what arrived
 
 ### Requirement: A new resource name never collides with a stored one
 A resource name derived for an item being appended SHALL be unique within its
@@ -1066,6 +1162,27 @@ complete.
 - GIVEN a target that refuses a duplicate `UID`
 - WHEN a run pushes the second copy
 - THEN the report names the refusal, the `UID` and the collection, and the run reports having written nothing
+
+### Requirement: A refused write is reported, never counted as applied
+A write a remote would not take SHALL be reported, naming the source, the
+collection, the item, what was attempted and why it failed, in the text and
+`--json` reports alike. It SHALL NOT be counted among the hunks the run applied:
+the hunk the run derived for that item SHALL be taken back, the item patch being
+the plan and not the outcome. It SHALL keep appearing on every run until the
+write lands or the reason is removed.
+
+A body that never reached the wire, because the blob tree no longer holds it,
+SHALL be reported the same way and for the same reason: the change is still in
+the store and the next run will try again.
+
+A create refused with the no-uid-conflict precondition SHALL keep its own entry
+and gain no second one, since that entry names the identity and the remedy, and
+one write is one line.
+
+#### Scenario: A server refuses a body
+- GIVEN a source that answers an update with a refusal
+- WHEN the run reports
+- THEN the refusal is named with its reason, the update is not among the hunks applied, and a run with no other work does not read as having written anything
 
 ### Requirement: A duplicated identity is mirrored, not reported
 A collection holding two resources under one identity SHALL be mirrored as two

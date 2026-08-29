@@ -25,7 +25,7 @@ use std::{collections::HashMap, io::Write, path::Path};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use io_pimdir::{PimdirBlobs, PimdirProducer, PimdirStore, codec::PimdirAction};
+use io_pimdir::{PimdirBlobs, PimdirProducer, PimdirReader, PimdirStore, codec::PimdirAction};
 use io_replica::{object::ReplicaHash, placement::ReplicaLinkId};
 use log::{info, warn};
 
@@ -178,6 +178,13 @@ impl Conflict {
 
         let kind = self.kind()?;
 
+        // NOTE: before the blob write, so a body no parser reads never
+        // reaches the tree at all. The automatic merge refuses the same
+        // thing with `Merged::Unmergeable`; this is the half a person, or
+        // the merger they named, writes by hand.
+        kind.validate_body(body, &self.link_id)
+            .with_context(|| format!("Settle conflict {} in {}", self.id, self.collection))?;
+
         let blobs = store.blobs();
 
         // NOTE: opened before the first blob write rather than at it, the
@@ -242,7 +249,7 @@ impl Conflict {
 /// The store answers this off a partial index over the conflicted flag, so a
 /// store with nothing outstanding pays for an empty index rather than for a
 /// pass over every collection.
-pub fn list(store: &PimdirStore, account: &str) -> Result<Vec<Conflict>> {
+pub fn list(store: &PimdirReader, account: &str) -> Result<Vec<Conflict>> {
     let parked = store
         .list_conflicts(Some(account))
         .with_context(|| format!("List the conflicts of account {account}"))?;
@@ -357,10 +364,17 @@ mod tests {
     /// The revision the store recorded the divergence at.
     const REVISION: &str = "etag-2";
 
+    /// The identity every seeded card states, and the one every placement
+    /// here is linked by. The fixture states it rather than leaving the body
+    /// and the link id to disagree, a settled body having to keep it.
+    const UID: &str = "uid:a";
+
     /// A card carrying one phone number, which is the field the two sides of
     /// the seeded divergence set differently.
     fn card(tel: &str) -> String {
-        format!("BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Jane Doe\r\nTEL:{tel}\r\nEND:VCARD\r\n")
+        format!(
+            "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:{UID}\r\nFN:Jane Doe\r\nTEL:{tel}\r\nEND:VCARD\r\n"
+        )
     }
 
     /// Seeds a store holding one card the engine marked conflicted, with all
@@ -389,7 +403,7 @@ mod tests {
                 ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
                     collection: ReplicaCollectionId("contacts".into()),
                     handle: ReplicaHandle("card1".into()),
-                    link_id: Some(ReplicaLinkId("uid:a".into())),
+                    link_id: Some(ReplicaLinkId(UID.into())),
                     object: Some(blobs.hash(card("+2").as_bytes())),
                     level: ReplicaLevel::Full,
                     meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
@@ -457,5 +471,107 @@ mod tests {
         let body = blobs.get(&placement.object.unwrap()).unwrap().unwrap();
         assert_eq!(String::from_utf8(body).unwrap(), card("+4"));
         assert!(list(&store, ACCOUNT).unwrap().is_empty());
+    }
+
+    /// A divergence whose remote body no run has fetched yet is a listing
+    /// entry and not a decision. The engine marks a conflict with that body
+    /// wanted rather than held, so this is the state every conflict passes
+    /// through, and reading it as resolvable would hand `--prefer-remote` a
+    /// side that is not there.
+    #[test]
+    fn a_conflict_waiting_for_its_diverging_body_is_listed_and_not_resolvable() {
+        use crate::conflict::report::ConflictSummary;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_conflict(dir.path());
+        let blobs = store.blobs();
+
+        let conflicts = list(&store, ACCOUNT).unwrap();
+        let fetched = find(conflicts.clone(), conflicts[0].id, None).unwrap();
+        assert!(fetched.resolvable());
+
+        let waiting = Conflict {
+            remote: None,
+            ..fetched
+        };
+        assert!(!waiting.resolvable());
+
+        let sides = waiting.sides(&blobs).unwrap();
+        assert!(sides.base.is_some());
+        assert!(sides.local.is_some());
+        assert!(
+            sides.remote.is_none(),
+            "a merger handed an absent remote side would merge against nothing"
+        );
+
+        let summary = ConflictSummary::from(&waiting);
+        assert!(!summary.resolvable);
+        let listed = summary.to_string();
+        assert!(
+            listed.contains("waiting for its diverging body"),
+            "{listed}"
+        );
+    }
+
+    /// A body no parser reads is not a decision, whoever wrote it.
+    ///
+    /// A tool that crashed after a partial write, or a person who saved a
+    /// half-finished template, would otherwise replace a real card with
+    /// something that is not one: the item keeps its link id and loses every
+    /// field the identity was derived from. The automatic merge already
+    /// refuses exactly this, with `Merged::Unmergeable`.
+    #[test]
+    fn a_settled_body_that_no_parser_reads_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_conflict(dir.path());
+        let blobs = store.blobs();
+
+        let conflicts = list(&store, ACCOUNT).unwrap();
+        let conflict = find(conflicts.clone(), conflicts[0].id, None).unwrap();
+
+        let err = conflict
+            .apply(dir.path(), ACCOUNT, b"this is not a card at all")
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("BEGIN:VCARD"), "{err:#}");
+
+        let placement = load_side(&store, "contacts").unwrap().remove(0);
+        assert_eq!(
+            placement.status,
+            ReplicaStatus::Conflict,
+            "the refusal leaves the divergence exactly as it was",
+        );
+        assert_eq!(
+            placement.object,
+            Some(blobs.hash(card("+2").as_bytes())),
+            "and leaves the local side untouched",
+        );
+    }
+
+    /// A resolution that drops or changes the item's `UID` is a resolution of
+    /// some other item.
+    ///
+    /// The bytes read as a card here, so nothing structural catches it: what
+    /// does is that the store addresses the row by an identity its content no
+    /// longer states, which is exactly the state a frontend reads as one
+    /// contact and the server as another.
+    #[test]
+    fn a_settled_body_that_renames_the_item_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_conflict(dir.path());
+
+        let conflicts = list(&store, ACCOUNT).unwrap();
+        let conflict = find(conflicts.clone(), conflicts[0].id, None).unwrap();
+
+        let renamed = card("+4").replace(UID, "uid:someone-else");
+        let err = conflict
+            .apply(dir.path(), ACCOUNT, renamed.as_bytes())
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("uid:someone-else"), "{err:#}");
+
+        let dropped = card("+4").replace(&format!("UID:{UID}\r\n"), "");
+        let err = conflict
+            .apply(dir.path(), ACCOUNT, dropped.as_bytes())
+            .unwrap_err();
+        assert!(format!("{err:#}").contains("states none"), "{err:#}");
     }
 }

@@ -82,8 +82,9 @@
 //!
 //! The [`cli`] module holds the clap parser, one module per subcommand, and
 //! the outcome a command exits with: a sync that reconciled everything it was
-//! asked to and still parked a conflict is neither a success nor a failure,
-//! so it carries a code of its own back to `main`.
+//! asked to and still left something waiting, a parked conflict or a write a
+//! side would not take, is neither a success nor a failure, so it carries a
+//! code of its own back to `main`.
 //! [`config`] is the TOML schema and [`account`] its runtime counterpart, the
 //! endpoints of one account with every secret already resolved, which is what
 //! [`client`], the kind-neutral backend seam, opens a connection from.

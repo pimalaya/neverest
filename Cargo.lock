@@ -1210,7 +1210,7 @@ dependencies = [
 [[package]]
 name = "io-pimdir"
 version = "0.3.0"
-source = "git+https://github.com/pimalaya/io-pimdir#e6a2ac37e51a34bb541f1cc8a6153cfa5792626a"
+source = "git+https://github.com/pimalaya/io-pimdir#2934bdbdf4165b85d2fd63211092403c2a710a41"
 dependencies = [
  "blake3",
  "fs4",
@@ -1235,7 +1235,7 @@ dependencies = [
 [[package]]
 name = "io-replica"
 version = "0.4.2"
-source = "git+https://github.com/pimalaya/io-replica#198d70a995db9cf2d5ae880746a3ed0d64e829fb"
+source = "git+https://github.com/pimalaya/io-replica#3a71ebd25b87c418c04fc2150d0ddcfa83b5ae1d"
 dependencies = [
  "log",
  "thiserror",
@@ -2743,8 +2743,7 @@ dependencies = [
 [[package]]
 name = "vcard-rs"
 version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "033f4e5d98faeabf2c322837a6f27e08cd553fcc3afeb231cb2e7430d59e826f"
+source = "git+https://github.com/pimalaya/vcard#1ec26c995b727eb8bb8c28c2b45a2bf76da8d3a9"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",

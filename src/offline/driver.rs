@@ -69,8 +69,8 @@ use crate::{
     offline::{
         drive, pipe,
         remote::{
-            BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, RefusedCreate, hydrate_batch,
-            resolve_kind, wire_name,
+            BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, RefusedCreate, RejectedPush,
+            hydrate_batch, resolve_kind, wire_name,
         },
         state::StoreState,
         storage::{hydration_targets, load_side, projection_view},
@@ -80,7 +80,7 @@ use crate::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
             DrainedQueue, ItemConflict, ParkedQueueAction, PatchEntry, PurgedItems,
-            RefusedDuplicate, SyncReport,
+            RefusedDuplicate, RejectedWrite, SyncReport,
         },
     },
 };
@@ -282,6 +282,10 @@ struct SourceCtx {
     /// identity, collected by the remote each pass pushes and drained into the
     /// report by [`itemize_refused`].
     refused: Vec<RefusedCreate>,
+    /// The writes this endpoint would not take, collected the same way and
+    /// drained into the report by [`itemize_rejected`], which also un-counts
+    /// the hunks the run had derived for them.
+    rejected: Vec<RejectedPush>,
 }
 
 impl SourceCtx {
@@ -585,6 +589,7 @@ fn run_pair(
         pool: Pool::open(left_account, left_budget)
             .with_context(|| format!("Open source {left_name}"))?,
         refused: Vec::new(),
+        rejected: Vec::new(),
     };
     let mut right = SourceCtx {
         name: right_name.clone(),
@@ -594,6 +599,7 @@ fn run_pair(
         pool: Pool::open(right_account, right_budget)
             .with_context(|| format!("Open target {right_name}"))?,
         refused: Vec::new(),
+        rejected: Vec::new(),
     };
     s.success("Opened endpoints");
 
@@ -856,6 +862,7 @@ fn open_source_contexts(
             authority,
             pool: pool.context("Open connection")?,
             refused: Vec::new(),
+            rejected: Vec::new(),
         });
     }
     Ok(ctxs)
@@ -865,8 +872,11 @@ fn open_source_contexts(
 /// workers, each on its own connection and store handle, pulls the collection
 /// queue and reconciles, collecting the bodies to hydrate. Reads run
 /// concurrently through WAL and writes serialise on the store's single-writer
-/// lock. Report patches are merged after the barrier. A collection that errors
-/// is logged and skipped, its bodies never entering the plan.
+/// lock. Each collection's report is absorbed whole after the barrier, arms
+/// and all: what a worker parked, refused or collided on is as much the run's
+/// report as the patch it derived, and dropping it would leave the run naming
+/// how many items it touched and never what it left behind. A collection that
+/// errors is logged and skipped, its bodies never entering the plan.
 #[allow(clippy::too_many_arguments)]
 fn phase1_spine(
     source: &str,
@@ -901,7 +911,7 @@ fn phase1_spine(
                     match collection_spine(&collection, ctx, store, blobs, store_dir, dry_run) {
                         Ok((targets, rep)) => {
                             plans_ref.lock().unwrap().push((collection, targets));
-                            merged_ref.lock().unwrap().item.patch.extend(rep.item.patch);
+                            merged_ref.lock().unwrap().absorb(rep);
                         }
                         Err(err) => {
                             warn!("{collection} scan error: {err:#}");
@@ -928,9 +938,7 @@ fn phase1_spine(
     });
 
     let plans = plans.into_inner().unwrap();
-    let merged = merged.into_inner().unwrap();
-    report.item.patch.extend(merged.item.patch);
-    report.collection.patch.extend(merged.collection.patch);
+    report.absorb(merged.into_inner().unwrap());
     s.success(format!("Scanned {total} collection(s) on {source}"));
     Ok(plans)
 }
@@ -986,6 +994,7 @@ fn collection_spine(
         }
     }
     itemize_refused(&ctx.name, mem::take(&mut ctx.refused), &mut report);
+    itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
 
     let mut targets: Vec<(ReplicaHandle, u64)> = Vec::new();
     for placement in projection_view(store, collection, &ctx.name)
@@ -1183,11 +1192,9 @@ fn flag_snapshot(
 /// into add and remove hunks, and a `Vanished` becomes a delete. A new remote
 /// item is an `Added` event but the pull plan already reports it as a `Fetch`.
 ///
-/// A `Conflicted` event says a placement entered conflict, not that it is
-/// still in one: [`resolve_conflicts`] has run since and merged away whatever
-/// nobody disagreed about. So the store is asked which of them survived, and
-/// only those reach the report, a divergence settled in the same run being
-/// nothing a person has to hear about.
+/// The divergences the same events carry are [`itemize_conflicted`]'s, which
+/// the two-endpoint path calls on its own, this one being reached only where
+/// a source is reconciled against the store alone.
 fn itemize_pulled(
     events: &[ReplicaEvent],
     before: &HashMap<String, ReplicaFlags>,
@@ -1198,16 +1205,7 @@ fn itemize_pulled(
     report: &mut SyncReport,
 ) -> Result<()> {
     let after = flag_snapshot(store, collection, source)?;
-    let parked: HashSet<String> = match events
-        .iter()
-        .any(|event| matches!(event, ReplicaEvent::Conflicted(_)))
-    {
-        false => HashSet::new(),
-        true => conflicted_placements(store, collection, source)?
-            .into_iter()
-            .map(|placement| placement.handle.0)
-            .collect(),
-    };
+    itemize_conflicted(events, store, collection, display, source, report)?;
 
     for event in events {
         match event {
@@ -1253,19 +1251,60 @@ fn itemize_pulled(
                     None,
                 ));
             }
-            ReplicaEvent::Conflicted(handle) => {
-                if !parked.contains(&handle.0) {
-                    continue;
-                }
-                report.conflicts.push(ItemConflict {
-                    side: source.to_string(),
-                    collection: display.to_string(),
-                    id: handle.0.clone(),
-                });
-            }
             _ => {}
         }
     }
+    Ok(())
+}
+
+/// Names the divergences a pass parked, once each.
+///
+/// A `Conflicted` event says a placement *entered* conflict, not that it is
+/// still in one: [`resolve_conflicts`] has run since and merged away whatever
+/// nobody disagreed about. So the store is asked which of them survived, and
+/// only those reach the report, a divergence settled in the same run being
+/// nothing a person has to hear about.
+///
+/// Called once per pass by every topology, which is why the report is asked
+/// to note rather than to push. A collection is reconciled until it is
+/// quiescent, and a divergence the run's own merge settles and a later pass
+/// marks again is one divergence and one line, not one per pass.
+fn itemize_conflicted(
+    events: &[ReplicaEvent],
+    store: &PimdirSourceStore,
+    collection: &str,
+    display: &str,
+    source: &str,
+    report: &mut SyncReport,
+) -> Result<()> {
+    if !events
+        .iter()
+        .any(|event| matches!(event, ReplicaEvent::Conflicted(_)))
+    {
+        return Ok(());
+    }
+
+    let parked: HashSet<String> = conflicted_placements(store, collection, source)?
+        .into_iter()
+        .map(|placement| placement.handle.0)
+        .collect();
+
+    for event in events {
+        let ReplicaEvent::Conflicted(handle) = event else {
+            continue;
+        };
+
+        if !parked.contains(&handle.0) {
+            continue;
+        }
+
+        report.note_conflict(ItemConflict {
+            side: source.to_string(),
+            collection: display.to_string(),
+            id: handle.0.clone(),
+        });
+    }
+
     Ok(())
 }
 
@@ -1329,6 +1368,12 @@ fn itemize_fetches(
 /// Reconciles one collection: a first per-side reconcile resolving link ids and
 /// pulling both servers into the hub, a hydration of the bodies about to cross,
 /// then extra passes pushing the projected propagations until quiescent.
+///
+/// The collection fills a report of its own, folded into the account's through
+/// [`SyncReport::absorb`] on the way out, which is the same fold the
+/// one-source path makes at its worker barrier. One fold, named field by
+/// field, is what keeps an arm from being dropped on one path and carried on
+/// the other.
 #[allow(clippy::too_many_arguments)]
 fn sync_collection(
     collection: &str,
@@ -1342,12 +1387,49 @@ fn sync_collection(
     dry_run: bool,
     relay: bool,
     progress: &CollectionProgress,
-    report: &mut SyncReport,
+    account: &mut SyncReport,
 ) -> Result<()> {
     left_store
         .ensure_collection(collection, media_type)
         .with_context(|| format!("Declare kind for {collection}"))?;
 
+    let mut report = SyncReport::default();
+    let outcome = sync_collection_into(
+        collection,
+        left,
+        right,
+        left_store,
+        right_store,
+        blobs,
+        store_dir,
+        dry_run,
+        relay,
+        progress,
+        &mut report,
+    );
+
+    // Folded whether the collection reconciled or failed: what it did report
+    // before it stopped is still what happened.
+    account.absorb(report);
+
+    outcome
+}
+
+/// The body of [`sync_collection`], filling that collection's own report.
+#[allow(clippy::too_many_arguments)]
+fn sync_collection_into(
+    collection: &str,
+    left: &mut SourceCtx,
+    right: &mut SourceCtx,
+    left_store: &mut PimdirSourceStore,
+    right_store: &mut PimdirSourceStore,
+    blobs: &PimdirBlobs,
+    store_dir: &Path,
+    dry_run: bool,
+    relay: bool,
+    progress: &CollectionProgress,
+    report: &mut SyncReport,
+) -> Result<()> {
     reconcile_pass(
         collection,
         left,
@@ -1357,6 +1439,7 @@ fn sync_collection(
         blobs,
         store_dir,
         dry_run,
+        report,
     )?;
     propagate(
         collection,
@@ -1385,6 +1468,7 @@ fn sync_collection(
             blobs,
             store_dir,
             dry_run,
+            report,
         )?;
         let propagated = propagate(
             collection,
@@ -1404,6 +1488,8 @@ fn sync_collection(
 
     itemize_refused(&left.name, mem::take(&mut left.refused), report);
     itemize_refused(&right.name, mem::take(&mut right.refused), report);
+    itemize_rejected(&left.name, mem::take(&mut left.rejected), report);
+    itemize_rejected(&right.name, mem::take(&mut right.rejected), report);
 
     Ok(())
 }
@@ -1603,6 +1689,13 @@ fn relay_one(
 /// One per-side reconcile round: sync each side against its server, then
 /// resolve any freshly probed placement to `Meta` so its link id is known and
 /// it joins the hub. Returns whether either side pulled or pushed.
+///
+/// Each side's divergences are itemized here, right after its own merge and
+/// before the next side runs, which is the only place they can be: the
+/// engine's events are this pass's and nothing keeps them. A collection is
+/// reconciled until quiescent, so this runs several times over one
+/// collection, and the report notes rather than appends: a divergence a pass
+/// settles and a later pass marks again is one divergence.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_pass(
     collection: &str,
@@ -1613,6 +1706,7 @@ fn reconcile_pass(
     blobs: &PimdirBlobs,
     store_dir: &Path,
     dry_run: bool,
+    report: &mut SyncReport,
 ) -> Result<bool> {
     let left_report = sync_side_rebuilding(
         collection,
@@ -1623,6 +1717,14 @@ fn reconcile_pass(
     )?;
     upgrade_probed(collection, left, left_store, blobs, dry_run)?;
     resolve_conflicts(collection, left, left_store, blobs, store_dir, dry_run)?;
+    itemize_conflicted(
+        &left_report.events,
+        left_store,
+        collection,
+        display_name(&left.namespace, collection),
+        &left.name,
+        report,
+    )?;
     let right_report = sync_side_rebuilding(
         collection,
         right,
@@ -1632,6 +1734,14 @@ fn reconcile_pass(
     )?;
     upgrade_probed(collection, right, right_store, blobs, dry_run)?;
     resolve_conflicts(collection, right, right_store, blobs, store_dir, dry_run)?;
+    itemize_conflicted(
+        &right_report.events,
+        right_store,
+        collection,
+        display_name(&right.namespace, collection),
+        &right.name,
+        report,
+    )?;
     Ok(moved(&left_report) || moved(&right_report))
 }
 
@@ -1826,7 +1936,9 @@ fn sync_side(
     // Kept whether the pass succeeded or not: a refusal is something the run
     // did learn, and a later failure does not unlearn it.
     let refused = remote.take_refused();
+    let rejected = remote.take_rejected();
     ctx.refused.extend(refused);
+    ctx.rejected.extend(rejected);
 
     report.with_context(|| format!("Sync {} {collection}", &ctx.name))
 }
@@ -2231,14 +2343,117 @@ fn placement_hunks(
 /// The remote collects them as it pushes ([`PimRemote::take_refused`]) and
 /// leaves them on the side's context; what is added here is the side's name,
 /// which the remote does not know it by.
+///
+/// A collection is reconciled until it is quiescent, and a create the other
+/// side will not take is re-derived and re-refused on every pass, so the
+/// batch this drains carries the same refusal several times over. Two copies
+/// of one identity are still two refusals, which is what the handle
+/// distinguishes: the repeats it drops are the same copy meeting the same
+/// answer again.
 fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &mut SyncReport) {
-    report
-        .refused
-        .extend(refused.into_iter().map(|refused| RefusedDuplicate {
+    let mut seen: HashSet<(String, String, String)> = HashSet::new();
+
+    for refused in refused {
+        let key = (
+            refused.collection.clone(),
+            refused.uid.clone(),
+            refused.handle,
+        );
+
+        if !seen.insert(key) {
+            continue;
+        }
+
+        report.refused.push(RefusedDuplicate {
             side: side.to_string(),
             collection: refused.collection,
             uid: refused.uid,
-        }));
+        });
+    }
+}
+
+/// Names the writes a side would not take, and takes back the hunks the run
+/// had derived for them.
+///
+/// The item patch is itemized from the projection before the passes that
+/// push, so every entry in it is a plan. A plan the remote refused is not
+/// work the run did: leaving it in the patch makes the run count a write that
+/// never landed, say `synchronized: 1 hunks`, exit successfully and report
+/// the identical phantom on every run after it, which is what a rejected
+/// `PUT` was seen doing against a real CardDAV server. The refusal takes its
+/// place, in the vocabulary a refused duplicate already speaks.
+///
+/// A hunk is matched by the side, the collection and the handle. The remote
+/// names a collection the way the wire does and so does the report
+/// ([`display_name`]), so the two meet without translation. A create is
+/// itemized by link id rather than by handle and therefore matches nothing:
+/// it stays in the patch beside its refusal, which is the honest half of what
+/// can be known here.
+///
+/// One write is one line whatever a convergence loop does: the passes
+/// re-derive the same write and meet the same answer, and the batch drained
+/// here carries all of them.
+fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncReport) {
+    let mut seen: HashSet<(String, String, &'static str)> = HashSet::new();
+
+    for rejected in rejected {
+        let key = (
+            rejected.collection.clone(),
+            rejected.handle.clone(),
+            rejected.action,
+        );
+
+        if !seen.insert(key) {
+            continue;
+        }
+
+        report
+            .item
+            .patch
+            .retain(|entry| !names(&entry.hunk, side, &rejected.collection, &rejected.handle));
+        report.rejected.push(RejectedWrite {
+            side: side.to_string(),
+            collection: rejected.collection,
+            id: rejected.handle,
+            action: rejected.action.to_string(),
+            reason: rejected.reason,
+        });
+    }
+}
+
+/// Whether `hunk` is the plan for `handle` in `collection` on `side`.
+///
+/// A copy names its item by link id rather than by handle, the item having no
+/// handle on the side it is being created on, so it answers `false` whatever
+/// it carries.
+fn names(hunk: &ItemHunk, side: &str, collection: &str, handle: &str) -> bool {
+    match hunk {
+        ItemHunk::AddFlags {
+            side: s,
+            collection: c,
+            id,
+            ..
+        }
+        | ItemHunk::RemoveFlags {
+            side: s,
+            collection: c,
+            id,
+            ..
+        }
+        | ItemHunk::Delete {
+            side: s,
+            collection: c,
+            id,
+            ..
+        }
+        | ItemHunk::Update {
+            side: s,
+            collection: c,
+            id,
+            ..
+        } => s == side && c == collection && id == handle,
+        ItemHunk::Copy { .. } | ItemHunk::Fetch { .. } => false,
+    }
 }
 
 /// The context of the named source in a pair.
@@ -2472,9 +2687,13 @@ fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncReport) 
 /// answering the same question being a dozen too many. What it says is the
 /// configuration's to write, the items themselves being in the report and in
 /// the log.
-fn announce_conflicts(account_config: &AccountConfig, report: &SyncReport) {
+///
+/// Returns how many items it announced, which is the length of the parked
+/// list and never more: the report notes a divergence once however many
+/// passes over however many endpoints marked it.
+fn announce_conflicts(account_config: &AccountConfig, report: &SyncReport) -> usize {
     if report.conflicts.is_empty() {
-        return;
+        return 0;
     }
 
     for conflict in &report.conflicts {
@@ -2482,12 +2701,14 @@ fn announce_conflicts(account_config: &AccountConfig, report: &SyncReport) {
     }
 
     let Some(notification) = &account_config.conflict.notify else {
-        return;
+        return report.conflicts.len();
     };
 
     if let Err(err) = notification.0.show() {
         warn!("cannot show the conflict notification: {err}");
     }
+
+    report.conflicts.len()
 }
 
 /// Performs the queue's `submit` intents, the half the store's own drain leaves
@@ -2923,6 +3144,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::cli::exit::Exit;
 
     /// A store with one body and the files a dry run writes to.
     fn stub_store(dir: &Path) {
@@ -3172,7 +3394,11 @@ mod tests {
 
         let placements = load_side(&store, "left/INBOX").unwrap();
         assert_eq!(placements.len(), 1);
-        assert_eq!(placements[0].status, ReplicaStatus::Dirty);
+        // NOTE: a drained `Add` is a create the next sync owes the source,
+        // and a binding carrying no base has never been reconciled with it.
+        // This read `Dirty` until io-replica's a-bound-create-is-still-a-create,
+        // which is the shape that stranded every queued create.
+        assert_eq!(placements[0].status, ReplicaStatus::Created);
         assert!(placements[0].base.is_none());
         assert_eq!(
             placements[0].link_id.as_ref().map(|l| l.0.as_str()),
@@ -3745,6 +3971,52 @@ mod tests {
         assert_eq!(report.outstanding_conflicts, 0);
     }
 
+    /// A conflict the engine marked reaches the report the account prints.
+    ///
+    /// The event is the engine's own here rather than a synthesized one, and
+    /// the fold is [`SyncReport::absorb`], which is the one a worker's
+    /// collection report travels back through. Merging only the item patch
+    /// left the account report with an empty `conflicts`, so the warning
+    /// block never named what the run had just parked and
+    /// [`announce_conflicts`], which returns early on exactly that
+    /// emptiness, could not fire the account's notification at all.
+    #[test]
+    fn a_conflict_the_engine_marked_survives_the_report_merge() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_local_edit(dir.path(), "v1");
+        let mut remote = MutableRemote::at("card1", "v9");
+
+        let before = flag_snapshot(&store, "contacts", "left").unwrap();
+        let sync = sync_with(&mut store, &mut remote, ReplicaPushRights::all());
+        assert_eq!(sync.conflicts, 1, "the engine parked it");
+
+        let mut collection = SyncReport::default();
+        itemize_pulled(
+            &sync.events,
+            &before,
+            &store,
+            "contacts",
+            "contacts",
+            "left",
+            &mut collection,
+        )
+        .unwrap();
+        assert_eq!(collection.conflicts.len(), 1, "the collection names it");
+
+        let mut account = SyncReport::default();
+        account.absorb(collection);
+        assert_eq!(
+            account.conflicts.len(),
+            1,
+            "and so does the account report, which is the one printed and the \
+             one the notification is raised from",
+        );
+
+        let text = account.to_string();
+        assert!(text.contains("Warnings (1)"), "{text}");
+        assert!(text.contains("card1"), "{text}");
+    }
+
     /// Both sides setting the same field is the residue no merge settles. It
     /// stays parked and is counted from the store, which is the number the
     /// run's own exit code answers with 2.
@@ -3776,7 +4048,7 @@ mod tests {
         assert_eq!(placement.status, ReplicaStatus::Conflict);
         assert_eq!(placement.object, Some(local), "the local side is untouched");
 
-        let mut report = SyncReport::default();
+        let mut collection = SyncReport::default();
         itemize_pulled(
             &[ReplicaEvent::Conflicted(ReplicaHandle("card1".into()))],
             &HashMap::new(),
@@ -3784,13 +4056,72 @@ mod tests {
             "contacts",
             "contacts",
             "dav",
-            &mut report,
+            &mut collection,
         )
         .unwrap();
+        assert_eq!(collection.conflicts.len(), 1);
+
+        // The collection's report is what a worker fills, and the account's
+        // is what gets printed. Asserting the first alone cannot notice the
+        // second losing it, which is how the arm went missing.
+        let mut report = SyncReport::default();
+        report.absorb(collection);
         assert_eq!(report.conflicts.len(), 1);
 
         count_conflicts(&store, CONFLICT_ACCOUNT, &mut report);
         assert_eq!(report.outstanding_conflicts, 1);
+        assert!(report.left_waiting(), "which is what exits with 2");
+
+        let text = report.to_string();
+        assert!(text.contains("changed on both sides"), "{text}");
+    }
+
+    /// A write the remote would not take is not a write the run made.
+    ///
+    /// The item patch is the plan, derived from the projection before
+    /// anything is pushed, so a refused `PUT` used to be counted among the
+    /// hunks the run applied: `synchronized: 1 hunks`, exit 0, the item still
+    /// dirty and the identical phantom reported on every run after it. The
+    /// refusal takes the hunk's place and the run says it is waiting.
+    #[test]
+    fn a_refused_write_is_reported_instead_of_counted_as_a_hunk() {
+        let mut report = SyncReport::default();
+        for id in ["card1", "card2"] {
+            report.item.patch.push(PatchEntry::new(
+                ItemHunk::Update {
+                    side: String::from("dav"),
+                    collection: String::from("Default"),
+                    id: String::from(id),
+                    content_key: 0,
+                },
+                None,
+            ));
+        }
+
+        itemize_rejected(
+            "dav",
+            vec![RejectedPush {
+                collection: String::from("Default"),
+                handle: String::from("card1"),
+                action: "update",
+                reason: String::from("HTTP 403: Resource is not a vCard object"),
+            }],
+            &mut report,
+        );
+
+        let ids: Vec<&ItemHunk> = report.item.patch.iter().map(|entry| &entry.hunk).collect();
+        assert_eq!(ids.len(), 1, "the refused write left the patch: {ids:?}");
+        assert!(format!("{:?}", ids[0]).contains("card2"), "{ids:?}");
+
+        let text = report.to_string();
+        assert!(text.contains("Warnings (1)"), "{text}");
+        assert!(text.contains("refused the update of card1"), "{text}");
+        assert!(text.contains("synchronized: 1 hunks"), "{text}");
+        assert_eq!(
+            Exit::from(&report),
+            Exit::Conflicted,
+            "a run that could not deliver a write is not a run that succeeded",
+        );
     }
 
     /// A conflict an earlier run parked reaches no later run's report: the
@@ -3825,6 +4156,64 @@ mod tests {
 
         let text = report.to_string();
         assert!(text.contains("1 item(s) waiting for a decision"), "{text}");
+    }
+
+    /// A create a frontend staged must still read back as a create.
+    ///
+    /// io-replica pushes an add only for a placement whose status is
+    /// `Created` (its local-create arm reads that field and nothing else), so
+    /// a status the store cannot hold back is a create that never reaches the
+    /// server. The run keeps deriving a patch for it and keeps exiting 0,
+    /// which is the shape a two-replica account was seen looping in against
+    /// Fastmail: six staged cards, six hunks reported on every run, and an
+    /// address book that received none of them.
+    ///
+    /// The drain itself is covered above; what is asserted here is the state
+    /// it leaves, which is the only thing the sync after it can act on.
+    #[test]
+    fn a_queued_create_reads_back_as_a_create() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account(CONFLICT_ACCOUNT)
+            .for_source("dav");
+        store
+            .ensure_collection("dav/contacts", "text/vcard")
+            .unwrap();
+
+        let body = card("+1", "new");
+        let blobs = store.blobs();
+        let hash = blobs.hash(body.as_bytes());
+        let mut writer = blobs.writer().unwrap();
+        writer.write_all(body.as_bytes()).unwrap();
+        let size = writer.commit(&hash).unwrap();
+
+        let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
+        producer
+            .enqueue(
+                "dav/contacts",
+                &PimdirAction::Add {
+                    link_id: Some(ReplicaLinkId("uid:new".into())),
+                    flags: ReplicaFlags::default(),
+                    object: Some(hash),
+                    meta: None,
+                    handle: None,
+                },
+                Some(size),
+                "2026-08-29T00:00:00Z",
+            )
+            .unwrap();
+        drop(producer);
+
+        assert_eq!(store.drain_collection("dav/contacts").unwrap().applied, 1);
+
+        let placement = load_side(&store, "dav/contacts").unwrap().remove(0);
+        assert_eq!(
+            placement.status,
+            ReplicaStatus::Created,
+            "a staged create the store reads back as {:?} is never pushed",
+            placement.status,
+        );
     }
 
     /// Seeds a store holding one locally edited item: its body points at
@@ -3871,6 +4260,190 @@ mod tests {
             ])
             .unwrap();
         store
+    }
+
+    /// One side of a two-endpoint account: a store handle for `source` over
+    /// the shared hub, holding one locally edited card against
+    /// `base_revision`.
+    ///
+    /// Both sides hold the same item under the same link id, which is what an
+    /// account mirroring two servers is: one hub item, one binding per
+    /// endpoint, each with a base of its own.
+    fn endpoint_with_local_edit(
+        dir: &std::path::Path,
+        source: &str,
+        base_revision: &str,
+    ) -> PimdirSourceStore {
+        let mut store = PimdirStore::open(dir).unwrap().for_source(source);
+        store.ensure_collection("contacts", "text/vcard").unwrap();
+        store
+            .write(vec![
+                ReplicaWriteOp::StoreObject {
+                    object: ReplicaObject {
+                        hash: ReplicaHash("0rig".into()),
+                        size: 3,
+                    },
+                    body: Some(b"old".to_vec()),
+                },
+                ReplicaWriteOp::StoreObject {
+                    object: ReplicaObject {
+                        hash: ReplicaHash("ed17".into()),
+                        size: 3,
+                    },
+                    body: Some(b"new".to_vec()),
+                },
+                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+                    collection: ReplicaCollectionId("contacts".into()),
+                    handle: ReplicaHandle("card1".into()),
+                    link_id: Some(ReplicaLinkId("uid:a".into())),
+                    object: Some(ReplicaHash("ed17".into())),
+                    level: ReplicaLevel::Full,
+                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
+                    sort_key: ReplicaSortKey::default(),
+                    flags: ReplicaFlags::default(),
+                    status: ReplicaStatus::Dirty,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: Some(ReplicaBase {
+                        flags: ReplicaFlags::default(),
+                        revision: Some(base_revision.to_string()),
+                        object: Some(ReplicaHash("0rig".into())),
+                    }),
+                    origin: None,
+                }),
+            ])
+            .unwrap();
+        store
+    }
+
+    /// Puts a parked divergence back the way this run's own merge leaves one
+    /// it settled: dirty again, rebased on the revision it conflicted at, so
+    /// the next pass pushes and can meet a remote that moved once more.
+    fn settle_as_the_merge_would(store: &mut PimdirSourceStore) {
+        let mut placement = load_side(store, "contacts").unwrap().remove(0);
+        let revision = placement.conflict_revision.take();
+
+        placement.status = ReplicaStatus::Dirty;
+        placement.conflict_object = None;
+        placement.base = Some(ReplicaBase {
+            flags: ReplicaFlags::default(),
+            revision,
+            object: Some(ReplicaHash("0rig".into())),
+        });
+
+        store
+            .write(vec![ReplicaWriteOp::UpsertPlacement(placement)])
+            .unwrap();
+    }
+
+    /// A source and a target both park a divergence, and the run names each
+    /// once however many passes it takes to converge.
+    ///
+    /// The two-endpoint path never itemized at all: `reconcile_pass` asked
+    /// its two sync reports whether anything moved and threw the events away,
+    /// so an account mirroring two servers, which is the topology this shape
+    /// exists for, reported no conflict in the text report, none in `--json`,
+    /// and could not raise the notification either.
+    ///
+    /// Naive itemizing double-counts instead, which is why this drives more
+    /// than one pass: a divergence the run's own merge settles and a later
+    /// pass marks again is one divergence and one line. The passes here are
+    /// the engine's own, against the fake mutable remote, in the order
+    /// `reconcile_pass` runs them; what needs a network, and is not reached,
+    /// is only the connected context wrapping each side.
+    #[test]
+    fn a_conflict_on_each_endpoint_is_named_once_across_a_convergence_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut left = endpoint_with_local_edit(dir.path(), "left", "l1");
+        let mut right = endpoint_with_local_edit(dir.path(), "right", "r1");
+        let mut left_remote = MutableRemote::at("card1", "l9");
+        let mut right_remote = MutableRemote::at("card1", "r9");
+
+        let mut report = SyncReport::default();
+        for pass in 0..2 {
+            let left_pass = sync_with(&mut left, &mut left_remote, ReplicaPushRights::all());
+            itemize_conflicted(
+                &left_pass.events,
+                &left,
+                "contacts",
+                "contacts",
+                "left",
+                &mut report,
+            )
+            .unwrap();
+
+            let right_pass = sync_with(&mut right, &mut right_remote, ReplicaPushRights::all());
+            itemize_conflicted(
+                &right_pass.events,
+                &right,
+                "contacts",
+                "contacts",
+                "right",
+                &mut report,
+            )
+            .unwrap();
+
+            assert_eq!(
+                (pass, left_pass.conflicts),
+                (pass, 1),
+                "the engine parked the left side on pass {pass}",
+            );
+
+            // What the run's own merge does to a divergence it settles, so
+            // the next pass genuinely marks this one again rather than
+            // meeting a placement the engine stays silent about.
+            settle_as_the_merge_would(&mut left);
+            left_remote
+                .items
+                .insert(String::from("card1"), (String::from("l10"), None));
+        }
+
+        assert_eq!(
+            report.conflicts.len(),
+            2,
+            "one line per endpoint, not one per pass: {:?}",
+            report.conflicts,
+        );
+        let sides: Vec<&str> = report
+            .conflicts
+            .iter()
+            .map(|conflict| conflict.side.as_str())
+            .collect();
+        assert_eq!(sides, ["left", "right"]);
+
+        let config = AccountConfig::default();
+        assert_eq!(
+            announce_conflicts(&config, &report),
+            2,
+            "and one announcement per item entering conflict",
+        );
+
+        // A later run over the same store: both placements are parked
+        // already, the engine says nothing about either, and the run that
+        // finds them is quiet.
+        let mut later = SyncReport::default();
+        for (store, remote, side) in [
+            (&mut left, &mut left_remote, "left"),
+            (&mut right, &mut right_remote, "right"),
+        ] {
+            let pass = sync_with(store, remote, ReplicaPushRights::all());
+            itemize_conflicted(
+                &pass.events,
+                store,
+                "contacts",
+                "contacts",
+                side,
+                &mut later,
+            )
+            .unwrap();
+        }
+
+        assert!(later.conflicts.is_empty());
+        assert_eq!(
+            announce_conflicts(&config, &later),
+            0,
+            "a conflict an earlier run parked is announced by no later one",
+        );
     }
 
     /// A store holding one card the client has staged a delete for: the
@@ -4148,6 +4721,7 @@ mod tests {
         let refused = vec![RefusedCreate {
             collection: String::from("agenda"),
             uid: String::from("event-1@google.com"),
+            handle: String::from("copy-1.ics"),
         }];
 
         let mut report = SyncReport {
@@ -4168,6 +4742,68 @@ mod tests {
         assert_eq!(json["refused"][0]["side"], "right");
         assert_eq!(json["refused"][0]["collection"], "agenda");
         assert_eq!(json["refused"][0]["uid"], "event-1@google.com");
+    }
+
+    /// A collection is reconciled until quiescent, so the batch a run drains
+    /// carries the same refusal once per pass: the create is re-derived, the
+    /// other side answers the same way, and none of that is news. Two copies
+    /// of one identity are still two refusals, which is the distinction the
+    /// handle keeps.
+    #[test]
+    fn a_refusal_re_observed_on_a_later_pass_is_still_one_refusal() {
+        let refused = |handle: &str| RefusedCreate {
+            collection: String::from("agenda"),
+            uid: String::from("event-1@google.com"),
+            handle: String::from(handle),
+        };
+
+        let mut report = SyncReport::default();
+        itemize_refused(
+            "right",
+            vec![
+                refused("copy-1.ics"),
+                refused("copy-1.ics"),
+                refused("copy-2.ics"),
+            ],
+            &mut report,
+        );
+
+        assert_eq!(
+            report.refused.len(),
+            2,
+            "one line per copy, however many passes met the same answer",
+        );
+    }
+
+    /// The same, for a write a side would not take: the passes re-derive it
+    /// and meet the same refusal, and the run says so once.
+    #[test]
+    fn a_write_refused_on_every_pass_is_still_one_line() {
+        let rejected = |handle: &str| RejectedPush {
+            collection: String::from("Default"),
+            handle: String::from(handle),
+            action: "update",
+            reason: String::from("HTTP 403: Resource is not a vCard object"),
+        };
+
+        let mut report = SyncReport::default();
+        report.item.patch.push(PatchEntry::new(
+            ItemHunk::Update {
+                side: String::from("dav"),
+                collection: String::from("Default"),
+                id: String::from("card1"),
+                content_key: 0,
+            },
+            None,
+        ));
+        itemize_rejected(
+            "dav",
+            vec![rejected("card1"), rejected("card1"), rejected("card2")],
+            &mut report,
+        );
+
+        assert_eq!(report.rejected.len(), 2);
+        assert!(report.item.patch.is_empty(), "and the hunk is still gone");
     }
 
     #[test]

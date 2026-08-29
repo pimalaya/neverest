@@ -51,6 +51,89 @@ pub struct SyncReport {
     /// twice (counted as warnings).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<RefusedDuplicate>,
+    /// Writes a remote refused, so the change stayed in the store. Re-tried
+    /// and re-reported by every run until it lands or an operator removes
+    /// the reason (counted as warnings).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<RejectedWrite>,
+}
+
+impl SyncReport {
+    /// Folds a collection-scoped report into this account-wide one.
+    ///
+    /// Every arm a collection can fill travels, and there is exactly one
+    /// place that decides which: a run that reconciled a collection in a
+    /// worker thread and merged back only its item patch would say how many
+    /// items it touched and never what it parked, which is the whole of the
+    /// warning block and the trigger the conflict notification fires from.
+    ///
+    /// What does not travel is what a collection never had an opinion about:
+    /// the account's own name and dry-run flag, the retention sweep, which
+    /// runs once for the account, and the outstanding conflict count, which
+    /// is read from the store once rather than summed over collections.
+    pub fn absorb(&mut self, other: Self) {
+        // NOTE: every field is named, none elided, so a field added to the
+        // report is a compile error here rather than an arm that silently
+        // stops travelling, which is how the parked conflicts went missing.
+        let Self {
+            account: _,
+            dry_run: _,
+            collection,
+            item,
+            collisions,
+            drained,
+            parked,
+            submitted,
+            purged: _,
+            conflicts,
+            outstanding_conflicts: _,
+            refused,
+            rejected,
+        } = other;
+
+        self.collection.patch.extend(collection.patch);
+        self.item.patch.extend(item.patch);
+        self.collisions.extend(collisions);
+        self.drained.extend(drained);
+        self.parked.extend(parked);
+        self.submitted.extend(submitted);
+        self.conflicts.extend(conflicts);
+        self.refused.extend(refused);
+        self.rejected.extend(rejected);
+    }
+
+    /// Records a divergence this run parked, unless the run named it already.
+    ///
+    /// A collection is reconciled until it is quiescent, so a pass runs
+    /// several times over one collection and both endpoints report into one
+    /// account report. The engine says nothing about a placement it has
+    /// already parked, so a repeat means the run's own merge settled the
+    /// divergence and a later pass marked it again: one divergence, one line,
+    /// and one notification. Which is also why the number of decisions
+    /// waiting is read from the store instead of counted here.
+    pub fn note_conflict(&mut self, conflict: ItemConflict) {
+        let named = self.conflicts.iter().any(|named| {
+            named.side == conflict.side
+                && named.collection == conflict.collection
+                && named.id == conflict.id
+        });
+
+        if !named {
+            self.conflicts.push(conflict);
+        }
+    }
+
+    /// Whether the run left work behind that no rerun clears on its own,
+    /// which is what the exit code answers.
+    ///
+    /// Three states qualify, and they are one class: a divergence waiting for
+    /// a decision, a duplicate `UID` the other side will not take, and a
+    /// write the remote refused. Each leaves the store holding something it
+    /// could not deliver, each is re-reported on every run until a person
+    /// acts, and none of them is a failure of the run.
+    pub fn left_waiting(&self) -> bool {
+        self.outstanding_conflicts > 0 || !self.refused.is_empty() || !self.rejected.is_empty()
+    }
 }
 
 /// One create a side refused with the CalDAV or CardDAV `no-uid-conflict`
@@ -85,6 +168,49 @@ impl fmt::Display for RefusedDuplicate {
         write!(
             f,
             "{side} refused a copy in {collection}: it already holds UID {uid}, so the second copy stays unwritten until one of the two carries a UID of its own"
+        )
+    }
+}
+
+/// One write a remote would not take: a body it rejected, a flag change it
+/// refused, a delete it would not perform.
+///
+/// A hunk is the plan the run derived, and until the remote answers, a plan
+/// is all it is. A write that did not land is therefore not one of the hunks
+/// the run reports having applied: it is carried here instead, so
+/// `already in sync` keeps meaning the run wrote nothing and the hunk count
+/// keeps meaning what reached a server.
+///
+/// The repetition is the point, as it is for [`RefusedDuplicate`]. The store
+/// still holds the change, the next run tries again, and a refusal a server
+/// repeats forever (a body it will not parse, a collection it made read-only)
+/// is one a person has to act on. A refusal on the way to the wire, a body
+/// the blob tree lost, is named the same way for the same reason.
+#[derive(Debug, Serialize)]
+pub struct RejectedWrite {
+    pub side: String,
+    pub collection: String,
+    /// The item's handle on that side.
+    pub id: String,
+    /// What the run was trying to do: `update`, `append`, `delete`, `move`
+    /// or `set flags`.
+    pub action: String,
+    /// Why it did not land, as the backend put it.
+    pub reason: String,
+}
+
+impl fmt::Display for RejectedWrite {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            id,
+            action,
+            reason,
+        } = self;
+        write!(
+            f,
+            "{side} refused the {action} of {id} in {collection}, so it stays in the store: {reason}"
         )
     }
 }
@@ -314,8 +440,11 @@ impl fmt::Display for SyncReport {
         let item_errors = self.item.patch.iter().filter(|e| e.error.is_some()).count();
         let submit_errors = self.submitted.iter().filter(|e| e.error.is_some()).count();
         let errors = mailbox_errors + item_errors + submit_errors;
-        let warnings =
-            self.collisions.len() + self.parked.len() + self.conflicts.len() + self.refused.len();
+        let warnings = self.collisions.len()
+            + self.parked.len()
+            + self.conflicts.len()
+            + self.refused.len()
+            + self.rejected.len();
 
         if !self.drained.is_empty() {
             writeln!(f, "Queue ({n}):", n = self.drained.len())?;
@@ -370,6 +499,9 @@ impl fmt::Display for SyncReport {
                 writeln!(f, " - {c}")?;
             }
             for r in &self.refused {
+                writeln!(f, " - {r}")?;
+            }
+            for r in &self.rejected {
                 writeln!(f, " - {r}")?;
             }
             for p in &self.parked {

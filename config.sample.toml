@@ -318,6 +318,8 @@ imap.item.delete = false
 # contradictory. That merge is built in and is not configured. What is left is
 # both sides setting the same field differently, which no merge settles, so the
 # item parks and the run exits 2 instead of 0, having synced everything else.
+# That code is what a run leaving anything waiting exits with, a write the other
+# side would not take included.
 #
 # This is the desktop notification shown when an item enters conflict. UNSET,
 # the default, leaves the warning in the log and the entry in the report: a run
@@ -347,9 +349,12 @@ imap.item.delete = false
 # The result is taken only on a zero exit with the output written. An editor
 # exits zero on a bare quit, so a zero exit alone is not a decision, and a
 # merger that leaves its output untouched leaves the conflict exactly as it
-# was. A decision is refused when the store has observed a newer remote
-# revision since it was computed, since pushing it would overwrite everything
-# that arrived meanwhile.
+# was. The body it does write has to be a body of that item, so one no parser
+# reads and one stating another UID are both refused rather than stored. A
+# decision is refused when the store has observed a newer remote revision since
+# it was computed, since pushing it would overwrite everything that arrived
+# meanwhile; the store stays free while the merger runs, so a sync may record
+# that revision from under it.
 
 # --------------------------------------------------------------------------------
 # Store options

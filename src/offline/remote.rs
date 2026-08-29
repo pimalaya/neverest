@@ -20,6 +20,7 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeSet, HashMap},
+    fmt,
     io::{self, Write},
     mem,
     sync::{
@@ -96,9 +97,16 @@ pub struct PimRemote<'a> {
     held: HeldHandles,
     /// The creates this side refused because it already holds the item's
     /// identity, drained into the report by the driver, which names the
-    /// source. Filled in push order, one entry per refused create, and never
-    /// deduplicated: two copies refused are two lines.
+    /// source. Filled in push order, one entry per refused create: two copies
+    /// refused are two lines, which is what the handle on each entry keeps
+    /// true once the driver drops the repeats a convergence loop collects.
     refused: Vec<RefusedCreate>,
+    /// The writes this side would not take, drained into the report by the
+    /// driver, which names the source and drops the repeats a convergence
+    /// loop collects. One entry per rejected change, in push order, so a run
+    /// says what it could not deliver rather than counting it among the hunks
+    /// it applied.
+    rejected: Vec<RejectedPush>,
 }
 
 /// The handles one side is known to hold, per collection: everything its
@@ -152,6 +160,34 @@ pub struct RefusedCreate {
     pub collection: String,
     /// The identity the refused copy shares with the resource already there.
     pub uid: String,
+    /// The handle the refused copy was being appended under, which is what
+    /// tells two copies of one identity apart from the same copy refused
+    /// again on a later pass of the same run. It is a key rather than
+    /// something the report says: the copies share everything a person
+    /// would act on.
+    pub handle: String,
+}
+
+/// One write that did not land, as the remote knows it.
+///
+/// It covers both halves of a rejection: what a server answered no to, and
+/// what never reached one because the body it needed was not in the blob
+/// tree. Both leave the change in the store for the next run, which is what
+/// the report says about it; the source's name is the driver's to add.
+///
+/// A create refused with the `no-uid-conflict` precondition is *not* one of
+/// these. It has a report entry of its own naming the identity and the remedy
+/// ([`RefusedCreate`]), and one write is one line.
+pub struct RejectedPush {
+    /// The collection the write was going into, as the server names it.
+    pub collection: String,
+    /// The item's handle on this side.
+    pub handle: String,
+    /// What the run was trying to do: `update`, `append`, `delete`, `move` or
+    /// `set flags`.
+    pub action: &'static str,
+    /// Why it did not land, as the backend put it.
+    pub reason: String,
 }
 
 impl<'a> PimRemote<'a> {
@@ -166,6 +202,7 @@ impl<'a> PimRemote<'a> {
             sizes: HashMap::new(),
             held: HeldHandles::default(),
             refused: Vec::new(),
+            rejected: Vec::new(),
         }
     }
 
@@ -189,6 +226,7 @@ impl<'a> PimRemote<'a> {
             sizes,
             held: HeldHandles::default(),
             refused: Vec::new(),
+            rejected: Vec::new(),
         }
     }
 
@@ -201,6 +239,38 @@ impl<'a> PimRemote<'a> {
     /// taken off the remote so the driver can name them in the report.
     pub fn take_refused(&mut self) -> Vec<RefusedCreate> {
         mem::take(&mut self.refused)
+    }
+
+    /// The writes this side would not take, taken off the remote so the
+    /// driver can name them in the report.
+    pub fn take_rejected(&mut self) -> Vec<RejectedPush> {
+        mem::take(&mut self.rejected)
+    }
+
+    /// Records a write that did not land and answers the engine with the
+    /// rejection it expects.
+    ///
+    /// A rejection is an outcome rather than an error: it is what makes
+    /// io-replica keep the change and re-merge instead of clobbering the
+    /// remote, and an error would abort the whole batch. Recording it is what
+    /// keeps the run from reporting the write as one it made.
+    fn reject(
+        &mut self,
+        collection: &str,
+        handle: ReplicaHandle,
+        action: &'static str,
+        reason: impl fmt::Display,
+    ) -> ReplicaPushResult {
+        let reason = reason.to_string();
+        warn!("{action} {} in {collection} rejected: {reason}", handle.0);
+        self.rejected.push(RejectedPush {
+            collection: collection.to_string(),
+            handle: handle.0.clone(),
+            action,
+            reason,
+        });
+
+        rejected_bare(handle)
     }
 }
 
@@ -326,14 +396,18 @@ impl ReplicaRemote for PimRemote<'_> {
             let result = match change.kind {
                 ReplicaChangeKind::SetFlags { handle, flags } => {
                     let email_flags = to_item_flags(&flags);
-                    match self.pool.primary().store_flags(
+                    let stored = self.pool.primary().store_flags(
                         &collection,
                         &[handle.as_str()],
                         &email_flags,
                         FlagOp::Set,
-                    ) {
+                    );
+
+                    match stored {
                         Ok(()) => accepted(handle, None),
-                        Err(err) => rejected(handle, "store flags", err),
+                        Err(err) => {
+                            self.reject(&collection, handle, "set flags", format!("{err:#}"))
+                        }
                     }
                 }
                 ReplicaChangeKind::Remove {
@@ -344,23 +418,32 @@ impl ReplicaRemote for PimRemote<'_> {
                 } => match to {
                     Some(target) => {
                         let dest = wire_name(&self.namespace, target.as_str()).to_string();
-                        match self
-                            .pool
-                            .primary()
-                            .move_items(&collection, &dest, &[handle.as_str()])
-                        {
+                        let moved =
+                            self.pool
+                                .primary()
+                                .move_items(&collection, &dest, &[handle.as_str()]);
+
+                        match moved {
                             Ok(()) => accepted(handle, None),
-                            Err(err) => rejected(handle, "move item", err),
+                            Err(err) => {
+                                self.reject(&collection, handle, "move", format!("{err:#}"))
+                            }
                         }
                     }
-                    None => match self.pool.primary().delete_item(
-                        &collection,
-                        handle.as_str(),
-                        if_match.as_deref(),
-                    ) {
-                        Ok(()) => accepted(handle, None),
-                        Err(err) => rejected(handle, "delete item", err),
-                    },
+                    None => {
+                        let deleted = self.pool.primary().delete_item(
+                            &collection,
+                            handle.as_str(),
+                            if_match.as_deref(),
+                        );
+
+                        match deleted {
+                            Ok(()) => accepted(handle, None),
+                            Err(err) => {
+                                self.reject(&collection, handle, "delete", format!("{err:#}"))
+                            }
+                        }
+                    }
                 },
                 ReplicaChangeKind::Add {
                     handle,
@@ -766,29 +849,23 @@ impl PimRemote<'_> {
         link: LinkId<'_>,
     ) -> ReplicaPushResult {
         let Some(hash) = object else {
-            warn!(
-                "append with no stored body for {}, rejecting",
-                handle.as_str()
-            );
-            return rejected_bare(handle);
+            return self.reject(collection, handle, "append", "no body was stored for it");
         };
 
         let reader = match self.blob.reader(&hash) {
             Ok(Some(file)) => file,
             Ok(None) => {
-                warn!("append body {} missing from blob store", hash.as_str());
-                return rejected_bare(handle);
+                let reason = format!("its body {} is missing from the blob tree", hash.as_str());
+                return self.reject(collection, handle, "append", reason);
             }
             Err(err) => {
-                warn!("append body read error: {err:#}");
-                return rejected_bare(handle);
+                return self.reject(collection, handle, "append", format!("{err:#}"));
             }
         };
         let len = match reader.metadata() {
             Ok(meta) => meta.len() as usize,
             Err(err) => {
-                warn!("append body stat error: {err:#}");
-                return rejected_bare(handle);
+                return self.reject(collection, handle, "append", format!("{err:#}"));
             }
         };
 
@@ -801,27 +878,32 @@ impl PimRemote<'_> {
         let written = match written {
             Ok(written) => written,
             Err(err) => {
-                if is_duplicate_uid(&err) {
-                    let uid = link.hint.unwrap_or(handle.as_str());
-                    warn!("append to {collection} refused: it already holds UID {uid}");
-                    self.refused.push(RefusedCreate {
-                        collection: collection.to_string(),
-                        uid: uid.to_string(),
-                    });
-                } else {
-                    warn!("append to {collection} error: {err:#}");
+                // NOTE: a duplicate `UID` names itself, with the identity and
+                // the remedy the generic refusal has no way to state, so it
+                // is reported there and not here: one write is one line.
+                if !is_duplicate_uid(&err) {
+                    return self.reject(collection, handle, "append", format!("{err:#}"));
                 }
+
+                let uid = link.hint.unwrap_or(handle.as_str());
+                warn!("append to {collection} refused: it already holds UID {uid}");
+                self.refused.push(RefusedCreate {
+                    collection: collection.to_string(),
+                    uid: uid.to_string(),
+                    handle: handle.0.clone(),
+                });
+
                 return rejected_bare(handle);
             }
         };
 
         let assigned = ReplicaHandle::from(written.id);
         if !self.held.claim(collection, assigned.as_str()) {
-            warn!(
-                "append to {collection} was answered with {}, which it already holds; rejecting",
+            let reason = format!(
+                "the server answered with {}, which it already holds",
                 assigned.as_str(),
             );
-            return rejected_bare(handle);
+            return self.reject(collection, handle, "append", reason);
         }
 
         ReplicaPushResult {
@@ -850,39 +932,36 @@ impl PimRemote<'_> {
         let reader = match self.blob.reader(&object) {
             Ok(Some(file)) => file,
             Ok(None) => {
-                warn!("update body {} missing from blob store", object.as_str());
-                return rejected_bare(handle);
+                let reason = format!("its body {} is missing from the blob tree", object.as_str());
+                return self.reject(collection, handle, "update", reason);
             }
             Err(err) => {
-                warn!("update body read error: {err:#}");
-                return rejected_bare(handle);
+                return self.reject(collection, handle, "update", format!("{err:#}"));
             }
         };
         let len = match reader.metadata() {
             Ok(meta) => meta.len() as usize,
             Err(err) => {
-                warn!("update body stat error: {err:#}");
-                return rejected_bare(handle);
+                return self.reject(collection, handle, "update", format!("{err:#}"));
             }
         };
 
-        match self.pool.primary().update_item_stream(
+        let updated = self.pool.primary().update_item_stream(
             collection,
             handle.as_str(),
             reader,
             len,
             if_match,
-        ) {
+        );
+
+        match updated {
             Ok(revision) => ReplicaPushResult {
                 handle,
                 outcome: ReplicaPushOutcome::Accepted,
                 assigned: None,
                 revision,
             },
-            Err(err) => {
-                warn!("update {} in {collection} rejected: {err:#}", handle.0);
-                rejected_bare(handle)
-            }
+            Err(err) => self.reject(collection, handle, "update", format!("{err:#}")),
         }
     }
 }
@@ -894,11 +973,6 @@ fn accepted(handle: ReplicaHandle, assigned: Option<ReplicaHandle>) -> ReplicaPu
         assigned,
         revision: None,
     }
-}
-
-fn rejected(handle: ReplicaHandle, what: &str, err: anyhow::Error) -> ReplicaPushResult {
-    warn!("{what} {} rejected: {err:#}", handle.as_str());
-    rejected_bare(handle)
 }
 
 fn rejected_bare(handle: ReplicaHandle) -> ReplicaPushResult {

@@ -112,6 +112,10 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 ### Changed
 
+- A run that could not deliver a write now exits 2 rather than 0, and so does a run holding a duplicate `UID` a side refuses.
+
+  Exit 2 means the run reconciled its collections and left something waiting for a person, which until now was only a parked conflict. A write the other side would not take is the same class of outcome: item-wide, unresolved, re-reported every run and unchanged by a rerun. A wrapper distinguishing "everything delivered" from "something is waiting" keeps working; one reading 2 as "conflicts, specifically" now also sees it for a refusal, and the report says which.
+
 - Resolved every configured secret once per run instead of once per opened connection.
 
   A `password.command` is a command until something runs it, and that used to happen inside the connection layer: opening a connection took the configuration and spawned the command, so an IMAP source at the default `-j 4` ran it four times, concurrently, before its first request. An account naming one `pass` entry from its `imap`, `smtp`, `carddav` and `caldav` tables paid six `gpg` invocations per sync, each one a key unlock. A run now resolves them all up front into a runtime account holding the values themselves, memoizing identical commands, so that same account resolves once. Opening a second connection to a side costs a handshake and nothing else.
@@ -195,6 +199,26 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 - Bumped the Pimalaya libraries: io-replica 0.4, io-pimdir 0.3, io-imap 0.6, io-smtp 0.3, io-webdav 0.2, io-http 0.5, io-pim-discovery 0.7, io-msgraph 0.3, pimalaya-stream 0.3, pimalaya-cli 0.2 and pimalaya-config 0.1. SASL moved out of pimalaya-stream into the new io-sasl crate, so the SCRAM-SHA-256 the configuration has always offered is now runnable. The minimum supported Rust version is 1.89.
 
 ### Fixed
+
+- `conflict resolve --interactive` stored whatever the merger wrote.
+
+  A decision was read as "the output file is no longer the empty one it was seeded with", and nothing looked at those bytes afterwards: they went into the blob tree and onto the queue, the kind being asked only for the summary derived on the way past. A merger writing `this is not a card at all` and exiting zero therefore replaced a contact with something that is not one, keeping the item's link id and losing every field its identity came from. A tool that crashes after a partial write, a template saved half-finished and a program that writes its error message to the output path all produce it. The body is now read before it is staged and refused unless it opens and closes with the kind's delimiters and states the `UID` the item is bound by, which is what makes it a resolution *of that item*; either refusal leaves the divergence exactly as an aborted merger leaves it.
+
+- An account syncing a source to a target never reported a conflict at all.
+
+  Conflicts reached the report from one place, the path a source takes against the local store alone. The two-endpoint reconcile ran each side's sync and asked its reports only whether anything had moved, throwing the per-item events away, so an account mirroring two servers showed no conflict in the text report, none in `--json`, and could raise no notification, the announcement being made from a list nothing ever filled. It did still say how many decisions were waiting, that count being read from the store, and never which. Both topologies now report a parked divergence the same way, and a collection reconciled over several passes names one divergence once, as it does a refused duplicate and a refused write.
+
+- A run never named the conflict it had just parked, so the conflict notification could not fire.
+
+  Collections are reconciled across a worker pool and their reports merged at a barrier, and the merge carried the item patch alone: what a collection parked, what a side refused and what it skipped were dropped before the account's report was printed. The run showed only the store-wide count, how many items are waiting and never which, and the desktop notification, which is raised from the parked list, returned early on a list that was always empty. Every arm of a collection's report now travels.
+
+- A write the server refused was counted as an applied hunk and the run exited 0.
+
+  The item patch is the plan derived before anything is pushed, and nothing revisited it afterwards, so a `PUT` the server answered with `403` was reported as `update item …`, counted in the hunk total, and exited successfully, then reported identically on every run after it. At the default log level there was no warning either, so the only signal a cron job had said the run had succeeded over a change that never left the store. A refused write is now reported as one, with its reason, and the hunk it was derived from is taken back.
+
+- No sync could run while a person was in the interactive merger, which made the staleness guard unreachable.
+
+  `conflict resolve` took neverest's run lock only around the apply, so that a sync stayed free while a merger was open, and then held io-pimdir's store *owner* lock for the whole command anyway. A sync of that store was refused outright, and since a sync is the only thing that moves a placement's conflict revision, the guard that refuses a decision computed against a revision the store has moved past could never fire: the refusal, the retry and the re-export were dead code. Every conflict command now reads through a handle that owns nothing and takes no lock, and the resolution re-reads the divergence per attempt, releasing the store before the merger runs.
 
 - Every source drained every collection, so the first one alphabetically destroyed what a frontend queued for the others.
 

@@ -56,7 +56,7 @@ mail-parser = { version = "0.11", features = ["serde"] }
 log = "0.4"
 percent-encoding = "2"
 pimalaya-cli = { version = "0.2", default-features = false, features = ["terminal", "prompt", "wizard", "spinner", "imap", "smtp"] }
-pimalaya-config = { version = "0.1", default-features = false, features = ["toml", "secret"] }
+pimalaya-config = { version = "0.2", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.3", default-features = false }
 rfc2047-decoder = "1"
 secrecy = { version = "0.10", features = ["serde"] }
@@ -73,5 +73,4 @@ ical-rs.git = "https://github.com/pimalaya/ical"
 io-pimdir.git = "https://github.com/pimalaya/io-pimdir"
 io-replica.git = "https://github.com/pimalaya/io-replica"
 io-webdav.git = "https://github.com/pimalaya/io-webdav"
-pimalaya-config.git = "https://github.com/pimalaya/config"
 vcard-rs.git = "https://github.com/pimalaya/vcard"

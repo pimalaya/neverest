@@ -33,6 +33,7 @@ pub fn configure_token(label: &str, key_default: &str, oauth: bool) -> Result<Se
     to_secret(keyring::prompt_token(label, key_default, oauth)?)
 }
 
+/// Turns a picker choice into the [`Secret`] the configuration stores.
 fn to_secret(choice: SecretChoice) -> Result<Secret> {
     Ok(match choice {
         SecretChoice::Command(argv) => command_secret(argv)?,

@@ -114,7 +114,7 @@ Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths c
 
 Run `neverest` with no configuration file on disk and a minimal wizard discovers a provider from an email address, tests it, then offers to write the result. It sets up **one account with one backend**, the offline replica most setups want; anything else is written by hand against [config.sample.toml](./config.sample.toml).
 
-`neverest configure` runs the same flow over an existing account. Declining the save prints the configuration on stdout, and a redirected stdout skips the prompts, so `neverest > config.toml` writes the file itself.
+`neverest configure` runs the same flow to add another account. It generates and never edits: the account it produces is appended to the file already there as plain text, so your comments and formatting survive, and changing an account is a job for your editor. Declining the prompt prints the account on stdout, and `--json` or a redirected stdout skips the prompts entirely, so `neverest configure > config.toml` writes the file itself.
 
 An account is one pimdir store fed by one or more named **sources**, each a remote, and it may hold several kinds at once. What it does is its arity plus two flags: with no `targets` every source syncs into the local store, the offline replica; with them the source is copied to each target.
 

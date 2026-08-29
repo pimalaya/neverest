@@ -4,9 +4,9 @@
 //! printed report and in `--json`.
 //!
 //! Under io-replica these are descriptors the driver emits per cross-side
-//! propagation step, the per-side reconcile being internal and not
-//! itemized. `content_key` is the cross-side alignment key, skipped from
-//! JSON to keep the report shape stable.
+//! propagation step, plus the flag changes and removals its opening pull-only
+//! round found a server had made. `content_key` is the cross-side alignment
+//! key, skipped from JSON to keep the report shape stable.
 
 use std::{collections::BTreeSet, fmt};
 

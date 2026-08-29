@@ -364,9 +364,33 @@ reads offline with no further setting. The wizard SHALL NOT write `one-way`,
 `retain` or a `targets` table: their defaults are the offline replica it exists
 to produce.
 
-All other wizard rules (the single email-address prompt, the derived account
-name, the fan-out deadline, the capability-narrowed credential prompts, the
-connection test before writing, the save confirmations) are unchanged.
+All other wizard rules (the single email-address prompt, the fan-out deadline,
+the capability-narrowed credential prompts, the connection test before writing)
+are unchanged.
+
+### Requirement: The wizard generates an account and never edits one
+`neverest configure` SHALL generate a new account. It SHALL NOT read an account
+back, seed the prompts with its values, or write it out again: editing an
+account, adding a second by hand, and everything the prompts do not cover belong
+to the file and the user's editor, against the documented sample.
+
+`configure` SHALL take no account: `-a` names an account to run against, and
+there is nothing to name when the wizard generates. The dispatcher SHALL NOT
+hand it one.
+
+The account name SHALL be derived and never prompted, being only the table key,
+and it SHALL be free: the wizard SHALL suffix the name discovery proposes
+(`posteo`, `posteo-2`, …) until the configuration does not already hold it. A
+second `[accounts.<name>]` table makes the whole document fail to parse, taking
+the accounts that used to work down with it.
+
+The generated account SHALL claim `default` only when no account already in the
+configuration does. Two `default = true` accounts would make the one every
+command picks depend on map ordering.
+
+A configuration file that fails to parse SHALL be an error rather than read as
+absent: appending to a broken document buries the real problem under a second
+one.
 
 ### Requirement: A bare invocation offers the wizard only on a first run
 Running `neverest` with no subcommand SHALL print the help, except on a machine
@@ -383,26 +407,47 @@ skipped when `--account` names an account: with no subcommand that is a
 half-typed command rather than a first run, and the help is what points at the
 commands.
 
-The wizard SHALL NOT write a configuration file unconditionally: it SHALL ask
-for confirmation before saving, SHALL ask again before overwriting an existing
-file, and SHALL print the generated TOML document on stdout when either
-confirmation is declined, so a generated configuration is never lost. In JSON
-mode or when stdout is not a terminal, the wizard SHALL emit the document on
-stdout without the save prompts, so `neverest > config.toml` and scripted runs
-keep working.
+`neverest configure` itself SHALL refuse to run when stdin is not a terminal,
+naming the documented sample as the way out: a wizard cannot prompt a cron job.
 
-A command that finds no configuration file SHALL propose the wizard ("No
-configuration found, create one at `<path>`?"), under the same two guards, and
-SHALL then read the configuration again rather than trust the wizard's result,
-which is only printed when the save is declined. A command still finding none
-SHALL fail naming the path it looked at and the documented sample; it SHALL NOT
-exit reporting success.
+The wizard SHALL NOT write a configuration file unconditionally: it SHALL ask
+for confirmation before saving to a path holding no file, SHALL ask before
+appending to one that does ("Append account `<name>` to `<path>`?"), and SHALL
+print the generated TOML document on stdout when either confirmation is
+declined, so a generated account is never lost. In JSON mode or when stdout is
+not a terminal, the wizard SHALL emit the document on stdout and touch no file,
+so `neverest configure > config.toml` and scripted runs keep working.
+
+Appending SHALL be a plain text append of `"\n<document>"` to the file opened
+in append mode. The wizard SHALL NOT parse a configuration file and serialize
+it back: comments, ordering and hand-written formatting are not in the parsed
+model, and re-serializing destroys every one of them.
+
+A saved account SHALL be reported on stderr, naming the file it landed in and
+the name it landed under, since that name was never asked for; an account that
+did not claim the default SHALL be told it is reachable through `-a <name>`.
+
+A command that finds no configuration file SHALL propose the wizard, under the
+same two guards, and SHALL then read the configuration again rather than trust
+the wizard's result, which is only printed when the save is declined. A command
+still finding none SHALL fail naming the path it looked at and the documented
+sample; it SHALL NOT exit reporting success.
 
 ### Requirement: The generated configuration is a dotted document
 A configuration neverest writes or prints SHALL render as Himalaya's does: one
-`[accounts.<name>]` table header per account, the only headers in the document,
+`[accounts.<name>]` table header per account, the only header in the document,
 with every field below it written as a dotted key. An empty table SHALL write
 nothing. The saved file and the document printed on stdout SHALL be identical.
+
+A rendered account SHALL be readable in that order rather than the serializer's:
+the groups SHALL be ordered with the backend the wizard wrote before the sync
+options it never writes, each group SHALL be separated by a blank line, and the
+key naming what a group points at (`server`, `user-id`) SHALL be lifted to the
+top of its own, ahead of the credential authenticating against it.
+
+An account naming several sources SHALL render under that same single header,
+its sources being dotted keys like every other field, so appending a table after
+it never opens a header a later account would fall into.
 
 The document SHALL hold only what was actually decided: every field equal to
 its default SHALL be omitted (the account `default` flag when false, the
@@ -1511,9 +1556,9 @@ message: a message serialises as one prose string, so `--json` over one yields
 nothing a consumer can read, and several messages in one run yield several
 documents where a consumer expects one value.
 
-A command that only confirms SHALL keep its message. `configure` says an
-account was configured and reports nothing about it, which is the whole of the
-exception.
+`configure` returns data: the account it generated, under the name and default
+claim it derived. Its `Display` is the TOML document alone, which is what makes
+a redirected stdout a usable configuration file.
 
 Every such output type SHALL be registered in the schema registry under its
 invocation path, the command path joined with hyphens and prefixed `neverest-`,

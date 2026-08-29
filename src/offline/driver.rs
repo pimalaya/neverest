@@ -12,9 +12,9 @@
 //! hub's project and absorb, so there is no hand-rolled cross-merge, and
 //! syncing the sides in turn until quiescent converges them.
 //!
-//! Collection deletion is not propagated yet, only creation, and the itemized
-//! report lists cross-side copies, flags and deletes, the per-side server
-//! reconcile being internal.
+//! Collection deletion is not propagated yet, only creation. The itemized
+//! report lists the cross-side copies, flags and deletes a run plans, plus what
+//! its opening pull-only round found the servers had already done.
 
 use std::{
     cmp::Reverse,
@@ -1352,6 +1352,9 @@ fn sync_collection_into(
     progress: &CollectionProgress,
     report: &mut SyncOutput,
 ) -> Result<()> {
+    // NOTE: the opening round pulls and never pushes. Its events are then
+    // the remotes' own doing rather than the echo of a write this run just
+    // made, and no push clears a projection before `itemize` reads it.
     reconcile_pass(
         collection,
         left,
@@ -1360,6 +1363,7 @@ fn sync_collection_into(
         right_store,
         blobs,
         store_dir,
+        false,
         dry_run,
         report,
     )?;
@@ -1380,7 +1384,7 @@ fn sync_collection_into(
         return Ok(());
     }
 
-    for _ in 0..MAX_EXTRA_PASSES {
+    for _ in 0..=MAX_EXTRA_PASSES {
         let progressed = reconcile_pass(
             collection,
             left,
@@ -1389,6 +1393,7 @@ fn sync_collection_into(
             right_store,
             blobs,
             store_dir,
+            true,
             dry_run,
             report,
         )?;
@@ -1602,7 +1607,7 @@ fn relay_one(
     Ok(())
 }
 
-/// One per-side reconcile round, answering whether either side moved.
+/// One reconcile round over both sides, answering whether either moved.
 ///
 /// Each side's divergences are itemized right after its own merge, the only
 /// place they can be: the engine's events are this pass's and nothing keeps
@@ -1616,44 +1621,70 @@ fn reconcile_pass(
     right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     store_dir: &Path,
+    push: bool,
     dry_run: bool,
     report: &mut SyncOutput,
 ) -> Result<bool> {
-    let left_report = sync_side_rebuilding(
-        collection,
-        left,
-        left_store,
-        blobs,
-        !dry_run && left.writable(),
+    let left_report = reconcile_side(
+        collection, left, left_store, blobs, store_dir, push, dry_run, report,
     )?;
-    upgrade_probed(collection, left, left_store, blobs, dry_run)?;
-    resolve_conflicts(collection, left, left_store, blobs, store_dir, dry_run)?;
-    itemize_conflicted(
-        &left_report.events,
-        left_store,
-        collection,
-        display_name(&left.namespace, collection),
-        &left.name,
-        report,
-    )?;
-    let right_report = sync_side_rebuilding(
+    let right_report = reconcile_side(
         collection,
         right,
         right_store,
         blobs,
-        !dry_run && right.writable(),
-    )?;
-    upgrade_probed(collection, right, right_store, blobs, dry_run)?;
-    resolve_conflicts(collection, right, right_store, blobs, store_dir, dry_run)?;
-    itemize_conflicted(
-        &right_report.events,
-        right_store,
-        collection,
-        display_name(&right.namespace, collection),
-        &right.name,
+        store_dir,
+        push,
+        dry_run,
         report,
     )?;
     Ok(moved(&left_report) || moved(&right_report))
+}
+
+/// One side of a reconcile round: its merge, its probes and its report.
+///
+/// Only a pulling round's events name what the remote itself did. A pushing
+/// round's `FlagsChanged` and `Vanished` also echo the writes this run just
+/// made, so itemizing those would report the run's own work back as the
+/// remote's, on top of the propagation [`itemize`] already plans.
+#[allow(clippy::too_many_arguments)]
+fn reconcile_side(
+    collection: &str,
+    ctx: &mut SourceCtx,
+    store: &mut PimdirSourceStore,
+    blobs: &PimdirBlobs,
+    store_dir: &Path,
+    push: bool,
+    dry_run: bool,
+    report: &mut SyncOutput,
+) -> Result<ReplicaSyncReport> {
+    let push = push && !dry_run && ctx.writable();
+    let before = if push {
+        None
+    } else {
+        Some(flag_snapshot(store, collection, &ctx.name)?)
+    };
+
+    let side = sync_side_rebuilding(collection, ctx, store, blobs, push)?;
+    upgrade_probed(collection, ctx, store, blobs, dry_run)?;
+    resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
+
+    let display = display_name(&ctx.namespace, collection);
+
+    match &before {
+        Some(before) => itemize_pulled(
+            &side.events,
+            before,
+            store,
+            collection,
+            display,
+            &ctx.name,
+            report,
+        )?,
+        None => itemize_conflicted(&side.events, store, collection, display, &ctx.name, report)?,
+    }
+
+    Ok(side)
 }
 
 /// Whether a side's sync changed anything, used to detect convergence.
@@ -4200,6 +4231,121 @@ mod tests {
             warn_conflicts(&later),
             0,
             "a conflict an earlier run parked is announced by no later one",
+        );
+    }
+
+    /// One side of a two-endpoint account, holding one reconciled card.
+    ///
+    /// Clean against its own server at `revision`, so what a pull round finds
+    /// is the server's own doing and nothing this run staged.
+    fn endpoint_holding(dir: &std::path::Path, source: &str, revision: &str) -> PimdirSourceStore {
+        let mut store = PimdirStore::open(dir).unwrap().for_source(source);
+        store.ensure_collection("contacts", "text/vcard").unwrap();
+        store
+            .write(vec![
+                ReplicaWriteOp::StoreObject {
+                    object: ReplicaObject {
+                        hash: ReplicaHash("0rig".into()),
+                        size: 3,
+                    },
+                    body: Some(b"old".to_vec()),
+                },
+                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+                    collection: ReplicaCollectionId("contacts".into()),
+                    handle: ReplicaHandle("card1".into()),
+                    link_id: Some(ReplicaLinkId("uid:a".into())),
+                    object: Some(ReplicaHash("0rig".into())),
+                    level: ReplicaLevel::Full,
+                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
+                    sort_key: ReplicaSortKey::default(),
+                    flags: ReplicaFlags::default(),
+                    status: ReplicaStatus::Clean,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: Some(ReplicaBase {
+                        flags: ReplicaFlags::default(),
+                        revision: Some(revision.to_string()),
+                        object: Some(ReplicaHash("0rig".into())),
+                    }),
+                    origin: None,
+                }),
+            ])
+            .unwrap();
+        store
+    }
+
+    /// A server's own delete is named on the side that pulled it and on the
+    /// side that must apply it, once each.
+    ///
+    /// The two-endpoint path read only conflicts out of its pass, so a card a
+    /// server dropped reached the report as the propagation alone and never as
+    /// the removal the run had found. Itemizing a pushing pass instead
+    /// double-counts, which is why the opening round only ever pulls.
+    #[test]
+    fn a_server_delete_is_named_once_on_each_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut left = endpoint_holding(dir.path(), "left", "l1");
+        let right = endpoint_holding(dir.path(), "right", "r1");
+
+        let mut left_remote = MutableRemote::at("card1", "l1");
+        left_remote.items.clear();
+
+        let before = flag_snapshot(&left, "contacts", "left").unwrap();
+        let pull = drive(
+            &mut left,
+            &mut left_remote,
+            ReplicaSync::new(
+                String::from("contacts"),
+                sync_options(
+                    false,
+                    ReplicaPushRights::all(),
+                    ReplicaConflictPolicy::Manual,
+                ),
+            ),
+        )
+        .unwrap();
+        assert!(
+            pull.events
+                .iter()
+                .any(|event| matches!(event, ReplicaEvent::Vanished(_))),
+            "the engine saw the card go: {:?}",
+            pull.events,
+        );
+
+        let mut report = SyncOutput::default();
+        itemize_pulled(
+            &pull.events,
+            &before,
+            &left,
+            "contacts",
+            "contacts",
+            "left",
+            &mut report,
+        )
+        .unwrap();
+
+        for (source, other) in [("left", "right"), ("right", "left")] {
+            for placement in projection_view(&right, "contacts", source).unwrap() {
+                for hunk in placement_hunks(source, other, "contacts", &placement) {
+                    report.item.patch.push(PatchEntry::new(hunk, None));
+                }
+            }
+        }
+
+        let deletes: Vec<&str> = report
+            .item
+            .patch
+            .iter()
+            .filter_map(|entry| match &entry.hunk {
+                ItemHunk::Delete { side, .. } => Some(side.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deletes,
+            ["left", "right"],
+            "the pull names it on left, the projection owes it on right: {:?}",
+            report.item.patch,
         );
     }
 

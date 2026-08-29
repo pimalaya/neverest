@@ -90,7 +90,10 @@
 //! `submit` holds the queued send, and `driver` builds the report.
 //!
 //! [`sync`] keeps the output types alone, the engine having moved to
-//! [`offline`], and [`wizard`] bootstraps a first configuration.
+//! [`offline`], and [`wizard`] discovers an account from one prompt. What
+//! becomes of that account belongs to `cli::configure`, which generates and
+//! never edits: it appends the rendered table rather than re-serializing the
+//! document, so a hand-written configuration keeps its comments.
 //!
 //! [`json_schema`] is the registry behind `neverest json-schema`: one entry
 //! per data command, mapping its invocation path to the schema of what it
@@ -134,9 +137,8 @@ use pimalaya_cli::{
 use pimalaya_config::toml::TomlConfig;
 
 use crate::{
-    cli::{exit::Exit, main::Cli},
+    cli::{configure::offer_configuration, exit::Exit, main::Cli},
     config::Config,
-    wizard::discover,
 };
 
 fn main() -> ExitCode {
@@ -178,7 +180,7 @@ fn meet_bare_invocation(
     if !configured && !named_account && !printer.is_json() && stdin().is_terminal() {
         let target = Config::target_path(config_paths)?;
 
-        if discover::offer_configuration(printer, &target)? {
+        if offer_configuration(printer, config_paths, &target)? {
             return Ok(());
         }
     }

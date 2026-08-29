@@ -5,9 +5,9 @@
 
 use std::{
     collections::HashMap,
-    fmt, fs,
+    fmt,
     io::{IsTerminal, stdin},
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::Duration,
 };
 
@@ -29,7 +29,7 @@ use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::wizard::discover::{CONFIG_SAMPLE_URL, offer_configuration};
+use crate::{cli::configure::offer_configuration, wizard::discover::CONFIG_SAMPLE_URL};
 
 /// `skip_serializing_if` predicate omitting a defaulted field, so what the
 /// wizard writes carries only what the user chose.
@@ -150,35 +150,21 @@ impl Config {
 
         let target = Config::target_path(config_paths)?;
 
+        // NOTE: a script and a JSON consumer cannot answer a prompt, so both
+        // skip the offer and fail below.
         if !printer.is_json() && stdin().is_terminal() {
-            offer_configuration(printer, &target)?;
+            offer_configuration(printer, config_paths, &target)?;
         }
 
+        // NOTE: the wizard may print the account instead of writing it, so
+        // having run it proves nothing and the lookup runs again.
         match Config::from_paths_or_default(config_paths)? {
             Some(config) => Ok(config),
             None => bail!(
-                "No configuration found at {}, run `neverest` to generate one or write it by hand: {CONFIG_SAMPLE_URL}",
+                "No configuration found at {}, run `neverest configure` to generate one or write it by hand: {CONFIG_SAMPLE_URL}",
                 target.display(),
             ),
         }
-    }
-
-    /// Serializes `self` to TOML at `path`, creating missing parents.
-    ///
-    /// The document renders like himalaya's: one `[accounts.<name>]` header
-    /// per account, every field below it a dotted key.
-    pub fn write(&self, path: &Path) -> Result<()> {
-        let toml = config_toml::to_string(self).context("Serialize TOML config error")?;
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Create TOML config parent {} error", parent.display()))?;
-        }
-
-        fs::write(path, toml)
-            .with_context(|| format!("Write TOML config {} error", path.display()))?;
-
-        Ok(())
     }
 }
 
@@ -274,14 +260,116 @@ pub struct AccountConfig {
     collection: Option<RemovedKey>,
 }
 
+/// The account groups in reading order: the backend the wizard writes
+/// first, the sync options it never writes last.
+///
+/// Serialized alphabetically a generated account would open on
+/// `connections` and bury its backend under `conflict`.
+const RENDER_ORDER: [&str; 16] = [
+    "default",
+    "imap",
+    "carddav",
+    "caldav",
+    "jmap",
+    "gmail",
+    "msgraph",
+    "smtp",
+    "sources",
+    "targets",
+    "one-way",
+    "retain",
+    "store",
+    "conflict",
+    "item",
+    "connections",
+];
+
+/// The keys naming what a backend group points at, lifted to the top of
+/// their group.
+///
+/// Serialized alphabetically, `imap.server` would read under the
+/// `imap.sasl` credential authenticating against it.
+const ENDPOINT_KEYS: [&str; 2] = ["server", "user-id"];
+
 impl AccountConfig {
+    /// Renders this account as an `[accounts.<name>]` block, ready to be
+    /// written to a configuration file or appended to one.
+    ///
+    /// What it adds to the serializer is reading order, dotted keys coming
+    /// out alphabetically: groups are reordered ([`RENDER_ORDER`]), each
+    /// endpoint is lifted to the top of its own ([`ENDPOINT_KEYS`]), and a
+    /// blank line separates them.
+    pub fn render(&self, name: &str) -> Result<String> {
+        // NOTE: borrowed rather than built into a `Config`, which would
+        // mean cloning the account to render it. The emitter only looks
+        // for an `accounts` table, so any shape carrying one will do.
+        #[derive(Serialize)]
+        struct AccountDocument<'a> {
+            accounts: HashMap<&'a str, &'a AccountConfig>,
+        }
+
+        let document = AccountDocument {
+            accounts: HashMap::from([(name, self)]),
+        };
+        let rendered = config_toml::to_string(&document)?;
+
+        let (header, body) = match rendered.split_once('\n') {
+            Some((header, body)) => (header, body),
+            None => return Ok(rendered),
+        };
+
+        let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+
+        for line in body.lines().filter(|line| !line.trim().is_empty()) {
+            let key = line.split(['.', ' ']).next().unwrap_or(line).to_string();
+
+            match groups.iter_mut().find(|(name, _)| *name == key) {
+                Some((_, lines)) => lines.push(line),
+                None => groups.push((key, vec![line])),
+            }
+        }
+
+        groups.sort_by_key(|(key, _)| {
+            RENDER_ORDER
+                .iter()
+                .position(|known| known == key)
+                .unwrap_or(RENDER_ORDER.len())
+        });
+
+        let mut document = format!("{header}\n");
+
+        for (index, (_, mut lines)) in groups.into_iter().enumerate() {
+            if index > 0 {
+                document.push('\n');
+            }
+
+            // NOTE: the endpoint is what the group is about, so it reads
+            // first; the credentials and the quirks qualify it.
+            lines.sort_by_key(|line| {
+                let field = line.split(['.', ' ']).nth(1).unwrap_or_default();
+
+                ENDPOINT_KEYS
+                    .iter()
+                    .position(|known| *known == field)
+                    .unwrap_or(ENDPOINT_KEYS.len())
+            });
+
+            for line in lines {
+                document.push_str(line);
+                document.push('\n');
+            }
+        }
+
+        Ok(document)
+    }
+
     /// A single-source account, the only shape the wizard writes: one
     /// provider, one protocol, a store keeping every body.
-    pub fn with_source(default: bool, source: SourceConfig) -> Self {
-        let mut account = Self {
-            default,
-            ..Self::default()
-        };
+    ///
+    /// The `default` flag is left to the caller, which claims it only when
+    /// no account already in the configuration holds it.
+    pub fn with_source(source: SourceConfig) -> Self {
+        let mut account = Self::default();
         account.set_direct_source(source);
         account
     }
@@ -301,29 +389,6 @@ impl AccountConfig {
             SourceBackendConfig::Gmail(config) => self.gmail = Some(config),
             SourceBackendConfig::Msgraph(config) => self.msgraph = Some(config),
         }
-    }
-
-    /// The direct-backend sources in protocol order, what the wizard owns
-    /// and `configure` re-runs over.
-    ///
-    /// A source from the explicit `sources` table is hand-written and never
-    /// appears here.
-    pub fn direct_sources(&self) -> Vec<SourceConfig> {
-        [
-            self.imap.clone().map(SourceBackendConfig::Imap),
-            self.carddav.clone().map(SourceBackendConfig::Carddav),
-            self.caldav.clone().map(SourceBackendConfig::Caldav),
-            self.jmap.clone().map(SourceBackendConfig::Jmap),
-            self.gmail.clone().map(SourceBackendConfig::Gmail),
-            self.msgraph.clone().map(SourceBackendConfig::Msgraph),
-        ]
-        .into_iter()
-        .flatten()
-        .map(|backend| SourceConfig {
-            backend,
-            smtp: self.smtp.clone(),
-        })
-        .collect()
     }
 
     /// Every configured source keyed by its id, the sugar folded into the
@@ -1536,6 +1601,8 @@ impl SaslConfig {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
 
     #[test]

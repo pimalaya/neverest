@@ -1,31 +1,21 @@
-//! # Configuration wizard
+//! # Discovery
 //!
-//! Offered when no configuration file is found, by a bare `neverest` or by a
-//! command that needs an account, and re-run over an existing account by
-//! `neverest configure` (see [`super::edit`]). A configuration that already
-//! exists is never met with it: a bare `neverest` gets the help instead.
+//! The half of the wizard deciding what the account is, what becomes of it
+//! belonging to [`crate::cli::configure`].
 //!
 //! It asks for one input, an email address (a bare domain is accepted and
 //! synthesized as `@domain`). That feeds io-pim-discovery's parallel search
 //! (see [`super::search`]) and every reachable service becomes one selectable
 //! configuration; only backends compiled into this build are proposed.
 //!
-//! The wizard writes one account with one source, in the direct-backend sugar
+//! It discovers one account with one source, in the direct-backend sugar
 //! (`imap.server = …`): the offline replica, which is the common case and
 //! reads offline with no further setting. A second kind, a mirror and a
-//! fan-in are all written by hand against config.sample.toml.
-//!
-//! The generated configuration is offered for saving when writing to a
-//! terminal; when stdout is redirected or in JSON mode it is emitted straight
-//! to stdout, so scripts keep working.
-
-use std::{collections::HashMap, fmt, io::IsTerminal, path::Path};
+//! fan-in are all written by hand against config.sample.toml, and so is a
+//! change to an account already configured.
 
 use anyhow::{Result, bail};
-use log::info;
-use pimalaya_cli::{printer::Printer, prompt, spinner::Spinner};
-use pimalaya_config::toml as config_toml;
-use serde::{Serialize, Serializer};
+use pimalaya_cli::{prompt, spinner::Spinner};
 
 #[cfg(any(feature = "imap", feature = "msgraph"))]
 use crate::config::SourceBackendConfig;
@@ -40,7 +30,7 @@ use crate::wizard::msgraph;
 #[cfg(any(feature = "imap", feature = "msgraph", feature = "dav"))]
 use crate::wizard::search::DiscoveredKind;
 use crate::{
-    config::{AccountConfig, Config, SourceConfig},
+    config::{AccountConfig, SourceConfig},
     wizard::search::{self, Discovered},
 };
 
@@ -53,125 +43,26 @@ const EMAIL_PROMPT: &str = "Email address:";
 pub const CONFIG_SAMPLE_URL: &str =
     "https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
 
-/// Offers to generate a configuration at `target`, running the wizard
-/// when accepted, and reports whether it ran.
+/// Discovers one account from a single prompt, tests it, and hands back the
+/// name it proposes beside the account itself.
 ///
-/// The only place the wizard introduces itself to someone who did not ask for
-/// it. Callers guard the offer on a terminal and on the human output, since
-/// neither a script nor a JSON consumer can answer a prompt.
-pub fn offer_configuration(printer: &mut impl Printer, target: &Path) -> Result<bool> {
-    let prompt = format!(
-        "No configuration found, create one at {}?",
-        target.display()
-    );
-
-    if !prompt::bool(&prompt, true)? {
-        return Ok(false);
-    }
-
-    run(printer, target)?;
-
-    Ok(true)
-}
-
-/// Runs the wizard and either saves the resulting [`Config`] to `target` or
-/// prints it as a ready-to-save TOML document, then returns it.
-pub fn run(printer: &mut impl Printer, target: &Path) -> Result<Config> {
-    if !printer.is_json() {
-        print_welcome();
-    }
-
+/// What becomes of that account belongs to [`crate::cli::configure`]. This is
+/// the discovery half alone.
+pub fn run() -> Result<(String, AccountConfig)> {
     let email = prompt_email()?;
 
+    // NOTE: the account name is just the TOML table key, so it is derived
+    // from the input rather than prompted; the user renames it by hand.
     let account_name = default_account_name(&email);
     let source = configure(&account_name, &email)?;
 
-    let account = AccountConfig::with_source(true, source);
-
-    let config = Config {
-        accounts: HashMap::from([(account_name.clone(), account)]),
-    };
-
-    if printer.is_json() || !std::io::stdout().is_terminal() {
-        printer.out(GeneratedConfig(&config))?;
-        return Ok(config);
-    }
-
-    save_or_print(printer, target, config)
-}
-
-/// Offers to save the generated config to `target`, printing it on stdout
-/// when the user declines or an existing file must not be overwritten.
-fn save_or_print(printer: &mut impl Printer, target: &Path, config: Config) -> Result<Config> {
-    let prompt = format!("Save this configuration to {}?", target.display());
-
-    let save = prompt::bool(&prompt, true)?
-        && (!target.exists()
-            || prompt::bool(
-                format!("{} already exists. Overwrite it?", target.display()),
-                false,
-            )?);
-
-    if !save {
-        return printer.out(GeneratedConfig(&config)).map(|()| config);
-    }
-
-    config.write(target)?;
-    info!("configuration written to {}", target.display());
-
-    eprintln!();
-    eprintln!("Configuration saved to {}.", target.display());
-    eprintln!("Run `neverest init` to prepare the store, then `neverest sync`.");
-
-    Ok(config)
-}
-
-/// The account the wizard produced, as a ready-to-save TOML document or, in
-/// JSON mode, an object. Byte-for-byte what [`Config::write`] saves.
-struct GeneratedConfig<'a>(&'a Config);
-
-impl fmt::Display for GeneratedConfig<'_> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let toml = config_toml::to_string(self.0).map_err(|_| fmt::Error)?;
-        write!(f, "{toml}")
-    }
-}
-
-impl Serialize for GeneratedConfig<'_> {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
-    }
-}
-
-/// Prints a welcome banner on stderr framing the project and the wizard,
-/// so the first run explains itself before dropping into prompts.
-fn print_welcome() {
-    eprintln!();
-    eprintln!("Welcome to Neverest, the CLI to synchronize PIM collections.");
-    eprintln!();
-    eprintln!("Neverest reconciles what you already have, mail over IMAP or");
-    eprintln!("Microsoft Graph and contacts and calendar over DAV, with a local");
-    eprintln!("pimdir store the apps read and edit. Before it can sync, it needs");
-    eprintln!("to know about one account.");
-    eprintln!();
-    eprintln!("This wizard discovers a provider's settings from your email address,");
-    eprintln!("tests the connection and generates a ready-to-use configuration it");
-    eprintln!("can save for you.");
-    eprintln!();
-    eprintln!("Every field is documented in the sample configuration:");
-    eprintln!("  {CONFIG_SAMPLE_URL}");
-    eprintln!();
+    Ok((account_name, AccountConfig::with_source(source)))
 }
 
 /// Prompts the email address and normalizes it for discovery: a bare domain
 /// becomes the `@domain` form the search understands.
-pub fn prompt_email() -> Result<String> {
-    prompt_email_with(None)
-}
-
-/// [`prompt_email`] with a pre-filled default.
-pub fn prompt_email_with(default: Option<&str>) -> Result<String> {
-    let input = prompt::text(EMAIL_PROMPT, default)?;
+fn prompt_email() -> Result<String> {
+    let input = prompt::text(EMAIL_PROMPT, None)?;
     let input = input.trim();
 
     if input.is_empty() {

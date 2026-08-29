@@ -89,7 +89,7 @@ impl Command {
             Self::Check(cmd) => cmd.execute(printer, config_paths, account),
             Self::Conflict(cmd) => cmd.execute(printer, config_paths, account),
             Self::Init(cmd) => cmd.execute(printer, config_paths, account),
-            Self::Configure(cmd) => cmd.execute(printer, config_paths, account),
+            Self::Configure(cmd) => cmd.execute(printer, config_paths),
             Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
             Self::Completion(cmd) => cmd.execute(printer, Cli::command()),
             Self::JsonSchema(cmd) => cmd.execute(printer, json_schema::schemas()),

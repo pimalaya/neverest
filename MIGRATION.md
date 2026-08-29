@@ -53,7 +53,7 @@ Everything in the v0.1.0 section below applies too: v1.0.0-beta only added a few
 |---|---|
 | `synchronize <account>` | `sync -a <account>` |
 | `check-up <account>` | `check -a <account>` |
-| `configure <account>` | `configure -a <account>` |
+| `configure <account>` | `configure`, which generates a new account rather than editing one |
 | (none) | `init -a <account>`, mandatory once, before the first sync |
 | `-f` / `--include-folder` | `-m` / `--include-collection` |
 | `-x` / `--exclude-folder` | `-x` / `--exclude-collection` |

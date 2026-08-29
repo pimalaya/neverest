@@ -6,7 +6,6 @@
 #[cfg(feature = "dav")]
 pub mod dav;
 pub mod discover;
-pub mod edit;
 #[cfg(feature = "imap")]
 pub mod imap_smtp;
 #[cfg(feature = "msgraph")]

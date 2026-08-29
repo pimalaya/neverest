@@ -18,8 +18,8 @@ use serde_json::Value;
 /// Builds the command-to-schema map consumed by `json-schema <DIR>`.
 ///
 /// Each value describes the type the command hands to the printer. The
-/// commands confirming rather than reporting, `configure` above all, are
-/// absent: they print a message and have no payload to describe.
+/// commands confirming rather than reporting are absent: they print a
+/// message and have no payload to describe.
 pub fn schemas() -> BTreeMap<String, Value> {
     let mut schemas = BTreeMap::new();
 
@@ -33,6 +33,7 @@ pub fn schemas() -> BTreeMap<String, Value> {
     }
 
     insert!("neverest-check", crate::cli::check::CheckOutput);
+    insert!("neverest-configure", crate::cli::configure::ConfigureOutput);
     insert!("neverest-init", crate::cli::init::InitOutput);
     insert!("neverest-sync", crate::sync::report::SyncOutput);
     insert!(

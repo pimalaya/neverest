@@ -128,6 +128,7 @@ mod tests {
             flags: ReplicaFlags::default(),
             status: ReplicaStatus::Clean,
             conflict_revision: None,
+            conflict_object: None,
             base: Some(ReplicaBase {
                 flags: ReplicaFlags::default(),
                 revision: None,

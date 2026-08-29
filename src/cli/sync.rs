@@ -16,6 +16,7 @@ use pimalaya_cli::printer::Printer;
 use pimalaya_config::toml::TomlConfig;
 
 use crate::{
+    cli::exit::Exit,
     config::{CollectionFilter, Config},
     offline::{driver, state::StoreState},
 };
@@ -23,7 +24,7 @@ use crate::{
 /// How long a run waits for another run's store lock before giving up:
 /// long enough for a connector-triggered scoped run to queue behind a
 /// cron tick, short enough to fail loudly on a wedged holder.
-const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+pub const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often the waiter retries the lock.
 const LOCK_POLL: Duration = Duration::from_millis(500);
@@ -38,6 +39,12 @@ const LOCK_POLL: Duration = Duration::from_millis(500);
 /// The three filter flags keep their pre-`generic-pim-sync` spellings
 /// (`--include-mailbox`, `--exclude-mailbox`, `--all-mailboxes`) as hidden
 /// aliases, so existing scripts and the connector contract keep working.
+///
+/// Exit code 0 means the run reconciled everything and left nothing waiting,
+/// 1 that it failed, and 2 that it reconciled its collections and parked
+/// conflicts a person has to settle. A conflict is one item wide and halts
+/// nothing, so it is not a failure: under a supervisor restarting on failure
+/// it would loop over a state no supervisor can fix.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
     /// Run the synchronization without applying any changes; only
@@ -106,7 +113,7 @@ impl SyncCommand {
         printer: &mut impl Printer,
         config_paths: &[PathBuf],
         account_name: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Exit> {
         let mut config = Config::load_or_wizard(printer, config_paths)?;
 
         let Some((name, account_config)) = config.take_account(account_name)? else {
@@ -155,7 +162,14 @@ impl SyncCommand {
             self.accept_mode,
         )?;
 
-        printer.out(report)
+        // Read before the report is printed, which consumes it.
+        let outstanding = report.outstanding_conflicts;
+        printer.out(report)?;
+
+        Ok(match outstanding {
+            0 => Exit::Success,
+            _ => Exit::Conflicted,
+        })
     }
 }
 
@@ -164,7 +178,7 @@ impl SyncCommand {
 /// connector-triggered scoped runs serialize instead of failing), then
 /// erroring out clearly. The kernel releases the lock on FD close
 /// (normal exit or crash), so no PID file to clean up.
-fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
+pub fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
     let lock_path = store_dir.join("sync.lock");
     let file = File::options()
         .read(true)

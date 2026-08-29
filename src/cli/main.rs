@@ -15,7 +15,8 @@ use pimalaya_cli::{
 };
 
 use crate::cli::{
-    check::CheckCommand, configure::ConfigureCommand, init::InitCommand, sync::SyncCommand,
+    check::CheckCommand, configure::ConfigureCommand, conflict::ConflictCommand, exit::Exit,
+    init::InitCommand, sync::SyncCommand,
 };
 
 #[derive(Parser, Debug)]
@@ -52,6 +53,9 @@ pub enum Command {
     Check(CheckCommand),
     Init(InitCommand),
     Sync(SyncCommand),
+    #[command(arg_required_else_help = true)]
+    #[command(alias = "conflicts")]
+    Conflict(ConflictCommand),
     #[command(alias = "cfg")]
     Configure(ConfigureCommand),
     #[command(arg_required_else_help = true)]
@@ -70,19 +74,27 @@ impl Command {
     /// other pimalaya CLI: which account a command runs against is a property
     /// of the invocation, not of the subcommand, and repeating it per
     /// subcommand is how the same option ends up documented four ways.
+    ///
+    /// A sync is the one command with an outcome beyond succeeding or
+    /// failing, since it can reconcile everything it was asked to and still
+    /// leave conflicts parked, so it is the one that returns its own
+    /// [`Exit`]. Every other command either works or errors.
     pub fn execute(
         self,
         printer: &mut impl Printer,
         config_paths: &[PathBuf],
         account: Option<&str>,
-    ) -> Result<()> {
-        match self {
+    ) -> Result<Exit> {
+        let done = match self {
+            Self::Sync(cmd) => return cmd.execute(printer, config_paths, account),
             Self::Check(cmd) => cmd.execute(printer, config_paths, account),
+            Self::Conflict(cmd) => cmd.execute(printer, config_paths, account),
             Self::Init(cmd) => cmd.execute(printer, config_paths, account),
-            Self::Sync(cmd) => cmd.execute(printer, config_paths, account),
             Self::Configure(cmd) => cmd.execute(printer, config_paths, account),
             Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
             Self::Completion(cmd) => cmd.execute(printer, Cli::command()),
-        }
+        };
+
+        done.map(|()| Exit::Success)
     }
 }

@@ -82,6 +82,34 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   Each action a frontend enqueued is applied exactly once, and the run reports per-collection applied counts plus any permanently unappliable action, until repaired. The sync then pushes the resulting dirty state.
 
+- Added the **three-way merge** a run resolves a content conflict with, behind the `merge` cargo feature (on by default, and it implies `dav`).
+
+  Most divergence is not disagreement: one side changed a phone number and the other a note, and the base the last sync agreed on proves it by naming which side touched which field. Every run therefore merges the base, local and remote bodies of each conflicted item, dispatched on the collection's kind (vcard-rs for contacts, ical-rs for calendars, tasks and journals), and clears the conflict as an ordinary edit staged through the store's queue whenever the merge reports no collision. Mail is immutable-content and reaches none of this. The remote body comes from the store, the engine's upgrade pass having fetched it into the conflict object, so a conflict whose body has not landed yet is visible and left alone rather than merged against a body nobody holds.
+
+  The merge is built in rather than configured: it is a pure function over bodies the store already holds, there is no taste in it, and the format vocabulary is closed. Because it cannot be swapped it is strictly conservative, resolving on an empty report and on nothing else. Both sides setting the same field differently is a genuine disagreement and still parks for a person.
+
+- Added exit code 2 for a run that reconciled its collections and left conflicts behind, and the outstanding count beside it in both output modes.
+
+  A conflict is one item wide and halts nothing: failing the run would stop the other ten thousand items over one duplicated phone number, and under a supervisor restarting on failure it would loop over a state no supervisor can fix. The count is read from the store rather than from the run's own tally, the engine emitting nothing for a placement it already parked, so it is the number of decisions waiting rather than the number this run discovered.
+
+- Added `conflict.notify`, a desktop notification shown when an item enters conflict, behind the `notify` cargo feature (on by default).
+
+  Opt-in and unset by default, which leaves the warning in the log and the entry in the report: a run under cron never shells out unasked. A conflict an earlier run already parked is announced by no later one, so a five-minute schedule over one unresolved card raises one notification rather than nearly three hundred a day.
+
+- Added the `conflict` command, which is the only place a content collision is decided.
+
+  `conflict list` names every divergence the account's store is holding, `conflict show <id>` prints the three bodies a decision is made from, and `conflict resolve <id>` settles one. An item is addressed by the public id every other command already shows, narrowed by `--source` when it diverged on more than one. A conflict whose diverging remote body no run has fetched yet is listed and is not resolvable until one has.
+
+  `--prefer-local` and `--prefer-remote` discard a side, which is acceptable because a person asked for it by name and is exactly what a background run must never do on its own. Deciding is never reached from a sync, whatever is attached to its terminal: a run has one when a wrapper script drives it, when a pane nobody is sitting at watches it and when a person is waiting, and the three cannot be told apart from inside.
+
+- Added `conflict.merger` and `conflict resolve --interactive`, which hand a collision to a program of your own.
+
+  Following git mergetool, the three bodies are handed over as filesystem paths appended positionally, base first, then the divergent sides, then the path to write, which is tcal's own argument order and makes `conflict.merger = "tcal merge"` the whole configuration. A command carrying any of the placeholders `{base}`, `{local}`, `{remote}` and `{output}` is substituted instead, for a tool with an argument shape of its own: tcard takes its output as a flag. The result is taken only on a zero exit with the output written, compared by content rather than by timestamp, since an editor exits zero on a bare quit and reading that as a choice would discard a side by accident.
+
+- Added the staleness guard, which refuses a decision the store moved out from under.
+
+  `conflict resolve` records the revision the divergence was recorded at and re-reads the store before staging anything. An unresolved conflict tracks the newest remote revision on every run, so a decision left in an editor for an hour can be a decision about a version nobody holds any more, and pushing it would overwrite everything that arrived meanwhile. A revision that moved is reported as moved; under `--interactive` the fresh bodies are exported again and the merger asked once more. The store lock is deliberately not held across the merger, so a sync is never blocked behind a person sitting in an editor.
+
 ### Changed
 
 - Resolved every configured secret once per run instead of once per opened connection.
@@ -132,7 +160,7 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - The sync seam carries content revisions end to end and implements conditional in-place updates.
 
-  An edit is written `If-Match` the last-synced revision, and a remote that moved since is rejected rather than overwritten, so the engine re-merges and records a conflict instead of destroying someone's edit. Conflicts are reported in both output modes and re-reported every run until resolved; neverest never resolves one by itself.
+  An edit is written `If-Match` the last-synced revision, and a remote that moved since is rejected rather than overwritten, so the engine re-merges and records a conflict instead of destroying someone's edit. Conflicts are reported in both output modes and re-reported every run until resolved. What the run's own three-way merge cannot settle, neverest never decides by itself.
 
 - Link ids, dates and summaries are the pimdir format's, not neverest's.
 
@@ -167,6 +195,12 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 - Bumped the Pimalaya libraries: io-replica 0.4, io-pimdir 0.3, io-imap 0.6, io-smtp 0.3, io-webdav 0.2, io-http 0.5, io-pim-discovery 0.7, io-msgraph 0.3, pimalaya-stream 0.3, pimalaya-cli 0.2 and pimalaya-config 0.1. SASL moved out of pimalaya-stream into the new io-sasl crate, so the SCRAM-SHA-256 the configuration has always offered is now runnable. The minimum supported Rust version is 1.89.
 
 ### Fixed
+
+- Every source drained every collection, so the first one alphabetically destroyed what a frontend queued for the others.
+
+  The pre-sync drain listed the store's queued collections and drained all of them through the running source's handle, and that listing is store-wide: the queue records no source. Staging an existing item's action resolves that item's binding for the *draining* source, so a contacts source reaching a mail collection could not place the action, and io-pimdir parked it. A parked row is terminal, skipped by every later drain and cleared by no verb, so the action was destroyed before the source that held the item ever looked. Sources run in name order, which made this a rule rather than a race: on an account declaring `caldav`, `carddav` and `imap`, every flag change himalaya queued against `imap/INBOX` was parked by `caldav`, with `seq … projects no placement` as its epitaph. A source now drains only the collections its own namespace owns, and the drain reports what it skipped beside what it applied and parked.
+
+  io-pimdir is fixed in the same breath, so that a missing binding leaves the row pending for the source that can apply it rather than parking it. Rows already parked stay parked: `pimdir queue cancel <id>` drops one, and the action it carried has to be redone in the frontend.
 
 - A parked queue action was reported once per source instead of once per run.
 

@@ -18,6 +18,8 @@ use io_sasl::{
 };
 use pimalaya_cli::printer::Printer;
 use pimalaya_config::{
+    command::CommandConfig,
+    notify::Notification,
     secret::{Secret, SecretResolver},
     toml as config_toml,
     toml::{TomlConfig, shell_expanded_string},
@@ -260,6 +262,10 @@ pub struct AccountConfig {
     /// source.
     #[serde(default)]
     pub store: StoreConfig,
+
+    /// How a run announces a content conflict it could not merge away.
+    #[serde(default)]
+    pub conflict: ConflictConfig,
 
     // TODO: item-level sync filters (date range, sender, subject).
     #[serde(default, alias = "message")]
@@ -587,6 +593,64 @@ impl<'de> Deserialize<'de> for RemovedKey {
         Ok(Self)
     }
 }
+
+/// How an account announces a content conflict, which is the only part of
+/// conflict handling anybody configures.
+///
+/// Whether a run merges is not a setting. The three-way merge is a pure
+/// function over bodies the store already holds, there is no taste in it, and
+/// because nobody can swap it out it resolves only what nobody disagreed
+/// about (see [`crate::kind::merge`]).
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ConflictConfig {
+    /// The desktop notification a run shows when an item enters conflict,
+    /// written as `conflict.notify = { summary = "…", body = "…" }`.
+    ///
+    /// Unset, the default, leaves the warning in the log and the entry in
+    /// the report: an unattended tool never shells out unasked. A run that
+    /// observes a conflict an earlier one parked notifies nothing either
+    /// way, so a five-minute schedule over one unresolved card raises one
+    /// notification rather than three hundred a day.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notify: Option<ConflictNotification>,
+
+    /// The interactive merger `neverest conflict resolve --interactive`
+    /// hands a collision to, written as `conflict.merger = "tcal merge"`.
+    ///
+    /// Unset, the default, leaves that flag with nothing to run. It is never
+    /// reached from a sync, whatever is attached to the terminal: a run has
+    /// one when a wrapper script drives it, when a pane nobody is sitting at
+    /// watches it and when a person is waiting, and the three are
+    /// indistinguishable from inside.
+    ///
+    /// Following git mergetool, the bodies are handed over as filesystem
+    /// paths appended positionally, base first, then the divergent sides,
+    /// then the path to write, which is tcal's own argument order and makes
+    /// `"tcal merge"` the whole configuration. A command carrying any of the
+    /// placeholders {base}, {local}, {remote} and {output} is substituted
+    /// instead of appended, which is what a tool with a fixed argument shape
+    /// needs: tcard takes its output as a flag, so it is written
+    /// `"tcard merge {base} {local} {remote} --output {output}"`.
+    ///
+    /// The result is taken only on a zero exit with the output written. An
+    /// editor exits zero on a bare quit, so a zero exit alone is not a
+    /// decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merger: Option<CommandConfig>,
+}
+
+/// A desktop notification as a configuration writes it.
+///
+/// A newtype rather than the bare notification, so the key can be left out:
+/// the serde adapter reads one notification and has nothing to say about
+/// absence, which is what an opt-in needs.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ConflictNotification(
+    /// What the daemon renders: a summary and an optional body.
+    #[serde(with = "pimalaya_config::notify")]
+    pub Notification,
+);
 
 /// The local pimdir store an account syncs through — the retained cache the app
 /// reads. Implicit per account; this only customises it.

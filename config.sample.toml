@@ -309,6 +309,49 @@ imap.item.delete = false
 #caldav.pool-size = 4
 
 # --------------------------------------------------------------------------------
+# Conflict options
+# --------------------------------------------------------------------------------
+
+# Every run three-way merges the diverging bodies of a conflicted card or event
+# against the base the last sync agreed on, and clears the conflict whenever
+# nothing collided: two sides editing different fields have said nothing
+# contradictory. That merge is built in and is not configured. What is left is
+# both sides setting the same field differently, which no merge settles, so the
+# item parks and the run exits 2 instead of 0, having synced everything else.
+#
+# This is the desktop notification shown when an item enters conflict. UNSET,
+# the default, leaves the warning in the log and the entry in the report: a run
+# under cron never shells out unasked. A conflict an earlier run already parked
+# is announced by no later one, so a five-minute schedule raises one
+# notification rather than three hundred a day.
+#conflict.notify = { summary = "neverest", body = "A contact needs a decision" }
+
+# The interactive merger `neverest conflict resolve --interactive` hands a
+# collision to. UNSET by default, which leaves that flag with nothing to run.
+# It is never reached from a sync, whatever is attached to the terminal: a run
+# has one when a wrapper script drives it, when a pane nobody is sitting at
+# watches it and when a person is waiting, and the three cannot be told apart
+# from inside.
+#
+# Following git mergetool, the three bodies are handed over as filesystem paths
+# appended positionally, base first, then the divergent sides, then the path to
+# write. That is tcal's own argument order, so its name is the whole
+# configuration:
+#conflict.merger = "tcal merge"
+#
+# A command carrying any of the placeholders {base}, {local}, {remote} and
+# {output} is substituted instead of appended, which is what a tool with an
+# argument shape of its own needs. tcard takes its output as a flag:
+#conflict.merger = "tcard merge {base} {local} {remote} --output {output}"
+#
+# The result is taken only on a zero exit with the output written. An editor
+# exits zero on a bare quit, so a zero exit alone is not a decision, and a
+# merger that leaves its output untouched leaves the conflict exactly as it
+# was. A decision is refused when the store has observed a newer remote
+# revision since it was computed, since pushing it would overwrite everything
+# that arrived meanwhile.
+
+# --------------------------------------------------------------------------------
 # Store options
 # --------------------------------------------------------------------------------
 

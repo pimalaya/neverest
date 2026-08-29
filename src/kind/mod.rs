@@ -2,7 +2,7 @@
 //! *which* media type it is.
 //!
 //! io-replica, io-pimdir and the [`crate::client`] seam are all
-//! kind-agnostic; exactly three things are not, and they live here:
+//! kind-agnostic; exactly four things are not, and they live here:
 //!
 //! - the **link id**, an item's stable cross-collection identity (a
 //!   `Message-ID`, a vCard or iCalendar `UID`);
@@ -11,9 +11,12 @@
 //! - the **sort key**, the item's place in its collection's natural order
 //!   (newest first for mail, A to Z for cards, chronological for calendar
 //!   items), which the store orders a page by and never parses out of the
-//!   summary (pimdir SPEC §9.3).
+//!   summary (pimdir SPEC §9.3);
+//! - the **merge**, the three-way reconciliation of a content conflict's
+//!   base, local and remote bodies, which lives in [`merge`] and is what
+//!   keeps io-replica free of every format.
 //!
-//! All three are derived from a raw body by [`Kind::parse_body`], the single
+//! The first three are derived from a raw body by [`Kind::parse_body`], the single
 //! dispatch point the sync goes through. A kind that also has a cheap
 //! server-side summary tier (mail's IMAP `ENVELOPE`) additionally
 //! implements [`Kind::parse_summary`], so the `Meta` tier resolves without
@@ -28,6 +31,7 @@
 #[cfg(feature = "dav")]
 pub mod ical;
 pub mod mail;
+pub mod merge;
 #[cfg(feature = "dav")]
 pub mod vcard;
 
@@ -99,6 +103,19 @@ impl Kind {
             Self::Vcard => "text/vcard",
             #[cfg(feature = "dav")]
             Self::Ical => "text/calendar",
+        }
+    }
+
+    /// The extension a body of this kind is exported under, so a merger a
+    /// person configured is handed files it recognises rather than four
+    /// nameless ones.
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Mail => "eml",
+            #[cfg(feature = "dav")]
+            Self::Vcard => "vcf",
+            #[cfg(feature = "dav")]
+            Self::Ical => "ics",
         }
     }
 

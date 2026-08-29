@@ -70,20 +70,28 @@
 //! Everything above [`client`] is kind-neutral. It speaks collections and
 //! items rather than mailboxes and messages, so a contacts or calendar backend
 //! implements the same surface, while each adapter keeps its own protocol
-//! nouns behind it: an IMAP mailbox stays a mailbox inside [`imap`]. Exactly
-//! two things vary per media type, and both live in [`kind`], an item's link
-//! id and its versioned summary. The kind a source syncs comes from the
+//! nouns behind it: an IMAP mailbox stays a mailbox inside [`imap`]. What
+//! varies per media type lives in [`kind`]: an item's link id, its versioned
+//! summary and sort key, and the three-way merge a content conflict is
+//! resolved by. That merge is here rather than in io-replica so the engine
+//! keeps knowing nothing about formats. The kind a source syncs comes from the
 //! backend's media type and is recorded on the pimdir collection, so one store
 //! may hold several.
 //!
 //! ## Layout
 //!
-//! The [`cli`] module holds the clap parser and one module per subcommand.
+//! The [`cli`] module holds the clap parser, one module per subcommand, and
+//! the outcome a command exits with: a sync that reconciled everything it was
+//! asked to and still parked a conflict is neither a success nor a failure,
+//! so it carries a code of its own back to `main`.
 //! [`config`] is the TOML schema and [`account`] its runtime counterpart, the
 //! endpoints of one account with every secret already resolved, which is what
 //! [`client`], the kind-neutral backend seam, opens a connection from.
 //! [`item`] is the vocabulary above that seam, and [`kind`] the per-media-type
-//! derivations.
+//! derivations. [`conflict`] is the other end of that merge: the divergences
+//! it could not settle, the decision a person makes about one, and the guard
+//! refusing a decision the store moved out from under. Deciding is a command
+//! and never a run, so nothing there is reachable from a sync.
 //!
 //! [`offline`] is the sync engine: `mod` maps sources onto pimdir source ids
 //! and drives the coroutines, `state` records what the last run derived,
@@ -98,6 +106,7 @@ mod account;
 mod cli;
 mod client;
 mod config;
+mod conflict;
 #[cfg(feature = "dav")]
 mod dav;
 #[cfg(feature = "imap")]
@@ -113,6 +122,7 @@ mod wizard;
 use std::{
     io::{IsTerminal, stdin},
     path::PathBuf,
+    process::ExitCode,
 };
 
 use anyhow::Result;
@@ -124,22 +134,31 @@ use pimalaya_cli::{
 };
 use pimalaya_config::toml::TomlConfig;
 
-use crate::{cli::main::Cli, config::Config, wizard::discover};
+use crate::{
+    cli::{exit::Exit, main::Cli},
+    config::Config,
+    wizard::discover,
+};
 
-fn main() {
+fn main() -> ExitCode {
     let cli = Cli::parse();
     let mut printer = StdoutPrinter::new(&cli.json);
     let result = execute(&mut printer, cli);
-    ErrorReport::eval(&mut printer, result);
+
+    // NOTE: the only way out that is neither success nor failure travels back
+    // up here rather than exiting from inside a subcommand, so one place
+    // decides what the process leaves behind.
+    ErrorReport::eval(&mut printer, result).into()
 }
 
-fn execute(printer: &mut StdoutPrinter, cli: Cli) -> Result<()> {
+fn execute(printer: &mut StdoutPrinter, cli: Cli) -> Result<Exit> {
     Logger::try_init(&cli.log)?;
     let config_paths = cli.config_paths.as_ref();
 
     match cli.command {
         Some(command) => command.execute(printer, config_paths, cli.account.name.as_deref()),
-        None => meet_bare_invocation(printer, config_paths, cli.account.name.is_some()),
+        None => meet_bare_invocation(printer, config_paths, cli.account.name.is_some())
+            .map(|()| Exit::Success),
     }
 }
 

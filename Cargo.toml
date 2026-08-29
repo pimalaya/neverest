@@ -16,15 +16,17 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["rustls-ring", "imap", "smtp", "msgraph", "dav"]
+default = ["rustls-ring", "imap", "smtp", "msgraph", "dav", "merge", "notify"]
 dav = ["dep:io-webdav", "dep:io-http", "io-pim-discovery/rfc6764"]
 imap = ["dep:io-imap", "io-imap/client", "io-imap/scram"]
+merge = ["dav", "dep:ical-rs", "dep:vcard-rs"]
+notify = ["pimalaya-config/notify"]
 smtp = ["dep:io-smtp", "io-smtp/client", "io-smtp/scram"]
 msgraph = ["dep:io-msgraph", "io-msgraph/client"]
 native-tls = ["pimalaya-stream/native-tls", "io-pim-discovery/native-tls", "io-webdav?/native-tls", "io-imap?/native-tls", "io-msgraph?/native-tls", "io-smtp?/native-tls"]
 rustls-aws = ["pimalaya-stream/rustls-aws", "io-pim-discovery/rustls-aws", "io-webdav?/rustls-aws", "io-imap?/rustls-aws", "io-msgraph?/rustls-aws", "io-smtp?/rustls-aws"]
 rustls-ring = ["pimalaya-stream/rustls-ring", "io-pim-discovery/rustls-ring", "io-webdav?/rustls-ring", "io-imap?/rustls-ring", "io-msgraph?/rustls-ring", "io-smtp?/rustls-ring"]
-vendored = ["pimalaya-stream/vendored", "io-webdav?/vendored", "io-imap?/vendored", "io-msgraph?/vendored", "io-smtp?/vendored"]
+vendored = ["pimalaya-config/vendored", "pimalaya-stream/vendored", "io-webdav?/vendored", "io-imap?/vendored", "io-msgraph?/vendored", "io-smtp?/vendored"]
 
 [profile.release]
 lto = "fat"
@@ -35,9 +37,6 @@ panic = "abort"
 [build-dependencies]
 pimalaya-cli = { version = "0.2", default-features = false, features = ["build"] }
 
-[dev-dependencies]
-tempfile = "3"
-
 [dependencies]
 anyhow = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -45,6 +44,7 @@ clap = { version = "4.4", features = ["derive", "env", "wrap_help"] }
 crossbeam-queue = "0.3"
 crossterm = { version = "0.29", default-features = false, features = ["serde"] }
 dirs = "6"
+ical-rs = { version = "0.2", optional = true }
 io-http = { version = "0.5", default-features = false, optional = true }
 io-imap = { version = "0.6", default-features = false, optional = true }
 io-msgraph = { version = "0.3", default-features = false, optional = true }
@@ -65,10 +65,13 @@ secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 shellexpand = "3.1"
+tempfile = "3"
 toml = "1.1"
 url = { version = "2.2", features = ["serde"] }
+vcard-rs = { version = "0.2", optional = true }
 
 [patch.crates-io]
+ical-rs.git = "https://github.com/pimalaya/ical"
 io-pimdir.git = "https://github.com/pimalaya/io-pimdir"
 io-replica.git = "https://github.com/pimalaya/io-replica"
 io-webdav.git = "https://github.com/pimalaya/io-webdav"

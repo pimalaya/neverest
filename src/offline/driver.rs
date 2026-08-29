@@ -19,7 +19,9 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeSet, HashMap, HashSet},
-    fs, mem,
+    fs,
+    io::Write,
+    mem,
     path::{Path, PathBuf},
     process,
     sync::{
@@ -31,12 +33,16 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow, bail};
+use chrono::Utc;
 use crossbeam_queue::SegQueue;
-use io_pimdir::{PimdirBlobs, PimdirError, PimdirSourceStore, PimdirStore};
+use io_pimdir::{
+    PimdirBlobs, PimdirError, PimdirProducer, PimdirSourceStore, PimdirStore, codec::PimdirAction,
+};
 use io_replica::{
     client::{ReplicaRemote, ReplicaStorage},
     collection::ReplicaCollectionId,
     coroutine::{ReplicaArg, ReplicaCoroutine, ReplicaCoroutineState, ReplicaYield},
+    object::ReplicaHash,
     placement::{
         ReplicaFlags, ReplicaHandle, ReplicaLevel, ReplicaMeta, ReplicaPlacement, ReplicaStatus,
     },
@@ -59,7 +65,7 @@ use crate::{
     client::{Client, Pool},
     config::{AccountConfig, AccountMode, CollectionFilter, SourceConfig, SourcePermissions},
     item::flag::Flag,
-    kind::{Kind, LinkId},
+    kind::{Kind, LinkId, merge::Merged},
     offline::{
         drive, pipe,
         remote::{
@@ -417,12 +423,17 @@ pub fn run(
     }
 
     // Once for the run, whatever the sources did and whether or not this is a
-    // dry run: the parked rows are the store's, and a source-by-source read
-    // would report each of them once per source.
+    // dry run: the parked rows and the outstanding conflicts are the store's,
+    // and a source-by-source read would report each of them once per source.
     match PimdirStore::open(&work_dir) {
-        Ok(store) => report_parked(&store, &mut report),
-        Err(err) => warn!("cannot open the store to list parked actions: {err}"),
+        Ok(store) => {
+            report_parked(&store, &mut report);
+            count_conflicts(&store, &account_name, &mut report);
+        }
+        Err(err) => warn!("cannot open the store to read what it left behind: {err}"),
     }
+
+    announce_conflicts(account_config, &report);
 
     if !dry_run {
         state.record_mode(&mode, accept_mode);
@@ -543,7 +554,7 @@ fn run_pair(
     let mut right_store = open_store(work_dir, &right_name, account_name)?;
     let blobs = left_store.blobs();
 
-    drain_queues(&mut left_store, report);
+    drain_queues(&mut left_store, namespace, report);
 
     // Declared, not derived: `retain` says whether the store is a replica, and
     // `relay` is only how a crossing gets there when it is not.
@@ -657,6 +668,7 @@ fn run_pair(
             &mut left_store,
             &mut right_store,
             &blobs,
+            work_dir,
             dry_run,
             relay,
             &progress,
@@ -746,7 +758,7 @@ fn run_local(
         ctxs.len()
     ));
 
-    drain_queues(&mut stores[0], report);
+    drain_queues(&mut stores[0], source_name, report);
 
     let raw = ctxs[0].pool.primary().media_type();
     let kind = Kind::from_media_type(raw)
@@ -790,6 +802,7 @@ fn run_local(
         &mut ctxs,
         &mut stores,
         &blobs,
+        work_dir,
         dry_run,
         report,
     )?;
@@ -854,12 +867,14 @@ fn open_source_contexts(
 /// concurrently through WAL and writes serialise on the store's single-writer
 /// lock. Report patches are merged after the barrier. A collection that errors
 /// is logged and skipped, its bodies never entering the plan.
+#[allow(clippy::too_many_arguments)]
 fn phase1_spine(
     source: &str,
     filtered: &[String],
     ctxs: &mut [SourceCtx],
     stores: &mut [PimdirSourceStore],
     blobs: &PimdirBlobs,
+    store_dir: &Path,
     dry_run: bool,
     report: &mut SyncReport,
 ) -> Result<Vec<CollectionPlan>> {
@@ -883,7 +898,7 @@ fn phase1_spine(
         for (ctx, store) in ctxs.iter_mut().zip(stores.iter_mut()) {
             scope.spawn(move || {
                 while let Some(collection) = queue_ref.pop() {
-                    match collection_spine(&collection, ctx, store, blobs, dry_run) {
+                    match collection_spine(&collection, ctx, store, blobs, store_dir, dry_run) {
                         Ok((targets, rep)) => {
                             plans_ref.lock().unwrap().push((collection, targets));
                             merged_ref.lock().unwrap().item.patch.extend(rep.item.patch);
@@ -930,6 +945,7 @@ fn collection_spine(
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
+    store_dir: &Path,
     dry_run: bool,
 ) -> Result<(Vec<(ReplicaHandle, u64)>, SyncReport)> {
     let mut report = SyncReport::default();
@@ -938,6 +954,10 @@ fn collection_spine(
 
     let pull = sync_side_rebuilding(collection, ctx, store, blobs, false)?;
     let display = display_name(&ctx.namespace, collection);
+    // NOTE: before the report reads which conflicts survived. A divergence the
+    // merge settles was never a disagreement, and reporting one the run
+    // resolved in the same breath is the noise this whole pass removes.
+    resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
     itemize_pulled(
         &pull.events,
         &before,
@@ -1162,6 +1182,12 @@ fn flag_snapshot(
 /// per-item events. A `FlagsChanged` is diffed against the pre-pull snapshot
 /// into add and remove hunks, and a `Vanished` becomes a delete. A new remote
 /// item is an `Added` event but the pull plan already reports it as a `Fetch`.
+///
+/// A `Conflicted` event says a placement entered conflict, not that it is
+/// still in one: [`resolve_conflicts`] has run since and merged away whatever
+/// nobody disagreed about. So the store is asked which of them survived, and
+/// only those reach the report, a divergence settled in the same run being
+/// nothing a person has to hear about.
 fn itemize_pulled(
     events: &[ReplicaEvent],
     before: &HashMap<String, ReplicaFlags>,
@@ -1172,6 +1198,17 @@ fn itemize_pulled(
     report: &mut SyncReport,
 ) -> Result<()> {
     let after = flag_snapshot(store, collection, source)?;
+    let parked: HashSet<String> = match events
+        .iter()
+        .any(|event| matches!(event, ReplicaEvent::Conflicted(_)))
+    {
+        false => HashSet::new(),
+        true => conflicted_placements(store, collection, source)?
+            .into_iter()
+            .map(|placement| placement.handle.0)
+            .collect(),
+    };
+
     for event in events {
         match event {
             ReplicaEvent::FlagsChanged(handle) => {
@@ -1217,6 +1254,9 @@ fn itemize_pulled(
                 ));
             }
             ReplicaEvent::Conflicted(handle) => {
+                if !parked.contains(&handle.0) {
+                    continue;
+                }
                 report.conflicts.push(ItemConflict {
                     side: source.to_string(),
                     collection: display.to_string(),
@@ -1298,6 +1338,7 @@ fn sync_collection(
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
+    store_dir: &Path,
     dry_run: bool,
     relay: bool,
     progress: &CollectionProgress,
@@ -1314,6 +1355,7 @@ fn sync_collection(
         left_store,
         right_store,
         blobs,
+        store_dir,
         dry_run,
     )?;
     propagate(
@@ -1341,6 +1383,7 @@ fn sync_collection(
             left_store,
             right_store,
             blobs,
+            store_dir,
             dry_run,
         )?;
         let propagated = propagate(
@@ -1568,6 +1611,7 @@ fn reconcile_pass(
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
+    store_dir: &Path,
     dry_run: bool,
 ) -> Result<bool> {
     let left_report = sync_side_rebuilding(
@@ -1578,6 +1622,7 @@ fn reconcile_pass(
         !dry_run && left.writable(),
     )?;
     upgrade_probed(collection, left, left_store, blobs, dry_run)?;
+    resolve_conflicts(collection, left, left_store, blobs, store_dir, dry_run)?;
     let right_report = sync_side_rebuilding(
         collection,
         right,
@@ -1586,6 +1631,7 @@ fn reconcile_pass(
         !dry_run && right.writable(),
     )?;
     upgrade_probed(collection, right, right_store, blobs, dry_run)?;
+    resolve_conflicts(collection, right, right_store, blobs, store_dir, dry_run)?;
     Ok(moved(&left_report) || moved(&right_report))
 }
 
@@ -1819,6 +1865,200 @@ fn upgrade_probed(
     )
     .with_context(|| format!("Upgrade probed {} {collection}", &ctx.name))?;
     Ok(())
+}
+
+/// One side's placements the engine left marked conflicted in `collection`.
+fn conflicted_placements(
+    store: &PimdirSourceStore,
+    collection: &str,
+    source: &str,
+) -> Result<Vec<ReplicaPlacement>> {
+    Ok(load_side(store, collection)
+        .with_context(|| format!("Load {source} {collection}"))?
+        .into_iter()
+        .filter(|placement| placement.status == ReplicaStatus::Conflict)
+        .collect())
+}
+
+/// Merges what nobody disagreed about, leaving parked only the divergences a
+/// person has to settle. Returns how many conflicts it cleared.
+///
+/// Most divergence is not disagreement: one side changed a phone number and
+/// the other a note, and the base the last sync agreed on proves it by naming
+/// which side touched which field. Merging those needs no one, and a
+/// background tool that asks anyway is one a user switches off.
+///
+/// A conflict is marked with the diverging remote body *wanted* rather than
+/// held, the engine fetching nothing by itself, so the first half of this is
+/// an ordinary `Full` upgrade of the conflicted placements: what it fetches
+/// lands on the conflict object and nowhere else, the placement's own body
+/// being the local side of the divergence. A conflict whose remote body has
+/// not landed yet is visible and not resolvable, and is left exactly as it is
+/// rather than merged against a body nobody holds.
+///
+/// The merge is [`Kind::merge`], dispatched on the collection's kind and
+/// built in rather than configured, and the resolution is staged as an
+/// ordinary `update` through the store's queue then drained in the same
+/// breath. That is already the path whoever owns an edit resolves a conflict
+/// by, so a merged body is written exactly one way. Anything the merge did
+/// not settle stays parked, untouched.
+fn resolve_conflicts(
+    collection: &str,
+    ctx: &mut SourceCtx,
+    store: &mut PimdirSourceStore,
+    blobs: &PimdirBlobs,
+    store_dir: &Path,
+    dry_run: bool,
+) -> Result<usize> {
+    if dry_run {
+        return Ok(0);
+    }
+
+    let parked = conflicted_placements(store, collection, &ctx.name)?;
+    if parked.is_empty() {
+        return Ok(0);
+    }
+
+    debug!("merge {} conflicted item(s) in {collection}", parked.len());
+
+    let wanted: Vec<ReplicaHandle> = parked
+        .iter()
+        .filter(|placement| placement.conflict_object.is_none())
+        .map(|placement| placement.handle.clone())
+        .collect();
+
+    if !wanted.is_empty() {
+        let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
+        drive(
+            store,
+            &mut remote,
+            ReplicaUpgrade::new(collection.to_string(), wanted, ReplicaTier::Full),
+        )
+        .with_context(|| format!("Fetch the diverging bodies of {} {collection}", &ctx.name))?;
+    }
+
+    let kind = resolve_kind(&mut ctx.pool);
+
+    merge_conflicts(collection, kind, &ctx.name, store, blobs, store_dir)
+}
+
+/// The half of [`resolve_conflicts`] that reaches no server: merges the
+/// conflicted placements whose three bodies the store already holds, and
+/// stages each empty report as an ordinary edit. Returns how many it cleared.
+fn merge_conflicts(
+    collection: &str,
+    kind: Kind,
+    source: &str,
+    store: &mut PimdirSourceStore,
+    blobs: &PimdirBlobs,
+    store_dir: &Path,
+) -> Result<usize> {
+    // NOTE: opened before the first blob write rather than at it, the
+    // producer's staging lock being what keeps a collector out of the window
+    // between a body reaching the blob tree and the queue row pinning it.
+    let mut producer = PimdirProducer::open(store_dir, env!("CARGO_PKG_NAME"))
+        .with_context(|| format!("Stage the merged conflicts of {collection}"))?;
+    let mut staged = 0usize;
+
+    for placement in conflicted_placements(store, collection, source)? {
+        let handle = placement.handle.0.clone();
+
+        let Some(link_id) = placement.link_id.clone() else {
+            debug!("conflicted item {handle} in {collection} carries no link id yet");
+            continue;
+        };
+
+        let sides = (
+            placement.base.as_ref().and_then(|base| base.object.clone()),
+            placement.object.clone(),
+            placement.conflict_object.clone(),
+        );
+        let (Some(base_hash), Some(local_hash), Some(remote_hash)) = sides else {
+            debug!("conflicted item {handle} in {collection} is missing a side to merge against");
+            continue;
+        };
+
+        let read = |hash: &ReplicaHash| -> Result<Option<Vec<u8>>> {
+            blobs.get(hash).with_context(|| {
+                format!(
+                    "Read the body {} of {handle} in {collection}",
+                    hash.as_str()
+                )
+            })
+        };
+        let (Some(base), Some(local), Some(remote)) =
+            (read(&base_hash)?, read(&local_hash)?, read(&remote_hash)?)
+        else {
+            debug!("a body of the conflicted item {handle} in {collection} is not in the store");
+            continue;
+        };
+
+        let body = match kind.merge(&base, &local, &remote) {
+            Merged::Body(body) => body,
+            Merged::Collided(fields) => {
+                debug!("both sides changed {fields} field(s) of {handle} in {collection}");
+                continue;
+            }
+            Merged::Unmergeable(why) => {
+                debug!("cannot merge {handle} in {collection}: {why}");
+                continue;
+            }
+        };
+
+        let Some(seq) = store
+            .seq_for_link(collection, &link_id.0)
+            .with_context(|| format!("Resolve the id of {handle} in {collection}"))?
+        else {
+            debug!("conflicted item {handle} in {collection} has no row to update");
+            continue;
+        };
+
+        let hash = blobs.hash(&body);
+        let mut writer = blobs
+            .writer()
+            .with_context(|| format!("Store the merged body of {handle} in {collection}"))?;
+        writer
+            .write_all(&body)
+            .with_context(|| format!("Store the merged body of {handle} in {collection}"))?;
+        let size = writer
+            .commit(&hash)
+            .with_context(|| format!("Store the merged body of {handle} in {collection}"))?;
+
+        let (_, meta, _) = kind.parse_body(&body, size);
+        producer
+            .enqueue(
+                collection,
+                &PimdirAction::Update {
+                    seq,
+                    object: hash,
+                    meta: Some(meta),
+                },
+                Some(size),
+                &Utc::now().to_rfc3339(),
+            )
+            .with_context(|| format!("Stage the merged body of {handle} in {collection}"))?;
+
+        staged += 1;
+    }
+
+    drop(producer);
+
+    if staged == 0 {
+        return Ok(0);
+    }
+
+    let drained = store
+        .drain_collection(collection)
+        .with_context(|| format!("Apply the merged conflicts of {collection}"))?;
+    if drained.parked > 0 {
+        warn!(
+            "{} merged conflict(s) in {collection} could not be applied and parked",
+            drained.parked
+        );
+    }
+    info!("merged and resolved {staged} conflict(s) in {collection}");
+
+    Ok(staged)
 }
 
 /// Hydrates (to `Full`) the bodies of items held by only one side that the other
@@ -2125,14 +2365,23 @@ fn content_key(link: &str) -> u64 {
     acc
 }
 
-/// Drains every collection's pending frontend actions into the store before the
-/// sync, neverest being the store's sole owner. Each collection is applied
-/// exactly once by io-pimdir's
+/// Drains the pending frontend actions of the collections `namespace` owns
+/// into the store before the sync, neverest being the store's sole owner. Each
+/// collection is applied exactly once by io-pimdir's
 /// [`drain_collection`](PimdirSourceStore::drain_collection). A permanently bad
 /// action parks, for [`report_parked`] to surface until it is repaired; a
 /// transient failure leaves the collection queued for the next run and only
 /// warns, the sync itself still running offline-first.
-fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
+///
+/// The queue is the whole store's and records no source, so the collections it
+/// names have to be narrowed here: a source drains what its own namespace owns
+/// and nothing else. Draining another's projects an action against a source
+/// holding no binding for the item it names, which io-pimdir leaves pending
+/// rather than parking, but only after the drain that could have applied it
+/// has been robbed of its turn. Sources are run in name order, so without this
+/// the first one alphabetically would answer for every frontend write on the
+/// account.
+fn drain_queues(store: &mut PimdirSourceStore, namespace: &str, report: &mut SyncReport) {
     let collections = match store.queued_collections() {
         Ok(collections) => collections,
         Err(err) => {
@@ -2141,13 +2390,18 @@ fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncReport) {
         }
     };
 
+    let prefix = format!("{namespace}/");
+
     for collection in collections {
+        if !collection.starts_with(&prefix) {
+            continue;
+        }
         match store.drain_collection(&collection) {
             Ok(drained) => {
-                if drained.applied > 0 || drained.parked > 0 {
+                if drained.applied > 0 || drained.parked > 0 || drained.skipped > 0 {
                     info!(
-                        "drained {} queued action(s) in {collection} ({} parked)",
-                        drained.applied, drained.parked
+                        "drained {} queued action(s) in {collection} ({} parked, {} skipped)",
+                        drained.applied, drained.parked, drained.skipped
                     );
                 }
                 if drained.applied > 0 {
@@ -2185,6 +2439,54 @@ fn report_parked(store: &PimdirStore, report: &mut SyncReport) {
             }
         }
         Err(err) => warn!("cannot list parked actions: {err}"),
+    }
+}
+
+/// Counts the decisions the store is holding, once for the run. That count is
+/// what the report states and what the run's exit code answers.
+///
+/// Read from the store rather than from the run's own tally, because the two
+/// are different numbers. The engine emits nothing for a placement it already
+/// parked, so the conflicts a run itemizes are only the ones it newly marked;
+/// that early return is what keeps a repeated run quiet, and it is exactly
+/// why it cannot also serve as the number of decisions waiting.
+fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncReport) {
+    match store.list_conflicts(Some(account)) {
+        Ok(conflicts) => report.outstanding_conflicts = conflicts.len(),
+        Err(err) => warn!("cannot count the conflicts waiting for a decision: {err}"),
+    }
+}
+
+/// Announces the conflicts this run marked: a warning per item in the log,
+/// then the account's notification once, if it declares one.
+///
+/// The log is the default and the notification is the opt-in, so an
+/// unattended run never shells out unasked. Only what this run marked is
+/// announced, which is the whole of the once-only rule: the engine returns
+/// early for a placement it already parked, so a five-minute schedule over one
+/// unresolved card raises one notification rather than nearly three hundred a
+/// day, all naming the same card. An unattended tool that repeats itself is
+/// one a user silences.
+///
+/// One notification carries the run rather than one per item, a dozen popups
+/// answering the same question being a dozen too many. What it says is the
+/// configuration's to write, the items themselves being in the report and in
+/// the log.
+fn announce_conflicts(account_config: &AccountConfig, report: &SyncReport) {
+    if report.conflicts.is_empty() {
+        return;
+    }
+
+    for conflict in &report.conflicts {
+        warn!("{conflict}");
+    }
+
+    let Some(notification) = &account_config.conflict.notify else {
+        return;
+    };
+
+    if let Err(err) = notification.0.show() {
+        warn!("cannot show the conflict notification: {err}");
     }
 }
 
@@ -2305,7 +2607,7 @@ fn sweep_retained(
     store: &mut PimdirStore,
     report: &mut SyncReport,
 ) {
-    let Some(cutoff) = account_config.store.purge_cutoff(chrono::Utc::now()) else {
+    let Some(cutoff) = account_config.store.purge_cutoff(Utc::now()) else {
         return;
     };
 
@@ -2609,11 +2911,10 @@ fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> 
 
 #[cfg(test)]
 mod tests {
-    use io_pimdir::{PimdirProducer, codec::PimdirAction};
     use io_replica::{
         change::{ReplicaChange, ReplicaChangeKind, ReplicaDropReason, ReplicaWriteOp},
         collection::ReplicaCheckpoint,
-        object::{ReplicaHash, ReplicaObject},
+        object::ReplicaObject,
         placement::{ReplicaBase, ReplicaLinkId, ReplicaSortKey},
         remote::{
             ReplicaFetchedBody, ReplicaFetchedItem, ReplicaPushOutcome, ReplicaPushResult,
@@ -2734,6 +3035,47 @@ mod tests {
         assert!(err.contains("left"), "{err}");
     }
 
+    /// The queue is the whole store's and records no source, so a source
+    /// that drained every collection answered for another's work: on an
+    /// account syncing mail, contacts and calendar, `caldav` sorts first
+    /// and reached every mail action himalaya queued before `imap` did.
+    #[test]
+    fn a_source_drains_only_the_collections_of_its_own_namespace() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+        store
+            .ensure_collection("imap/INBOX", "message/rfc822")
+            .unwrap();
+
+        let mut producer = PimdirProducer::open(dir.path(), "himalaya").unwrap();
+        producer
+            .enqueue(
+                "imap/INBOX",
+                &PimdirAction::Add {
+                    link_id: Some(ReplicaLinkId("mid:queued@x".into())),
+                    flags: ReplicaFlags::default(),
+                    object: None,
+                    meta: None,
+                    handle: None,
+                },
+                None,
+                "2026-08-28T00:00:00Z",
+            )
+            .unwrap();
+
+        let mut report = SyncReport::default();
+        drain_queues(&mut store, "caldav", &mut report);
+        assert!(
+            report.drained.is_empty(),
+            "a mail collection is not caldav's"
+        );
+
+        drain_queues(&mut store, "imap", &mut report);
+        assert_eq!(report.drained.len(), 1);
+        assert_eq!(report.drained[0].collection, "imap/INBOX");
+        assert_eq!(report.drained[0].applied, 1);
+    }
+
     /// A parked row belongs to the store, and an account's sources each
     /// drain it: reading the parked rows where the drain runs reported one
     /// row once per source, so a mail account syncing contacts and calendar
@@ -2742,12 +3084,14 @@ mod tests {
     fn a_parked_action_is_reported_once_however_many_sources_drained() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
-        store.ensure_collection("INBOX", "message/rfc822").unwrap();
+        store
+            .ensure_collection("imap/INBOX", "message/rfc822")
+            .unwrap();
 
         let mut producer = PimdirProducer::open(dir.path(), "himalaya").unwrap();
         producer
             .enqueue(
-                "INBOX",
+                "imap/INBOX",
                 &PimdirAction::SetFlags {
                     seq: 6951,
                     flags: ReplicaFlags::from_iter(["\\Seen"]),
@@ -2758,8 +3102,8 @@ mod tests {
             .unwrap();
 
         let mut report = SyncReport::default();
-        for _ in 0..3 {
-            drain_queues(&mut store, &mut report);
+        for source in ["caldav", "carddav", "imap"] {
+            drain_queues(&mut store, source, &mut report);
         }
         report_parked(&store, &mut report);
 
@@ -2771,7 +3115,9 @@ mod tests {
     fn the_pre_sync_drain_applies_queued_actions_and_reports_parked_ones() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
-        store.ensure_collection("INBOX", "message/rfc822").unwrap();
+        store
+            .ensure_collection("left/INBOX", "message/rfc822")
+            .unwrap();
 
         let blobs = store.blobs();
         let mut writer = blobs.writer().unwrap();
@@ -2782,7 +3128,7 @@ mod tests {
         let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
         producer
             .enqueue(
-                "INBOX",
+                "left/INBOX",
                 &PimdirAction::Add {
                     link_id: Some(ReplicaLinkId("mid:q1@x".into())),
                     flags: ReplicaFlags::from_iter(["\\Seen"]),
@@ -2796,7 +3142,7 @@ mod tests {
             .unwrap();
         producer
             .enqueue(
-                "INBOX",
+                "left/INBOX",
                 &PimdirAction::Remove { seq: 424242 },
                 None,
                 "2026-08-07T00:00:01Z",
@@ -2804,7 +3150,7 @@ mod tests {
             .unwrap();
         producer
             .enqueue(
-                "INBOX",
+                "left/INBOX",
                 &PimdirAction::SetFlags {
                     seq: 424243,
                     flags: ReplicaFlags::from_iter(["\\Seen"]),
@@ -2815,16 +3161,16 @@ mod tests {
             .unwrap();
 
         let mut report = SyncReport::default();
-        drain_queues(&mut store, &mut report);
+        drain_queues(&mut store, "left", &mut report);
         report_parked(&store, &mut report);
 
         assert_eq!(report.drained.len(), 1);
-        assert_eq!(report.drained[0].collection, "INBOX");
+        assert_eq!(report.drained[0].collection, "left/INBOX");
         assert_eq!(report.drained[0].applied, 2);
         assert_eq!(report.parked.len(), 1);
         assert!(report.parked[0].error.contains("unknown seq"));
 
-        let placements = load_side(&store, "INBOX").unwrap();
+        let placements = load_side(&store, "left/INBOX").unwrap();
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].status, ReplicaStatus::Dirty);
         assert!(placements[0].base.is_none());
@@ -2834,7 +3180,7 @@ mod tests {
         );
 
         let mut second = SyncReport::default();
-        drain_queues(&mut store, &mut second);
+        drain_queues(&mut store, "left", &mut second);
         report_parked(&store, &mut second);
         assert!(second.drained.is_empty());
         assert_eq!(second.parked.len(), 1);
@@ -2953,6 +3299,7 @@ mod tests {
                     flags: ReplicaFlags::default(),
                     status: ReplicaStatus::Clean,
                     conflict_revision: None,
+                    conflict_object: None,
                     base: Some(ReplicaBase {
                         flags: ReplicaFlags::default(),
                         revision: None,
@@ -3006,7 +3353,9 @@ mod tests {
     fn a_submit_intent_survives_the_drain_and_is_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
-        store.ensure_collection("Sent", "message/rfc822").unwrap();
+        store
+            .ensure_collection("left/Sent", "message/rfc822")
+            .unwrap();
 
         let blobs = store.blobs();
         let mut writer = blobs.writer().unwrap();
@@ -3017,7 +3366,7 @@ mod tests {
         let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
         producer
             .enqueue(
-                "Sent",
+                "left/Sent",
                 &PimdirAction::Unknown {
                     kind: submit::SUBMIT.into(),
                     payload: r#"{"v":1,"object":"cafe0002","from":"a@x.org","rcpts":["b@y.org"],"subject":"hi"}"#
@@ -3030,14 +3379,14 @@ mod tests {
             .unwrap();
 
         let mut report = SyncReport::default();
-        drain_queues(&mut store, &mut report);
+        drain_queues(&mut store, "left", &mut report);
         assert!(report.drained.is_empty());
         assert!(report.parked.is_empty());
-        assert!(load_side(&store, "Sent").unwrap().is_empty());
+        assert!(load_side(&store, "left/Sent").unwrap().is_empty());
 
         let intents = submit::pending(&store).unwrap();
         assert_eq!(intents.len(), 1);
-        assert_eq!(intents[0].collection, "Sent");
+        assert_eq!(intents[0].collection, "left/Sent");
         assert_eq!(intents[0].subject().as_deref(), Some("hi"));
         assert_eq!(
             intents[0].object.as_ref().map(|h| h.0.as_str()),
@@ -3058,7 +3407,7 @@ mod tests {
         let mut report = SyncReport::default();
         sweep_retained(&config, &mut store, &mut report);
         assert!(report.purged.is_none());
-        assert!(config.store.purge_cutoff(chrono::Utc::now()).is_none());
+        assert!(config.store.purge_cutoff(Utc::now()).is_none());
 
         config.store.purge_after = Some(crate::config::HumanDuration(
             std::time::Duration::from_secs(0),
@@ -3101,6 +3450,7 @@ mod tests {
                     flags: ReplicaFlags::default(),
                     status: ReplicaStatus::Clean,
                     conflict_revision: None,
+                    conflict_object: None,
                     base: Some(ReplicaBase {
                         flags: ReplicaFlags::default(),
                         revision: None,
@@ -3262,6 +3612,221 @@ mod tests {
         }
     }
 
+    /// The account a conflicted store is grouped under, which is also what
+    /// [`count_conflicts`] scopes its listing to.
+    const CONFLICT_ACCOUNT: &str = "cards";
+
+    /// Seeds a store holding one card the engine marked conflicted, with all
+    /// three bodies present: the base the last sync agreed on, the local side
+    /// of the divergence, and the remote side the upgrade pass supplied.
+    ///
+    /// This is the state [`merge_conflicts`] starts from, so a test reaches it
+    /// without a server: what needs a connection is the fetch that lands the
+    /// remote body, and that is the other half of [`resolve_conflicts`].
+    fn store_with_conflict(
+        dir: &std::path::Path,
+        base: &str,
+        local: &str,
+        remote: &str,
+    ) -> PimdirSourceStore {
+        let mut store = PimdirStore::open(dir)
+            .unwrap()
+            .for_account(CONFLICT_ACCOUNT)
+            .for_source("dav");
+        store.ensure_collection("contacts", "text/vcard").unwrap();
+
+        let blobs = store.blobs();
+        let stored = |body: &str| ReplicaWriteOp::StoreObject {
+            object: ReplicaObject {
+                hash: blobs.hash(body.as_bytes()),
+                size: body.len(),
+            },
+            body: Some(body.as_bytes().to_vec()),
+        };
+
+        store
+            .write(vec![
+                stored(base),
+                stored(local),
+                stored(remote),
+                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+                    collection: ReplicaCollectionId("contacts".into()),
+                    handle: ReplicaHandle("card1".into()),
+                    link_id: Some(ReplicaLinkId("uid:a".into())),
+                    object: Some(blobs.hash(local.as_bytes())),
+                    level: ReplicaLevel::Full,
+                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
+                    sort_key: ReplicaSortKey::default(),
+                    flags: ReplicaFlags::default(),
+                    status: ReplicaStatus::Conflict,
+                    conflict_revision: Some(String::from("etag-2")),
+                    conflict_object: Some(blobs.hash(remote.as_bytes())),
+                    base: Some(ReplicaBase {
+                        flags: ReplicaFlags::default(),
+                        revision: Some(String::from("etag-1")),
+                        object: Some(blobs.hash(base.as_bytes())),
+                    }),
+                    origin: None,
+                }),
+            ])
+            .unwrap();
+
+        store
+    }
+
+    /// A card carrying `tel` and `note`, the two fields the merge tests move
+    /// independently of each other.
+    fn card(tel: &str, note: &str) -> String {
+        format!(
+            "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Jane Doe\r\nTEL:{tel}\r\nNOTE:{note}\r\nEND:VCARD\r\n"
+        )
+    }
+
+    /// Two sides editing different fields of one card have said nothing
+    /// contradictory: the base names which side touched which, both survive,
+    /// the conflict clears through the queue, and the run reports nothing.
+    /// Asking a person about this is a background tool asking to be switched
+    /// off.
+    #[cfg(feature = "merge")]
+    #[test]
+    fn disjoint_edits_on_both_sides_resolve_with_no_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_conflict(
+            dir.path(),
+            &card("+1", "old"),
+            &card("+2", "old"),
+            &card("+1", "new"),
+        );
+        let blobs = store.blobs();
+
+        let merged = merge_conflicts(
+            "contacts",
+            Kind::Vcard,
+            "dav",
+            &mut store,
+            &blobs,
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(merged, 1);
+
+        let placement = load_side(&store, "contacts").unwrap().remove(0);
+        assert_ne!(placement.status, ReplicaStatus::Conflict);
+        assert!(placement.conflict_object.is_none());
+        assert_eq!(
+            placement.base.and_then(|base| base.revision).as_deref(),
+            Some("etag-2"),
+            "the push the resolution stages is conditioned on the revision it \
+             was merged against, not on the one the divergence started from",
+        );
+
+        let body = blobs.get(&placement.object.unwrap()).unwrap().unwrap();
+        let body = String::from_utf8(body).unwrap();
+        assert!(body.contains("TEL:+2"), "{body}");
+        assert!(body.contains("NOTE:new"), "{body}");
+
+        let mut report = SyncReport::default();
+        itemize_pulled(
+            &[ReplicaEvent::Conflicted(ReplicaHandle("card1".into()))],
+            &HashMap::new(),
+            &store,
+            "contacts",
+            "contacts",
+            "dav",
+            &mut report,
+        )
+        .unwrap();
+        assert!(
+            report.conflicts.is_empty(),
+            "a divergence the run settled is not reported"
+        );
+
+        count_conflicts(&store, CONFLICT_ACCOUNT, &mut report);
+        assert_eq!(report.outstanding_conflicts, 0);
+    }
+
+    /// Both sides setting the same field is the residue no merge settles. It
+    /// stays parked and is counted from the store, which is the number the
+    /// run's own exit code answers with 2.
+    #[cfg(feature = "merge")]
+    #[test]
+    fn a_same_field_collision_parks_and_is_still_counted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_conflict(
+            dir.path(),
+            &card("+1", "old"),
+            &card("+2", "old"),
+            &card("+3", "old"),
+        );
+        let blobs = store.blobs();
+        let local = blobs.hash(card("+2", "old").as_bytes());
+
+        let merged = merge_conflicts(
+            "contacts",
+            Kind::Vcard,
+            "dav",
+            &mut store,
+            &blobs,
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(merged, 0);
+
+        let placement = load_side(&store, "contacts").unwrap().remove(0);
+        assert_eq!(placement.status, ReplicaStatus::Conflict);
+        assert_eq!(placement.object, Some(local), "the local side is untouched");
+
+        let mut report = SyncReport::default();
+        itemize_pulled(
+            &[ReplicaEvent::Conflicted(ReplicaHandle("card1".into()))],
+            &HashMap::new(),
+            &store,
+            "contacts",
+            "contacts",
+            "dav",
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(report.conflicts.len(), 1);
+
+        count_conflicts(&store, CONFLICT_ACCOUNT, &mut report);
+        assert_eq!(report.outstanding_conflicts, 1);
+    }
+
+    /// A conflict an earlier run parked reaches no later run's report: the
+    /// engine returns early for a placement it already marked, so it emits no
+    /// event and there is nothing to announce. The store still holds the
+    /// decision, which is why the two numbers are read from two places.
+    #[test]
+    fn a_second_run_over_an_unresolved_conflict_announces_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_conflict(
+            dir.path(),
+            &card("+1", "old"),
+            &card("+2", "old"),
+            &card("+3", "old"),
+        );
+
+        let mut report = SyncReport::default();
+        itemize_pulled(
+            &[],
+            &HashMap::new(),
+            &store,
+            "contacts",
+            "contacts",
+            "dav",
+            &mut report,
+        )
+        .unwrap();
+        assert!(report.conflicts.is_empty());
+
+        count_conflicts(&store, CONFLICT_ACCOUNT, &mut report);
+        assert_eq!(report.outstanding_conflicts, 1);
+
+        let text = report.to_string();
+        assert!(text.contains("1 item(s) waiting for a decision"), "{text}");
+    }
+
     /// Seeds a store holding one locally edited item: its body points at
     /// `edited`, its base at `original` and revision `base_revision`, i.e. the
     /// state a frontend leaves behind after staging an edit offline.
@@ -3295,6 +3860,7 @@ mod tests {
                     flags: ReplicaFlags::default(),
                     status: ReplicaStatus::Dirty,
                     conflict_revision: None,
+                    conflict_object: None,
                     base: Some(ReplicaBase {
                         flags: ReplicaFlags::default(),
                         revision: Some(base_revision.to_string()),
@@ -3332,6 +3898,7 @@ mod tests {
                     flags: ReplicaFlags::default(),
                     status: ReplicaStatus::Tombstone,
                     conflict_revision: None,
+                    conflict_object: None,
                     base: Some(ReplicaBase {
                         flags: ReplicaFlags::default(),
                         revision: Some(String::from("v1")),
@@ -3524,6 +4091,7 @@ mod tests {
             flags: ReplicaFlags::default(),
             status: ReplicaStatus::Clean,
             conflict_revision: None,
+            conflict_object: None,
             base: Some(ReplicaBase {
                 flags: ReplicaFlags::default(),
                 revision: None,
@@ -3750,6 +4318,7 @@ mod tests {
                 flags: ReplicaFlags::default(),
                 status: ReplicaStatus::Clean,
                 conflict_revision: None,
+                conflict_object: None,
                 base: None,
                 origin: None,
             })])
@@ -3795,6 +4364,7 @@ mod tests {
                 flags: ReplicaFlags::default(),
                 status: ReplicaStatus::Clean,
                 conflict_revision: None,
+                conflict_object: None,
                 base: None,
                 origin: None,
             })])

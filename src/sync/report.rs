@@ -31,10 +31,21 @@ pub struct SyncReport {
     /// What the retention sweep reclaimed, when one ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purged: Option<PurgedItems>,
-    /// Items whose content diverged on both sides and were left conflicted.
-    /// Re-reported by every run until resolved (counted as warnings).
+    /// Items whose content diverged on both sides beyond what the run's own
+    /// three-way merge could settle, and which this run therefore left
+    /// conflicted (counted as warnings).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<ItemConflict>,
+    /// How many items the store holds waiting for a decision, whichever run
+    /// marked them. This is what the run's exit code answers.
+    ///
+    /// Not the length of [`conflicts`](Self::conflicts), and the difference
+    /// matters: the engine emits nothing for a placement it already parked,
+    /// which is what keeps a five-minute schedule from notifying about one
+    /// card three hundred times a day, and which is also why the run's own
+    /// tally is not the number of decisions waiting.
+    #[serde(default)]
+    pub outstanding_conflicts: usize,
     /// Creates a side refused because it already holds the item's `UID`.
     /// Re-reported by every run until that side stops holding the identity
     /// twice (counted as warnings).
@@ -78,13 +89,14 @@ impl fmt::Display for RefusedDuplicate {
     }
 }
 
-/// One item left conflicted: its content changed on both sides against a
+/// One item left conflicted: both sides changed the same field against a
 /// shared base, so neither could win without losing an edit.
 ///
-/// Neverest never resolves one by itself — resolution is an edit, and whose
-/// edit wins is not a decision a sync run can make. The item is reported here
-/// on every run until someone settles it (a frontend stages the merged body
-/// through the pimdir queue's `update` action).
+/// This is the residue of the run's own three-way merge, which takes both
+/// sides wherever they touched different fields. What is left is a genuine
+/// disagreement, and whose edit wins is not a decision a sync run can make:
+/// resolution is an edit, staged through the pimdir queue's `update` action
+/// by whoever owns it.
 ///
 /// Only mutable-content kinds can reach this state: mail bodies are immutable,
 /// so a mail sync never reports a conflict.
@@ -363,6 +375,15 @@ impl fmt::Display for SyncReport {
             for p in &self.parked {
                 writeln!(f, " - {p}")?;
             }
+            writeln!(f)?;
+        }
+
+        if self.outstanding_conflicts > 0 {
+            writeln!(
+                f,
+                "Conflicts: {n} item(s) waiting for a decision",
+                n = self.outstanding_conflicts,
+            )?;
             writeln!(f)?;
         }
 

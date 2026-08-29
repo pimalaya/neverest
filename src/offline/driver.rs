@@ -3913,7 +3913,7 @@ mod tests {
     /// the conflict clears through the queue, and the run reports nothing.
     /// Asking a person about this is a background tool asking to be switched
     /// off.
-    #[cfg(feature = "merge")]
+    #[cfg(feature = "dav")]
     #[test]
     fn disjoint_edits_on_both_sides_resolve_with_no_report() {
         let dir = tempfile::tempdir().unwrap();
@@ -4020,7 +4020,7 @@ mod tests {
     /// Both sides setting the same field is the residue no merge settles. It
     /// stays parked and is counted from the store, which is the number the
     /// run's own exit code answers with 2.
-    #[cfg(feature = "merge")]
+    #[cfg(feature = "dav")]
     #[test]
     fn a_same_field_collision_parks_and_is_still_counted() {
         let dir = tempfile::tempdir().unwrap();

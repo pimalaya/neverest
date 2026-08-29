@@ -6,10 +6,14 @@
 //! touched which field. Merging those needs no one, and reporting them to a
 //! person is a background tool asking to be switched off.
 //!
-//! The merge is built in rather than configured. It is a pure function over
-//! bodies the store already holds, there is no taste in it, and the format
-//! vocabulary is closed: contacts are vcard-rs, calendars and tasks and
-//! journals are ical-rs, and mail is immutable-content and reaches none of
+//! The merge is built in rather than configured, and that holds at build
+//! time too: it rides on the `dav` cargo feature rather than one of its own,
+//! since every mutable-content kind arrives with `dav` and nothing else can
+//! reach a merge. No build of neverest syncs a card or an event without one.
+//! It is a pure function over bodies the store already holds, there is no
+//! taste in it, and the format vocabulary is closed: contacts are vcard-rs,
+//! calendars and tasks and journals are ical-rs, and mail is
+//! immutable-content and reaches none of
 //! this. Because it cannot be swapped it is strictly conservative, resolving
 //! on an empty report and on nothing else: a merge nobody can replace has no
 //! business deciding anything a person might have decided differently, and
@@ -19,20 +23,20 @@
 //! byte for byte and the remote's non-colliding changes are replayed onto
 //! them.
 
-#[cfg(feature = "merge")]
+#[cfg(feature = "dav")]
 use ical::tree::{
     cst::IcalCst,
     merge::{IcalMerge, IcalMergeSide},
 };
-#[cfg(feature = "merge")]
+#[cfg(feature = "dav")]
 use vcard::tree::{cst::VcardCst, merge::merge};
 
 use crate::kind::Kind;
 
 /// What a three-way merge concluded about one conflicted item.
-// NOTE: a build without the `merge` cargo feature constructs neither
-// resolving variant, the merge being the only thing that produces them.
-#[cfg_attr(not(feature = "merge"), allow(dead_code))]
+// NOTE: a build without `dav` carries no mutable-content kind, so mail is
+// the only arm left and neither resolving variant is ever constructed.
+#[cfg_attr(not(feature = "dav"), allow(dead_code))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Merged {
     /// Nobody disagreed: the merged body carries both sides' edits and
@@ -47,7 +51,6 @@ pub enum Merged {
     Unmergeable(String),
 }
 
-#[cfg(feature = "merge")]
 impl Kind {
     /// Three-way merges the `local` and `remote` bodies of one conflicted
     /// item against the `base` the last sync agreed on.
@@ -63,9 +66,13 @@ impl Kind {
     /// whoever the preference favours. It is stated rather than defaulted so
     /// that reading this beside tcal, which prefers the right side because
     /// it puts the edit it speaks for there, does not suggest an oversight.
+    // NOTE: without `dav` the mail arm is the whole match, and mail is
+    // immutable-content, so no side is ever read.
+    #[cfg_attr(not(feature = "dav"), allow(unused_variables))]
     pub fn merge(self, base: &[u8], local: &[u8], remote: &[u8]) -> Merged {
         match self {
             Self::Mail => Merged::Unmergeable(String::from("mail bodies are immutable")),
+            #[cfg(feature = "dav")]
             Self::Vcard => {
                 let (base, local, remote) = match (
                     VcardCst::parse(base),
@@ -85,6 +92,7 @@ impl Kind {
                     collided => Merged::Collided(collided),
                 }
             }
+            #[cfg(feature = "dav")]
             Self::Ical => {
                 let (base, local, remote) = match (
                     IcalCst::parse(base),
@@ -115,21 +123,10 @@ impl Kind {
     }
 }
 
-#[cfg(not(feature = "merge"))]
-impl Kind {
-    /// The merge a build without the `merge` cargo feature cannot run, so
-    /// every conflict parks for a person.
-    pub fn merge(self, _base: &[u8], _local: &[u8], _remote: &[u8]) -> Merged {
-        Merged::Unmergeable(String::from(
-            "this build has no three-way merge, rebuild with the merge cargo feature",
-        ))
-    }
-}
-
 /// Names the side whose body no parser accepts, for the log line a parked
 /// conflict leaves behind. A body the store holds and cannot read is worth
 /// saying out loud rather than counting as a collision.
-#[cfg(feature = "merge")]
+#[cfg(feature = "dav")]
 fn unparsed<E: core::fmt::Display>(base: Option<E>, local: Option<E>, remote: Option<E>) -> Merged {
     let (side, err) = match (base, local, remote) {
         (Some(err), _, _) => ("base", err),
@@ -147,7 +144,7 @@ mod tests {
 
     /// Disjoint edits are not a disagreement: the base names which side
     /// touched which field, so both survive and nobody is asked anything.
-    #[cfg(feature = "merge")]
+    #[cfg(feature = "dav")]
     #[test]
     fn disjoint_edits_on_both_sides_merge_into_one_card() {
         let base =
@@ -168,7 +165,7 @@ mod tests {
 
     /// The same field set two ways is the residual case no merge settles,
     /// and the one a person is asked about.
-    #[cfg(feature = "merge")]
+    #[cfg(feature = "dav")]
     #[test]
     fn a_same_field_collision_is_not_merged_away() {
         let base = b"BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Jane Doe\r\nTEL:+1\r\nEND:VCARD\r\n";
@@ -179,7 +176,7 @@ mod tests {
     }
 
     /// The calendar half of the same rule, over the other library.
-    #[cfg(feature = "merge")]
+    #[cfg(feature = "dav")]
     #[test]
     fn a_calendar_merges_disjoint_edits_and_parks_a_collision() {
         let event = |summary: &str, location: &str| {
@@ -211,7 +208,7 @@ mod tests {
 
     /// A body the store holds and no parser reads is reported as what it
     /// is, rather than counted as a disagreement nobody had.
-    #[cfg(feature = "merge")]
+    #[cfg(feature = "dav")]
     #[test]
     fn an_unreadable_body_is_unmergeable_rather_than_collided() {
         let base = b"BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Jane Doe\r\nEND:VCARD\r\n";

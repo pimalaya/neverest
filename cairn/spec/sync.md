@@ -957,6 +957,13 @@ collision. The merge SHALL be built in rather than configured, and SHALL be
 dispatched on the collection's kind: vcard-rs for contacts, ical-rs for calendars
 and tasks and journals. Mail is immutable-content and reaches none of this.
 
+The merge SHALL NOT be gated by a cargo feature of its own, and SHALL ride on
+the feature that decides whether a mutable-content kind exists at all. Built in
+rather than configured is a statement about build time as much as about
+configuration: a feature that removes the merge makes this requirement false in
+the builds that omit it. Nothing else can reach a merge, so nothing is lost by
+tying them.
+
 It SHALL resolve on an empty report and on nothing else. Being unswappable is
 what forces that: a merge nobody can replace has no business deciding anything a
 person might have decided differently, and the report distinguishes the two

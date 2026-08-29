@@ -302,6 +302,10 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 ### Removed
 
+- Removed the `merge` cargo feature; the three-way merge now rides on `dav`.
+
+  The sync spec requires without condition that a run merges a marked conflict, and that the merge is "built in rather than configured". A feature gating it made that false in the builds that omitted it. It could not earn its keep either: it was declared `merge = ["dav", ...]`, so it enabled another feature, and every mutable-content kind is already `dav`-gated, so it was co-extensive with `dav` across everything it could act on. `dep:ical-rs` and `dep:vcard-rs` moved into `dav`, and no build anyone would have made changes behaviour: `default` carried `merge`, and `--features merge` pulled `dav` in regardless.
+
 - **BREAKING**: removed local file backends as sync sources (Maildir, then m2dir).
 
   A source is a remote, and the pimdir store is the local replica, so a local file store beside it would be a second local copy. An existing on-disk tree is brought in through io-pimdir's conversion tooling instead.

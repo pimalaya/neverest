@@ -1,5 +1,7 @@
-//! `neverest configure` command: re-runs the wizard against an existing
-//! account, using current values as defaults, and saves the result.
+//! # Configure command
+//!
+//! Re-runs the wizard against an existing account, using current values as
+//! defaults, and saves the result.
 
 use std::path::PathBuf;
 

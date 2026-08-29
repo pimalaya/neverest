@@ -1,5 +1,7 @@
-//! `neverest init` command: probes both sides and creates the pimdir replica
-//! store whose `pimdir.db` marks the account initialized.
+//! # Init command
+//!
+//! Probes both sides and creates the pimdir replica store whose `pimdir.db`
+//! marks the account initialized.
 
 use std::{fs, path::PathBuf};
 
@@ -63,15 +65,14 @@ impl InitCommand {
             .with_context(|| format!("Create replica dir {}", replica.display()))?;
         PimdirStore::open(&replica)
             .with_context(|| format!("Create pimdir store {}", replica.display()))?;
-        // The mode is stamped here, so the first sync compares against what
-        // `init` opened rather than against nothing.
+        // Stamped here, so the first sync compares against what `init`
+        // opened rather than against nothing.
         StoreState::stamp(&replica, Some(&mode))
             .with_context(|| format!("Stamp store state {}", replica.display()))?;
         s.success("Created replica store");
 
-        // A first run under `one-way` has no recorded mode to compare against,
-        // so nothing can refuse it. Saying what the account will do is what
-        // stands in for the confirmation a one-shot tool cannot ask for.
+        // Nothing can refuse a first `one-way` run, so saying what the
+        // account will do stands in for a confirmation.
         printer.out(Message::new(format!(
             "Account {name} successfully initialized: {mode}"
         )))

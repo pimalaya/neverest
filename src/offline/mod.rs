@@ -1,27 +1,17 @@
-//! The io-replica-based sync engine, persisting to a pimdir store.
+//! # Offline sync engine
 //!
-//! Replaces the hand-rolled 3-way diff/apply of `src/sync/` with the
-//! [io-replica](https://github.com/pimalaya/io-replica) replica engine over an
-//! [io-pimdir](https://github.com/pimalaya/io-pimdir) store (a SQLite index plus
-//! a content-addressed blob directory).
+//! The [io-replica](https://github.com/pimalaya/io-replica) engine over an
+//! [io-pimdir](https://github.com/pimalaya/io-pimdir) store, replacing the
+//! hand-rolled 3-way diff of src/sync/.
 //!
-//! An account's sources are the *sources* of its shared collections: one
-//! [`PimdirSourceStore`](io_pimdir::PimdirSourceStore) handle per source, named
-//! after it, over the same files. `load` projects that source's view of the
-//! shared hub, `write` absorbs the engine's writes back into its bindings, so
-//! cross-source propagation of items, flags and deletions falls out of the
-//! per-source reconcile with no hand-rolled cross-merge.
+//! One [`PimdirSourceStore`](io_pimdir::PimdirSourceStore) handle per source
+//! over the same files: `load` projects that source's view of the shared hub
+//! and `write` absorbs the engine's writes back, so cross-source propagation of
+//! items, flags and deletions needs no hand-rolled cross-merge.
 //!
 //! Sources meet only inside a namespace: a hub collection id is
 //! `<namespace>/<name>`, so a mail source and a contacts source under one
 //! account, or two providers cached side by side, never share a collection.
-//!
-//! Layout:
-//! - [`storage`] the per-source projection and hydration helpers over a
-//!   [`PimdirSourceStore`](io_pimdir::PimdirSourceStore);
-//! - [`remote`] [`remote::PimRemote`], the [`ReplicaRemote`] over one client;
-//! - [`driver`] per-account, per-namespace and per-collection orchestration,
-//!   including the derivation of what the store keeps, and the report.
 
 use anyhow::{Result, anyhow};
 use io_replica::{
@@ -40,20 +30,18 @@ pub mod submit;
 
 /// The pimdir source id of a configured source: its name, verbatim.
 ///
-/// The axis that distinguishes each source's bindings of one shared item in the
-/// store. It is the name from the configuration and nothing derived, so the id
-/// a binding was written under is the one the configuration still shows, and
-/// renaming a source in the configuration orphans its bindings rather than
-/// quietly rebinding them.
+/// The axis that distinguishes each source's bindings of one shared item. It is
+/// the configured name and nothing derived, so renaming a source orphans its
+/// bindings rather than quietly rebinding them.
 pub fn source_id(name: &str) -> ReplicaSourceId {
     ReplicaSourceId(name.to_string())
 }
 
-/// Drives any standard-shape io-replica coroutine to completion over borrowed
-/// storage and remote seams (io-replica's `ReplicaClient::run`, but borrowing so
-/// the driver keeps its long-lived per-side
-/// [`PimdirSourceStore`](io_pimdir::PimdirSourceStore) handle and client across the
-/// ephemeral coroutine).
+/// Drives an io-replica coroutine to completion over borrowed seams.
+///
+/// io-replica's `ReplicaClient::run`, but borrowing, so the driver keeps its
+/// long-lived per-side [`PimdirSourceStore`](io_pimdir::PimdirSourceStore)
+/// handle and client across the ephemeral coroutine.
 pub fn drive<S, R, C, T, E>(storage: &mut S, remote: &mut R, mut coroutine: C) -> Result<T>
 where
     S: ReplicaStorage,

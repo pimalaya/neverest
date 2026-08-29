@@ -1,11 +1,8 @@
-//! IMAP adapter for the shared cross-protocol client.
+//! # IMAP adapter
 //!
-//! Thin glue over [`ImapClient`], which already wraps io_imap's
-//! high-level session (`select`, `fetch`, `store`, `copy`, `move`,
-//! `append`, `list`, `status`). Each method takes and returns the TUI's
-//! shared [`crate::item`] types; the only real work is converting
-//! between those and io_imap's wire types, adapted from the retired
-//! io-email IMAP drivers.
+//! Thin glue over [`ImapClient`], which already wraps io_imap's high-level
+//! session. The only real work is converting between the shared
+//! [`crate::item`] types and io_imap's wire types.
 
 use std::{
     collections::BTreeSet,
@@ -50,8 +47,8 @@ use crate::{
 };
 
 impl ImapClient {
-    /// Lists every selectable mailbox. With `with_counts`, follows each
-    /// row with a STATUS to populate totals and unread counts.
+    /// Lists every selectable mailbox, following each row with a STATUS to
+    /// populate totals and unread counts when `with_counts`.
     pub fn list_mailboxes(&mut self, with_counts: bool) -> Result<Vec<Collection>> {
         let reference: ImapMailbox<'static> = ""
             .try_into()
@@ -84,13 +81,9 @@ impl ImapClient {
 
     /// Enumerates a mailbox's UID+flag spine, incrementally when possible.
     ///
-    /// The opaque `cursor` bytes carry the last `(UIDVALIDITY,
-    /// HIGHESTMODSEQ)` pair ([`decode_checkpoint`]); with one and a
-    /// QRESYNC-capable server whose UIDVALIDITY still matches, does a QRESYNC
-    /// SELECT: the server streams only the messages changed since the modseq and
-    /// the UIDs that vanished, so nothing is fetched when nothing changed.
-    /// Otherwise a full `FETCH 1:* (UID FLAGS)` snapshot. No ENVELOPE is fetched
-    /// — the link id is resolved later at the `Meta` tier.
+    /// The opaque `cursor` carries the last `(UIDVALIDITY, HIGHESTMODSEQ)`
+    /// pair; with one and a matching QRESYNC server, only what changed since
+    /// the modseq is streamed. Otherwise a full `FETCH 1:* (UID FLAGS)`.
     pub fn enumerate(&mut self, mailbox: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
         let mbox = parse_mailbox(mailbox)?;
         let cursor = cursor.and_then(decode_checkpoint);
@@ -152,10 +145,8 @@ impl ImapClient {
         })
     }
 
-    /// SELECTs `mailbox` unless it is already the connection's current selection,
-    /// so a run of fetches on one mailbox pays a single SELECT. The select
-    /// response is discarded (callers that need `UIDVALIDITY`/`EXISTS` use the
-    /// explicit path in `enumerate`).
+    /// SELECTs `mailbox` unless it is already selected, so a run of fetches on
+    /// one mailbox pays a single SELECT.
     fn select_cached(&mut self, mailbox: &str) -> Result<()> {
         if self.is_selected(mailbox) {
             return Ok(());
@@ -166,9 +157,8 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Fetches envelopes for a specific UID set (link-id / summary resolution at
-    /// the `Meta` tier), as `UID FETCH <set> (UID FLAGS ENVELOPE RFC822.SIZE)` —
-    /// targeted, never a whole-mailbox `1:*` sweep. Empty `uids` short-circuits.
+    /// Fetches envelopes for a specific UID set, as `UID FETCH <set> (UID FLAGS
+    /// ENVELOPE RFC822.SIZE)`: targeted, never a whole-mailbox `1:*` sweep.
     pub fn fetch_envelopes(&mut self, mailbox: &str, uids: &[&str]) -> Result<Vec<ItemSummary>> {
         if uids.is_empty() {
             return Ok(Vec::new());
@@ -218,11 +208,11 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Streams the bodies of a UID set in one batched `UID FETCH … (UID
-    /// BODY.PEEK[])`, routing each to a per-message sink (`open` at its start,
-    /// `done` at its end). One SELECT + one FETCH for the whole set; no body lands
-    /// in memory whole. The inner method is `fetch_bodies_stream` (reached through
-    /// `Deref`), so this wrapper is named `fetch_bodies` to avoid recursing.
+    /// Streams a UID set's bodies in one batched `UID FETCH … (BODY.PEEK[])`.
+    ///
+    /// One SELECT and one FETCH for the whole set, and no body lands in memory
+    /// whole. Named apart from the inner `fetch_bodies_stream` reached through
+    /// `Deref`, which it would otherwise recurse into.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         mailbox: &str,
@@ -243,7 +233,7 @@ impl ImapClient {
     }
 
     /// Streams one message's raw RFC 5322 bytes into `sink` without flipping
-    /// `\Seen` (BODY.PEEK[]); the body never lands in memory whole.
+    /// `\Seen` (BODY.PEEK[]).
     pub fn get_message_stream(&mut self, mailbox: &str, id: &str, sink: impl Write) -> Result<()> {
         let uid: NonZeroU32 = id.parse().map_err(|_| anyhow!("Invalid IMAP UID {id}"))?;
 
@@ -252,9 +242,10 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Appends `len` octets streamed from `source` to `mailbox` with `flags`,
-    /// returning the appended UID (UIDPLUS APPENDUID, else a UID SEARCH on the
-    /// provided `message_id`); the body never lands in memory whole.
+    /// Appends `len` octets streamed from `source` to `mailbox` with `flags`.
+    ///
+    /// Returns the appended UID from the UIDPLUS APPENDUID response, falling
+    /// back to a UID SEARCH on `message_id` where the server lacks UIDPLUS.
     pub fn add_message_stream(
         &mut self,
         mailbox: &str,
@@ -303,8 +294,7 @@ impl ImapClient {
             .ok_or_else(|| anyhow!("Fallback UID search returned no match"))
     }
 
-    /// Copies a UID set from `from` to `to`. Part of the backend surface;
-    /// the sync engine moves rather than copies.
+    /// Copies a UID set from `from` to `to`.
     #[allow(dead_code)]
     pub fn copy_messages(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
         let target = parse_mailbox(to)?;
@@ -341,10 +331,10 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Deletes one message: marks it `\Deleted`, then EXPUNGEs. EXPUNGE
-    /// removes every `\Deleted` message in the mailbox, but the sync
-    /// engine only flags the ones it means to drop, so nothing else is
-    /// caught.
+    /// Deletes one message: marks it `\Deleted`, then EXPUNGEs.
+    ///
+    /// EXPUNGE removes every `\Deleted` message in the mailbox, but the sync
+    /// engine only flags the ones it means to drop, so nothing else is caught.
     pub fn delete_message(&mut self, mailbox: &str, id: &str) -> Result<()> {
         let sequence_set = parse_uids(&[id])?;
 
@@ -368,8 +358,7 @@ type ListRow = (
     Vec<FlagNameAttribute<'static>>,
 );
 
-/// Drops `\Noselect` containers (RFC 3501 §6.3.8): they cannot hold
-/// messages and would error out on any later shared-API op.
+/// Drops `\Noselect` containers (RFC 3501 §6.3.8), which cannot hold messages.
 fn is_selectable(row: &ListRow) -> bool {
     !row.2.contains(&FlagNameAttribute::Noselect)
 }
@@ -400,7 +389,7 @@ fn apply_status(mailbox: &mut Collection, items: Vec<StatusDataItem>) {
     }
 }
 
-/// FETCH item-name list: UID + FLAGS + ENVELOPE + RFC822.SIZE, plus
+/// FETCH item-name list: UID, FLAGS, ENVELOPE and RFC822.SIZE, plus
 /// BODYSTRUCTURE when `with_attachment` is set.
 fn build_item_names(with_attachment: bool) -> MacroOrMessageDataItemNames<'static> {
     let mut names = vec![
@@ -423,8 +412,7 @@ fn uid_flag_names() -> MacroOrMessageDataItemNames<'static> {
     ])
 }
 
-/// Extracts one enumeration entry (UID + flags) from a FETCH row; `None` when no
-/// UID is present.
+/// Extracts one enumeration entry from a FETCH row; `None` without a UID.
 fn enum_entry(items: &[MessageDataItem<'static>]) -> Option<EnumEntry> {
     let mut uid = None;
     let mut flags = BTreeSet::new();
@@ -558,9 +546,8 @@ fn body_structure_has_attachment(structure: &BodyStructure<'_>) -> bool {
     }
 }
 
-/// Maps a shared [`Flag`] to its IMAP wire counterpart. IANA flags
-/// become the matching system flag; custom keywords pass through as
-/// Keyword atoms, with a sanitised fallback for non-atom-safe input.
+/// Maps a shared [`Flag`] to its IMAP wire counterpart: IANA flags become the
+/// matching system flag, custom keywords pass through as Keyword atoms.
 fn flag_from(flag: &Flag) -> ImapFlag<'static> {
     match flag.iana() {
         Some(IanaFlag::Seen) => ImapFlag::Seen,
@@ -654,9 +641,7 @@ fn decode_mime_bytes(bytes: &[u8]) -> String {
 }
 
 /// Encodes an IMAP sync cursor `(UIDVALIDITY, HIGHESTMODSEQ)` into checkpoint
-/// bytes (little-endian: 4-byte uidvalidity + 8-byte modseq). The encoding is
-/// private to this adapter: the driver never decodes it, reading the epoch
-/// through `Client::handle_space_epoch` instead.
+/// bytes: little-endian, a 4-byte uidvalidity then an 8-byte modseq.
 pub(crate) fn encode_checkpoint(uid_validity: u32, highest_mod_seq: u64) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(12);
     bytes.extend_from_slice(&uid_validity.to_le_bytes());
@@ -664,7 +649,7 @@ pub(crate) fn encode_checkpoint(uid_validity: u32, highest_mod_seq: u64) -> Vec<
     bytes
 }
 
-/// Decodes an IMAP sync cursor; `None` for an absent or malformed checkpoint (a
+/// Decodes an IMAP sync cursor; `None` for absent or malformed bytes (a
 /// non-CONDSTORE checkpoint has `modseq = 0`, which forces a full enumerate).
 pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Option<(u32, u64)> {
     if bytes.len() != 12 {
@@ -676,9 +661,10 @@ pub(crate) fn decode_checkpoint(bytes: &[u8]) -> Option<(u32, u64)> {
 }
 
 /// The backend UIDVALIDITY an IMAP checkpoint carries, `None` when the bytes
-/// are not an IMAP cursor. Read through `Client::handle_space_epoch`, which the
-/// driver compares before and after a pull to detect a handle-space change
-/// (which rebuilds the collection and bumps its generation).
+/// are not an IMAP cursor.
+///
+/// The driver compares it before and after a pull to detect a handle-space
+/// change, which rebuilds the collection and bumps its generation.
 pub(crate) fn checkpoint_uid_validity(bytes: &[u8]) -> Option<u32> {
     decode_checkpoint(bytes).map(|(uid_validity, _)| uid_validity)
 }

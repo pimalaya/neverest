@@ -1,3 +1,5 @@
+//! # Parser
+//!
 //! Top-level CLI parser and subcommand dispatcher.
 
 use std::path::PathBuf;
@@ -25,18 +27,16 @@ use crate::cli::{
 #[command(long_version = long_version!())]
 #[command(propagate_version = true, infer_subcommands = true)]
 pub struct Cli {
-    /// The command to run; a bare `neverest` (no subcommand) prints the
-    /// help, or offers the configuration wizard when no configuration
-    /// file is found.
+    /// The command to run; a bare `neverest` prints the help, or offers the
+    /// configuration wizard when no configuration file is found.
     #[command(subcommand)]
     pub command: Option<Command>,
 
     /// Override the default configuration file path.
     ///
-    /// Paths are shell-expanded then canonicalized; multiple paths may
-    /// be delimited by `:` and are merged left-to-right. When no path
-    /// resolves to an existing file, the wizard runs against the first
-    /// one.
+    /// Paths are shell-expanded then canonicalized; multiple paths may be
+    /// delimited by `:` and are merged left-to-right. When none resolves to
+    /// an existing file, the wizard runs against the first.
     #[arg(short, long = "config", global = true, env = "NEVEREST_CONFIG")]
     #[arg(value_name = "PATH", value_parser = path_parser, value_delimiter = ':')]
     pub config_paths: Vec<PathBuf>,
@@ -67,18 +67,12 @@ pub enum Command {
 }
 
 impl Command {
-    /// Runs the subcommand against the account `-a` names, or the default one
-    /// when it names none.
+    /// Runs the subcommand against the account `-a` names, or the default.
     ///
-    /// The flag is global and declared once, on [`Cli`], as it is in every
-    /// other pimalaya CLI: which account a command runs against is a property
-    /// of the invocation, not of the subcommand, and repeating it per
-    /// subcommand is how the same option ends up documented four ways.
-    ///
-    /// A sync is the one command with an outcome beyond succeeding or
-    /// failing, since it can reconcile everything it was asked to and still
-    /// leave conflicts parked, so it is the one that returns its own
-    /// [`Exit`]. Every other command either works or errors.
+    /// The flag is global and declared once, on [`Cli`], as in every other
+    /// pimalaya CLI: the account is a property of the invocation. Sync is the
+    /// one command with an outcome beyond succeeding or failing, so it
+    /// returns its own [`Exit`]; every other works or errors.
     pub fn execute(
         self,
         printer: &mut impl Printer,

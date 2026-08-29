@@ -1,4 +1,6 @@
-//! Account configuration: each account holds named [`SourceConfig`]s over one
+//! # Configuration
+//!
+//! The TOML schema: each account holds named [`SourceConfig`]s over one
 //! pimdir store, plus that store's settings.
 
 use std::{
@@ -29,15 +31,13 @@ use url::Url;
 
 use crate::wizard::discover::{CONFIG_SAMPLE_URL, offer_configuration};
 
-/// `skip_serializing_if` predicate skipping a field equal to its type's
-/// default, so a generated config omits defaulted values (the only
-/// serializer is the wizard, see [`crate::wizard`]).
+/// `skip_serializing_if` predicate omitting a defaulted field, so what the
+/// wizard writes carries only what the user chose.
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
-/// [`is_default`] for the HTTP-backend ALPN list, which defaults to a
-/// non-empty value.
+/// [`is_default`] for the HTTP ALPN list, whose default is not empty.
 fn is_default_http_alpn(alpn: &[String]) -> bool {
     alpn == default_http_alpn().as_slice()
 }
@@ -45,9 +45,8 @@ fn is_default_http_alpn(alpn: &[String]) -> bool {
 /// Splices the per-source shared fields (`collection`, `flag`, `item`,
 /// `pool_size`) onto every protocol-specific config struct.
 ///
-/// `collection` and `item` keep a serde alias on their pre-`generic-pim-sync`
-/// spellings (`mailbox` / `message`), so an existing mail configuration keeps
-/// loading unchanged.
+/// `collection` and `item` keep a serde alias on their old `mailbox` and
+/// `message` spellings, so an existing mail configuration keeps loading.
 macro_rules! source_config {
     (
         $(#[$struct_meta:meta])*
@@ -70,16 +69,15 @@ macro_rules! source_config {
             pub flag: FlagSourcePermissions,
             #[serde(default, alias = "message", skip_serializing_if = "is_default")]
             pub item: ItemSourcePermissions,
-            /// Per-source connection pool size override; defaults are
-            /// picked per backend.
+            /// Connection pool size override; the default is per backend.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub pool_size: Option<usize>,
         }
     };
 }
 
-/// Generates a [`SourceConfig`] accessor that forwards to the matching
-/// shared field on the source's backend variant, by value.
+/// Generates a [`SourceConfig`] accessor forwarding to the shared field on
+/// the source's backend variant, by value.
 macro_rules! source_accessor {
     ($name:ident, $ty:ty) => {
         pub fn $name(&self) -> $ty {
@@ -142,11 +140,9 @@ impl Config {
     /// Loads `Config` from `config_paths`, or offers the wizard when no
     /// file exists.
     ///
-    /// A missing configuration is met with the wizard rather than with an
-    /// error: the welcome frames what neverest is and offers to generate
-    /// an account, then the command carries on either way. Accepting is
-    /// what gives it a chance to work; declining leaves it to fail on the
-    /// configuration it still has not got.
+    /// A missing configuration is met with the wizard rather than an error:
+    /// the command carries on either way, accepting giving it a chance to
+    /// work and declining leaving it to fail on what it has not got.
     pub fn load_or_wizard(printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<Config> {
         if let Some(config) = Config::from_paths_or_default(config_paths)? {
             return Ok(config);
@@ -167,10 +163,10 @@ impl Config {
         }
     }
 
-    /// Serializes `self` to TOML at `path`, creating missing parent
-    /// directories. The document renders like himalaya's: one
-    /// `[accounts.<name>]` header per account, every field below it a
-    /// dotted key, and no table header for anything else.
+    /// Serializes `self` to TOML at `path`, creating missing parents.
+    ///
+    /// The document renders like himalaya's: one `[accounts.<name>]` header
+    /// per account, every field below it a dotted key.
     pub fn write(&self, path: &Path) -> Result<()> {
         let toml = config_toml::to_string(self).context("Serialize TOML config error")?;
 
@@ -186,17 +182,11 @@ impl Config {
     }
 }
 
-/// Per-account configuration: one or more named sources over one pimdir store.
+/// Per-account configuration: named sources over one pimdir store.
 ///
-/// An account is the hub: one store, one database, one blob directory, and
-/// whatever sources feed it. A source's name is its pimdir source id, so it
-/// names every binding that source owns in the store and renaming one orphans
-/// them all.
-///
-/// A backend written directly under the account (`imap`, `carddav`, …) is sugar
-/// for a source named after its protocol, which is the whole configuration for
-/// the common single-provider account. The `sources` table is what a mirror or
-/// a fan-in reaches for, since those need two sources of one protocol.
+/// An account is the hub: one store, one blob directory. A source's name
+/// is its pimdir source id, so renaming one orphans its bindings, and a
+/// backend written under the account is sugar for a source named after it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct AccountConfig {
@@ -207,22 +197,20 @@ pub struct AccountConfig {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sources: HashMap<String, SourceConfig>,
 
-    /// Named targets, on the same terms as [`sources`](Self::sources): the map
-    /// key is the pimdir source id every binding a target owns is recorded
-    /// under. A positional list would reassign them all on a reorder, which is
-    /// why `left` and `right` were removed and are not worth reintroducing.
+    /// Named targets, on the same terms as [`sources`](Self::sources).
     ///
-    /// Absent means the local store is the destination.
+    /// Absent means the local store is the destination. Named, not
+    /// positional: a list would reassign every binding on a reorder, which
+    /// is why `left` and `right` are gone and not worth reintroducing.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub targets: HashMap<String, SourceConfig>,
 
-    /// Makes the `sources` side authoritative: a difference resolves in its
-    /// favour and the other side's change is discarded rather than merged, so
-    /// no conflict is recorded.
+    /// Makes the `sources` side authoritative, the other side's change being
+    /// discarded rather than merged, so no conflict is recorded.
     ///
-    /// It does not mean the other side goes unread. Every run still enumerates
-    /// it, or every item would be re-pushed; its state decides what the run has
-    /// left to do and never who wins. Changes are **overwritten, not merged**.
+    /// The other side is still enumerated every run, or every item would be
+    /// re-pushed; its state decides what is left to do and never who wins.
+    /// Changes are overwritten, not merged.
     #[serde(default, skip_serializing_if = "is_default")]
     pub one_way: bool,
 
@@ -230,10 +218,8 @@ pub struct AccountConfig {
     /// than being only the ledger of spines and checkpoints.
     ///
     /// Unset takes the destination's answer: true with no targets, the store
-    /// being what the account syncs into, false with targets, a configuration
-    /// naming sources and targets having asked to copy between them rather
-    /// than to fill a disk. Set it explicitly to keep a local copy of a
-    /// migration.
+    /// being what the account syncs into; false with targets, which asked to
+    /// copy rather than to fill a disk. Set it to keep a copy of a migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain: Option<bool>,
 
@@ -251,14 +237,15 @@ pub struct AccountConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub msgraph: Option<MsgraphConfig>,
 
-    /// The send channel of the sugar source that carries mail, the flat
+    /// The send channel of the sugar source carrying mail, the flat
     /// spelling of `sources.<name>.smtp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<SmtpConfig>,
 
-    /// The local pimdir store this account syncs through. Optional: the store is
-    /// implicit (per-account state dir) and customised only here, never as a
-    /// source.
+    /// The local pimdir store this account syncs through.
+    ///
+    /// Optional: the store is implicit, a per-account state directory, and
+    /// is customised only here, never declared as a source.
     #[serde(default)]
     pub store: StoreConfig,
 
@@ -270,14 +257,15 @@ pub struct AccountConfig {
     #[serde(default, alias = "message")]
     pub item: ItemSyncConfig,
 
-    /// Max connections per source for concurrent `Full` body fetches (default
-    /// 4). Keep it under your provider's per-account connection limit. A `sync
-    /// --connections N` flag overrides it.
+    /// Max connections per source for concurrent body fetches, 4 by default.
+    ///
+    /// Keep it under the provider's per-account connection limit. `sync
+    /// --connections N` overrides it for one run.
     #[serde(default)]
     pub connections: Option<usize>,
 
-    /// Removed keys, kept only so a configuration carrying one is refused by
-    /// name rather than as an unknown field. See [`AccountConfig::validate`].
+    /// Removed keys, kept so a configuration carrying one is refused by name
+    /// rather than as an unknown field. See [`AccountConfig::validate`].
     #[serde(default, skip_serializing)]
     left: Option<RemovedKey>,
     #[serde(default, skip_serializing)]
@@ -287,9 +275,8 @@ pub struct AccountConfig {
 }
 
 impl AccountConfig {
-    /// A single-source account, which is the only shape the wizard writes: one
-    /// provider, one protocol, and a store that keeps every body because
-    /// nothing crosses. Everything beyond that is configured by hand.
+    /// A single-source account, the only shape the wizard writes: one
+    /// provider, one protocol, a store keeping every body.
     pub fn with_source(default: bool, source: SourceConfig) -> Self {
         let mut account = Self {
             default,
@@ -299,9 +286,8 @@ impl AccountConfig {
         account
     }
 
-    /// Writes `source` as the direct-backend sugar, replacing whatever backend
-    /// of that protocol the account carried and lifting its send channel to the
-    /// account-level `smtp` table the sugar spells it with.
+    /// Writes `source` as the direct-backend sugar, replacing the backend of
+    /// that protocol and lifting its send channel to the account `smtp`.
     pub fn set_direct_source(&mut self, source: SourceConfig) {
         let SourceConfig { backend, smtp } = source;
 
@@ -317,9 +303,11 @@ impl AccountConfig {
         }
     }
 
-    /// The direct-backend sources in protocol order, which is what the wizard
-    /// owns and what `configure` re-runs over. A source from the explicit
-    /// `sources` table is hand-written and never appears here.
+    /// The direct-backend sources in protocol order, what the wizard owns
+    /// and `configure` re-runs over.
+    ///
+    /// A source from the explicit `sources` table is hand-written and never
+    /// appears here.
     pub fn direct_sources(&self) -> Vec<SourceConfig> {
         [
             self.imap.clone().map(SourceBackendConfig::Imap),
@@ -338,11 +326,11 @@ impl AccountConfig {
         .collect()
     }
 
-    /// Every configured source keyed by its id, the direct-backend sugar folded
-    /// into the explicit `sources` table.
+    /// Every configured source keyed by its id, the sugar folded into the
+    /// explicit `sources` table.
     ///
-    /// The sugar's source id is its protocol name, which is the id the expanded
-    /// form writes too, so expanding an account by hand is a no-op on the store.
+    /// The sugar's source id is its protocol name, the same id the expanded
+    /// form writes, so expanding an account by hand is a store no-op.
     pub fn sources(&self) -> Result<HashMap<String, SourceConfig>> {
         let mut sources = self.sources.clone();
 
@@ -373,8 +361,8 @@ impl AccountConfig {
         Ok(sources)
     }
 
-    /// Hands the account-level `smtp` table to the one sugar source that could
-    /// use it. A source in the explicit table carries its own.
+    /// Hands the account `smtp` table to the one sugar source that could use
+    /// it; a source in the explicit table carries its own.
     fn attach_send_channel(&self, sources: &mut HashMap<String, SourceConfig>) -> Result<()> {
         let Some(smtp) = &self.smtp else {
             return Ok(());
@@ -406,30 +394,28 @@ impl AccountConfig {
         Ok(())
     }
 
-    /// Whether a source of that name came from the direct-backend sugar rather
-    /// than from the explicit table.
+    /// Whether that name came from the sugar rather than the explicit table.
     fn is_sugar(&self, name: &str) -> bool {
         !self.sources.contains_key(name)
     }
 
-    /// Every endpoint the account opens, sources and targets alike, keyed by
-    /// its pimdir source id.
+    /// Every endpoint the account opens, keyed by its pimdir source id.
     ///
-    /// A target is a source handle of the same store: it enumerates, it holds
-    /// bindings, and it is written to. What separates the two is direction,
-    /// which is [`AccountMode`], not the seam that opens them.
+    /// A target is a source handle of the same store: it enumerates, holds
+    /// bindings and is written to. Only direction separates the two, which
+    /// is [`AccountMode`] and not the seam that opens them.
     pub fn endpoints(&self) -> Result<HashMap<String, SourceConfig>> {
         let mut endpoints = self.sources()?;
         endpoints.extend(self.targets.clone());
         Ok(endpoints)
     }
 
-    /// The account's mode: which endpoints it holds, which way changes flow,
-    /// and whether the store keeps bodies.
+    /// The account's mode: which endpoints, which direction, whether the
+    /// store keeps bodies.
     ///
-    /// Both `check` and the sync go through it, so what a run reports and what
-    /// it does cannot drift apart. Every illegal arity is refused here, naming
-    /// the cell reached and the nearest legal one.
+    /// Both `check` and the sync go through it, so what a run reports and
+    /// what it does cannot drift apart. Every illegal arity is refused here,
+    /// naming the cell reached and the nearest legal one.
     pub fn mode(&self) -> Result<AccountMode> {
         let sources = self.sources()?;
         let mut source_names: Vec<String> = sources.keys().cloned().collect();
@@ -466,9 +452,6 @@ impl AccountConfig {
             );
         }
 
-        // The destination answers it: the store with no target, the targets
-        // otherwise, a migration having asked to copy rather than to fill a
-        // disk.
         let retain = self.retain.unwrap_or(target_names.is_empty());
 
         Ok(AccountMode {
@@ -479,12 +462,11 @@ impl AccountConfig {
         })
     }
 
-    /// Rejects an account a command cannot run: a removed key, no source at all,
-    /// a source declaring options its backend cannot honour, or two sources
-    /// racing for the send channel.
+    /// Rejects an account a command cannot run: a removed key, no source, a
+    /// source declaring what its backend cannot honour, two senders.
     ///
     /// Run by every command that opens an account, so a bad configuration is
-    /// refused before any connection is made rather than halfway through a sync.
+    /// refused before a connection rather than halfway through a sync.
     pub fn validate(&self) -> Result<()> {
         self.reject_removed_keys()?;
 
@@ -509,8 +491,7 @@ impl AccountConfig {
             );
         }
 
-        // Refuses every illegal arity, and is what `check` and the sync both
-        // read, so a configuration that loads is one they agree on.
+        // Called for its refusals: `check` and the sync read the same mode.
         self.mode()?;
 
         let mut senders: Vec<_> = sources
@@ -531,10 +512,11 @@ impl AccountConfig {
         Ok(())
     }
 
-    /// Refuses a key this version removed, naming what replaces it. A removed
-    /// key is refused rather than ignored: honouring neither the old meaning nor
-    /// the new one silently is how a configuration ends up doing the opposite of
-    /// what it says.
+    /// Refuses a key this version removed, naming what replaces it.
+    ///
+    /// Refused rather than ignored: silently honouring neither the old
+    /// meaning nor the new one is how a configuration ends up doing the
+    /// opposite of what it says.
     fn reject_removed_keys(&self) -> Result<()> {
         if self.left.is_some() || self.right.is_some() {
             bail!(
@@ -577,9 +559,9 @@ impl AccountConfig {
 
 /// Presence marker for a configuration key this version removed.
 ///
-/// Deserializing accepts whatever the key held and discards it, so the account
-/// can refuse it by name with its replacement instead of failing as an unknown
-/// field with no explanation.
+/// Deserializing accepts whatever the key held and discards it, so the
+/// account refuses it by name with its replacement rather than as an
+/// unknown field with no explanation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RemovedKey;
 
@@ -593,67 +575,45 @@ impl<'de> Deserialize<'de> for RemovedKey {
     }
 }
 
-/// How an account announces a content conflict, which is the only part of
-/// conflict handling anybody configures.
+/// How an account announces a content conflict, the only part of conflict
+/// handling anybody configures.
 ///
-/// Whether a run merges is not a setting. The three-way merge is a pure
-/// function over bodies the store already holds, there is no taste in it, and
-/// because nobody can swap it out it resolves only what nobody disagreed
-/// about (see [`crate::kind::merge`]).
+/// Whether a run merges is not a setting: the three-way merge is a pure
+/// function over bodies the store holds, and because nobody can swap it out
+/// it resolves only what nobody disagreed about (see [`crate::kind::merge`]).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ConflictConfig {
-    /// The interactive merger `neverest conflict resolve --interactive`
-    /// hands a collision to, written as `conflict.merger = "tcal merge"`.
+    /// The merger `conflict resolve --interactive` runs, `"tcal merge"`.
     ///
-    /// Unset, the default, leaves that flag with nothing to run. It is never
-    /// reached from a sync, whatever is attached to the terminal: a run has
-    /// one when a wrapper script drives it, when a pane nobody is sitting at
-    /// watches it and when a person is waiting, and the three are
-    /// indistinguishable from inside.
-    ///
-    /// Following git mergetool, the bodies are handed over as filesystem
-    /// paths appended positionally, base first, then the divergent sides,
-    /// then the path to write, which is tcal's own argument order and makes
-    /// `"tcal merge"` the whole configuration. A command carrying any of the
-    /// placeholders {base}, {local}, {remote} and {output} is substituted
-    /// instead of appended, which is what a tool with a fixed argument shape
-    /// needs: tcard takes its output as a flag, so it is written
-    /// `"tcard merge {base} {local} {remote} --output {output}"`.
-    ///
-    /// The result is taken only on a zero exit with the output written. An
-    /// editor exits zero on a bare quit, so a zero exit alone is not a
-    /// decision.
+    /// Unset by default; a sync never runs it. Paths are appended
+    /// git-mergetool style (base, sides, output) unless the command names
+    /// {base}, {local}, {remote} or {output}; only a written output counts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merger: Option<CommandConfig>,
 }
 
-/// The local pimdir store an account syncs through — the retained cache the app
-/// reads. Implicit per account; this only customises it.
+/// The local pimdir store an account syncs through, the cache a frontend
+/// reads. Implicit per account; this table only customises it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct StoreConfig {
-    /// Override the store directory (holds `pimdir.db` + `objects/`); defaults
-    /// to the per-account XDG state directory.
+    /// The store directory, holding `pimdir.db` and `objects/`.
+    ///
+    /// Defaults to the per-account XDG state directory.
     #[serde(default, deserialize_with = "shell_expanded_path_opt")]
     pub root: Option<PathBuf>,
 
-    /// How long the store keeps a **retained** (soft-deleted) item before a
-    /// sync run reclaims it: `store.purge-after = "90d"`.
+    /// How long a retained (soft-deleted) item survives before a sync run
+    /// reclaims it: `store.purge-after = "90d"`.
     ///
-    /// A pimdir store never truly deletes an item; when its last source
-    /// binding vanishes the row is retained, hidden from the sync seam and
-    /// from normal listings, keeping its body. Purge is explicit and
-    /// time-based, and neverest is the sweeper.
-    ///
-    /// **Unset means never purge** (retained items pile up until an operator
-    /// reclaims them). `"0"` purges immediately, reproducing a terminal
-    /// delete. There is deliberately no boolean: the delay subsumes the on /
-    /// off switch.
+    /// A pimdir store never truly deletes: the row is retained, hidden but
+    /// keeping its body, and neverest is the sweeper. Unset means never
+    /// purge and `"0"` purges at once; there is deliberately no boolean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purge_after: Option<HumanDuration>,
 
-    /// Removed keys, kept only so a configuration carrying one is refused by
+    /// Removed keys, kept so a configuration carrying one is refused by
     /// name. See [`StoreConfig::reject_removed_keys`].
     #[serde(default, skip_serializing)]
     retention: Option<RemovedKey>,
@@ -665,9 +625,8 @@ impl StoreConfig {
     /// Refuses `retention` and `hydration`, whose one answer is now the
     /// account's `retain`.
     ///
-    /// A three-point retention scale described a store that could hold only the
-    /// bodies that happened to cross, which is neither a replica nor a relay
-    /// and which nothing asked for. Accepting either key and mapping it onto
+    /// A three-point scale described a store holding only the bodies that
+    /// happened to cross, which nothing asked for; mapping either key onto
     /// `retain` would guess, so both are refused by name.
     fn reject_removed_keys(&self) -> Result<()> {
         if self.retention.is_some() || self.hydration.is_some() {
@@ -682,13 +641,11 @@ impl StoreConfig {
     }
 
     /// The RFC 3339 purge cutoff of a run starting at `now`: a retained item
-    /// whose `retained_at` is strictly older is reclaimed. `None` when
-    /// `purge-after` is unset (never purge) or so large that no instant can
-    /// precede it, which means the same thing.
+    /// strictly older than it is reclaimed.
     ///
-    /// The format matches the one the store stamps `retained_at` with
-    /// (`…THH:MM:SS.sssZ`), so the comparison the store runs is a plain
-    /// lexicographic one on equally shaped instants.
+    /// `None` when `purge-after` is unset, or so large no instant precedes
+    /// it, which means the same. The format matches what the store stamps
+    /// `retained_at` with, so the comparison is plain lexicographic.
     pub fn purge_cutoff(&self, now: DateTime<Utc>) -> Option<String> {
         let after = chrono::Duration::from_std(self.purge_after?.0).ok()?;
         let cutoff = now.checked_sub_signed(after)?;
@@ -696,13 +653,12 @@ impl StoreConfig {
     }
 }
 
-/// A human-written duration, the shape a scheduling knob takes in the TOML
-/// document: one non-negative integer and one unit suffix (`"90d"`, `"12h"`,
-/// `"30m"`, `"45s"`, `"2w"`), or a bare `"0"` (every unit agrees on zero).
+/// A human-written duration: one non-negative integer and one unit suffix
+/// (`"90d"`, `"12h"`, `"30m"`, `"45s"`, `"2w"`), or a bare `"0"`.
 ///
-/// A day is 86400 seconds and a week is 7 days: this is a retention delay, not
-/// calendar arithmetic, so no time zone or DST rule enters into it. Months and
-/// years are refused for the same reason (they have no fixed length).
+/// A day is 86400 seconds and a week 7 days: a retention delay is not
+/// calendar arithmetic, so no time zone or DST rule enters into it, and
+/// months and years are refused for having no fixed length.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct HumanDuration(pub Duration);
 
@@ -782,29 +738,27 @@ impl Serialize for HumanDuration {
     }
 }
 
-/// What an account does: which endpoints it holds, which way changes flow, and
-/// whether the store keeps bodies.
+/// What an account does: which endpoints, which direction, whether the
+/// store keeps bodies.
 ///
-/// Declared, never derived. The mode is the arity of `sources` and `targets`
-/// plus the two flags, so nothing about an account's behaviour depends on a
-/// coincidence between two of its sources.
+/// Declared, never derived: the mode is the arity of `sources` and
+/// `targets` plus the two flags, so no behaviour depends on a coincidence
+/// between two sources.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AccountMode {
     /// The source names, sorted, so a report reads the same twice.
     pub sources: Vec<String>,
-    /// The target names, sorted. Empty means the local store is the
-    /// destination.
+    /// The target names, sorted; empty means the store is the destination.
     pub targets: Vec<String>,
     /// Whether the `sources` side is authoritative.
     pub one_way: bool,
-    /// Whether the store holds bodies, resolved from the destination when the
-    /// configuration left it unset.
+    /// Whether the store holds bodies, resolved from the destination when
+    /// the configuration left it unset.
     pub retain: bool,
 }
 
 impl AccountMode {
-    /// Whether the local store is the destination, every source merging or
-    /// overwriting into it rather than into another remote.
+    /// Whether the local store is the destination rather than a remote.
     pub fn is_local(&self) -> bool {
         self.targets.is_empty()
     }
@@ -812,10 +766,9 @@ impl AccountMode {
     /// Whether a crossing between two remotes may be streamed rather than
     /// staged in the store.
     ///
-    /// An internal choice, not a mode: what the user declared is `retain`, and
-    /// both answers honour it. Streaming is possible only where both endpoints
-    /// speak a protocol that can take a body straight from the other, which
-    /// today means IMAP to IMAP.
+    /// An internal choice, not a mode: what the user declared is `retain`,
+    /// which both answers honour. It needs both endpoints on a protocol that
+    /// takes a body straight from the other, so IMAP to IMAP today.
     pub fn streams(&self, sources: &HashMap<String, SourceConfig>) -> bool {
         !self.retain
             && !self.is_local()
@@ -865,25 +818,23 @@ where
     Ok(raw.map(|s| PathBuf::from(shellexpand::tilde(&s).into_owned())))
 }
 
-/// One source of the account's hub: the remote it talks to, plus the
-/// send channel its queued submit intents leave through when that remote
-/// cannot submit by itself.
+/// One source of the account's hub: the remote it talks to, plus the send
+/// channel its queued submit intents leave through.
 ///
-/// The channel belongs to the source, not to the account: a backend either
-/// sends natively (Microsoft Graph through `sendMail`, and JMAP once its
-/// submission lands) or needs a companion SMTP server, which is a
-/// property of that provider. At most one source per account may declare one.
+/// The channel belongs to the source and not the account, since sending
+/// natively (Graph's `sendMail`) or needing a companion SMTP server is a
+/// property of the provider. At most one source per account declares one.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SourceConfig {
     #[serde(flatten)]
     pub backend: SourceBackendConfig,
 
-    /// The SMTP submission server this source's queued submit intents are
-    /// flushed through. Only meaningful on a backend that cannot send by
-    /// itself (IMAP): a Graph source sends through the Graph `sendMail`
-    /// action instead. Absent (and no source that sends natively), queued
-    /// submit intents stay pending.
+    /// The SMTP server this source's queued submit intents flush through.
+    ///
+    /// Only meaningful on a backend that cannot send by itself (IMAP), a
+    /// Graph source using `sendMail` instead. Absent, and with no source
+    /// sending natively, submit intents stay pending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<SmtpConfig>,
 }
@@ -901,8 +852,8 @@ pub enum SourceBackendConfig {
 }
 
 impl SourceBackendConfig {
-    /// The protocol table this backend is written under, which is also the id
-    /// of the source the direct-backend sugar builds from it.
+    /// The protocol table this backend is written under, which is also the
+    /// id of the source the sugar builds from it.
     pub fn protocol(&self) -> &'static str {
         match self {
             Self::Imap(_) => "imap",
@@ -930,8 +881,7 @@ impl SourceConfig {
     source_accessor!(item, ItemSourcePermissions);
     source_accessor!(pool_size, Option<usize>);
 
-    /// Whether this source carries the removed `collection.namespace` key, so
-    /// the account can refuse it by name.
+    /// Whether this source carries the removed `collection.namespace` key.
     fn declares_namespace(&self) -> bool {
         self.collection().namespace.is_some()
     }
@@ -940,8 +890,7 @@ impl SourceConfig {
         matches!(self.backend, SourceBackendConfig::Imap(_))
     }
 
-    /// Whether this source talks a remote HTTP backend (JMAP, Gmail or
-    /// Microsoft Graph); these share the smaller default pool size.
+    /// Whether this source talks HTTP, those sharing a smaller default pool.
     pub fn is_http(&self) -> bool {
         matches!(
             self.backend,
@@ -953,15 +902,15 @@ impl SourceConfig {
         )
     }
 
-    /// Whether this source sends by itself, without a companion SMTP
-    /// channel: the Graph `sendMail` action today.
+    /// Whether this source sends by itself: Graph's `sendMail` today.
     pub fn sends_natively(&self) -> bool {
         matches!(self.backend, SourceBackendConfig::Msgraph(_))
     }
 
-    /// Whether this source can carry a send channel at all. A contacts or
-    /// calendar source cannot: submission is a mail capability, so an `smtp`
-    /// table there is a configuration error rather than a dead option.
+    /// Whether this source can carry a send channel at all.
+    ///
+    /// A contacts or calendar source cannot: submission is a mail
+    /// capability, so an `smtp` table there is an error, not a dead option.
     pub fn carries_mail(&self) -> bool {
         !matches!(
             self.backend,
@@ -969,10 +918,11 @@ impl SourceConfig {
         )
     }
 
-    /// Whether a body can be streamed straight from this source to another
-    /// rather than staged on the way. Only the IMAP to IMAP pairing can, so
-    /// this gates [`AccountMode::streams`], which is an optimisation of the
-    /// declared `retain` and never a mode of its own.
+    /// Whether a body streams straight from this source to another rather
+    /// than being staged on the way.
+    ///
+    /// Only an IMAP pairing can, so this gates [`AccountMode::streams`],
+    /// an optimisation of the declared `retain` and never a mode of its own.
     pub fn is_streamable(&self) -> bool {
         self.is_imap()
     }
@@ -1021,35 +971,34 @@ pub enum CollectionFilter {
     Exclude(Vec<String>),
 }
 
-/// A source's collection-level configuration: which hub collections it binds
-/// into, which of them it syncs, and what it may do to the collection set.
+/// A source's collection-level configuration: which collections it syncs,
+/// and what it may do to the collection set.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct CollectionSourceConfig {
-    /// Whether the sync may create a collection on this source, and delete one.
+    /// Whether the sync may create a collection on this source, and delete
+    /// one.
     ///
-    /// Both default to granting, unlike the `item` block, which requires its
-    /// pair to be declared in full. The asymmetry is deliberate: this table
-    /// also carries `filter`, so it is declared for reasons that have nothing
-    /// to do with permissions, and demanding a permission pair from someone
-    /// writing a filter would be a trap.
+    /// Both grant by default, unlike the `item` block, which must be
+    /// declared in full: this table also carries `filter`, and demanding a
+    /// permission pair from someone writing a filter would be a trap.
     #[serde(default = "default_true")]
     pub create: bool,
     #[serde(default = "default_true")]
     pub delete: bool,
 
-    /// Removed key, kept only so a configuration carrying it is refused by
-    /// name. Which endpoints meet is now the account's arity, and which way is
+    /// Removed key, kept so a configuration carrying it is refused by name.
+    ///
+    /// Which endpoints meet is now the account's arity, and which way is
     /// [`AccountConfig::one_way`].
     #[serde(default, skip_serializing)]
     namespace: Option<RemovedKey>,
 
     /// Collection-name filter for this source.
     ///
-    /// Per source rather than per account, because an account may hold sources
-    /// of several kinds and a mailbox include-list means nothing to a contacts
-    /// source. Filters are consequently asymmetric: a collection may be synced
-    /// on one source and skipped on another.
+    /// Per source, because an account may hold several kinds and a mailbox
+    /// include-list means nothing to a contacts source. Filters are
+    /// therefore asymmetric: a collection may sync on one source only.
     #[serde(default, alias = "filters", skip_serializing_if = "is_default")]
     pub filter: CollectionFilter,
 }
@@ -1105,14 +1054,9 @@ impl Default for FlagSourcePermissions {
 
 /// Per-source item permissions gating item mutations.
 ///
-/// `create` and `delete` are required when the block is declared at all
-/// (declare it in full or omit it); `update` instead **defaults to true**,
-/// because it was added after the fact: an existing configuration declaring
-/// only `create` and `delete` must keep parsing rather than failing on a
-/// missing field it could not have known about.
-///
-/// `update` only bites on a mutable-content backend. Mail bodies are
-/// immutable, so an in-place update never arises there and the gate is inert.
+/// `create` and `delete` are required once the block is declared at all;
+/// `update` defaults to true, added later so an older configuration keeps
+/// parsing. It bites on mutable content alone, mail bodies being immutable.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ItemSourcePermissions {
@@ -1146,9 +1090,10 @@ source_config! {
         pub tls: TlsConfig,
         #[serde(default, skip_serializing_if = "is_default")]
         pub starttls: bool,
-        /// ALPN protocol identifiers offered during the TLS handshake.
-        /// Unset takes io-imap's own default (`["imap"]`), which owns
-        /// it; set it to `[]` to skip ALPN.
+        /// ALPN identifiers offered during the TLS handshake.
+        ///
+        /// Unset takes io-imap's own default (`["imap"]`), which owns it;
+        /// `[]` skips ALPN.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub alpn: Option<Vec<String>>,
         pub sasl: Option<SaslConfig>,
@@ -1156,21 +1101,23 @@ source_config! {
 }
 
 source_config! {
-    /// CardDAV side (RFC 6352). The server URL is the entry point only:
-    /// the principal and the address book home set are discovered from it,
-    /// and each address book becomes a collection.
+    /// A CardDAV source (RFC 6352), each address book a collection.
+    ///
+    /// The server URL is the entry point only: the principal and the
+    /// address book home set are discovered from it.
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct CarddavConfig {
-        /// The DAV entry point: a bare authority
-        /// (`dav.example.org[:port]`, read as `https://<authority>`) or a
-        /// full URL (`https://dav.example.org/dav/`, or an `http://` one
-        /// for a server on a trusted network).
+        /// The DAV entry point.
+        ///
+        /// A bare authority (`dav.example.org[:port]`, read as
+        /// `https://<authority>`) or a full URL, `http://` included for a
+        /// server on a trusted network.
         pub server: String,
         #[serde(default)]
         pub tls: TlsConfig,
-        /// ALPN protocol identifiers offered during the TLS handshake.
-        /// Defaults to `["http/1.1"]`; set to `[]` to skip ALPN.
+        /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
+        /// by default; `[]` skips ALPN.
         #[serde(
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
@@ -1181,21 +1128,23 @@ source_config! {
 }
 
 source_config! {
-    /// CalDAV side (RFC 4791). The server URL is the entry point only:
-    /// the principal and the calendar home set are discovered from it, and
-    /// each calendar becomes a collection.
+    /// A CalDAV source (RFC 4791), each calendar a collection.
+    ///
+    /// The server URL is the entry point only: the principal and the
+    /// calendar home set are discovered from it.
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct CaldavConfig {
-        /// The DAV entry point: a bare authority
-        /// (`dav.example.org[:port]`, read as `https://<authority>`) or a
-        /// full URL (`https://dav.example.org/dav/`, or an `http://` one
-        /// for a server on a trusted network).
+        /// The DAV entry point.
+        ///
+        /// A bare authority (`dav.example.org[:port]`, read as
+        /// `https://<authority>`) or a full URL, `http://` included for a
+        /// server on a trusted network.
         pub server: String,
         #[serde(default)]
         pub tls: TlsConfig,
-        /// ALPN protocol identifiers offered during the TLS handshake.
-        /// Defaults to `["http/1.1"]`; set to `[]` to skip ALPN.
+        /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
+        /// by default; `[]` skips ALPN.
         #[serde(
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
@@ -1205,8 +1154,8 @@ source_config! {
     }
 }
 
-/// DAV authentication, shared by CardDAV and CalDAV: HTTP Basic (the common
-/// case) or a bearer token for a provider fronting DAV with OAuth 2.0.
+/// DAV authentication: HTTP Basic, or a bearer token for a provider
+/// fronting DAV with OAuth 2.0.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DavAuthConfig {
@@ -1222,13 +1171,11 @@ pub enum DavAuthConfig {
 
 #[cfg(feature = "dav")]
 impl DavAuthConfig {
-    /// Resolves the configured secret through `resolver` and converts to
-    /// io-webdav's auth.
+    /// Resolves the configured secret and converts to io-webdav's auth.
     ///
-    /// The resolver is what keeps an account's CardDAV and CalDAV sides,
-    /// which usually name one password entry, from unlocking it twice.
-    /// Resolution happens where a runtime account is built (see
-    /// [`crate::account`]), never per opened connection.
+    /// The resolver keeps an account's CardDAV and CalDAV sides, which
+    /// usually name one password entry, from unlocking it twice. It runs
+    /// where the account is built ([`crate::account`]), never per connection.
     pub fn try_into_dav_auth(
         self,
         resolver: &mut SecretResolver,
@@ -1256,8 +1203,8 @@ source_config! {
         pub server: String,
         #[serde(default)]
         pub tls: TlsConfig,
-        /// ALPN protocol identifiers offered during the TLS handshake.
-        /// Defaults to `["http/1.1"]`; set to `[]` to skip ALPN.
+        /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
+        /// by default; `[]` skips ALPN.
         #[serde(
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
@@ -1284,20 +1231,20 @@ pub enum JmapAuthConfig {
 }
 
 source_config! {
-    /// Gmail REST API side (`https://gmail.googleapis.com`). Labels are
-    /// exposed as mailboxes; the API host is fixed, so only the mailbox
-    /// owner, TLS and the OAuth 2.0 credential are configurable.
+    /// A Gmail REST API source, its labels exposed as mailboxes.
+    ///
+    /// The API host is fixed, so only the mailbox owner, TLS and the
+    /// OAuth 2.0 credential are configurable.
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct GmailConfig {
-        /// Gmail user id (the mailbox owner). Defaults to `me`, the
-        /// authenticated user.
+        /// Gmail user id, `me` by default: the authenticated user.
         #[serde(default = "default_gmail_user_id")]
         pub user_id: String,
         #[serde(default)]
         pub tls: TlsConfig,
-        /// ALPN protocol identifiers offered during the TLS handshake.
-        /// Defaults to `["http/1.1"]`; set to `[]` to skip ALPN.
+        /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
+        /// by default; `[]` skips ALPN.
         #[serde(
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
@@ -1307,31 +1254,31 @@ source_config! {
     }
 }
 
-/// Gmail authentication; only OAuth 2.0 bearer tokens are accepted.
+/// Gmail authentication: OAuth 2.0 bearer tokens only.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct GmailAuthConfig {
-    /// OAuth 2.0 bearer access token; the client adds the `Bearer `
-    /// prefix itself. Refresh is the caller's responsibility.
+    /// OAuth 2.0 bearer token, the `Bearer ` prefix added by the client.
+    ///
+    /// Refreshing it is the caller's responsibility.
     pub token: Secret,
 }
 
 source_config! {
-    /// Microsoft Graph API side (`https://graph.microsoft.com`). Mail
-    /// folders are exposed as mailboxes; the API host is fixed, so only
-    /// the mailbox owner, TLS and the OAuth 2.0 credential are
-    /// configurable.
+    /// A Microsoft Graph source, its mail folders exposed as mailboxes.
+    ///
+    /// The API host is fixed, so only the mailbox owner, TLS and the
+    /// OAuth 2.0 credential are configurable.
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct MsgraphConfig {
-        /// Graph user id (the mailbox owner). Defaults to `me`, the
-        /// authenticated user.
+        /// Graph user id, `me` by default: the authenticated user.
         #[serde(default = "default_msgraph_user_id")]
         pub user_id: String,
         #[serde(default)]
         pub tls: TlsConfig,
-        /// ALPN protocol identifiers offered during the TLS handshake.
-        /// Defaults to `["http/1.1"]`; set to `[]` to skip ALPN.
+        /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
+        /// by default; `[]` skips ALPN.
         #[serde(
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
@@ -1341,59 +1288,56 @@ source_config! {
     }
 }
 
-/// Microsoft Graph authentication; only OAuth 2.0 bearer tokens are
-/// accepted, neverest never runs an OAuth flow itself.
+/// Microsoft Graph authentication: OAuth 2.0 bearer tokens only, neverest
+/// never running an OAuth flow itself.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct MsgraphAuthConfig {
-    /// OAuth 2.0 bearer access token; the client adds the `Bearer `
-    /// prefix itself. Acquiring and refreshing the token is the
-    /// caller's responsibility: point `token.command` at any command
-    /// printing a valid token, typically ortie.
+    /// OAuth 2.0 bearer token, the `Bearer ` prefix added by the client.
+    ///
+    /// Acquiring and refreshing it is the caller's job: point
+    /// `token.command` at any command printing a valid token, ortie say.
     pub token: Secret,
 }
 
-/// The SMTP submission server a side's queued sends are flushed
-/// through (`<side>.smtp`).
+/// The SMTP server a source's queued sends flush through.
 ///
 /// The shape mirrors [`ImapConfig`] field for field, submission being the
-/// other half of the same mail account: a bare authority or a URL, the
-/// same TLS block, and a `sasl` table naming one mechanism.
+/// other half of the same mail account: a bare authority or a URL, the same
+/// TLS block, and a `sasl` table naming one mechanism.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SmtpConfig {
-    /// Submission server: a bare authority (`smtp.example.org[:port]`,
-    /// read as `smtps://<authority>`), a full `smtp://` URL (cleartext,
-    /// usually with `starttls`) or an `smtps://` URL (implicit TLS).
+    /// The submission server.
+    ///
+    /// A bare authority (`smtp.example.org[:port]`, read as
+    /// `smtps://<authority>`), a cleartext `smtp://` URL, usually with
+    /// `starttls`, or an `smtps://` URL for implicit TLS.
     pub server: String,
     #[serde(default)]
     pub tls: TlsConfig,
     /// Upgrades a plain `smtp://` connection via STARTTLS.
     #[serde(default, skip_serializing_if = "is_default")]
     pub starttls: bool,
-    /// ALPN protocol identifiers offered during the TLS handshake.
-    /// Unset takes io-smtp's own default (`["smtp"]`, the token RFC
-    /// 7595 registers), which owns it; set it to `[]` to skip ALPN.
+    /// ALPN identifiers offered during the TLS handshake.
+    ///
+    /// Unset takes io-smtp's own default (`["smtp"]`, the token RFC 7595
+    /// registers), which owns it; `[]` skips ALPN.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpn: Option<Vec<String>>,
-    /// The mechanism the submission session authenticates with, one
-    /// table of [`SaslConfig`]. Omit it for an unauthenticated relay,
-    /// which stops after `EHLO` and sends no `AUTH` at all.
+    /// The mechanism the session authenticates with, one [`SaslConfig`].
+    ///
+    /// Omit it for an unauthenticated relay, which stops after `EHLO` and
+    /// sends no `AUTH` at all.
     pub sasl: Option<SaslConfig>,
 }
 
 /// Resolves a configured `server` into a URL, `scheme` filling in for a
-/// value carrying none, so every backend accepts a bare authority
-/// (`dav.example.org`, `imap.example.org:143`) as readily as a full URL.
+/// value carrying none, so a bare authority is as good as a full URL.
 ///
-/// The presence of `://` is what tells them apart, and it has to be:
-/// a bare authority is **not** a relative URL. `url` reads
-/// `dav.example.org:8443` as the scheme `dav.example.org` with the path
-/// `8443`,
-/// which parses cleanly and carries no host, so a caller matching on
-/// [`ParseError::RelativeUrlWithoutBase`] catches the portless spelling
-/// and hands the ported one straight to a backend, which then rejects it
-/// for having no host.
+/// The presence of `://` tells them apart, and it has to: a bare authority
+/// is not a relative URL, `url` reading `dav.example.org:8443` as a scheme
+/// with a path, which parses cleanly and carries no host.
 #[cfg_attr(
     not(any(feature = "imap", feature = "smtp", feature = "dav")),
     allow(dead_code)
@@ -1416,8 +1360,7 @@ fn default_msgraph_user_id() -> String {
     String::from("me")
 }
 
-/// Default ALPN list for the HTTP-based backends (Gmail, Microsoft
-/// Graph): the REST APIs ride on HTTP/1.1.
+/// Default ALPN list for the HTTP backends: their APIs ride on HTTP/1.1.
 fn default_http_alpn() -> Vec<String> {
     vec![String::from("http/1.1")]
 }
@@ -1457,10 +1400,10 @@ pub enum RustlsCryptoConfig {
 )]
 impl TlsConfig {
     /// Builds the runtime [`Tls`] handle the connect helpers expect.
-    /// `alpn` is the protocol-level ALPN list (e.g. `["imap"]`,
-    /// `["http/1.1"]`); pass an empty vec to skip ALPN. The TOML
-    /// schema never exposes `tls.rustls.alpn` directly: the per-
-    /// protocol `*.alpn` field is folded in here.
+    ///
+    /// `alpn` is the protocol-level list, empty to skip ALPN. The schema
+    /// never exposes `tls.rustls.alpn`: the per-protocol `*.alpn` field is
+    /// folded in here.
     pub fn into_tls(self, alpn: Vec<String>) -> Tls {
         Tls {
             provider: self.provider.map(|p| match p {
@@ -1542,14 +1485,11 @@ pub struct SaslScramSha256Config {
 
 #[cfg_attr(not(any(feature = "imap", feature = "smtp")), allow(dead_code))]
 impl SaslConfig {
-    /// Resolves the SASL config into a runtime [`Sasl`], reading its secret
-    /// through `resolver`. `host` and `port` come from the live server URL,
-    /// and only OAUTHBEARER uses them, echoing them in the GS2 header.
+    /// Resolves the SASL config into a runtime [`Sasl`].
     ///
-    /// The resolver is what keeps an account's IMAP and SMTP tables, which
-    /// usually name one password entry, from unlocking it twice. Resolution
-    /// happens where a runtime account is built (see [`crate::account`]),
-    /// never per opened connection.
+    /// `host` and `port` come from the live server URL and only OAUTHBEARER
+    /// uses them, in the GS2 header. The resolver keeps an account's IMAP
+    /// and SMTP tables, which usually name one entry, from unlocking twice.
     pub fn try_into_sasl(
         self,
         host: impl ToString,
@@ -1645,9 +1585,8 @@ msgraph.user-id = "me"
         assert!(err.to_string().contains("device-code"));
     }
 
-    /// The sugar's source id is its protocol name, which is the id the expanded
-    /// form writes: the store cannot tell the two spellings apart, so expanding
-    /// an account by hand never orphans a binding.
+    /// The store cannot tell the two spellings apart, so expanding an
+    /// account by hand never orphans a binding.
     #[test]
     fn the_direct_backend_sugar_expands_to_the_same_source() {
         let sugar: AccountConfig = toml::from_str(
@@ -1958,9 +1897,8 @@ msgraph.user-id = "me"
         assert!(err.contains("exactly one direct mail backend"), "got {err}");
     }
 
-    /// The send channel spells its credentials exactly as the sync side
-    /// does, token mechanisms included, and omits the table for a relay
-    /// that takes no `AUTH`.
+    /// The send channel spells its credentials as the sync side does, and
+    /// omits the table for a relay that takes no `AUTH`.
     #[test]
     fn the_send_channel_names_a_sasl_mechanism() {
         let account: AccountConfig = toml::from_str(
@@ -1987,9 +1925,8 @@ msgraph.user-id = "me"
         assert!(relay.smtp.expect("a declared channel").sasl.is_none());
     }
 
-    /// The retired flat spelling is refused rather than silently ignored,
-    /// which would open an unauthenticated session against a server that
-    /// requires one.
+    /// Ignoring the retired flat spelling would open an unauthenticated
+    /// session against a server that requires one, so it is refused.
     #[test]
     fn the_flat_login_and_password_spelling_is_refused() {
         let err = toml::from_str::<AccountConfig>(
@@ -2006,9 +1943,8 @@ msgraph.user-id = "me"
         assert!(err.contains("login"), "got {err}");
     }
 
-    /// A bare authority carrying a port is the case that used to reach a
-    /// backend as a hostless URL: `url` reads `dav.example.org:8443` as the
-    /// scheme `dav.example.org`, so it parses and only the backend notices.
+    /// A bare authority with a port used to reach a backend as a hostless
+    /// URL, `url` reading `dav.example.org:8443` as a scheme and a path.
     #[test]
     fn a_server_resolves_from_an_authority_with_or_without_a_port() {
         for (server, scheme, host, port) in [

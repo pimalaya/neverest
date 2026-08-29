@@ -1,14 +1,11 @@
-//! Email address shared across all mail protocols.
+//! # Address
 //!
-//! Mail-specific; the kind seam (change `generic-pim-sync`, phase 2)
-//! moves it under the `message/rfc822` kind.
+//! An email address shared by every mail protocol. Mail-specific: phase 2
+//! of the kind seam moves it under the `message/rfc822` kind.
 
 use serde::{Deserialize, Serialize};
 
 /// A single email address with an optional display name.
-///
-/// Common shape used by every protocol-specific envelope and message
-/// representation.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Address {

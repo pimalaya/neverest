@@ -1,36 +1,22 @@
-//! Microsoft Graph client adapter for the shared cross-protocol client.
+//! # Microsoft Graph client
 //!
-//! [`GraphClient`] wraps the std blocking io-msgraph client with the
-//! folder name map (Graph addresses folders by id, the sync keys
-//! mailboxes by display name), the delta row cache serving the `Meta`
-//! tier, and keep-alive handling (the stream is reopened when the
-//! server closed it). It implements the same adapter surface as the
-//! IMAP backend: `enumerate` drives the Graph messages delta query
-//! carrying the `@odata.deltaLink` URL as the engine's opaque
-//! checkpoint (HTTP 410 = expired link, restarting a fresh full round),
-//! `fetch_envelopes` serves the cached delta rows, the body methods
-//! fetch the raw RFC 5322 MIME content via `/$value`.
+//! [`GraphClient`] wraps the std blocking io-msgraph client behind the same
+//! adapter surface as the IMAP backend, with the folder name map, the delta row
+//! cache serving the `Meta` tier and stream reopens.
 //!
-//! Folders are listed two levels deep: the top-level folders plus one
-//! level of children, named `Parent/Child` so the sync sees a
-//! conventional hierarchy. Deeper nesting is not replicated.
+//! `enumerate` drives the messages delta query, carrying the `@odata.deltaLink`
+//! as the engine's opaque checkpoint (HTTP 410 means an expired link and
+//! restarts a fresh full round). Folders are listed two levels deep, named
+//! `Parent/Child`; deeper nesting is not replicated.
 //!
-//! Push scope is honest: flag changes push through `message_update` and
-//! deletes through `message_delete`; appends, moves and mailbox
-//! mutations are rejected (pull-only), so a two-source mirror with a
-//! Graph side propagates flags and deletions but not new messages into
-//! Graph.
+//! Push scope is honest: flag changes and deletes push, appends, moves and
+//! mailbox mutations are rejected, so a mirror with a Graph side propagates
+//! flags and deletions but no new message into Graph.
 //!
-//! Graph message ids (the replica handles) are mutable across
-//! folder moves (no immutable-id support yet), so a moved message
-//! surfaces as a removal in the old round plus an addition in the new
-//! one. A delta reset (expired link) never changes handle identity —
-//! Graph ids survive it — so no handle-space rebuild (and no
-//! `collections.generation` bump) ever follows, unlike the IMAP
-//! UIDVALIDITY path. Flags map to the IANA wire spellings: `isRead`
-//! becomes `\Seen`, a `flagged` follow-up flagStatus becomes
-//! `\Flagged` and `isDraft` becomes `\Draft`; `\Answered` and
-//! `\Deleted` have no Graph delta equivalent and are never produced.
+//! Graph message ids are mutable across folder moves (no immutable-id support
+//! yet), so a moved message surfaces as a removal plus an addition. A delta
+//! reset never changes handle identity, so no handle-space rebuild follows,
+//! unlike the IMAP UIDVALIDITY path.
 
 use std::{collections::HashMap, io::Write, time::Duration};
 
@@ -67,10 +53,8 @@ use crate::{
     },
 };
 
-/// The `$select` projection of the delta query: the envelope fields the
-/// meta v1 summary and the flag mapping need, nothing more, so delta
-/// pages stay small (Graph exposes no RFC 5322 octet size, the blob
-/// length fills the meta `size` at the `Full` tier).
+/// The `$select` projection of the delta query: the envelope fields the meta
+/// summary and the flag mapping need, so delta pages stay small.
 const DELTA_SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,internetMessageId,isRead,isDraft,flag,parentFolderId";
 
 /// The page size requested when listing mail folders.
@@ -81,20 +65,20 @@ pub struct GraphClient {
     inner: MsgraphClientStd,
     /// The TLS configuration, kept for stream reopens.
     tls: Tls,
-    /// Folder display name (or `Parent/Child` path) to folder id,
-    /// refreshed from the folder listing when a name misses.
+    /// Folder display name (or `Parent/Child` path) to folder id, refreshed
+    /// from the folder listing when a name misses.
     folders: HashMap<String, String>,
     /// The delta rows of the last enumerations, keyed by collection then
     /// handle, serving the `Meta` tier without re-fetching.
     rows: HashMap<String, HashMap<String, MsgraphMessage>>,
-    /// Whether the server allowed reusing the stream after the last
-    /// exchange; when false the next operation reopens it.
+    /// Whether the server allowed reusing the stream after the last exchange;
+    /// when false the next operation reopens it.
     alive: bool,
 }
 
 impl GraphClient {
-    /// Opens the TLS connection to the Graph API with the given bearer
-    /// token, scoped to the `user` mailbox owner (`me` or a user id).
+    /// Opens the TLS connection to the Graph API with the given bearer token,
+    /// scoped to the `user` mailbox owner (`me` or a user id).
     pub fn connect(token: &SecretString, user: &str, tls: Tls) -> Result<Self> {
         let options = MsgraphClientStdConnectOptions {
             tls: tls.clone(),
@@ -112,8 +96,7 @@ impl GraphClient {
         })
     }
 
-    /// Reopens the stream to the Graph API endpoint, keeping the bearer
-    /// credential.
+    /// Reopens the stream to the Graph API endpoint, keeping the credential.
     fn reconnect(&mut self) -> Result<()> {
         debug!("reopening the graph stream");
 
@@ -131,8 +114,8 @@ impl GraphClient {
         Ok(())
     }
 
-    /// Runs one Graph operation, reopening the stream first when the
-    /// server closed it, and records the new keep-alive hint.
+    /// Runs one Graph operation, reopening the stream first when the server
+    /// closed it, and records the new keep-alive hint.
     fn op<T>(
         &mut self,
         run: impl FnOnce(&mut MsgraphClientStd) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
@@ -146,10 +129,10 @@ impl GraphClient {
         Ok(out.response)
     }
 
-    /// Lists the synced mail folders as shared mailboxes: every
-    /// top-level mail folder plus one level of children (named
-    /// `Parent/Child`), paged through the OData next links. The name
-    /// map is refreshed as a side effect. Counts are not populated.
+    /// Lists the synced mail folders as shared mailboxes, every top-level
+    /// folder plus one level of children named `Parent/Child`.
+    ///
+    /// The name map is refreshed as a side effect; counts are not populated.
     pub fn list_mailboxes(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         Ok(self
             .list_folders()?
@@ -163,8 +146,8 @@ impl GraphClient {
             .collect())
     }
 
-    /// Lists the replicated folder names with their ids, refreshing the
-    /// name map as a side effect.
+    /// Lists the replicated folder names with their ids, refreshing the name
+    /// map as a side effect.
     fn list_folders(&mut self) -> Result<Vec<(String, String)>> {
         debug!("begin graph folder listing");
 
@@ -221,8 +204,8 @@ impl GraphClient {
         .context("Follow folder paging link error")
     }
 
-    /// Resolves a collection name to its Graph folder id,
-    /// case-insensitively, refreshing the folder map on a miss.
+    /// Resolves a collection name to its Graph folder id, case-insensitively,
+    /// refreshing the folder map on a miss.
     fn folder_id(&mut self, name: &str) -> Result<String> {
         if let Some(id) = lookup_folder(&self.folders, name) {
             return Ok(id);
@@ -231,11 +214,11 @@ impl GraphClient {
         lookup_folder(&self.folders, name).with_context(|| format!("Unknown Graph folder {name}"))
     }
 
-    /// Enumerates a mailbox through one Graph delta round. The opaque
-    /// `cursor` bytes carry the previous round's `@odata.deltaLink`;
-    /// without one (first sync, or an unreadable checkpoint) a fresh
-    /// full round runs. The returned checkpoint is the next round's
-    /// delta link.
+    /// Enumerates a mailbox through one Graph delta round.
+    ///
+    /// The opaque `cursor` carries the previous round's `@odata.deltaLink`;
+    /// without one (first sync, or an unreadable checkpoint) a fresh full round
+    /// runs. The returned checkpoint is the next round's delta link.
     pub fn enumerate(&mut self, mailbox: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
         let link = cursor.and_then(decode_checkpoint);
         let (rows, fresh, delta_link) = self.delta_round(mailbox, link)?;
@@ -266,11 +249,12 @@ impl GraphClient {
         })
     }
 
-    /// Runs one full delta round over a folder: the saved delta link
-    /// when given (falling back to a fresh round on an expired link,
-    /// HTTP 410), else a fresh folder-scoped round, paging until the
-    /// delta link closes it. Returns the accumulated rows, whether the
-    /// round was a fresh full one, and the next round's delta link.
+    /// Runs one full delta round over a folder, paging until the delta link
+    /// closes it.
+    ///
+    /// Resumes from the saved link when given, falling back to a fresh round on
+    /// an expired one (HTTP 410). Returns the rows, whether the round was a
+    /// fresh full one, and the next round's delta link.
     fn delta_round(
         &mut self,
         mailbox: &str,
@@ -326,8 +310,8 @@ impl GraphClient {
             .with_context(|| format!("Start delta of {mailbox} error"))
     }
 
-    /// Folds a delta round's rows into the per-collection cache:
-    /// changed rows are stored by handle, removed rows are dropped.
+    /// Folds a delta round's rows into the per-collection cache: changed rows
+    /// are stored by handle, removed rows are dropped.
     fn cache_rows(&mut self, mailbox: &str, rows: &[MsgraphMessageDelta]) {
         let cache = self.rows.entry(mailbox.to_owned()).or_default();
         for row in rows {
@@ -342,8 +326,8 @@ impl GraphClient {
         }
     }
 
-    /// The delta row of a handle: the enumeration cache when it holds
-    /// it, else a targeted single-message get.
+    /// The delta row of a handle: the enumeration cache when it holds it, else
+    /// a targeted single-message get.
     fn row(&mut self, mailbox: &str, id: &str) -> Result<MsgraphMessage> {
         match self.rows.get(mailbox).and_then(|cache| cache.get(id)) {
             Some(message) => Ok(message.clone()),
@@ -353,10 +337,11 @@ impl GraphClient {
         }
     }
 
-    /// Fetches envelopes for a message-id set, served from the cached
-    /// delta rows (one message get per handle missing the cache). Graph
-    /// exposes no RFC 5322 octet size, so `size` stays 0 and the meta
-    /// `size` is filled from the blob length at the `Full` tier.
+    /// Fetches envelopes for a message-id set, served from the cached delta
+    /// rows (one message get per handle missing the cache).
+    ///
+    /// Graph exposes no RFC 5322 octet size, so `size` stays 0 and is filled
+    /// from the blob length at the `Full` tier.
     pub fn fetch_envelopes(&mut self, mailbox: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
         let mut envelopes = Vec::with_capacity(ids.len());
         for id in ids {
@@ -366,9 +351,8 @@ impl GraphClient {
         Ok(envelopes)
     }
 
-    /// Streams the bodies of a message-id set: one raw MIME get per
-    /// message (Graph has no batched body fetch), each routed to its
-    /// own sink.
+    /// Streams the bodies of a message-id set: one raw MIME get per message,
+    /// Graph having no batched body fetch.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         _mailbox: &str,
@@ -405,11 +389,12 @@ impl GraphClient {
             .with_context(|| format!("Get raw message {id} error"))
     }
 
-    /// Replaces the flags of a message-id set: `\Seen` maps to
-    /// `isRead`, `\Flagged` to the follow-up flagStatus. Only
-    /// [`FlagOp::Set`] is supported (the engine pushes full flag sets);
-    /// `\Draft` is read-only on Graph and other keywords have no Graph
-    /// equivalent, both are ignored.
+    /// Replaces the flags of a message-id set: `\Seen` maps to `isRead`,
+    /// `\Flagged` to the follow-up flagStatus.
+    ///
+    /// Only [`FlagOp::Set`] is supported, the engine pushing full flag sets.
+    /// `\Draft` is read-only on Graph and other keywords have no equivalent,
+    /// both ignored.
     pub fn store_flags(&mut self, ids: &[&str], flags: &[Flag], op: FlagOp) -> Result<()> {
         if !matches!(op, FlagOp::Set) {
             bail!("Graph flag updates only support a full set");
@@ -430,33 +415,26 @@ impl GraphClient {
         Ok(())
     }
 
-    /// Sends raw RFC 5322 MIME bytes through the Graph sendMail action,
-    /// this side's send channel for a queued submit intent. Graph saves the
-    /// message to Sent itself.
+    /// Sends raw RFC 5322 MIME bytes through the Graph sendMail action, which
+    /// saves the message to Sent itself.
     ///
-    /// The client error comes back unwrapped, so the caller can read the
-    /// HTTP status off it and tell a rejection of this message (permanent)
-    /// from a transient failure worth retrying.
-    ///
-    /// sendMail derives the recipients from the MIME headers (Bcc
-    /// included), so envelope recipients beyond the headers are lost;
-    /// acceptable for submission clients, whose recipients ride in the
-    /// headers.
+    /// The client error comes back unwrapped, so the caller can read the HTTP
+    /// status off it. sendMail derives the recipients from the MIME headers
+    /// (Bcc included), so envelope recipients beyond the headers are lost.
     pub fn send_mime(&mut self, raw: &[u8]) -> Result<(), MsgraphClientStdError> {
         self.op(|client| client.mail_send_mime(raw))?;
         Ok(())
     }
 }
 
-/// Whether a client error is an expired delta link (HTTP 410), the
-/// signal to restart a full round.
+/// Whether a client error is an expired delta link (HTTP 410), the signal to
+/// restart a full round.
 fn is_expired_link(err: &MsgraphClientStdError) -> bool {
     matches!(err, MsgraphClientStdError::Send(send) if send.status() == Some(410))
 }
 
-/// Folds one folder listing page into the `(name, id)` entries,
-/// prefixing child folders with their parent name. Folders missing a
-/// name or an id are skipped.
+/// Folds one folder listing page into `(name, id)` entries, prefixing child
+/// folders with their parent name. Folders missing a name or an id are skipped.
 fn fold_folder_page(
     entries: &mut Vec<(String, String)>,
     parent: Option<&str>,
@@ -474,8 +452,8 @@ fn fold_folder_page(
     }
 }
 
-/// Finds a folder id by mailbox name, case-insensitively (the sync
-/// matches mailbox names case-insensitively too).
+/// Finds a folder id by mailbox name, case-insensitively, as the sync matches
+/// mailbox names too.
 fn lookup_folder(folders: &HashMap<String, String>, name: &str) -> Option<String> {
     folders
         .iter()
@@ -483,9 +461,8 @@ fn lookup_folder(folders: &HashMap<String, String>, name: &str) -> Option<String
         .map(|(_, id)| id.clone())
 }
 
-/// Maps a delta row to the shared flag set: `\Seen` for a read message,
-/// `\Flagged` for a flagged follow-up, `\Draft` for a draft.
-/// `\Answered` and `\Deleted` have no Graph delta equivalent.
+/// Maps a delta row to the shared flag set. `\Answered` and `\Deleted` have no
+/// Graph delta equivalent and are never produced.
 fn message_flags(message: &MsgraphMessage) -> std::collections::BTreeSet<Flag> {
     let mut flags = std::collections::BTreeSet::new();
     if message.is_read == Some(true) {
@@ -501,9 +478,8 @@ fn message_flags(message: &MsgraphMessage) -> std::collections::BTreeSet<Flag> {
     flags
 }
 
-/// The `message_update` patch replacing a message's flags: `isRead`
-/// from `\Seen`, the follow-up flagStatus from `\Flagged`. Every other
-/// field stays absent, so the PATCH touches nothing else.
+/// The `message_update` patch replacing a message's flags. Every other field
+/// stays absent, so the PATCH touches nothing else.
 fn flags_patch(flags: &[Flag]) -> MsgraphMessage {
     let seen = flags.iter().any(|f| f.iana() == Some(IanaFlag::Seen));
     let flagged = flags.iter().any(|f| f.iana() == Some(IanaFlag::Flagged));
@@ -520,8 +496,7 @@ fn flags_patch(flags: &[Flag]) -> MsgraphMessage {
     }
 }
 
-/// The author-claimed date of a delta row (Graph emits ISO 8601
-/// date-times).
+/// The author-claimed date of a delta row (Graph emits ISO 8601 date-times).
 fn message_date(message: &MsgraphMessage) -> Option<DateTime<FixedOffset>> {
     let raw = message.received_date_time.as_deref()?;
     DateTime::parse_from_rfc3339(raw).ok()
@@ -557,9 +532,8 @@ fn encode_checkpoint(link: &str) -> Vec<u8> {
     link.as_bytes().to_vec()
 }
 
-/// Decodes checkpoint bytes back into the delta link; `None` for an
-/// absent, empty or non-UTF-8 checkpoint, which forces a fresh full
-/// round rather than a bogus delta.
+/// Decodes checkpoint bytes back into the delta link; `None` for an absent,
+/// empty or non-UTF-8 checkpoint, which forces a fresh full round.
 fn decode_checkpoint(bytes: &[u8]) -> Option<String> {
     let link = std::str::from_utf8(bytes).ok()?;
     (!link.is_empty()).then(|| link.to_owned())
@@ -571,8 +545,8 @@ mod tests {
 
     use super::*;
 
-    /// A delta row fixture as Graph would serialize it, exercising the
-    /// serde shape along the way.
+    /// A delta row fixture as Graph would serialize it, exercising the serde
+    /// shape along the way.
     fn fixture_row() -> MsgraphMessage {
         serde_json::from_str(
             r#"{

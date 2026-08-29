@@ -1,15 +1,13 @@
-//! DAV wizard (contacts and calendar).
+//! # DAV wizard
 //!
-//! A DAV server is addressed by URL and authenticates with HTTP Basic in the
-//! common case, or with a bearer token where the provider fronts DAV with
-//! OAuth 2.0. The discovered entry supplies the URL, so the wizard only
-//! collects the login and its secret, then opens the session (which discovers
-//! the home set) as the connection test.
+//! Contacts and calendar. A DAV server authenticates with HTTP Basic, or with
+//! a bearer token where the provider fronts DAV with OAuth 2.0; the discovered
+//! entry supplies the URL, so the wizard collects the login and its secret and
+//! opens a session, which discovers the home set, as the connection test.
 //!
-//! One flow serves CardDAV and CalDAV: the two ask the same questions and
-//! write the same fields under a different table, so the only thing
-//! [`DavKind`] decides here is what the prompts are called and which config
-//! the answers land in.
+//! One flow serves CardDAV and CalDAV: they ask the same questions and write
+//! the same fields under a different table, so [`DavKind`] decides only what
+//! the prompts are called and which config the answers land in.
 
 use anyhow::Result;
 use pimalaya_cli::{prompt, spinner::Spinner};

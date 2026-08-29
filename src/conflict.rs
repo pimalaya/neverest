@@ -1,22 +1,16 @@
-//! The divergences a run parked, and the decision that settles one.
+//! # Conflicts
 //!
-//! Every run three-way merges what nobody disagreed about (see
-//! [`crate::kind::merge`]) and parks the rest. What is left is a genuine
-//! disagreement: both sides changed the same field, and whose edit wins is
-//! not a decision a sync can make. This module is the other end of that, the
-//! vocabulary the conflict command reads the parked divergences with, plus
-//! the one write that settles one.
+//! The divergences a run parked, and the decision that settles one. Every run
+//! three-way merges what nobody disagreed about (see [`crate::kind::merge`])
+//! and parks the genuine disagreements, whose winner a sync cannot pick.
 //!
-//! Deciding is a command and never a run. Nothing here is reached from a
-//! sync, whatever is attached to its terminal: a run has one when a wrapper
-//! script drives it, when a pane nobody is sitting at watches it and when a
-//! person is waiting, and the three are indistinguishable from inside.
+//! Deciding is a command and never a run: nothing here is reached from a
+//! sync, whatever is attached to its terminal.
 //!
-//! A resolution is an ordinary edit. The chosen body is staged through the
-//! store's queue as an update and drained in the same breath, which is
-//! already the path whoever owns an edit resolves a conflict by, so a settled
-//! body is written exactly one way. Nothing is pushed from here; the next run
-//! does that, conditioned on the revision the divergence was recorded at.
+//! A resolution is an ordinary edit, staged through the store's queue and
+//! drained in the same breath, so a settled body is written exactly one way.
+//! Nothing is pushed from here; the next run does that, conditioned on the
+//! revision the divergence was recorded at.
 
 pub mod merger;
 pub mod report;
@@ -35,28 +29,32 @@ use crate::kind::Kind;
 /// remote body both moved away from the base the last sync agreed on.
 #[derive(Clone, Debug)]
 pub struct Conflict {
-    /// The item's public id, which is what every neverest command addresses
-    /// an item by. It is store-global and shared by the item's placements,
-    /// so it names the card rather than one source's binding of it.
+    /// The item's public id, which every neverest command addresses it by.
+    ///
+    /// Store-global and shared by the item's placements, so it names the card
+    /// rather than one source's binding of it.
     pub id: i64,
     /// The store collection the item sits in, spelled `<namespace>/<name>`.
     pub collection: String,
-    /// The IANA media type that collection is declared with, which is what
-    /// picks the parse a settled body is summarized through and the
+    /// The IANA media type that collection is declared with.
+    ///
+    /// It picks the parse a settled body is summarized through, and the
     /// extension an export is written under.
     pub media_type: String,
-    /// The source whose own sync is stuck on the divergence. One source may
-    /// be conflicted while another holding the same item is in sync, which
-    /// is why a decision names this as well as the item.
+    /// The source whose own sync is stuck on the divergence.
+    ///
+    /// One source may be conflicted while another holding the same item is in
+    /// sync, which is why a decision names this as well as the item.
     pub source: String,
     /// The item's handle on that source, which the next run pushes to.
     pub handle: String,
-    /// The item's cross-source identity, which the same binding is found
-    /// again by when a decision is applied.
+    /// The item's cross-source identity, which finds the same binding again
+    /// when a decision is applied.
     pub link_id: ReplicaLinkId,
-    /// The remote revision observed when the divergence was recorded, or
-    /// `None` from a remote reporting none. A decision computed against it
-    /// is stale once it moves, which is what [`Conflict::apply`] refuses on.
+    /// The remote revision observed when the divergence was recorded.
+    ///
+    /// `None` from a remote reporting none. A decision computed against it is
+    /// stale once it moves, which is what [`Conflict::apply`] refuses on.
     pub revision: Option<String>,
     /// The body the last sync agreed on, the merge's common ancestor.
     pub base: Option<ReplicaHash>,
@@ -69,18 +67,16 @@ pub struct Conflict {
 
 /// What applying a decision concluded.
 ///
-/// Only the first of the three changed anything, and the other two are
-/// outcomes rather than failures: the store moved under a decision that took
-/// a person some minutes to make, which is ordinary and is exactly what the
-/// guard exists to notice.
+/// Only the first of the three changed anything; the other two are outcomes
+/// rather than failures, the store having moved under a decision that took a
+/// person some minutes to make, which is what the guard exists to notice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Applied {
     /// The chosen body was staged as an edit and drained, so the item is no
     /// longer conflicted.
     Resolved,
-    /// The store has observed a newer remote revision than the one the
-    /// decision was computed against, so nothing was pushed. Carries what
-    /// the store holds now.
+    /// The store has observed a newer remote revision than the decision was
+    /// computed against, so nothing was pushed. Carries what it holds now.
     Moved(Option<String>),
     /// The divergence is gone: another run, or another decision, settled it
     /// while this one was being made.
@@ -106,8 +102,7 @@ impl Conflict {
     ///
     /// A conflict is marked with the diverging remote body wanted rather than
     /// held, the engine fetching nothing by itself, so one whose remote side
-    /// has not landed yet is visible and listable and not resolvable. It
-    /// becomes resolvable on the next run, which fetches it.
+    /// has not landed is listable and not resolvable until the next run.
     pub fn resolvable(&self) -> bool {
         self.remote.is_some()
     }
@@ -144,18 +139,9 @@ impl Conflict {
 
     /// Applies `body` as the item's content, which settles the divergence.
     ///
-    /// The staleness guard comes first. An unresolved conflict tracks the
-    /// newest remote revision on every run, so a decision left in an editor
-    /// for an hour can be a decision about a version nobody holds any more,
-    /// and pushing it would overwrite everything that arrived meanwhile,
-    /// which is the loss the parking exists to prevent arriving at the last
-    /// step instead of the first. The store is therefore read again here,
-    /// under the caller's lock, and a revision that moved is reported rather
-    /// than applied.
-    ///
-    /// What follows is the edit path a run's own merge takes: the body into
-    /// the blob tree, an `update` onto the queue, and the collection drained
-    /// in the same breath.
+    /// A decision left in an editor can be about a version nobody holds any
+    /// more, so the store is read again first, under the caller's lock, and a
+    /// revision that moved is reported rather than pushed over what arrived.
     pub fn apply(&self, dir: &Path, account: &str, body: &[u8]) -> Result<Applied> {
         let mut store = PimdirStore::open(dir)
             .with_context(|| format!("Open the store of account {account}"))?
@@ -180,17 +166,15 @@ impl Conflict {
 
         // NOTE: before the blob write, so a body no parser reads never
         // reaches the tree at all. The automatic merge refuses the same
-        // thing with `Merged::Unmergeable`; this is the half a person, or
-        // the merger they named, writes by hand.
+        // thing with `Merged::Unmergeable`.
         kind.validate_body(body, &self.link_id)
             .with_context(|| format!("Settle conflict {} in {}", self.id, self.collection))?;
 
         let blobs = store.blobs();
 
-        // NOTE: opened before the first blob write rather than at it, the
-        // producer's staging lock being what keeps a collector out of the
-        // window between a body reaching the blob tree and the queue row
-        // pinning it.
+        // NOTE: opened before the first blob write, the producer's staging
+        // lock being what keeps a collector out of the window between a body
+        // reaching the blob tree and the queue row pinning it.
         let mut producer = PimdirProducer::open(dir, env!("CARGO_PKG_NAME"))
             .with_context(|| format!("Stage the resolution of conflict {}", self.id))?;
 
@@ -246,9 +230,9 @@ impl Conflict {
 /// The divergences an account's store is holding, by collection then item
 /// then source.
 ///
-/// The store answers this off a partial index over the conflicted flag, so a
-/// store with nothing outstanding pays for an empty index rather than for a
-/// pass over every collection.
+/// The store answers off a partial index over the conflicted flag, so a store
+/// with nothing outstanding pays for an empty index rather than for a pass
+/// over every collection.
 pub fn list(store: &PimdirReader, account: &str) -> Result<Vec<Conflict>> {
     let parked = store
         .list_conflicts(Some(account))
@@ -310,9 +294,8 @@ pub fn list(store: &PimdirReader, account: &str) -> Result<Vec<Conflict>> {
 /// on more than one of them.
 ///
 /// An id names an item and a divergence is one source's, so the two are not
-/// the same arity. They coincide for every account with one source of a
-/// kind, which is most of them, and the ambiguity is named rather than
-/// guessed at everywhere else.
+/// the same arity. They coincide for every account with one source of a kind,
+/// and the ambiguity is named rather than guessed at everywhere else.
 pub fn find(conflicts: Vec<Conflict>, id: i64, source: Option<&str>) -> Result<Conflict> {
     let mut found: Vec<Conflict> = conflicts
         .into_iter()
@@ -364,13 +347,12 @@ mod tests {
     /// The revision the store recorded the divergence at.
     const REVISION: &str = "etag-2";
 
-    /// The identity every seeded card states, and the one every placement
-    /// here is linked by. The fixture states it rather than leaving the body
-    /// and the link id to disagree, a settled body having to keep it.
+    /// The identity every seeded card states and every placement is linked
+    /// by, a settled body having to keep it.
     const UID: &str = "uid:a";
 
-    /// A card carrying one phone number, which is the field the two sides of
-    /// the seeded divergence set differently.
+    /// A card carrying one phone number, the field the two sides of the
+    /// seeded divergence set differently.
     fn card(tel: &str) -> String {
         format!(
             "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:{UID}\r\nFN:Jane Doe\r\nTEL:{tel}\r\nEND:VCARD\r\n"
@@ -425,12 +407,10 @@ mod tests {
         store
     }
 
-    /// A decision computed against a revision the store has since moved past
-    /// is a decision about a version nobody holds any more, and pushing it
-    /// would overwrite whatever arrived meanwhile. It is reported as moved
-    /// and changes nothing, and the same decision against the revision the
-    /// store does hold settles the item, so the guard discriminates rather
-    /// than refusing everything.
+    /// A decision computed against a revision the store has moved past would
+    /// overwrite whatever arrived meanwhile, so it is reported as moved and
+    /// changes nothing. The same decision against the revision the store does
+    /// hold settles the item, so the guard discriminates.
     #[test]
     fn a_resolution_against_a_moved_revision_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -474,10 +454,9 @@ mod tests {
     }
 
     /// A divergence whose remote body no run has fetched yet is a listing
-    /// entry and not a decision. The engine marks a conflict with that body
-    /// wanted rather than held, so this is the state every conflict passes
-    /// through, and reading it as resolvable would hand `--prefer-remote` a
-    /// side that is not there.
+    /// entry and not a decision. Every conflict passes through that state,
+    /// and reading it as resolvable would hand `--prefer-remote` a side that
+    /// is not there.
     #[test]
     fn a_conflict_waiting_for_its_diverging_body_is_listed_and_not_resolvable() {
         use crate::conflict::report::ConflictSummary;
@@ -515,11 +494,9 @@ mod tests {
 
     /// A body no parser reads is not a decision, whoever wrote it.
     ///
-    /// A tool that crashed after a partial write, or a person who saved a
-    /// half-finished template, would otherwise replace a real card with
-    /// something that is not one: the item keeps its link id and loses every
-    /// field the identity was derived from. The automatic merge already
-    /// refuses exactly this, with `Merged::Unmergeable`.
+    /// A crashed partial write, or a half-finished template saved by hand,
+    /// would otherwise replace a real card with something that is not one:
+    /// the item keeps its link id and loses every field behind the identity.
     #[test]
     fn a_settled_body_that_no_parser_reads_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -550,10 +527,9 @@ mod tests {
     /// A resolution that drops or changes the item's `UID` is a resolution of
     /// some other item.
     ///
-    /// The bytes read as a card here, so nothing structural catches it: what
-    /// does is that the store addresses the row by an identity its content no
-    /// longer states, which is exactly the state a frontend reads as one
-    /// contact and the server as another.
+    /// The bytes read as a card, so nothing structural catches it: the store
+    /// would address the row by an identity its content no longer states, a
+    /// frontend reading it as one contact and the server as another.
     #[test]
     fn a_settled_body_that_renames_the_item_is_refused() {
         let dir = tempfile::tempdir().unwrap();

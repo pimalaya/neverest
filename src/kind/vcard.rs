@@ -1,41 +1,30 @@
-//! The `text/vcard` kind: how a contact card derives its link id and its
-//! `v:1` summary.
+//! # vCard kind
 //!
-//! Unlike [mail](super::mail), a card has **one** derivation: a DAV
-//! `sync-collection` REPORT returns hrefs and ETags but no `UID`, so a card
-//! resolves at the `Full` tier only and [`parse_summary`](super::Kind::parse_summary)
-//! is `None` for this kind. There is therefore no two-derivations hazard to
-//! keep in agreement, which is the one thing mail got wrong.
+//! `text/vcard`: how a contact card derives its link id and its `v:1`
+//! summary. A card has one derivation only, a DAV `sync-collection` REPORT
+//! returning hrefs and ETags but no `UID`, so there is no two-derivations
+//! hazard to keep in agreement, which is the one thing mail got wrong.
 //!
 //! Cards are read with a deliberately small scanner rather than a vCard
-//! parser. The sync needs exactly two things out of a card, its `UID` and a
-//! handful of display fields, and it must never rewrite one: a card crosses
-//! this crate as opaque bytes, byte-for-byte, so a property this scanner does
-//! not understand cannot be lost. Rendering a card is the frontend's job, and
-//! that is where a full parser (vcard-rs) belongs.
+//! parser: the sync needs a `UID` and a few display fields and must never
+//! rewrite one, a card crossing this crate as opaque bytes. Rendering is the
+//! frontend's job, and that is where a full parser (vcard-rs) belongs.
 //!
-//! Unlike [mail](super::mail), this scanner is **not** yet
-//! [`io_pimdir::conventions::card`]. The link id and the summary shape are the
-//! format's, but io-pimdir's own scanner reads two properties differently, and
-//! both ways round it is the one that loses: it splits a property on the first
-//! colon, so a quoted parameter holding one (`FN;LANGUAGE="x:y":Jane Doe`,
-//! legal under RFC 6350 §3.3) cuts the value in half, and it leaves RFC 6350
-//! §3.4 escaping in place, so a reader displays `Doe\, Jane`. Delegating today
-//! would regress both, which
-//! `a_parameter_may_hold_a_colon_of_its_own` and
-//! `display_values_are_unescaped_but_the_body_is_not_touched` below would
-//! catch. They stay here until io-pimdir's card conventions read a card the
-//! same way, at which point this file becomes the delegation mail already is.
+//! The scanner is not yet [`io_pimdir::conventions::card`]: io-pimdir splits
+//! a property on the first colon, halving a value whose parameter is quoted
+//! around one (RFC 6350 §3.3), and leaves §3.4 escaping in place, so a reader
+//! displays `Doe\, Jane`. Two tests below hold the line until it does not.
 
 use io_replica::placement::{ReplicaLinkId, ReplicaMeta, ReplicaSortKey};
 use serde::Serialize;
 
-/// The `text/vcard` meta schema version this writer emits (pimdir SPEC Annex A).
+/// The `text/vcard` meta schema version this writer emits (SPEC Annex A).
 const META_VERSION: u8 = 1;
 
-/// Versioned card summary persisted as the `text/vcard` [`ReplicaMeta`] blob,
-/// the stable JSON contract a reader parses to render a contact list without
-/// fetching a body. Absent optional fields mean "unknown".
+/// Versioned card summary persisted as the `text/vcard` [`ReplicaMeta`] blob.
+///
+/// The stable JSON contract a reader parses to render a contact list without
+/// fetching a body. Absent optional fields mean unknown.
 #[derive(Serialize)]
 struct MetaSummary<'a> {
     /// Schema version ([`META_VERSION`]).
@@ -78,11 +67,11 @@ pub fn parse_body(raw: &[u8], size: u64) -> (ReplicaLinkId, ReplicaMeta, Replica
     (link_id, ReplicaMeta(meta), sort_key)
 }
 
-/// The card's position in an A-to-Z listing: its display name casefolded
-/// and trimmed (pimdir SPEC Annex A.2), which is what keeps `alice` and
-/// `Alice` from interleaving between two writers.
+/// The card's position in an A-to-Z listing: its display name casefolded and
+/// trimmed (pimdir SPEC Annex A.2).
 ///
-/// A card with no `FN` keeps the unknown (empty) key and sorts to the head,
+/// That is what keeps `alice` and `Alice` from interleaving between two
+/// writers. A card with no `FN` keeps the empty key and sorts to the head,
 /// where a nameless contact is visible rather than buried.
 fn sort_key(full_name: &str) -> ReplicaSortKey {
     ReplicaSortKey(full_name.trim().to_lowercase())
@@ -91,16 +80,9 @@ fn sort_key(full_name: &str) -> ReplicaSortKey {
 /// The link id for a card: its bare `UID`, else a digest of the whole body
 /// (`hash:`).
 ///
-/// pimdir SPEC Annex A.2 gives the identity as the `UID` verbatim, with
-/// nothing prepended; only the fallback is marked, since it names nothing any
-/// server has heard of.
-///
-/// A card without a `UID` is legal but unaddressable across servers, so the
-/// fallback only has to be stable and collision-resistant enough to keep two
-/// different cards apart within one store. FNV-1a is used rather than
-/// `DefaultHasher` because its output is fixed by its own specification: a
-/// hash that changed with a compiler version would silently re-link every
-/// such card and store its body twice.
+/// pimdir SPEC Annex A.2 gives the identity as the `UID` verbatim; only the
+/// fallback is marked. FNV-1a rather than `DefaultHasher`, whose output
+/// changing with a compiler version would re-link and duplicate every card.
 fn link_id(uid: Option<&str>, raw: &[u8]) -> ReplicaLinkId {
     match uid {
         Some(uid) if !uid.is_empty() => ReplicaLinkId::from(uid.to_owned()),
@@ -127,11 +109,11 @@ fn first(props: &[(String, String)], name: &str) -> Option<String> {
 }
 
 /// Splits a raw card into `(NAME, value)` pairs: lines unfolded (RFC 6350
-/// §3.2), group prefixes and parameters stripped from the name, the name
-/// upper-cased, and the value unescaped.
+/// §3.2), group prefixes and parameters stripped, the name upper-cased, the
+/// value unescaped.
 ///
-/// Bytes are read lossily on purpose: a card whose encoding a server got wrong
-/// still yields its `UID`, and the body itself is stored untouched either way.
+/// Bytes are read lossily on purpose: a card whose encoding a server got
+/// wrong still yields its `UID`, and the body is stored untouched either way.
 fn properties(raw: &[u8]) -> Vec<(String, String)> {
     let text = String::from_utf8_lossy(raw);
     let mut logical: Vec<String> = Vec::new();
@@ -171,9 +153,10 @@ fn split_property(line: &str) -> Option<(String, String)> {
     ))
 }
 
-/// The byte index of the first `:` outside a quoted parameter value. A
-/// parameter may legally hold one (`PHOTO;VALUE="uri:x":…`), and taking that
-/// one would cut the property name in half.
+/// The byte index of the first `:` outside a quoted parameter value.
+///
+/// A parameter may legally hold one (`PHOTO;VALUE="uri:x":…`), and taking
+/// that one would cut the property name in half.
 fn unquoted_colon(line: &str) -> Option<usize> {
     let mut quoted = false;
     for (index, char) in line.char_indices() {

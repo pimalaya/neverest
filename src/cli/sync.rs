@@ -1,5 +1,7 @@
-//! `neverest sync` command: runs the io-replica-based reconcile and prints the
-//! resulting [`crate::sync::report::SyncReport`].
+//! # Sync command
+//!
+//! Runs the io-replica-based reconcile and prints the resulting
+//! [`crate::sync::report::SyncReport`].
 
 use std::{
     fs::{self, File, TryLockError},
@@ -21,9 +23,10 @@ use crate::{
     offline::{driver, state::StoreState},
 };
 
-/// How long a run waits for another run's store lock before giving up:
-/// long enough for a connector-triggered scoped run to queue behind a
-/// cron tick, short enough to fail loudly on a wedged holder.
+/// How long a run waits for another run's store lock before giving up.
+///
+/// Long enough for a connector-triggered scoped run to queue behind a cron
+/// tick, short enough to fail loudly on a wedged holder.
 pub const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often the waiter retries the lock.
@@ -32,24 +35,23 @@ const LOCK_POLL: Duration = Duration::from_millis(500);
 /// Synchronizes the account's collections and items through its pimdir store.
 ///
 /// Each source is reconciled against the store, then against every target the
-/// account names. Sources never meet: an item one holds crosses to the targets,
-/// never to another source, so a mail source and a contacts source under one
-/// account stay apart.
+/// account names. Sources never meet: an item one holds crosses to the
+/// targets, never to another source, so a mail source and a contacts source
+/// under one account stay apart.
 ///
 /// The three filter flags keep their pre-`generic-pim-sync` spellings
 /// (`--include-mailbox`, `--exclude-mailbox`, `--all-mailboxes`) as hidden
-/// aliases, so existing scripts and the connector contract keep working.
+/// aliases, so existing scripts keep working.
 ///
 /// Exit code 0 means the run reconciled everything and left nothing waiting,
 /// 1 that it failed, and 2 that it reconciled its collections and left
 /// something waiting: a parked conflict, a duplicate `UID` the other side
-/// refuses, or a write it would not take. Each is one item wide and halts
-/// nothing, so none is a failure: under a supervisor restarting on failure
-/// they would loop over a state no supervisor can fix.
+/// refuses, or a write it would not take. None is a failure: each is one item
+/// wide and halts nothing, and under a supervisor restarting on failure they
+/// would loop over a state no supervisor can fix.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
-    /// Run the synchronization without applying any changes; only
-    /// prints the patch that would have been applied.
+    /// Print the patch that would be applied, without applying it.
     #[arg(long, short = 'd')]
     pub dry_run: bool,
 
@@ -101,9 +103,9 @@ pub struct SyncCommand {
     /// Accept a mode change that discards data, and remember the answer.
     ///
     /// Turning `one-way` on makes the sources authoritative, so the next run
-    /// discards whatever the other side changed on its own rather than merging
-    /// it. That first run is the one that loses them, which is why it is
-    /// refused until this says otherwise.
+    /// discards whatever the other side changed on its own rather than
+    /// merging it. That first run is the one that loses them, which is why it
+    /// is refused until this says otherwise.
     #[arg(long)]
     pub accept_mode: bool,
 }
@@ -163,7 +165,7 @@ impl SyncCommand {
             self.accept_mode,
         )?;
 
-        // Read before the report is printed, which consumes it.
+        // Read before printing, which consumes the report.
         let exit = Exit::from(&report);
         printer.out(report)?;
 
@@ -171,11 +173,11 @@ impl SyncCommand {
     }
 }
 
-/// Takes the store's advisory `sync.lock` for the whole run, waiting up
-/// to `timeout` for another run to release it (cron ticks and
-/// connector-triggered scoped runs serialize instead of failing), then
-/// erroring out clearly. The kernel releases the lock on FD close
-/// (normal exit or crash), so no PID file to clean up.
+/// Takes the store's advisory `sync.lock` for the whole run.
+///
+/// Waits up to `timeout` so cron ticks and connector-triggered scoped runs
+/// serialize instead of failing, then errors out. The kernel releases the
+/// lock on FD close, so there is no PID file to clean up.
 pub fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
     let lock_path = store_dir.join("sync.lock");
     let file = File::options()
@@ -213,9 +215,10 @@ pub fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
     }
 }
 
-/// Drops the pimdir store (items, bindings, checkpoints) and blobs so the next
-/// sync re-reconciles from scratch. A scoped reset (`--include-collection`) is not
-/// yet supported by the store; it drops everything.
+/// Drops the pimdir store and blobs so the next sync re-reconciles.
+///
+/// A scoped reset (`--include-collection`) is not yet supported by the
+/// store; it drops everything.
 fn reset_replica(replica: &std::path::Path, include: &[String]) -> Result<()> {
     if !include.is_empty() {
         info!("reset: per-collection scope not yet supported, resetting whole replica");
@@ -263,8 +266,8 @@ mod tests {
         acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap();
     }
 
-    /// The refusal a sidecar-less store raises names `--reset` as its remedy,
-    /// so a reset leaving the store sidecar-less would raise it again.
+    /// The refusal a sidecar-less store raises names `--reset` as its
+    /// remedy, so a reset leaving it sidecar-less would raise it again.
     #[test]
     fn a_reset_leaves_a_store_the_next_run_can_read() {
         let dir = tempfile::tempdir().unwrap();

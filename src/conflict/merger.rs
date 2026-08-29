@@ -1,22 +1,19 @@
-//! The interactive merger a person settles a collision with.
+//! # Interactive merger
 //!
-//! Neverest runs no editor and renders no form. It hands the three bodies to
-//! a program the account names and takes back one body, which is how every
-//! interactive merger works and leaves what the program does with them,
-//! opening an editor, drawing a form or asking nothing at all, none of
-//! neverest's business.
+//! The program a person settles a collision with. Neverest runs no editor and
+//! renders no form: it hands the three bodies to a program the account names
+//! and takes back one body, and what that program does with them is its own
+//! business.
 //!
 //! Following git mergetool, the bodies travel as filesystem paths rather than
 //! on standard input, base first, then the divergent sides, then the path to
-//! write. They are appended positionally, so a tool taking that order needs
-//! no further configuration, and a command carrying placeholders is
-//! substituted instead, for a tool with an argument shape of its own.
+//! write. They are appended positionally, and a command carrying placeholders
+//! is substituted instead, for a tool with an argument shape of its own.
 //!
-//! The result is taken only on a zero exit with the output written. An editor
-//! exits zero on a bare quit, so a zero exit alone is not a choice, and
-//! reading it as one would discard a side by accident. What written means
-//! here is the output file's bytes differing from the ones this put there,
-//! which no clock skew and no filesystem timestamp granularity can get wrong.
+//! The result is taken only on a zero exit with the output written: an editor
+//! exits zero on a bare quit, so a zero exit alone is not a choice. Written
+//! means the output file's bytes differ from the ones this put there, which
+//! no clock skew and no timestamp granularity can get wrong.
 
 use std::{
     fs,
@@ -34,10 +31,11 @@ use crate::conflict::Sides;
 /// with, in the order the positional form appends them.
 const PLACEHOLDERS: [&str; 4] = ["{base}", "{local}", "{remote}", "{output}"];
 
-/// The bytes the output path is seeded with, and therefore what an untouched
-/// output still holds when the merger returns. Empty, so a merger writing
-/// nothing and a merger writing an empty body are the same abort, which they
-/// are: an empty card settles nothing.
+/// The bytes the output path is seeded with, and what an untouched output
+/// still holds.
+///
+/// Empty, so a merger writing nothing and one writing an empty body are the
+/// same abort, which they are: an empty card settles nothing.
 const UNWRITTEN: &[u8] = b"";
 
 /// One invocation of the configured interactive merger over one divergence.
@@ -58,10 +56,9 @@ impl<'a> Merger<'a> {
     /// Writes the three bodies into `dir` under the kind's `extension` and
     /// names the output path beside them.
     ///
-    /// A side the store does not hold is refused here rather than exported as
-    /// an empty file: a merger handed an empty vCard as the common ancestor
-    /// would report every field as a conflict, which is a worse answer than
-    /// saying what is missing.
+    /// A side the store does not hold is refused rather than exported as an
+    /// empty file: a merger handed an empty vCard as the common ancestor
+    /// would report every field as a conflict.
     pub fn export(
         command: &'a CommandConfig,
         dir: &Path,
@@ -93,8 +90,7 @@ impl<'a> Merger<'a> {
     /// aborted by exiting non-zero or by leaving its output untouched.
     ///
     /// Standard input and output are the terminal's, which is the point: the
-    /// person typed the command this runs from, and whatever the merger draws
-    /// there is theirs to see.
+    /// person typed the command this runs from.
     pub fn run(&self) -> Result<Option<Vec<u8>>> {
         fs::write(&self.output, UNWRITTEN)
             .with_context(|| format!("Seed the merger output {}", self.output.display()))?;
@@ -126,9 +122,8 @@ impl<'a> Merger<'a> {
     fn command(&self) -> Command {
         match self.command {
             CommandConfig::Shell(line) => {
-                // A shell line is a line, so a path with a space in it (a
-                // TMPDIR under a home directory, most of them on macOS)
-                // becomes two arguments unless it is quoted here.
+                // A shell line is a line, so a path holding a space becomes
+                // two arguments unless it is quoted here.
                 let paths = self.paths(quote);
 
                 match substitute(line, &paths) {
@@ -137,8 +132,8 @@ impl<'a> Merger<'a> {
                 }
             }
             CommandConfig::Argv { program, args } => {
-                // No shell in between, so the kernel exec rules apply and a
-                // path is one argument whatever it holds.
+                // No shell in between, so a path is one argument whatever it
+                // holds.
                 let paths = self.paths(|path| path.display().to_string());
 
                 let mut command = Command::new(program);
@@ -213,8 +208,7 @@ fn quote(path: &Path) -> String {
 mod tests {
     use super::*;
 
-    /// The three bodies an export writes out, which are the same three the
-    /// merger tests hand over.
+    /// The three bodies every merger test hands over.
     fn sides() -> Sides {
         Sides {
             base: Some(b"base".to_vec()),
@@ -224,8 +218,8 @@ mod tests {
     }
 
     /// A merger that refuses, and one that exits zero without writing, are
-    /// the same answer: no decision was made. Taking the second as one would
-    /// discard a side every time somebody quit an editor.
+    /// the same answer. Taking the second as a decision would discard a side
+    /// every time somebody quit an editor.
     #[cfg(unix)]
     #[test]
     fn a_merger_that_aborts_or_writes_nothing_yields_no_body() {

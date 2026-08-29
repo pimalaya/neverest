@@ -1,9 +1,9 @@
-//! Microsoft Graph API wizard (Microsoft accounts).
+//! # Microsoft Graph wizard
 //!
-//! The Graph API is bearer-token-only, and neverest never runs an OAuth
-//! grant itself: the wizard collects the user id and a token secret,
-//! typically an Ortie command since tokens expire and need refreshing.
-//! The connection is tested before the configuration is written.
+//! The Graph API is bearer-token-only, and neverest never runs an OAuth grant
+//! itself: the wizard collects the user id and a token secret, typically an
+//! Ortie command since tokens expire. The connection is tested before the
+//! configuration is written.
 
 use anyhow::Result;
 use pimalaya_cli::{prompt, spinner::Spinner};

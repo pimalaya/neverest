@@ -1,14 +1,16 @@
-//! Email-driven service discovery for the wizard.
+//! # Service discovery
 //!
-//! The address feeds io-pim-discovery's parallel discovery (fixed
-//! provider rules, PACC, Mozilla autoconfig, RFC 6186 SRV, with a final
-//! WWW-Authenticate probe refining the advertised schemes), and every
-//! reachable service becomes one selectable entry carrying the
-//! authentication capabilities it advertised (the concrete method is
-//! picked once the service is chosen). A detected Microsoft account also
-//! offers the Graph API. Only the services neverest has a backend for are
-//! proposed, IMAP + SMTP, Microsoft Graph, CardDAV and CalDAV, so the
-//! wizard never writes a source [`crate::client::open`] would refuse.
+//! Email-driven discovery for the wizard. The address feeds
+//! io-pim-discovery's parallel search (fixed provider rules, PACC, Mozilla
+//! autoconfig, RFC 6186 SRV, with a final WWW-Authenticate probe refining the
+//! advertised schemes).
+//!
+//! Every reachable service becomes one selectable entry carrying the
+//! authentication capabilities it advertised, and a detected Microsoft
+//! account also offers the Graph API.
+//!
+//! Only services neverest has a backend for are proposed, so the wizard never
+//! writes a source [`crate::client::open`] would refuse.
 
 #![cfg_attr(not(feature = "imap"), allow(dead_code, unused_imports))]
 
@@ -29,22 +31,25 @@ use io_pim_discovery::{
 use pimalaya_stream::tls::{Rustls, Tls};
 use url::Url;
 
-/// DNS-over-TCP resolver backing discovery when `NEVEREST_DNS_RESOLVER`
-/// is unset and no system resolver is found: Cloudflare's `1.1.1.1`.
+/// DNS-over-TCP resolver backing discovery when `NEVEREST_DNS_RESOLVER` is
+/// unset and no system resolver is found: Cloudflare's `1.1.1.1`.
 const DEFAULT_RESOLVER: &str = "tcp://1.1.1.1:53";
 
-/// Upper bound on the parallel discovery fan-out. An unreachable
-/// endpoint (a firewalled port, a black-hole host) must not stall the
-/// interactive wizard, so mechanisms that have not reported by then are
-/// abandoned and only what completed in time is offered.
+/// Upper bound on the parallel discovery fan-out.
+///
+/// An unreachable endpoint (a firewalled port, a black-hole host) must not
+/// stall the interactive wizard, so mechanisms that have not reported by then
+/// are abandoned and only what completed in time is offered.
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// One selectable service to reach the account, carrying the
-/// authentication capabilities it advertised. The concrete method (SASL
-/// mechanism, HTTP scheme) is picked in a second prompt once the service
-/// is chosen, so a service appears exactly once in the list.
+/// One selectable service to reach the account, with the authentication
+/// capabilities it advertised.
+///
+/// The concrete method (SASL mechanism, HTTP scheme) is picked in a second
+/// prompt once the service is chosen, so a service appears exactly once.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Discovered {
+    /// The service this entry configures.
     pub kind: DiscoveredKind,
     /// Login hint advertised by the mechanism (usually the email).
     pub username: Option<String>,
@@ -80,13 +85,12 @@ pub struct TcpEndpoint {
     pub security: DiscoverySecurity,
 }
 
-/// The authentication capabilities a service advertised, folded across
-/// all its discovered methods. It drives the per-service auth prompt:
-/// which SASL mechanisms to offer, and whether the OAuth token brokers
-/// appear. Neverest reads a token an external manager (such as Ortie)
-/// issues but never runs a grant itself, so OAuth is not a method of its
-/// own here: it only unlocks the brokers behind the API token flow (see
-/// [`super::secret`]).
+/// The authentication capabilities a service advertised, folded across all
+/// its discovered methods.
+///
+/// It drives the per-service auth prompt. Neverest reads a token an external
+/// manager issues but never runs a grant, so OAuth is no method of its own
+/// here: it only unlocks the brokers behind the API token flow.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct AuthCaps {
     /// Basic/password auth: SASL PLAIN/LOGIN/SCRAM. Often an app
@@ -99,9 +103,8 @@ pub struct AuthCaps {
 }
 
 impl AuthCaps {
-    /// Whether any capability was advertised. When none was (a mechanism
-    /// that names no auth), the auth prompt offers every method so the
-    /// user is never left without a choice.
+    /// Whether any capability was advertised. When none was, the auth prompt
+    /// offers every method so the user is never left without a choice.
     pub fn any(self) -> bool {
         self.basic || self.bearer || self.oauth
     }
@@ -124,10 +127,9 @@ impl fmt::Display for Discovered {
 }
 
 impl Discovered {
-    /// Best default login for the credential prompt: the advertised
-    /// username when it looks like an address, else the searched email
-    /// when the user typed a full one, else nothing (a bare domain,
-    /// whose synthesized `@domain` form is rejected here).
+    /// Best default login for the credential prompt: the advertised username
+    /// when it looks like an address, else the searched email when the user
+    /// typed a full one, else nothing.
     pub fn login_default(&self, email: &str) -> Option<String> {
         self.username
             .clone()
@@ -218,9 +220,9 @@ pub fn search(email: &str) -> Result<Vec<Discovered>> {
     Ok(found)
 }
 
-/// Drops the discovered entries whose backend is not compiled in. The
-/// IMAP + SMTP entry only needs the `imap` feature: a build without
-/// `smtp` still syncs, it just gets no send channel.
+/// Drops the discovered entries whose backend is not compiled in. The IMAP +
+/// SMTP entry only needs `imap`: a build without `smtp` still syncs, it just
+/// gets no send channel.
 pub fn retain_supported(found: &mut Vec<Discovered>) {
     found.retain(|entry| match entry.kind {
         DiscoveredKind::ImapSmtp { .. } => cfg!(feature = "imap"),
@@ -229,9 +231,8 @@ pub fn retain_supported(found: &mut Vec<Discovered>) {
     });
 }
 
-/// Resolves the provider from the email domain (fast path for consumer
-/// addresses), falling back to any provider-tagged config, which
-/// catches custom domains detected through their MX records.
+/// Resolves the provider from the email domain, falling back to any
+/// provider-tagged config, which catches custom domains detected by MX.
 fn provider_of(email: &str, configs: &[DiscoveryServiceConfig]) -> Option<DiscoveryKnownProvider> {
     let by_domain = email
         .rsplit_once('@')
@@ -245,9 +246,8 @@ fn provider_of(email: &str, configs: &[DiscoveryServiceConfig]) -> Option<Discov
     })
 }
 
-/// Folds a service's advertised methods into its [`AuthCaps`]: password
-/// into `basic`, bearer into `bearer`, and every OAuth grant into `oauth`
-/// (which only unlocks the token brokers, never a self-run grant).
+/// Folds a service's advertised methods into its [`AuthCaps`]: password into
+/// `basic`, bearer into `bearer`, every OAuth grant into `oauth`.
 fn caps_of(auth: &[DiscoveryAuthMethod]) -> AuthCaps {
     let mut caps = AuthCaps::default();
 
@@ -263,9 +263,8 @@ fn caps_of(auth: &[DiscoveryAuthMethod]) -> AuthCaps {
 }
 
 /// Picks the best config for a TCP service, restricted to the detected
-/// provider's own configs when there is one: the most secure endpoint
-/// wins, so a domain advertising both implicit TLS and STARTTLS keeps
-/// the former.
+/// provider's own configs when there is one: the most secure endpoint wins,
+/// so a domain advertising both implicit TLS and STARTTLS keeps the former.
 fn best(
     configs: &[DiscoveryServiceConfig],
     service: DiscoveryService,
@@ -299,7 +298,6 @@ fn looks_like_address(value: &str) -> bool {
         .is_some_and(|(local, domain)| !local.is_empty() && !domain.is_empty())
 }
 
-/// Extracts a [`TcpEndpoint`] from a config, or `None` for an HTTP one.
 /// The HTTP endpoint of a discovered service, for the DAV kinds (a DAV
 /// service is addressed by URL, never by host and port).
 fn http_endpoint(config: &DiscoveryServiceConfig) -> Option<String> {
@@ -309,6 +307,7 @@ fn http_endpoint(config: &DiscoveryServiceConfig) -> Option<String> {
     }
 }
 
+/// Extracts a [`TcpEndpoint`] from a config, or `None` for an HTTP one.
 fn tcp_endpoint(config: &DiscoveryServiceConfig) -> Option<TcpEndpoint> {
     match &config.endpoint {
         DiscoveryEndpoint::Tcp {
@@ -324,11 +323,11 @@ fn tcp_endpoint(config: &DiscoveryServiceConfig) -> Option<TcpEndpoint> {
     }
 }
 
-/// Resolver used by discovery: the `NEVEREST_DNS_RESOLVER` override
-/// first, then the system resolver (`/etc/resolv.conf` on unix, the
-/// network adapters on windows), then the Cloudflare default. This
-/// avoids leaking the email domain to a third-party resolver and works
-/// around networks that block the default.
+/// Resolver used by discovery: the `NEVEREST_DNS_RESOLVER` override, then the
+/// system resolver, then the Cloudflare default.
+///
+/// Preferring the system one avoids leaking the email domain to a third-party
+/// resolver; the override works around networks that block the default.
 fn discovery_resolver() -> Url {
     if let Ok(resolver) = env::var("NEVEREST_DNS_RESOLVER")
         && let Ok(url) = resolver.parse()
@@ -345,8 +344,8 @@ fn discovery_resolver() -> Url {
         .expect("DEFAULT_RESOLVER must be a valid URL")
 }
 
-/// TLS profile for the HTTPS-bound discovery mechanisms; they only
-/// speak HTTP/1.1 to `_well-known` endpoints.
+/// TLS profile for the HTTPS-bound discovery mechanisms; they only speak
+/// HTTP/1.1 to `_well-known` endpoints.
 fn discovery_tls() -> Tls {
     Tls {
         rustls: Rustls {

@@ -1,11 +1,12 @@
-//! Report DTOs: the collection / item / flag changes a sync applied, rendered
-//! in the printed report and `--json`.
+//! # Sync hunks
 //!
-//! These were the applied work units of the v1 engine; under io-replica they
-//! are pure descriptors the driver emits for each cross-side propagation step
-//! (the per-side server reconcile is internal and not itemized). `content_key`
-//! is the cross-side alignment key, skipped from JSON to keep the report shape
-//! stable.
+//! The collection, item and flag changes a sync applied, rendered in the
+//! printed report and in `--json`.
+//!
+//! Under io-replica these are descriptors the driver emits per cross-side
+//! propagation step, the per-side reconcile being internal and not
+//! itemized. `content_key` is the cross-side alignment key, skipped from
+//! JSON to keep the report shape stable.
 
 use std::{collections::BTreeSet, fmt};
 
@@ -15,8 +16,8 @@ use crate::item::flag::Flag;
 
 /// Collection-level change: create or delete a collection on one side.
 ///
-/// `Delete` is kept for the report and --json shape, though collection
-/// deletion is not propagated yet (only creation).
+/// `Delete` is kept for the report and `--json` shape, though collection
+/// deletion is not propagated yet.
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 #[allow(dead_code)]
@@ -30,9 +31,10 @@ pub enum CollectionHunk {
         collection: String,
     },
     /// The collection could not be reconciled at all, so nothing about its
-    /// items is known this run. Carried as its own kind because reusing a
-    /// create to report one says the sync tried to make a collection it never
-    /// touched.
+    /// items is known this run.
+    ///
+    /// Its own kind, because reporting one as a create would say the sync
+    /// tried to make a collection it never touched.
     Scan {
         side: String,
         collection: String,
@@ -95,9 +97,8 @@ pub enum ItemHunk {
         #[serde(skip)]
         content_key: u64,
     },
-    /// Fetch (download) an item from `side` into the local store — the pull
-    /// plan of a one-source local sync (reported by a dry run; a real run just
-    /// hydrates it).
+    /// Fetch an item from `side` into the local store, which a dry run
+    /// reports as its pull plan and a real run simply hydrates.
     Fetch {
         side: String,
         collection: String,
@@ -105,8 +106,9 @@ pub enum ItemHunk {
         #[serde(skip)]
         content_key: u64,
     },
-    /// Replace `side`'s copy of the item's body in place — a mutable-content
-    /// edit. Never emitted for mail, whose bodies are immutable.
+    /// Replace `side`'s copy of the item's body in place.
+    ///
+    /// Never emitted for mail, whose bodies are immutable.
     Update {
         side: String,
         collection: String,
@@ -179,8 +181,7 @@ impl fmt::Display for ItemHunk {
     }
 }
 
-/// Lowercase comma-joined flag list wrapped in brackets, e.g.
-/// `[\seen, \flagged]`.
+/// Lowercase comma-joined flag list in brackets, e.g. `[\seen, \flagged]`.
 fn format_flag_list(flags: &BTreeSet<Flag>) -> String {
     let mut out = String::from("[");
     let mut first = true;

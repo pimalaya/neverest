@@ -1,27 +1,18 @@
-//! The three-way merge a run resolves a content conflict with.
+//! # Three-way merge
 //!
-//! A conflict is two edits of one item against a base the last sync agreed
-//! on. Most of them are not disagreements: one side changed a phone number
-//! and the other a note, and the base is what proves it by naming which side
-//! touched which field. Merging those needs no one, and reporting them to a
-//! person is a background tool asking to be switched off.
+//! What a run resolves a content conflict with. Most conflicts are not
+//! disagreements: one side changed a phone number and the other a note, and
+//! the base proves it by naming which side touched which field.
 //!
-//! The merge is built in rather than configured, and that holds at build
-//! time too: it rides on the `dav` cargo feature rather than one of its own,
-//! since every mutable-content kind arrives with `dav` and nothing else can
-//! reach a merge. No build of neverest syncs a card or an event without one.
-//! It is a pure function over bodies the store already holds, there is no
-//! taste in it, and the format vocabulary is closed: contacts are vcard-rs,
-//! calendars and tasks and journals are ical-rs, and mail is
-//! immutable-content and reaches none of
-//! this. Because it cannot be swapped it is strictly conservative, resolving
-//! on an empty report and on nothing else: a merge nobody can replace has no
-//! business deciding anything a person might have decided differently, and
-//! the report distinguishes the two exactly.
+//! Built in rather than configured, at build time too: it rides on the `dav`
+//! cargo feature rather than one of its own, every mutable-content kind
+//! arriving with `dav`. Contacts are vcard-rs, calendars and tasks and
+//! journals ical-rs, and mail is immutable-content and reaches none of this.
 //!
-//! The local body is the merge's left side, so the store's own bytes survive
-//! byte for byte and the remote's non-colliding changes are replayed onto
-//! them.
+//! Because it cannot be swapped it is strictly conservative, resolving on an
+//! empty report and on nothing else: a merge nobody can replace has no
+//! business deciding what a person might have decided differently. The local
+//! body is the left side, so the store's own bytes survive byte for byte.
 
 #[cfg(feature = "dav")]
 use ical::tree::{
@@ -45,9 +36,9 @@ pub enum Merged {
     /// Both sides changed the same field, that many times over. No merge
     /// settles it, so the conflict parks for a person.
     Collided(usize),
-    /// The merge could not run at all, for the reason named: a body no
-    /// parser accepts, or a kind carrying no merge of its own. The conflict
-    /// parks untouched, which is what an unanswerable question deserves.
+    /// The merge could not run at all, for the reason named: a body no parser
+    /// accepts, or a kind carrying no merge of its own. The conflict parks
+    /// untouched.
     Unmergeable(String),
 }
 
@@ -55,17 +46,9 @@ impl Kind {
     /// Three-way merges the `local` and `remote` bodies of one conflicted
     /// item against the `base` the last sync agreed on.
     ///
-    /// The ical merge is told nothing about who the right side speaks for
-    /// (RFC 5546 §3.2): neverest syncs a calendar rather than acting as an
-    /// attendee, so it makes no such claim and refuses no change on that
-    /// ground.
-    ///
-    /// It prefers the left side, which is the local one for both kinds, and
-    /// the preference decides nothing here: a run takes a merge only on an
-    /// empty report, so a collision parks rather than being settled by
-    /// whoever the preference favours. It is stated rather than defaulted so
-    /// that reading this beside tcal, which prefers the right side because
-    /// it puts the edit it speaks for there, does not suggest an oversight.
+    /// The ical merge names no attendee the right side speaks for (RFC 5546
+    /// §3.2): neverest syncs a calendar rather than acting as one. Preferring
+    /// left decides nothing here, a run merging only on an empty report.
     // NOTE: without `dav` the mail arm is the whole match, and mail is
     // immutable-content, so no side is ever read.
     #[cfg_attr(not(feature = "dav"), allow(unused_variables))]
@@ -124,8 +107,7 @@ impl Kind {
 }
 
 /// Names the side whose body no parser accepts, for the log line a parked
-/// conflict leaves behind. A body the store holds and cannot read is worth
-/// saying out loud rather than counting as a collision.
+/// conflict leaves behind, rather than counting it as a collision.
 #[cfg(feature = "dav")]
 fn unparsed<E: core::fmt::Display>(base: Option<E>, local: Option<E>, remote: Option<E>) -> Merged {
     let (side, err) = match (base, local, remote) {
@@ -143,7 +125,7 @@ mod tests {
     use crate::kind::{Kind, merge::Merged};
 
     /// Disjoint edits are not a disagreement: the base names which side
-    /// touched which field, so both survive and nobody is asked anything.
+    /// touched which field, so both survive.
     #[cfg(feature = "dav")]
     #[test]
     fn disjoint_edits_on_both_sides_merge_into_one_card() {
@@ -163,8 +145,7 @@ mod tests {
         assert!(body.contains("NOTE:new"), "{body}");
     }
 
-    /// The same field set two ways is the residual case no merge settles,
-    /// and the one a person is asked about.
+    /// The same field set two ways is the residual case no merge settles.
     #[cfg(feature = "dav")]
     #[test]
     fn a_same_field_collision_is_not_merged_away() {
@@ -206,8 +187,8 @@ mod tests {
         );
     }
 
-    /// A body the store holds and no parser reads is reported as what it
-    /// is, rather than counted as a disagreement nobody had.
+    /// A body no parser reads is reported as what it is, rather than counted
+    /// as a disagreement nobody had.
     #[cfg(feature = "dav")]
     #[test]
     fn an_unreadable_body_is_unmergeable_rather_than_collided() {
@@ -220,8 +201,8 @@ mod tests {
         assert!(reason.contains("local"), "{reason}");
     }
 
-    /// Mail bodies never change, so a mail item cannot diverge and its
-    /// merge is a question with no answer rather than a silent success.
+    /// Mail bodies never change, so its merge is a question with no answer
+    /// rather than a silent success.
     #[test]
     fn mail_carries_no_merge() {
         assert!(matches!(

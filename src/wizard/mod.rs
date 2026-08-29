@@ -1,6 +1,7 @@
-//! Interactive configuration wizard: email-driven service discovery,
-//! per-backend credential prompts, and the converters from wizard
-//! answers to on-disk [`crate::config`] types.
+//! # Wizard
+//!
+//! Interactive configuration: email-driven service discovery, per-backend
+//! credential prompts, and the converters from answers to [`crate::config`].
 
 #[cfg(feature = "dav")]
 pub mod dav;

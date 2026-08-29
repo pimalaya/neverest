@@ -10,11 +10,9 @@
 # can be passed at once, separated by `:`; the first one is the base and the
 # rest are deep-merged on top of it.
 #
-# Run bare `neverest` (no subcommand) with no configuration file on disk and it
-# offers the wizard, which prints the help otherwise: the wizard discovers a
-# provider from your email address, tests it, and writes a one-account,
-# one-source configuration here, in the flat spelling below. Everything else on
-# this page is written by hand.
+# Bare `neverest` with no configuration file on disk offers the wizard, which
+# writes a one-account, one-source configuration in the flat spelling below.
+# Everything else on this page is written by hand.
 #
 # An account is one pimdir STORE, fed by one or more named SOURCES, each a
 # remote. A backend written directly under the account (`imap.server = …`) is
@@ -32,12 +30,11 @@
 #         N        0     true  sources overwrite the store, local edits dropped
 #
 # Anything else is refused at load, naming the nearest legal shape. With no
-# target the local store is the destination, which is the offline replica most
-# people want and what everything below is written for.
+# target the local store is the destination, the offline replica everything
+# below is written for.
 #
 # Sources never meet: an item one holds crosses to the targets, never to another
-# source, so several sources sit side by side in one store for a frontend to
-# union at display time.
+# source, so several sit side by side in one store for a frontend to union.
 # ================================================================================
 
 [accounts.example]
@@ -45,24 +42,16 @@
 # Use this account when `-a/--account` is not passed.
 default = true
 
-# Make the sources authoritative: a difference resolves in their favour and the
-# other side's change is DISCARDED rather than merged, so nothing is ever
-# reported as a conflict. The other side is still read every run, or every item
-# would be re-pushed; it just never wins. Overwritten, not merged.
-#
-# Turning this on over an account that synced both ways is refused once, since
-# the run that follows is the one that discards: `neverest sync --accept-mode`
-# says you meant it, and neverest remembers.
+# Make the sources authoritative: their side wins and the other's change is
+# DISCARDED rather than merged, so nothing is reported as a conflict. Turning it
+# on over an account that synced both ways is refused once; `neverest sync
+# --accept-mode` says you meant it.
 #one-way = false
 
-# Whether the store keeps bodies and is readable by a frontend, rather than
-# being only the ledger of item spines and enumeration checkpoints it has to be
-# in every mode.
-#
-# Unset takes the destination's answer: true with no targets, since the store is
-# what the account syncs into, false with targets, a configuration naming both
-# having asked to copy between them rather than to fill a disk. Set it with
-# targets to migrate AND keep a local copy.
+# Whether the store keeps bodies and is readable by a frontend, rather than only
+# the ledger of item spines and checkpoints it has to be in every mode. Unset
+# takes the destination's answer: true with no targets, false with targets. Set
+# it with targets to migrate AND keep a local copy.
 #retain = true
 
 # --------------------------------------------------------------------------------
@@ -70,16 +59,15 @@ default = true
 # --------------------------------------------------------------------------------
 #
 # Each source picks exactly one backend: `imap.*`, `jmap.*`, `gmail.*`,
-# `msgraph.*`, `carddav.*` or `caldav.*`. Its filter, permissions and pool size live inside
-# that backend table:
-#   - `collection.filter`: which collections this source syncs (per source, since
-#     an `include = ["INBOX"]` means nothing to a contacts source)
+# `msgraph.*`, `carddav.*` or `caldav.*`. Its filter, permissions and pool size
+# live inside that backend table:
+#   - `collection.filter`: which collections this source syncs
 #   - `collection.{create,delete}`, `flag.update`, `item.update`: default true
 #   - `item.{create,delete}`: both required when the block is declared
 #   - `pool-size`: default 8 (IMAP), 4 (JMAP, Gmail, Graph, DAV)
 #
-# `item.update` gates in-place body edits, so it is inert for mail (immutable
-# bodies) and meaningful for CardDAV and CalDAV.
+# `item.update` gates in-place body edits, so it is inert for mail and
+# meaningful for CardDAV and CalDAV.
 
 # Which collections this source syncs. Pick exactly one variant; omit for `all`.
 imap.collection.filter = "all"
@@ -239,13 +227,9 @@ imap.item.delete = false
 # --------------------------------------------------------------------------------
 
 # A CardDAV side syncs **contacts**, so it pairs with another contacts side or
-# with the store alone, never with a mailbox: an account's two sides must agree
-# on their kind. Requires the `dav` cargo feature, which is in the default set
-# and covers CalDAV too.
-#
-# The URL is the entry point only; the principal and the address book home set
-# are discovered from it, and each address book becomes a collection keyed by
-# its path segment.
+# with the store alone, never with a mailbox. Requires the `dav` cargo feature,
+# in the default set, which covers CalDAV too. The URL is the entry point only:
+# the principal and home set are discovered, each address book a collection.
 #
 # Bare authority (implicit `https://`), or a full `http://` / `https://` URL.
 #carddav.server = "dav.example.org"
@@ -261,9 +245,8 @@ imap.item.delete = false
 #carddav.tls.provider = "rustls"
 #carddav.alpn = ["http/1.1"]
 
-# Cards are mutable, unlike mail: `item.update` gates in-place edits here, and
-# a conditional write means a card edited on both sides is reported as a
-# conflict rather than overwritten.
+# Cards are mutable, unlike mail: `item.update` gates in-place edits, and a
+# conditional write reports a card edited on both sides as a conflict.
 #carddav.item.update = true
 #carddav.item.create = true
 #carddav.item.delete = false
@@ -275,12 +258,7 @@ imap.item.delete = false
 # --------------------------------------------------------------------------------
 
 # A CalDAV side syncs **calendar**, on exactly the terms the CardDAV block above
-# describes: same fields, same `dav` cargo feature, same adapter underneath. It
-# pairs with another calendar side or with the store alone.
-#
-# The URL is the entry point only; the principal and the calendar home set are
-# discovered from it, and each calendar becomes a collection keyed by its path
-# segment.
+# describes: same fields, same `dav` cargo feature, same adapter underneath.
 #
 # The item is the calendar object **resource**, not the component: RFC 4791
 # keeps every component sharing a `UID` in one resource, so a recurring series
@@ -301,8 +279,8 @@ imap.item.delete = false
 #caldav.alpn = ["http/1.1"]
 
 # Calendar resources are mutable, like cards: `item.update` gates in-place
-# edits, and a conditional write means an event edited on both sides is
-# reported as a conflict rather than overwritten.
+# edits, and a conditional write reports an event edited on both sides as a
+# conflict.
 #caldav.item.update = true
 #caldav.item.create = true
 #caldav.item.delete = false
@@ -314,51 +292,36 @@ imap.item.delete = false
 
 # Every run three-way merges the diverging bodies of a conflicted card or event
 # against the base the last sync agreed on, and clears the conflict whenever
-# nothing collided: two sides editing different fields have said nothing
-# contradictory. That merge is built in and is not configured. What is left is
-# both sides setting the same field differently, which no merge settles, so the
-# item parks and the run exits 2 instead of 0, having synced everything else.
-# That code is what a run leaving anything waiting exits with, a write the other
-# side would not take included.
+# nothing collided. That merge is built in and is not configured. What is left
+# is both sides setting one field two ways: the item parks and the run exits 2.
 #
 # Neverest raises no desktop notification of its own. Every run warns in the
 # log, and `--json` carries both halves a notifier needs: `conflicts` is what
-# this run marked, `outstanding_conflicts` is what the store holds waiting. So
-# a five-minute schedule notifies on entry, once, by testing the first, with
-# no state of its own to keep:
+# this run marked, `outstanding_conflicts` what the store holds waiting. Testing
+# the first notifies on entry, once, with no state of its own to keep:
 #
 #   neverest sync --json | jq -e '.conflicts | length > 0' >/dev/null \
 #     && notify-send "neverest" "an item needs a decision"
-#
-# A wrapper can also name the item, which a fixed summary and body could not.
 
 # The interactive merger `neverest conflict resolve --interactive` hands a
-# collision to. UNSET by default, which leaves that flag with nothing to run.
-# It is never reached from a sync, whatever is attached to the terminal: a run
-# has one when a wrapper script drives it, when a pane nobody is sitting at
-# watches it and when a person is waiting, and the three cannot be told apart
-# from inside.
+# collision to. UNSET by default, which leaves that flag with nothing to run. It
+# is never reached from a sync, whatever is attached to the terminal.
 #
-# Following git mergetool, the three bodies are handed over as filesystem paths
-# appended positionally, base first, then the divergent sides, then the path to
+# Following git mergetool, the three bodies are appended positionally as
+# filesystem paths, base first, then the divergent sides, then the path to
 # write. That is tcal's own argument order, so its name is the whole
 # configuration:
 #conflict.merger = "tcal merge"
 #
 # A command carrying any of the placeholders {base}, {local}, {remote} and
-# {output} is substituted instead of appended, which is what a tool with an
-# argument shape of its own needs. tcard takes its output as a flag:
+# {output} is substituted instead of appended. tcard takes its output as a flag:
 #conflict.merger = "tcard merge {base} {local} {remote} --output {output}"
 #
-# The result is taken only on a zero exit with the output written. An editor
-# exits zero on a bare quit, so a zero exit alone is not a decision, and a
-# merger that leaves its output untouched leaves the conflict exactly as it
-# was. The body it does write has to be a body of that item, so one no parser
-# reads and one stating another UID are both refused rather than stored. A
-# decision is refused when the store has observed a newer remote revision since
-# it was computed, since pushing it would overwrite everything that arrived
-# meanwhile; the store stays free while the merger runs, so a sync may record
-# that revision from under it.
+# The result is taken only on a zero exit with the output written: an editor
+# exits zero on a bare quit. The body it writes has to be a body of that item,
+# so one no parser reads and one stating another UID are both refused. A
+# decision is refused when the store observed a newer remote revision since it
+# was computed, the store staying free while the merger runs.
 
 # --------------------------------------------------------------------------------
 # Store options
@@ -371,25 +334,18 @@ imap.item.delete = false
 # true to false does NOT delete the bodies already stored: they stay,
 # unreferenced, until an explicit `pimdir gc` or `neverest sync --reset`.
 #
-# Whether a crossing between two remotes is streamed straight through or staged
-# in the store and released is neverest's own business, taken where the pairing
-# allows it (IMAP to IMAP today). Either way `retain = false` means the store
-# holds no body afterwards.
-#
 # CAUTION: with `retain = true` and a target, the store is a backup rather than a
 # cache, and `neverest sync --reset` destroys it along with the rest.
 
-# The store never truly deletes: an item whose last binding vanishes (a remote
-# expunge) is retained instead, hidden but kept with its body. This is how long
-# it stays before a sync reclaims it: one integer plus `s`, `m`, `h`, `d` or
-# `w`. UNSET means never purge, `"0"` purges at once (the terminal-delete
-# behaviour). `neverest sync --no-purge` skips one run. Inspect and restore
-# retained items with the `pimdir` CLI.
+# The store never truly deletes: an item whose last binding vanishes is retained,
+# hidden but kept with its body. This is how long before a sync reclaims it: an
+# integer plus `s`, `m`, `h`, `d` or `w`. UNSET never purges, `"0"` purges at
+# once, `sync --no-purge` skips one run, `pimdir` restores retained items.
 #store.purge-after = "90d"
 
 # BACKUP RECIPE: a read-only source plus no purge, so a remote expunge cannot
-# lose anything. The expunge still propagates, but the item stays in the store,
-# restorable, until you purge on purpose:
+# lose anything. The item stays in the store, restorable, until you purge on
+# purpose:
 #
 #   imap.item.delete = false
 #   imap.collection.delete = false
@@ -400,18 +356,16 @@ imap.item.delete = false
 # --------------------------------------------------------------------------------
 
 # The server a source's queued `submit` intents are sent through at the start of
-# every sync. A frontend enqueues one through the store's action queue (a
-# `v: 1` payload naming the body blob plus the envelope); there is no reserved
-# Outbox collection. The channel belongs to the source it completes: a source
-# either sends by itself (Graph, through sendMail) or needs this. AT MOST ONE
-# source per account may declare it; two is refused at load.
+# every sync. A frontend enqueues one through the store's action queue; there is
+# no reserved Outbox collection. A source either sends by itself (Graph, through
+# sendMail) or needs this, and AT MOST ONE per account may declare it.
 #
 # An SMTP 4xx leaves the intent pending for the next run, a 5xx parks it.
 # Sending is at-least-once, so `Message-ID` deduplication is the provider's job.
 #
-# The block mirrors the `imap` one above field for field, submission being the
-# other half of the same mail account: a bare authority (implicit `smtps://`) or
-# a full URL, the same `tls` table, and one `sasl` mechanism.
+# The block mirrors the `imap` one above field for field: a bare authority
+# (implicit `smtps://`) or a full URL, the same `tls` table, one `sasl`
+# mechanism.
 #smtp.server = "smtp.fastmail.com"
 #smtp.server = "smtps://smtp.fastmail.com:465"
 #smtp.server = "smtp://smtp.example.com:587"
@@ -446,16 +400,13 @@ imap.item.delete = false
 # Named sources (the explicit form)
 # --------------------------------------------------------------------------------
 #
-# Everything above is the sugar: `imap.server` is `sources.imap.imap.server`, the
-# source taking its protocol as its name. The two spellings are the same
-# configuration, source id included, so expanding one by hand changes nothing in
-# the store.
+# Everything above is the sugar: `imap.server` is `sources.imap.imap.server`,
+# the source taking its protocol as its name. The two spellings are the same
+# configuration, source id included.
 #
-# Reach for the explicit table when you need two sources of one protocol, which
-# the sugar cannot express. The map key is the source name, and the source name
-# is the pimdir source id every binding it owns is recorded under: RENAMING ONE
-# ORPHANS THEM, so pick a name you can live with. `targets` is the same map on
-# the same terms.
+# Reach for the explicit table when you need two sources of one protocol. The
+# map key is the source name, which is the pimdir source id every binding it
+# owns is recorded under: RENAMING ONE ORPHANS THEM. `targets` is the same map.
 #
 # MIGRATE, one way: the source is the truth and the target is made to match it.
 # Anything changed on the target alone is overwritten on the next run.
@@ -469,14 +420,13 @@ imap.item.delete = false
 #   targets.new.imap.sasl.plain.username = "user@new-provider.com"
 #   targets.new.imap.sasl.plain.password.command = "pass show new"
 #
-# MIRROR, two ways: drop `one-way` and the same pair keeps each other in step,
-# an edit on either side reaching the other. Two authoritative remotes can
-# genuinely disagree, so a divergence is reported as a conflict rather than
-# resolved.
+# MIRROR, two ways: drop `one-way` and the same pair keeps each other in step.
+# Two authoritative remotes can genuinely disagree, so a divergence is reported
+# as a conflict rather than resolved.
 #
-# SIDE BY SIDE: several sources and no target. They cache into one store without
-# ever writing to each other, for a frontend to union at display time. This is
-# the default, so it is what you get by saying nothing.
+# SIDE BY SIDE: several sources and no target, caching into one store without
+# ever writing to each other. This is the default, so it is what you get by
+# saying nothing.
 #
 #   [accounts.personal]
 #   sources.fastmail.imap.server = "imap.fastmail.com"

@@ -1,23 +1,13 @@
-//! Per-side views over a shared pimdir store.
+//! # Per-side store views
 //!
 //! The store persists a [`ReplicaHub`](io_replica::hub::ReplicaHub) per
-//! collection — one shared item plus a base per source. The engine's
-//! [`ReplicaStorage`] seam (`load` / `lookup_objects` / `write`) is serviced by
-//! the [`PimdirSourceStore`] handle itself, one per side (`"left"` /
-//! `"right"`); this module adds the two multi-source reads the driver needs on
-//! top of that seam:
+//! collection, one shared item plus a base per source, and services the
+//! [`ReplicaStorage`] seam through the [`PimdirSourceStore`] handle itself.
 //!
-//! - [`load_side`]: the placements one side's coroutines see (its hub
-//!   projection plus its not-yet-linked residual), for the `Meta` upgrade pass;
-//! - [`projection_view`]: the cross-side propagation a side owes (a `Created`
-//!   copy, a `Dirty` flag change, a `Tombstone` delete), for the report;
-//! - [`hydration_targets`]: the one-sided, bodiless items whose body must be
-//!   fetched (`Full`) so the other side can receive a copy.
-//!
-//! [`load_side`] reads through one source handle (so it carries that source's
-//! residual); [`projection_view`] and [`hydration_targets`] read the whole hub
-//! (both sources' bindings), so they take the source-less handle a side's own
-//! handle dereferences to.
+//! This module adds the multi-source reads the driver needs on top of that
+//! seam. [`load_side`] reads through one source handle, so it carries that
+//! source's residual; [`projection_view`] and [`hydration_targets`] read the
+//! whole hub, both sources' bindings included.
 
 use io_pimdir::{PimdirError, PimdirSourceStore, PimdirStore};
 use io_replica::{
@@ -29,9 +19,10 @@ use io_replica::{
 
 use crate::offline::source_id;
 
-/// The placements one side's coroutines see for a collection: its hub projection
-/// plus this source handle's residual (freshly probed items not yet linked).
-/// The handle must be the side's own store (source is fixed at open).
+/// The placements one side's coroutines see for a collection.
+///
+/// Its hub projection plus this handle's residual (freshly probed items not yet
+/// linked). The handle must be the side's own store, source fixed at open.
 pub fn load_side(
     store: &PimdirSourceStore,
     collection: &str,
@@ -44,10 +35,11 @@ pub fn load_side(
         .placements)
 }
 
-/// The cross-source propagation the source named `source` owes for a
-/// collection: the hub projection alone (a `Created` copy in, a `Dirty` flag
-/// change, a `Tombstone` delete), without the residual probes. Drives the
-/// itemized report. Reads the whole hub, so any source handle serves it.
+/// The cross-source propagation `source` owes for a collection.
+///
+/// The hub projection alone (a `Created` copy in, a `Dirty` flag change, a
+/// `Tombstone` delete), without the residual probes. Drives the itemized
+/// report, and reads the whole hub, so any source handle serves it.
 pub fn projection_view(
     store: &PimdirStore,
     collection: &str,
@@ -60,11 +52,11 @@ pub fn projection_view(
     ))
 }
 
-/// The one-sided, bodiless items whose body must be hydrated (`Full`) so the
-/// other source can receive a copy: for each shared item held by exactly one
-/// of the pair, with no body yet, whose *other* source may create items, the
-/// holding source's name and the item's handle there. Reads the whole hub, so
-/// any source handle serves it.
+/// The one-sided, bodiless items whose body must be hydrated (`Full`).
+///
+/// For each shared item held by exactly one of the pair, with no body yet,
+/// whose other source may create items: the holding source's name and the
+/// item's handle there. Reads the whole hub, so any source handle serves it.
 pub fn hydration_targets(
     store: &PimdirStore,
     collection: &str,
@@ -105,8 +97,7 @@ mod tests {
 
     use super::*;
 
-    /// A `Meta`-level, linked placement with a base (the shape a side reports
-    /// after its first reconcile).
+    /// A `Meta`-level linked placement with a base, as after a first reconcile.
     fn linked(
         collection: &str,
         handle: &str,

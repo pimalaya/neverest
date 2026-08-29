@@ -1,36 +1,23 @@
-//! Configuration wizard.
+//! # Configuration wizard
 //!
-//! Offered when no configuration file is found, either by a bare
-//! `neverest` (no subcommand) or by a command that needs an account (see
-//! [`offer_configuration`] and
-//! [`crate::config::Config::load_or_wizard`]), and re-run over an
-//! existing account by `neverest configure` (see [`super::edit`]). A
-//! configuration that already exists is never met with the wizard: a bare
-//! `neverest` gets the help instead. It opens with a welcome banner on
-//! stderr, then asks for **one** input:
-//! an email address. A bare domain is accepted too (it is synthesized as
-//! `@domain`); a source is always a remote, so there is no server URL or
-//! folder path to type here.
+//! Offered when no configuration file is found, by a bare `neverest` or by a
+//! command that needs an account, and re-run over an existing account by
+//! `neverest configure` (see [`super::edit`]). A configuration that already
+//! exists is never met with it: a bare `neverest` gets the help instead.
 //!
-//! The address feeds io-pim-discovery's parallel discovery (see
-//! [`super::search`]) and every reachable service becomes one selectable
-//! configuration; picking one then prompts its authentication method and
-//! credentials, and tests the connection. Only backends compiled into
-//! this build are proposed, so the wizard never writes a source
-//! [`crate::client::open`] would refuse. When discovery finds nothing the
-//! wizard stops and points at the documented sample, rather than
-//! prompting for a hand-entered config.
+//! It asks for one input, an email address (a bare domain is accepted and
+//! synthesized as `@domain`). That feeds io-pim-discovery's parallel search
+//! (see [`super::search`]) and every reachable service becomes one selectable
+//! configuration; only backends compiled into this build are proposed.
 //!
-//! The wizard writes **one account with one source**, in the
-//! direct-backend sugar (`imap.server = …`): the offline replica, which is
-//! the common case. A source alone in its namespace makes the store keep
-//! every body, so that account reads offline with no further setting. A
-//! second kind, a mirror and a fan-in are all written by hand against
-//! config.sample.toml.
+//! The wizard writes one account with one source, in the direct-backend sugar
+//! (`imap.server = …`): the offline replica, which is the common case and
+//! reads offline with no further setting. A second kind, a mirror and a
+//! fan-in are all written by hand against config.sample.toml.
 //!
 //! The generated configuration is offered for saving when writing to a
-//! terminal; when stdout is redirected (`neverest > config.toml`) or in
-//! JSON mode it is emitted straight to stdout, so scripts keep working.
+//! terminal; when stdout is redirected or in JSON mode it is emitted straight
+//! to stdout, so scripts keep working.
 
 use std::{collections::HashMap, fmt, io::IsTerminal, path::Path};
 
@@ -57,23 +44,21 @@ use crate::{
     wizard::search::{self, Discovered},
 };
 
-/// The one prompt of the wizard. Discovery also accepts a bare domain,
-/// but the label names what users actually have.
+/// The one prompt of the wizard. Discovery also accepts a bare domain, but
+/// the label names what users actually have.
 const EMAIL_PROMPT: &str = "Email address:";
 
 /// The documented sample configuration, shown in the welcome banner and
-/// pointed at when discovery finds nothing to configure automatically.
+/// pointed at when discovery finds nothing.
 pub const CONFIG_SAMPLE_URL: &str =
     "https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
 
 /// Offers to generate a configuration at `target`, running the wizard
 /// when accepted, and reports whether it ran.
 ///
-/// This is the only place the wizard introduces itself to someone who did
-/// not ask for it: a bare `neverest` on a machine with no configuration,
-/// or a command that needs an account and finds none. Callers guard the
-/// offer on a terminal and on the human output, since neither a script
-/// nor a JSON consumer can answer a prompt.
+/// The only place the wizard introduces itself to someone who did not ask for
+/// it. Callers guard the offer on a terminal and on the human output, since
+/// neither a script nor a JSON consumer can answer a prompt.
 pub fn offer_configuration(printer: &mut impl Printer, target: &Path) -> Result<bool> {
     let prompt = format!(
         "No configuration found, create one at {}?",
@@ -89,10 +74,8 @@ pub fn offer_configuration(printer: &mut impl Printer, target: &Path) -> Result<
     Ok(true)
 }
 
-/// Runs the wizard and either saves the resulting [`Config`] to
-/// `target` or prints it as a ready-to-save TOML document, then returns
-/// it. Run on bare `neverest`, and proposed by
-/// [`crate::config::Config::load_or_wizard`] on first run.
+/// Runs the wizard and either saves the resulting [`Config`] to `target` or
+/// prints it as a ready-to-save TOML document, then returns it.
 pub fn run(printer: &mut impl Printer, target: &Path) -> Result<Config> {
     if !printer.is_json() {
         print_welcome();
@@ -117,9 +100,8 @@ pub fn run(printer: &mut impl Printer, target: &Path) -> Result<Config> {
     save_or_print(printer, target, config)
 }
 
-/// Offers to save the generated config to `target`, falling back to
-/// printing it on stdout when the user declines or an existing file must
-/// not be overwritten. Prompts and confirmations render on stderr.
+/// Offers to save the generated config to `target`, printing it on stdout
+/// when the user declines or an existing file must not be overwritten.
 fn save_or_print(printer: &mut impl Printer, target: &Path, config: Config) -> Result<Config> {
     let prompt = format!("Save this configuration to {}?", target.display());
 
@@ -144,9 +126,8 @@ fn save_or_print(printer: &mut impl Printer, target: &Path, config: Config) -> R
     Ok(config)
 }
 
-/// The account produced by the wizard, rendered as a ready-to-save TOML
-/// document (for stdout), or serialized as an object in JSON mode. The
-/// document is byte-for-byte what [`Config::write`] saves.
+/// The account the wizard produced, as a ready-to-save TOML document or, in
+/// JSON mode, an object. Byte-for-byte what [`Config::write`] saves.
 struct GeneratedConfig<'a>(&'a Config);
 
 impl fmt::Display for GeneratedConfig<'_> {
@@ -182,8 +163,7 @@ fn print_welcome() {
     eprintln!();
 }
 
-/// Prompts the email address (seeded with `default` when re-running over
-/// an existing account) and normalizes it for discovery: a bare domain
+/// Prompts the email address and normalizes it for discovery: a bare domain
 /// becomes the `@domain` form the search understands.
 pub fn prompt_email() -> Result<String> {
     prompt_email_with(None)
@@ -204,10 +184,9 @@ pub fn prompt_email_with(default: Option<&str>) -> Result<String> {
     })
 }
 
-/// Searches the services reachable from `email`, keeps only those this
-/// build supports, lets the user pick one, then configures its backend
-/// (the authentication method is picked in a second, service-specific
-/// prompt) and tests the connection.
+/// Searches the services reachable from `email`, keeps only those this build
+/// supports, lets the user pick one, then configures its backend (its
+/// authentication method being a second prompt) and tests the connection.
 pub fn configure(account_name: &str, email: &str) -> Result<SourceConfig> {
     let spinner = Spinner::start("Searching for server settings");
     let mut found = search::search(email)?;
@@ -263,11 +242,9 @@ fn dispatch(account_name: &str, email: &str, choice: Discovered) -> Result<Sourc
     }
 }
 
-/// Stops the wizard when discovery found nothing to configure for
-/// `email`: it prints where to go next (a hand-written config, seeded
-/// from the documented sample) and errors out, rather than dropping into
-/// a hand-entry flow. The wizard only ever configures what it can
-/// discover automatically.
+/// Stops the wizard when discovery found nothing for `email`, pointing at the
+/// documented sample rather than dropping into a hand-entry flow: it only
+/// ever configures what it can discover automatically.
 fn stop_undiscovered(email: &str) -> Result<SourceConfig> {
     bail!(
         "Could not automatically discover a configuration for {email}.\n\n\

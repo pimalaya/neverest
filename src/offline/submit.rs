@@ -1,63 +1,29 @@
-//! The `submit` intent: a queued submission carried by the pimdir action
-//! queue, and the send channel it leaves through.
+//! # The submit intent
 //!
-//! # The contract
+//! A queued submission carried by the pimdir action queue, and the send channel
+//! it leaves through.
 //!
 //! Submission is the one mail-specific concept left in an otherwise
-//! kind-neutral engine, and it is confined here, to the send channel. It is
-//! **not** a store concept: pimdir carries an action kind and a versioned
-//! JSON payload, and `submit` is a kind **neverest** defines. Any other
-//! owner draining the same queue skips it (it lacks the capability), so the
-//! row stays pending rather than parked.
+//! kind-neutral engine, confined here. It is not a store concept: `submit` is
+//! an action kind neverest defines, and an owner draining the same queue
+//! without the capability skips the row rather than parking it.
 //!
-//! A producer (himalaya, today) enqueues one queue row:
+//! A producer enqueues a `submit` row whose payload is the `v: 1` envelope
+//! ([`SubmitMeta`]) and whose body is written into the object store before the
+//! enqueue, so the row pins it and GC cannot sweep it in between. The anchor
+//! collection is the producer's choice, every collection's queue being scanned.
 //!
-//! - **kind**: `submit`.
-//! - **payload** (`v: 1`):
+//! ```json
+//! {"v":1,"from":"a@x.org","rcpts":["b@y.org","c@y.org"],"subject":"hi"}
+//! ```
 //!
-//!   ```json
-//!   {
-//!     "v": 1,
-//!     "object": "<body hash>",
-//!     "from": "a@x.org",
-//!     "rcpts": ["b@y.org"],
-//!     "subject": "hi"
-//!   }
-//!   ```
+//! Submission is at-least-once: a crash between the server accepting and the
+//! row being acknowledged resends on the next run, no transaction spanning an
+//! SMTP dialogue. Deduplication is the provider's job, through `Message-ID` on
+//! the receiving side.
 //!
-//!   `v`, `object` and `from` are required (an empty `from` is the null
-//!   reverse path, for bounces), `rcpts` defaults to empty and `subject` is
-//!   optional and for the report only. Unknown fields are ignored so the
-//!   schema can grow.
-//! - **the body**: written durably into the store's object store *before* the
-//!   enqueue, and named by the payload's `object`, which is the pimdir
-//!   convention every action kind follows. The queue row therefore pins it
-//!   ("queued bodies are pinned"), so GC cannot sweep the body between the
-//!   enqueue and the send. The body belongs to **no collection**: it is not an
-//!   item, it is a payload in flight.
-//! - **collection**: whatever the producer chose to anchor the intent on (a
-//!   client typically picks `Sent`). Neverest scans every collection's
-//!   pending actions, so there is no anchor rule and no schema change.
-//!
-//! Neverest sends it through the first side offering a channel: that side's
-//! own `smtp` table (an SMTP submission session) or its native send (the
-//! Graph `sendMail` action, which files the message in Sent itself). On
-//! success the row is acknowledged (`drop_action`), which releases the
-//! object pin and lets the next GC reclaim the body.
-//!
-//! # Known property: submission is at-least-once
-//!
-//! A crash between "the server accepted the message" and "the queue row is
-//! acknowledged" resends on the next run. That was already true of the
-//! Outbox collection this replaces, so it is not a regression, but as a
-//! queue intent it is a visible contract: **deduplication is the provider's
-//! job**, through `Message-ID` dedup on the receiving side. Neverest does
-//! not, and cannot, close that window by itself (no transaction spans an
-//! SMTP dialogue).
-//!
-//! A build compiled without any send channel (neither `smtp` nor `msgraph`)
-//! **skips** submit intents: they stay pending, never parked, since another
-//! build can perform them.
+//! A build with no send channel skips the intents, leaving them pending rather
+//! than parked, since another build can perform them.
 
 #[cfg(feature = "smtp")]
 use std::{borrow::Cow, net::Ipv4Addr};
@@ -89,20 +55,20 @@ use crate::account::SmtpAccount;
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::GraphClient;
 
-/// The queue action kind neverest defines for a submission. pimdir knows
-/// nothing about it: it carries the kind and the payload, an owner that
-/// cannot perform it skips the row.
+/// The queue action kind neverest defines for a submission.
+///
+/// pimdir knows nothing about it: it carries the kind and the payload, and an
+/// owner that cannot perform it skips the row.
 pub const SUBMIT: &str = "submit";
 
-/// One pending `submit` row, as read from the queue: the payload stays raw
-/// so a malformed one can be parked with its reason rather than hiding the
-/// whole intent.
-//
+/// One pending `submit` row, as read from the queue.
+///
+/// The payload stays raw so a malformed one can be parked with its reason
+/// rather than hiding the whole intent.
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub struct SubmitIntent {
-    /// The queue row's global append id, the handle for acknowledging
-    /// (`drop_action`) or parking (`fail_action`) it.
+    /// The queue row's append id, the handle for acknowledging or parking it.
     pub id: i64,
     /// The collection the producer anchored the intent on.
     pub collection: String,
@@ -114,8 +80,10 @@ pub struct SubmitIntent {
 
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
 impl SubmitIntent {
-    /// The decoded envelope. A payload that does not decode is a
-    /// **permanent** failure: no later run decodes it any better.
+    /// The decoded envelope.
+    ///
+    /// A payload that does not decode is a permanent failure: no later run
+    /// decodes it any better.
     pub fn envelope(&self) -> Result<SubmitMeta, SubmitFailure> {
         let meta: SubmitMeta = serde_json::from_str(&self.payload)
             .map_err(|err| SubmitFailure::permanent(anyhow!("Malformed submit payload: {err}")))?;
@@ -128,8 +96,10 @@ impl SubmitIntent {
         Ok(meta)
     }
 
-    /// The subject for the report, best effort: an intent whose payload is
-    /// too broken to decode still has to be reportable.
+    /// The subject for the report, best effort.
+    ///
+    /// An intent whose payload is too broken to decode still has to be
+    /// reportable.
     pub fn subject(&self) -> Option<String> {
         serde_json::from_str::<SubmitMeta>(&self.payload)
             .ok()
@@ -139,10 +109,9 @@ impl SubmitIntent {
 
 /// The `v: 1` submit payload: the SMTP envelope plus one display field.
 ///
-/// The envelope serves the SMTP channel; a native sender (Graph) reads the
-/// addresses out of the MIME body itself and only needs the blob, so a
-/// Graph-only build decodes the payload (a broken one still parks) without
-/// reading the envelope back out.
+/// A native sender (Graph) reads the addresses out of the MIME body itself and
+/// only needs the blob, so a Graph-only build decodes the payload (a broken one
+/// still parks) without reading the envelope back out.
 #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
 #[derive(Debug, Deserialize)]
 pub struct SubmitMeta {
@@ -166,11 +135,9 @@ pub struct SubmitMeta {
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
 #[derive(Debug)]
 pub enum SubmitFailure {
-    /// Retry: the row stays pending and the next run tries again (a
-    /// connection failure, an SMTP 4xx).
+    /// Retry: the row stays pending for the next run (a dropped link, a 4xx).
     Transient(anyhow::Error),
-    /// Park: no run can do better (a malformed payload, a missing body, an
-    /// SMTP 5xx). The row is kept with its error for an operator.
+    /// Park: no run does better; the row keeps its error (5xx, bad payload).
     Permanent(anyhow::Error),
 }
 
@@ -194,14 +161,11 @@ impl SubmitFailure {
     }
 }
 
-/// Every pending `submit` intent in the store, across every collection, in
-/// queue order.
+/// Every pending `submit` intent in the store, in queue order.
 ///
-/// The store's drain applies the action kinds pimdir defines and **skips**
-/// the ones it does not (they read back as [`PimdirAction::Unknown`]), so
-/// this reads exactly what the drain deliberately left behind. A collection
-/// whose queue cannot be read is warned about and skipped, so one broken row
-/// never blocks the account's other submissions.
+/// The drain skips the kinds pimdir does not define (they read back as
+/// [`PimdirAction::Unknown`]), so this reads exactly what it left behind. A
+/// queue that cannot be read is skipped, never blocking the other collections.
 pub fn pending(store: &PimdirStore) -> Result<Vec<SubmitIntent>> {
     let collections = store
         .queued_collections()
@@ -239,17 +203,16 @@ pub fn pending(store: &PimdirStore) -> Result<Vec<SubmitIntent>> {
     Ok(intents)
 }
 
-/// The send channel a submission leaves through, resolved per account. Its
-/// variants are the send-capable backends compiled in; a build with none of
+/// The send channel a submission leaves through, resolved per account.
+///
+/// Its variants are the send-capable backends compiled in; a build with none of
 /// them has no channel type at all and can only leave intents pending.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 pub enum SendChannel<'a> {
-    /// A fresh SMTP submission session (the sending side's `smtp` table),
-    /// quit once every intent has been attempted.
+    /// A fresh SMTP session, quit once every intent has been attempted.
     #[cfg(feature = "smtp")]
     Smtp(SmtpClientStd),
-    /// The account's live Graph session: the sendMail action with the raw
-    /// MIME body (Graph files it in Sent itself).
+    /// The live Graph session: sendMail with the raw MIME body, filed in Sent.
     #[cfg(feature = "msgraph")]
     Graph(&'a mut GraphClient),
     /// Ties the lifetime down when the Graph variant is compiled out.
@@ -260,8 +223,9 @@ pub enum SendChannel<'a> {
 
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 impl SendChannel<'_> {
-    /// Closes the channel cleanly once the run's intents are attempted (the
-    /// SMTP session is ours; a Graph session belongs to its side).
+    /// Closes the channel once the run's intents are attempted.
+    ///
+    /// The SMTP session is ours; a Graph session belongs to its side.
     pub fn close(&mut self) {
         #[cfg(feature = "smtp")]
         if let SendChannel::Smtp(client) = self {
@@ -270,16 +234,11 @@ impl SendChannel<'_> {
     }
 }
 
-/// Connects the SMTP submission session: TCP or implicit TLS per the URL
-/// scheme, the optional STARTTLS upgrade, then the SASL exchange the
-/// `sasl` table names, if any.
+/// Connects the SMTP submission session, upgrading and authenticating.
 ///
-/// It takes the resolved [`SmtpAccount`] rather than the configuration
-/// it came from, so a send channel sharing its password entry with the
-/// source it belongs to costs no second unlock. The URL is already
-/// resolved too: a configured value carrying no scheme is a bare
-/// authority and takes `smtps://`, submission over implicit TLS being
-/// the modern default and the one RFC 8314 §3.3 asks for.
+/// It takes the resolved [`SmtpAccount`] rather than its configuration, so a
+/// channel sharing its source's password entry costs no second unlock. A URL
+/// with no scheme takes `smtps://`, the implicit TLS RFC 8314 §3.3 asks for.
 #[cfg(feature = "smtp")]
 pub fn connect_smtp(account: &SmtpAccount) -> Result<SmtpClientStd> {
     let opts = SmtpSessionOpenOptions {
@@ -298,21 +257,20 @@ pub fn connect_smtp(account: &SmtpAccount) -> Result<SmtpClientStd> {
     Ok(client)
 }
 
-/// The EHLO identity of the submission sessions: the loopback address
-/// literal RFC 5321 §4.1.3 reserves for a client with no resolvable domain
-/// name of its own, which a desktop client behind a NAT never has.
+/// The EHLO identity: the loopback address literal of RFC 5321 §4.1.3.
 ///
-/// A bare `localhost` is not a name either, and a server entitled to check
-/// (RFC 5321 §4.1.4) refuses it: Stalwart answers `550 5.5.0 Invalid EHLO
-/// domain`, so every queued intent stayed pending against it.
+/// A desktop behind a NAT has no resolvable domain name, and a bare
+/// `localhost` is not one either: a server entitled to check (§4.1.4) refuses
+/// it, Stalwart answering `550 5.5.0 Invalid EHLO domain`.
 #[cfg(feature = "smtp")]
 fn ehlo_domain() -> SmtpEhloDomain<'static> {
     Ipv4Addr::LOCALHOST.into()
 }
 
-/// Sends one intent through `channel`: the payload provides the SMTP
-/// envelope, the pinned blob the raw bytes. Message content is never
-/// logged.
+/// Sends one intent through `channel`.
+///
+/// The payload provides the SMTP envelope, the pinned blob the raw bytes.
+/// Message content is never logged.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 pub fn send_one(
     channel: &mut SendChannel<'_>,
@@ -349,8 +307,9 @@ pub fn send_one(
     }
 }
 
-/// Classifies an SMTP send failure the way RFC 5321 §4.2.1 does: a 5xx
-/// reply is permanent (the server will refuse it again), a 4xx reply and
+/// Classifies an SMTP send failure the way RFC 5321 §4.2.1 does.
+///
+/// A 5xx reply is permanent, the server refusing it again; a 4xx reply and
 /// anything else (a dropped connection, a TLS error) is transient.
 #[cfg(feature = "smtp")]
 fn classify_smtp(err: SmtpClientError) -> SubmitFailure {
@@ -380,9 +339,10 @@ fn classify_smtp(err: SmtpClientError) -> SubmitFailure {
     }
 }
 
-/// Classifies a Graph `sendMail` failure: a 4xx status is a rejection of
-/// this message (permanent), except the two "come back later" ones; a 5xx,
-/// a transport error or anything without a status is transient.
+/// Classifies a Graph `sendMail` failure.
+///
+/// A 4xx status rejects this message (permanent), except the two "come back
+/// later" ones; a 5xx, a transport error or no status at all is transient.
 #[cfg(feature = "msgraph")]
 fn classify_graph(err: MsgraphClientStdError) -> SubmitFailure {
     let status = match &err {
@@ -397,8 +357,7 @@ fn classify_graph(err: MsgraphClientStdError) -> SubmitFailure {
     }
 }
 
-/// The MAIL FROM reverse path of an envelope sender, the null path for an
-/// empty one (bounces).
+/// The MAIL FROM reverse path, the null path for an empty sender (bounces).
 #[cfg(feature = "smtp")]
 fn reverse_path(from: &str) -> Result<SmtpReversePath<'static>> {
     if from.is_empty() {
@@ -433,18 +392,17 @@ mod tests {
     use super::*;
     use crate::config::SmtpConfig;
 
-    /// What the scripted SMTP sink captured from one session: the envelope
-    /// command lines and the DATA payload.
+    /// What the sink captured: the envelope command lines and the DATA payload.
     struct Captured {
         commands: Vec<String>,
         data: Vec<u8>,
     }
 
-    /// A minimal scripted SMTP sink on a random local port: one thread
-    /// accepts one session, answers the canonical submission dialogue
-    /// (greeting, EHLO, MAIL, RCPT, DATA, QUIT) and captures the envelope
-    /// and message bytes. `reject` makes it answer the DATA command with
-    /// that reply line instead of accepting.
+    /// A minimal scripted SMTP sink on a random local port.
+    ///
+    /// One thread accepts one session, answers the canonical submission
+    /// dialogue and captures the envelope and message bytes. `reject` makes it
+    /// answer the DATA command with that reply line instead of accepting.
     fn spawn_smtp_sink(reject: Option<&'static str>) -> (u16, mpsc::Receiver<Captured>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind sink");
         let port = listener.local_addr().expect("sink addr").port();
@@ -509,8 +467,7 @@ mod tests {
         (port, rx)
     }
 
-    /// Writes a body into the blob store and returns the intent pointing at
-    /// it, the exact shape a producer's queue row lands as.
+    /// Stages a body in the blob store and returns the intent pointing at it.
     fn stage_intent(blobs: &PimdirBlobs, id: i64, payload: &str, body: &[u8]) -> SubmitIntent {
         let hash = ReplicaHash(format!("hash-{id}"));
         let mut writer = blobs.writer().expect("blob writer");

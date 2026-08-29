@@ -1,32 +1,21 @@
-//! The per-kind seam: everything about a synced item that depends on
-//! *which* media type it is.
+//! # Kind
 //!
-//! io-replica, io-pimdir and the [`crate::client`] seam are all
-//! kind-agnostic; exactly four things are not, and they live here:
+//! The per-kind seam: everything about a synced item that depends on which
+//! media type it is. io-replica, io-pimdir and the [`crate::client`] seam are
+//! kind-agnostic; exactly four things are not, and they live here.
 //!
-//! - the **link id**, an item's stable cross-collection identity (a
-//!   `Message-ID`, a vCard or iCalendar `UID`);
-//! - the **summary**, the `v:1` JSON blob a reader renders a list from
-//!   without fetching a body (pimdir SPEC Annex A);
-//! - the **sort key**, the item's place in its collection's natural order
-//!   (newest first for mail, A to Z for cards, chronological for calendar
-//!   items), which the store orders a page by and never parses out of the
-//!   summary (pimdir SPEC §9.3);
-//! - the **merge**, the three-way reconciliation of a content conflict's
-//!   base, local and remote bodies, which lives in [`merge`] and is what
-//!   keeps io-replica free of every format.
+//! The link id is an item's stable cross-collection identity, the summary the
+//! `v:1` JSON blob a reader lists from without fetching a body (pimdir SPEC
+//! Annex A), the sort key its place in the collection's natural order (SPEC
+//! §9.3), and the merge the three-way reconciliation in [`merge`].
 //!
-//! The first three are derived from a raw body by [`Kind::parse_body`], the single
-//! dispatch point the sync goes through. A kind that also has a cheap
-//! server-side summary tier (mail's IMAP `ENVELOPE`) additionally
-//! implements [`Kind::parse_summary`], so the `Meta` tier resolves without
-//! a body. **A kind that implements both MUST make them agree
-//! byte-for-byte** — see [`mail`] for what happens when they do not.
+//! The first three come from [`Kind::parse_body`]. A kind with a cheap
+//! server-side summary tier (mail's IMAP `ENVELOPE`) also implements
+//! [`Kind::parse_summary`], and **a kind implementing both MUST make them
+//! agree byte-for-byte**: see [`mail`] for what happens when they do not.
 //!
-//! Deliberately an enum rather than a trait: the set of kinds is closed
-//! and small, there is one dispatch point, and it mirrors how
-//! [`crate::client::Client`] already dispatches over its backends. A
-//! trait would buy dynamic dispatch nobody needs.
+//! An enum rather than a trait: the set of kinds is closed and small, there
+//! is one dispatch point, and a trait would buy dispatch nobody needs.
 
 #[cfg(feature = "dav")]
 pub mod ical;
@@ -53,19 +42,21 @@ const MINT_SEPARATOR: char = '#';
 
 /// A link id read as its parts by [`Kind::split_link_id`].
 ///
-/// Both parts are absent for a key the item's content never stated (a kind
-/// fallback with nothing minted onto it), which is the shape a write has no
-/// identity to offer a server for.
+/// Both parts are absent for a key the item's content never stated, which is
+/// the shape a write has no identity to offer a server for.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LinkId<'a> {
-    /// The identity the item states and a backend can address it by: the
-    /// `Message-ID` an IMAP server without UIDPLUS needs to recover the UID
-    /// it assigned, the `UID` a DAV backend builds the new href from. `None`
-    /// for the kind's own fallback, which no server has heard of.
+    /// The identity the item states and a backend can address it by.
+    ///
+    /// The `Message-ID` an IMAP server without UIDPLUS recovers its UID from,
+    /// the `UID` a DAV backend builds the new href from. `None` for the
+    /// kind's own fallback, which no server has heard of.
     pub hint: Option<&'a str>,
-    /// The handle the key was minted on, for a second copy of an identity the
-    /// collection holds twice. `None` for an ordinary key. It is what a name
-    /// derived from the identity must carry to stay distinct from the twin's.
+    /// The handle the key was minted on, for a second copy of an identity one
+    /// collection holds twice.
+    ///
+    /// `None` for an ordinary key. A name derived from the identity must
+    /// carry it to stay distinct from the twin's.
     pub mint: Option<&'a str>,
 }
 
@@ -107,9 +98,8 @@ impl Kind {
         }
     }
 
-    /// The extension a body of this kind is exported under, so a merger a
-    /// person configured is handed files it recognises rather than four
-    /// nameless ones.
+    /// The extension a body of this kind is exported under, so a configured
+    /// merger is handed files it recognises rather than four nameless ones.
     pub fn extension(self) -> &'static str {
         match self {
             Self::Mail => "eml",
@@ -121,8 +111,7 @@ impl Kind {
     }
 
     /// The link id, `v:1` summary and sort key for a raw body of `size`
-    /// octets — the `Full` tier's derivation, and the only one every kind
-    /// implements.
+    /// octets: the `Full` tier's derivation, which every kind implements.
     pub fn parse_body(self, raw: &[u8], size: u64) -> (ReplicaLinkId, ReplicaMeta, ReplicaSortKey) {
         match self {
             Self::Mail => mail::parse_body(raw, size),
@@ -136,21 +125,9 @@ impl Kind {
     /// Refuses a body that is not one of this kind, or not one of *this*
     /// item.
     ///
-    /// A settled conflict body is the one body reaching the store that
-    /// nothing here derived: a person wrote it, or the merger they named
-    /// did. Two things are asked of it. It has to read as the kind the
-    /// collection declares, which is what keeps a half-written template, a
-    /// tool that wrote its error message to the output path, or a merger
-    /// that crashed mid-write from replacing a contact with something that
-    /// is not one. And it has to keep the identity the item is bound by: a
-    /// body stating another `UID`, or none, is a resolution of some other
-    /// item, and taking it leaves the store holding a row whose link id has
-    /// nothing to do with its content.
-    ///
-    /// The reading is the kind's own scanner rather than the merge's parser,
-    /// so a build without the `merge` cargo feature, where an interactive
-    /// resolution is the only way a divergence is ever settled, is guarded
-    /// the same way.
+    /// A settled body is the one body reaching the store that nothing here
+    /// derived, so two things are asked of it: it reads as the kind the
+    /// collection declares, and it keeps the identity the item is bound by.
     pub fn validate_body(self, body: &[u8], link_id: &ReplicaLinkId) -> Result<()> {
         let Some(component) = self.component() else {
             bail!("Mail bodies are immutable, so no body settles a message");
@@ -183,8 +160,7 @@ impl Kind {
     }
 
     /// The component a body of this kind is wrapped in (RFC 6350 §6.1.1, RFC
-    /// 5545 §3.4), or `None` for a kind whose bodies are opaque to every
-    /// reader here.
+    /// 5545 §3.4), or `None` for a kind whose bodies are opaque here.
     fn component(self) -> Option<&'static str> {
         match self {
             Self::Mail => None,
@@ -195,23 +171,12 @@ impl Kind {
         }
     }
 
-    /// Splits a link id into the two things a write needs from it: the
-    /// identity a backend can address the item by, and what tells this copy
-    /// from the one already holding that identity.
+    /// Splits a link id into the identity a backend can address the item by,
+    /// and what tells this copy from the one already holding that identity.
     ///
-    /// **The one legitimate place a link id is parsed.** The store never
-    /// parses one, and neither does anything else here: a key is opaque to
-    /// every reader (pimdir SPEC §9), and the single exception is the write
-    /// side, which has to hand a server an identity it can act on. Every
-    /// backend therefore takes its hint and its mint from here rather than
-    /// reading the string itself.
-    ///
-    /// An ordinary key *is* the identity, pimdir SPEC Annex A prepending
-    /// nothing to it. A minted key (`dup:<hint>#<handle>`, SPEC §9) is the
-    /// second copy of an identity one collection holds twice: its hint is the
-    /// identity both copies genuinely carry, so an append resolves against the
-    /// server by it, and its mint is the handle it was minted from, which is
-    /// what keeps the two copies apart in anything named after them.
+    /// **The one legitimate place a link id is parsed**: a key is opaque to
+    /// every reader (pimdir SPEC §9), and only the write side hands a server
+    /// an identity. A second copy is minted `dup:<hint>#<handle>` (SPEC §9).
     pub fn split_link_id<'l>(self, link_id: &'l ReplicaLinkId) -> LinkId<'l> {
         let Some(minted) = link_id.0.strip_prefix(MINT_PREFIX) else {
             return LinkId {
@@ -221,8 +186,7 @@ impl Kind {
         };
 
         // The last separator, not the first: a `Message-ID` may legally carry
-        // a `#` (RFC 5322 `atext` admits it) and a handle addressed as one
-        // path segment or a UID may not.
+        // a `#` (RFC 5322 `atext`) and a handle may not.
         let (hint, mint) = minted.rsplit_once(MINT_SEPARATOR).unwrap_or(("", minted));
 
         LinkId {
@@ -234,9 +198,9 @@ impl Kind {
     /// The identity in a key, or `None` for the kind's own fallback (mail's
     /// `alt:`, a DAV item's `hash:`), which the server has never heard of.
     ///
-    /// Those are the one case a prefix marks, and a real `Message-ID` or `UID`
-    /// cannot be mistaken for one, RFC 5322 `atext` admitting no colon before
-    /// the `@`.
+    /// Those are the one case a prefix marks, and a real `Message-ID` or
+    /// `UID` cannot be mistaken for one, RFC 5322 `atext` admitting no colon
+    /// before the `@`.
     fn hint(self, key: &str) -> Option<&str> {
         let fallback = match self {
             Self::Mail => "alt:",
@@ -248,10 +212,8 @@ impl Kind {
     }
 
     /// The tier a freshly probed item is raised to so its link id and summary
-    /// resolve: `Meta` where the backend has a cheap server-side summary
-    /// (mail's IMAP `ENVELOPE`), `Full` where only the body carries the
-    /// identity, which is every kind [`parse_summary`](Self::parse_summary)
-    /// answers `None` for.
+    /// resolve: `Meta` where the backend has a cheap server-side summary,
+    /// `Full` where only the body carries the identity.
     pub fn probe_tier(self) -> ReplicaTier {
         match self {
             Self::Mail => ReplicaTier::Meta,
@@ -261,12 +223,11 @@ impl Kind {
     }
 
     /// The link id, `v:1` summary and sort key from a server-side summary,
-    /// for a kind whose backend offers a cheap `Meta` tier (mail's IMAP
-    /// `ENVELOPE`).
+    /// for a kind offering a cheap `Meta` tier (mail's IMAP `ENVELOPE`).
     ///
     /// `None` for a kind with no such tier: a DAV `sync-collection` report
-    /// returns hrefs and ETags but no `UID`, so a DAV item can only resolve
-    /// from its body and goes straight to `Full`.
+    /// returns hrefs and ETags but no `UID`, so a DAV item goes straight to
+    /// `Full`.
     pub fn parse_summary(
         self,
         summary: &ItemSummary,
@@ -279,12 +240,11 @@ impl Kind {
     }
 }
 
-/// Whether `body`'s first and last content lines are the `BEGIN` and the
-/// `END` of `component`.
+/// Whether `body` opens with `BEGIN:component` and closes with `END:`.
 ///
-/// Blank lines are skipped at both ends, a trailing line terminator being
-/// optional in what the store holds, and the comparison is ASCII
-/// case-insensitive because both formats spell their delimiters that way.
+/// Blank lines are skipped at both ends, a trailing terminator being optional
+/// in what the store holds, and the comparison is ASCII case-insensitive
+/// because both formats spell their delimiters that way.
 fn wrapped_in(body: &[u8], component: &str) -> bool {
     let text = String::from_utf8_lossy(body);
     let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
@@ -321,9 +281,8 @@ mod tests {
         assert_eq!(Kind::Mail.split_link_id(&link), LinkId::default());
     }
 
-    /// The second copy of an identity keeps the identity, which is what an
-    /// append resolves against, and gains the part that tells it from the
-    /// copy holding that identity bare.
+    /// The second copy keeps the identity an append resolves against, and
+    /// gains the part telling it from the copy holding that identity bare.
     #[test]
     fn a_minted_key_splits_into_the_shared_identity_and_the_copys_own_part() {
         let link = ReplicaLinkId::from("dup:a@example.org#146");
@@ -350,8 +309,8 @@ mod tests {
         );
     }
 
-    /// Two copies of a resource carrying no `UID` are minted over the kind's
-    /// fallback, so the mint is the only part a write can name them by.
+    /// Two copies carrying no `UID` are minted over the kind's fallback, so
+    /// the mint is the only part a write can name them by.
     #[test]
     #[cfg(feature = "dav")]
     fn a_mint_over_a_fallback_keeps_the_mint_and_no_hint() {

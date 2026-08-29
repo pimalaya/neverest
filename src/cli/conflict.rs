@@ -1,5 +1,7 @@
-//! `neverest conflict` command: lists the divergences runs parked, shows the
-//! bodies one is between, and settles it.
+//! # Conflict command
+//!
+//! Lists the divergences runs parked, shows the bodies one is between, and
+//! settles it.
 
 use std::path::{Path, PathBuf};
 
@@ -21,13 +23,12 @@ use crate::{
     offline::driver,
 };
 
-/// How many times a decision is recomputed against a remote that moved under
-/// it before the command gives up.
+/// How many times a decision is recomputed against a moved remote before the
+/// command gives up.
 ///
-/// The retry is what makes the guard usable rather than a wall: a person who
-/// spent a minute in a merger is handed the bodies that arrived meanwhile and
-/// asked again. The cap is what keeps a store somebody else is syncing hard
-/// from turning that into a loop.
+/// The retry hands a person who spent a minute in a merger the bodies that
+/// arrived meanwhile and asks again; the cap keeps a store somebody else is
+/// syncing hard from turning that into a loop.
 const MAX_ATTEMPTS: usize = 3;
 
 /// Lists, inspects and settles the divergences a run could not merge away.
@@ -124,10 +125,10 @@ impl ConflictShowCommand {
 /// Settles one divergence, by taking a side or by handing the bodies to the
 /// configured merger.
 ///
-/// `--prefer-local` and `--prefer-remote` discard the other side, which is
-/// acceptable because a person asked for it by name and is exactly what a
-/// background run must never do on its own. The decision is refused when the
-/// store has observed a newer remote revision since it was computed.
+/// `--prefer-local` and `--prefer-remote` discard the other side, which a
+/// person may ask for by name and a background run must never do on its own.
+/// The decision is refused when the store has observed a newer remote
+/// revision since it was computed.
 #[derive(Debug, Parser)]
 #[command(group = ArgGroup::new("side").required(true))]
 pub struct ConflictResolveCommand {
@@ -167,16 +168,13 @@ impl ConflictResolveCommand {
         self.resolve(printer, &name, &account_config, &dir)
     }
 
-    /// The decision loop, from the bodies a merger is handed to the edit that
-    /// settles the divergence.
+    /// The decision loop, from the bodies a merger is handed to the edit
+    /// that settles the divergence.
     ///
-    /// Nothing here holds the store open across the decision. io-pimdir's
-    /// owner lock lives on the handle, so a handle kept for the command's
-    /// whole life would refuse every sync of that store for as long as a
-    /// person sits in an editor, which is exactly the window the staleness
-    /// guard was written for: the bodies are read through a lock-free reader
-    /// that is dropped before the merger runs, and the store is opened again,
-    /// under neverest's own `sync.lock`, only to apply what came back.
+    /// Nothing holds the store open across the decision: io-pimdir's owner
+    /// lock lives on the handle, so keeping one would refuse every sync of
+    /// that store while a person sits in an editor, which is the very window
+    /// the staleness guard was written for.
     fn resolve(
         &self,
         printer: &mut impl Printer,
@@ -328,10 +326,8 @@ fn store_dir(name: &str, account_config: &AccountConfig) -> Result<PathBuf> {
 /// Opens the account's store for reading only.
 ///
 /// A reader owns nothing and takes no lock (pimdir SPEC §8), so any number of
-/// them run against a store a sync is holding. Every conflict command reads
-/// through one: listing what is parked, showing the three bodies and handing
-/// them to a merger are all reads, and none of them is a reason to keep a
-/// sync out.
+/// them run against a store a sync is holding. Every conflict command is a
+/// read, and no read is a reason to keep a sync out.
 fn read(name: &str, dir: &Path) -> Result<PimdirReader> {
     PimdirReader::open(dir).with_context(|| format!("Read the store of account {name}"))
 }
@@ -366,16 +362,15 @@ mod tests {
     /// The identity the seeded card states and the placement is linked by.
     const UID: &str = "uid:a";
 
-    /// The revision the divergence was recorded at, which is the one the
-    /// concurrent sync moves the store past.
+    /// The revision the concurrent sync moves the store past.
     const REVISION: &str = "etag-2";
 
-    /// How long a step of the handshake waits before failing the test rather
-    /// than hanging the suite.
+    /// How long a handshake step waits before failing the test rather than
+    /// hanging the suite.
     const PATIENCE: Duration = Duration::from_secs(10);
 
     /// A [`Printer`] keeping what it was handed, so the test reads the
-    /// command's own output rather than the store alone.
+    /// command's own output.
     #[derive(Default)]
     struct TestPrinter(String);
 
@@ -444,16 +439,10 @@ mod tests {
     /// A sync runs while a person is in the merger, and the decision they
     /// come back with is recomputed against what arrived.
     ///
-    /// This is the whole point of the staleness guard, and it was
-    /// unreachable: the command held io-pimdir's owner lock for its entire
-    /// life, so the only thing that can move a placement's conflict revision,
-    /// a sync of that store, was refused outright while the merger was up.
-    /// `Applied::Moved`, the retry loop and the warning that goes with it
-    /// were all dead in ordinary use.
-    ///
-    /// The merger here is that sync: it signals the test, waits for the
-    /// store to be written from another thread as a sync would write it, and
-    /// only then answers. The write is what fails before the fix.
+    /// The whole point of the staleness guard, and it was unreachable: the
+    /// command held io-pimdir's owner lock for its entire life, so the only
+    /// thing that can move a conflict revision, a sync of that store, was
+    /// refused while the merger was up. The merger here is that sync.
     #[cfg(unix)]
     #[test]
     fn a_store_written_under_the_merger_sends_the_decision_back_for_another_look() {
@@ -495,10 +484,9 @@ mod tests {
             thread::spawn(move || {
                 await_file(&entered);
 
-                // The lock itself, and not only the handle: io-pimdir counts
-                // owning handles per process, so a second `open` here would
-                // succeed off that count whether or not the file lock is
-                // free. This is the lock another process contends for.
+                // The lock itself, not the handle: io-pimdir counts owning
+                // handles per process, so a second `open` here would succeed
+                // off that count. This is what another process contends for.
                 let owner = fs::File::options()
                     .read(true)
                     .write(true)
@@ -509,8 +497,7 @@ mod tests {
                     .expect("the store is unowned while the merger runs");
                 drop(owner);
 
-                // What no sync could do while the merger was up: take the
-                // store and record the revision the remote moved to.
+                // What no sync could do while the merger was up.
                 let mut store = PimdirStore::open(&dir)
                     .expect("a store the merger does not own")
                     .for_account(ACCOUNT)
@@ -561,8 +548,8 @@ mod tests {
         );
     }
 
-    /// Polls for a file the merger writes, bounded so a failure is a failed
-    /// test rather than a hung suite.
+    /// Polls for a file the merger writes, bounded so a failure fails the
+    /// test rather than hanging the suite.
     fn await_file(path: &Path) {
         let deadline = Instant::now() + PATIENCE;
         while !path.exists() {

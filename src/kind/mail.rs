@@ -1,38 +1,23 @@
-//! The `message/rfc822` kind: how a mail message derives its link id and
-//! its `v:1` summary.
+//! # Mail kind
 //!
-//! The **conventions** are the format's: the link id is the bare
-//! `Message-ID` and the `Date:` is the UTC instant, both as pimdir SPEC
-//! Annex A.1 and the format's own `vectors/meta.json` give them, and the
-//! summary is [`PimdirMailMeta`] itself, so the schema cannot drift from
-//! io-pimdir's by a field or a spelling.
+//! `message/rfc822`: how a message derives its link id and its `v:1` summary.
+//! The conventions are the format's, the link id being the bare `Message-ID`
+//! and the summary [`PimdirMailMeta`] itself (pimdir SPEC Annex A.1), so the
+//! schema cannot drift from io-pimdir's by a field or a spelling.
 //!
-//! The **reader** is still this crate's, and deliberately.
-//! [`io_pimdir::conventions::mail`] scans headers raw, so it hands back
-//! `=?utf-8?q?D=C3=A9p=C3=B4t?=` where a subject was RFC 2047 encoded, and a
-//! list of a real mailbox is then mojibake. The format's vectors are ASCII
-//! only, so nothing there says otherwise and nothing there catches it.
-//! Delegating the scan would trade a correct reader for a nominal
-//! deduplication; `a_subject_is_decoded_not_shown_encoded` holds the line
-//! until io-pimdir decodes encoded-words, at which point `parse_body` becomes
-//! a call to `mail::derive` and this file loses its parser.
+//! The reader is still this crate's, deliberately.
+//! [`io_pimdir::conventions::mail`] scans headers raw, so an RFC 2047 subject
+//! comes back as mojibake in every list, and the format's ASCII-only vectors
+//! catch none of it. One test holds the line until io-pimdir decodes them.
 //!
-//! Mail is also the one kind with a cheap **`Meta`** tier, an IMAP or Graph
-//! `ENVELOPE` rather than a body, which no library derives for us anyway.
+//! Mail is also the one kind with a cheap `Meta` tier, an IMAP or Graph
+//! `ENVELOPE` rather than a body, so there are two derivations and they must
+//! agree byte-for-byte.
 //!
-//! So there are **two** derivations and they must agree byte-for-byte. They
-//! did not once: `chrono`'s plain `to_rfc3339` writes UTC as `+00:00` while
-//! `mail_parser` writes `Z`, and since the `alt:` link id embeds the date, a
-//! message with no `Message-ID` linked one way at `Meta` and another at
-//! `Full`. That stranded the `Meta` item, so it was re-fetched every single
-//! sync and its body was stored twice. Both tiers now build the *same*
-//! [`PimdirMailMeta`] and take their link id and sort key from it through
-//! [`link_id`] and [`sort_key`], over one date formatter ([`utc`]), so there
-//! is one rule and one spelling; `meta_and_full_link_ids_agree_on_dates`
-//! keeps them honest.
-//!
-//! The DAV kinds have no such hazard: they resolve at `Full` only, so there
-//! is only ever one derivation to get right.
+//! They did not once: `chrono` wrote UTC as `+00:00` where `mail_parser`
+//! wrote `Z`, and since the `alt:` link id embeds the date, a message with no
+//! `Message-ID` linked one way at `Meta` and another at `Full`, stranding it
+//! so it was re-fetched every sync and its body stored twice.
 
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use io_pimdir::conventions::mail::PimdirMailMeta;
@@ -44,13 +29,9 @@ use crate::item::summary::{ItemSummary, normalize_message_id, parse_message_ids}
 /// The link id for a message: its bare `Message-ID`, else a
 /// `(subject, date, sender)` fallback (`alt:`).
 ///
-/// pimdir SPEC Annex A.1 and the format's vectors give the identity as the
-/// bare id, angle brackets stripped and nothing prepended: a `Message-ID`
-/// cannot contain a colon before its `@` (RFC 5322 `atext`), so the
-/// prefixed fallbacks can never be mistaken for one.
-///
-/// Both tiers go through this, over the meta they both build, so the rule
-/// is written once.
+/// pimdir SPEC Annex A.1 gives the identity as the bare id, brackets stripped
+/// and nothing prepended: a `Message-ID` cannot hold a colon before its `@`
+/// (RFC 5322 `atext`), so the prefixed fallback is never mistaken for one.
 fn link_id(meta: &PimdirMailMeta) -> ReplicaLinkId {
     match &meta.message_id {
         Some(id) if !id.is_empty() => ReplicaLinkId::from(id.clone()),
@@ -64,21 +45,20 @@ fn link_id(meta: &PimdirMailMeta) -> ReplicaLinkId {
 }
 
 /// The message's position in a newest-first listing: the `Date:` the meta
-/// already carries, which is RFC 3339 UTC at seconds precision (pimdir SPEC
-/// Annex A.1), so byte order is chronological order whatever offset the
-/// sender wrote.
+/// already carries.
 ///
-/// Unknown (empty) when the header is missing or unparseable, which lands
-/// the message at the end of the listing.
+/// RFC 3339 UTC at seconds precision (pimdir SPEC Annex A.1), so byte order
+/// is chronological order whatever offset the sender wrote. Empty when the
+/// header is missing or unparseable, which sorts the message last.
 fn sort_key(meta: &PimdirMailMeta) -> ReplicaSortKey {
     ReplicaSortKey(meta.date.clone().unwrap_or_default())
 }
 
-/// The `Date:` as Annex A.1 spells it: the **UTC instant**, RFC 3339 at
-/// seconds precision, never the local reading the sender wrote.
+/// The `Date:` as Annex A.1 spells it: the UTC instant, RFC 3339 at seconds
+/// precision, never the local reading the sender wrote.
 ///
-/// The one formatter both tiers use, which is what keeps the `alt:` link id
-/// they each derive identical.
+/// The one formatter both tiers use, which keeps the `alt:` link ids they
+/// each derive identical.
 fn utc(date: DateTime<FixedOffset>) -> String {
     date.with_timezone(&Utc)
         .to_rfc3339_opts(SecondsFormat::Secs, true)
@@ -103,7 +83,7 @@ pub fn parse_summary(env: &ItemSummary) -> (ReplicaLinkId, ReplicaMeta, ReplicaS
 
 /// The `Full`-tier derivation: the same summary, read off a raw message's
 /// headers. `size` is the whole message's octet length, known from the
-/// stream, since `raw` is only the header prefix it carried.
+/// stream, `raw` being only the header prefix it carried.
 pub fn parse_body(raw: &[u8], size: u64) -> (ReplicaLinkId, ReplicaMeta, ReplicaSortKey) {
     let parsed = MessageParser::default().parse(raw);
     let address = |header: Option<&mail_parser::Address<'_>>| {
@@ -164,8 +144,8 @@ mod tests {
     use super::*;
     use crate::item::address::Address;
 
-    /// A reader's view of the `message/rfc822` meta (pimdir SPEC Annex A), mirroring
-    /// what a Himalaya pimdir backend would deserialize.
+    /// A reader's view of the `message/rfc822` meta (pimdir SPEC Annex A),
+    /// mirroring what a Himalaya pimdir backend would deserialize.
     #[derive(Deserialize)]
     struct MetaView {
         v: u8,
@@ -200,9 +180,8 @@ mod tests {
     }
 
     /// The body tier is io-pimdir's, so a message the format has a vector for
-    /// derives what the vector says: the identity is the bare `Message-ID`,
-    /// and the date is the UTC instant rather than the offset the sender
-    /// wrote.
+    /// derives what the vector says: the bare `Message-ID`, and the UTC
+    /// instant rather than the offset the sender wrote.
     #[test]
     fn the_body_tier_is_the_format() {
         let raw = b"Message-ID: <basic-1@example.org>\r\n\
@@ -227,8 +206,7 @@ mod tests {
     /// A summary is what a reader shows, so an encoded-word header is decoded
     /// here or it is mojibake in every list. This is the one thing keeping
     /// `parse_body` from being a call to io-pimdir's conventions, whose
-    /// scanner reads headers raw and whose vectors are ASCII only, so nothing
-    /// upstream says otherwise and nothing upstream catches it.
+    /// scanner reads headers raw and whose vectors are ASCII only.
     #[test]
     fn a_subject_is_decoded_not_shown_encoded() {
         let raw = b"Message-ID: <enc-1@example.org>\r\n\
@@ -241,9 +219,8 @@ mod tests {
         assert_eq!(view.subject, "Dépôt de votre Lettre");
     }
 
-    /// The stream knows the message's length; the header prefix the
-    /// conventions read does not, and reporting the prefix would show every
-    /// message as a few hundred bytes.
+    /// The stream knows the message's length; the header prefix does not, and
+    /// reporting the prefix would show every message as a few hundred bytes.
     #[test]
     fn the_body_tier_reports_the_streamed_size_not_the_prefix() {
         let raw = b"Message-ID: <x@y>\r\nSubject: S\r\n\r\n";
@@ -292,8 +269,8 @@ mod tests {
         assert_eq!(body_link, env_link);
     }
 
-    /// A message with no parseable date omits it rather than guessing, and
-    /// the empty key lands it last in a descending listing.
+    /// A message with no parseable date omits it rather than guessing, the
+    /// empty key landing it last in a descending listing.
     #[test]
     fn a_message_without_a_date_sorts_last_and_omits_the_field() {
         let (_, meta, key) = parse_summary(&summary(Some("nodate-1@example.org"), None));

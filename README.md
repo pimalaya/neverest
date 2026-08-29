@@ -112,9 +112,13 @@ A configuration is loaded from the first valid path among:
 
 Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths can be passed at once, separated by `:`. The first one is the base and the rest are deep-merged on top. The full field reference lives in [config.sample.toml](./config.sample.toml).
 
-Run `neverest` with no configuration file on disk and a minimal wizard asks for an email address, searches the services reachable from it, prompts the authentication the chosen one advertises, tests the connection, then offers to write the result. It sets up **one account with one backend**, the offline replica most setups want, and nothing more: a second kind, a mirror between two providers, a fan-in are all written by hand against [config.sample.toml](./config.sample.toml). `neverest configure` runs the same flow again over an existing account. Declining the save prints the configuration on stdout, and a redirected stdout skips the prompts altogether, so `neverest > config.toml` writes the file itself.
+Run `neverest` with no configuration file on disk and a minimal wizard discovers a provider from an email address, tests it, then offers to write the result. It sets up **one account with one backend**, the offline replica most setups want; anything else is written by hand against [config.sample.toml](./config.sample.toml).
 
-An account is one pimdir store fed by one or more named **sources**, each a remote, and it may hold several kinds at once. What it does is its arity plus two flags, so there is no mode to name: with no `targets` every source syncs into the local store, which is the offline replica; with them the source is copied to each target. `one-way` makes the sources authoritative, so the other side's changes are overwritten rather than merged, and `retain` says whether the store keeps bodies or is only the ledger it has to be in every mode. Sources never meet, so several of them cache side by side for a frontend to union at display time.
+`neverest configure` runs the same flow over an existing account. Declining the save prints the configuration on stdout, and a redirected stdout skips the prompts, so `neverest > config.toml` writes the file itself.
+
+An account is one pimdir store fed by one or more named **sources**, each a remote, and it may hold several kinds at once. What it does is its arity plus two flags: with no `targets` every source syncs into the local store, the offline replica; with them the source is copied to each target.
+
+`one-way` makes the sources authoritative, so the other side's changes are overwritten rather than merged, and `retain` says whether the store keeps bodies or is only the ledger it has to be anyway. Sources never meet, so several cache side by side for a frontend to union at display time.
 
 ## Usage
 
@@ -133,9 +137,9 @@ An account is initialized once, which opens every source so credential and netwo
 
 ### Conflicts
 
-A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What is left is both sides setting one field two ways, which no merge settles: the item parks, everything else keeps syncing, and the run exits 2 rather than failing over one contact.
+A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What no merge settles is both sides setting one field two ways: the item parks, everything else keeps syncing, and the run exits 2.
 
-Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries the two numbers a notifier needs: `conflicts` is what this run marked, `outstanding_conflicts` is what the store holds waiting. The engine says nothing about a placement an earlier run already parked, so testing the first is how a schedule notifies on entry, once, with no state of its own to keep:
+Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries the two numbers a notifier needs: `conflicts` is what this run marked, `outstanding_conflicts` what the store holds waiting. Testing the first notifies on entry, once, with no state of its own to keep:
 
 ```sh
 neverest sync --json | jq -e '.conflicts | length > 0' >/dev/null \
@@ -144,13 +148,15 @@ neverest sync --json | jq -e '.conflicts | length > 0' >/dev/null \
 
 A wrapper reading that report can name the item, its collection and its side, which a fixed summary and body could not.
 
-Deciding is a command and never a run, whatever is attached to the terminal. `conflict list` names what is waiting, `conflict show <id>` prints the three bodies, and `conflict resolve <id>` settles one, either by taking a side with `--prefer-local` or `--prefer-remote` or by handing the bodies to the merger `conflict.merger` names. A settled body has to be a body of that item, so one no parser reads and one stating another `UID` are both refused. A decision is refused when the remote moved while it was being made, since pushing it would overwrite whatever arrived meanwhile, and nothing here holds the store, so a sync stays free to run while a merger is open.
+Deciding is a command and never a run. `conflict list` names what is waiting, `conflict show <id>` prints the three bodies, and `conflict resolve <id>` settles one, either by taking a side with `--prefer-local` or `--prefer-remote` or by handing the bodies to the merger `conflict.merger` names.
 
-Exit 2 is wider than conflicts: it means the run reconciled its collections and left something waiting for a person, which is a parked conflict, a duplicate `UID` the other side refuses, or a write it would not take. The report names which. A write that did not land is never counted among the hunks a run applied, so `already in sync` means the run wrote nothing.
+A settled body has to be a body of that item, so one no parser reads and one stating another `UID` are both refused. A decision is refused when the remote moved while it was being made, and nothing here holds the store, so a sync stays free to run while a merger is open.
+
+Exit 2 is wider than conflicts: the run reconciled its collections but left something waiting for a person, be it a parked conflict, a duplicate `UID` the other side refuses, or a write it would not take. The report names which. A write that did not land is never counted, so `already in sync` means the run wrote nothing.
 
 ### Retention and backup
 
-The store never truly deletes an item. When its last binding vanishes the row is retained: hidden from the sync and from listings, but kept with its body. Reclaiming is explicit and time-based, and neverest is the sweeper: after each sync it purges every retained item older than `store.purge-after`, then reports how many items and bytes it freed. Leaving the delay unset means never purge, `"0"` reproduces a terminal delete, and `sync --no-purge` skips the sweep for one run.
+The store never truly deletes an item: when its last binding vanishes the row is retained, hidden from the sync and from listings but kept with its body. After each sync neverest purges every retained item older than `store.purge-after`. Unset means never purge, `"0"` reproduces a terminal delete, and `sync --no-purge` skips one run.
 
 This is what turns a sync into a backup. Make the source read-only and leave `store.purge-after` unset: a remote expunge still retires the local row, but the item and its body stay in the store, restorable, and neverest never pushes a deletion back to the server.
 
@@ -163,13 +169,15 @@ imap.collection.delete = false
 
 ### Duplicated identities
 
-A collection may hold one identity twice: two messages carrying the same `Message-ID`, two cards carrying the same `UID`. Neverest cannot tell such copies apart, so it syncs neither of them and reports the collection and every id involved, on every run until the collection holds the identity once. Which copy to keep is a decision only you can make, with your own client.
+A collection may hold one identity twice: two messages carrying the same `Message-ID`, two cards the same `UID`. Neverest cannot tell such copies apart, so it syncs neither and reports every id involved, on every run until the collection holds the identity once. Which copy to keep is yours to decide.
 
-This is not an invalid mailbox, and nothing is wrong with your server. RFC 5322 binds the generator of a `Message-ID`, not what a store may hold: a copy legitimately carries the identifier of the message it copies, and a migration commonly produces such a pair. Reporting is what neverest does instead of guessing, because guessing costs mail. Propagating a delete of the copy it happened to pick removes the only copy on the other source while the first still holds the message.
+Nothing is wrong with your server: RFC 5322 binds the generator of a `Message-ID`, not what a store may hold, and a migration commonly produces such a pair. Guessing costs mail, since propagating a delete of the copy it happened to pick removes the only copy on the other source.
 
 ### Coming from Maildir
 
-Neverest ships no Maildir converter, and a local file store is not a sync source: the pimdir store is the local replica. Keyword storage is not standardized across Maildir consumers (info-section letters, dovecot-keywords, `X-Keywords` and `X-Label` headers), so a local migration would silently lose or mangle flags depending on which tool wrote the source tree. Initialize a fresh account and resync from the authoritative server instead: flags re-converge cleanly and the store reflects the actual server state. An existing on-disk tree is brought in through io-pimdir's conversion tooling rather than synced as a source.
+Neverest ships no Maildir converter, and a local file store is not a sync source: the pimdir store is the local replica. Keyword storage is not standardized across Maildir consumers, so a local migration would silently lose or mangle flags depending on which tool wrote the source tree.
+
+Initialize a fresh account and resync from the authoritative server instead: flags re-converge cleanly and the store reflects the actual server state. An existing on-disk tree is brought in through io-pimdir's conversion tooling rather than synced as a source.
 
 ## License
 

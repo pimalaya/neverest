@@ -1,3 +1,5 @@
+//! # Conflict output
+//!
 //! What the conflict command prints: `Display` for the terminal, `Serialize`
 //! for `--json`, one type per verb.
 
@@ -50,9 +52,10 @@ pub struct ConflictSummary {
     pub handle: String,
     /// The remote revision the divergence was recorded at.
     pub revision: Option<String>,
-    /// Whether a decision can be made about it at all. A conflict whose
-    /// diverging remote body a run has not fetched yet is visible and not
-    /// resolvable, and the next run makes it so.
+    /// Whether a decision can be made about it at all.
+    ///
+    /// A conflict whose diverging remote body no run has fetched yet is
+    /// visible and not resolvable; the next run makes it so.
     pub resolvable: bool,
 }
 
@@ -151,8 +154,7 @@ impl fmt::Display for ConflictShowOutput {
 #[serde(rename_all = "kebab-case", tag = "outcome")]
 pub enum ConflictResolveOutput {
     /// The decision was applied: the item holds the chosen body and is no
-    /// longer conflicted. The next run pushes it, conditioned on the
-    /// revision the divergence was recorded at.
+    /// longer conflicted. The next run pushes it.
     Resolved {
         /// The item that was settled.
         id: i64,

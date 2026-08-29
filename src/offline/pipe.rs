@@ -1,9 +1,11 @@
-//! A bounded in-memory pipe: a [`Write`] end feeding a [`Read`] end across
-//! threads, blocking the writer when the buffer is full and the reader when it is
-//! empty, so a body streams from one connection to another without ever being
-//! held whole in memory. Used by relay (a two-source pass-through copy): one
-//! thread streams a fetch into the writer while another streams the writer's
-//! output into an append.
+//! # Bounded in-memory pipe
+//!
+//! A [`Write`] end feeding a [`Read`] end across threads, blocking the writer
+//! when the buffer is full and the reader when it is empty, so a body streams
+//! from one connection to another without ever being held whole in memory.
+//!
+//! Used by relay, a two-source pass-through copy: one thread streams a fetch
+//! into the writer while another streams its output into an append.
 
 use std::{
     collections::VecDeque,
@@ -26,8 +28,7 @@ struct Buffer {
     closed: bool,
 }
 
-/// The write end. Dropping it closes the pipe (the reader then sees EOF once it
-/// has drained the buffer).
+/// The write end; dropping it closes the pipe (EOF once the reader drains).
 pub struct PipeWriter {
     shared: Arc<Shared>,
 }

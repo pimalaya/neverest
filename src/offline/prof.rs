@@ -1,18 +1,17 @@
-//! Ad-hoc env-gated profiling of the coroutine drive loop.
+//! # Drive-loop profiling
 //!
 //! Set `NEVEREST_PROFILE=1` to accumulate, per io-replica yield kind, the call
-//! count and wall time spent servicing it (storage `load`/`write`, remote
-//! `enumerate`/`fetch`/`push`/`lookup`). The breakdown is printed to stderr at
-//! the end of a sync run. Temporary diagnostic scaffolding — not a product
-//! feature.
+//! count and wall time spent servicing it. The breakdown is printed to stderr
+//! at the end of a sync run.
+//!
+//! Temporary diagnostic scaffolding, not a product feature.
 
 use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
 
-/// One accumulator: how many times a yield kind was serviced and the total
-/// nanoseconds spent doing so.
+/// One accumulator: a yield kind's service count and total nanoseconds.
 pub struct Stat {
     pub count: AtomicU64,
     pub nanos: AtomicU64,

@@ -1,24 +1,18 @@
-//! The `text/calendar` kind: how a calendar object resource derives its link
-//! id and its `v:1` summary.
+//! # iCalendar kind
 //!
-//! Like a [card](super::vcard) and unlike [mail](super::mail), a calendar
-//! resource has **one** derivation: a DAV `sync-collection` REPORT returns
-//! hrefs and ETags but no `UID`, so it resolves at the `Full` tier only and
-//! [`parse_summary`](super::Kind::parse_summary) is `None` for this kind.
-//! There is therefore no two-derivations hazard to keep in agreement.
+//! `text/calendar`: how a calendar object resource derives its link id and
+//! its `v:1` summary. Like a card, it resolves at the `Full` tier only, a DAV
+//! `sync-collection` REPORT returning hrefs and ETags but no `UID`, so there
+//! is no two-derivations hazard to keep in agreement.
 //!
-//! The item is the **resource**, not the component: RFC 4791 §4.1 keeps every
+//! The item is the resource, not the component: RFC 4791 §4.1 keeps every
 //! component sharing a `UID` in one resource, so a recurring series and its
 //! overrides are one item, summarised from the master.
 //!
 //! Unlike the card scanner beside it, this one is
-//! [`io_pimdir::conventions::calendar`] outright. Delegating costs nothing
-//! here: io-pimdir reads the properties a summary needs the way pimdir SPEC
-//! Annex A.3 spells them, **verbatim**, which is the same reading a frontend
-//! wants, and it resolves the sort key through the `VTIMEZONE` the resource
-//! carries, which is the one genuinely hard part and the one two writers of a
-//! store must not answer differently. A second implementation here would buy
-//! nothing and could only drift.
+//! [`io_pimdir::conventions::calendar`] outright. It reads Annex A.3's
+//! properties verbatim and resolves the sort key through the resource's
+//! `VTIMEZONE`, the one hard part two writers of a store must not differ on.
 
 use io_pimdir::conventions::{
     PimdirDerivation,
@@ -36,9 +30,8 @@ pub fn parse_body(raw: &[u8], size: u64) -> (ReplicaLinkId, ReplicaMeta, Replica
         sort_key,
     } = calendar::derive(raw);
 
-    // io-pimdir sizes the summary from the bytes it was handed, which are the
-    // whole resource unless the stream capped its prefix; only then is there
-    // anything to restate, so a whole body pays no round-trip.
+    // io-pimdir sizes the summary from the bytes it was handed, so only a
+    // capped prefix has anything to restate.
     let meta = match size == raw.len() as u64 {
         true => meta,
         false => with_size(meta, size),
@@ -47,9 +40,8 @@ pub fn parse_body(raw: &[u8], size: u64) -> (ReplicaLinkId, ReplicaMeta, Replica
     (link_id, meta, sort_key)
 }
 
-/// Restates a summary's `size` as the resource's true octet length, leaving it
-/// as it stands when it does not parse (the summary is then whatever io-pimdir
-/// wrote, which is still better than none).
+/// Restates a summary's `size` as the resource's true octet length, leaving
+/// it as it stands when it does not parse.
 fn with_size(meta: ReplicaMeta, size: u64) -> ReplicaMeta {
     let Ok(mut summary) = serde_json::from_str::<PimdirCalendarMeta>(&meta.0) else {
         return meta;
@@ -89,9 +81,8 @@ mod tests {
         let anonymous = EVENT.replace("UID:event-1@example.org\r\n", "");
         let (link, _, _) = parse_body(anonymous.as_bytes(), anonymous.len() as u64);
 
-        // `hash:` is the prefix `Kind::split_link_id` reads as "no server has
-        // heard of this id"; a fallback spelled otherwise would be pushed as a
-        // `UID`.
+        // `hash:` is what `Kind::split_link_id` reads as "no server knows
+        // this id"; a fallback spelled otherwise would be pushed as a `UID`.
         assert!(link.0.starts_with("hash:"), "got {}", link.0);
     }
 
@@ -117,9 +108,8 @@ mod tests {
         assert_eq!(summary.size, Some(EVENT.len() as u64));
     }
 
-    /// A resource longer than the streamed prefix derives from what arrived,
-    /// so io-pimdir sizes the summary from a fraction of the body. The octet
-    /// count the stream reported is the one a reader must see.
+    /// A resource longer than the streamed prefix is sized from a fraction of
+    /// its body, but the count the stream reported is what a reader must see.
     #[test]
     fn a_truncated_body_still_reports_the_whole_resource_size() {
         let (_, meta, _) = parse_body(EVENT.as_bytes(), 4096);

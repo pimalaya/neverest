@@ -1,19 +1,14 @@
-//! [`io_replica::client::ReplicaRemote`] backed by one [`Client`], one side of
-//! the sync.
+//! # One side's remote seam
 //!
-//! `enumerate` reads the collection's handle and flag spine incrementally,
-//! passing the stored cursor down opaquely so the backend decides whether it
-//! can answer a delta or owes a full snapshot. io-replica derives what vanished
-//! by diffing a complete snapshot against the stored placements. `fetch`
-//! resolves the link id and the summary through [`Kind`], at the cheap
-//! server-side tier when the kind has one and from the raw body otherwise.
-//! `push` maps the four [`ReplicaChangeKind`] variants onto the client's flag,
-//! delete, move, append and update calls.
+//! [`io_replica::client::ReplicaRemote`] backed by one [`Client`].
 //!
-//! Everything kind-specific (the link id, the summary, the sort key) lives in
-//! [`crate::kind`] and is resolved once per side from
-//! [`Client::media_type`](crate::client::Client::media_type). Bodies are
-//! content-addressed by the store's own hash ([`PimdirBlobs::hasher`]). A
+//! `enumerate` passes the stored cursor down opaquely, so the backend decides
+//! whether it can answer a delta or owes a full snapshot. `fetch` resolves the
+//! link id and the summary through [`Kind`]. `push` maps the four
+//! [`ReplicaChangeKind`] variants onto the client's calls.
+//!
+//! Everything kind-specific lives in [`crate::kind`], resolved once per side
+//! from [`Client::media_type`](crate::client::Client::media_type). A
 //! mutable-content kind carries a revision, so its writes are conditional on
 //! the last-synced one; an immutable one leaves it `None` and never conflicts.
 
@@ -57,9 +52,7 @@ use crate::{
     kind::{Kind, LinkId},
 };
 
-/// No DAV backend is compiled in, so no write can be refused with the
-/// `no-uid-conflict` precondition: it is the only refusal named that way, mail
-/// carrying no identity a server enforces.
+/// No DAV backend, so nothing can be refused with `no-uid-conflict`.
 #[cfg(not(feature = "dav"))]
 fn is_duplicate_uid(_err: &anyhow::Error) -> bool {
     false
@@ -67,57 +60,51 @@ fn is_duplicate_uid(_err: &anyhow::Error) -> bool {
 
 /// One side's remote seam over its connection [`Pool`].
 ///
-/// Sequential verbs (enumerate, push, `Meta` fetch) run on the pool's primary
-/// connection; a `Full` fetch borrows several of the pool's connections at once
-/// to stream several bodies in parallel. The pool is persistent, so the extra
-/// connections' auth is paid once for the whole run, not per batch.
+/// Sequential verbs run on the pool's primary connection; a `Full` fetch
+/// borrows several at once. The pool is persistent, so the extra connections'
+/// auth is paid once for the whole run rather than per batch.
 pub struct PimRemote<'a> {
-    /// The kind this side syncs, resolved once from
-    /// [`Client::media_type`]. It selects the link-id and summary
-    /// derivation; the driver has already refused an unknown or
-    /// mismatched media type before any remote is built.
+    /// The kind this side syncs, resolved once from [`Client::media_type`].
+    ///
+    /// The driver has already refused an unknown or mismatched media type
+    /// before any remote is built.
     kind: Kind,
     pool: &'a mut Pool,
     blob: PimdirBlobs,
-    /// The hub namespace this source binds into, stripped off a collection id
-    /// before it reaches the wire. See [`PimRemote::wire_name`].
+    /// The hub namespace, stripped off before any wire call. See [`wire_name`].
     namespace: String,
-    /// Called once per body streamed at the `Full` tier, so the driver can tick
-    /// a per-item progress counter. `Sync` because the fetch pool calls it from
-    /// several worker threads at once.
+    /// Ticked once per `Full` body, for the driver's progress counter.
+    ///
+    /// `Sync` because the fetch pool calls it from several workers at once.
     on_body: Option<&'a (dyn Fn() + Sync)>,
-    /// Handle to body octet size, from the store's already-fetched envelope
-    /// meta, so no round trip. When present, `Full` fetches are ordered
-    /// largest-first so the heavy items go up front and the progress counter
-    /// accelerates to a smooth finish rather than stalling on a big body that
-    /// happened to land last.
+    /// Handle to body octet size, from the store's meta, so no round trip.
+    ///
+    /// When present, `Full` fetches run largest-first, so progress accelerates
+    /// to a smooth finish rather than stalling on a big body that landed last.
     sizes: HashMap<String, u64>,
-    /// What this side is known to hold, so a create answered with a handle it
-    /// already holds is caught before it becomes a second binding.
+    /// What this side is known to hold.
+    ///
+    /// A create answered with a handle it already holds is caught before it
+    /// becomes a second binding.
     held: HeldHandles,
-    /// The creates this side refused because it already holds the item's
-    /// identity, drained into the report by the driver, which names the
-    /// source. Filled in push order, one entry per refused create: two copies
-    /// refused are two lines, which is what the handle on each entry keeps
-    /// true once the driver drops the repeats a convergence loop collects.
+    /// The creates this side refused because it already holds the identity.
+    ///
+    /// One entry per refused create, in push order: two copies refused are two
+    /// lines, which is what the handle on each entry keeps true once the driver
+    /// drops the repeats a convergence loop collects.
     refused: Vec<RefusedCreate>,
-    /// The writes this side would not take, drained into the report by the
-    /// driver, which names the source and drops the repeats a convergence
-    /// loop collects. One entry per rejected change, in push order, so a run
-    /// says what it could not deliver rather than counting it among the hunks
-    /// it applied.
+    /// The writes this side would not take, one entry each, in push order.
+    ///
+    /// Drained into the report by the driver, so a run says what it could not
+    /// deliver rather than counting it among the hunks it applied.
     rejected: Vec<RejectedPush>,
 }
 
-/// The handles one side is known to hold, per collection: everything its
-/// enumerations named this run, less what they reported vanished, plus every
-/// handle a create was assigned.
+/// The handles one side is known to hold, per collection.
 ///
-/// It is a floor rather than a proof of what the side holds. A full
-/// enumeration (a DAV collection with no `sync-collection`, an IMAP resync)
-/// makes it the whole collection; an incremental one narrows it to what
-/// changed plus this run's own creates. That is enough for what it guards,
-/// a server answering a create with a resource it already had.
+/// A floor rather than a proof: a full enumeration makes it the whole
+/// collection, an incremental one only what changed plus this run's creates.
+/// Enough for what it guards: a server answering a create with a held href.
 #[derive(Default)]
 struct HeldHandles(HashMap<String, BTreeSet<String>>);
 
@@ -136,10 +123,11 @@ impl HeldHandles {
         }
     }
 
-    /// Claims `handle` for a create, answering whether it was free. A handle
-    /// the side already holds is not a new member: the server answered the
-    /// create with a resource it had, and binding the item to it would leave
-    /// two items on one handle.
+    /// Claims `handle` for a create, answering whether it was free.
+    ///
+    /// A handle the side already holds is not a new member: the server answered
+    /// the create with a resource it had, and binding the item to it would
+    /// leave two items on one handle.
     fn claim(&mut self, collection: &str, handle: &str) -> bool {
         self.0
             .entry(collection.to_string())
@@ -148,43 +136,34 @@ impl HeldHandles {
     }
 }
 
-/// One create a side refused with the CalDAV or CardDAV `no-uid-conflict`
-/// precondition, as the remote knows it.
+/// One create a side refused with the `no-uid-conflict` precondition.
 ///
-/// It carries the collection as the wire names it and the identity the two
-/// copies share; the source's name is the driver's to add, this seam knowing
-/// the namespace a collection binds into rather than the name the report
-/// speaks of it by.
+/// The source's name is the driver's to add, this seam knowing the namespace a
+/// collection binds into rather than the name the report speaks of it by.
 pub struct RefusedCreate {
     /// The collection the create was refused in, as the server names it.
     pub collection: String,
     /// The identity the refused copy shares with the resource already there.
     pub uid: String,
-    /// The handle the refused copy was being appended under, which is what
-    /// tells two copies of one identity apart from the same copy refused
-    /// again on a later pass of the same run. It is a key rather than
-    /// something the report says: the copies share everything a person
-    /// would act on.
+    /// The handle the refused copy was being appended under.
+    ///
+    /// A key rather than something the report says: it tells two copies of one
+    /// identity apart from the same copy refused again on a later pass, the
+    /// copies sharing everything a person would act on.
     pub handle: String,
 }
 
 /// One write that did not land, as the remote knows it.
 ///
-/// It covers both halves of a rejection: what a server answered no to, and
-/// what never reached one because the body it needed was not in the blob
-/// tree. Both leave the change in the store for the next run, which is what
-/// the report says about it; the source's name is the driver's to add.
-///
-/// A create refused with the `no-uid-conflict` precondition is *not* one of
-/// these. It has a report entry of its own naming the identity and the remedy
-/// ([`RefusedCreate`]), and one write is one line.
+/// Both halves of a rejection: what a server answered no to, and what never
+/// reached one for want of a body. Both leave the change in the store for the
+/// next run. A create refused with `no-uid-conflict` has [`RefusedCreate`].
 pub struct RejectedPush {
     /// The collection the write was going into, as the server names it.
     pub collection: String,
     /// The item's handle on this side.
     pub handle: String,
-    /// What the run was trying to do: `update`, `append`, `delete`, `move` or
-    /// `set flags`.
+    /// What the run tried: `update`, `append`, `delete`, `move`, `set flags`.
     pub action: &'static str,
     /// Why it did not land, as the backend put it.
     pub reason: String,
@@ -206,9 +185,10 @@ impl<'a> PimRemote<'a> {
         }
     }
 
-    /// Like [`new`](Self::new) but ticks `on_body` after each `Full` body
-    /// streams, and orders the `Full` fetch largest-first using `sizes`, taken
-    /// from the store's envelope meta. Pass an empty map to keep handle order.
+    /// Like [`new`](Self::new), but ticking `on_body` per streamed `Full` body.
+    ///
+    /// The `Full` fetch runs largest-first by `sizes`, taken from the store's
+    /// envelope meta. An empty map keeps handle order.
     pub fn with_progress(
         pool: &'a mut Pool,
         blob: PimdirBlobs,
@@ -235,25 +215,21 @@ impl<'a> PimRemote<'a> {
         wire_name(&self.namespace, collection)
     }
 
-    /// The creates this side refused because it already holds the identity,
-    /// taken off the remote so the driver can name them in the report.
+    /// The refused creates, taken off so the driver can name them in reports.
     pub fn take_refused(&mut self) -> Vec<RefusedCreate> {
         mem::take(&mut self.refused)
     }
 
-    /// The writes this side would not take, taken off the remote so the
-    /// driver can name them in the report.
+    /// The rejected writes, taken off so the driver can name them in reports.
     pub fn take_rejected(&mut self) -> Vec<RejectedPush> {
         mem::take(&mut self.rejected)
     }
 
-    /// Records a write that did not land and answers the engine with the
-    /// rejection it expects.
+    /// Records a write that did not land, answering the engine's rejection.
     ///
-    /// A rejection is an outcome rather than an error: it is what makes
-    /// io-replica keep the change and re-merge instead of clobbering the
-    /// remote, and an error would abort the whole batch. Recording it is what
-    /// keeps the run from reporting the write as one it made.
+    /// A rejection is an outcome rather than an error: it makes io-replica keep
+    /// the change and re-merge instead of clobbering the remote, where an error
+    /// would abort the batch. Recording it keeps the run from claiming it.
     fn reject(
         &mut self,
         collection: &str,
@@ -276,18 +252,9 @@ impl<'a> PimRemote<'a> {
 
 /// The name the backend knows a hub collection by.
 ///
-/// A hub collection id is `<namespace>/<name>`, which is what keeps a mailbox
-/// and an address book both called `Default` apart in one store, and what keeps
-/// two providers cached side by side from meeting. The server knows nothing of
-/// that: this is the seam where the id becomes a name again, and every wire call
-/// goes through it, including the ones the driver's fetch pool makes on its own
-/// connections rather than through [`PimRemote`]. A leak reaches the server as a
-/// collection it has no name for, which IMAP rejects outright (`/` is not legal
-/// in a mailbox name on a server whose delimiter is `.`) and a path-addressed
-/// backend would look up under a directory that does not exist.
-///
-/// A name that merely starts with the namespace keeps its own spelling: only the
-/// `<namespace>/` prefix is a namespace.
+/// This is where a `<namespace>/<name>` hub id becomes a name again, and every
+/// wire call goes through it, the driver's fetch pool included. Only the
+/// `<namespace>/` prefix goes; a leaked `/` is a mailbox name IMAP rejects.
 pub(crate) fn wire_name<'n>(namespace: &str, collection: &'n str) -> &'n str {
     collection
         .strip_prefix(namespace)
@@ -299,8 +266,7 @@ pub(crate) fn wire_name<'n>(namespace: &str, collection: &'n str) -> &'n str {
 ///
 /// The driver refuses an unknown or cross-kind media type before opening any
 /// remote, so this cannot legitimately fail. Falling back to [`Kind::Mail`]
-/// rather than panicking keeps a construction path that takes no `Result`
-/// honest, and the warning names the media type if it ever does.
+/// rather than panicking keeps a construction path taking no `Result` honest.
 pub(crate) fn resolve_kind(pool: &mut Pool) -> Kind {
     let media_type = pool.primary().media_type();
     Kind::from_media_type(media_type).unwrap_or_else(|| {
@@ -309,21 +275,24 @@ pub(crate) fn resolve_kind(pool: &mut Pool) -> Kind {
     })
 }
 
-/// How many bodies to request per batched fetch. Larger cuts round trips but
-/// coarsens the per-batch retry unit and the command size.
+/// How many bodies to request per batched fetch.
+///
+/// Larger cuts round trips but coarsens the retry unit and the command size.
 pub(crate) const BATCH_SIZE: usize = 64;
 
-/// Maps shared flags to protocol-neutral offline flag strings, their raw wire
-/// spelling. A single side is internally consistent, and both sides run the
-/// same normalization for the system flags that matter.
+/// Maps shared flags to their raw wire spelling.
+///
+/// A single side is internally consistent, and both sides run the same
+/// normalization for the system flags that matter.
 fn to_offline_flags<'f>(flags: impl IntoIterator<Item = &'f Flag>) -> ReplicaFlags {
     flags.into_iter().map(|f| f.raw()).collect()
 }
 
-/// The item flags of a known set. An unknown one (nothing has read the
-/// item's markers) yields none, which is what a push of it would mean
-/// anyway: neverest's backends all report markers as they enumerate, so
-/// only a store written by another owner can carry one.
+/// The item flags of a known set.
+///
+/// An unknown one (nothing has read the markers) yields none, which is what a
+/// push of it would mean anyway: every backend here reports markers as it
+/// enumerates, so only a store written by another owner can carry one.
 fn to_item_flags(flags: &ReplicaFlags) -> Vec<Flag> {
     let Some(flags) = flags.known() else {
         return Vec::new();
@@ -474,13 +443,11 @@ impl ReplicaRemote for PimRemote<'_> {
 /// The key into the pre-fetch cache: `(collection, handle)`.
 pub type FetchKey = (String, String);
 
-/// A [`ReplicaRemote`] for the Full-apply phase. Its `fetch` returns bodies the
-/// global hydrate phase already streamed into the blob store, keyed by
-/// `(collection, handle)`, so the per-collection `Full` upgrade does only index
-/// writes — no network. A cache miss (a body the pre-fetch skipped or failed)
-/// falls back to a real fetch on the wrapped [`PimRemote`], so a gap is
-/// corrected rather than lost. `enumerate`/`push` are never reached by a `Full`
-/// upgrade but delegate to the fallback for safety.
+/// A [`ReplicaRemote`] for the Full-apply phase, serving bodies from cache.
+///
+/// The hydrate phase already streamed them in, so the `Full` upgrade does only
+/// index writes. A miss falls back to a real fetch on the wrapped
+/// [`PimRemote`], correcting a gap rather than losing it, and so do the rest.
 pub struct CachedFetchRemote<'a> {
     cache: &'a HashMap<FetchKey, ReplicaFetchedItem>,
     fallback: PimRemote<'a>,
@@ -534,9 +501,10 @@ impl ReplicaRemote for CachedFetchRemote<'_> {
 }
 
 impl PimRemote<'_> {
-    /// Meta tier: a targeted summary fetch of just the requested handles, with
-    /// no bodies and no whole-collection sweep, so the link ids and summaries
-    /// resolve cheaply and the cost scales with the change.
+    /// Meta tier: a targeted summary fetch of just the requested handles.
+    ///
+    /// No bodies and no whole-collection sweep, so the cost scales with the
+    /// change rather than with the collection.
     fn fetch_meta(
         &mut self,
         collection: &str,
@@ -571,11 +539,11 @@ impl PimRemote<'_> {
         Ok(items)
     }
 
-    /// Full tier: every body streamed straight into the blob store, never held
-    /// whole, and fetched in batches rather than one command per item, so N
-    /// bodies cost about N/[`BATCH_SIZE`] round trips. Batches are work-stolen
-    /// across a bounded pool of connections, and the engine serialises the index
-    /// write afterwards.
+    /// Full tier: every body streamed straight into the blob store.
+    ///
+    /// Never held whole, and fetched in batches rather than one command per
+    /// item, so N bodies cost about N/[`BATCH_SIZE`] round trips. Batches are
+    /// work-stolen across a bounded pool of connections.
     fn fetch_full(
         &mut self,
         collection: &str,
@@ -616,10 +584,11 @@ impl PimRemote<'_> {
         self.fetch_full_pooled(collection, batches, target)
     }
 
-    /// Fetches `batches` across up to `target` of the pool's persistent
-    /// connections: a shared queue of batches, each worker draining it on its
-    /// own connection. Work-stealing balances the load with no size probe, a
-    /// worker with heavy batches naturally taking fewer.
+    /// Fetches `batches` across up to `target` of the pool's connections.
+    ///
+    /// One shared queue, each worker draining it on its own connection.
+    /// Work-stealing balances the load with no size probe, a worker with heavy
+    /// batches naturally taking fewer.
     fn fetch_full_pooled(
         &mut self,
         collection: &str,
@@ -672,10 +641,10 @@ impl PimRemote<'_> {
     }
 }
 
-/// Streams one message's body straight into the blob store and reports the
-/// object by reference (bounded memory); the link id and summary come from the
-/// streamed header prefix. Shared by the serial and pooled fetch paths, and free
-/// of `PimRemote` so a pool worker can call it on its own connection.
+/// Streams one body into the blob store and reports the object by reference.
+///
+/// The link id and summary come from the streamed header prefix. Free of
+/// `PimRemote` so a pool worker can call it on its own connection.
 fn fetch_one_full(
     kind: Kind,
     client: &mut Client,
@@ -692,11 +661,9 @@ fn fetch_one_full(
         .finish()
         .with_context(|| format!("Commit body {} in {collection} error", handle.as_str()))?;
 
-    // No kind this syncs has an empty body: a message carries headers and a
-    // card carries at least its BEGIN and END lines. Storing one anyway gives
-    // it a link id that is the digest of nothing, so every empty body a server
-    // hands back resolves to that one identity, and each after the first is
-    // filed as another copy of it.
+    // No kind here has an empty body, and storing one names it by the digest of
+    // nothing: every empty body a server hands back resolves to that identity,
+    // each after the first filed as another copy of it.
     if size == 0 {
         bail!(
             "Server returned an empty body for {} in {collection}",
@@ -715,13 +682,11 @@ fn fetch_one_full(
     })
 }
 
-/// Fetches a batch of bodies in one command, each streamed straight into its own
-/// blob so memory stays bounded, returning one fetched item per body. The
-/// handle the server echoes keys each body back, so out-of-order responses
-/// still route correctly. A batch error, and a batch answering for fewer
-/// members than it was asked about, both fall back to per-item fetches, which
-/// content-addressing makes idempotent. Ticks `on_body` per body, and runs on
-/// one connection so nothing inside is shared across threads.
+/// Fetches a batch of bodies in one command, each streamed into its own blob.
+///
+/// The handle the server echoes keys each body back, so out-of-order responses
+/// still route. A batch error, or a batch answering for fewer members than it
+/// was asked, falls back to per-item fetches, idempotent by content address.
 pub(crate) fn hydrate_batch(
     kind: Kind,
     client: &mut Client,
@@ -760,11 +725,9 @@ pub(crate) fn hydrate_batch(
 
     match batched {
         Ok(()) => {
-            // A batch answering for fewer members than it was asked about is
-            // not a batch that succeeded: the engine would record nothing for
-            // the rest and ask for them again on every later run. A CardDAV
-            // server was found doing exactly that, returning the ETag of each
-            // card and its body as `404 Not Found`.
+            // A short batch is not a batch that succeeded: the engine would
+            // record nothing for the rest and ask again every run. A CardDAV
+            // server was seen answering each card's ETag with a 404 body.
             let fetched: BTreeSet<String> = items
                 .iter()
                 .map(|item| item.handle.as_str().to_owned())
@@ -816,30 +779,11 @@ pub(crate) fn hydrate_batch(
 }
 
 impl PimRemote<'_> {
-    /// Appends a stored body as a genuine new member. The two sides are
-    /// different servers, so no server-side copy is possible and the deduped
-    /// body is uploaded.
+    /// Appends a stored body as a genuine new member, checking the answer.
     ///
-    /// Two things about the answer are checked before it becomes a binding.
-    ///
-    /// A server may refuse the create outright because it already holds the
-    /// item's `UID` (RFC 4791 §5.3.2, RFC 6352 §6.3.2), which is reported as
-    /// what it is rather than as a status, and comes back every run until that
-    /// side stops holding the identity twice.
-    ///
-    /// A server may instead answer a create by *updating* the resource that
-    /// already holds the `UID` and handing back its href, which RFC 6352
-    /// §6.3.2 forbids and nothing here can prevent, so it is caught on the way
-    /// back: an assigned handle this side is already known to hold is recorded
-    /// as a rejected push and never bound. The engine binds one handle per
-    /// item per source, and two items pointing at one handle make the next
-    /// enumeration read one of them as vanished, which propagates a delete of
-    /// a resource nobody removed.
-    ///
-    /// What this side is known to hold is a floor rather than a proof: a full
-    /// enumeration (a DAV collection with no `sync-collection`, an IMAP
-    /// resync) makes it the whole collection, an incremental one narrows it to
-    /// what changed plus this run's own creates.
+    /// A server may answer a create by updating the resource already holding
+    /// the `UID` and handing its href back (RFC 6352 §6.3.2 forbids it). Two
+    /// items on one handle read as one vanished, propagating a phantom delete.
     fn append(
         &mut self,
         collection: &str,
@@ -878,9 +822,8 @@ impl PimRemote<'_> {
         let written = match written {
             Ok(written) => written,
             Err(err) => {
-                // NOTE: a duplicate `UID` names itself, with the identity and
-                // the remedy the generic refusal has no way to state, so it
-                // is reported there and not here: one write is one line.
+                // NOTE: a duplicate `UID` gets its own report entry, naming the
+                // identity and the remedy a generic rejection cannot state.
                 if !is_duplicate_uid(&err) {
                     return self.reject(collection, handle, "append", format!("{err:#}"));
                 }
@@ -914,14 +857,11 @@ impl PimRemote<'_> {
         }
     }
 
-    /// Replaces an item's body in place, conditionally on the last-synced
-    /// revision.
+    /// Replaces an item's body in place, conditional on the synced revision.
     ///
-    /// A refusal is reported as [`ReplicaPushOutcome::Rejected`] rather than as
-    /// an error: rejection is the expected outcome when the remote moved since
-    /// the base, and it is what makes io-replica re-merge and mark the
-    /// placement conflicted instead of clobbering the remote body. An error
-    /// would abort the whole batch.
+    /// A refusal is [`ReplicaPushOutcome::Rejected`] rather than an error: it
+    /// is what makes io-replica re-merge and mark the placement conflicted
+    /// instead of clobbering the remote body, an error aborting the batch.
     fn update(
         &mut self,
         collection: &str,
@@ -984,14 +924,14 @@ fn rejected_bare(handle: ReplicaHandle) -> ReplicaPushResult {
     }
 }
 
-/// Cap on captured header bytes, bounding memory if an item carries no header
-/// and body boundary at all.
+/// Cap on captured header bytes, bounding memory if no boundary is found.
 const HEADER_CAP: usize = 256 * 1024;
 
-/// A [`Write`] sink for a streaming `Full` fetch. It tees each chunk into the
-/// blob store, folds it into the content hash, and captures the header prefix
-/// up to the blank line so the link id and summary parse without a second pass.
-/// The whole body never sits in memory.
+/// A [`Write`] sink for a streaming `Full` fetch.
+///
+/// It tees each chunk into the blob store, folds it into the content hash, and
+/// captures the header prefix so the link id and summary parse without a second
+/// pass. The whole body never sits in memory.
 struct HydrateSink {
     writer: PimdirBlobWriter,
     hasher: PimdirHasher,
@@ -1000,9 +940,10 @@ struct HydrateSink {
 }
 
 impl HydrateSink {
-    /// `hasher` comes from the store's blob handle, so a body is named by
-    /// the algorithm the store records (pimdir SPEC §5) and dedups against
-    /// what any other consumer of the same store wrote.
+    /// Builds the sink over a blob writer and the store's own hasher.
+    ///
+    /// A body is then named by the algorithm the store records (pimdir SPEC §5)
+    /// and dedups against what any other consumer of that store wrote.
     fn new(writer: PimdirBlobWriter, hasher: PimdirHasher) -> Self {
         Self {
             writer,
@@ -1012,8 +953,7 @@ impl HydrateSink {
         }
     }
 
-    /// Commits the streamed blob under its computed hash and returns
-    /// `(hash, size, captured header bytes)`.
+    /// Commits the blob under its hash, returning `(hash, size, header bytes)`.
     fn finish(self) -> Result<(ReplicaHash, usize, Vec<u8>)> {
         let hash = self.hasher.finish();
         let size = self.writer.commit(&hash)? as usize;
@@ -1044,8 +984,7 @@ impl Write for HydrateSink {
     }
 }
 
-/// The byte offset just past the header and body boundary in `buf`, or `None`
-/// when it is not present.
+/// The byte offset just past the header and body boundary, or `None`.
 fn header_boundary(buf: &[u8]) -> Option<usize> {
     buf.windows(4)
         .position(|w| w == b"\r\n\r\n")
@@ -1057,9 +996,10 @@ fn header_boundary(buf: &[u8]) -> Option<usize> {
 mod tests {
     use super::*;
 
-    /// Every wire call goes through this seam, the driver's own fetch pool
-    /// included. A hub id that reaches a server is rejected outright on IMAP,
-    /// whose mailbox names cannot hold the `/` a namespace prefix ends on.
+    /// Every wire call goes through this seam.
+    ///
+    /// A hub id that reaches a server is rejected outright on IMAP, whose
+    /// mailbox names cannot hold the `/` a namespace prefix ends on.
     #[test]
     fn a_hub_id_becomes_the_name_its_server_knows() {
         assert_eq!(
@@ -1067,14 +1007,8 @@ mod tests {
             "Archives.Charlie"
         );
         assert_eq!(wire_name("mail", "mail/INBOX"), "INBOX");
-
-        // An IMAP hierarchy survives: only the first segment is the namespace.
         assert_eq!(wire_name("mail", "mail/Archive/2026"), "Archive/2026");
-
-        // A name that merely starts with the namespace keeps its spelling.
         assert_eq!(wire_name("mail", "mailbox/INBOX"), "mailbox/INBOX");
-
-        // An id from another namespace is left whole rather than mangled.
         assert_eq!(wire_name("cards", "mail/INBOX"), "mail/INBOX");
     }
 
@@ -1087,11 +1021,10 @@ mod tests {
         }
     }
 
-    /// A server that answers a create by updating the resource already
-    /// holding the `UID` hands back an href this side is known to hold. Two
-    /// items on one handle make the next enumeration read one of them as
-    /// vanished, which propagates a delete of a resource nobody removed, so
-    /// the create is rejected instead of bound.
+    /// A server updating the `UID`'s resource hands back an href this holds.
+    ///
+    /// Two items on one handle make the next enumeration read one as vanished,
+    /// propagating a delete nobody asked for, so the create is refused.
     #[test]
     fn a_create_answered_with_a_handle_the_side_holds_is_refused() {
         let mut held = HeldHandles::default();
@@ -1116,9 +1049,10 @@ mod tests {
         );
     }
 
-    /// A member the server reported gone is free again: its href may be
-    /// reused, and refusing a create onto a resource nobody holds would keep
-    /// an item unwritable for the rest of the run.
+    /// A member the server reported gone is free again.
+    ///
+    /// Its href may be reused, and refusing a create onto a resource nobody
+    /// holds would keep an item unwritable for the rest of the run.
     #[test]
     fn a_vanished_handle_stops_being_held() {
         let mut held = HeldHandles::default();

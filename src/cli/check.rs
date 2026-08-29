@@ -1,6 +1,8 @@
-//! `neverest check` command: reports what the store keeps, then opens every
-//! source and lists its collections to surface credential, network or config
-//! errors before a real sync.
+//! # Check command
+//!
+//! Reports what the store keeps, then opens every source and lists its
+//! collections, surfacing credential, network or config errors before a real
+//! sync.
 
 use std::path::PathBuf;
 
@@ -15,9 +17,11 @@ use pimalaya_config::toml::TomlConfig;
 
 use crate::{account::Account, client, config::Config};
 
-/// Reports the account's namespaces, then opens every configured source and
-/// lists its collections, surfacing credential, network or config errors
-/// before a real sync.
+/// Probes every configured source before a real sync.
+///
+/// Reports the account's namespaces, then opens each source and lists its
+/// collections, surfacing credential, network or config errors before a real
+/// sync.
 #[derive(Debug, Parser)]
 pub struct CheckCommand {}
 
@@ -40,8 +44,8 @@ impl CheckCommand {
 
         printer.out(Message::new(account_config.mode()?.to_string()))?;
 
-        // Every credential at once, so a check costs one unlock per
-        // distinct password command rather than one per endpoint.
+        // Every credential at once, so a check costs one unlock per password
+        // command rather than one per endpoint.
         let account = Account::resolve(&account_config)?;
 
         for endpoint in account_config.endpoints()?.keys() {

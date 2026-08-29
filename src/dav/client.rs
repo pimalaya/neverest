@@ -1,48 +1,28 @@
-//! DAV client adapter for the shared cross-protocol client.
+//! # DAV client
 //!
 //! [`DavClient`] wraps the std blocking io-webdav client behind the same
-//! adapter surface as the IMAP and Graph backends, for CardDAV (RFC 6352) and
-//! CalDAV (RFC 4791) alike. It is the **mutable-content** side of the sync: a
-//! card or an event is edited in place rather than replaced, so this is where
-//! the revision plumbing (ETags, `If-Match`) built blind against mail finally
-//! has a server that exercises it.
+//! adapter surface as the IMAP and Graph backends, serving CardDAV (RFC 6352)
+//! and CalDAV (RFC 4791) alike.
 //!
-//! One adapter serves both because the two protocols differ in three things
-//! this file names ([`DavKind`]) and in nothing else: the home set they
-//! discover, the collection they list, and the extension a new resource is
-//! named with. Everything below that (enumeration, multiget, conditional
-//! writes) is RFC 4918 and RFC 6578, which both sit on.
+//! One adapter serves both because they differ only in the home set they
+//! discover, the collection they list and the extension a new resource is
+//! named with ([`DavKind`]). This is the mutable-content side of the sync,
+//! where the ETag and `If-Match` plumbing built for mail is finally exercised.
 //!
-//! Three shapes differ from the mail backends:
+//! Three shapes differ from the mail backends: collections are keyed by their
+//! path segment, a display name being optional, mutable and free to collide;
+//! items resolve at `Full` only, a `sync-collection` REPORT carrying hrefs and
+//! ETags but never a `UID`; flags are known-empty rather than unknown.
 //!
-//! - **Collections are address books and calendars**, keyed by their path
-//!   segment id rather than their display name. A display name is optional,
-//!   may collide between two collections and may change under a running sync,
-//!   none of which a collection key survives.
-//! - **Items resolve at `Full` only.** A `sync-collection` REPORT returns
-//!   hrefs and ETags, never a `UID`, so there is no cheap `Meta` tier and
-//!   [`crate::kind::Kind::parse_summary`] is `None` for both DAV kinds.
-//! - **Flags are known-empty, not unknown.** DAV has no flag concept, so
-//!   every entry reports an empty set, which the engine reads as "no flags"
-//!   rather than "not fetched".
+//! Enumeration is RFC 6578 where the server implements it: a rejected token
+//! ([`WebdavSyncCollectionError::InvalidSyncToken`]) is answered with a fresh
+//! full report, and a truncated one (§3.6) is drained by running it again from
+//! the token it returned.
 //!
-//! Enumeration is RFC 6578 where the server implements it: an initial report
-//! (no token) returns the whole member set plus the token, and a later one
-//! returns only what changed. A server that rejects the stored token
-//! ([`WebdavSyncCollectionError::InvalidSyncToken`]) is answered with a fresh full
-//! report, which the engine reads as a complete snapshot and reconciles
-//! against, exactly as an expired Graph delta link or an IMAP UIDVALIDITY
-//! bump would be. A truncated report (RFC 6578 §3.6) is drained by running it
-//! again from the token it returned.
-//!
-//! `sync-collection` is an extension, though, and a deployment may implement
-//! none of it: its `supported-report-set` then holds the multiget and query
-//! reports alone, and the REPORT comes back with the RFC 3253 §3.6
-//! `DAV:supported-report` precondition. Such a collection is listed with a
-//! `PROPFIND` instead, which yields the same ids and ETags with no token, so it
-//! enumerates in full on every run rather than not syncing at all. The listing
-//! is chosen from the advertised report set where a run already listed the
-//! collections, and from the refusal otherwise.
+//! That report is an extension, though, and a server implementing none of it
+//! refuses with the RFC 3253 §3.6 `DAV:supported-report` precondition. Such a
+//! collection is listed with a `PROPFIND` instead, which yields the same ids
+//! and ETags with no token, rather than not syncing at all.
 
 use std::{
     collections::BTreeSet,
@@ -72,14 +52,11 @@ use crate::{
     kind::{Kind, LinkId},
 };
 
-/// How many truncated rounds a single enumeration drains before giving up,
-/// so a server answering "truncated" forever cannot spin the sync.
+/// How many truncated rounds one enumeration drains before giving up, so a
+/// server answering "truncated" forever cannot spin the sync.
 const MAX_SYNC_ROUNDS: usize = 32;
 
-/// Which DAV flavour a session speaks.
-///
-/// The whole of the protocol difference: everything else the adapter does is
-/// the WebDAV both sit on, so the sync sees one backend with two media types.
+/// Which DAV flavour a session speaks: the whole of the protocol difference.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DavKind {
     /// CardDAV (RFC 6352): address books of contact cards.
@@ -89,8 +66,8 @@ pub enum DavKind {
 }
 
 impl DavKind {
-    /// The IANA media type of the resources this flavour syncs, recorded as
-    /// the pimdir collection's `kind`.
+    /// The IANA media type of the resources this flavour syncs, recorded as the
+    /// pimdir collection's `kind`.
     pub fn media_type(self) -> &'static str {
         match self {
             Self::Card => "text/vcard",
@@ -106,8 +83,8 @@ impl DavKind {
         }
     }
 
-    /// The configuration table this flavour is written under, which is also
-    /// the id of the source the direct-backend sugar builds from it.
+    /// The configuration table this flavour is written under, also the id of
+    /// the source the direct-backend sugar builds from it.
     pub fn protocol(self) -> &'static str {
         match self {
             Self::Card => "carddav",
@@ -137,8 +114,7 @@ impl fmt::Display for DavKind {
 pub struct DavClient {
     kind: DavKind,
     inner: WebdavClientStd,
-    /// The connect arguments, kept so a connection the server closed can be
-    /// reopened (see [`op`](DavClient::op)).
+    /// The connect arguments, kept so a closed connection can be reopened.
     server: Url,
     tls: Tls,
     auth: WebdavAuth,
@@ -173,21 +149,12 @@ impl DavClient {
         self.kind.media_type()
     }
 
-    /// Runs one WebDAV exchange, reopening the connection and running it
-    /// again when the server had closed it.
+    /// Runs one WebDAV exchange, reopening the connection and running it again
+    /// when the server had closed it.
     ///
-    /// io-webdav holds a single stream and reports no keep-alive hint, so a
-    /// server that answers HTTP/1.0 (Radicale's built-in server) or sends
-    /// `Connection: close` leaves the next request written into a socket the
-    /// peer already hung up on, and everything after the first exchange
-    /// fails. The Graph backend reconnects on the hint its client does
-    /// report; this is the same repair without one.
-    ///
-    /// Only an end-of-stream failure is retried, which is the shape of a
-    /// request the server never read, so a create or a delete is not
-    /// replayed against a server that acted on it. The reopened client keeps
-    /// the discovered principal and home-set URLs, so a reconnect costs a
-    /// handshake and no discovery.
+    /// io-webdav holds a single stream and reports no keep-alive hint, so an
+    /// HTTP/1.0 or `Connection: close` peer breaks every exchange after the
+    /// first. Only an end-of-stream failure retries, never an applied write.
     fn op<T>(
         &mut self,
         mut run: impl FnMut(&mut WebdavClientStd) -> Result<T, WebdavClientStdError>,
@@ -202,10 +169,9 @@ impl DavClient {
         }
     }
 
-    /// Reopens the connection, carrying the discovery this session already
-    /// paid for over to the new client.
+    /// Reopens the connection, carrying over the discovery already paid for.
     ///
-    /// Both home sets are carried without asking which one this session
+    /// Both home sets are copied without asking which one this session
     /// discovered: only its own is ever populated, so the other copies an
     /// absence.
     fn reconnect(&mut self) -> Result<(), WebdavClientStdError> {
@@ -220,9 +186,11 @@ impl DavClient {
         Ok(())
     }
 
-    /// Lists every collection of this session's kind. Counts are never
-    /// reported: DAV has no cheap total, and paying a full enumeration per
-    /// collection to render one number is not a trade this makes.
+    /// Lists every collection of this session's kind.
+    ///
+    /// Counts are never reported: DAV has no cheap total, and paying a full
+    /// enumeration per collection to render one number is not a trade this
+    /// makes.
     pub fn list_collections(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         let kind = self.kind;
         let ids: BTreeSet<String> = match kind {
@@ -235,9 +203,7 @@ impl DavClient {
         }
         .with_context(|| format!("Cannot list the {kind} collections"))?;
 
-        // Both the id and the name are the path segment: a collection key must
-        // be stable and unique, and a DAV display name is neither (optional,
-        // mutable, free to collide).
+        // The path segment is the key: a display name may collide or change.
         Ok(ids
             .into_iter()
             .map(|id| Collection {
@@ -286,20 +252,12 @@ impl DavClient {
         .with_context(|| format!("Cannot delete the {kind} collection {collection}"))
     }
 
-    /// Enumerates a collection through `sync-collection`, carrying the
-    /// server's sync token as the engine's opaque checkpoint, and listing it
-    /// instead on a server that does not implement the report.
+    /// Enumerates a collection through `sync-collection`, its sync token riding
+    /// as the engine's opaque checkpoint.
     ///
-    /// RFC 6578 is an extension: a deployment may advertise a
-    /// `supported-report-set` holding the multiget and query reports and no
-    /// `sync-collection`, then answer the REPORT with the RFC 3253 §3.6
-    /// `DAV:supported-report` precondition. Without the fallback that is a hard
-    /// enumerate failure, so every collection on such a server is unsyncable.
-    ///
-    /// The choice is made twice over: from the `supported-report-set` io-webdav
-    /// caches while listing, which a sync run always pays for first, and from
-    /// the refusal itself, for a server that advertises one thing and answers
-    /// another.
+    /// RFC 6578 is an extension, so a server may refuse the REPORT with the RFC
+    /// 3253 §3.6 `DAV:supported-report` precondition; the collection is listed
+    /// instead, which without the fallback would be unsyncable.
     pub fn enumerate(&mut self, collection: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
         if !has_sync_collection(self.reports(collection)) {
             debug!(
@@ -311,8 +269,7 @@ impl DavClient {
                 .with_context(|| format!("Cannot list {collection}"));
         }
 
-        // The fallback keeps no token, so its checkpoint is empty, which means
-        // the same as no cursor at all.
+        // An empty checkpoint is the listing fallback's, meaning no cursor.
         let token = cursor
             .filter(|cursor| !cursor.is_empty())
             .map(String::from_utf8_lossy)
@@ -366,15 +323,11 @@ impl DavClient {
     }
 
     /// One full listing through a `PROPFIND` at Depth 1, for a server with no
-    /// `sync-collection`. It carries no token, so the checkpoint is empty and
-    /// every run lists the whole collection: correct, and the price of a
-    /// server offering nothing incremental.
+    /// `sync-collection`.
     ///
-    /// A `PROPFIND` rather than the query report, which is the other thing such
-    /// a server advertises: a query carries a filter the server evaluates by
-    /// parsing every resource, so one resource it cannot parse fails the whole
-    /// enumeration, where a `PROPFIND` reads names and ETags out of the store
-    /// and lists the collection past it.
+    /// It carries no token, so every run lists the whole collection. A
+    /// `PROPFIND` rather than the query report: a query filter is evaluated by
+    /// parsing every resource, so one unparsable resource fails the listing.
     fn list(&mut self, collection: &str) -> Result<Enumeration, WebdavClientStdError> {
         let opts = WebdavSyncCollectionOptions { fallback: true };
         let delta = self.sync_collection(collection, None, opts)?;
@@ -389,9 +342,7 @@ impl DavClient {
         Ok(Enumeration {
             items: delta.changed.into_iter().map(entry).collect(),
             vanished: Vec::new(),
-            // A truncated listing holds part of the collection, and a partial
-            // snapshot read as a complete one deletes every member the server
-            // left out.
+            // A partial snapshot read as complete deletes members left out.
             complete: !delta.truncated,
             checkpoint: Vec::new(),
         })
@@ -495,10 +446,10 @@ impl DavClient {
         Ok(etag)
     }
 
-    /// Creates a resource, addressing it by the item's `UID` so the href a
-    /// server assigns stays derivable from the body itself, plus the minted
-    /// part of its key where it has one, so a second copy of that `UID` never
-    /// lands on the href its twin holds.
+    /// Creates a resource, addressed by the item's `UID`.
+    ///
+    /// The minted part of the key joins it where there is one, so a second copy
+    /// of that `UID` never lands on the href its twin holds.
     pub fn add_item_stream(
         &mut self,
         collection: &str,
@@ -514,9 +465,10 @@ impl DavClient {
             .with_context(|| format!("Cannot create {id} in {collection}"))
     }
 
-    /// Replaces a resource in place, conditionally on the last-synced ETag: a
-    /// server whose copy moved since rejects the write rather than losing the
-    /// other edit, which is what the engine's conflict path is waiting for.
+    /// Replaces a resource in place, conditionally on the last-synced ETag.
+    ///
+    /// A server whose copy moved since rejects the write rather than losing the
+    /// other edit, which is what the engine's conflict path waits for.
     pub fn update_item_stream(
         &mut self,
         collection: &str,
@@ -550,10 +502,11 @@ impl DavClient {
             .with_context(|| format!("Cannot delete {id} from {collection}"))
     }
 
-    /// Moves resources between collections. DAV has no server-side move here,
-    /// so each is re-created at the target and deleted from the source; the
-    /// delete only runs once the create was accepted, so a failure leaves the
-    /// resource where it was rather than nowhere.
+    /// Moves resources between collections.
+    ///
+    /// DAV has no server-side move here, so each is re-created at the target
+    /// and deleted from the source; the delete only runs once the create was
+    /// accepted, so a failure leaves the resource where it was.
     pub fn move_items(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
         for id in ids {
             let (data, etag) = self
@@ -570,9 +523,8 @@ impl DavClient {
         Ok(())
     }
 
-    /// Rejected: DAV has no flags, and the enumeration reports every member
-    /// as known-empty, so the engine never derives a flag change to push. A
-    /// call here means something upstream invented one.
+    /// Rejected: DAV has no flags, and the enumeration reports every member as
+    /// known-empty, so the engine never derives a flag change to push.
     pub fn store_flags(&mut self, _ids: &[&str], _flags: &[Flag], _op: FlagOp) -> Result<()> {
         bail!("{} has no flags (store not supported)", self.kind)
     }
@@ -650,16 +602,12 @@ fn href_id(href: &str) -> String {
         .to_owned()
 }
 
-/// The resource name a new item is created under: its `UID` plus the kind's
-/// conventional extension, and the minted part of its key where the collection
-/// it came from held that `UID` twice.
+/// The resource name a new item is created under: its `UID`, the minted part of
+/// its key where there is one, and the kind's conventional extension.
 ///
-/// The body fallback is only for an item whose key states no identity at all.
-/// A minted key states one its twin already took, so a name derived from the
-/// body would collide by construction, and a colliding `PUT` is not refused by
-/// a server but applied to the resource already there: the copy that synced
-/// first would be overwritten by the copy being appended, losing it and
-/// reporting success.
+/// The body fallback is only for an item stating no identity at all: a minted
+/// key states one its twin already took, and a colliding `PUT` is not refused
+/// but applied to the resource already there, losing it and reporting success.
 fn resource_id(kind: DavKind, link: LinkId<'_>, body: &[u8]) -> String {
     let extension = kind.extension();
     let hint = link.hint.map(str::trim).filter(|hint| !hint.is_empty());
@@ -689,13 +637,12 @@ fn sanitize(uid: &str) -> String {
         .collect()
 }
 
-/// Whether the exchange died on a connection the server had already closed,
-/// the one failure [`DavClient::op`] repairs by reopening it.
+/// Whether the exchange died on a connection the server had already closed, the
+/// one failure [`DavClient::op`] repairs by reopening it.
 ///
 /// An end of stream where a response was due says the request was never
-/// answered, and a broken pipe or a reset says it was never written, so
-/// neither leaves a half-applied write behind. Every other failure is the
-/// server's answer and is reported as it is.
+/// answered, and a broken pipe or a reset says it was never written, so neither
+/// leaves a half-applied write behind.
 fn is_connection_closed(err: &WebdavClientStdError) -> bool {
     match err {
         WebdavClientStdError::Send(WebdavSendError::Send(Http11SendError::Eof))
@@ -713,15 +660,12 @@ fn is_connection_closed(err: &WebdavClientStdError) -> bool {
     }
 }
 
-/// Whether a failed write was refused because the collection already holds a
-/// resource carrying that `UID`: the `no-uid-conflict` precondition of RFC
-/// 4791 §5.3.2 and RFC 6352 §6.3.2, which io-webdav names.
+/// Whether a failed write was refused for the `no-uid-conflict` precondition of
+/// RFC 4791 §5.3.2 and RFC 6352 §6.3.2.
 ///
-/// The error crosses the client seam as an [`anyhow::Error`], so the typed
-/// refusal is read back out of its chain. This is the seam where a DAV status
-/// becomes something the report can say in the user's terms, and the only
-/// caller is the push path in [`crate::offline::remote`], a build without the
-/// `dav` feature having no write that can be refused this way.
+/// That is, the collection already holds a resource carrying that `UID`. The
+/// error crosses the client seam as an [`anyhow::Error`], so the typed refusal
+/// is read back out of its chain.
 pub fn is_duplicate_uid(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause
@@ -732,10 +676,9 @@ pub fn is_duplicate_uid(err: &anyhow::Error) -> bool {
 
 /// Whether the server advertises `sync-collection` for a collection.
 ///
-/// A collection nobody listed counts as supporting it: the report is what
-/// enumerates, and a server that does not implement it names the refusal
-/// itself, so the unknown case costs one failed REPORT and never a wrong
-/// enumeration.
+/// A collection nobody listed counts as supporting it: a server that does not
+/// implement the report names the refusal itself, so the unknown case costs one
+/// failed REPORT and never a wrong enumeration.
 fn has_sync_collection(reports: Option<&BTreeSet<String>>) -> bool {
     match reports {
         Some(reports) => reports.contains(SYNC_COLLECTION.local),
@@ -798,9 +741,8 @@ mod tests {
         );
     }
 
-    /// Two items sharing a `UID` reach two hrefs. The second one's key was
-    /// minted on the href it was read from, and that part reaching the name is
-    /// what keeps the `PUT` off the resource the first copy already holds.
+    /// Two items sharing a `UID` reach two hrefs: the minted part of the second
+    /// one's key keeps its `PUT` off the resource the first already holds.
     #[test]
     fn a_minted_copy_is_addressed_beside_its_twin_rather_than_over_it() {
         let twin = stated("event-1@google.com");
@@ -817,10 +759,8 @@ mod tests {
         assert_ne!(twin, copy);
     }
 
-    /// A pair carrying no `UID` at all is minted over the kind's digest
-    /// fallback, and the body must not name either copy: two bodies that hash
-    /// the same are what got them minted, so a body-derived name is the
-    /// collision itself.
+    /// Two bodies that hash the same are what got the pair minted, so a
+    /// body-derived name would be the collision itself.
     #[test]
     fn a_minted_copy_without_a_uid_is_never_named_after_its_body() {
         let card = b"BEGIN:VCARD\r\nVERSION:4.0\r\nFN:No Uid\r\nEND:VCARD\r\n";
@@ -855,9 +795,7 @@ mod tests {
     }
 
     /// RFC 6578 is an extension, so a collection advertising no
-    /// `sync-collection` is one to list instead, decided before a REPORT is
-    /// sent. Which reports a server advertises is io-webdav's reading; which
-    /// enumeration that buys is this crate's decision.
+    /// `sync-collection` is listed instead, decided before any REPORT is sent.
     #[test]
     fn a_collection_without_the_report_is_listed_instead() {
         let advertised = |reports: &[&str]| {

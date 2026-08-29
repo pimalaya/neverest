@@ -1,11 +1,13 @@
-//! Re-runs the wizard over an existing account.
+//! # Account edit
 //!
-//! `neverest configure` runs the same discovery flow as the first-run
-//! wizard (see [`super::discover`]), seeding the email prompt from the
-//! account's current direct backend. It owns that backend and the send
-//! channel only: the `default` flag, the store, the item settings, the
-//! connection budget and a hand-written `sources` table are carried over
-//! untouched, since a mirror or a second kind is configured by hand.
+//! Re-runs the wizard over an existing account. `neverest configure` runs the
+//! same discovery flow as the first-run wizard (see [`super::discover`]),
+//! seeding the email prompt from the account's current direct backend.
+//!
+//! It owns that backend and the send channel only: the `default` flag, the
+//! store, the item settings, the connection budget and a hand-written
+//! `sources` table are carried over untouched, a mirror or a second kind
+//! being configured by hand.
 
 use std::path::Path;
 
@@ -59,8 +61,7 @@ pub fn edit_account(target: &Path, mut config: Config, account_name: &str) -> Re
     Ok(config)
 }
 
-/// User-facing email for a source, seeding the email prompt when
-/// extractable.
+/// The user-facing email of a source, seeding the email prompt.
 fn source_email(source: &SourceConfig) -> Option<String> {
     match &source.backend {
         SourceBackendConfig::Imap(c) => sasl_login(c.sasl.as_ref()),

@@ -1,44 +1,22 @@
-//! The runtime account: the endpoints a run connects to, with every
-//! secret already resolved.
+//! # Runtime account
 //!
-//! [`crate::config`] is what the TOML says, and it says where a
-//! credential comes from rather than what it is: a `password.command`
-//! is a `pass` or `gpg` invocation waiting to be spawned. An [`Account`]
-//! is what a run acts on, and it holds the values themselves, so
-//! nothing below this module can spawn a process to authenticate.
+//! The endpoints a run connects to, with every secret already resolved.
+//! [`crate::config`] says where a credential comes from, an [`Account`]
+//! holds the value itself, so nothing below this module spawns a process
+//! to authenticate.
 //!
-//! That split is what makes the connection layer cheap. Resolution used
-//! to happen inside `client::open`, once per opened connection, so an
-//! account with a four-connection IMAP source paid four key unlocks
-//! before its first request. It happens here instead, once per run, and
-//! the pool re-opens a connection from material it already holds.
+//! Resolution happens once per run through one shared
+//! [`pimalaya_config::secret::SecretResolver`], not once per opened
+//! connection as it used to: a four-connection source paid four key
+//! unlocks, and a command named by several endpoints now runs once.
 //!
-//! ## What resolving buys, and what it costs
+//! A failure is kept per endpoint ([`Account::get`] raises it) rather than
+//! failing the whole resolution, a stale entry for calendars being no
+//! reason to leave mail unsynced. Values are never re-read, which is exact
+//! for a one-shot run; a daemon would resolve a new account.
 //!
-//! Every endpoint is resolved up front, through one
-//! [`pimalaya_config::secret::SecretResolver`] shared by all of them, so
-//! a command named by several endpoints (an account's IMAP and SMTP
-//! tables, its CardDAV and CalDAV ones) is spawned once for the whole
-//! account.
-//!
-//! Resolving up front means a broken credential is found before the run
-//! rather than during it, which is the point, but it must not turn one
-//! broken entry into a dead account: sources are independent, and a
-//! stale `pass` entry for calendars is no reason to leave mail unsynced.
-//! So a failure is kept per endpoint ([`Account::get`] raises it) rather
-//! than failing the resolution, and the driver reports it where it
-//! already reports a source that could not be opened.
-//!
-//! ## Freshness
-//!
-//! An account is resolved once and never re-read, which is exact for a
-//! one-shot run and would not be for a long-lived one: a token with a
-//! lifetime shorter than the process cannot be refreshed from a value
-//! resolved at startup. neverest is one-shot, so nothing needs it yet;
-//! a daemon would resolve a new account rather than mutate this one.
-//!
-//! None of these types derive `Debug`: what they hold is exactly what
-//! must not reach a log line.
+//! None of these types derive `Debug`: what they hold is exactly what must
+//! not reach a log line.
 
 use std::collections::HashMap;
 
@@ -69,17 +47,16 @@ use crate::dav::client::DavKind;
 
 /// An account's endpoints, resolved once for the run.
 ///
-/// Built by [`Account::resolve`] and read by name through
-/// [`Account::get`], which is where an endpoint that failed to resolve
-/// raises its error, so one broken credential stops one source rather
-/// than the account.
+/// Read by name through [`Account::get`], where a failed endpoint raises
+/// its error, so one broken credential stops one source and not the whole
+/// account.
 pub struct Account {
-    /// Every endpoint the account declares, sources and targets alike,
-    /// keyed by the name that is also its pimdir source id.
+    /// Every endpoint declared, keyed by the name that is also its pimdir
+    /// source id.
     ///
-    /// A failure is kept as its rendered message: an endpoint is read
-    /// once per source that syncs against it, and an error carrying a
-    /// cause chain cannot be handed out twice.
+    /// A failure is kept as its rendered message: an endpoint is read once
+    /// per source syncing against it, and an error carrying a cause chain
+    /// cannot be handed out twice.
     endpoints: HashMap<String, Result<SourceAccount, String>>,
 }
 
@@ -87,15 +64,9 @@ impl Account {
     /// Resolves every endpoint `config` declares, spawning each distinct
     /// secret command once.
     ///
-    /// Fails only when the endpoints cannot be enumerated at all, an
-    /// endpoint that fails to resolve being kept for [`Account::get`].
-    /// The count of those is what the spinner reports, so a resolution
-    /// that lost an endpoint does not read as a clean one.
-    ///
-    /// The spinner is here rather than at each of the three commands
-    /// that resolve, because this is the wait it exists for: a locked
-    /// `gpg-agent` answers in seconds, and every one of them used to
-    /// spend those seconds with nothing on screen.
+    /// Fails only when the endpoints cannot be enumerated at all, a failed
+    /// endpoint being kept for [`Account::get`] and counted by the spinner,
+    /// so a lost one does not read as clean. The wait is a locked agent.
     pub fn resolve(config: &AccountConfig) -> Result<Self> {
         let endpoints = config.endpoints()?;
         let s = Spinner::start("Resolving credentials…");
@@ -118,8 +89,7 @@ impl Account {
         Ok(Self { endpoints })
     }
 
-    /// The endpoint named `name`, raising what its resolution failed
-    /// with when it failed.
+    /// The endpoint named `name`, raising what its resolution failed with.
     pub fn get(&self, name: &str) -> Result<SourceAccount> {
         match self.endpoints.get(name) {
             Some(Ok(account)) => Ok(account.clone()),
@@ -129,22 +99,18 @@ impl Account {
     }
 }
 
-/// One endpoint with every secret resolved: what a connection is opened
-/// from.
+/// One endpoint with every secret resolved: what a connection opens from.
 #[derive(Clone)]
 pub struct SourceAccount {
     /// The backend to connect to, with its credential.
     pub backend: SourceAccountBackend,
-    /// The send channel this endpoint declares, `None` when it declares
-    /// none or when the build has no `smtp` feature.
+    /// The send channel this endpoint declares, if any.
     #[cfg(feature = "smtp")]
     pub smtp: Option<SmtpAccount>,
 }
 
 impl SourceAccount {
-    /// Resolves one endpoint on its own, for a caller holding a single
-    /// configuration rather than a whole account (the wizard's
-    /// connection checks).
+    /// Resolves one endpoint on its own, for the wizard's checks.
     #[cfg_attr(
         not(any(feature = "imap", feature = "msgraph", feature = "dav")),
         allow(dead_code)
@@ -153,8 +119,7 @@ impl SourceAccount {
         Self::resolve_with(name, config, &mut SecretResolver::new())
     }
 
-    /// Resolves one endpoint through `resolver`, so several endpoints
-    /// naming one command spawn it once.
+    /// Resolves one endpoint, so endpoints naming one command spawn it once.
     fn resolve_with(
         name: &str,
         config: &SourceConfig,
@@ -179,8 +144,8 @@ impl SourceAccount {
     }
 }
 
-/// The resolved counterpart of [`SourceBackendConfig`]: one variant per
-/// compiled-in backend, each holding exactly what its `connect` takes.
+/// The resolved [`SourceBackendConfig`]: one variant per compiled-in
+/// backend, holding exactly what its `connect` takes.
 #[derive(Clone)]
 pub enum SourceAccountBackend {
     #[cfg(feature = "imap")]
@@ -189,16 +154,17 @@ pub enum SourceAccountBackend {
     Dav(DavAccount),
     #[cfg(feature = "msgraph")]
     Msgraph(MsgraphAccount),
-    /// Keeps the type inhabited when no backend is compiled in. It is
-    /// never constructed: resolution refuses every backend first.
+    /// Keeps the type inhabited when no backend is compiled in.
+    ///
+    /// Never constructed: resolution refuses every backend first.
     #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
     #[allow(dead_code)]
     Unavailable,
 }
 
 impl SourceAccountBackend {
-    /// Resolves a backend configuration, refusing a backend this build
-    /// cannot open at all rather than leaving it to fail at connect.
+    /// Resolves a backend configuration, refusing one this build cannot
+    /// open rather than letting it fail at connect.
     #[cfg_attr(
         not(any(feature = "imap", feature = "msgraph", feature = "dav")),
         allow(unused_variables)
@@ -269,20 +235,17 @@ pub struct ImapAccount {
     pub tls: Tls,
     /// Whether a cleartext connection is upgraded through STARTTLS.
     pub starttls: bool,
-    /// The credential the session authenticates with, `None` for a
-    /// preauthenticated server.
+    /// The credential to authenticate with, `None` if preauthenticated.
     pub sasl: Option<Sasl>,
 }
 
-/// A resolved DAV endpoint, CardDAV and CalDAV alike, `kind` being what
-/// tells them apart.
+/// A resolved DAV endpoint, `kind` telling CardDAV and CalDAV apart.
 #[cfg(feature = "dav")]
 #[derive(Clone)]
 pub struct DavAccount {
     /// Which home set the session discovers from the server URL.
     pub kind: DavKind,
-    /// The DAV entry point, a configured bare authority already read as
-    /// a URL.
+    /// The DAV entry point, a configured authority already read as a URL.
     pub server: Url,
     /// The TLS handle, ALPN folded in.
     pub tls: Tls,
@@ -294,8 +257,7 @@ pub struct DavAccount {
 #[cfg(feature = "msgraph")]
 #[derive(Clone)]
 pub struct MsgraphAccount {
-    /// The OAuth 2.0 bearer access token, as the configured command
-    /// printed it.
+    /// The OAuth 2.0 bearer token, as the configured command printed it.
     pub token: SecretString,
     /// The mailbox owner, `me` for the authenticated user.
     pub user_id: String,
@@ -303,34 +265,30 @@ pub struct MsgraphAccount {
     pub tls: Tls,
 }
 
-/// A resolved SMTP submission channel: the arguments of a submission
-/// session open.
+/// A resolved SMTP submission channel: the arguments of a session open.
 #[cfg(feature = "smtp")]
 #[derive(Clone)]
 pub struct SmtpAccount {
-    /// The submission server URL, a configured bare authority already
-    /// read as one.
+    /// The submission server URL, a configured authority read as one.
     pub server: Url,
     /// The TLS handle, ALPN folded in.
     pub tls: Tls,
     /// Whether a cleartext connection is upgraded through STARTTLS.
     pub starttls: bool,
-    /// The credential the session authenticates with, `None` for an
-    /// unauthenticated relay.
+    /// The credential to authenticate with, `None` for an open relay.
     pub sasl: Option<Sasl>,
 }
 
 #[cfg(feature = "smtp")]
 impl SmtpAccount {
-    /// Resolves a send channel on its own, for a caller holding a single
-    /// configuration (the wizard's connection check).
+    /// Resolves a send channel on its own, for the wizard's check.
     #[cfg_attr(not(feature = "imap"), allow(dead_code))]
     pub fn resolve(config: &SmtpConfig) -> Result<Self> {
         Self::resolve_with(config, &mut SecretResolver::new())
     }
 
-    /// Resolves a send channel through `resolver`, so a channel sharing
-    /// its credential with the source it belongs to spawns nothing.
+    /// Resolves a send channel, spawning nothing when it shares its
+    /// source's credential.
     fn resolve_with(config: &SmtpConfig, resolver: &mut SecretResolver) -> Result<Self> {
         let server = server_url(&config.server, "smtps")?;
         let alpn = config
@@ -365,8 +323,7 @@ mod tests {
     use super::Account;
     use crate::config::AccountConfig;
 
-    /// The reason the resolver exists: an account naming one password
-    /// entry from four places reads it once.
+    /// The reason the resolver exists: four endpoints, one entry, one read.
     #[test]
     fn one_password_command_named_by_four_endpoints_is_spawned_once() {
         let path = temp_dir().join(format!("neverest-resolve-once-{}", process::id()));

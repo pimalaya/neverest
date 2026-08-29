@@ -1,20 +1,20 @@
-//! Per-account and per-collection orchestration over the io-replica engine.
+//! # Sync orchestration
+//!
+//! Per-account, per-namespace and per-collection orchestration over the
+//! io-replica engine.
 //!
 //! Each collection's two sides are the two sources of one shared collection in
-//! a pimdir store: one [`PimdirSourceStore`] handle per side over the same
-//! files, the collection name as the bare collection id. The driver only runs
-//! the engine's per-side sync, an upgrade to resolve link ids and a `Full`
-//! upgrade to hydrate a body about to be copied. Cross-side propagation of
-//! items, flags and deletions falls out of the shared hub's project and absorb,
-//! so there is no hand-rolled cross-merge, and syncing the sides in turn until
-//! quiescent converges them. The topology mismatch this resolves is in the
-//! crate header.
+//! a pimdir store, one [`PimdirSourceStore`] handle per side over the same
+//! files. The driver runs the engine's per-side sync, an upgrade to resolve
+//! link ids and a `Full` upgrade to hydrate a body about to be copied.
+//!
+//! Cross-side propagation of items, flags and deletions falls out of the shared
+//! hub's project and absorb, so there is no hand-rolled cross-merge, and
+//! syncing the sides in turn until quiescent converges them.
 //!
 //! Collection deletion is not propagated yet, only creation, and the itemized
 //! report lists cross-side copies, flags and deletes, the per-side server
-//! reconcile being internal. A `Full` fetch opens a small connection pool to
-//! stream several bodies at once, largest-first; the rest of a side runs on one
-//! connection.
+//! reconcile being internal.
 
 use std::{
     cmp::Reverse,
@@ -85,30 +85,25 @@ use crate::{
     },
 };
 
-/// How many extra sync passes to run after the first, propagating and settling
-/// cross-side changes. Two or three passes converge a collection in practice,
-/// so the cap only guards against a pathological loop.
+/// How many extra sync passes to run after the first.
+///
+/// Two or three converge a collection in practice, so the cap only guards
+/// against a pathological loop.
 const MAX_EXTRA_PASSES: usize = 4;
 
 /// The remote name behind a hub collection id, for a report the user reads.
 ///
-/// A report names the collection the way its server does, not the way the store
-/// keys it: that is the name the user typed into `--include-collection` and the
-/// one they see in their client.
+/// A report names a collection the way its server does, not the way the store
+/// keys it: that is the name the user typed and the one their client shows.
 fn display_name<'a>(namespace: &str, collection: &'a str) -> &'a str {
     wire_name(namespace, collection)
 }
 
 /// The hub collection id a remote collection name binds to in `namespace`.
 ///
-/// A hub collection is keyed by its kind, its namespace and its name, and this
-/// is where the last two meet: a mailbox and an address book both called
-/// `Default` land on different ids, and two providers cached side by side never
-/// share one. The kind rides on the collection row, declared by
-/// `ensure_collection`.
-///
-/// [`crate::offline::remote::PimRemote`] strips the prefix back off before any
-/// call reaches the wire, so a server only ever sees the name it gave.
+/// Where the namespace and the name meet: a mailbox and an address book both
+/// called `Default` land on different ids, and two providers cached side by
+/// side never share one. The prefix is stripped again before any wire call.
 fn hub_id(namespace: &str, name: &str) -> String {
     format!("{namespace}/{name}")
 }
@@ -119,8 +114,7 @@ pub fn replica_dir(account: &str) -> Result<PathBuf> {
     Ok(base.join("neverest").join(account))
 }
 
-/// The account's pimdir store directory: the configured `store.root` override,
-/// else the default per-account state directory.
+/// The account's store directory: `store.root`, else [`replica_dir`].
 pub fn store_dir(account: &str, config: &AccountConfig) -> Result<PathBuf> {
     match &config.store.root {
         Some(root) => Ok(root.clone()),
@@ -128,9 +122,10 @@ pub fn store_dir(account: &str, config: &AccountConfig) -> Result<PathBuf> {
     }
 }
 
-/// How many connections a side may open. An HTTP backend keeps one: extra
-/// connections only pay extra token acquisitions, the API being
-/// request/response anyway.
+/// How many connections a side may open.
+///
+/// An HTTP backend keeps one: extra connections only pay extra token
+/// acquisitions, the API being request/response anyway.
 fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
     if config.is_imap() {
         connections.max(1)
@@ -139,13 +134,11 @@ fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
     }
 }
 
-/// Opens one source handle over the account's store, grouping every collection
-/// it writes under `account` (pimdir SPEC §9.2) so a store shared by two
-/// hand-written accounts tells whose collection is whose.
+/// Opens one source handle over the account's store.
 ///
-/// A store an earlier draft of the format wrote cannot be migrated in place, so
-/// the refusal is answered with the one command that fixes it: the store is a
-/// derived cache, and dropping it costs a resync.
+/// Every collection it writes is grouped under `account` (pimdir SPEC §9.2),
+/// so a store shared by two accounts tells whose is whose. A store an earlier
+/// format wrote cannot be migrated, so the refusal names the `--reset` fix.
 fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
     match PimdirStore::open(dir) {
         Ok(store) => Ok(store.for_account(account).for_source(source)),
@@ -158,14 +151,11 @@ fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceSto
     }
 }
 
-/// The one kind a two-side account syncs, refusing a pair whose backends
-/// disagree.
+/// The one kind a two-side account syncs, refusing a disagreeing pair.
 ///
-/// The kind is never configured, falling out of each side's backend, so the
-/// configuration schema cannot express "these two sides are compatible" and
-/// this check is the enforcement point. It runs after the sides open, the
-/// earliest moment their media types are known, and before the first store
-/// write, so a mismatched account fails with nothing half-written.
+/// The kind is never configured, falling out of each side's backend, so this is
+/// the only enforcement point. It runs as soon as the media types are known and
+/// before the first store write, so a mismatch fails with nothing half-written.
 fn check_kinds(left: &mut SourceCtx, right: &mut SourceCtx) -> Result<Kind> {
     let left = (
         left.name.clone(),
@@ -180,8 +170,7 @@ fn check_kinds(left: &mut SourceCtx, right: &mut SourceCtx) -> Result<Kind> {
     pair_kind(left, right)
 }
 
-/// The pure half of [`check_kinds`]: the two sides' media types in, the one
-/// kind they agree on out.
+/// The pure half of [`check_kinds`]: two media types in, the agreed kind out.
 fn pair_kind(left: (&str, &str), right: (&str, &str)) -> Result<Kind> {
     let resolve = |(source, raw): (&str, &str)| -> Result<Kind> {
         Kind::from_media_type(raw).with_context(|| {
@@ -207,9 +196,10 @@ fn pair_kind(left: (&str, &str), right: (&str, &str)) -> Result<Kind> {
     Ok(left_kind)
 }
 
-/// Live per-collection progress: the collection spinner and its base label, so
-/// an inner phase such as body hydration or relay can append a percentage to
-/// the `[2/7] Syncing INBOX` line.
+/// Live per-collection progress: the spinner and its base label.
+///
+/// An inner phase such as body hydration or relay appends a percentage to the
+/// `[2/7] Syncing INBOX` line.
 struct CollectionProgress<'a> {
     spinner: &'a Spinner,
     label: &'a str,
@@ -226,31 +216,25 @@ impl CollectionProgress<'_> {
 
 /// Which side wins when an endpoint and the store disagree about one item.
 ///
-/// This is the whole of `one-way`. A namespace could say which endpoints met
-/// and never which way, so both sides were authoritative and every divergence
-/// had to become a conflict; declaring an authority is what removes the
-/// conflict rather than resolving it.
+/// This is the whole of `one-way`. Without it both sides are authoritative and
+/// every divergence has to become a conflict; declaring an authority is what
+/// removes the conflict rather than resolving it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Authority {
-    /// Neither side wins: a divergence is recorded as a conflict for the user
-    /// to resolve. The two-way default.
+    /// Neither side wins: a divergence is a conflict. The two-way default.
     Shared,
-    /// The endpoint wins: its version replaces the store's, and the store never
-    /// writes back. The `sources` side under `one-way`.
+    /// The endpoint wins and the store never writes back: the `sources` side.
     Endpoint,
-    /// The store wins: its version is pushed over the endpoint's, and what the
-    /// endpoint changed on its own is overwritten. The `targets` side under
-    /// `one-way`.
+    /// The store wins, overwriting the endpoint: the `targets` side.
     Store,
 }
 
 impl Authority {
     /// How a divergence between the endpoint and the store resolves.
     ///
-    /// `remote` is the endpoint and `local` is the store, so an authoritative
-    /// endpoint prefers the remote and an authoritative store prefers the
-    /// local. Neither records a conflict, which is the point: under `one-way`
-    /// there is nothing for a user to resolve.
+    /// `remote` is the endpoint and `local` is the store. Neither authority
+    /// records a conflict, which is the point: under `one-way` there is nothing
+    /// for a user to resolve.
     fn conflict_policy(self) -> ReplicaConflictPolicy {
         match self {
             Self::Shared => ReplicaConflictPolicy::Manual,
@@ -259,32 +243,26 @@ impl Authority {
         }
     }
 
-    /// Whether anything is ever written back to the endpoint. False for an
-    /// authoritative one: what it holds is the truth.
+    /// Whether anything is written back; false for an authoritative endpoint.
     fn writes_back(self) -> bool {
         !matches!(self, Self::Endpoint)
     }
 }
 
-/// One connected endpoint plus its permissions, its authority, and whether it
-/// may push.
+/// One connected endpoint plus its permissions and its authority.
 struct SourceCtx {
-    /// The endpoint's configured name, which is its pimdir source id and the
-    /// name every hunk this run reports carries.
+    /// The configured name: its pimdir source id, and what every hunk carries.
     name: String,
-    /// The hub namespace it binds into, stripped back off a collection id
-    /// before any call reaches the wire.
+    /// The hub namespace it binds into, stripped back off before any wire call.
     namespace: String,
     pool: Pool,
     perms: SourcePermissions,
     authority: Authority,
-    /// The creates this endpoint refused because it already holds the item's
-    /// identity, collected by the remote each pass pushes and drained into the
-    /// report by [`itemize_refused`].
+    /// The creates this endpoint refused, drained by [`itemize_refused`].
     refused: Vec<RefusedCreate>,
-    /// The writes this endpoint would not take, collected the same way and
-    /// drained into the report by [`itemize_rejected`], which also un-counts
-    /// the hunks the run had derived for them.
+    /// The writes it would not take, drained by [`itemize_rejected`].
+    ///
+    /// That drain also un-counts the hunks the run had derived for them.
     rejected: Vec<RejectedPush>,
 }
 
@@ -293,9 +271,10 @@ impl SourceCtx {
         self.authority.conflict_policy()
     }
 
-    /// A side pushes unless it forbids every item and flag mutation (a fully
-    /// read-only source), or unless it is authoritative, which is the same
-    /// statement made by the account rather than by a permission table.
+    /// A side pushes unless it forbids every mutation, or is authoritative.
+    ///
+    /// The two say the same thing, one through a permission table and one
+    /// through the account's mode.
     fn writable(&self) -> bool {
         let rights = self.push_rights();
         self.authority.writes_back()
@@ -304,11 +283,9 @@ impl SourceCtx {
 
     /// The side's configured permissions as io-replica's per-kind push rights.
     ///
-    /// The two vocabularies line up one to one, so this is a mapping rather
-    /// than a policy. A forbidden kind is kept pending by the engine (never
-    /// pushed, and a forbidden delete is not applied to the replica either)
-    /// while the other kinds still propagate — which is what makes a side
-    /// read-only for *some* operations, rather than all or nothing.
+    /// A mapping rather than a policy, the two vocabularies lining up one to
+    /// one. The engine keeps a forbidden kind pending while the others still
+    /// propagate, which is what makes a side read-only for some operations.
     fn push_rights(&self) -> ReplicaPushRights {
         ReplicaPushRights {
             flags: self.perms.flag.update,
@@ -322,14 +299,8 @@ impl SourceCtx {
 /// Runs the whole account sync and returns the report.
 ///
 /// An account is one hub and one mode (see [`AccountConfig::mode`]). With no
-/// target each source is reconciled against the store the app reads; with
-/// targets each source is reconciled against every one of them, propagation
-/// falling out of the shared hub. Sources never see each other: their
-/// collection ids differ, which is what keeps a mail source and a contacts
-/// source, or two providers cached side by side, from meeting.
-///
-/// What the store keeps is declared by `retain` rather than derived here, so
-/// nothing about it is reported: the configuration already says it.
+/// target a source is reconciled against the store the app reads; with targets,
+/// against each of them. Sources never see each other, their ids differing.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     account_name: impl Into<String>,
@@ -347,8 +318,8 @@ pub fn run(
     let running = select_sources(&mode, only_sources)?;
 
     let real_dir = store_dir(&account_name, account_config)?;
-    // Held for the whole run: dropping it is what removes the replica, so
-    // an early return cannot leave one behind.
+    // Held for the whole run: dropping it removes the replica, so an early
+    // return cannot leave one behind.
     let dry_replica = dry_run.then(|| DryRunReplica::new(&real_dir)).transpose()?;
     let work_dir = match &dry_replica {
         Some(replica) => replica.dir.clone(),
@@ -365,21 +336,15 @@ pub fn run(
         ..Default::default()
     };
 
-    // Refuses a mode change that would discard what the previous one kept,
-    // before any endpoint is opened.
+    // Before any endpoint is opened.
     state.check_mode(&mode)?;
 
-    // Every credential the run needs, read once here rather than once per
-    // opened connection.
+    // Every credential the run needs, read once rather than per connection.
     let account = Account::resolve(account_config)?;
 
     for source_name in &running {
         let source = endpoints[source_name].clone();
 
-        // A source is reconciled against the local store, then, where the
-        // account names targets, what it holds crosses to each of them. Sources
-        // never meet: an item held by one is pushed to the targets, never to
-        // another source.
         let outcome = if mode.is_local() {
             run_local(
                 &account_name,
@@ -411,9 +376,8 @@ pub fn run(
             )
         };
 
-        // A source that fails is reported and the next one still runs: they
-        // share nothing but the file the store lives in, so one broken remote
-        // is no reason to leave the others unsynced.
+        // Sources share nothing but the store file, so one broken remote is no
+        // reason to leave the others unsynced.
         if let Err(err) = outcome {
             warn!("source {source_name} sync error: {err:#}");
             report.collection.patch.push(PatchEntry::new(
@@ -426,9 +390,8 @@ pub fn run(
         }
     }
 
-    // Once for the run, whatever the sources did and whether or not this is a
-    // dry run: the parked rows and the outstanding conflicts are the store's,
-    // and a source-by-source read would report each of them once per source.
+    // Once for the run: the parked rows and the outstanding conflicts belong to
+    // the store, and a per-source read would report each of them once a source.
     match PimdirStore::open(&work_dir) {
         Ok(store) => {
             report_parked(&store, &mut report);
@@ -458,11 +421,10 @@ pub fn run(
     Ok(report)
 }
 
-/// The sources this run touches: every one of them, or those `--source` named.
+/// The sources this run touches: all of them, or those `--source` named.
 ///
 /// Narrowing picks sources rather than namespaces, there being none: an account
-/// is one mode, and a source is reconciled on its own against the store and
-/// whatever targets the account declares.
+/// is one mode, and a source reconciles on its own.
 fn select_sources(mode: &AccountMode, only: &[String]) -> Result<Vec<String>> {
     if only.is_empty() {
         return Ok(mode.sources.clone());
@@ -483,15 +445,11 @@ fn select_sources(mode: &AccountMode, only: &[String]) -> Result<Vec<String>> {
         .collect())
 }
 
-/// One source against every target the account names, each pairing run on its
-/// own.
+/// One source against every target the account names, each pairing on its own.
 ///
-/// Both endpoints bind the source's namespace, which is what makes them meet:
-/// an item the source holds with no binding for the target is pushed to it.
-/// Targets are run in turn rather than together, because under `one-way` the
-/// source is authoritative and no target can influence another, so a pairing
-/// is complete on its own. The source is therefore enumerated once per target,
-/// which the single-target migration this exists for never notices.
+/// Both endpoints bind the source's namespace, which is what makes them meet.
+/// Targets run in turn rather than together, no target influencing another
+/// under `one-way`, so the source is enumerated once per target.
 #[allow(clippy::too_many_arguments)]
 fn run_targets(
     account_name: &str,
@@ -532,8 +490,7 @@ fn run_targets(
     Ok(())
 }
 
-/// One source against one target over the shared hub, cross-endpoint
-/// propagation falling out of it.
+/// One source against one target, propagation falling out of the shared hub.
 #[allow(clippy::too_many_arguments)]
 fn run_pair(
     account_name: &str,
@@ -567,10 +524,8 @@ fn run_pair(
     let left_budget = connection_budget(&left_config, connections);
     let right_budget = connection_budget(&right_config, connections);
 
-    // Under `one-way` the source is the truth and the target follows it, so
-    // neither side records a conflict: the store takes the source's version and
-    // pushes it over the target's. Without it both sides are shared and a
-    // divergence is a conflict, which is the two-way mirror.
+    // Under `one-way` the source is the truth and the target follows, so
+    // neither side records a conflict; without it both are shared.
     let (left_authority, right_authority) = if mode.one_way {
         (Authority::Endpoint, Authority::Store)
     } else {
@@ -706,18 +661,14 @@ fn run_pair(
     Ok(())
 }
 
-/// A collection's spine result: its name and the bodies to hydrate (handle + size),
-/// carried from Phase 1 (spine) into Phase 2 (hydrate) and Phase 3 (apply).
+/// A collection's spine result: its name and the bodies to hydrate.
 type CollectionPlan = (String, Vec<(ReplicaHandle, u64)>);
 
-/// The local, one-source sync, run as three account-wide phases so the
-/// connection pool stays saturated end to end rather than idling at collection
-/// boundaries. Phase 1 spines every collection in parallel over its own
-/// connection and store handle, collecting the bodies to hydrate. Phase 2
-/// streams every body across all collections through one global work-stealing
-/// pool into the blob store. Phase 3 applies the fetched bodies to the index
-/// per collection from cache, with no network. The store is the single local
-/// copy the app reads, so there is no cross-side hydration.
+/// The local, one-source sync, run as three account-wide phases.
+///
+/// Spine, then hydrate, then apply, each account-wide, so the connection pool
+/// stays saturated end to end rather than idling at collection boundaries. The
+/// store is the single local copy the app reads, so nothing crosses.
 #[allow(clippy::too_many_arguments)]
 fn run_local(
     account_name: &str,
@@ -737,9 +688,8 @@ fn run_local(
 
     let workers = connection_budget(&source_config, connections);
     let s = Spinner::start(format!("Opening connections to {source_name}…"));
-    // With no target the store is the destination: `one-way` makes the source
-    // the truth and discards what was staged locally, leaving it off merges the
-    // two, which is the offline replica an app writes into.
+    // With no target the store is the destination: `one-way` discards what was
+    // staged locally, leaving it off merges the two.
     let authority = if mode.one_way {
         Authority::Endpoint
     } else {
@@ -830,8 +780,7 @@ fn run_local(
     Ok(())
 }
 
-/// Opens `count` independent single-connection [`SourceCtx`]s in parallel, so the
-/// connection handshakes overlap instead of paying them one after another.
+/// Opens `count` single-connection [`SourceCtx`]s with overlapping handshakes.
 fn open_source_contexts(
     name: &str,
     namespace: &str,
@@ -868,15 +817,11 @@ fn open_source_contexts(
     Ok(ctxs)
 }
 
-/// Phase 1, spining each collection in parallel: a work-stealing pool of
-/// workers, each on its own connection and store handle, pulls the collection
-/// queue and reconciles, collecting the bodies to hydrate. Reads run
-/// concurrently through WAL and writes serialise on the store's single-writer
-/// lock. Each collection's report is absorbed whole after the barrier, arms
-/// and all: what a worker parked, refused or collided on is as much the run's
-/// report as the patch it derived, and dropping it would leave the run naming
-/// how many items it touched and never what it left behind. A collection that
-/// errors is logged and skipped, its bodies never entering the plan.
+/// Phase 1, spining each collection in parallel over its own connection.
+///
+/// Reads run concurrently through WAL, writes serialise on the store's
+/// single-writer lock. Each collection's report is absorbed whole, arms and
+/// all: dropping one leaves the run naming what it touched, never what it left.
 #[allow(clippy::too_many_arguments)]
 fn phase1_spine(
     source: &str,
@@ -943,11 +888,11 @@ fn phase1_spine(
     Ok(plans)
 }
 
-/// Reconciles one collection's spine, without hydration: pull the remote into
-/// the hub, itemize the pending local edits and the pull plan, then push and
-/// settle. Returns the not-yet-`Full` bodies to hydrate, each with the size its
-/// local envelope meta carries so the download can run largest-first, plus the
-/// report patches. A dry run stops after itemizing, leaving the targets empty.
+/// Reconciles one collection's spine, without hydration.
+///
+/// Returns the not-yet-`Full` bodies to hydrate, each with the size its local
+/// envelope meta carries so the download runs largest-first, plus the report
+/// patches. A dry run stops after itemizing, leaving the targets empty.
 fn collection_spine(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -962,9 +907,8 @@ fn collection_spine(
 
     let pull = sync_side_rebuilding(collection, ctx, store, blobs, false)?;
     let display = display_name(&ctx.namespace, collection);
-    // NOTE: before the report reads which conflicts survived. A divergence the
-    // merge settles was never a disagreement, and reporting one the run
-    // resolved in the same breath is the noise this whole pass removes.
+    // NOTE: before the report reads which conflicts survived, a divergence the
+    // merge settles never having been a disagreement.
     resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
     itemize_pulled(
         &pull.events,
@@ -975,10 +919,9 @@ fn collection_spine(
         &ctx.name,
         &mut report,
     )?;
-    // NOTE: before the probe, which resolves link ids and, for a kind that
-    // carries no cheap `Meta` tier, does so by downloading the whole body. Read
-    // after it, a card is already hydrated and reports nothing, so a run that
-    // pulled a whole address book called itself quiescent.
+    // NOTE: before the probe, which resolves a bodiless kind's link ids by
+    // downloading. Read after it, a card is already hydrated and reports
+    // nothing, so a run that pulled a whole address book called itself quiet.
     itemize_fetches(collection, display, store, &ctx.name, &mut report)?;
     upgrade_probed(collection, ctx, store, blobs, dry_run)?;
     itemize_single(collection, store, ctx, &mut report)?;
@@ -1009,14 +952,11 @@ fn collection_spine(
     Ok((targets, report))
 }
 
-/// Phase 2, hydrating every body across every collection through one global
-/// work-stealing pool. Bodies are chunked into largest-first per-collection
-/// batches, since a batched fetch stays within one selected collection, and the
-/// biggest batches are queued first for a global largest-first order. A worker
-/// finishing one collection's last batch immediately steals the next
-/// collection's, so no connection idles at a collection edge. Bodies stream
-/// into the blob store, and the fetched items are cached by collection and
-/// handle for Phase 3.
+/// Phase 2, hydrating every body through one global work-stealing pool.
+///
+/// A batched fetch stays within one selected collection, so bodies are chunked
+/// per collection and the biggest batches queued first for a global
+/// largest-first order. A worker steals the next, idling at no collection edge.
 fn phase2_hydrate(
     source: &str,
     plans: &[CollectionPlan],
@@ -1117,10 +1057,10 @@ fn phase2_hydrate(
     Ok(cache)
 }
 
-/// Phase 3, applying the pre-fetched bodies to the index one collection at a
-/// time with no network: io-replica's `Full` upgrade runs over a
-/// [`CachedFetchRemote`] serving each body from the Phase 2 cache, a miss
-/// falling back to a real fetch. Only store writes happen here.
+/// Phase 3, applying the pre-fetched bodies to the index, per collection.
+///
+/// The `Full` upgrade runs over a [`CachedFetchRemote`], a miss falling back to
+/// a real fetch. Only store writes happen here.
 fn phase3_apply(
     source: &str,
     plans: &[CollectionPlan],
@@ -1141,9 +1081,9 @@ fn phase3_apply(
     Ok(())
 }
 
-/// Raises every not-yet-`Full` item of `collection` to `Full` from the pre-fetch
-/// cache (blobs already on disk), so the retained store holds each body for the
-/// app to read offline.
+/// Raises every not-yet-`Full` item of `collection` from the pre-fetch cache.
+///
+/// The retained store then holds each body for the app to read offline.
 fn apply_full(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -1171,8 +1111,9 @@ fn apply_full(
     Ok(())
 }
 
-/// A `handle → flags` snapshot of a side's items, taken before a pull so its
-/// remote flag changes can be diffed out of the sync's per-item events.
+/// A `handle -> flags` snapshot of a side's items, taken before a pull.
+///
+/// Its remote flag changes are then diffed out of the sync's per-item events.
 fn flag_snapshot(
     store: &PimdirSourceStore,
     collection: &str,
@@ -1185,16 +1126,11 @@ fn flag_snapshot(
         .collect())
 }
 
-/// Itemizes into the report the remote-originated changes a pull applied: flag
-/// changes and removals on already-synced items. The pull applies them silently,
-/// the item reading `Clean` afterwards, so they are recovered from the sync's
-/// per-item events. A `FlagsChanged` is diffed against the pre-pull snapshot
-/// into add and remove hunks, and a `Vanished` becomes a delete. A new remote
-/// item is an `Added` event but the pull plan already reports it as a `Fetch`.
+/// Itemizes the remote-originated flag changes and removals a pull applied.
 ///
-/// The divergences the same events carry are [`itemize_conflicted`]'s, which
-/// the two-endpoint path calls on its own, this one being reached only where
-/// a source is reconciled against the store alone.
+/// The pull applies them silently, the item reading `Clean` afterwards, so they
+/// are recovered from the sync's per-item events. A new remote item is an
+/// `Added` event but the pull plan already reports it as a `Fetch`.
 fn itemize_pulled(
     events: &[ReplicaEvent],
     before: &HashMap<String, ReplicaFlags>,
@@ -1259,16 +1195,9 @@ fn itemize_pulled(
 
 /// Names the divergences a pass parked, once each.
 ///
-/// A `Conflicted` event says a placement *entered* conflict, not that it is
-/// still in one: [`resolve_conflicts`] has run since and merged away whatever
-/// nobody disagreed about. So the store is asked which of them survived, and
-/// only those reach the report, a divergence settled in the same run being
-/// nothing a person has to hear about.
-///
-/// Called once per pass by every topology, which is why the report is asked
-/// to note rather than to push. A collection is reconciled until it is
-/// quiescent, and a divergence the run's own merge settles and a later pass
-/// marks again is one divergence and one line, not one per pass.
+/// A `Conflicted` event says a placement entered conflict, not that it is still
+/// in one, [`resolve_conflicts`] having run since, so the store is asked which
+/// survived. It notes rather than pushes: one divergence stays one line.
 fn itemize_conflicted(
     events: &[ReplicaEvent],
     store: &PimdirSourceStore,
@@ -1308,8 +1237,7 @@ fn itemize_conflicted(
     Ok(())
 }
 
-/// Itemizes one side's pending projection into the report, the outbound work a
-/// flag, move, delete or compose staged, reusing the shared placement mapping.
+/// Itemizes one side's projection: the work a flag, move or compose staged.
 fn itemize_single(
     collection: &str,
     store: &PimdirStore,
@@ -1327,13 +1255,11 @@ fn itemize_single(
     Ok(())
 }
 
-/// Reports the pull plan of a one-source local sync: each not-yet-`Full`,
-/// non-tombstone item is a body this run fetches, named the same way whether or
-/// not the run is a dry one.
+/// Reports the pull plan: every not-yet-`Full`, non-tombstone item.
 ///
 /// Runs before the probe rather than after it. A kind with no cheap `Meta` tier
-/// resolves its link id from the body, so the probe hydrates it, and a plan read
-/// afterwards would be empty for exactly the items the run is about to pull.
+/// resolves its link id from the body, so the probe hydrates it, and a plan
+/// read afterwards would be empty for exactly what the run is about to pull.
 fn itemize_fetches(
     collection: &str,
     display: &str,
@@ -1365,15 +1291,11 @@ fn itemize_fetches(
     Ok(())
 }
 
-/// Reconciles one collection: a first per-side reconcile resolving link ids and
-/// pulling both servers into the hub, a hydration of the bodies about to cross,
-/// then extra passes pushing the projected propagations until quiescent.
+/// Reconciles one collection until quiescent.
 ///
 /// The collection fills a report of its own, folded into the account's through
-/// [`SyncReport::absorb`] on the way out, which is the same fold the
-/// one-source path makes at its worker barrier. One fold, named field by
-/// field, is what keeps an arm from being dropped on one path and carried on
-/// the other.
+/// [`SyncReport::absorb`], the same fold the one-source path makes at its
+/// barrier. One fold keeps an arm from being dropped on just one path.
 #[allow(clippy::too_many_arguments)]
 fn sync_collection(
     collection: &str,
@@ -1408,7 +1330,7 @@ fn sync_collection(
         &mut report,
     );
 
-    // Folded whether the collection reconciled or failed: what it did report
+    // Folded whether the collection reconciled or failed: what it reported
     // before it stopped is still what happened.
     account.absorb(report);
 
@@ -1494,10 +1416,10 @@ fn sync_collection_into(
     Ok(())
 }
 
-/// Propagates the collection's cross-side copies, either by retaining, which
-/// hydrates the body into the store for the projection to push, or by relaying,
-/// which streams the body server-to-server and keeps only the spine. Returns
-/// how many bodies were moved.
+/// Propagates the collection's cross-side copies, returning how many moved.
+///
+/// Retaining hydrates the body into the store for the projection to push;
+/// relaying streams it server-to-server and keeps only the spine.
 #[allow(clippy::too_many_arguments)]
 fn propagate(
     collection: &str,
@@ -1525,30 +1447,27 @@ fn propagate(
     }
 }
 
-/// One cross-copy body to relay: its holding side and fetch handle, the exact
-/// octet length taken from the item's meta so the target append is
-/// length-prefixed without buffering the body, the link id and the flags.
+/// One cross-copy body to relay.
+///
+/// `size` is the exact octet length from the item's meta, so the target append
+/// is length-prefixed without buffering the body.
 struct RelayTarget {
     /// The name of the source holding the body.
     holding: String,
     handle: ReplicaHandle,
-    /// The cross-side identity, carried so the relayed append can be itemized
-    /// under the same id the hydrating path reports a copy under.
+    /// The cross-side identity, so a relay is itemized under the hydrating id.
     link: String,
-    /// The identity the target addresses the new item by, from
-    /// [`Kind::split_link_id`], owned because the link id it points into is
-    /// dropped with the hub.
+    /// The identity the target addresses the new item by.
+    ///
+    /// Owned, because the link id it points into is dropped with the hub.
     hint: Option<String>,
-    /// The minted part of the key, where the copy shares its identity with
-    /// another item of the same collection, so the target names it apart from
-    /// the copy already holding that identity.
+    /// The minted part of the key, naming a copy apart from its twin.
     mint: Option<String>,
     size: usize,
     flags: Vec<Flag>,
 }
 
-/// Reads the relay targets from the hub: an item held by exactly one side,
-/// never hydrated so with no stored object, whose far side may create it.
+/// The relay targets: a one-sided, never-hydrated item its far side may create.
 fn relay_targets(
     store: &PimdirStore,
     kind: Kind,
@@ -1593,14 +1512,11 @@ fn meta_size(meta: &Option<ReplicaMeta>) -> Option<usize> {
     value.get("size")?.as_u64().map(|n| n as usize)
 }
 
-/// Streams each cross-copy body directly from its holding side to the other
-/// through a bounded pipe, the store keeping only the spine: the target's next
-/// enumerate binds the relayed message, whose body is never stored. Returns how
-/// many were relayed.
+/// Streams each cross-copy body between the sides, keeping only the spine.
 ///
 /// A relay never reaches the projection the hydrating path is reported from, so
-/// each write to the target server is itemized here instead. Without that, a
-/// run that relayed would report having written nothing.
+/// each write to the target is itemized here instead. Without that, a run that
+/// relayed would report having written nothing.
 fn relay_copies(
     collection: &str,
     left: &mut SourceCtx,
@@ -1653,9 +1569,9 @@ fn relay_copies(
     Ok(count)
 }
 
-/// Relays one message: a worker thread streams the fetch into the bounded pipe
-/// while this thread streams the pipe into the length-prefixed target append,
-/// so the body crosses without ever being held whole or stored.
+/// Relays one message: a fetch thread into the pipe, this one into the append.
+///
+/// The body therefore crosses without ever being held whole or stored.
 fn relay_one(
     holding_pool: &mut Pool,
     target_pool: &mut Pool,
@@ -1686,16 +1602,11 @@ fn relay_one(
     Ok(())
 }
 
-/// One per-side reconcile round: sync each side against its server, then
-/// resolve any freshly probed placement to `Meta` so its link id is known and
-/// it joins the hub. Returns whether either side pulled or pushed.
+/// One per-side reconcile round, answering whether either side moved.
 ///
-/// Each side's divergences are itemized here, right after its own merge and
-/// before the next side runs, which is the only place they can be: the
-/// engine's events are this pass's and nothing keeps them. A collection is
-/// reconciled until quiescent, so this runs several times over one
-/// collection, and the report notes rather than appends: a divergence a pass
-/// settles and a later pass marks again is one divergence.
+/// Each side's divergences are itemized right after its own merge, the only
+/// place they can be: the engine's events are this pass's and nothing keeps
+/// them. The report notes rather than appends, so one divergence is one line.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_pass(
     collection: &str,
@@ -1745,25 +1656,16 @@ fn reconcile_pass(
     Ok(moved(&left_report) || moved(&right_report))
 }
 
-/// Whether a side's sync changed anything (pulled or the remote accepted a
-/// push), used to detect convergence.
+/// Whether a side's sync changed anything, used to detect convergence.
 fn moved(report: &ReplicaSyncReport) -> bool {
     report.pulled > 0 || report.pushed > 0
 }
 
-/// Runs one side's sync, then the handle-space rebuild guard: the stored
-/// checkpoint's epoch is read before and after the sync, and a change means the
-/// server renumbered every handle. io-replica's rekey then re-enumerates the
-/// new handle space, carrying cached bodies, summaries and pending state over
-/// by link id, and its write batch lands through
-/// [`PimdirSourceStore::write_rekeyed`] so `collections.generation` bumps
-/// atomically with the rebuild. Ordinary syncs and full resyncs never bump.
-/// Graph sides never rebuild, their message ids surviving a delta reset.
+/// Runs one side's sync, then the handle-space rebuild guard.
 ///
-/// The guard is pre/post within one run, neverest keeping no
-/// per-collection state beside the store. A crash between the sync's checkpoint
-/// write and the rekey loses the pre value, so that window can miss one
-/// generation bump; content still converges through link ids on the next sync.
+/// The stored checkpoint's epoch is read before and after; a change means the
+/// server renumbered every handle. The guard is pre/post within one run, so a
+/// crash in between can miss one bump; link ids still converge on the next.
 fn sync_side_rebuilding(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -1790,8 +1692,7 @@ fn sync_side_rebuilding(
     Ok(report)
 }
 
-/// The handle-space epoch carried by `collection`'s stored checkpoint, `None`
-/// when there is no checkpoint or the backend has no such notion.
+/// The handle-space epoch of `collection`'s stored checkpoint, if any.
 ///
 /// The checkpoint bytes are the backend's own encoding, so the backend decodes
 /// them ([`Client::handle_space_epoch`]); the driver only compares the number
@@ -1813,11 +1714,11 @@ fn stored_epoch(
         .and_then(|checkpoint| client.handle_space_epoch(&checkpoint.0)))
 }
 
-/// Drives io-replica's rekey over the side's remote, routing its rebuild
-/// write batch through [`PimdirSourceStore::write_rekeyed`] instead of the
-/// plain storage seam, so "the ids you cached are void" (the generation
-/// bump) commits atomically with the rebuild that voided them. Returns
-/// the rekey report and the new generation.
+/// Drives io-replica's rekey, returning its report and the new generation.
+///
+/// The rebuild write batch goes through [`PimdirSourceStore::write_rekeyed`]
+/// rather than the plain storage seam, so "the ids you cached are void" commits
+/// atomically with the rebuild that voided them.
 fn rebuild_collection(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -1828,8 +1729,7 @@ fn rebuild_collection(
     drive_rekey(store, &mut remote, collection)
 }
 
-/// The generic rekey pump behind [`rebuild_collection`], seam-typed so a
-/// test can drive it over a scripted remote.
+/// The rekey pump behind [`rebuild_collection`], seam-typed for a test.
 fn drive_rekey<R>(
     store: &mut PimdirSourceStore,
     remote: &mut R,
@@ -1897,13 +1797,9 @@ where
 
 /// The engine options one side syncs under.
 ///
-/// Every side here is bound to the store's hub, which is what fixes the delete
-/// disposition: a refused delete (`push` off, or `item.delete = false`) is
-/// held, never reverted. Reverting one says "this source still holds the
-/// member", which a hub reads as the item being alive, since an add beats a
-/// delete across sources: it clears the deletion for every side and mirrors the
-/// item back to the one it was deleted on. A backup side configured to take no
-/// deletes would then resurrect on both what the user removed on one.
+/// Being hub-bound fixes the delete disposition: a refused delete is held, not
+/// reverted. Reverting says "this source still holds the member", and an add
+/// beats a delete, so a side taking no deletes would resurrect on both sides.
 fn sync_options(
     push: bool,
     rights: ReplicaPushRights,
@@ -1933,8 +1829,8 @@ fn sync_side(
         &mut remote,
         ReplicaSync::new(collection.to_string(), opts),
     );
-    // Kept whether the pass succeeded or not: a refusal is something the run
-    // did learn, and a later failure does not unlearn it.
+    // Kept whether the pass succeeded or not: a later failure does not unlearn
+    // a refusal the run already saw.
     let refused = remote.take_refused();
     let rejected = remote.take_rejected();
     ctx.refused.extend(refused);
@@ -1943,10 +1839,11 @@ fn sync_side(
     report.with_context(|| format!("Sync {} {collection}", &ctx.name))
 }
 
-/// Raises every freshly probed placement to the tier its kind resolves at
-/// ([`Kind::probe_tier`]) so its link id and summary are known and it enters
-/// the hub: `Meta` for mail, whose envelope carries the identity, `Full` for a
-/// kind whose body is the only thing that does.
+/// Raises every freshly probed placement to [`Kind::probe_tier`].
+///
+/// Its link id is then known and it enters the hub. `Meta` for mail, whose
+/// envelope carries the identity; `Full` for a kind whose body is the only
+/// thing that does.
 fn upgrade_probed(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -1992,28 +1889,11 @@ fn conflicted_placements(
         .collect())
 }
 
-/// Merges what nobody disagreed about, leaving parked only the divergences a
-/// person has to settle. Returns how many conflicts it cleared.
+/// Merges what nobody disagreed about, leaving parked only what needs a person.
 ///
-/// Most divergence is not disagreement: one side changed a phone number and
-/// the other a note, and the base the last sync agreed on proves it by naming
-/// which side touched which field. Merging those needs no one, and a
-/// background tool that asks anyway is one a user switches off.
-///
-/// A conflict is marked with the diverging remote body *wanted* rather than
-/// held, the engine fetching nothing by itself, so the first half of this is
-/// an ordinary `Full` upgrade of the conflicted placements: what it fetches
-/// lands on the conflict object and nowhere else, the placement's own body
-/// being the local side of the divergence. A conflict whose remote body has
-/// not landed yet is visible and not resolvable, and is left exactly as it is
-/// rather than merged against a body nobody holds.
-///
-/// The merge is [`Kind::merge`], dispatched on the collection's kind and
-/// built in rather than configured, and the resolution is staged as an
-/// ordinary `update` through the store's queue then drained in the same
-/// breath. That is already the path whoever owns an edit resolves a conflict
-/// by, so a merged body is written exactly one way. Anything the merge did
-/// not settle stays parked, untouched.
+/// Most divergence is not disagreement: one side changed a phone number and the
+/// other a note, and the base proves it. The remote body is only wanted, not
+/// held, so it is fetched first and never merged against nothing.
 fn resolve_conflicts(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -2054,9 +1934,11 @@ fn resolve_conflicts(
     merge_conflicts(collection, kind, &ctx.name, store, blobs, store_dir)
 }
 
-/// The half of [`resolve_conflicts`] that reaches no server: merges the
-/// conflicted placements whose three bodies the store already holds, and
-/// stages each empty report as an ordinary edit. Returns how many it cleared.
+/// The half of [`resolve_conflicts`] that reaches no server.
+///
+/// Merges the placements whose three bodies the store holds and stages each
+/// result through the queue, the same path an owner's own edit takes, so a
+/// merged body is written exactly one way. What it cannot settle stays parked.
 fn merge_conflicts(
     collection: &str,
     kind: Kind,
@@ -2065,9 +1947,9 @@ fn merge_conflicts(
     blobs: &PimdirBlobs,
     store_dir: &Path,
 ) -> Result<usize> {
-    // NOTE: opened before the first blob write rather than at it, the
-    // producer's staging lock being what keeps a collector out of the window
-    // between a body reaching the blob tree and the queue row pinning it.
+    // NOTE: opened before the first blob write, its staging lock being what
+    // keeps a collector out of the window between a body reaching the blob
+    // tree and the queue row pinning it.
     let mut producer = PimdirProducer::open(store_dir, env!("CARGO_PKG_NAME"))
         .with_context(|| format!("Stage the merged conflicts of {collection}"))?;
     let mut staged = 0usize;
@@ -2173,9 +2055,9 @@ fn merge_conflicts(
     Ok(staged)
 }
 
-/// Hydrates (to `Full`) the bodies of items held by only one side that the other
-/// side may receive, so the hub holds the body and its next projection stages
-/// the copy. Returns how many bodies were fetched.
+/// Hydrates the bodies of one-sided items the other side may receive.
+///
+/// The hub then holds the body and its next projection stages the copy.
 fn hydrate_copies(
     collection: &str,
     left: &mut SourceCtx,
@@ -2242,9 +2124,10 @@ fn hydrate_copies(
     Ok(total)
 }
 
-/// Itemizes the pending cross-side work into the report by reading each side's
-/// hub projection: a `Created` placement is a copy in, a `Dirty` one a flag
-/// change, a `Tombstone` a delete.
+/// Itemizes the pending cross-side work from each side's hub projection.
+///
+/// A `Created` placement is a copy in, a `Dirty` one a flag change or an
+/// update, a `Tombstone` a delete.
 fn itemize(
     collection: &str,
     store: &PimdirStore,
@@ -2265,8 +2148,9 @@ fn itemize(
     Ok(())
 }
 
-/// Maps a projected placement to its report hunks. A flag change can surface as
-/// both an add and a remove.
+/// Maps a projected placement to its report hunks.
+///
+/// A flag change can surface as both an add and a remove.
 fn placement_hunks(
     source: &str,
     other: &str,
@@ -2336,20 +2220,11 @@ fn placement_hunks(
     }
 }
 
-/// Names the creates a side refused because it already holds the identity, in
-/// the terms the report speaks: the source's configured name, the collection
-/// as its server names it, and the shared `UID`.
+/// Names the creates a side refused because it already holds the identity.
 ///
-/// The remote collects them as it pushes ([`PimRemote::take_refused`]) and
-/// leaves them on the side's context; what is added here is the side's name,
-/// which the remote does not know it by.
-///
-/// A collection is reconciled until it is quiescent, and a create the other
-/// side will not take is re-derived and re-refused on every pass, so the
-/// batch this drains carries the same refusal several times over. Two copies
-/// of one identity are still two refusals, which is what the handle
-/// distinguishes: the repeats it drops are the same copy meeting the same
-/// answer again.
+/// A collection reconciles until quiescent, so a create the other side will not
+/// take is re-refused every pass. Two copies of one identity are still two
+/// refusals, which is what the handle tells apart from a repeated one.
 fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &mut SyncReport) {
     let mut seen: HashSet<(String, String, String)> = HashSet::new();
 
@@ -2372,27 +2247,11 @@ fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &mut SyncRep
     }
 }
 
-/// Names the writes a side would not take, and takes back the hunks the run
-/// had derived for them.
+/// Names the writes a side would not take, un-counting their hunks.
 ///
-/// The item patch is itemized from the projection before the passes that
-/// push, so every entry in it is a plan. A plan the remote refused is not
-/// work the run did: leaving it in the patch makes the run count a write that
-/// never landed, say `synchronized: 1 hunks`, exit successfully and report
-/// the identical phantom on every run after it, which is what a rejected
-/// `PUT` was seen doing against a real CardDAV server. The refusal takes its
-/// place, in the vocabulary a refused duplicate already speaks.
-///
-/// A hunk is matched by the side, the collection and the handle. The remote
-/// names a collection the way the wire does and so does the report
-/// ([`display_name`]), so the two meet without translation. A create is
-/// itemized by link id rather than by handle and therefore matches nothing:
-/// it stays in the patch beside its refusal, which is the honest half of what
-/// can be known here.
-///
-/// One write is one line whatever a convergence loop does: the passes
-/// re-derive the same write and meet the same answer, and the batch drained
-/// here carries all of them.
+/// The item patch is a plan, itemized before anything is pushed, so a refused
+/// write left in it counts as one the run made and comes back as a phantom on
+/// every later run, as a rejected `PUT` did against a real CardDAV server.
 fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncReport) {
     let mut seen: HashSet<(String, String, &'static str)> = HashSet::new();
 
@@ -2423,9 +2282,8 @@ fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncRe
 
 /// Whether `hunk` is the plan for `handle` in `collection` on `side`.
 ///
-/// A copy names its item by link id rather than by handle, the item having no
-/// handle on the side it is being created on, so it answers `false` whatever
-/// it carries.
+/// A copy names its item by link id, having no handle on the side it is being
+/// created on, so it answers `false` whatever it carries.
 fn names(hunk: &ItemHunk, side: &str, collection: &str, handle: &str) -> bool {
     match hunk {
         ItemHunk::AddFlags {
@@ -2490,8 +2348,7 @@ fn filter_collections(
         .collect()
 }
 
-/// Create-only collection diff: make each side hold the union of filtered
-/// collections, gated by the target side's create permission.
+/// Create-only collection diff, gated by each side's create permission.
 fn diff_collections(
     left: &BTreeSet<String>,
     right: &BTreeSet<String>,
@@ -2553,9 +2410,10 @@ fn to_email_flag_set(flags: &ReplicaFlags) -> BTreeSet<Flag> {
     flags.iter().map(|s| Flag::from_raw(s.clone())).collect()
 }
 
-/// What `new` gained over `old`, and what it lost, as the report renders
-/// them. An unknown set holds no markers to compare with, so it reads as
-/// empty: nothing is reported added or removed against a side nobody read.
+/// What `new` gained over `old`, and what it lost.
+///
+/// An unknown set holds no markers to compare with, so it reads as empty:
+/// nothing is reported added or removed against a side nobody read.
 fn flag_diff(old: &ReplicaFlags, new: &ReplicaFlags) -> (BTreeSet<Flag>, BTreeSet<Flag>) {
     let empty = BTreeSet::new();
     let old = old.known().unwrap_or(&empty);
@@ -2569,8 +2427,7 @@ fn flag_diff(old: &ReplicaFlags, new: &ReplicaFlags) -> (BTreeSet<Flag>, BTreeSe
     (diff(new, old), diff(old, new))
 }
 
-/// A stable-ish u64 content key for the report DTO. Display never shows it, so
-/// it only needs to be internally consistent.
+/// A u64 content key for the report DTO, never displayed, so only consistent.
 fn content_key(link: &str) -> u64 {
     let mut acc: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in link.bytes() {
@@ -2580,22 +2437,11 @@ fn content_key(link: &str) -> u64 {
     acc
 }
 
-/// Drains the pending frontend actions of the collections `namespace` owns
-/// into the store before the sync, neverest being the store's sole owner. Each
-/// collection is applied exactly once by io-pimdir's
-/// [`drain_collection`](PimdirSourceStore::drain_collection). A permanently bad
-/// action parks, for [`report_parked`] to surface until it is repaired; a
-/// transient failure leaves the collection queued for the next run and only
-/// warns, the sync itself still running offline-first.
+/// Drains the pending frontend actions of the collections `namespace` owns.
 ///
-/// The queue is the whole store's and records no source, so the collections it
-/// names have to be narrowed here: a source drains what its own namespace owns
-/// and nothing else. Draining another's projects an action against a source
-/// holding no binding for the item it names, which io-pimdir leaves pending
-/// rather than parking, but only after the drain that could have applied it
-/// has been robbed of its turn. Sources are run in name order, so without this
-/// the first one alphabetically would answer for every frontend write on the
-/// account.
+/// The queue is the whole store's and records no source, so a source drains its
+/// own namespace and nothing else: draining another's robs the drain that could
+/// have applied it, and the first source alphabetically would answer for all.
 fn drain_queues(store: &mut PimdirSourceStore, namespace: &str, report: &mut SyncReport) {
     let collections = match store.queued_collections() {
         Ok(collections) => collections,
@@ -2633,13 +2479,9 @@ fn drain_queues(store: &mut PimdirSourceStore, namespace: &str, report: &mut Syn
 
 /// Surfaces the store's parked queue actions, once for the run.
 ///
-/// A parked row belongs to the store, not to a source: it is whatever a
-/// frontend enqueued and the drain found permanently unappliable, and the
-/// queue records no source. Reading it where the drain runs would report it
-/// once per source that ran, so a mail account syncing contacts and calendar
-/// beside its mail would show the same row three times.
-///
-/// They are re-reported by every run, until the row is repaired or dropped.
+/// A parked row belongs to the store, not to a source, so reading it where the
+/// drain runs reports it once per source: an account syncing mail, contacts and
+/// calendar showed the same row three times. Every run re-reports them.
 fn report_parked(store: &PimdirStore, report: &mut SyncReport) {
     match store.parked_actions() {
         Ok(parked) => {
@@ -2657,14 +2499,11 @@ fn report_parked(store: &PimdirStore, report: &mut SyncReport) {
     }
 }
 
-/// Counts the decisions the store is holding, once for the run. That count is
-/// what the report states and what the run's exit code answers.
+/// Counts the decisions the store is holding, once for the run.
 ///
-/// Read from the store rather than from the run's own tally, because the two
-/// are different numbers. The engine emits nothing for a placement it already
-/// parked, so the conflicts a run itemizes are only the ones it newly marked;
-/// that early return is what keeps a repeated run quiet, and it is exactly
-/// why it cannot also serve as the number of decisions waiting.
+/// Read from the store rather than from the run's own tally: the engine says
+/// nothing about a placement it already parked, so a run itemizes only what it
+/// newly marked, which is why that tally cannot count what is waiting.
 fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncReport) {
     match store.list_conflicts(Some(account)) {
         Ok(conflicts) => report.outstanding_conflicts = conflicts.len(),
@@ -2674,22 +2513,9 @@ fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncReport) 
 
 /// Warns about the conflicts this run marked, one line per item.
 ///
-/// Only what this run marked, which is the whole of the once-only rule: the
-/// engine returns early for a placement it already parked, so a five-minute
-/// schedule over one unresolved card warns once rather than nearly three
-/// hundred times a day, all naming the same card. An unattended tool that
-/// repeats itself is one a user silences.
-///
-/// Neverest raises no desktop notification of its own. The distinction the
-/// once-only rule rests on is in the report rather than buried in a popup:
-/// `conflicts` is what this run marked and `outstanding_conflicts` is what
-/// the store holds waiting, so a caller reading `--json` notifies on entry
-/// by testing the first, with no state of its own to keep. It can also name
-/// the item, which a static summary and body could never do.
-///
-/// Returns how many items it warned about, which is the length of the parked
-/// list and never more: the report notes a divergence once however many
-/// passes over however many endpoints marked it.
+/// Only what this run marked, which is the whole of the once-only rule: a
+/// five-minute schedule over one unresolved card warns once, not three hundred
+/// times a day. A `--json` caller notifies off `conflicts`, keeping no state.
 fn warn_conflicts(report: &SyncReport) -> usize {
     for conflict in &report.conflicts {
         warn!("{conflict}");
@@ -2698,15 +2524,11 @@ fn warn_conflicts(report: &SyncReport) -> usize {
     report.conflicts.len()
 }
 
-/// Performs the queue's `submit` intents, the half the store's own drain leaves
-/// pending because performing one is a capability rather than a mutation.
+/// Performs the queue's `submit` intents, which the store's drain leaves alone.
 ///
-/// Each intent goes through the first side offering a send channel: its own
-/// `smtp` table when it carries one, else its native send. A sent intent is
-/// acknowledged, which releases its body's pin; a permanent failure parks the
-/// row with its error; a transient one leaves it pending for the next run.
-/// Without a channel at all the intents stay pending with a warning, never
-/// parked, since another build or another host can perform them.
+/// A sent intent is acknowledged, releasing its body's pin; a permanent failure
+/// parks the row with its error, a transient one leaves it pending. With no
+/// channel they stay pending, never parked, another build being able to send.
 fn drain_submits(
     account_config: &AccountConfig,
     account: &Account,
@@ -2795,21 +2617,11 @@ fn drain_submits(
     }
 }
 
-/// Reclaims the store's retained (soft-deleted) items older than
-/// `store.purge-after`. It runs after the sync rather than before it, so an
-/// item this run retired starts its delay now instead of being reclaimed by
-/// the very run that retired it.
+/// Reclaims the retained items older than `store.purge-after`, unset never.
 ///
-/// Unset means never purge, so the sweep does not run at all. It warns rather
-/// than fails: a store that cannot be swept is a housekeeping problem, not a
-/// reason to fail a run that synced correctly.
-///
-/// A purge releases a body, it does not reclaim one. The store collects nothing
-/// by itself (pimdir SPEC §5), so the store's owner runs the collector, and
-/// here that is this. It runs only after a purge that took something, since
-/// that is when this run knows a body was released and the collector costs a
-/// walk of the whole blob tree. Orphans left by a crash are what `pimdir gc`
-/// is for.
+/// It runs after the sync, so an item this run retired starts its delay rather
+/// than going with it, and it warns instead of failing. A purge only releases a
+/// body (pimdir SPEC §5), so the collector runs here too, after a purge only.
 fn sweep_retained(
     account_config: &AccountConfig,
     store: &mut PimdirStore,
@@ -2849,10 +2661,10 @@ fn sweep_retained(
     });
 }
 
-/// Resolves the account's send channel. It belongs to a source: its own `smtp`
-/// table when it carries one, else its native send. At most one source may
-/// declare an `smtp` table (the account refuses more at load), so there is no
-/// tiebreak here. `None` warns and leaves the queued intents pending.
+/// Resolves the account's send channel: an `smtp` table, else a native send.
+///
+/// At most one source may declare an `smtp` table, the account refusing more at
+/// load, so there is no tiebreak here. `None` warns and leaves them pending.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 #[cfg_attr(not(feature = "smtp"), allow(unused_variables))]
 fn open_send_channel<'a>(
@@ -2917,15 +2729,13 @@ fn open_send_channel<'a>(
     }
 }
 
-/// Which side performs the submit intents, and how: its own SMTP channel, or
-/// the live session of the side at that index, a native sender.
+/// Which source performs the submit intents, and how.
 ///
-/// Each variant is consumed by the arm its cargo feature gates, so a
-/// build with only one of them carries the other unread rather than duplicating
-/// the walk per feature combination.
+/// Each variant is consumed by the arm its cargo feature gates, so a build with
+/// only one of them carries the other unread rather than duplicating the walk
+/// per feature combination.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 #[allow(dead_code)]
-/// Which source completes the account's submission, and how.
 enum SendChannelPick {
     /// The name of the source whose `smtp` table the intents leave through.
     Smtp(String),
@@ -2933,11 +2743,11 @@ enum SendChannelPick {
     Native(usize),
 }
 
-/// Hydrates every not-yet-`Full`, non-tombstone placement of both sides to
-/// `Full` under `store.hydration = "full"`, so the store mirrors every body.
-/// The shared object store dedups, so the second side's upgrade links an
-/// already-stored body by link id without a fetch. Returns how many placements
-/// were raised.
+/// Hydrates every not-yet-`Full` placement of both sides.
+///
+/// The store then mirrors every body, and the shared object store dedups, so
+/// the second side's upgrade links an already-stored body by link id without a
+/// fetch.
 #[allow(clippy::too_many_arguments)]
 fn hydrate_full_collection(
     collection: &str,
@@ -2980,36 +2790,25 @@ fn hydrate_full_collection(
     Ok(raised)
 }
 
-/// The blob subdirectory of a pimdir store (SPEC §5), the one part of it
-/// a dry run shares with the real store rather than copying.
+/// The blob subdirectory of a pimdir store (SPEC §5), shared by a dry run.
 const BLOBS_DIR: &str = "objects";
 
-/// A throwaway replica of the pimdir store, so a dry run advances no
-/// checkpoint and writes to no server, removed however the run ends.
+/// A throwaway replica of the pimdir store, removed however the run ends.
 ///
-/// It is built **beside** the real store rather than under the temporary
-/// directory, so the two share a filesystem and the bodies can be
-/// hardlinked instead of copied. That is the difference between reading
-/// a mail account's whole blob tree and creating a few thousand
-/// directory entries, and on a machine whose `/tmp` is a tmpfs it is
-/// also the difference between spending gigabytes of memory and
-/// spending none.
-///
-/// Only the blob tree is shared. Everything else, the SQLite database
-/// above all, is copied, because a dry run writes to it and a hardlink
-/// would carry those writes into the real store. A file this misjudges
-/// is copied rather than shared, so the cost of the rule being wrong is
-/// a slower dry run and never a corrupted store.
+/// Built beside the real store, not under the temporary directory, so the two
+/// share a filesystem and the bodies are hardlinked rather than copied, which
+/// on a tmpfs also saves gigabytes. Only the blob tree is ever shared.
 struct DryRunReplica {
     /// Where the replica lives, which is the run's `work_dir`.
     dir: PathBuf,
 }
 
 impl DryRunReplica {
-    /// Clones the store at `real_dir` into a sibling directory, first
-    /// clearing whatever an earlier run left behind: a panic aborts a
-    /// release build, where no destructor runs, so a leftover is a state
-    /// this has to meet rather than one it can rule out.
+    /// Clones the store at `real_dir` into a sibling directory.
+    ///
+    /// Whatever an earlier run left behind is cleared first: a panic aborts a
+    /// release build, running no destructor, so a leftover is a state this has
+    /// to meet rather than one it can rule out.
     fn new(real_dir: &Path) -> Result<Self> {
         let parent = real_dir.parent().unwrap_or(Path::new("."));
         let name = real_dir
@@ -3039,8 +2838,8 @@ impl DryRunReplica {
                 counts.copied
             );
 
-            // A blob tree that could not be shared was read and written
-            // whole, which is the slow dry run this exists to avoid.
+            // A blob tree that could not be shared was read and written whole,
+            // the slow dry run this exists to avoid.
             if counts.linked == 0 && counts.copied > 0 {
                 info!(
                     "dry-run replica copied {} file(s), links unavailable",
@@ -3072,9 +2871,9 @@ struct CloneCounts {
 }
 
 /// Removes the replicas of earlier runs, named by `prefix` under `dir`.
-/// A directory that will not go is left with a warning: it costs disk,
-/// never correctness, the run about to start writing under a name of its
-/// own.
+///
+/// A directory that will not go is left with a warning: it costs disk, never
+/// correctness, the run about to start writing under a name of its own.
 fn clear_stale_replicas(dir: &Path, prefix: &str) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -3093,9 +2892,10 @@ fn clear_stale_replicas(dir: &Path, prefix: &str) {
     }
 }
 
-/// Clones `src`'s contents into `dst`, created on demand: a file under
-/// `blobs` is hardlinked, anything else is copied, and a link the
-/// filesystem refuses falls back to a copy.
+/// Clones `src` into `dst`, hardlinking under `blobs` and copying the rest.
+///
+/// A link the filesystem refuses falls back to a copy, so the cost of
+/// misjudging a file is a slower dry run and never a corrupted store.
 fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> Result<()> {
     fs::create_dir_all(dst)?;
 
@@ -3142,10 +2942,11 @@ mod tests {
         fs::write(dir.join("neverest.json"), b"{}").unwrap();
     }
 
-    /// The rule the replica rests on: a body is shared, so a mail
-    /// account's blob tree is not read and written whole, and everything
-    /// a dry run writes to is its own, so those writes cannot reach the
-    /// real store.
+    /// The rule the replica rests on.
+    ///
+    /// A body is shared, so a mail account's blob tree is not read and written
+    /// whole, and everything a dry run writes to is its own, so those writes
+    /// cannot reach the real store.
     #[cfg(unix)]
     #[test]
     fn a_dry_run_replica_shares_the_bodies_and_copies_the_rest() {
@@ -3172,8 +2973,9 @@ mod tests {
         );
     }
 
-    /// Writing to the replica's index leaves the real one alone, which is
-    /// what a dry run means and what a shared index would break.
+    /// Writing to the replica's index leaves the real one alone.
+    ///
+    /// That is what a dry run means, and what a shared index would break.
     #[test]
     fn writing_to_a_dry_run_replica_leaves_the_store_alone() {
         let root = tempfile::tempdir().unwrap();
@@ -3189,8 +2991,9 @@ mod tests {
         );
     }
 
-    /// The replica goes however the run ends, an early return included,
-    /// which is why it is a guard rather than a line on the way out.
+    /// The replica goes however the run ends, an early return included.
+    ///
+    /// Which is why it is a guard rather than a line on the way out.
     #[test]
     fn a_dry_run_replica_is_removed_when_the_run_ends() {
         let root = tempfile::tempdir().unwrap();
@@ -3206,8 +3009,9 @@ mod tests {
         assert!(store.join("pimdir.db").exists());
     }
 
-    /// A release build aborts on a panic, running no destructor, so the
-    /// next run is what clears what the aborted one left.
+    /// A release build aborts on a panic and runs no destructor.
+    ///
+    /// The next run is what clears what the aborted one left behind.
     #[test]
     fn a_replica_an_earlier_run_left_behind_is_cleared() {
         let root = tempfile::tempdir().unwrap();
@@ -3244,9 +3048,9 @@ mod tests {
         assert!(err.contains("left"), "{err}");
     }
 
-    /// The queue is the whole store's and records no source, so a source
-    /// that drained every collection answered for another's work: on an
-    /// account syncing mail, contacts and calendar, `caldav` sorts first
+    /// A source that drained every collection answered for another's work.
+    ///
+    /// On an account syncing mail, contacts and calendar, `caldav` sorts first
     /// and reached every mail action himalaya queued before `imap` did.
     #[test]
     fn a_source_drains_only_the_collections_of_its_own_namespace() {
@@ -3285,10 +3089,11 @@ mod tests {
         assert_eq!(report.drained[0].applied, 1);
     }
 
-    /// A parked row belongs to the store, and an account's sources each
-    /// drain it: reading the parked rows where the drain runs reported one
-    /// row once per source, so a mail account syncing contacts and calendar
-    /// beside its mail showed the same warning three times.
+    /// A parked row belongs to the store, and every source drains it.
+    ///
+    /// Reading the parked rows where the drain runs reported one row once per
+    /// source, so an account syncing three kinds showed the same warning three
+    /// times.
     #[test]
     fn a_parked_action_is_reported_once_however_many_sources_drained() {
         let dir = tempfile::tempdir().unwrap();
@@ -3381,10 +3186,9 @@ mod tests {
 
         let placements = load_side(&store, "left/INBOX").unwrap();
         assert_eq!(placements.len(), 1);
-        // NOTE: a drained `Add` is a create the next sync owes the source,
-        // and a binding carrying no base has never been reconciled with it.
-        // This read `Dirty` until io-replica's a-bound-create-is-still-a-create,
-        // which is the shape that stranded every queued create.
+        // NOTE: a drained `Add` is a create the next sync owes the source. It
+        // read `Dirty` until io-replica's a-bound-create-is-still-a-create,
+        // the shape that stranded every queued create.
         assert_eq!(placements[0].status, ReplicaStatus::Created);
         assert!(placements[0].base.is_none());
         assert_eq!(
@@ -3399,10 +3203,10 @@ mod tests {
         assert_eq!(second.parked.len(), 1);
     }
 
-    /// The stored checkpoint's UIDVALIDITY, read the way the IMAP adapter
-    /// encodes it. The rekey guard itself goes through
-    /// `Client::handle_space_epoch`, but this test has no client, so it decodes
-    /// directly, which is also why it is gated on the IMAP feature.
+    /// The stored checkpoint's UIDVALIDITY, as the IMAP adapter encodes it.
+    ///
+    /// The guard itself goes through `Client::handle_space_epoch`, but this
+    /// test has no client, which is also why it is gated on the IMAP feature.
     #[cfg(feature = "imap")]
     fn stored_checkpoint_uid_validity(store: &PimdirSourceStore, collection: &str) -> Option<u32> {
         let loaded = store
@@ -3417,8 +3221,7 @@ mod tests {
             .and_then(|checkpoint| crate::imap::backend::checkpoint_uid_validity(&checkpoint.0))
     }
 
-    /// A scripted remote for the rekey pump: a fixed new spine plus meta
-    /// answers, rejecting pushes.
+    /// A scripted remote for the rekey pump: a fixed spine, rejecting pushes.
     #[cfg(feature = "imap")]
     struct ScriptedRemote {
         /// The new handle space: `(handle, link id)` pairs.
@@ -3635,9 +3438,8 @@ mod tests {
     /// A purged item's body actually leaves the disk.
     ///
     /// A purge releases a reference, it does not reclaim bytes, and the store
-    /// collects nothing by itself (pimdir SPEC §5). Without a collector on this
-    /// path a backup store would grow without bound while reporting that it had
-    /// reclaimed things.
+    /// collects nothing by itself (pimdir SPEC §5). Without a collector here a
+    /// backup store grows without bound while reporting reclaimed bytes.
     #[test]
     fn the_sweep_collects_the_bodies_the_purge_released() {
         let dir = tempfile::tempdir().unwrap();
@@ -3686,10 +3488,9 @@ mod tests {
             .unwrap();
         assert!(body.is_file(), "retention keeps the body");
 
-        // A `0s` delay purges what was retained *strictly* before the
-        // cutoff, and the cutoff carries milliseconds, so an item dropped
-        // and swept within one of them is not old enough to go. Real
-        // delays are days; this test has to age the item itself.
+        // A `0s` delay purges what was retained strictly before a cutoff
+        // carrying milliseconds, so an item dropped and swept within one of
+        // them is not old enough to go.
         thread::sleep(std::time::Duration::from_millis(5));
 
         let mut store = PimdirStore::open(dir.path()).unwrap();
@@ -3712,12 +3513,11 @@ mod tests {
         assert!(!body.exists(), "the body is gone from the blob tree");
     }
 
-    /// A mutable-content remote: every item carries an ETag, and a write is
-    /// conditional on it.
+    /// A mutable-content remote: every item carries an ETag.
     ///
-    /// This is the path no compiled-in backend exercises yet, proven here
-    /// before any DAV code exists, so a CardDAV failure later is a protocol bug
-    /// rather than an engine one.
+    /// The path no compiled-in backend exercises yet, proven here before any
+    /// DAV code exists, so a CardDAV failure later is a protocol bug rather
+    /// than an engine one.
     struct MutableRemote {
         /// `handle -> (revision, accepted body)`.
         items: HashMap<String, (String, Option<ReplicaHash>)>,
@@ -3825,17 +3625,14 @@ mod tests {
         }
     }
 
-    /// The account a conflicted store is grouped under, which is also what
-    /// [`count_conflicts`] scopes its listing to.
+    /// The account a conflicted store is grouped, and counted, under.
     const CONFLICT_ACCOUNT: &str = "cards";
 
-    /// Seeds a store holding one card the engine marked conflicted, with all
-    /// three bodies present: the base the last sync agreed on, the local side
-    /// of the divergence, and the remote side the upgrade pass supplied.
+    /// Seeds one conflicted card with all three bodies present.
     ///
-    /// This is the state [`merge_conflicts`] starts from, so a test reaches it
-    /// without a server: what needs a connection is the fetch that lands the
-    /// remote body, and that is the other half of [`resolve_conflicts`].
+    /// The state [`merge_conflicts`] starts from, so a test reaches it without
+    /// a server: what needs a connection is the fetch that lands the remote
+    /// body, and that is the other half of [`resolve_conflicts`].
     fn store_with_conflict(
         dir: &std::path::Path,
         base: &str,
@@ -3887,19 +3684,18 @@ mod tests {
         store
     }
 
-    /// A card carrying `tel` and `note`, the two fields the merge tests move
-    /// independently of each other.
+    /// A card carrying `tel` and `note`, the fields the merge tests move.
     fn card(tel: &str, note: &str) -> String {
         format!(
             "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Jane Doe\r\nTEL:{tel}\r\nNOTE:{note}\r\nEND:VCARD\r\n"
         )
     }
 
-    /// Two sides editing different fields of one card have said nothing
-    /// contradictory: the base names which side touched which, both survive,
-    /// the conflict clears through the queue, and the run reports nothing.
-    /// Asking a person about this is a background tool asking to be switched
-    /// off.
+    /// Two sides editing different fields have said nothing contradictory.
+    ///
+    /// The base names which side touched which, both survive, the conflict
+    /// clears through the queue, and the run reports nothing. Asking a person
+    /// is a background tool asking to be switched off.
     #[cfg(feature = "dav")]
     #[test]
     fn disjoint_edits_on_both_sides_resolve_with_no_report() {
@@ -3960,13 +3756,9 @@ mod tests {
 
     /// A conflict the engine marked reaches the report the account prints.
     ///
-    /// The event is the engine's own here rather than a synthesized one, and
-    /// the fold is [`SyncReport::absorb`], which is the one a worker's
-    /// collection report travels back through. Merging only the item patch
-    /// left the account report with an empty `conflicts`, so the warning
-    /// block never named what the run had just parked and
-    /// [`warn_conflicts`], which returns early on exactly that
-    /// emptiness, could not fire the account's notification at all.
+    /// The fold is [`SyncReport::absorb`], the one a worker's collection report
+    /// travels back through. Merging only the item patch left the account
+    /// report with an empty `conflicts`, so nothing named what it had parked.
     #[test]
     fn a_conflict_the_engine_marked_survives_the_report_merge() {
         let dir = tempfile::tempdir().unwrap();
@@ -4004,8 +3796,9 @@ mod tests {
         assert!(text.contains("card1"), "{text}");
     }
 
-    /// Both sides setting the same field is the residue no merge settles. It
-    /// stays parked and is counted from the store, which is the number the
+    /// Both sides setting the same field is the residue no merge settles.
+    ///
+    /// It stays parked and is counted from the store, which is the number the
     /// run's own exit code answers with 2.
     #[cfg(feature = "dav")]
     #[test]
@@ -4048,9 +3841,8 @@ mod tests {
         .unwrap();
         assert_eq!(collection.conflicts.len(), 1);
 
-        // The collection's report is what a worker fills, and the account's
-        // is what gets printed. Asserting the first alone cannot notice the
-        // second losing it, which is how the arm went missing.
+        // A worker fills the collection's report, the account's is printed:
+        // asserting the first alone is how the arm went missing.
         let mut report = SyncReport::default();
         report.absorb(collection);
         assert_eq!(report.conflicts.len(), 1);
@@ -4065,11 +3857,9 @@ mod tests {
 
     /// A write the remote would not take is not a write the run made.
     ///
-    /// The item patch is the plan, derived from the projection before
-    /// anything is pushed, so a refused `PUT` used to be counted among the
-    /// hunks the run applied: `synchronized: 1 hunks`, exit 0, the item still
-    /// dirty and the identical phantom reported on every run after it. The
-    /// refusal takes the hunk's place and the run says it is waiting.
+    /// The item patch is the plan, derived before anything is pushed, so a
+    /// refused `PUT` used to be counted among the hunks the run applied:
+    /// `synchronized: 1 hunks`, exit 0, and the same phantom on every run.
     #[test]
     fn a_refused_write_is_reported_instead_of_counted_as_a_hunk() {
         let mut report = SyncReport::default();
@@ -4111,10 +3901,11 @@ mod tests {
         );
     }
 
-    /// A conflict an earlier run parked reaches no later run's report: the
-    /// engine returns early for a placement it already marked, so it emits no
-    /// event and there is nothing to announce. The store still holds the
-    /// decision, which is why the two numbers are read from two places.
+    /// A conflict an earlier run parked reaches no later run's report.
+    ///
+    /// The engine returns early for a placement it already marked, so there is
+    /// nothing to announce. The store still holds the decision, which is why
+    /// the two numbers are read from two places.
     #[test]
     fn a_second_run_over_an_unresolved_conflict_announces_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -4147,16 +3938,9 @@ mod tests {
 
     /// A create a frontend staged must still read back as a create.
     ///
-    /// io-replica pushes an add only for a placement whose status is
-    /// `Created` (its local-create arm reads that field and nothing else), so
-    /// a status the store cannot hold back is a create that never reaches the
-    /// server. The run keeps deriving a patch for it and keeps exiting 0,
-    /// which is the shape a two-replica account was seen looping in against
-    /// Fastmail: six staged cards, six hunks reported on every run, and an
-    /// address book that received none of them.
-    ///
-    /// The drain itself is covered above; what is asserted here is the state
-    /// it leaves, which is the only thing the sync after it can act on.
+    /// io-replica pushes an add only for a `Created` placement, so a status the
+    /// store cannot hold back never reaches the server. A two-replica account
+    /// looped against Fastmail so: six staged cards, six hunks, none received.
     #[test]
     fn a_queued_create_reads_back_as_a_create() {
         let dir = tempfile::tempdir().unwrap();
@@ -4203,9 +3987,10 @@ mod tests {
         );
     }
 
-    /// Seeds a store holding one locally edited item: its body points at
-    /// `edited`, its base at `original` and revision `base_revision`, i.e. the
-    /// state a frontend leaves behind after staging an edit offline.
+    /// Seeds a store holding one locally edited item.
+    ///
+    /// Its body points at `edited`, its base at `original` and
+    /// `base_revision`: what a frontend leaves after staging an edit offline.
     fn store_with_local_edit(dir: &std::path::Path, base_revision: &str) -> PimdirSourceStore {
         let mut store = PimdirStore::open(dir).unwrap().for_source("left");
         store.ensure_collection("contacts", "text/vcard").unwrap();
@@ -4249,9 +4034,7 @@ mod tests {
         store
     }
 
-    /// One side of a two-endpoint account: a store handle for `source` over
-    /// the shared hub, holding one locally edited card against
-    /// `base_revision`.
+    /// One side of a two-endpoint account, holding one locally edited card.
     ///
     /// Both sides hold the same item under the same link id, which is what an
     /// account mirroring two servers is: one hub item, one binding per
@@ -4303,9 +4086,10 @@ mod tests {
         store
     }
 
-    /// Puts a parked divergence back the way this run's own merge leaves one
-    /// it settled: dirty again, rebased on the revision it conflicted at, so
-    /// the next pass pushes and can meet a remote that moved once more.
+    /// Puts a parked divergence back the way this run's own merge leaves it.
+    ///
+    /// Dirty again, rebased on the revision it conflicted at, so the next pass
+    /// pushes and can meet a remote that moved once more.
     fn settle_as_the_merge_would(store: &mut PimdirSourceStore) {
         let mut placement = load_side(store, "contacts").unwrap().remove(0);
         let revision = placement.conflict_revision.take();
@@ -4323,21 +4107,11 @@ mod tests {
             .unwrap();
     }
 
-    /// A source and a target both park a divergence, and the run names each
-    /// once however many passes it takes to converge.
+    /// A source and a target both park a divergence, each named once.
     ///
-    /// The two-endpoint path never itemized at all: `reconcile_pass` asked
-    /// its two sync reports whether anything moved and threw the events away,
-    /// so an account mirroring two servers, which is the topology this shape
-    /// exists for, reported no conflict in the text report, none in `--json`,
-    /// and could not raise the notification either.
-    ///
-    /// Naive itemizing double-counts instead, which is why this drives more
-    /// than one pass: a divergence the run's own merge settles and a later
-    /// pass marks again is one divergence and one line. The passes here are
-    /// the engine's own, against the fake mutable remote, in the order
-    /// `reconcile_pass` runs them; what needs a network, and is not reached,
-    /// is only the connected context wrapping each side.
+    /// `reconcile_pass` asked whether anything moved and threw the events away,
+    /// so a two-endpoint account reported no conflict anywhere. Naive itemizing
+    /// double-counts instead, which is why this drives more than one pass.
     #[test]
     fn a_conflict_on_each_endpoint_is_named_once_across_a_convergence_loop() {
         let dir = tempfile::tempdir().unwrap();
@@ -4376,9 +4150,8 @@ mod tests {
                 "the engine parked the left side on pass {pass}",
             );
 
-            // What the run's own merge does to a divergence it settles, so
-            // the next pass genuinely marks this one again rather than
-            // meeting a placement the engine stays silent about.
+            // What the run's own merge does to a divergence it settles, so the
+            // next pass genuinely marks this one again.
             settle_as_the_merge_would(&mut left);
             left_remote
                 .items
@@ -4404,9 +4177,7 @@ mod tests {
             "and one announcement per item entering conflict",
         );
 
-        // A later run over the same store: both placements are parked
-        // already, the engine says nothing about either, and the run that
-        // finds them is quiet.
+        // A later run: both are parked already, so the engine says nothing.
         let mut later = SyncReport::default();
         for (store, remote, side) in [
             (&mut left, &mut left_remote, "left"),
@@ -4432,8 +4203,7 @@ mod tests {
         );
     }
 
-    /// A store holding one card the client has staged a delete for: the
-    /// tombstone a frontend leaves behind after removing an item offline.
+    /// A store holding the tombstone a frontend leaves after an offline delete.
     fn store_with_local_delete(dir: &std::path::Path) -> PimdirSourceStore {
         let mut store = PimdirStore::open(dir).unwrap().for_source("left");
         store.ensure_collection("contacts", "text/vcard").unwrap();
@@ -4488,13 +4258,9 @@ mod tests {
 
     /// A side that may not delete holds the tombstone instead of undoing it.
     ///
-    /// Both refusals (`push = false`, `item.delete = false`) run through one
-    /// disposition, and for a hub-backed store it has to be `Keep`. Undoing the
-    /// delete writes the placement back clean, which says the source still
-    /// holds the member; the hub takes that as the item being alive and clears
-    /// the deletion on every side, so removing an item once brings it back
-    /// everywhere. The tombstone staying is what keeps the removal a removal
-    /// until a run that may push delivers it.
+    /// Both refusals run through one disposition, and for a hub-backed store it
+    /// has to be `Keep`: undoing the delete says the source still holds the
+    /// member, so the hub clears the deletion and the item returns everywhere.
     #[test]
     fn a_side_that_may_not_delete_keeps_the_tombstone() {
         let dir = tempfile::tempdir().unwrap();
@@ -4636,8 +4402,7 @@ mod tests {
         assert!(!ctx_rights.remove);
     }
 
-    /// A `Meta`-level placement with a base, the shape a side reports once its
-    /// first reconcile has linked it.
+    /// A `Meta`-level placement with a base, as after a first reconcile.
     fn linked(handle: &str, link: &str, meta: &str) -> ReplicaPlacement {
         ReplicaPlacement {
             collection: ReplicaCollectionId("INBOX".into()),
@@ -4660,11 +4425,11 @@ mod tests {
         }
     }
 
-    /// Where the freeze this change reverses left one of two copies out of the
-    /// store and warned about it, both copies are ordinary items now: the
-    /// second carries the key the engine minted for it, projects a copy to the
-    /// other side like any other item, and the run says nothing of its own
-    /// about the pair.
+    /// Two copies of one identity are both ordinary items.
+    ///
+    /// Where the freeze this reverses left one of them out of the store and
+    /// warned, the second now carries a minted key, projects a copy like any
+    /// other item, and the run says nothing of its own about the pair.
     #[test]
     fn a_duplicated_identity_is_two_items_and_no_warning() {
         let dir = tempfile::tempdir().unwrap();
@@ -4699,9 +4464,10 @@ mod tests {
         assert!(json.get("refused").is_none(), "{json}");
     }
 
-    /// A target refusing the second copy is the one thing worth a line: the
-    /// run wrote nothing for that item, and the line carries the `UID` and the
-    /// collection the user repairs it by.
+    /// A target refusing the second copy is the one thing worth a line.
+    ///
+    /// The run wrote nothing for that item, and the line carries the `UID` and
+    /// the collection the user repairs it by.
     #[test]
     fn a_refused_duplicate_is_named_with_its_uid() {
         let refused = vec![RefusedCreate {
@@ -4730,11 +4496,11 @@ mod tests {
         assert_eq!(json["refused"][0]["uid"], "event-1@google.com");
     }
 
-    /// A collection is reconciled until quiescent, so the batch a run drains
-    /// carries the same refusal once per pass: the create is re-derived, the
-    /// other side answers the same way, and none of that is news. Two copies
-    /// of one identity are still two refusals, which is the distinction the
-    /// handle keeps.
+    /// A refusal is reported once however many passes met it.
+    ///
+    /// A collection reconciles until quiescent, so the create is re-derived and
+    /// answered the same way each pass. Two copies of one identity are still
+    /// two refusals, which is the distinction the handle keeps.
     #[test]
     fn a_refusal_re_observed_on_a_later_pass_is_still_one_refusal() {
         let refused = |handle: &str| RefusedCreate {
@@ -4761,8 +4527,7 @@ mod tests {
         );
     }
 
-    /// The same, for a write a side would not take: the passes re-derive it
-    /// and meet the same refusal, and the run says so once.
+    /// The same for a rejected write: re-derived every pass, reported once.
     #[test]
     fn a_write_refused_on_every_pass_is_still_one_line() {
         let rejected = |handle: &str| RejectedPush {
@@ -4842,6 +4607,7 @@ mod tests {
     }
 
     /// A hub collection id carries its namespace and the wire name does not.
+    ///
     /// Getting this backwards is how a mailbox and an address book both called
     /// `Default` would end up as one collection.
     #[test]
@@ -4849,14 +4615,9 @@ mod tests {
         assert_eq!(hub_id("mail", "INBOX"), "mail/INBOX");
         assert_eq!(display_name("mail", "mail/INBOX"), "INBOX");
 
-        // An IMAP hierarchy survives: only the first segment is the namespace.
         assert_eq!(hub_id("mail", "Archive/2026"), "mail/Archive/2026");
         assert_eq!(display_name("mail", "mail/Archive/2026"), "Archive/2026");
-
-        // A name that merely starts with the namespace is not stripped.
         assert_eq!(display_name("mail", "mailbox/INBOX"), "mailbox/INBOX");
-
-        // An id from another namespace is left whole rather than mangled.
         assert_eq!(display_name("cards", "mail/INBOX"), "mail/INBOX");
     }
 
@@ -4884,8 +4645,9 @@ mod tests {
         assert!(err.contains("no source named nope"), "got {err}");
     }
 
-    /// The authority is the whole of `one-way`, and it is what stops a
-    /// divergence from becoming a conflict nobody can resolve.
+    /// The authority is the whole of `one-way`.
+    ///
+    /// It is what stops a divergence becoming a conflict nobody can resolve.
     #[test]
     fn the_authority_decides_the_conflict_and_the_push() {
         assert_eq!(
@@ -4916,10 +4678,10 @@ mod tests {
         );
     }
 
-    /// A freshly probed item carries no link id, so it sits in the source's
-    /// residual and never enters the hub. The pull plan has to read the side,
-    /// not the projection, or a first sync of a kind whose identity lives in
-    /// the body reports nothing at all.
+    /// A freshly probed item carries no link id, so it never enters the hub.
+    ///
+    /// The pull plan has to read the side, not the projection, or a first sync
+    /// of a kind whose identity lives in the body reports nothing at all.
     #[test]
     fn the_pull_plan_names_an_item_that_has_no_link_id_yet() {
         let dir = tempfile::tempdir().unwrap();
@@ -4963,8 +4725,9 @@ mod tests {
         );
     }
 
-    /// A content change drops the stale object and leaves the level where it
-    /// was, so a plan keyed on the level calls an item about to be re-fetched
+    /// A content change drops the stale object and leaves the level alone.
+    ///
+    /// A plan keyed on the level therefore calls an item about to be re-fetched
     /// done.
     #[test]
     fn the_pull_plan_names_a_body_dropped_by_a_content_change() {
@@ -5002,15 +4765,15 @@ mod tests {
         );
     }
 
-    /// A calendar whose server implements no `sync-collection`: every
-    /// enumeration is the whole member set, complete, under an empty
-    /// checkpoint, and an identity is resolved only by downloading the body.
-    /// The reported Posteo shape, with one `UID` under two hrefs.
+    /// A calendar whose server implements no `sync-collection`.
+    ///
+    /// Every enumeration is the whole member set, and an identity resolves only
+    /// by downloading the body. The reported Posteo shape, one `UID` under two
+    /// hrefs.
     struct FullListingRemote {
         /// `handle -> (uid, body)`, in the order the listing returns them.
         items: Vec<(String, String, Vec<u8>)>,
-        /// Every handle a body was fetched for, in order, so a re-run that
-        /// downloads the same resource again is visible.
+        /// Every handle a body was fetched for, so a re-download is visible.
         fetched: Vec<String>,
     }
 
@@ -5079,8 +4842,9 @@ mod tests {
         }
     }
 
-    /// A content hash for a fake body, standing in for the store's own
-    /// hasher: distinct bodies must name distinct objects or a test proves
+    /// A content hash for a fake body, standing in for the store's own hasher.
+    ///
+    /// Distinct bodies must name distinct objects, or a test proves
     /// deduplication rather than storage.
     fn digest(body: &[u8]) -> u64 {
         body.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
@@ -5088,9 +4852,10 @@ mod tests {
         })
     }
 
-    /// One collection's spine as `collection_spine` runs it for a source with
-    /// no counterpart: pull, report the bodies still to fetch, then raise the
-    /// probed items to `Full`, which is where a DAV identity resolves.
+    /// One collection's spine as `collection_spine` runs it for a lone source.
+    ///
+    /// Pull, report the bodies still to fetch, then raise the probed items to
+    /// `Full`, which is where a DAV identity resolves.
     fn spine(
         store: &mut PimdirSourceStore,
         remote: &mut FullListingRemote,
@@ -5129,15 +4894,11 @@ mod tests {
         report
     }
 
-    /// The reported case, end to end: a calendar holding one `UID` under two
-    /// hrefs mirrors as two items with two bodies, and the run after it says
-    /// nothing at all.
+    /// One `UID` under two hrefs mirrors as two items; the next run is silent.
     ///
-    /// The second run is the bug the user saw. The frozen twin never got a
-    /// row, so the pull plan read it as an unfetched body and named it on
-    /// every run; the collection is listed in full every run here, exactly as
-    /// that server lists it, so nothing but a row of its own could ever stop
-    /// the line coming back.
+    /// That second run is the bug the user saw: the frozen twin never got a
+    /// row, so the pull plan read it as an unfetched body and named it every
+    /// run. The collection is listed in full here, as that server lists it.
     #[test]
     fn one_identity_under_two_hrefs_mirrors_as_two_items_and_settles() {
         let dir = tempfile::tempdir().unwrap();
@@ -5198,8 +4959,8 @@ mod tests {
             "the other is minted on the href it came from",
         );
 
-        // The run the user actually complained about: the same full listing,
-        // and nothing left to say about it.
+        // The run the user complained about: the same full listing, nothing
+        // left to say.
         let second = spine(&mut store, &mut remote, "caldav/agenda");
         assert!(
             second.item.patch.is_empty(),

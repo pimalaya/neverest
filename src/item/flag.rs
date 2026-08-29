@@ -1,40 +1,30 @@
-//! Email flag (a.k.a. keyword) shared across all protocols.
+//! # Flag
 //!
-//! A [`Flag`] carries two views of the same value: the original wire
-//! spelling as observed on the backend, and an optional [`IanaFlag`]
-//! classification when the wire string matches an IANA-registered
-//! keyword (case-insensitive, leading `\` or `$` stripped). Custom
-//! user-defined keywords flow through unchanged with `iana = None`.
+//! An email flag (keyword) shared across all protocols: its wire spelling
+//! as observed on the backend, plus an [`IanaFlag`] classification when
+//! that spelling matches a registered keyword.
 //!
-//! Equality and ordering are IANA-first so that wire spellings like
-//! `\Seen`, `$seen` and `seen` collapse to the same logical flag while
-//! custom keywords compare case-insensitively. This lets a
-//! `BTreeSet<Flag>` (the storage shape used by [`ItemSummary::flags`]) act
-//! as a normalised set across backends.
-//!
-//! [`ItemSummary::flags`]: crate::item::summary::ItemSummary::flags
+//! Equality, ordering and hashing are IANA-first, so `\Seen`, `$seen` and
+//! `seen` collapse to one logical flag while custom keywords compare
+//! case-insensitively. That is what makes a `BTreeSet<Flag>` a normalised
+//! set across backends.
 
 use std::{cmp::Ordering, hash::Hash};
 
 use serde::{Deserialize, Serialize};
 
-/// A flag attached to an envelope or message.
-///
-/// Constructed via [`Flag::from_raw`] (wire spelling in, IANA lookup
-/// derived) or [`Flag::from_iana`] (IANA tag in, canonical wire
-/// spelling synthesised).
+/// A flag attached to an item, keeping its wire spelling and IANA tag.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Flag {
     raw: String,
     iana: Option<IanaFlag>,
 }
 
-/// IANA-registered email keywords supported by the shared API.
+/// IANA-registered email keywords, per the canonical table at
+/// <https://www.iana.org/assignments/imap-jmap-keywords/>.
 ///
-/// Listed in the canonical wire-spelling table at
-/// <https://www.iana.org/assignments/imap-jmap-keywords/>. Variant
-/// order is the lookup order; [`Ord`] is derived from declaration
-/// order to give stable per-IANA-key sorting.
+/// Declaration order is the derived [`Ord`], which is what gives stable
+/// per-keyword sorting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum IanaFlag {
@@ -42,10 +32,10 @@ pub enum IanaFlag {
     Answered,
     Flagged,
     Draft,
-    /// Sync verb. Adapters round-trip `\Deleted` so single-side
-    /// workflows behave, but a sync engine should translate
-    /// "one side has Deleted" into `delete_message` on the other
-    /// side rather than propagating the flag.
+    /// A sync verb rather than a flag to propagate.
+    ///
+    /// Adapters round-trip `\Deleted` so single-side workflows behave,
+    /// but a sync translates it into a delete on the other side.
     Deleted,
     Forwarded,
     Junk,
@@ -56,21 +46,16 @@ pub enum IanaFlag {
 }
 
 impl Flag {
-    /// Builds a [`Flag`] from a wire spelling. The raw string is kept
-    /// verbatim; the IANA classification is derived by
-    /// [`classify_iana`]. Only the backends that report flags as wire
-    /// strings (IMAP, JMAP) parse them this way; the Graph adapter uses
-    /// it to fold stored flag sets back to wire spellings.
+    /// Builds a [`Flag`] from a wire spelling kept verbatim, deriving its
+    /// IANA classification with [`classify_iana`].
     pub fn from_raw(raw: impl Into<String>) -> Self {
         let raw = raw.into();
         let iana = classify_iana(&raw);
         Self { raw, iana }
     }
 
-    /// Builds a [`Flag`] tagged with an [`IanaFlag`] and the matching
-    /// canonical wire spelling (`\Seen`, `$Forwarded`, …). Part of the
-    /// shared flag API; no active backend synthesises flags client-side
-    /// yet, so it is exercised only by the tests.
+    /// Builds a [`Flag`] from an [`IanaFlag`] and its canonical wire
+    /// spelling (`\Seen`, `$Forwarded`, …).
     #[allow(dead_code)]
     pub fn from_iana(iana: IanaFlag) -> Self {
         Self {
@@ -79,15 +64,12 @@ impl Flag {
         }
     }
 
-    /// Original wire spelling as observed on the backend (or the
-    /// canonical spelling when built from an [`IanaFlag`]).
+    /// The wire spelling as observed on the backend.
     pub fn raw(&self) -> &str {
         &self.raw
     }
 
-    /// IANA classification when the raw spelling matched a registered
-    /// keyword; `None` for user-defined custom keywords. Read by the
-    /// backends that map flags back to a wire format (IMAP, JMAP).
+    /// The IANA classification, `None` for a custom keyword.
     #[cfg_attr(not(any(feature = "imap", feature = "msgraph")), allow(dead_code))]
     pub fn iana(&self) -> Option<IanaFlag> {
         self.iana
@@ -107,11 +89,10 @@ impl PartialEq for Flag {
 impl Eq for Flag {}
 
 impl Ord for Flag {
-    /// IANA-tagged flags sort before custom keywords (IANA-first
-    /// canonical ordering). Within each group, IANA flags use the
-    /// derived enum order and custom keywords compare on their
-    /// lowercase raw text so that `"Foo"` and `"foo"` order
-    /// consistently with equality.
+    /// IANA-tagged flags sort before custom keywords.
+    ///
+    /// Custom keywords compare on their lowercase raw text, so ordering
+    /// agrees with equality.
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.iana, other.iana) {
             (Some(a), Some(b)) => a.cmp(&b),
@@ -132,8 +113,8 @@ impl PartialOrd for Flag {
 }
 
 impl Hash for Flag {
-    /// Hashes the IANA tag first; falls back to the lowercase raw
-    /// bytes when none, so that values comparing equal hash equal.
+    /// Hashes the IANA tag, or the lowercase raw bytes when there is
+    /// none, so that values comparing equal hash equal.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         match self.iana {
             Some(iana) => {
@@ -150,11 +131,8 @@ impl Hash for Flag {
     }
 }
 
-/// Classifies a wire flag spelling against the IANA keyword table.
-///
-/// Strips a single leading `\` or `$` prefix, lowercases the rest, and
-/// matches against the canonical name list. Returns `None` for custom
-/// user-defined keywords.
+/// Classifies a wire spelling (one leading `\` or `$` stripped, case
+/// insensitive) against the IANA table; `None` for a custom keyword.
 pub fn classify_iana(raw: &str) -> Option<IanaFlag> {
     let stripped = raw
         .strip_prefix('\\')
@@ -177,9 +155,10 @@ pub fn classify_iana(raw: &str) -> Option<IanaFlag> {
     }
 }
 
-/// Canonical wire spelling for each IANA keyword. The four RFC 3501
-/// system flags use the `\Capital` form; the rest use the `$Capital`
-/// form per the IANA mail keywords registry.
+/// Canonical wire spelling of an IANA keyword.
+///
+/// The four RFC 3501 system flags take the `\Capital` form, the rest the
+/// `$Capital` form of the IANA mail keywords registry.
 fn canonical_raw(iana: IanaFlag) -> &'static str {
     match iana {
         IanaFlag::Seen => "\\Seen",
@@ -196,13 +175,11 @@ fn canonical_raw(iana: IanaFlag) -> &'static str {
     }
 }
 
-/// Direction of a flag store operation. `Add` and `Remove` patch the
-/// message's existing flag set; `Set` replaces it wholesale (the sync
-/// engine pushes a whole reconciled flag set at once).
+/// Direction of a flag store operation.
 ///
-/// The backends implement all three, but the sync engine only ever emits
-/// `Set`, so `Add`/`Remove` are part of the shared surface rather than
-/// live code paths.
+/// `Add` and `Remove` patch the existing set, `Set` replaces it. Every
+/// backend implements all three, but the sync engine emits only `Set`,
+/// pushing a whole reconciled set at once.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum FlagOp {

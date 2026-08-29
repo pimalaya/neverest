@@ -1,16 +1,14 @@
-//! Neverest's own state beside the pimdir store.
+//! # Store sidecar state
 //!
-//! Two things the store cannot answer, both about the *previous* run:
+//! The two things the store cannot answer about the previous run: which
+//! collection-id layout it was written with, and what mode it ran under.
 //!
-//! - which collection-id layout the store was written with, so a store keyed on
-//!   bare collection names is refused loudly instead of reading back as a set of
-//!   empty collections;
-//! - what mode the account ran under, so a run that would discard what the
-//!   previous mode kept is refused before it opens anything.
+//! A store keyed on bare collection names would read back as a set of empty
+//! collections instead of being refused, and a run that would discard what the
+//! previous mode kept is refused before it opens anything.
 //!
-//! It lives in `neverest.json` beside `pimdir.db`, deliberately outside the
-//! store: it is this crate's bookkeeping, not part of the pimdir format, and a
-//! store shared with another reader owes it nothing.
+//! It lives in neverest.json beside pimdir.db, deliberately outside the store:
+//! it is this crate's bookkeeping, not part of the pimdir format.
 
 use std::{
     fs,
@@ -23,8 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::AccountMode;
 
-/// The current collection-id layout: `<namespace>/<name>`, with the kind on the
-/// collection row. Layout 0 is the unnamespaced ancestor, which is not read.
+/// The current collection-id layout: `<namespace>/<name>`, kind on the row.
+///
+/// Layout 0 is the unnamespaced ancestor, which is not read.
 const LAYOUT: u32 = 1;
 
 /// The sidecar file name, beside `pimdir.db` in the store directory.
@@ -33,8 +32,8 @@ const FILE: &str = "neverest.json";
 /// The account mode a store was last synced under.
 ///
 /// Only what a comparison needs: the endpoint counts rather than their names,
-/// since renaming an endpoint already orphans its bindings and is not what this
-/// guards, plus the two flags that decide whether a run discards anything.
+/// renaming already orphaning the bindings, plus the two flags that decide
+/// whether a run discards anything.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModeStamp {
     #[serde(default)]
@@ -62,12 +61,10 @@ impl From<&AccountMode> for ModeStamp {
 pub struct StoreState {
     /// The collection-id layout the store was written with.
     pub layout: u32,
-    /// The mode the last run synced under, absent on a store created before
-    /// modes were stamped or by a `stamp` that had no account to describe.
+    /// The mode the last run synced under, absent before modes were stamped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<ModeStamp>,
-    /// Set once the user has accepted the current mode, so a refusal that has
-    /// been answered does not come back on every run.
+    /// Set once the user accepted the mode, so the refusal stops coming back.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mode_accepted: bool,
 }
@@ -79,11 +76,9 @@ fn is_false(value: &bool) -> bool {
 impl StoreState {
     /// Reads the sidecar, refusing a store this version cannot read.
     ///
-    /// A store directory holding a `pimdir.db` but no sidecar predates
-    /// namespaced collection ids. Every collection would be looked up under a
-    /// key nothing was ever written to, so the sync would report a healthy run
-    /// over an empty replica. That silence is the whole reason this file
-    /// exists.
+    /// A store directory holding a pimdir.db but no sidecar predates namespaced
+    /// collection ids: every collection would be looked up under a key nothing
+    /// wrote to, and the sync would report a healthy run over an empty replica.
     pub fn load(dir: &Path) -> Result<Self> {
         let path = Self::path(dir);
 
@@ -120,17 +115,11 @@ impl StoreState {
         Ok(state)
     }
 
-    /// Stamps a store this version has just created, and clears whatever a
-    /// previous store in the same directory recorded.
+    /// Stamps a store this version just created, clearing any previous record.
     ///
-    /// Whoever materializes `pimdir.db` owes the sidecar: [`StoreState::load`]
-    /// reads a store directory holding one without the other as the
-    /// unnamespaced ancestor, so a store created without this stamp is refused
-    /// on the next run, and refused again after the `--reset` the refusal asks
-    /// for, since resetting recreates the store the same way.
-    ///
-    /// `mode` is stamped where the caller knows it, so the first sync after an
-    /// `init` compares against what `init` opened rather than against nothing.
+    /// Whoever materializes pimdir.db owes the sidecar: a store created without
+    /// this stamp reads as the unnamespaced ancestor, so it is refused on the
+    /// next run and again after the `--reset` the refusal asks for.
     pub fn stamp(dir: &Path, mode: Option<&AccountMode>) -> Result<()> {
         Self {
             layout: LAYOUT,
@@ -150,19 +139,11 @@ impl StoreState {
         fs::write(&path, raw).with_context(|| format!("Write {} error", path.display()))
     }
 
-    /// Refuses a run whose mode would discard what the previous one kept, and
-    /// reports the changes that would not.
+    /// Refuses a run whose mode would discard what the previous one kept.
     ///
-    /// Only turning `one-way` on destroys anything: the run that follows
-    /// discards changes on the side the previous mode was merging, and it is
-    /// the first run that does it, so there is no second chance to ask. A
-    /// `retain` that dropped leaves every stored body in place, unreferenced,
-    /// and a bare arity change writes to an endpoint that was already being
-    /// written to, so both are said out loud and neither blocks.
-    ///
-    /// The comparison is on those transitions and not on configuration change
-    /// in general: a rotated credential or a new filter threatens nothing, and
-    /// forcing a resync for one would cost a mailbox.
+    /// Only turning `one-way` on destroys anything, and the first run does it,
+    /// so there is no second chance to ask; softer changes only warn. Other
+    /// configuration is not compared: forcing a resync would cost a mailbox.
     pub fn check_mode(&self, mode: &AccountMode) -> Result<()> {
         let Some(previous) = self.mode else {
             return Ok(());
@@ -199,8 +180,10 @@ impl StoreState {
         Ok(())
     }
 
-    /// Remembers the mode this run synced under. `accepted` records that the
-    /// user answered a refusal, so it does not come back next run.
+    /// Remembers the mode this run synced under.
+    ///
+    /// `accepted` records that the user answered a refusal, so it stops coming
+    /// back.
     pub fn record_mode(&mut self, mode: &AccountMode, accepted: bool) {
         self.mode = Some(ModeStamp::from(mode));
         self.mode_accepted = accepted;
@@ -267,8 +250,7 @@ mod tests {
         assert!(err.contains("--accept-mode"), "got {err}");
     }
 
-    /// Accepting is remembered, so a refusal that has been answered does not
-    /// come back on the next run.
+    /// Accepting is remembered, so an answered refusal does not come back.
     #[test]
     fn an_accepted_mode_stops_refusing() {
         let dir = tempfile::tempdir().unwrap();
@@ -281,8 +263,7 @@ mod tests {
         state.check_mode(&mode(1, 1, true, false)).unwrap();
     }
 
-    /// Turning one-way *off* merges where it used to overwrite, which loses
-    /// nothing, so it is not gated.
+    /// Turning one-way off merges where it overwrote: nothing lost, no gate.
     #[test]
     fn turning_one_way_off_is_not_gated() {
         let dir = tempfile::tempdir().unwrap();
@@ -294,8 +275,9 @@ mod tests {
         state.check_mode(&mode(1, 1, false, false)).unwrap();
     }
 
-    /// A store with no recorded mode has nothing to compare against, which is
-    /// the first run after an upgrade as well as the first run ever.
+    /// A store with no recorded mode has nothing to compare against.
+    ///
+    /// That is the first run after an upgrade as well as the first run ever.
     #[test]
     fn an_unstamped_store_is_not_gated() {
         let dir = tempfile::tempdir().unwrap();
@@ -303,9 +285,10 @@ mod tests {
         state.check_mode(&mode(1, 1, true, false)).unwrap();
     }
 
-    /// Dropping `retain` and adding an endpoint both report and neither
-    /// blocks: the first leaves every stored body in place, the second writes
-    /// where the account was already writing.
+    /// Dropping `retain` and adding an endpoint report without blocking.
+    ///
+    /// The first leaves every stored body in place, the second writes where the
+    /// account was already writing.
     #[test]
     fn a_softer_change_reports_without_blocking() {
         let dir = tempfile::tempdir().unwrap();

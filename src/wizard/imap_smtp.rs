@@ -1,24 +1,17 @@
-//! IMAP + SMTP wizard.
+//! # IMAP and SMTP wizard
 //!
-//! A discovery entry pins the endpoints, so [`configure_discovered`]
-//! picks the SASL mechanism, prompts its credentials and tests the IMAP
-//! connection, then, when discovery also found a submission endpoint,
-//! asks whether the account's send channel shares them: if so the same
-//! `sasl` table backs both, otherwise a mechanism is picked again (IMAP
-//! and SMTP may advertise different auth), and the SMTP connection is
-//! tested last. The wizard never invents an SMTP host: with no discovered
-//! submission endpoint the account has no send channel, and the user adds
-//! one by hand.
+//! A discovery entry pins the endpoints, so [`configure_discovered`] picks
+//! the SASL mechanism, prompts its credentials and tests IMAP, then asks
+//! whether the send channel shares them and tests SMTP last. The wizard never
+//! invents an SMTP host: with no submission endpoint there is no channel.
 //!
-//! IMAP is the sync side; SMTP is only the channel the queued submit
-//! intents are performed through. Both configure one `sasl` table of the
-//! same six mechanisms, so reuse is a copy of the IMAP one whatever it
-//! names, an OAuth token included.
+//! IMAP is the sync side; SMTP is only the channel the queued submit intents
+//! are performed through. Both configure one `sasl` table of the same six
+//! mechanisms, so reuse is a copy of the IMAP one, an OAuth token included.
 //!
-//! Only IMAP is probed for its advertised mechanisms. io-imap reads them
-//! off `CAPABILITY` as [`SaslMechanism`] values; io-smtp exposes the
-//! `AUTH` line as strings and no such reader, so the SMTP prompt offers
-//! the list discovery advertised rather than one the server confirmed.
+//! Only IMAP is probed for its advertised mechanisms: io-imap reads them off
+//! `CAPABILITY`, while io-smtp exposes the `AUTH` line as strings and no such
+//! reader, so the SMTP prompt offers what discovery advertised instead.
 
 use anyhow::{Result, bail};
 use io_pim_discovery::compose::config::DiscoverySecurity;
@@ -49,11 +42,10 @@ const OAUTHBEARER: &str = "OAUTHBEARER (username + API token)";
 const XOAUTH2: &str = "XOAUTH2 (username + API token)";
 
 /// Configures the IMAP side and the SMTP send channel from a discovered
-/// entry: pick the SASL mechanism and credentials for IMAP, test the
-/// connection, then ask whether SMTP reuses them (prompting a mechanism
-/// of its own when it does not) and test SMTP last. Both connections are
-/// validated here, so the caller writes a configuration that is known to
-/// connect.
+/// entry.
+///
+/// Both connections are validated here, so the caller writes a configuration
+/// that is known to connect.
 pub fn configure_discovered(
     account_name: &str,
     email: &str,
@@ -92,12 +84,11 @@ pub fn configure_discovered(
 }
 
 /// Configures and tests the send channel from the discovered submission
-/// endpoint, reusing the IMAP `sasl` table on confirmation. `None` when
-/// discovery found no endpoint: neverest never invents a submission host.
+/// endpoint, reusing the IMAP `sasl` table on confirmation.
 ///
-/// Declining reuse asks whether the server authenticates at all before
-/// offering a mechanism, since a submission relay on a trusted network
-/// takes no `AUTH`, which the config spells by omitting `sasl`.
+/// `None` when discovery found no endpoint. Declining reuse asks whether the
+/// server authenticates at all, since a relay on a trusted network takes no
+/// `AUTH`, which the config spells by omitting `sasl`.
 #[cfg(feature = "smtp")]
 fn configure_smtp(
     account_name: &str,
@@ -144,9 +135,8 @@ fn configure_smtp(
     Ok(None)
 }
 
-/// Runs a connection `test` behind a labelled spinner, surfacing a
-/// failure as the wizard's error so a bad credential stops here instead
-/// of yielding a config that cannot connect.
+/// Runs a connection `test` behind a labelled spinner, so a bad credential
+/// stops the wizard instead of yielding a config that cannot connect.
 fn test_connection(label: &str, test: impl FnOnce() -> Result<()>) -> Result<()> {
     let spinner = Spinner::start(format!("Testing {label} connection"));
 
@@ -159,15 +149,11 @@ fn test_connection(label: &str, test: impl FnOnce() -> Result<()>) -> Result<()>
     Ok(())
 }
 
-/// Prompts the SASL mechanism then its credentials. When `probed` is
-/// `Some` (a live IMAP CAPABILITY probe) only those mechanisms are
-/// offered, most preferred first and LOGIN last; otherwise the full list
-/// keyed on `caps` is offered, so a failed probe never leaves the user
-/// stuck. The token mechanisms' OAuth brokers appear only when a token
-/// or OAuth grant was advertised.
+/// Prompts the SASL mechanism then its credentials.
 ///
-/// `service` names the protocol the credentials are for, so a keyring
-/// entry says which of an account's two it holds.
+/// A live `CAPABILITY` probe narrows the menu; otherwise the full list keyed
+/// on `caps` is offered, so a failed probe never leaves the user stuck.
+/// `service` names the protocol, so a keyring entry says which one it holds.
 fn prompt_sasl(
     account_name: &str,
     service: &str,
@@ -209,8 +195,8 @@ fn prompt_mechanism(caps: AuthCaps, probed: Option<&[SaslMechanism]>) -> Result<
 }
 
 /// Prompts the credentials for `mechanism` and builds its SASL config.
-/// ANONYMOUS carries no login; every other mechanism needs one, plus a
-/// password (basic family) or an API token (OAuth family).
+/// ANONYMOUS carries no login; every other needs one, plus a password or an
+/// API token.
 fn build_sasl(
     mechanism: SaslMechanism,
     account_name: &str,
@@ -270,8 +256,8 @@ fn build_sasl(
 }
 
 /// The menu label for a mechanism, split by the credential it needs, or
-/// `None` for one [`SaslConfig`] cannot spell (io-sasl names every
-/// registered mechanism, neverest configures six of them).
+/// `None` for one [`SaslConfig`] cannot spell: io-sasl names every registered
+/// mechanism, neverest configures six.
 fn mechanism_label(mechanism: &SaslMechanism) -> Option<&'static str> {
     match mechanism {
         SaslMechanism::ScramSha256 => Some(SCRAM_SHA_256),
@@ -286,8 +272,7 @@ fn mechanism_label(mechanism: &SaslMechanism) -> Option<&'static str> {
 
 /// The mechanisms offered when no live probe is available, keyed on what
 /// discovery advertised (every family when nothing was): most preferred
-/// first, LOGIN last, token mechanisms only when a token or OAuth grant
-/// was advertised.
+/// first, LOGIN last, token mechanisms only when a token was advertised.
 fn fallback_mechanisms(caps: AuthCaps) -> Vec<SaslMechanism> {
     let mut mechanisms = Vec::new();
 
@@ -304,12 +289,11 @@ fn fallback_mechanisms(caps: AuthCaps) -> Vec<SaslMechanism> {
     mechanisms
 }
 
-/// Opens an unauthenticated IMAP connection to the discovered endpoint
-/// purely to read the server's CAPABILITY, and returns the mechanisms it
-/// advertises (most preferred first, LOGIN last), so only what the server
-/// supports is offered. `None` (offer the full list) when the probe fails
-/// or advertises nothing usable: the error is logged, never surfaced, so
-/// the wizard falls back rather than stopping.
+/// Opens an unauthenticated IMAP connection purely to read `CAPABILITY`, so
+/// only mechanisms the server supports are offered.
+///
+/// `None` when the probe fails or advertises nothing usable: the error is
+/// logged, never surfaced, so the wizard falls back rather than stopping.
 fn probe_mechanisms(endpoint: &TcpEndpoint) -> Option<Vec<SaslMechanism>> {
     use io_imap::{
         client::{ImapClientStd, default_alpn},
@@ -415,8 +399,8 @@ mod tests {
         assert!(starttls.starttls);
     }
 
-    /// The offered menu, as the labels the user actually sees, since
-    /// `SaslMechanism` implements no `PartialEq`.
+    /// The offered menu as labels, `SaslMechanism` implementing no
+    /// `PartialEq`.
     fn labels(caps: AuthCaps) -> Vec<&'static str> {
         fallback_mechanisms(caps)
             .iter()
@@ -446,9 +430,9 @@ mod tests {
         assert_eq!(unknown.last(), Some(&LOGIN));
     }
 
-    /// Reuse is a copy of the IMAP table, so a token mechanism backs the
-    /// send channel as readily as a password one: the case the old
-    /// LOGIN-only channel had to refuse.
+    /// Reuse is a copy of the IMAP table, so a token mechanism backs the send
+    /// channel as readily as a password one: what the old LOGIN-only channel
+    /// had to refuse.
     #[cfg(feature = "smtp")]
     #[test]
     fn any_mechanism_backs_the_send_channel() {

@@ -15,12 +15,9 @@
 //! body is the left side, so the store's own bytes survive byte for byte.
 
 #[cfg(feature = "dav")]
-use ical::tree::{
-    cst::IcalCst,
-    merge::{IcalMerge, IcalMergeSide},
-};
+use ical::tree::{cst::IcalCst, merge::IcalMerge};
 #[cfg(feature = "dav")]
-use vcard::tree::{cst::VcardCst, merge::merge};
+use vcard::tree::{cst::VcardCst, merge::VcardMerge};
 
 use crate::kind::Kind;
 
@@ -68,7 +65,12 @@ impl Kind {
                     }
                 };
 
-                let report = merge(&base, &local, &remote);
+                let report = VcardMerge {
+                    base: &base,
+                    left: &local,
+                    right: &remote,
+                }
+                .merge();
 
                 match report.conflicts.len() {
                     0 => Merged::Body(report.merged.to_string().into_bytes()),
@@ -92,8 +94,6 @@ impl Kind {
                     base: &base,
                     left: &local,
                     right: &remote,
-                    right_speaks_for: None,
-                    prefer: IcalMergeSide::Left,
                 }
                 .merge();
 

@@ -302,6 +302,10 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   A relayed body never reaches the projection the report is built from, so every relayed append was invisible and a run that appended messages could print `already in sync`. Each relay is itemized where it happens.
 
+- A relay now crosses, and crosses once.
+
+  The relay addressed both servers by the collection's store key rather than by the name they answer to, so every fetch and every append was issued against `mail/INBOX` and refused: nothing ever crossed, and a two-endpoint account with `retain = false` reported the error per collection per pass. It also dropped the handle the target assigned to the copy it had just appended, and a copy nothing records stays on one side as far as the store knows, so the next pass relayed it again. The relay now strips the namespace before it reaches a wire, as every other remote call does, and records the copy against the side that now holds it: its handle, under the item's own link id, at the body-less level a relay can claim and based on the append the server accepted, which is what an accepted push writes back through the engine. Fixing only the addressing would have turned a loud failure into a duplicate per pass on a live server.
+
 - A handle-space rebuild no longer freezes the collection.
 
   A `UIDVALIDITY` bump renumbers every message, and the store read the rebuild as one server reporting each identity under a second handle: it kept the voided handles, marked every item ambiguous and stopped syncing in both directions. Fixed in io-pimdir.

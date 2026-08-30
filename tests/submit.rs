@@ -171,6 +171,9 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
 /// in the server's own domain, and Stalwart's filter reads that as spoofing
 /// and files it under `Junk Mail`. The sync collects every mailbox, so the
 /// verdict changes where the message is, never whether it arrives.
+///
+/// The name it answers with is the one the store keys the collection under,
+/// which pimdir groups by the id of the source that synced it.
 fn wait_for_delivery(marker: &str) -> Option<String> {
     for _ in 0..30 {
         for (mailbox, path) in [("INBOX", "INBOX"), ("Junk Mail", "Junk%20Mail")] {
@@ -183,7 +186,7 @@ fn wait_for_delivery(marker: &str) -> Option<String> {
 
             let hits = String::from_utf8_lossy(&search.stdout);
             if hits.split_whitespace().any(|t| t.parse::<u32>().is_ok()) {
-                return Some(mailbox.to_owned());
+                return Some(format!("imap/{mailbox}"));
             }
         }
 

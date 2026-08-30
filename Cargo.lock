@@ -967,7 +967,7 @@ dependencies = [
 [[package]]
 name = "ical-rs"
 version = "0.2.0"
-source = "git+https://github.com/pimalaya/ical#bfa12a27d46166fc6a4c0332e34a69c8d72f73b4"
+source = "git+https://github.com/pimalaya/ical#7d8482ae09bc5451513b3d0e0ab61bcfa2b76e87"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",
@@ -2801,7 +2801,7 @@ dependencies = [
 [[package]]
 name = "vcard-rs"
 version = "0.2.1"
-source = "git+https://github.com/pimalaya/vcard#1ec26c995b727eb8bb8c28c2b45a2bf76da8d3a9"
+source = "git+https://github.com/pimalaya/vcard#92cef44148014ebfd060d882e0776e028d7f65f4"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",

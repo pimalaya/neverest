@@ -7,7 +7,10 @@
 # own calendars and addressbooks.
 #
 # Steps:
-#   1. Write a plaintext htpasswd file with one user (`test` / `test`).
+#   1. Write a plaintext htpasswd file with two users (`test` and `test2`,
+#      each its own password). Two principals means two home sets, which is
+#      what a two-endpoint account needs: one address book name, two servers
+#      as far as the sync is concerned.
 #   2. Write a minimal config enabling htpasswd auth and granting any
 #      authenticated user full access to their collections.
 #   3. Start the container, binding Radicale to host port 5232.
@@ -28,7 +31,7 @@ trap 'rm -rf "$CONFDIR"' EXIT
 
 # Plaintext htpasswd entry (`user:password`); fine for a throwaway test
 # container and avoids depending on a bcrypt tool to mint the hash.
-printf 'test:test\n' > "$CONFDIR/users"
+printf 'test:test\ntest2:test2\n' > "$CONFDIR/users"
 chmod 644 "$CONFDIR/users"
 
 cat > "$CONFDIR/config" <<'EOF'

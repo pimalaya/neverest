@@ -39,12 +39,14 @@ use io_pimdir::{
     PimdirBlobs, PimdirError, PimdirProducer, PimdirSourceStore, PimdirStore, codec::PimdirAction,
 };
 use io_replica::{
+    change::ReplicaWriteOp,
     client::{ReplicaRemote, ReplicaStorage},
     collection::ReplicaCollectionId,
     coroutine::{ReplicaArg, ReplicaCoroutine, ReplicaCoroutineState, ReplicaYield},
     object::ReplicaHash,
     placement::{
-        ReplicaFlags, ReplicaHandle, ReplicaLevel, ReplicaMeta, ReplicaPlacement, ReplicaStatus,
+        ReplicaBase, ReplicaFlags, ReplicaHandle, ReplicaLevel, ReplicaLinkId, ReplicaMeta,
+        ReplicaPlacement, ReplicaSortKey, ReplicaStatus,
     },
     rekey::{ReplicaRekey, ReplicaRekeyReport},
     remote::{ReplicaFetchedItem, ReplicaTier},
@@ -62,7 +64,7 @@ use pimalaya_cli::spinner::Spinner;
 use crate::sync::report::SubmitEntry;
 use crate::{
     account::{Account, SourceAccount},
-    client::{Client, Pool},
+    client::{Client, Pool, WrittenItem},
     config::{AccountConfig, AccountMode, CollectionFilter, SourceConfig, SourcePermissions},
     item::flag::Flag,
     kind::{Kind, LinkId, merge::Merged},
@@ -1438,7 +1440,15 @@ fn propagate(
     report: &mut SyncOutput,
 ) -> Result<usize> {
     if relay {
-        relay_copies(collection, left, right, left_store, progress, report)
+        relay_copies(
+            collection,
+            left,
+            right,
+            left_store,
+            right_store,
+            progress,
+            report,
+        )
     } else {
         hydrate_copies(
             collection,
@@ -1469,7 +1479,15 @@ struct RelayTarget {
     /// The minted part of the key, naming a copy apart from its twin.
     mint: Option<String>,
     size: usize,
+    /// The markers to append the copy with, as its backend spells them.
     flags: Vec<Flag>,
+    /// The same markers as the hub holds them, for the placement the
+    /// relay records: [`Flag`] equality collapses two wire spellings into
+    /// one, so a round trip through it can drop a marker the hub kept.
+    marks: ReplicaFlags,
+    /// The item's cached summary, which the copy shares: the same message
+    /// on the other side, so the same summary.
+    meta: Option<ReplicaMeta>,
 }
 
 /// The relay targets: a one-sided, never-hydrated item its far side may create.
@@ -1505,6 +1523,8 @@ fn relay_targets(
             mint: split.mint.map(str::to_string),
             size,
             flags: to_email_flag_set(&item.flags).into_iter().collect(),
+            marks: item.flags.clone(),
+            meta: item.meta.clone(),
         });
     }
     Ok(out)
@@ -1522,22 +1542,29 @@ fn meta_size(meta: &Option<ReplicaMeta>) -> Option<usize> {
 /// A relay never reaches the projection the hydrating path is reported from, so
 /// each write to the target is itemized here instead. Without that, a run that
 /// relayed would report having written nothing.
+///
+/// The target alternates per item, so both sides' store handles are here: a
+/// copy is recorded against the side that now holds it and no other.
 fn relay_copies(
     collection: &str,
     left: &mut SourceCtx,
     right: &mut SourceCtx,
-    store: &mut PimdirSourceStore,
+    left_store: &mut PimdirSourceStore,
+    right_store: &mut PimdirSourceStore,
     progress: &CollectionProgress,
     report: &mut SyncOutput,
 ) -> Result<usize> {
     let targets = relay_targets(
-        store,
+        left_store,
         resolve_kind(&mut left.pool),
         collection,
         (&left.name, left.perms.item.create),
         (&right.name, right.perms.item.create),
     )?;
-    let display = display_name(&left.namespace, collection).to_string();
+    // NOTE: the hub id keys the store and the wire name is what a server
+    // answers to, and both sides sync one namespace, so the single
+    // stripped name serves the fetch, the append and the report alike.
+    let wire = wire_name(&left.namespace, collection).to_string();
     let total = targets.len();
     let mut count = 0;
 
@@ -1548,20 +1575,23 @@ fn relay_copies(
         } else {
             (&mut right.pool, &mut left.pool)
         };
-        let target_name = if holds_left {
-            right.name.clone()
+        let (target_name, target_store) = if holds_left {
+            (right.name.clone(), &mut *right_store)
         } else {
-            left.name.clone()
+            (left.name.clone(), &mut *left_store)
         };
 
-        relay_one(holding_pool, target_pool, collection, &target)
-            .with_context(|| format!("Relay {} in {display}", target.handle.0))?;
+        let written = relay_one(holding_pool, target_pool, &wire, &target)
+            .with_context(|| format!("Relay {} in {wire}", target.handle.0))?;
+
+        bind_relayed(target_store, collection, &target, written)
+            .with_context(|| format!("Record the relay of {} in {wire}", target.handle.0))?;
 
         report.item.patch.push(PatchEntry::new(
             ItemHunk::Copy {
                 source_side: target.holding.clone(),
                 target_side: target_name,
-                collection: display.clone(),
+                collection: wire.clone(),
                 source_id: target.link.clone(),
                 flags: target.flags.iter().cloned().collect(),
                 content_key: content_key(&target.link),
@@ -1574,15 +1604,68 @@ fn relay_copies(
     Ok(count)
 }
 
+/// Records the copy the target now holds, binding it to the item it was
+/// relayed from.
+///
+/// The relay is a side channel around the engine, so it owes the store what an
+/// accepted push writes back: the handle the server assigned, under the item's
+/// own link id, at the level a body-less spine can claim. Without it the item
+/// stays one-sided and every later pass relays it again.
+///
+/// This is the store's side of the crossing, so `collection` is the hub id it
+/// keys by, never the wire name the append went out under.
+fn bind_relayed(
+    store: &mut PimdirSourceStore,
+    collection: &str,
+    target: &RelayTarget,
+    written: WrittenItem,
+) -> Result<()> {
+    let placement = ReplicaPlacement {
+        collection: ReplicaCollectionId(collection.to_string()),
+        handle: ReplicaHandle(written.id),
+        link_id: Some(ReplicaLinkId(target.link.clone())),
+        // NOTE: relaying keeps the spine and nothing else, so the copy
+        // holds no body: `Full` here would strand it, an upgrade skipping
+        // whatever reads as hydrated.
+        object: None,
+        level: ReplicaLevel::Meta,
+        meta: target.meta.clone(),
+        // NOTE: the relay derives no key, as a queued create does not,
+        // and an unknown one leaves the hub's own in place.
+        sort_key: ReplicaSortKey::default(),
+        flags: target.marks.clone(),
+        status: ReplicaStatus::Clean,
+        conflict_revision: None,
+        conflict_object: None,
+        // NOTE: the base is the append the server has just accepted, so
+        // the next sync of this side reconciles the copy as already in
+        // sync. A base-less binding reads as a pending create instead,
+        // which is the append again.
+        base: Some(ReplicaBase {
+            flags: target.marks.clone(),
+            revision: written.revision,
+            object: None,
+        }),
+        origin: None,
+    };
+
+    store
+        .write(vec![ReplicaWriteOp::UpsertPlacement(placement)])
+        .map_err(|err| anyhow!("Storage write error: {err}"))
+}
+
 /// Relays one message: a fetch thread into the pipe, this one into the append.
 ///
-/// The body therefore crosses without ever being held whole or stored.
+/// The body therefore crosses without ever being held whole or stored. Both
+/// ends are wire calls, so `collection` is the name the servers answer to and
+/// never the hub id; what the target assigned to the copy is returned for the
+/// store to record.
 fn relay_one(
     holding_pool: &mut Pool,
     target_pool: &mut Pool,
     collection: &str,
     target: &RelayTarget,
-) -> Result<()> {
+) -> Result<WrittenItem> {
     let (writer, reader) = pipe::bounded(256 * 1024);
     let holding = holding_pool.primary();
     let dest = target_pool.primary();
@@ -1603,8 +1686,7 @@ fn relay_one(
         (fetch.join().unwrap(), append)
     });
     fetch.context("relay fetch")?;
-    append.context("relay append")?;
-    Ok(())
+    append.context("relay append")
 }
 
 /// One reconcile round over both sides, answering whether either moved.
@@ -2962,7 +3044,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::cli::exit::Exit;
+    use crate::{cli::exit::Exit, offline::source_id};
 
     /// A store with one body and the files a dry run writes to.
     fn stub_store(dir: &Path) {
@@ -4750,6 +4832,54 @@ mod tests {
         assert!(!text.contains("already in sync"), "{text}");
         assert!(text.contains("synchronized: 1 hunks"), "{text}");
         assert!(text.contains("from left to right"), "{text}");
+    }
+
+    /// What keeps a relay from repeating itself.
+    ///
+    /// A relay bypasses the engine, so nothing else writes the copy down: an
+    /// item is selected for being on one source alone, and only the target's
+    /// own binding takes it back out of that selection. Without it every pass
+    /// relays the same body again, which is a duplicate per pass on a server.
+    #[test]
+    fn a_relayed_copy_is_bound_to_its_target_and_never_relayed_twice() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
+        left.ensure_collection("INBOX", "message/rfc822").unwrap();
+
+        left.write(vec![ReplicaWriteOp::UpsertPlacement(linked(
+            "1",
+            "mid:a@x",
+            r#"{"v":1,"size":42}"#,
+        ))])
+        .unwrap();
+
+        let sides = |store: &PimdirStore| {
+            relay_targets(store, Kind::Mail, "INBOX", ("left", false), ("right", true)).unwrap()
+        };
+        let targets = sides(&left);
+        assert_eq!(targets.len(), 1);
+
+        let mut right = PimdirStore::open(dir.path()).unwrap().for_source("right");
+        let written = WrittenItem {
+            id: String::from("77"),
+            revision: None,
+        };
+        bind_relayed(&mut right, "INBOX", &targets[0], written).unwrap();
+
+        assert!(sides(&right).is_empty(), "the copy is not relayed again");
+
+        let hub = right.load_hub("INBOX").unwrap();
+        let item = hub.items.get(&ReplicaLinkId::from("mid:a@x")).unwrap();
+        assert_eq!(item.sources.len(), 2, "the item is two-sided now");
+
+        let binding = &item.sources[&source_id("right")];
+        assert_eq!(binding.handle, ReplicaHandle::from("77"), "as assigned");
+        assert!(
+            binding.base.is_some(),
+            "and based, so the next sync reads it as in sync rather than as a create",
+        );
+        assert!(item.object.is_none(), "the relay stored no body");
+        assert_eq!(item.level, ReplicaLevel::Meta, "so it claims no more");
     }
 
     /// A hub collection id carries its namespace and the wire name does not.

@@ -19,6 +19,7 @@ use io_replica::{
     change::ReplicaWriteOp,
     client::ReplicaStorage,
     collection::ReplicaCollectionId,
+    hub::ReplicaSourceId,
     object::ReplicaHash,
     placement::{ReplicaHandle, ReplicaLinkId, ReplicaPlacement},
     storage::{ReplicaLoadScope, ReplicaLoaded},
@@ -129,35 +130,106 @@ impl ReplicaStorage for HeldStore<'_> {
     }
 }
 
-/// The one-sided, bodiless items whose body must be hydrated (`Full`).
+/// One endpoint of a pair, as hydration reads it.
+pub struct HydrationSide<'a> {
+    /// The source id, as the account names it.
+    pub name: &'a str,
+    /// Whether the sync may create an item on it.
+    pub creates: bool,
+    /// Whether the sync may replace the body of an item it holds.
+    pub updates: bool,
+    /// Whether this side is the declared truth, so a difference resolves in
+    /// its favour rather than being a divergence.
+    pub decides: bool,
+}
+
+/// The bodiless items whose body must be hydrated (`Full`) for the pair to
+/// converge in this run.
 ///
-/// For each shared item held by exactly one of the pair, with no body yet,
-/// whose other source may create items: the holding source's name and the
-/// item's handle there. Reads the whole hub, so any source handle serves it.
+/// Two shapes qualify, and both are an item the hub holds no body for. An item
+/// held by one of the pair alone is a copy the other may be given, so the
+/// holder's body is fetched and the other side's create pushes it.
+///
+/// An item both of them hold, whose body exactly one of them pulled a change
+/// to, is an update the other side is owed: the changed side's body is fetched
+/// so the projection reads the unchanged side as dirty against it. Without it
+/// the push has nothing to send, the run reports an update it did not make, and
+/// the two endpoints converge a run later or, where no retention hydrates the
+/// body afterwards, never.
+///
+/// An item both of them rewrote is neither: that is a divergence, and it is
+/// merged or parked by the conflict path rather than pushed. Reads the whole
+/// hub, so any source handle serves it.
 pub fn hydration_targets(
     store: &PimdirStore,
     collection: &str,
-    left: (&str, bool),
-    right: (&str, bool),
+    left: HydrationSide<'_>,
+    right: HydrationSide<'_>,
 ) -> Result<Vec<(String, ReplicaHandle)>, PimdirError> {
     let hub = store.load_hub(collection)?;
+    let left_id = source_id(left.name);
     let mut out = Vec::new();
+
     for item in hub.items.values() {
-        if item.deleted || item.object.is_some() || item.sources.len() != 1 {
+        if item.deleted || item.object.is_some() || item.sources.is_empty() {
             continue;
         }
-        let (held, binding) = item.sources.iter().next().expect("one source");
 
-        let target_creates = if *held == source_id(left.0) {
-            right.1
-        } else {
-            left.1
+        let other = |held: &ReplicaSourceId| match *held == left_id {
+            true => &right,
+            false => &left,
         };
 
-        if target_creates {
-            out.push((held.0.clone(), binding.handle.clone()));
+        if item.sources.len() == 1 {
+            let (held, binding) = item.sources.iter().next().expect("one source");
+            if other(held).creates {
+                out.push((held.0.clone(), binding.handle.clone()));
+            }
+            continue;
+        }
+
+        // NOTE: a base that carries no body is the mark a pull leaves when
+        // the remote changed the content, since recording it drops the stale
+        // body from the item and from that source's base together. A base
+        // that is absent altogether never agreed with anything.
+        let pulled: Vec<_> = item
+            .sources
+            .iter()
+            .filter(|(_, binding)| {
+                binding
+                    .base
+                    .as_ref()
+                    .is_some_and(|base| base.object.is_none())
+            })
+            .collect();
+
+        // A difference only one side made is that side's to hand over. One
+        // both of them made is a divergence, which the conflict path merges
+        // or parks, unless an authority is declared: then the deciding side
+        // overwrites the other and its body is what crosses.
+        let changed = match pulled.as_slice() {
+            [(source, binding)] => Some((*source, *binding)),
+            _ => pulled
+                .iter()
+                .find(|(source, _)| {
+                    let side = match **source == left_id {
+                        true => &left,
+                        false => &right,
+                    };
+                    side.decides
+                })
+                .map(|(source, binding)| (*source, *binding)),
+        };
+
+        let Some((changed, binding)) = changed else {
+            continue;
+        };
+
+        if other(changed).updates {
+            out.push((changed.0.clone(), binding.handle.clone()));
         }
     }
+
     Ok(out)
 }
 
@@ -239,16 +311,28 @@ mod tests {
         ))])
         .unwrap();
 
-        let targets = hydration_targets(&left, "INBOX", ("left", false), ("right", true)).unwrap();
+        let targets =
+            hydration_targets(&left, "INBOX", side("left", false), side("right", true)).unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].0, "left");
         assert_eq!(targets[0].1.0, "1");
 
         assert!(
-            hydration_targets(&left, "INBOX", ("left", false), ("right", false))
+            hydration_targets(&left, "INBOX", side("left", false), side("right", false))
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// A side that may take neither a copy nor an update, for the tests that
+    /// vary one permission at a time.
+    fn side(name: &str, creates: bool) -> HydrationSide<'_> {
+        HydrationSide {
+            name,
+            creates,
+            updates: creates,
+            decides: false,
+        }
     }
 
     /// The copy one source is offered is another source's holding, and reading

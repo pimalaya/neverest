@@ -77,7 +77,7 @@ use crate::{
         },
         source_id,
         state::StoreState,
-        storage::{HeldStore, hydration_targets, load_side, projection_view},
+        storage::{HeldStore, HydrationSide, hydration_targets, load_side, projection_view},
         submit,
     },
     sync::{
@@ -2667,8 +2667,18 @@ fn hydrate_copies(
     let targets = hydration_targets(
         left_store,
         collection,
-        (&left.name, left.perms.item.create),
-        (&right.name, right.perms.item.create),
+        HydrationSide {
+            name: &left.name,
+            creates: left.perms.item.create,
+            updates: left.perms.item.update,
+            decides: left.authority == Authority::Endpoint,
+        },
+        HydrationSide {
+            name: &right.name,
+            creates: right.perms.item.create,
+            updates: right.perms.item.update,
+            decides: right.authority == Authority::Endpoint,
+        },
     )
     .with_context(|| format!("Hydration targets {collection}"))?;
     if targets.is_empty() {
@@ -2853,11 +2863,16 @@ fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncOu
     let mut seen: HashSet<(String, String, &'static str)> = HashSet::new();
 
     for rejected in rejected {
-        let key = (
-            rejected.collection.clone(),
-            rejected.handle.clone(),
-            rejected.action,
-        );
+        // NOTE: the hub stages an append under a handle of its own making,
+        // the item's link id with a marker appended, the item having no
+        // handle on the side it is being created on. That marker is what a
+        // person would read, and the copy hunk names the item by the link id
+        // alone, so both the report and the retraction take the id back.
+        let id = match rejected.handle.split_once('\u{1}') {
+            Some((link, _)) => link.to_string(),
+            None => rejected.handle.clone(),
+        };
+        let key = (rejected.collection.clone(), id.clone(), rejected.action);
 
         if !seen.insert(key) {
             continue;
@@ -2866,11 +2881,11 @@ fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncOu
         report
             .item
             .patch
-            .retain(|entry| !names(&entry.hunk, side, &rejected.collection, &rejected.handle));
+            .retain(|entry| !names(&entry.hunk, side, &rejected.collection, &id));
         report.rejected.push(RejectedWrite {
             side: side.to_string(),
             collection: rejected.collection,
-            id: rejected.handle,
+            id,
             action: rejected.action.to_string(),
             reason: rejected.reason,
         });
@@ -2879,8 +2894,9 @@ fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncOu
 
 /// Whether `hunk` is the plan for `handle` in `collection` on `side`.
 ///
-/// A copy names its item by link id, having no handle on the side it is being
-/// created on, so it answers `false` whatever it carries.
+/// A copy carries no handle on the side it is being created on, so it is named
+/// by the item's link id, which is what an append the hub staged is keyed by
+/// too. A fetch reaches no server and is never rejected.
 fn names(hunk: &ItemHunk, side: &str, collection: &str, handle: &str) -> bool {
     match hunk {
         ItemHunk::AddFlags {
@@ -2907,7 +2923,13 @@ fn names(hunk: &ItemHunk, side: &str, collection: &str, handle: &str) -> bool {
             id,
             ..
         } => s == side && c == collection && id == handle,
-        ItemHunk::Copy { .. } | ItemHunk::Fetch { .. } => false,
+        ItemHunk::Copy {
+            target_side,
+            collection: c,
+            source_id,
+            ..
+        } => target_side == side && c == collection && source_id == handle,
+        ItemHunk::Fetch { .. } => false,
     }
 }
 
@@ -4452,6 +4474,117 @@ mod tests {
         assert!(text.contains("changed on both sides"), "{text}");
     }
 
+    /// Two fields disagreeing is one item waiting, and two such items are two.
+    ///
+    /// The merge counts colliding fields and the report counts parked items,
+    /// which are not the same number: a run whose summary read `1 item(s)
+    /// waiting` over a two-field divergence, or over two of them, would have
+    /// passed everything else pinned at one.
+    #[cfg(feature = "dav")]
+    #[test]
+    fn two_colliding_fields_park_the_item_and_the_count_reads_past_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = card("+1", "old");
+        let local = card("+2", "mine");
+        let remote = card("+3", "theirs");
+
+        assert_eq!(
+            Kind::Vcard.merge(base.as_bytes(), local.as_bytes(), remote.as_bytes()),
+            Merged::Collided(2),
+            "the phone number and the note each disagree, and the merge counts \
+             both rather than stopping at the first",
+        );
+
+        let mut store = store_with_conflict(dir.path(), &base, &local, &remote);
+        let blobs = store.blobs();
+
+        // A second item diverging exactly the same way, over the same three
+        // bodies the store already holds: what the report prints is a number,
+        // and one item cannot tell a count from a flag.
+        store
+            .write(vec![ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+                collection: ReplicaCollectionId("contacts".into()),
+                handle: ReplicaHandle("card2".into()),
+                link_id: Some(ReplicaLinkId("uid:b".into())),
+                object: Some(blobs.hash(local.as_bytes())),
+                level: ReplicaLevel::Full,
+                meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
+                sort_key: ReplicaSortKey::default(),
+                flags: ReplicaFlags::default(),
+                status: ReplicaStatus::Conflict,
+                conflict_revision: Some(String::from("etag-2")),
+                conflict_object: Some(blobs.hash(remote.as_bytes())),
+                base: Some(ReplicaBase {
+                    flags: ReplicaFlags::default(),
+                    revision: Some(String::from("etag-1")),
+                    object: Some(blobs.hash(base.as_bytes())),
+                }),
+                origin: None,
+            })])
+            .unwrap();
+
+        let merged = merge_conflicts(
+            "contacts",
+            Kind::Vcard,
+            "dav",
+            &mut store,
+            &blobs,
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(
+            merged, 0,
+            "a body carrying a field nobody can pick is staged in part or not \
+             at all, and it is not at all",
+        );
+
+        let parked = load_side(&store, "contacts").unwrap();
+        assert_eq!(parked.len(), 2);
+        for placement in &parked {
+            assert_eq!(placement.status, ReplicaStatus::Conflict);
+            assert_eq!(
+                placement.object,
+                Some(blobs.hash(local.as_bytes())),
+                "the local side of {} is untouched",
+                placement.handle.0,
+            );
+        }
+
+        let mut collection = SyncOutput::default();
+        itemize_pulled(
+            &[
+                ReplicaEvent::Conflicted(ReplicaHandle("card1".into())),
+                ReplicaEvent::Conflicted(ReplicaHandle("card2".into())),
+            ],
+            &HashMap::new(),
+            &store,
+            "contacts",
+            "contacts",
+            "dav",
+            &mut collection,
+        )
+        .unwrap();
+
+        let mut report = SyncOutput::default();
+        report.absorb(collection);
+        assert_eq!(
+            report.conflicts.len(),
+            2,
+            "each item is named once, however many of its fields collided",
+        );
+
+        count_conflicts(&store, CONFLICT_ACCOUNT, &mut report);
+        assert_eq!(report.outstanding_conflicts, 2);
+        assert!(report.left_waiting(), "which is what exits with 2");
+
+        let text = report.to_string();
+        assert!(text.contains("Warnings (2)"), "{text}");
+        assert!(
+            text.contains("Conflicts: 2 item(s) waiting for a decision"),
+            "{text}",
+        );
+    }
+
     /// A write the remote would not take is not a write the run made.
     ///
     /// The item patch is the plan, derived before anything is pushed, so a
@@ -4496,6 +4629,50 @@ mod tests {
             Exit::Conflicted,
             "a run that could not deliver a write is not a run that succeeded",
         );
+    }
+
+    /// A refused append names the item and takes its copy back.
+    ///
+    /// The hub stages an append under the item's link id with a marker
+    /// appended, the item having no handle on the side it is being created
+    /// on. Reported raw, the marker reads as part of the name, and the copy
+    /// hunk the append came from was left in the patch, so a run every one of
+    /// whose writes a read-only calendar refused still counted them all.
+    #[test]
+    fn a_refused_append_is_named_by_its_link_id_and_its_copy_is_taken_back() {
+        let mut report = SyncOutput::default();
+        for id in ["event-1", "event-2"] {
+            report.item.patch.push(PatchEntry::new(
+                ItemHunk::Copy {
+                    source_side: String::from("local"),
+                    target_side: String::from("dav"),
+                    collection: String::from("Calendar"),
+                    source_id: String::from(id),
+                    flags: BTreeSet::new(),
+                    content_key: 0,
+                },
+                None,
+            ));
+        }
+
+        itemize_rejected(
+            "dav",
+            vec![RejectedPush {
+                collection: String::from("Calendar"),
+                handle: String::from("event-1\u{1}hub"),
+                action: "append",
+                reason: String::from("HTTP 403"),
+            }],
+            &mut report,
+        );
+
+        let left: Vec<&ItemHunk> = report.item.patch.iter().map(|entry| &entry.hunk).collect();
+        assert_eq!(left.len(), 1, "the refused append left the patch: {left:?}");
+        assert!(format!("{:?}", left[0]).contains("event-2"), "{left:?}");
+
+        let text = report.to_string();
+        assert!(text.contains("refused the append of event-1 in"), "{text}");
+        assert!(!text.contains("event-1\u{1}"), "the marker is printed raw");
     }
 
     /// A conflict an earlier run parked reaches no later run's report.

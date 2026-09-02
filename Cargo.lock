@@ -966,9 +966,9 @@ dependencies = [
 
 [[package]]
 name = "ical-rs"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4b5f716aef1e2991c325d70daf7810d16c46662a24f438b239750c2aefc0068"
+checksum = "bd2689df1c11bf13844e25901f0ff9ca53df8105e0a4eb55102acaa1e5b32583"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",
@@ -1210,9 +1210,9 @@ dependencies = [
 
 [[package]]
 name = "io-pimdir"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af1de77240dff400d113794f1fc3986e580744a255fabfb869cba5fd0f4f677a"
+checksum = "34747272c885f156bab9a50d8035f8170a6e305f43c12bac948184f25e34c99a"
 dependencies = [
  "blake3",
  "fs4",

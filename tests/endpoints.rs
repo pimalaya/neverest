@@ -18,6 +18,9 @@
 //!      first sync. There is no body they both came from, so no merge can
 //!      settle it, and the run must park rather than let the source's body
 //!      replace what the target already held.
+//!   4. The same divergence as the first, under an account declaring the
+//!      source authoritative. There is nothing to park then: `one-way = true`
+//!      is the answer to the question the other three ask a person.
 //!
 //! An account naming a source and a target keys the store under the source's
 //! name, so an address book reads as `a/<name>` here rather than as the
@@ -42,6 +45,8 @@ const MERGE_BOOK: &str = "merge";
 const BIND_BOOK: &str = "bind";
 /// The address book the ancestor-less divergence test owns on both principals.
 const SEED_BOOK: &str = "seed";
+/// The address book the one-way test owns on both principals.
+const AUTHORITY_BOOK: &str = "authority";
 /// The source endpoint's principal, whose password is its own name.
 const SOURCE: &str = "test";
 /// The target endpoint's principal.
@@ -180,6 +185,111 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
     assert!(
         listed.contains("card-2.vcf"),
         "the divergence is listable; listing was:\n{listed}",
+    );
+}
+
+/// `one-way = true` answers a real divergence instead of parking it.
+///
+/// The source is authoritative, so the difference the two-way account leaves
+/// for a person resolves in its favour: the target's own edit is overwritten,
+/// nothing is counted or listed as a conflict, the run exits 0, and the next
+/// one has nothing left to carry.
+#[test]
+#[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
+fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let state = root.join("state");
+    let config = root.join("config.toml");
+    fs::create_dir_all(&state).unwrap();
+    // NOTE: the account is one TOML table and the flag belongs to it wherever
+    // it sits, so appending keeps one account helper for both directions.
+    fs::write(&config, format!("{}one-way = true\n", account())).unwrap();
+
+    create_book(root, SOURCE, AUTHORITY_BOOK);
+    create_book(root, TARGET, AUTHORITY_BOOK);
+
+    put(
+        root,
+        SOURCE,
+        AUTHORITY_BOOK,
+        "card-1",
+        &card("card-1", "+1"),
+    );
+
+    neverest(&["init", "-a", "div"], &config, &state, 0);
+    sync(&config, &state, AUTHORITY_BOOK, 0);
+    assert_eq!(
+        get(SOURCE, AUTHORITY_BOOK, "card-1"),
+        get(TARGET, AUTHORITY_BOOK, "card-1"),
+        "the seed crossed",
+    );
+
+    // The same field set two ways, which is the divergence the two-way account
+    // parks: each endpoint agrees with its own server and only the pair
+    // disagrees.
+    put(
+        root,
+        SOURCE,
+        AUTHORITY_BOOK,
+        "card-1",
+        &card("card-1", "+2"),
+    );
+    put(
+        root,
+        TARGET,
+        AUTHORITY_BOOK,
+        "card-1",
+        &card("card-1", "+3"),
+    );
+
+    // Declaring an authority is what removes the conflict rather than
+    // resolving it: the run has nothing to ask, so it ends on 0.
+    let report = sync(&config, &state, AUTHORITY_BOOK, 0);
+    assert!(
+        report.contains(r#""outstandingConflicts":0"#),
+        "an authoritative source leaves nothing waiting; report was:\n{report}",
+    );
+    assert!(
+        !report.contains(r#""conflicts""#),
+        "and names nothing parked; report was:\n{report}",
+    );
+
+    // The overwrite lands in this run: the deciding side's body is hydrated
+    // before the pushing passes, so the target takes it without waiting for
+    // the run after.
+    assert!(
+        get(TARGET, AUTHORITY_BOOK, "card-1").contains("TEL:+2"),
+        "the target takes the source's body, its own edit discarded",
+    );
+    assert!(
+        get(SOURCE, AUTHORITY_BOOK, "card-1").contains("TEL:+2"),
+        "and the source is never written back to, which is what makes it \
+         authoritative",
+    );
+
+    // Discarded means settled: a rerun writes nothing and asks nothing, rather
+    // than carrying the same overwrite again every run.
+    let report = sync(&config, &state, AUTHORITY_BOOK, 0);
+    assert!(
+        !report.contains(r#""kind":"update""#),
+        "a rerun pushes nothing; report was:\n{report}",
+    );
+    assert!(
+        get(SOURCE, AUTHORITY_BOOK, "card-1").contains("TEL:+2")
+            && get(TARGET, AUTHORITY_BOOK, "card-1").contains("TEL:+2"),
+        "and both endpoints stay on the body the source decided",
+    );
+
+    let listed = neverest(
+        &["conflict", "list", "-a", "div", "--json"],
+        &config,
+        &state,
+        0,
+    );
+    assert!(
+        !listed.contains("card-1.vcf"),
+        "nothing was recorded for a person to settle; listing was:\n{listed}",
     );
 }
 

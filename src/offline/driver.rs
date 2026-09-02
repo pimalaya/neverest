@@ -43,6 +43,7 @@ use io_replica::{
     client::{ReplicaRemote, ReplicaStorage},
     collection::ReplicaCollectionId,
     coroutine::{ReplicaArg, ReplicaCoroutine, ReplicaCoroutineState, ReplicaYield},
+    hub::ReplicaSourceBinding,
     object::ReplicaHash,
     placement::{
         ReplicaBase, ReplicaFlags, ReplicaHandle, ReplicaLevel, ReplicaLinkId, ReplicaMeta,
@@ -74,8 +75,9 @@ use crate::{
             BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, RefusedCreate, RejectedPush,
             hydrate_batch, resolve_kind, wire_name,
         },
+        source_id,
         state::StoreState,
-        storage::{hydration_targets, load_side, projection_view},
+        storage::{HeldStore, hydration_targets, load_side, projection_view},
         submit,
     },
     sync::{
@@ -320,8 +322,8 @@ pub fn run(
     let running = select_sources(&mode, only_sources)?;
 
     let real_dir = store_dir(&account_name, account_config)?;
-    // Held for the whole run: dropping it removes the replica, so an early
-    // return cannot leave one behind.
+    // NOTE: held for the whole run: dropping it removes the replica, so an
+    // early return cannot leave one behind.
     let dry_replica = dry_run.then(|| DryRunReplica::new(&real_dir)).transpose()?;
     let work_dir = match &dry_replica {
         Some(replica) => replica.dir.clone(),
@@ -338,10 +340,11 @@ pub fn run(
         ..Default::default()
     };
 
-    // Before any endpoint is opened.
+    // NOTE: before any endpoint is opened.
     state.check_mode(&mode)?;
 
-    // Every credential the run needs, read once rather than per connection.
+    // NOTE: every credential the run needs, read once rather than per
+    // connection.
     let account = Account::resolve(account_config)?;
 
     for source_name in &running {
@@ -378,8 +381,8 @@ pub fn run(
             )
         };
 
-        // Sources share nothing but the store file, so one broken remote is no
-        // reason to leave the others unsynced.
+        // NOTE: sources share nothing but the store file, so one broken remote
+        // is no reason to leave the others unsynced.
         if let Err(err) = outcome {
             warn!("source {source_name} sync error: {err:#}");
             report.collection.patch.push(PatchEntry::new(
@@ -392,8 +395,9 @@ pub fn run(
         }
     }
 
-    // Once for the run: the parked rows and the outstanding conflicts belong to
-    // the store, and a per-source read would report each of them once a source.
+    // NOTE: once for the run: the parked rows and the outstanding conflicts
+    // belong to the store, and a per-source read would report each of them once
+    // a source.
     match PimdirStore::open(&work_dir) {
         Ok(store) => {
             report_parked(&store, &mut report);
@@ -519,14 +523,14 @@ fn run_pair(
 
     drain_queues(&mut left_store, namespace, report);
 
-    // Declared, not derived: `retain` says whether the store is a replica, and
-    // `relay` is only how a crossing gets there when it is not.
+    // NOTE: declared, not derived: `retain` says whether the store is a
+    // replica, and `relay` is only how a crossing gets there when it is not.
     let hydrate_full = mode.retain;
 
     let left_budget = connection_budget(&left_config, connections);
     let right_budget = connection_budget(&right_config, connections);
 
-    // Under `one-way` the source is the truth and the target follows, so
+    // NOTE: under `one-way` the source is the truth and the target follows, so
     // neither side records a conflict; without it both are shared.
     let (left_authority, right_authority) = if mode.one_way {
         (Authority::Endpoint, Authority::Store)
@@ -690,8 +694,8 @@ fn run_local(
 
     let workers = connection_budget(&source_config, connections);
     let s = Spinner::start(format!("Opening connections to {source_name}…"));
-    // With no target the store is the destination: `one-way` discards what was
-    // staged locally, leaving it off merges the two.
+    // NOTE: with no target the store is the destination: `one-way` discards
+    // what was staged locally, leaving it off merges the two.
     let authority = if mode.one_way {
         Authority::Endpoint
     } else {
@@ -1332,8 +1336,8 @@ fn sync_collection(
         &mut report,
     );
 
-    // Folded whether the collection reconciled or failed: what it reported
-    // before it stopped is still what happened.
+    // NOTE: folded whether the collection reconciled or failed: what it
+    // reported before it stopped is still what happened.
     account.absorb(report);
 
     outcome
@@ -1694,6 +1698,12 @@ fn relay_one(
 /// Each side's divergences are itemized right after its own merge, the only
 /// place they can be: the engine's events are this pass's and nothing keeps
 /// them. The report notes rather than appends, so one divergence is one line.
+///
+/// The two endpoints are then reconciled with each other, which no side's own
+/// merge can see: each of them agrees with its own server and only the pair
+/// disagrees. The ancestor that merge needs is read before the round, a pull
+/// dropping it. Where the pair never had one, the hub says so itself and the
+/// divergence parks unmerged.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_pass(
     collection: &str,
@@ -1707,6 +1717,16 @@ fn reconcile_pass(
     dry_run: bool,
     report: &mut SyncOutput,
 ) -> Result<bool> {
+    let reconciles = parks_divergences(left, right, dry_run);
+    let ancestors = match reconciles {
+        true => shared_bodies(left_store, collection)?,
+        false => HashMap::new(),
+    };
+    let divergences = match reconciles {
+        true => hub_divergences(left_store, collection)?,
+        false => HashMap::new(),
+    };
+
     let left_report = reconcile_side(
         collection, left, left_store, blobs, store_dir, push, dry_run, report,
     )?;
@@ -1720,7 +1740,464 @@ fn reconcile_pass(
         dry_run,
         report,
     )?;
-    Ok(moved(&left_report) || moved(&right_report))
+
+    let parked = park_divergences(
+        collection,
+        left,
+        right,
+        left_store,
+        right_store,
+        blobs,
+        store_dir,
+        &ancestors,
+        dry_run,
+        report,
+    )? + park_hub_conflicts(
+        collection,
+        left,
+        right,
+        left_store,
+        right_store,
+        &divergences,
+        dry_run,
+        report,
+    )?;
+
+    Ok(moved(&left_report) || moved(&right_report) || parked > 0)
+}
+
+/// Whether a pass reconciles the two endpoints with each other.
+///
+/// Only where neither of them decides: under `one-way` the source is the truth
+/// and the target follows it, so a difference between the two is not a
+/// divergence. A dry run stages nothing, the same bar [`resolve_conflicts`]
+/// holds.
+fn parks_divergences(left: &SourceCtx, right: &SourceCtx, dry_run: bool) -> bool {
+    !dry_run && left.authority == Authority::Shared && right.authority == Authority::Shared
+}
+
+/// The body each shared item holds, which is what its two endpoints agreed on.
+///
+/// Read before a round pulls, because pulling is what loses it: a remote
+/// content change drops the stale body from the item and from that source's
+/// base, so once both endpoints have pulled, the store holds their two new
+/// bodies and nothing they both came from.
+fn shared_bodies(store: &PimdirStore, collection: &str) -> Result<HashMap<String, ReplicaHash>> {
+    let hub = store
+        .load_hub(collection)
+        .with_context(|| format!("Load the hub of {collection}"))?;
+
+    Ok(hub
+        .items
+        .iter()
+        .filter(|(_, item)| !item.deleted)
+        .filter_map(|(link, item)| Some((link.0.clone(), item.object.clone()?)))
+        .collect())
+}
+
+/// The diverging body each item already carries, before a round records one.
+///
+/// The hub keeps its cross-source flag on the item once set: a source
+/// restating the shared body moves neither axis it is cleared on, so the flag
+/// outlives the decision that settled it and says nothing on its own about
+/// what is still owed. Read before the round, it says what a round newly
+/// recorded, which is the divergence a person has not seen yet.
+fn hub_divergences(store: &PimdirStore, collection: &str) -> Result<HashMap<String, ReplicaHash>> {
+    let hub = store
+        .load_hub(collection)
+        .with_context(|| format!("Load the hub of {collection}"))?;
+
+    Ok(hub
+        .items
+        .iter()
+        .filter(|(_, item)| item.conflicted)
+        .filter_map(|(link, item)| Some((link.0.clone(), item.conflict_object.clone()?)))
+        .collect())
+}
+
+/// One item both endpoints rewrote since they last agreed on it.
+struct Divergence {
+    /// The cross-side identity, which names the item in a report.
+    link: String,
+    /// The body both endpoints came from, the merge's common ancestor.
+    ancestor: ReplicaHash,
+    /// The handle the source holds it under, whose body becomes the shared one.
+    source_handle: ReplicaHandle,
+    /// The handle the target holds it under, whose body is the divergence.
+    target_handle: ReplicaHandle,
+    /// The revision the target's own pull observed, which a decision about the
+    /// divergence is computed against and refused on once it moves.
+    target_revision: Option<String>,
+    /// The markers the target last agreed on, so parking moves the content axis
+    /// and nothing else.
+    target_flags: ReplicaFlags,
+}
+
+/// The items both endpoints changed in one round, read from the store alone.
+///
+/// A pull drops the shared body and that source's base body together, so an
+/// item neither endpoint holds a base body for any more, that held one before
+/// the round, is one both of them rewrote. One endpoint alone leaves the
+/// other's base body in place, which is what tells the two cases apart.
+fn diverged_items(
+    store: &PimdirStore,
+    collection: &str,
+    ancestors: &HashMap<String, ReplicaHash>,
+    source: &str,
+    target: &str,
+) -> Result<Vec<Divergence>> {
+    let hub = store
+        .load_hub(collection)
+        .with_context(|| format!("Load the hub of {collection}"))?;
+    let (source_id, target_id) = (source_id(source), source_id(target));
+    let mut out = Vec::new();
+
+    for (link, item) in &hub.items {
+        if item.deleted || item.object.is_some() {
+            continue;
+        }
+        let (Some(ancestor), Some(held), Some(diverging)) = (
+            ancestors.get(&link.0),
+            item.sources.get(&source_id),
+            item.sources.get(&target_id),
+        ) else {
+            continue;
+        };
+        let pulled = |binding: &ReplicaSourceBinding| {
+            binding
+                .base
+                .as_ref()
+                .is_some_and(|base| base.object.is_none())
+        };
+        if !pulled(held) || !pulled(diverging) {
+            continue;
+        }
+
+        out.push(Divergence {
+            link: link.0.clone(),
+            ancestor: ancestor.clone(),
+            source_handle: held.handle.clone(),
+            target_handle: diverging.handle.clone(),
+            target_revision: diverging.base.as_ref().and_then(|b| b.revision.clone()),
+            target_flags: diverging
+                .base
+                .as_ref()
+                .map(|base| base.flags.clone())
+                .unwrap_or_default(),
+        });
+    }
+
+    Ok(out)
+}
+
+/// Reconciles what both endpoints rewrote, through the three-way merge.
+///
+/// Neither endpoint's own merge can see this divergence: each agrees with its
+/// own server, and only the pair disagrees, so the hub would absorb both bodies
+/// and project the last one it kept over the other. The pair is given the shape
+/// a one-endpoint divergence already has instead: the source's body is hydrated
+/// as the shared one and the target's is recorded as the divergence against it,
+/// so [`resolve_conflicts`] fetches the target's body, merges the three and
+/// stages what settles. What no merge settles stays parked and is reported,
+/// which is the whole point: neither side's edit is overwritten by the other.
+#[allow(clippy::too_many_arguments)]
+fn park_divergences(
+    collection: &str,
+    left: &mut SourceCtx,
+    right: &mut SourceCtx,
+    left_store: &mut PimdirSourceStore,
+    right_store: &mut PimdirSourceStore,
+    blobs: &PimdirBlobs,
+    store_dir: &Path,
+    ancestors: &HashMap<String, ReplicaHash>,
+    dry_run: bool,
+    report: &mut SyncOutput,
+) -> Result<usize> {
+    if !parks_divergences(left, right, dry_run) {
+        return Ok(0);
+    }
+
+    let diverged = diverged_items(left_store, collection, ancestors, &left.name, &right.name)?;
+    if diverged.is_empty() {
+        return Ok(0);
+    }
+
+    debug!(
+        "{} item(s) in {collection} changed on both endpoints",
+        diverged.len()
+    );
+
+    // NOTE: the source's body becomes the shared one, which is what makes it
+    // the merge's left side: ours, in the merge's own vocabulary.
+    let mut remote = PimRemote::new(&mut left.pool, blobs.clone(), left.namespace.clone());
+    let handles = diverged.iter().map(|d| d.source_handle.clone()).collect();
+    drive(
+        left_store,
+        &mut remote,
+        ReplicaUpgrade::new(collection.to_string(), handles, ReplicaTier::Full),
+    )
+    .with_context(|| format!("Fetch the diverging bodies of {} {collection}", &left.name))?;
+
+    let hub = left_store
+        .load_hub(collection)
+        .with_context(|| format!("Load the hub of {collection}"))?;
+    let mut writes = Vec::new();
+    let mut marked = Vec::new();
+
+    for divergence in diverged {
+        let Some(item) = hub.items.get(&ReplicaLinkId(divergence.link.clone())) else {
+            continue;
+        };
+        let Some(object) = item.object.clone() else {
+            debug!(
+                "{} in {collection} has no source body to merge",
+                divergence.link
+            );
+            continue;
+        };
+
+        // NOTE: the ancestor is unreferenced between the pull that dropped it
+        // and the write below that pins it again, so a collector that ran in
+        // between leaves a divergence with no base. It parks, unmerged, rather
+        // than being merged against a body nobody wrote.
+        let base = blobs
+            .get(&divergence.ancestor)
+            .with_context(|| {
+                format!(
+                    "Read the shared body of {} in {collection}",
+                    divergence.link
+                )
+            })?
+            .is_some()
+            .then_some(divergence.ancestor);
+
+        writes.push(ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+            collection: ReplicaCollectionId(collection.to_string()),
+            handle: divergence.target_handle.clone(),
+            link_id: Some(ReplicaLinkId(divergence.link)),
+            object: Some(object),
+            level: ReplicaLevel::Full,
+            meta: item.meta.clone(),
+            sort_key: item.sort_key.clone(),
+            flags: item.flags.clone(),
+            status: ReplicaStatus::Conflict,
+            conflict_revision: divergence.target_revision.clone(),
+            conflict_object: None,
+            base: Some(ReplicaBase {
+                flags: divergence.target_flags,
+                revision: divergence.target_revision,
+                object: base,
+            }),
+            origin: None,
+        }));
+        marked.push(divergence.target_handle);
+    }
+
+    if writes.is_empty() {
+        return Ok(0);
+    }
+
+    let staged = writes.len();
+    right_store
+        .write(writes)
+        .with_context(|| format!("Park the divergences of {} {collection}", &right.name))?;
+
+    resolve_conflicts(collection, right, right_store, blobs, store_dir, dry_run)?;
+
+    let still: HashSet<String> = conflicted_placements(right_store, collection, &right.name)?
+        .into_iter()
+        .map(|placement| placement.handle.0)
+        .collect();
+    let display = display_name(&right.namespace, collection);
+    for handle in marked {
+        if still.contains(&handle.0) {
+            report.note_conflict(ItemConflict {
+                side: right.name.clone(),
+                collection: display.to_string(),
+                id: handle.0,
+            });
+        }
+    }
+
+    Ok(staged)
+}
+
+/// One item two endpoints disagree about with nothing behind them.
+struct HubConflict {
+    /// The cross-side identity, which names the item in a report.
+    link: String,
+    /// The body the hub kept as the shared one, which the source contributed.
+    shared: ReplicaHash,
+    /// The body the hub recorded as diverging from it, the target's own.
+    diverging: ReplicaHash,
+    /// The summary the shared body carries, so parking restates it rather than
+    /// dropping it.
+    meta: Option<ReplicaMeta>,
+    /// The key the shared body sorts by, restated for the same reason.
+    sort_key: ReplicaSortKey,
+    /// The markers the item carries, restated for the same reason.
+    flags: ReplicaFlags,
+    /// The handle the target holds the item under, whose placement parks.
+    target_handle: ReplicaHandle,
+    /// The revision the target's own pull observed, which a decision about the
+    /// divergence is computed against and refused on once it moves.
+    target_revision: Option<String>,
+    /// The markers the target last agreed on, so parking moves the content axis
+    /// and nothing else.
+    target_flags: ReplicaFlags,
+}
+
+/// The divergences the round itself recorded between the two endpoints.
+///
+/// This is the hub's own cross-source axis, kept on the shared item rather than
+/// on a binding: an endpoint whose body differs from the shared one, with no
+/// body the two ever agreed on behind them, leaves `conflicted` set and its own
+/// body in `conflict_object`. Both endpoints already holding one identity
+/// before the store has read either is where it happens, which is what a mirror
+/// and a migration start from.
+///
+/// Read against `before`, the same flag as the round found it, so a divergence
+/// is parked the once. The flag outlives the decision that settles it, and
+/// parking again on a body a person has already ruled on would refuse the
+/// resolution's own push and never converge. A target whose binding is already
+/// conflicted is left alone too: it holds a decision of its own.
+fn hub_conflicts(
+    store: &PimdirStore,
+    collection: &str,
+    before: &HashMap<String, ReplicaHash>,
+    source: &str,
+    target: &str,
+) -> Result<Vec<HubConflict>> {
+    let hub = store
+        .load_hub(collection)
+        .with_context(|| format!("Load the hub of {collection}"))?;
+    let (source_id, target_id) = (source_id(source), source_id(target));
+    let mut out = Vec::new();
+
+    for (link, item) in &hub.items {
+        if item.deleted || !item.conflicted {
+            continue;
+        }
+
+        let (Some(shared), Some(diverging)) = (item.object.clone(), item.conflict_object.clone())
+        else {
+            continue;
+        };
+        if before.get(&link.0) == Some(&diverging) {
+            continue;
+        }
+        let (Some(_), Some(binding)) = (item.sources.get(&source_id), item.sources.get(&target_id))
+        else {
+            continue;
+        };
+        if binding.conflicted {
+            continue;
+        }
+        let base = binding.base.as_ref();
+
+        out.push(HubConflict {
+            link: link.0.clone(),
+            shared,
+            diverging,
+            meta: item.meta.clone(),
+            sort_key: item.sort_key.clone(),
+            flags: item.flags.clone(),
+            target_handle: binding.handle.clone(),
+            target_revision: base.and_then(|base| base.revision.clone()),
+            target_flags: base.map(|base| base.flags.clone()).unwrap_or_default(),
+        });
+    }
+
+    Ok(out)
+}
+
+/// Parks what the two endpoints disagreed about before they agreed on anything.
+///
+/// The divergence [`park_divergences`] handles has a common ancestor, the body
+/// both endpoints came from, so the three-way merge can settle most of it. This
+/// one has none: the two servers held one identity under two different bodies
+/// before the store read either of them, and a merge with no base could only
+/// ever park, so it parks directly.
+///
+/// The target's placement is written the shape a decision is read from: the
+/// source's body as its own, the target's recorded against it, and the revision
+/// the target's pull observed. Marking it is also what keeps the source's body
+/// off the target, the hub projecting a conflicted binding as `Conflict` and
+/// never as the `Dirty` the next round would push.
+#[allow(clippy::too_many_arguments)]
+fn park_hub_conflicts(
+    collection: &str,
+    left: &SourceCtx,
+    right: &SourceCtx,
+    left_store: &PimdirSourceStore,
+    right_store: &mut PimdirSourceStore,
+    before: &HashMap<String, ReplicaHash>,
+    dry_run: bool,
+    report: &mut SyncOutput,
+) -> Result<usize> {
+    if !parks_divergences(left, right, dry_run) {
+        return Ok(0);
+    }
+
+    let conflicts = hub_conflicts(left_store, collection, before, &left.name, &right.name)?;
+    if conflicts.is_empty() {
+        return Ok(0);
+    }
+
+    debug!(
+        "{} item(s) in {collection} differ across the endpoints with no shared ancestor",
+        conflicts.len()
+    );
+
+    let mut writes = Vec::with_capacity(conflicts.len());
+    let mut marked = Vec::with_capacity(conflicts.len());
+
+    for conflict in conflicts {
+        marked.push(conflict.target_handle.0.clone());
+        writes.push(ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
+            collection: ReplicaCollectionId(collection.to_string()),
+            handle: conflict.target_handle,
+            link_id: Some(ReplicaLinkId(conflict.link)),
+            object: Some(conflict.shared),
+            level: ReplicaLevel::Full,
+            meta: conflict.meta,
+            sort_key: conflict.sort_key,
+            flags: conflict.flags,
+            status: ReplicaStatus::Conflict,
+            conflict_revision: conflict.target_revision.clone(),
+            conflict_object: Some(conflict.diverging),
+            // NOTE: the base carries no body, the two endpoints never having
+            // agreed on one. It is also what keeps the automatic merge out:
+            // merging against the target's own body as the base would read the
+            // target as having changed nothing and settle on the source's body,
+            // which is the overwrite parking exists to refuse.
+            base: Some(ReplicaBase {
+                flags: conflict.target_flags,
+                revision: conflict.target_revision,
+                object: None,
+            }),
+            origin: None,
+        }));
+    }
+
+    let staged = writes.len();
+    right_store.write(writes).with_context(|| {
+        format!(
+            "Park the endpoint divergences of {} {collection}",
+            &right.name
+        )
+    })?;
+
+    let display = display_name(&right.namespace, collection);
+    for handle in marked {
+        report.note_conflict(ItemConflict {
+            side: right.name.clone(),
+            collection: display.to_string(),
+            id: handle,
+        });
+    }
+
+    Ok(staged)
 }
 
 /// One side of a reconcile round: its merge, its probes and its report.
@@ -1942,8 +2419,8 @@ fn sync_side(
         &mut remote,
         ReplicaSync::new(collection.to_string(), opts),
     );
-    // Kept whether the pass succeeded or not: a later failure does not unlearn
-    // a refusal the run already saw.
+    // NOTE: kept whether the pass succeeded or not: a later failure does not
+    // unlearn a refusal the run already saw.
     let refused = remote.take_refused();
     let rejected = remote.take_rejected();
     ctx.refused.extend(refused);
@@ -1957,6 +2434,11 @@ fn sync_side(
 /// Its link id is then known and it enters the hub. `Meta` for mail, whose
 /// envelope carries the identity; `Full` for a kind whose body is the only
 /// thing that does.
+///
+/// This is where identity is settled, so it reads the store through
+/// [`HeldStore`]: a copy the hub is offering this side is another endpoint's
+/// holding, not this one's, and reading it as one would mint a duplicate key
+/// for the card this side already has.
 fn upgrade_probed(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -1980,8 +2462,10 @@ fn upgrade_probed(
     }
 
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
+    let mut held = HeldStore::open(store, collection)
+        .with_context(|| format!("Read what {} holds in {collection}", &ctx.name))?;
     drive(
-        store,
+        &mut held,
         &mut remote,
         ReplicaUpgrade::new(collection.to_string(), probed, tier),
     )
@@ -2951,8 +3435,8 @@ impl DryRunReplica {
                 counts.copied
             );
 
-            // A blob tree that could not be shared was read and written whole,
-            // the slow dry run this exists to avoid.
+            // NOTE: a blob tree that could not be shared was read and written
+            // whole, the slow dry run this exists to avoid.
             if counts.linked == 0 && counts.copied > 0 {
                 info!(
                     "dry-run replica copied {} file(s), links unavailable",
@@ -3601,7 +4085,7 @@ mod tests {
             .unwrap();
         assert!(body.is_file(), "retention keeps the body");
 
-        // A `0s` delay purges what was retained strictly before a cutoff
+        // NOTE: a `0s` delay purges what was retained strictly before a cutoff
         // carrying milliseconds, so an item dropped and swept within one of
         // them is not old enough to go.
         thread::sleep(std::time::Duration::from_millis(5));
@@ -3954,8 +4438,8 @@ mod tests {
         .unwrap();
         assert_eq!(collection.conflicts.len(), 1);
 
-        // A worker fills the collection's report, the account's is printed:
-        // asserting the first alone is how the arm went missing.
+        // NOTE: a worker fills the collection's report, the account's is
+        // printed: asserting the first alone is how the arm went missing.
         let mut report = SyncOutput::default();
         report.absorb(collection);
         assert_eq!(report.conflicts.len(), 1);
@@ -4263,8 +4747,8 @@ mod tests {
                 "the engine parked the left side on pass {pass}",
             );
 
-            // What the run's own merge does to a divergence it settles, so the
-            // next pass genuinely marks this one again.
+            // NOTE: what the run's own merge does to a divergence it settles,
+            // so the next pass genuinely marks this one again.
             settle_as_the_merge_would(&mut left);
             left_remote
                 .items
@@ -4290,7 +4774,8 @@ mod tests {
             "and one announcement per item entering conflict",
         );
 
-        // A later run: both are parked already, so the engine says nothing.
+        // NOTE: a later run: both are parked already, so the engine says
+        // nothing.
         let mut later = SyncOutput::default();
         for (store, remote, side) in [
             (&mut left, &mut left_remote, "left"),
@@ -5235,8 +5720,8 @@ mod tests {
             "the other is minted on the href it came from",
         );
 
-        // The run the user complained about: the same full listing, nothing
-        // left to say.
+        // NOTE: the run the user complained about: the same full listing,
+        // nothing left to say.
         let second = spine(&mut store, &mut remote, "caldav/agenda");
         assert!(
             second.item.patch.is_empty(),

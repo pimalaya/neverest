@@ -329,7 +329,7 @@ mod tests {
         let path = temp_dir().join(format!("neverest-resolve-once-{}", process::id()));
         let _ = fs::remove_file(&path);
 
-        // Counts its own runs, one byte per spawn, and prints a secret.
+        // NOTE: counts its own runs, one byte per spawn, and prints a secret.
         let command = format!("printf x >> {path}; printf s3cr3t", path = path.display());
 
         let config: AccountConfig = toml::from_str(&format!(

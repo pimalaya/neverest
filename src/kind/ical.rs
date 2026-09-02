@@ -30,7 +30,7 @@ pub fn parse_body(raw: &[u8], size: u64) -> (ReplicaLinkId, ReplicaMeta, Replica
         sort_key,
     } = calendar::derive(raw);
 
-    // io-pimdir sizes the summary from the bytes it was handed, so only a
+    // NOTE: io-pimdir sizes the summary from the bytes it was handed, so only a
     // capped prefix has anything to restate.
     let meta = match size == raw.len() as u64 {
         true => meta,
@@ -81,7 +81,7 @@ mod tests {
         let anonymous = EVENT.replace("UID:event-1@example.org\r\n", "");
         let (link, _, _) = parse_body(anonymous.as_bytes(), anonymous.len() as u64);
 
-        // `hash:` is what `Kind::split_link_id` reads as "no server knows
+        // NOTE: `hash:` is what `Kind::split_link_id` reads as "no server knows
         // this id"; a fallback spelled otherwise would be pushed as a `UID`.
         assert!(link.0.starts_with("hash:"), "got {}", link.0);
     }

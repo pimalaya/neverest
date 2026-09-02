@@ -13,6 +13,7 @@ use crate::conflict::{Conflict, Sides};
 /// What `neverest conflict list` reports: every divergence the account's
 /// store is holding, or the fact that it is holding none.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConflictListOutput {
     /// The divergences, by collection then item then source.
     pub conflicts: Vec<ConflictSummary>,
@@ -42,6 +43,7 @@ impl fmt::Display for ConflictListOutput {
 
 /// One divergence as a listing names it.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConflictSummary {
     /// The item's public id, which is what the show and resolve verbs take.
     pub id: i64,
@@ -97,6 +99,7 @@ impl fmt::Display for ConflictSummary {
 /// What `neverest conflict show <id>` reports: the divergence and the three
 /// bodies it is between, which is what a decision is made from.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConflictShowOutput {
     /// The divergence itself.
     #[serde(flatten)]
@@ -152,7 +155,11 @@ impl fmt::Display for ConflictShowOutput {
 
 /// What `neverest conflict resolve <id>` concluded.
 #[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "kebab-case", tag = "outcome")]
+#[serde(
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase",
+    tag = "outcome"
+)]
 pub enum ConflictResolveOutput {
     /// The decision was applied: the item holds the chosen body and is no
     /// longer conflicted. The next run pushes it.

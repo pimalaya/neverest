@@ -9,11 +9,8 @@
   </p>
 </div>
 
-> [!CAUTION]
-> Neverest is in active development and currently shipped as `v1.0.0-rc`. Expect breaking changes between releases until stabilization.
-
 > [!IMPORTANT]
-> This README documents Neverest v1.0.0-rc, which is not released yet. Two releases exist: refer to the [v1.0.0-beta README](https://github.com/pimalaya/neverest/blob/v1.0.0-beta/README.md) or the [v0.1.0 README](https://github.com/pimalaya/neverest/blob/v0.1.0/README.md) for the one you are running, and to [MIGRATION.md](./MIGRATION.md) for the upgrade path from either.
+> This README documents Neverest v1.0.0. Refer to the [v1.0.0-beta README](https://github.com/pimalaya/neverest/blob/v1.0.0-beta/README.md) or the [v0.1.0 README](https://github.com/pimalaya/neverest/blob/v0.1.0/README.md) for an older release you are running, and to [MIGRATION.md](./MIGRATION.md) for the upgrade path from either.
 
 ## Table of contents
 
@@ -29,19 +26,19 @@
 
 ## Features
 
-- **PIM domain** support: **mail** via IMAP and Microsoft Graph (JMAP and Gmail configure but have no backend yet), **contacts** via CardDAV <sup>[rfc6352](https://www.iana.org/go/rfc6352)</sup> and **calendar** via CalDAV <sup>[rfc4791](https://www.iana.org/go/rfc4791)</sup> (both require the `dav` feature); one account syncs several at once
+- **PIM domain** support: **mail** via IMAP and Microsoft Graph, **contacts** via CardDAV <sup>[rfc6352](https://www.iana.org/go/rfc6352)</sup>, **calendar** via CalDAV <sup>[rfc4791](https://www.iana.org/go/rfc4791)</sup>, one account syncing several at once
 - **Local pimdir store** <sup>[specs](https://github.com/pimalaya/pimdir)</sup>: the single local copy an app reads, holding every domain an account syncs
 - **Retention**: a removed item is kept, never lost, and reclaimed on a schedule
 - **Relay** mode: a body crossing two IMAP servers is streamed server-to-server, never stored
 - **Queued submission**: a message a frontend enqueued leaves through its source's send channel
 - **Auth** support: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256 for IMAP; basic and bearer for CardDAV and CalDAV; OAuth 2.0 bearer tokens for Microsoft Graph
 - **TLS** support: [Rustls](https://crates.io/crates/rustls) with ring or aws crypto (`rustls-aws` feature), [Native TLS](https://crates.io/crates/native-tls) (`native-tls` feature)
-- **Discovery** support: known provider rules, PACC <sup>[specs](https://datatracker.ietf.org/doc/html/draft-ietf-mailmaint-pacc)</sup>, Autoconfiguration <sup>[specs](https://wiki.mozilla.org/Thunderbird:Autoconfiguration)</sup>, SRV <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup>, DAV <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup>
+- **Discovery** support: known provider rules, PACC, Thunderbird Autoconfiguration, SRV <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup> and DAV <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup>, all run in parallel
 - **Interactive wizard** turning an email address into a tested account
 - **TOML configuration** with multi-account support, and **JSON** output via `--json`, described by `neverest json-schema`
 
 > [!TIP]
-> Neverest is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support. The default feature set is declared in [Cargo.toml](./Cargo.toml).
+> Neverest is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support: contacts and calendar need `dav`. The default feature set is declared in [Cargo.toml](./Cargo.toml). JMAP and Gmail sources configure but have no backend yet.
 
 ## Installation
 
@@ -114,7 +111,9 @@ Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths c
 
 Run `neverest` with no configuration file on disk and a minimal wizard discovers a provider from an email address, tests it, then offers to write the result. It sets up **one account with one backend**, the offline replica most setups want; anything else is written by hand against [config.sample.toml](./config.sample.toml).
 
-`neverest configure` runs the same flow to add another account. It generates and never edits: the account it produces is appended to the file already there as plain text, so your comments and formatting survive, and changing an account is a job for your editor. Declining the prompt prints the account on stdout, and `--json` or a redirected stdout skips the prompts entirely, so `neverest configure > config.toml` writes the file itself.
+`neverest configure` runs the same flow to add another account. It generates and never edits: the account it produces is appended to the file already there as plain text, so your comments and formatting survive, and changing an account is a job for your editor.
+
+Declining the prompt prints the account on stdout, and `--json` or a redirected stdout skips the prompts entirely, so `neverest configure > config.toml` writes the file itself.
 
 An account is one pimdir store fed by one or more named **sources**, each a remote, and it may hold several kinds at once. What it does is its arity plus two flags: with no `targets` every source syncs into the local store, the offline replica; with them the source is copied to each target.
 
@@ -139,7 +138,7 @@ An account is initialized once, which opens every source so credential and netwo
 
 A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What no merge settles is both sides setting one field two ways: the item parks, everything else keeps syncing, and the run exits 2.
 
-Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries the two numbers a notifier needs: `conflicts` is what this run marked, `outstanding_conflicts` what the store holds waiting. Testing the first notifies on entry, once, with no state of its own to keep:
+Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries the two numbers a notifier needs: `conflicts` is what this run marked, `outstandingConflicts` what the store holds waiting. Testing the first notifies on entry, once, with no state of its own to keep:
 
 ```sh
 neverest sync --json | jq -e '.conflicts | length > 0' >/dev/null \

@@ -37,6 +37,7 @@ const MAX_ATTEMPTS: usize = 3;
 /// sync, whatever is attached to its terminal.
 #[derive(Debug, Parser)]
 pub struct ConflictCommand {
+    /// The verb to run.
     #[command(subcommand)]
     pub command: ConflictSubcommand,
 }
@@ -44,12 +45,16 @@ pub struct ConflictCommand {
 /// The three things a person does about a divergence.
 #[derive(Debug, Subcommand)]
 pub enum ConflictSubcommand {
+    /// Names every divergence the account is holding.
     List(ConflictListCommand),
+    /// Prints the three bodies one divergence is decided from.
     Show(ConflictShowCommand),
+    /// Settles one divergence, by side or through the merger.
     Resolve(ConflictResolveCommand),
 }
 
 impl ConflictCommand {
+    /// Dispatches to the verb the invocation named.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -72,6 +77,7 @@ impl ConflictCommand {
 pub struct ConflictListCommand {}
 
 impl ConflictListCommand {
+    /// Reads the account's outstanding divergences and prints them.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -105,6 +111,7 @@ pub struct ConflictShowCommand {
 }
 
 impl ConflictShowCommand {
+    /// Reads one divergence and prints its three bodies.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -156,6 +163,7 @@ pub struct ConflictResolveCommand {
 }
 
 impl ConflictResolveCommand {
+    /// Settles one divergence and stages the decision through the queue.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -484,9 +492,10 @@ mod tests {
             thread::spawn(move || {
                 await_file(&entered);
 
-                // The lock itself, not the handle: io-pimdir counts owning
-                // handles per process, so a second `open` here would succeed
-                // off that count. This is what another process contends for.
+                // NOTE: the lock itself, not the handle: io-pimdir counts
+                // owning handles per process, so a second `open` here would
+                // succeed off that count. This is what another process contends
+                // for.
                 let owner = fs::File::options()
                     .read(true)
                     .write(true)
@@ -497,7 +506,7 @@ mod tests {
                     .expect("the store is unowned while the merger runs");
                 drop(owner);
 
-                // What no sync could do while the merger was up.
+                // NOTE: what no sync could do while the merger was up.
                 let mut store = PimdirStore::open(&dir)
                     .expect("a store the merger does not own")
                     .for_account(ACCOUNT)

@@ -1,7 +1,7 @@
 ---
 cairn: change
 id: duplicate-link-id-freeze
-status: active
+status: landed
 created: 2026-08-25
 ---
 

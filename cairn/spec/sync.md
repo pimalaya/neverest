@@ -1255,9 +1255,115 @@ one write is one line.
 - THEN the refusal is named with its reason, the update is not among the hunks applied, and a run with no other work does not read as having written anything
 
 ### Requirement: A duplicated identity is mirrored, not reported
-A collection holding two resources under one identity SHALL be mirrored as two
+One collection holding two resources under one identity SHALL be mirrored as two
 items, and SHALL produce no report entry of its own. The store holds what the
 source holds, and a report entry is for work a run could not do.
+
+Two resources means two resources of one source. An identity a sibling endpoint
+of the same account also holds is one item bound twice, not two items: see "One
+identity is one item across an account's endpoints".
+
+### Requirement: Two endpoints are reconciled with each other
+An account whose endpoints are both authoritative SHALL reconcile them with each
+other as well as each with its own server. An item both endpoints changed since
+the store last agreed with them SHALL be three-way merged against the body they
+both came from, SHALL resolve as an ordinary edit where the merge reports no
+collision, and SHALL be parked and reported where it reports one. Neither
+endpoint's body SHALL be written over the other's on a collision.
+
+Neither endpoint's own reconcile can see this. Each of them agrees with its own
+server, and only the pair disagrees, so nothing marks it and the run reads as
+quiet while the two servers hold different bodies.
+
+The ancestor SHALL be read before the round pulls. Recording a remote content
+change drops the stale body from the shared item and from that source's base
+together, so once both endpoints have pulled, the store holds their two new
+bodies and nothing they both came from, and a merge attempted after that has no
+base to merge against.
+
+The source is the merge's left side, `ours`. That decides which body becomes the
+shared one and therefore what the target's divergence is recorded against; it
+decides nothing about a collision, which is a person's to settle through
+`neverest conflict resolve`.
+
+Under `one-way` there is no divergence to reconcile: the source is the truth and
+the target follows it, which is what declaring an authority is for. A dry run
+stages nothing.
+
+#### Scenario: Disjoint edits on two endpoints need no one
+- GIVEN one card whose two endpoints each changed a field the other left alone
+- WHEN the account is synced
+- THEN both changes survive on both endpoints and nothing is reported as waiting
+
+#### Scenario: A collision between two endpoints is parked, never overwritten
+- GIVEN one card whose two endpoints set the same field differently
+- WHEN the account is synced
+- THEN the divergence is parked and counted, each endpoint still holds its own body, and rerunning changes neither
+
+### Requirement: A divergence with no common ancestor parks rather than resolving itself
+Two endpoints of one account holding one identity under two different bodies,
+with no body they ever agreed on behind them, SHALL park the divergence and
+SHALL NOT write either body over the other. A three-way merge SHALL NOT be
+attempted: with no base it could only ever park, and merging against the
+target's own body as the base would read the target as having changed nothing
+and settle on the source's, which is the overwrite parking exists to refuse.
+
+This is the same disagreement as "Two endpoints are reconciled with each other"
+without the ancestor that requirement merges against, and it is what a migration
+and a hand-built mirror start from rather than a rare edge.
+
+The engine records it on the shared item rather than on a binding, the two being
+different questions: one says an endpoint and its own server disagree, the other
+that the two endpoints do. The parked divergence SHALL be taken from the item,
+and SHALL be taken before the run pushes, marking the target being what keeps
+the source's body off it: a conflicted binding projects as a conflict and never
+as the dirty placement a round would push.
+
+The parked placement SHALL carry the source's body as the item's own, the
+target's as the divergence recorded against it, and the revision the target's
+own pull observed, which is the shape `conflict list` and `conflict resolve`
+read. `--prefer-local` settles on the source's body and `--prefer-remote` on the
+target's, and the run after either carries the decision to both endpoints.
+
+The item's flag SHALL be read against the same flag as the round found it. It
+outlives the decision that settles it, no write clearing it where the source
+restates the shared body, so parking on it alone would re-park what a person has
+already ruled on and refuse the resolution's own push on every run after.
+
+Under `one-way` nothing parks: the source decides by declaration. A dry run
+stages nothing.
+
+#### Scenario: Two endpoints holding one identity under two bodies
+- GIVEN the same identity under two different bodies on two endpoints, before the store has read either
+- WHEN the account is synced
+- THEN the divergence is parked and counted, the run exits 2, and each endpoint still holds its own body
+
+#### Scenario: A parked divergence settles either way round
+- GIVEN a parked divergence between two endpoints that never agreed
+- WHEN it is resolved with `--prefer-local` or with `--prefer-remote`
+- THEN the next run carries the settled body to both endpoints and neither body was lost on the way
+
+### Requirement: One identity is one item across an account's endpoints
+An identity two endpoints of one account already hold SHALL bind to a single
+shared item, whichever endpoint the store reads first, and SHALL NOT be minted a
+second key. The minting rule answers one collection holding one identity twice;
+a sibling endpoint holding it once is not that.
+
+Identity is settled by the fetch that reads it, against the placements the store
+answers with. A source's projection carries the copies its sibling holds and it
+does not, so that the merge can derive the append, and reading those as claims on
+the identity turns the second endpoint's own card into a duplicate of the first
+endpoint's. The store SHALL therefore be read, where identity is settled, as what
+that source holds and nothing else.
+
+A mirror and a migration both start from two servers already holding the same
+items, so binding only when an item propagates from one side is binding in
+exactly the case that does not matter.
+
+#### Scenario: Two servers already holding one card
+- GIVEN the same card on both endpoints before the store has read either
+- WHEN the account is synced
+- THEN the store holds one item under the card's own key, neither endpoint is asked to take a copy it already holds, and a second run is quiescent
 
 ### Requirement: The report accounts for every write the run made
 A run that wrote to a remote SHALL report it. `already in sync` SHALL mean the
@@ -1569,9 +1675,29 @@ refused, so a renamed subcommand cannot leave a schema nobody can ask for.
 #### Scenario: A notifier reads the sync payload from its schema
 - GIVEN a build of neverest
 - WHEN `neverest json-schema neverest-sync` runs
-- THEN it prints the schema of the sync report, naming `conflicts` and `outstanding_conflicts` among its fields
+- THEN it prints the schema of the sync report, naming `conflicts` and `outstandingConflicts` among its fields
 
 #### Scenario: A checked account is one JSON document
 - GIVEN a configured account
 - WHEN `neverest check --json` runs
 - THEN one document is printed, naming the account, its mode and every endpoint that answered
+
+### Requirement: JSON keys are camelCase
+Every output type neverest prints SHALL serialize its keys as camelCase,
+matching the wire formats the endpoints speak (JMAP per RFC 8620, Microsoft
+Graph, the Google APIs) and keeping every key reachable by dot access in jq and
+JavaScript, which is how the README's notifier reads a report.
+
+A field carrying a provider or format spelling verbatim SHALL keep its explicit
+rename, `@odata.nextLink`, `nextPageToken` and the vCard `fn` being the
+examples: those are the wire's names rather than derivable ones. A variant name
+travelling as a value, the hunk `kind` and the resolve `outcome`, is not a key
+and SHALL keep its own spelling.
+
+Configuration types SHALL stay kebab-case, since what the loader reads from TOML
+is not what the printer emits.
+
+#### Scenario: A notifier dot-accesses every key of a report
+- GIVEN a run that parked a divergence
+- WHEN `neverest sync --json` prints its report
+- THEN every key of the document is camelCase, `dryRun` and `outstandingConflicts` among them, and none carries a hyphen or an underscore

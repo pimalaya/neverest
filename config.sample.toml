@@ -210,8 +210,8 @@ imap.item.delete = false
 #msgraph.alpn = ["http/1.1"]
 #msgraph.alpn = []
 
-# Bearer tokens only: neverest runs no OAuth flow. The command runs once per
-# opened connection, typically ortie serving a cached, auto-refreshed token.
+# Bearer tokens only: neverest runs no OAuth flow. The command runs once a run,
+# typically ortie serving a cached, auto-refreshed token.
 #msgraph.auth.token.raw = "***"
 #msgraph.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
 
@@ -297,7 +297,7 @@ imap.item.delete = false
 #
 # Neverest raises no desktop notification of its own. Every run warns in the
 # log, and `--json` carries both halves a notifier needs: `conflicts` is what
-# this run marked, `outstanding_conflicts` what the store holds waiting. Testing
+# this run marked, `outstandingConflicts` what the store holds waiting. Testing
 # the first notifies on entry, once, with no state of its own to keep:
 #
 #   neverest sync --json | jq -e '.conflicts | length > 0' >/dev/null \

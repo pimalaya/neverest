@@ -1,11 +1,11 @@
 ---
 cairn: change
 id: json-keys-are-camel-case
-status: active
+status: landed
 created: 2026-08-29
 ---
 
-# `--json` keys become camelCase at 2.0
+# `--json` keys become camelCase
 
 ## Why
 
@@ -19,9 +19,9 @@ Neverest emits both conventions today. The six registered output types carry no 
 
 Neverest is 1.0.0-rc, and the family rule is version-based: `--json` keys are a published contract, renaming one is breaking, and a breaking change waits for the next major, which here is 2.0.
 
-## Open option, not a decision
+## The option was taken
 
-Nothing stable has shipped from neverest yet. Switching before 1.0.0 goes out would cost nothing, would spare the project owing a 2.0 break almost immediately after its 1.0, and would let the README's jq recipes ship in their final spelling. The version-based rule was chosen deliberately, so this stays an option to raise while the release candidate is still open rather than a plan of record; once 1.0.0 ships, it expires and the switch is 2.0's.
+Nothing stable had shipped from neverest yet, so switching before 1.0.0 cost nothing, spared the project owing a 2.0 break right after its 1.0, and let the README jq recipes ship in their final spelling. The version-based rule stands for everything already published; this is the last window where it does not bind, and it was taken in the 1.0.0 release prep.
 
 ## What changes
 

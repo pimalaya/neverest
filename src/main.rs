@@ -90,10 +90,11 @@
 //! `submit` holds the queued send, and `driver` builds the report.
 //!
 //! [`sync`] keeps the output types alone, the engine having moved to
-//! [`offline`], and [`wizard`] discovers an account from one prompt. What
-//! becomes of that account belongs to `cli::configure`, which generates and
-//! never edits: it appends the rendered table rather than re-serializing the
-//! document, so a hand-written configuration keeps its comments.
+//! [`offline`], and [`wizard`] discovers an account from one prompt.
+//!
+//! What becomes of that account belongs to `cli::configure`, which generates
+//! and never edits: it appends the rendered table rather than re-serializing
+//! the document, so a hand-written configuration keeps its comments.
 //!
 //! [`json_schema`] is the registry behind `neverest json-schema`: one entry
 //! per data command, mapping its invocation path to the schema of what it

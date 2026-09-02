@@ -63,10 +63,14 @@ macro_rules! source_config {
                 $(#[$field_meta])*
                 pub $field_name: $field_ty,
             )*
+            /// Which collections this source syncs, and what may be created
+            /// or deleted on it.
             #[serde(default, alias = "mailbox", skip_serializing_if = "is_default")]
             pub collection: CollectionSourceConfig,
+            /// Whether flag updates may be pushed to this source.
             #[serde(default, skip_serializing_if = "is_default")]
             pub flag: FlagSourcePermissions,
+            /// Which item mutations may be pushed to this source.
             #[serde(default, alias = "message", skip_serializing_if = "is_default")]
             pub item: ItemSourcePermissions,
             /// Connection pool size override; the default is per backend.
@@ -109,9 +113,11 @@ macro_rules! source_ref_accessor {
     };
 }
 
+/// The whole configuration document: nothing but named accounts.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Config {
+    /// The named accounts the document declares.
     pub accounts: HashMap<String, AccountConfig>,
 }
 
@@ -176,6 +182,7 @@ impl Config {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct AccountConfig {
+    /// Whether a command with no `-a` resolves to this account.
     #[serde(default, skip_serializing_if = "is_default")]
     pub default: bool,
 
@@ -209,17 +216,22 @@ pub struct AccountConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain: Option<bool>,
 
-    /// Direct-backend sugar: each is a source named after its protocol.
+    /// Direct-backend sugar: an IMAP source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imap: Option<ImapConfig>,
+    /// Direct-backend sugar: a CardDAV source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub carddav: Option<CarddavConfig>,
+    /// Direct-backend sugar: a CalDAV source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub caldav: Option<CaldavConfig>,
+    /// Direct-backend sugar: a JMAP source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jmap: Option<JmapConfig>,
+    /// Direct-backend sugar: a Gmail source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gmail: Option<GmailConfig>,
+    /// Direct-backend sugar: a Graph source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub msgraph: Option<MsgraphConfig>,
 
@@ -240,6 +252,7 @@ pub struct AccountConfig {
     pub conflict: ConflictConfig,
 
     // TODO: item-level sync filters (date range, sender, subject).
+    /// Item-level sync options.
     #[serde(default, alias = "message")]
     pub item: ItemSyncConfig,
 
@@ -297,8 +310,7 @@ impl AccountConfig {
     ///
     /// What it adds to the serializer is reading order, dotted keys coming
     /// out alphabetically: groups are reordered ([`RENDER_ORDER`]), each
-    /// endpoint is lifted to the top of its own ([`ENDPOINT_KEYS`]), and a
-    /// blank line separates them.
+    /// endpoint is lifted to the top of its own ([`ENDPOINT_KEYS`]).
     pub fn render(&self, name: &str) -> Result<String> {
         // NOTE: borrowed rather than built into a `Config`, which would
         // mean cloning the account to render it. The emitter only looks
@@ -556,7 +568,8 @@ impl AccountConfig {
             );
         }
 
-        // Called for its refusals: `check` and the sync read the same mode.
+        // NOTE: called for its refusals: `check` and the sync read the same
+        // mode.
         self.mode()?;
 
         let mut senders: Vec<_> = sources
@@ -897,6 +910,7 @@ where
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct SourceConfig {
+    /// The one remote this source names.
     #[serde(flatten)]
     pub backend: SourceBackendConfig,
 
@@ -956,6 +970,7 @@ impl SourceConfig {
         self.collection().namespace.is_some()
     }
 
+    /// Whether this source is the IMAP backend.
     pub fn is_imap(&self) -> bool {
         matches!(self.backend, SourceBackendConfig::Imap(_))
     }
@@ -1022,11 +1037,15 @@ impl SourceConfig {
 /// Per-source permission triple gating which sync hunks may materialize.
 #[derive(Clone, Copy, Debug)]
 pub struct SourcePermissions {
+    /// What the source lets a run do to its collection set.
     pub collection: CollectionPermissions,
+    /// Whether the source takes flag updates.
     pub flag: FlagSourcePermissions,
+    /// What the source lets a run do to its items.
     pub item: ItemSourcePermissions,
 }
 
+/// Item-level sync options; none is settled yet.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ItemSyncConfig {}
@@ -1035,9 +1054,12 @@ pub struct ItemSyncConfig {}
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum CollectionFilter {
+    /// Every collection the source lists.
     #[default]
     All,
+    /// Only the named collections.
     Include(Vec<String>),
+    /// Every collection but the named ones.
     Exclude(Vec<String>),
 }
 
@@ -1046,14 +1068,14 @@ pub enum CollectionFilter {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct CollectionSourceConfig {
-    /// Whether the sync may create a collection on this source, and delete
-    /// one.
+    /// Whether the sync may create a collection on this source.
     ///
-    /// Both grant by default, unlike the `item` block, which must be
-    /// declared in full: this table also carries `filter`, and demanding a
+    /// It and `delete` grant by default, unlike the `item` block, which must
+    /// be declared in full: this table also carries `filter`, and demanding a
     /// permission pair from someone writing a filter would be a trap.
     #[serde(default = "default_true")]
     pub create: bool,
+    /// Whether the sync may delete one on this source.
     #[serde(default = "default_true")]
     pub delete: bool,
 
@@ -1097,7 +1119,9 @@ impl Default for CollectionSourceConfig {
 /// Per-source collection permissions gating collection-set mutations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CollectionPermissions {
+    /// Whether a run may create a collection here.
     pub create: bool,
+    /// Whether a run may delete one.
     pub delete: bool,
 }
 
@@ -1110,9 +1134,11 @@ impl Default for CollectionPermissions {
     }
 }
 
+/// Per-source flag permissions, gating flag propagation.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct FlagSourcePermissions {
+    /// Whether a run may push a flag change here.
     pub update: bool,
 }
 
@@ -1130,8 +1156,11 @@ impl Default for FlagSourcePermissions {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ItemSourcePermissions {
+    /// Whether a run may create an item here.
     pub create: bool,
+    /// Whether a run may delete one.
     pub delete: bool,
+    /// Whether a run may replace an item's body here.
     #[serde(default = "default_true")]
     pub update: bool,
 }
@@ -1152,12 +1181,16 @@ fn default_true() -> bool {
 }
 
 source_config! {
+    /// An IMAP source (RFC 9051), each mailbox a collection.
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct ImapConfig {
+        /// The server, a bare authority or a full URL.
         pub server: String,
+        /// How the connection is secured.
         #[serde(default)]
         pub tls: TlsConfig,
+        /// Whether a plain connection is upgraded with STARTTLS.
         #[serde(default, skip_serializing_if = "is_default")]
         pub starttls: bool,
         /// ALPN identifiers offered during the TLS handshake.
@@ -1166,6 +1199,7 @@ source_config! {
         /// `[]` skips ALPN.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub alpn: Option<Vec<String>>,
+        /// The one SASL mechanism the session authenticates with.
         pub sasl: Option<SaslConfig>,
     }
 }
@@ -1184,6 +1218,7 @@ source_config! {
         /// `https://<authority>`) or a full URL, `http://` included for a
         /// server on a trusted network.
         pub server: String,
+        /// How the connection is secured.
         #[serde(default)]
         pub tls: TlsConfig,
         /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
@@ -1192,7 +1227,9 @@ source_config! {
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
         )]
+        /// ALPN identifiers offered during the TLS handshake.
         pub alpn: Vec<String>,
+        /// How the DAV session authenticates.
         pub auth: DavAuthConfig,
     }
 }
@@ -1211,6 +1248,7 @@ source_config! {
         /// `https://<authority>`) or a full URL, `http://` included for a
         /// server on a trusted network.
         pub server: String,
+        /// How the connection is secured.
         #[serde(default)]
         pub tls: TlsConfig,
         /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
@@ -1219,7 +1257,9 @@ source_config! {
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
         )]
+        /// ALPN identifiers offered during the TLS handshake.
         pub alpn: Vec<String>,
+        /// How the DAV session authenticates.
         pub auth: DavAuthConfig,
     }
 }
@@ -1229,14 +1269,14 @@ source_config! {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DavAuthConfig {
+    /// A username and a password, HTTP Basic.
     Basic {
         #[serde(deserialize_with = "shell_expanded_string")]
         username: String,
         password: Secret,
     },
-    Bearer {
-        token: Secret,
-    },
+    /// A bearer token the client formats itself.
+    Bearer { token: Secret },
 }
 
 #[cfg(feature = "dav")]
@@ -1267,10 +1307,13 @@ impl DavAuthConfig {
 }
 
 source_config! {
+    /// A JMAP source (RFC 8620), each mailbox a collection.
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct JmapConfig {
+        /// The server, a bare authority or a full URL.
         pub server: String,
+        /// How the connection is secured.
         #[serde(default)]
         pub tls: TlsConfig,
         /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
@@ -1279,20 +1322,26 @@ source_config! {
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
         )]
+        /// ALPN identifiers offered during the TLS handshake.
         pub alpn: Vec<String>,
+        /// How the JMAP session authenticates.
         pub auth: JmapAuthConfig,
+        /// The JMAP identity a submission is sent under.
         pub identity_id: Option<String>,
+        /// The mailbox a submitted draft is written to.
         pub drafts_mailbox_id: Option<String>,
     }
 }
 
+/// How a JMAP session authenticates.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum JmapAuthConfig {
+    /// A verbatim `Authorization` header value.
     Header(Secret),
-    Bearer {
-        token: Secret,
-    },
+    /// A bearer token the client formats itself.
+    Bearer { token: Secret },
+    /// A username and a password, HTTP Basic.
     Basic {
         #[serde(deserialize_with = "shell_expanded_string")]
         username: String,
@@ -1311,6 +1360,7 @@ source_config! {
         /// Gmail user id, `me` by default: the authenticated user.
         #[serde(default = "default_gmail_user_id")]
         pub user_id: String,
+        /// How the connection is secured.
         #[serde(default)]
         pub tls: TlsConfig,
         /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
@@ -1319,7 +1369,9 @@ source_config! {
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
         )]
+        /// ALPN identifiers offered during the TLS handshake.
         pub alpn: Vec<String>,
+        /// How the Gmail session authenticates.
         pub auth: GmailAuthConfig,
     }
 }
@@ -1345,6 +1397,7 @@ source_config! {
         /// Graph user id, `me` by default: the authenticated user.
         #[serde(default = "default_msgraph_user_id")]
         pub user_id: String,
+        /// How the connection is secured.
         #[serde(default)]
         pub tls: TlsConfig,
         /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
@@ -1353,7 +1406,9 @@ source_config! {
             default = "default_http_alpn",
             skip_serializing_if = "is_default_http_alpn"
         )]
+        /// ALPN identifiers offered during the TLS handshake.
         pub alpn: Vec<String>,
+        /// How the Graph session authenticates.
         pub auth: MsgraphAuthConfig,
     }
 }
@@ -1384,6 +1439,7 @@ pub struct SmtpConfig {
     /// `smtps://<authority>`), a cleartext `smtp://` URL, usually with
     /// `starttls`, or an `smtps://` URL for implicit TLS.
     pub server: String,
+    /// How the connection is secured.
     #[serde(default)]
     pub tls: TlsConfig,
     /// Upgrades a plain `smtp://` connection via STARTTLS.
@@ -1435,10 +1491,13 @@ fn default_http_alpn() -> Vec<String> {
     vec![String::from("http/1.1")]
 }
 
+/// How a connection is secured, shared by every backend.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct TlsConfig {
+    /// Which TLS provider to use, the build's own default when unset.
     pub provider: Option<TlsProviderConfig>,
+    /// Options the rustls provider reads.
     #[serde(default)]
     pub rustls: RustlsConfig,
     /// Path to an extra CA certificate to trust, shell-expanded.
@@ -1446,23 +1505,31 @@ pub struct TlsConfig {
     pub cert: Option<PathBuf>,
 }
 
+/// Which TLS implementation carries the connection.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum TlsProviderConfig {
+    /// The rustls provider.
     Rustls,
+    /// The platform's own TLS stack.
     NativeTls,
 }
 
+/// Options the rustls provider reads.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct RustlsConfig {
+    /// Which crypto backend rustls uses, its default when unset.
     pub crypto: Option<RustlsCryptoConfig>,
 }
 
+/// Which crypto backend rustls uses.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum RustlsCryptoConfig {
+    /// The aws-lc-rs backend.
     Aws,
+    /// The ring backend.
     Ring,
 }
 
@@ -1494,64 +1561,90 @@ impl TlsConfig {
     }
 }
 
+/// The one SASL mechanism a session authenticates with.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum SaslConfig {
+    /// Authenticates nobody, for a relay taking anonymous mail.
     Anonymous(SaslAnonymousConfig),
+    /// The legacy LOGIN exchange.
     Login(SaslLoginConfig),
+    /// A username and a password in one message.
     Plain(SaslPlainConfig),
+    /// A bearer token in the GS2 header.
     Oauthbearer(SaslOauthbearerConfig),
+    /// A bearer token in the vendors' own spelling.
     Xoauth2(SaslXoauth2Config),
+    /// A salted challenge, so the password never crosses.
     #[serde(rename = "scram-sha-256")]
     ScramSha256(SaslScramSha256Config),
 }
 
+/// The ANONYMOUS mechanism (RFC 4505), which authenticates nobody.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SaslAnonymousConfig {
+    /// The trace message the mechanism carries, if any.
     pub message: Option<String>,
 }
 
+/// The legacy LOGIN mechanism, a username and a password.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SaslLoginConfig {
+    /// The identity the mechanism authenticates as.
     #[serde(deserialize_with = "shell_expanded_string")]
     pub username: String,
+    /// The password, resolved once per run.
     pub password: Secret,
 }
 
+/// The PLAIN mechanism (RFC 4616).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SaslPlainConfig {
+    /// The authorization identity, where it differs from the
+    /// authentication one.
     pub authzid: Option<String>,
+    /// The authentication identity.
     #[serde(deserialize_with = "shell_expanded_string")]
     #[serde(alias = "username")]
     pub authcid: String,
+    /// The password, resolved once per run.
     #[serde(alias = "password")]
     pub passwd: Secret,
 }
 
+/// The OAUTHBEARER mechanism (RFC 7628).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SaslOauthbearerConfig {
+    /// The identity the mechanism authenticates as.
     #[serde(deserialize_with = "shell_expanded_string")]
     pub username: String,
+    /// The access token, resolved once per run.
     pub token: Secret,
 }
 
+/// The XOAUTH2 mechanism, Google and Microsoft's predecessor to OAUTHBEARER.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SaslXoauth2Config {
+    /// The identity the mechanism authenticates as.
     #[serde(deserialize_with = "shell_expanded_string")]
     pub username: String,
+    /// The access token, resolved once per run.
     pub token: Secret,
 }
 
+/// The SCRAM-SHA-256 mechanism (RFC 7677), which sends no password.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SaslScramSha256Config {
+    /// The identity the mechanism authenticates as.
     #[serde(deserialize_with = "shell_expanded_string")]
     pub username: String,
+    /// The password, resolved once per run.
     pub password: Secret,
 }
 
@@ -2147,8 +2240,8 @@ msgraph.user-id = "me"
         let reloaded: TlsConfig = toml::from_str(&toml::to_string(&tls).unwrap()).unwrap();
         assert_eq!(reloaded.cert, tls.cert);
 
-        // An absent key never reaches the deserializer, so it stays absent
-        // rather than expanding an empty path.
+        // NOTE: an absent key never reaches the deserializer, so it stays
+        // absent rather than expanding an empty path.
         let tls: TlsConfig = toml::from_str("").unwrap();
         assert_eq!(tls.cert, None);
     }

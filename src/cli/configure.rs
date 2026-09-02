@@ -16,10 +16,11 @@
 //! sample, and so is a change to an account already there.
 //!
 //! Appending is a plain text append rather than a re-serialization, so
-//! comments, ordering and hand-written formatting come out untouched. Two
-//! rules guard it: the account name has to be free, two tables of one
-//! name making the whole document fail to parse, and the generated
-//! account claims the default only when no other one does.
+//! comments, ordering and hand-written formatting come out untouched.
+//!
+//! Two rules guard it: the account name has to be free, two tables of one
+//! name making the document fail to parse, and the generated account claims
+//! the default only when no other one does.
 
 use std::{
     fmt,
@@ -124,6 +125,7 @@ impl ExistingConfig {
 
 /// The generated account, as the printer takes it.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ConfigureOutput {
     /// The account name, which is the `[accounts.<name>]` table key.
     name: String,

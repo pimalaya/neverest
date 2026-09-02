@@ -6,15 +6,22 @@
 //!
 //! This module adds the multi-source reads the driver needs on top of that
 //! seam. [`load_side`] reads through one source handle, so it carries that
-//! source's residual; [`projection_view`] and [`hydration_targets`] read the
-//! whole hub, both sources' bindings included.
+//! source's residual, while [`projection_view`] and [`hydration_targets`]
+//! read the whole hub, both sources' bindings included.
+//!
+//! [`HeldStore`] narrows the seam back to what a source holds, for the one
+//! coroutine that reads a placement as a claim on an identity.
+
+use std::collections::{BTreeMap, HashSet};
 
 use io_pimdir::{PimdirError, PimdirSourceStore, PimdirStore};
 use io_replica::{
+    change::ReplicaWriteOp,
     client::ReplicaStorage,
     collection::ReplicaCollectionId,
-    placement::{ReplicaHandle, ReplicaPlacement},
-    storage::ReplicaLoadScope,
+    object::ReplicaHash,
+    placement::{ReplicaHandle, ReplicaLinkId, ReplicaPlacement},
+    storage::{ReplicaLoadScope, ReplicaLoaded},
 };
 
 use crate::offline::source_id;
@@ -50,6 +57,76 @@ pub fn projection_view(
         &ReplicaCollectionId(collection.to_string()),
         &source_id(source),
     ))
+}
+
+/// A source's store as an upgrade must read it: what that source holds, without
+/// the copies the hub is offering it.
+///
+/// A projection answers a source with the items it holds plus the ones a
+/// sibling holds and it does not, so that the merge derives the append. An
+/// upgrade asks a different question, who already holds this identity here,
+/// and a copy on offer is not a holder.
+///
+/// Left in, the second endpoint of an account reads its own card as a copy of
+/// the first endpoint's and is minted a key of its own (pimdir SPEC §9), which
+/// strands one identity as two items neither server will take.
+pub struct HeldStore<'a> {
+    store: &'a mut PimdirSourceStore,
+    /// The link ids this store's source is bound to in the collection.
+    held: HashSet<ReplicaLinkId>,
+}
+
+impl<'a> HeldStore<'a> {
+    /// Wraps `store`, reading which identities its source holds in
+    /// `collection`.
+    ///
+    /// Read once: an upgrade writes only after its last load, so nothing it
+    /// does can add a holder behind the wrap.
+    pub fn open(store: &'a mut PimdirSourceStore, collection: &str) -> Result<Self, PimdirError> {
+        let source = source_id(store.source());
+        let held = store
+            .load_hub(collection)?
+            .items
+            .iter()
+            .filter(|(_, item)| item.sources.contains_key(&source))
+            .map(|(link, _)| link.clone())
+            .collect();
+
+        Ok(Self { store, held })
+    }
+}
+
+impl ReplicaStorage for HeldStore<'_> {
+    type Error = PimdirError;
+
+    fn load(
+        &self,
+        collection: &ReplicaCollectionId,
+        scope: &ReplicaLoadScope,
+    ) -> Result<ReplicaLoaded, Self::Error> {
+        let mut loaded = self.store.load(collection, scope)?;
+        // NOTE: an unlinked placement claims no identity yet, so it stays: it
+        // is the freshly probed row the upgrade was called for.
+        loaded
+            .placements
+            .retain(|placement| match &placement.link_id {
+                Some(link) => self.held.contains(link),
+                None => true,
+            });
+
+        Ok(loaded)
+    }
+
+    fn lookup_objects(
+        &self,
+        links: &[ReplicaLinkId],
+    ) -> Result<BTreeMap<ReplicaLinkId, ReplicaHash>, Self::Error> {
+        self.store.lookup_objects(links)
+    }
+
+    fn write(&mut self, ops: Vec<ReplicaWriteOp>) -> Result<(), Self::Error> {
+        self.store.write(ops)
+    }
 }
 
 /// The one-sided, bodiless items whose body must be hydrated (`Full`).
@@ -172,5 +249,49 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    /// The copy one source is offered is another source's holding, and reading
+    /// it as this one's is what mints a duplicate key for the item the second
+    /// endpoint of an account already has.
+    #[test]
+    fn a_copy_on_offer_is_not_read_as_a_holding_of_the_side_it_is_offered_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
+
+        left.write(vec![
+            ReplicaWriteOp::StoreObject {
+                object: ReplicaObject {
+                    hash: ReplicaHash("abcd0000".into()),
+                    size: 3,
+                },
+                body: Some(b"abc".to_vec()),
+            },
+            ReplicaWriteOp::UpsertPlacement(linked("INBOX", "1", "mid:a", Some("abcd0000"))),
+        ])
+        .unwrap();
+
+        let mut right = PimdirStore::open(dir.path()).unwrap().for_source("right");
+        assert_eq!(
+            load_side(&right, "INBOX").unwrap().len(),
+            1,
+            "the projection offers right the copy left holds",
+        );
+
+        let held = HeldStore::open(&mut right, "INBOX").unwrap();
+        let loaded = held
+            .load(&ReplicaCollectionId("INBOX".into()), &ReplicaLoadScope::All)
+            .unwrap();
+        assert!(
+            loaded.placements.is_empty(),
+            "and an upgrade reads right as holding nothing; it read {:?}",
+            loaded.placements,
+        );
+
+        let held = HeldStore::open(&mut left, "INBOX").unwrap();
+        let loaded = held
+            .load(&ReplicaCollectionId("INBOX".into()), &ReplicaLoadScope::All)
+            .unwrap();
+        assert_eq!(loaded.placements.len(), 1, "while left still holds its own",);
     }
 }

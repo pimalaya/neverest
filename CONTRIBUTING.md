@@ -21,7 +21,9 @@ Neverest is an application: it writes no protocol and no storage logic of its ow
 - service discovery consumed by the wizard belongs in [io-pim-discovery](https://github.com/pimalaya/io-pim-discovery);
 - configuration shape, the per-kind derivations, the sync orchestration and the report live here.
 
-The shared clap, printer, prompt and spinner primitives come from [pimalaya/cli](https://github.com/pimalaya/cli), the TOML loader and secret resolution from [pimalaya/config](https://github.com/pimalaya/config), and the TCP and TLS plumbing from [pimalaya/stream](https://github.com/pimalaya/stream). To build against a local checkout of a Pimalaya crate, add a `<crate>.path = "../<repo>"` entry to `[patch.crates-io]`.
+The shared clap, printer, prompt and spinner primitives come from [pimalaya/cli](https://github.com/pimalaya/cli), the TOML loader and secret resolution from [pimalaya/config](https://github.com/pimalaya/config), and the TCP and TLS plumbing from [pimalaya/stream](https://github.com/pimalaya/stream).
+
+To build against a local checkout of a Pimalaya crate, add a `<crate>.path = "../<repo>"` entry to `[patch.crates-io]`.
 
 ## Feature matrix
 

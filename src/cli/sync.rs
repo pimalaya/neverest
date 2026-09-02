@@ -111,6 +111,7 @@ pub struct SyncCommand {
 }
 
 impl SyncCommand {
+    /// Reconciles the account, or plans the run under `--dry-run`.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -165,7 +166,7 @@ impl SyncCommand {
             self.accept_mode,
         )?;
 
-        // Read before printing, which consumes the report.
+        // NOTE: read before printing, which consumes the report.
         let exit = Exit::from(&report);
         printer.out(report)?;
 
@@ -173,7 +174,7 @@ impl SyncCommand {
     }
 }
 
-/// Takes the store's advisory `sync.lock` for the whole run.
+/// Takes the store's advisory sync.lock for the whole run.
 ///
 /// Waits up to `timeout` so cron ticks and connector-triggered scoped runs
 /// serialize instead of failing, then errors out. The kernel releases the

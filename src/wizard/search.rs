@@ -80,8 +80,11 @@ pub enum DiscoveredKind {
 /// A discovered TCP service endpoint (IMAP or SMTP).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TcpEndpoint {
+    /// The host the service answers on.
     pub host: String,
+    /// The port it answers on.
     pub port: u16,
+    /// How the connection is secured, which decides the URL scheme written.
     pub security: DiscoverySecurity,
 }
 

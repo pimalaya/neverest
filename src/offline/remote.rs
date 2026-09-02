@@ -170,6 +170,7 @@ pub struct RejectedPush {
 }
 
 impl<'a> PimRemote<'a> {
+    /// Binds a remote to the pool it calls through and the namespace it strips.
     pub fn new(pool: &'a mut Pool, blob: PimdirBlobs, namespace: impl Into<String>) -> Self {
         let kind = resolve_kind(pool);
         Self {
@@ -454,6 +455,7 @@ pub struct CachedFetchRemote<'a> {
 }
 
 impl<'a> CachedFetchRemote<'a> {
+    /// Serves fetches from a round's cache, falling back to the wire.
     pub fn new(cache: &'a HashMap<FetchKey, ReplicaFetchedItem>, fallback: PimRemote<'a>) -> Self {
         Self { cache, fallback }
     }
@@ -661,9 +663,9 @@ fn fetch_one_full(
         .finish()
         .with_context(|| format!("Commit body {} in {collection} error", handle.as_str()))?;
 
-    // No kind here has an empty body, and storing one names it by the digest of
-    // nothing: every empty body a server hands back resolves to that identity,
-    // each after the first filed as another copy of it.
+    // NOTE: no kind here has an empty body, and storing one names it by the
+    // digest of nothing: every empty body a server hands back resolves to that
+    // identity, each after the first filed as another copy of it.
     if size == 0 {
         bail!(
             "Server returned an empty body for {} in {collection}",
@@ -725,9 +727,10 @@ pub(crate) fn hydrate_batch(
 
     match batched {
         Ok(()) => {
-            // A short batch is not a batch that succeeded: the engine would
-            // record nothing for the rest and ask again every run. A CardDAV
-            // server was seen answering each card's ETag with a 404 body.
+            // NOTE: a short batch is not a batch that succeeded: the engine
+            // would record nothing for the rest and ask again every run. A
+            // CardDAV server was seen answering each card's ETag with a 404
+            // body.
             let fetched: BTreeSet<String> = items
                 .iter()
                 .map(|item| item.handle.as_str().to_owned())

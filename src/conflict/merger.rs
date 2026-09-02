@@ -122,8 +122,8 @@ impl<'a> Merger<'a> {
     fn command(&self) -> Command {
         match self.command {
             CommandConfig::Shell(line) => {
-                // A shell line is a line, so a path holding a space becomes
-                // two arguments unless it is quoted here.
+                // NOTE: a shell line is a line, so a path holding a space
+                // becomes two arguments unless it is quoted here.
                 let paths = self.paths(quote);
 
                 match substitute(line, &paths) {
@@ -132,8 +132,8 @@ impl<'a> Merger<'a> {
                 }
             }
             CommandConfig::Argv { program, args } => {
-                // No shell in between, so a path is one argument whatever it
-                // holds.
+                // NOTE: no shell in between, so a path is one argument whatever
+                // it holds.
                 let paths = self.paths(|path| path.display().to_string());
 
                 let mut command = Command::new(program);

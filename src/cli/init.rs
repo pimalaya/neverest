@@ -25,6 +25,7 @@ use crate::{
 pub struct InitCommand {}
 
 impl InitCommand {
+    /// Opens every endpoint, then creates the account's empty store.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -69,13 +70,13 @@ impl InitCommand {
             .with_context(|| format!("Create replica dir {}", replica.display()))?;
         PimdirStore::open(&replica)
             .with_context(|| format!("Create pimdir store {}", replica.display()))?;
-        // Stamped here, so the first sync compares against what `init`
+        // NOTE: stamped here, so the first sync compares against what `init`
         // opened rather than against nothing.
         StoreState::stamp(&replica, Some(&mode))
             .with_context(|| format!("Stamp store state {}", replica.display()))?;
         s.success("Created replica store");
 
-        // Nothing can refuse a first `one-way` run, so saying what the
+        // NOTE: nothing can refuse a first `one-way` run, so saying what the
         // account will do stands in for a confirmation.
         printer.out(InitOutput {
             account: name,
@@ -89,6 +90,7 @@ impl InitCommand {
 /// What `neverest init` reports: the store it created, and what the account
 /// will do once a sync runs against it.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct InitOutput {
     /// The account that was initialized.
     pub account: String,

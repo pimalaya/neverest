@@ -203,7 +203,8 @@ impl DavClient {
         }
         .with_context(|| format!("Cannot list the {kind} collections"))?;
 
-        // The path segment is the key: a display name may collide or change.
+        // NOTE: the path segment is the key: a display name may collide or
+        // change.
         Ok(ids
             .into_iter()
             .map(|id| Collection {
@@ -269,7 +270,8 @@ impl DavClient {
                 .with_context(|| format!("Cannot list {collection}"));
         }
 
-        // An empty checkpoint is the listing fallback's, meaning no cursor.
+        // NOTE: an empty checkpoint is the listing fallback's, meaning no
+        // cursor.
         let token = cursor
             .filter(|cursor| !cursor.is_empty())
             .map(String::from_utf8_lossy)
@@ -342,7 +344,8 @@ impl DavClient {
         Ok(Enumeration {
             items: delta.changed.into_iter().map(entry).collect(),
             vanished: Vec::new(),
-            // A partial snapshot read as complete deletes members left out.
+            // NOTE: a partial snapshot read as complete deletes members left
+            // out.
             complete: !delta.truncated,
             checkpoint: Vec::new(),
         })

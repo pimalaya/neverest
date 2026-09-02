@@ -34,12 +34,12 @@ change: duplicate-link-id-freeze
       pushed; drop the right side's checkpoint, sync, assert nothing is appended
       to A.
 - [x] `cargo test --all-features`, `cargo clippy --all-features --all-targets`,
-      `cargo fmt`. *(clippy and fmt clean; 70 unit tests green and one failing,
-      see the blocker below.)*
+      `cargo fmt`. *(all clean, and the eight live tests pass against
+      Radicale and the two Stalwart instances.)*
 - [x] Fold `delta.md` into `cairn/spec/sync.md`; add the `cairn/log` entry; mark
-      the change `landed` and archive it. *(Spec folded and log written; the
-      status stays `active` until the blocker below is cleared, since the suite
-      is not green.)*
+      the change `landed`. *(Spec folded, log written, and the status moved to
+      `landed` once the upstream floor below was cleared and the suite went
+      green.)*
 
 ## Addendum: unblocking the first task
 
@@ -63,19 +63,18 @@ task above cannot be done as written. Instead:
       until someone runs it against them. *(Run: it passes against both
       instances, so the whole chain is proven end to end rather than assumed.)*
 
-## Blocker: the rekey is frozen by io-pimdir's floor
+## Cleared: the rekey is no longer frozen by io-pimdir's floor
 
-- [ ] Upstream, in io-pimdir: `save_bindings_diff` compares the hub before and
+- [x] Upstream, in io-pimdir: `save_bindings_diff` compared the hub before and
       after a whole write batch, so a rekey's `DropPlacement { Superseded }`
-      plus its upsert under the new handle collapse into "same source,
-      different handle". The freeze floor then keeps the old handle and records
-      the new one as ambiguous, so a UIDVALIDITY bump freezes every item of the
-      collection instead of carrying it over. io-replica states that batch is
-      order-insensitive and marks the drops superseded precisely so a storage
-      can tell a renumbering from a delete; the diff has to carry that knowledge
-      down to the binding, not only to the item. `a_rekey_carries_state_by_link_id_and_bumps_the_generation_once`
-      is the failing witness here.
-- [ ] Once it is fixed: re-run the suite, mark this change `landed` and archive
-      it.
-- [ ] Drop the `[patch.crates-io]` block once io-replica and io-pimdir publish
-      (the same tail `retention-sweep` and `submit-intent` still carry).
+      plus its upsert under the new handle collapsed into "same source,
+      different handle". The freeze floor then kept the old handle and recorded
+      the new one as ambiguous, so a UIDVALIDITY bump froze every item of the
+      collection instead of carrying it over. Fixed in io-pimdir 0.4.0: a
+      handle-space rebuild supersedes the handle it replaces, per handle, so a
+      renumbered collection carries over while a genuine second copy is still
+      refused.
+- [x] Re-ran `tests/duplicates.rs` against the two Stalwart instances: it
+      passes, as do the seven other live tests.
+- [x] Dropped the `[patch.crates-io]` block, io-replica 0.5.0, io-pimdir 0.4.0,
+      io-webdav 0.3.0, ical-rs 0.5.0 and vcard-rs 0.4.0 all being published.

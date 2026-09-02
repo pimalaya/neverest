@@ -185,8 +185,8 @@ impl Kind {
             };
         };
 
-        // The last separator, not the first: a `Message-ID` may legally carry
-        // a `#` (RFC 5322 `atext`) and a handle may not.
+        // NOTE: the last separator, not the first: a `Message-ID` may legally
+        // carry a `#` (RFC 5322 `atext`) and a handle may not.
         let (hint, mint) = minted.rsplit_once(MINT_SEPARATOR).unwrap_or(("", minted));
 
         LinkId {

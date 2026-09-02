@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// delimiter and SPECIAL-USE attributes, JMAP rights, DAV privileges, …)
 /// is intentionally absent.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "camelCase")]
 pub struct Collection {
     /// Backend-specific identifier: a JMAP id, a DAV href, the name on IMAP.
     pub id: String,

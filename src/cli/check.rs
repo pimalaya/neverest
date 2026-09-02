@@ -25,6 +25,7 @@ use crate::{account::Account, client, config::Config};
 pub struct CheckCommand {}
 
 impl CheckCommand {
+    /// Opens every endpoint the account declares and reports what answered.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -43,8 +44,8 @@ impl CheckCommand {
 
         let mode = account_config.mode()?.to_string();
 
-        // Every credential at once, so a check costs one unlock per password
-        // command rather than one per endpoint.
+        // NOTE: every credential at once, so a check costs one unlock per
+        // password command rather than one per endpoint.
         let account = Account::resolve(&account_config)?;
 
         let mut sources = Vec::new();
@@ -82,6 +83,7 @@ fn check_source(label: &str, account: &Account) -> Result<SourceCheck> {
 /// A source that did not answer is not in here: the command stops on the
 /// first failure, so reaching this output means every endpoint opened.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct CheckOutput {
     /// The account that was checked.
     pub account: String,
@@ -107,6 +109,7 @@ impl fmt::Display for CheckOutput {
 
 /// One endpoint that answered, and how much it holds.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SourceCheck {
     /// The endpoint's pimdir source id.
     pub source: String,

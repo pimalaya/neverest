@@ -13,7 +13,9 @@ use std::{
 
 /// One accumulator: a yield kind's service count and total nanoseconds.
 pub struct Stat {
+    /// How many times that kind was serviced.
     pub count: AtomicU64,
+    /// How long servicing it took, summed.
     pub nanos: AtomicU64,
 }
 
@@ -24,6 +26,7 @@ impl Stat {
             nanos: AtomicU64::new(0),
         }
     }
+    /// Records one service of that kind and what it cost.
     pub fn add(&self, dur: Duration) {
         self.count.fetch_add(1, Ordering::Relaxed);
         self.nanos
@@ -37,11 +40,17 @@ impl Stat {
     }
 }
 
+/// Time spent reading placements out of the store.
 pub static LOAD: Stat = Stat::new();
+/// Time spent writing the engine's own batches back.
 pub static WRITE: Stat = Stat::new();
+/// Time spent listing a collection on a remote.
 pub static ENUMERATE: Stat = Stat::new();
+/// Time spent fetching bodies.
 pub static FETCH: Stat = Stat::new();
+/// Time spent pushing changes to a remote.
 pub static PUSH: Stat = Stat::new();
+/// Time spent resolving link ids against the store.
 pub static LOOKUP: Stat = Stat::new();
 
 /// Whether profiling is enabled (`NEVEREST_PROFILE` set to a non-empty value).

@@ -114,9 +114,9 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.18.0"
+version = "1.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce2b2dcc879c3bae0d371e77c99f2238400ef24ec001394befa67b6e543add9e"
+checksum = "b281d307588d634de920874890732659e2e7672f72b5e10e81badc1a8a83621e"
 dependencies = [
  "aws-lc-sys",
  "zeroize",
@@ -124,9 +124,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-sys"
-version = "0.44.0"
+version = "0.45.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f09fae7be8bb3174e05c6afdb34199e6dc0c7c04ba9fa237b1967adfbde27483"
+checksum = "9bff6c3b54fad79a2e60b8102caf565819711497c1f5f092f49508e2f5c31b27"
 dependencies = [
  "cc",
  "cmake",
@@ -966,8 +966,9 @@ dependencies = [
 
 [[package]]
 name = "ical-rs"
-version = "0.2.0"
-source = "git+https://github.com/pimalaya/ical#7d8482ae09bc5451513b3d0e0ab61bcfa2b76e87"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d4b5f716aef1e2991c325d70daf7810d16c46662a24f438b239750c2aefc0068"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",
@@ -1209,8 +1210,9 @@ dependencies = [
 
 [[package]]
 name = "io-pimdir"
-version = "0.3.0"
-source = "git+https://github.com/pimalaya/io-pimdir#2934bdbdf4165b85d2fd63211092403c2a710a41"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af1de77240dff400d113794f1fc3986e580744a255fabfb869cba5fd0f4f677a"
 dependencies = [
  "blake3",
  "fs4",
@@ -1234,8 +1236,9 @@ dependencies = [
 
 [[package]]
 name = "io-replica"
-version = "0.4.2"
-source = "git+https://github.com/pimalaya/io-replica#3a71ebd25b87c418c04fc2150d0ddcfa83b5ae1d"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d5bb3465f40bdfb5ea1a13cf7e0b2f3d97cbcf651e019cce729ad733e3b33ae"
 dependencies = [
  "log",
  "thiserror",
@@ -1279,8 +1282,9 @@ dependencies = [
 
 [[package]]
 name = "io-webdav"
-version = "0.2.1"
-source = "git+https://github.com/pimalaya/io-webdav#c569f81259746ea5744b2cb374582680a4ac82a2"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a72f27c4dbddf10a4b4e65f837421b88a1f1f0c0644cb1ae3473311e2719ed13"
 dependencies = [
  "anyhow",
  "io-http",
@@ -1453,9 +1457,9 @@ dependencies = [
 
 [[package]]
 name = "libredox"
-version = "0.1.21"
+version = "0.1.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7955dfc218a8afb29dfeffd540e3a6e96baeb94fe7138228dd7cc6937fbbf96"
+checksum = "8d8f1ea3f21fd3405dcaf6c9b5c1630af9afc422d9073ea39c5f6d6c772e08ed"
 dependencies = [
  "libc",
 ]
@@ -1563,9 +1567,9 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mio"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30d65c71f1ce40ab09135ce117d742b9f8a19ff91a41a8b57ed50bc2de59c427"
+checksum = "4b18443e9c262bfe8fa82f51666e2642c53393f7e5c27b3e1aeab922cff5b9d8"
 dependencies = [
  "libc",
  "log",
@@ -1592,7 +1596,7 @@ dependencies = [
 
 [[package]]
 name = "neverest"
-version = "1.0.0-rc"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1973,9 +1977,9 @@ dependencies = [
 
 [[package]]
 name = "quick-xml"
-version = "0.41.0"
+version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+checksum = "41b1177fdf999d2321d3fb46ff47159d9c1fb9ad66a4879f8c50a0b504615e9b"
 dependencies = [
  "memchr",
 ]
@@ -2488,9 +2492,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "socket2"
@@ -2675,9 +2679,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "toml"
-version = "1.1.4+spec-1.1.0"
+version = "1.1.5+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aace63f4bbcdfc2c965b059de67119c89c4017a70d633be6c104910f67056f5"
+checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -2800,8 +2804,9 @@ dependencies = [
 
 [[package]]
 name = "vcard-rs"
-version = "0.2.1"
-source = "git+https://github.com/pimalaya/vcard#92cef44148014ebfd060d882e0776e028d7f65f4"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "255606ce9ec8950425d1dedd846cf11ef53c6705627025821d664a845eeeda3f"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",

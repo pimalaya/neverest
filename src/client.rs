@@ -40,8 +40,11 @@ use crate::{
 /// delta, where `vanished` names the removals. Link ids resolve later at
 /// the `Meta` tier, so an entry carries no summary.
 pub struct Enumeration {
+    /// The members the listing answered with, in the server's own order.
     pub items: Vec<EnumEntry>,
+    /// The handles a delta reports as removed, empty on a full snapshot.
     pub vanished: Vec<String>,
+    /// Whether the listing is the whole collection rather than a delta.
     pub complete: bool,
     /// The next sync's cursor, in the backend's own encoding.
     pub checkpoint: Vec<u8>,
@@ -52,7 +55,9 @@ pub struct Enumeration {
 /// A backend with no flag concept reports an empty set, which the engine
 /// reads as known-empty and never as unknown.
 pub struct EnumEntry {
+    /// The member's handle on its own backend: an IMAP UID, a DAV href.
     pub id: String,
+    /// The flags the backend currently reports on it.
     pub flags: BTreeSet<Flag>,
     /// The current content revision (a DAV ETag), on a mutable-content
     /// backend.

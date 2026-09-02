@@ -24,6 +24,7 @@ use crate::{
     json_schema,
 };
 
+/// The command line neverest parses, and the flags every subcommand shares.
 #[derive(Parser, Debug)]
 #[command(name = env!("CARGO_PKG_NAME"))]
 #[command(author, version, about)]
@@ -43,14 +44,18 @@ pub struct Cli {
     #[arg(short, long = "config", global = true, env = "NEVEREST_CONFIG")]
     #[arg(value_name = "PATH", value_parser = path_parser, value_delimiter = ':')]
     pub config_paths: Vec<PathBuf>,
+    /// The account to run against, defaulting to the one claiming `default`.
     #[command(flatten)]
     pub account: AccountFlag,
+    /// Whether to print the command payload as JSON rather than as text.
     #[command(flatten)]
     pub json: JsonFlag,
+    /// How verbose the logs on stderr are.
     #[command(flatten)]
     pub log: LogFlags,
 }
 
+/// Every verb the binary offers, each one its own command type.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     Check(CheckCommand),

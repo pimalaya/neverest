@@ -14,7 +14,7 @@ use crate::item::{address::Address, flag::Flag};
 
 /// Enough of a message to render a list entry without fetching its body.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "camelCase")]
 pub struct ItemSummary {
     /// Backend-specific identifier: an IMAP UID, a JMAP email id.
     pub id: String,

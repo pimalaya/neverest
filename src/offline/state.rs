@@ -36,12 +36,16 @@ const FILE: &str = "neverest.json";
 /// whether a run discards anything.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ModeStamp {
+    /// How many sources the account declared.
     #[serde(default)]
     pub sources: usize,
+    /// How many targets it declared, zero being the offline replica.
     #[serde(default)]
     pub targets: usize,
+    /// Whether the sources overwrote the other side.
     #[serde(default)]
     pub one_way: bool,
+    /// Whether the store kept bodies.
     #[serde(default)]
     pub retain: bool,
 }
@@ -57,6 +61,10 @@ impl From<&AccountMode> for ModeStamp {
     }
 }
 
+/// The sidecar neverest keeps beside a store, naming what wrote it.
+///
+/// It is what tells a store this build can read from one an earlier draft of
+/// the format wrote, and it carries the mode every run is compared against.
 #[derive(Debug, Default, Deserialize, Serialize)]
 pub struct StoreState {
     /// The collection-id layout the store was written with.

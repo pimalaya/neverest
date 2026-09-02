@@ -17,6 +17,7 @@ use crate::sync::hunk::{CollectionHunk, ItemHunk};
 /// reconciled its collections and still parked something is neither a
 /// success nor a failure.
 #[derive(Debug, Default, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SyncOutput {
     /// The account the run reconciled.
     pub account: String,
@@ -141,6 +142,7 @@ impl SyncOutput {
 /// the write that could not land, retried and re-reported every run. Giving
 /// one copy a `UID` of its own is the user's call, made in their own client.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct RefusedDuplicate {
     /// The side that refused the write.
     pub side: String,
@@ -170,6 +172,7 @@ impl fmt::Display for RefusedDuplicate {
 /// keeps meaning the run wrote nothing. The store still holds the change and
 /// the next run retries; a refusal repeated forever is one a person acts on.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct RejectedWrite {
     /// The side that refused the write.
     pub side: String,
@@ -205,6 +208,7 @@ impl fmt::Display for RejectedWrite {
 /// they touched different fields; whose edit wins is itself an edit, staged
 /// through the pimdir queue. Only mutable-content kinds reach this state.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ItemConflict {
     /// The side the divergence is against.
     pub side: String,
@@ -230,6 +234,7 @@ impl fmt::Display for ItemConflict {
 
 /// One collection's applied count from the pre-sync queue drain.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct DrainedQueue {
     /// The collection the drained actions were anchored on.
     pub collection: String,
@@ -252,6 +257,7 @@ impl fmt::Display for DrainedQueue {
 /// It stays queryable in the store until repaired, and every run reports it
 /// again.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct ParkedQueueAction {
     /// The queue row's global append id.
     pub id: i64,
@@ -286,6 +292,7 @@ impl fmt::Display for ParkedQueueAction {
 /// Acknowledged when `error` is `None`, its queue row dropped and the body's
 /// pin released; parked when the failure is permanent, pending otherwise.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct SubmitEntry {
     /// The queue row's global append id.
     pub id: i64,
@@ -316,6 +323,7 @@ impl fmt::Display for SubmitEntry {
 /// the row goes with its reference, and the bytes are the collector's to take
 /// once nothing else points at them, so `bytes` is what this run freed.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PurgedItems {
     /// Retained items deleted for good.
     pub items: usize,
@@ -341,6 +349,7 @@ impl fmt::Display for PurgedItems {
 
 /// One content-key collision group; first id in `ids` is the kept one.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct MessageCollision {
     /// The side the colliding envelopes were read from.
     pub side: String,
@@ -385,6 +394,7 @@ impl fmt::Display for MessageCollision {
 
 /// One level of the patch a run applied, collection or item.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PatchOutcome<H> {
     /// The hunks the run applied at that level, in the order it applied
     /// them.
@@ -399,6 +409,7 @@ impl<H> Default for PatchOutcome<H> {
 
 /// One hunk of a patch, and whether applying it worked.
 #[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct PatchEntry<H> {
     /// The change the run tried to make.
     pub hunk: H,
@@ -407,6 +418,7 @@ pub struct PatchEntry<H> {
 }
 
 impl<H> PatchEntry<H> {
+    /// Records one hunk and, where the apply failed, how it read.
     pub fn new(hunk: H, error: Option<anyhow::Error>) -> Self {
         Self {
             hunk,

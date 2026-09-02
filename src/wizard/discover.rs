@@ -9,10 +9,10 @@
 //! configuration; only backends compiled into this build are proposed.
 //!
 //! It discovers one account with one source, in the direct-backend sugar
-//! (`imap.server = …`): the offline replica, which is the common case and
-//! reads offline with no further setting. A second kind, a mirror and a
-//! fan-in are all written by hand against config.sample.toml, and so is a
-//! change to an account already configured.
+//! (`imap.server = …`): the offline replica, which is the common case.
+//!
+//! A second kind, a mirror and a fan-in are written by hand against
+//! config.sample.toml, and so is a change to an account already configured.
 
 use anyhow::{Result, bail};
 use pimalaya_cli::{prompt, spinner::Spinner};

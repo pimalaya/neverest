@@ -40,8 +40,11 @@
 
 use std::{fs, io::Write, path::Path, process::Command};
 
-use chrono::Utc;
-use io_pimdir::{PimdirProducer, PimdirReader, codec::PimdirAction};
+use io_pimdir::{
+    client::{producer::PimdirProducer, reader::PimdirReader},
+    codec::PimdirAction,
+    object::PimdirObject,
+};
 
 const DAV: &str = "http://127.0.0.1:5232";
 const USER: &str = "test";
@@ -450,19 +453,17 @@ fn queue_update(state: &Path, account: &str, book: &str, link_id: &str, body: &s
     let hash = blobs.hash(body.as_bytes());
     let mut writer = blobs.writer().expect("open a blob writer");
     writer.write_all(body.as_bytes()).expect("write the body");
-    let size = writer.commit(&hash).expect("commit the body");
+    let object = PimdirObject {
+        hash: hash.clone(),
+        size: writer.commit(&hash).expect("commit the body") as usize,
+    };
 
     let mut producer = PimdirProducer::open(&dir, "carddav-test").expect("open the store to stage");
     producer
         .enqueue(
             &collection,
-            &PimdirAction::Update {
-                seq,
-                object: hash,
-                meta: None,
-            },
-            Some(size),
-            &Utc::now().to_rfc3339(),
+            &PimdirAction::Update { seq, object: hash },
+            Some(&object),
         )
         .expect("stage the edit");
 }

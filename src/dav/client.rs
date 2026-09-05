@@ -620,7 +620,7 @@ fn resource_id(kind: DavKind, link: LinkId<'_>, body: &[u8]) -> String {
         (Some(uid), Some(mint)) => format!("{}-{}", sanitize(uid), sanitize(mint)),
         (None, Some(mint)) => sanitize(mint),
         (None, None) => {
-            let (link, _, _) = kind.item_kind().parse_body(body, body.len() as u64);
+            let link = kind.item_kind().parse_body(body, body.len() as u64).link_id;
             sanitize(link.0.trim_start_matches("hash:"))
         }
     };

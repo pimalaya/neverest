@@ -36,8 +36,12 @@
 
 use std::{fs, io::Write, path::Path, process::Command};
 
-use io_pimdir::{PimdirBlobs, PimdirProducer, PimdirReader, codec::PimdirAction};
-use io_replica::collection::ReplicaCollectionId;
+use io_pimdir::{
+    client::{blobs::PimdirBlobs, producer::PimdirProducer, reader::PimdirReader},
+    codec::PimdirAction,
+    collection::PimdirCollectionId,
+    object::PimdirObject,
+};
 
 const IMAP_ROOT: &str = "imap://127.0.0.1:143";
 const IMAP_USER: &str = "test@pimalaya.org";
@@ -199,7 +203,7 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
     let live = links(&store, MAIL_COLLECTION);
     assert_eq!(live.len(), 1, "the expunged message left the live listing");
     let retained = reader
-        .list_retained(&ReplicaCollectionId(MAIL_COLLECTION.into()), None, 10)
+        .list_retained(PimdirCollectionId(MAIL_COLLECTION.into()), None, 10)
         .expect("list the retained mail");
     assert!(
         retained.iter().any(|item| item.link_id.0.contains(GONE)),
@@ -274,18 +278,16 @@ fn edit_card_in_store(store: &Path, body: &str) {
     let blobs = PimdirBlobs::open(store, producer.hash_algo());
     let mut writer = blobs.writer().expect("blob writer");
     writer.write_all(body.as_bytes()).unwrap();
-    let size = writer.commit(&hash).expect("commit body");
+    let object = PimdirObject {
+        hash: hash.clone(),
+        size: writer.commit(&hash).expect("commit the body") as usize,
+    };
 
     producer
         .enqueue(
             CARD_COLLECTION,
-            &PimdirAction::Update {
-                seq,
-                object: hash,
-                meta: None,
-            },
-            Some(size),
-            "2026-09-02T10:00:00Z",
+            &PimdirAction::Update { seq, object: hash },
+            Some(&object),
         )
         .expect("enqueue the edit");
 }

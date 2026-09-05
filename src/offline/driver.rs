@@ -1,7 +1,7 @@
 //! # Sync orchestration
 //!
 //! Per-account, per-namespace and per-collection orchestration over the
-//! io-replica engine.
+//! io-pimdir engine.
 //!
 //! Each collection's two sides are the two sources of one shared collection in
 //! a pimdir store, one [`PimdirSourceStore`] handle per side over the same
@@ -18,7 +18,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::Write,
     mem,
@@ -36,27 +36,27 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use crossbeam_queue::SegQueue;
 use io_pimdir::{
-    PimdirBlobs, PimdirError, PimdirProducer, PimdirSourceStore, PimdirStore, codec::PimdirAction,
-};
-use io_replica::{
-    change::ReplicaWriteOp,
-    client::{ReplicaRemote, ReplicaStorage},
-    collection::ReplicaCollectionId,
-    coroutine::{ReplicaArg, ReplicaCoroutine, ReplicaCoroutineState, ReplicaYield},
-    hub::ReplicaSourceBinding,
-    object::ReplicaHash,
+    change::PimdirWriteOp,
+    client::{
+        PimdirError, PimdirSourceStore, PimdirStore, blobs::PimdirBlobs, producer::PimdirProducer,
+    },
+    codec::PimdirAction,
+    collection::PimdirCollectionId,
+    hub::PimdirBinding,
+    load::PimdirLoadScope,
+    object::{PimdirHash, PimdirObject},
     placement::{
-        ReplicaBase, ReplicaFlags, ReplicaHandle, ReplicaLevel, ReplicaLinkId, ReplicaMeta,
-        ReplicaPlacement, ReplicaSortKey, ReplicaStatus,
+        PimdirBase, PimdirFlags, PimdirHandle, PimdirLevel, PimdirLinkId, PimdirPlacement,
+        PimdirSortKey, PimdirStatus,
     },
-    rekey::{ReplicaRekey, ReplicaRekeyReport},
-    remote::{ReplicaFetchedItem, ReplicaTier},
-    storage::ReplicaLoadScope,
+    rekey::{PimdirRekey, PimdirRekeyReport},
+    remote::{PimdirFetchedItem, PimdirTier},
+    summary::PimdirSummary,
     sync::{
-        ReplicaConflictPolicy, ReplicaDeletePolicy, ReplicaEvent, ReplicaPushRights, ReplicaSync,
-        ReplicaSyncOptions, ReplicaSyncReport,
+        PimdirConflictPolicy, PimdirPushRights, PimdirSync, PimdirSyncEvent, PimdirSyncOptions,
+        PimdirSyncReport,
     },
-    upgrade::ReplicaUpgrade,
+    upgrade::PimdirUpgrade,
 };
 use log::{debug, info, warn};
 use pimalaya_cli::spinner::Spinner;
@@ -70,14 +70,14 @@ use crate::{
     item::flag::Flag,
     kind::{Kind, LinkId, merge::Merged},
     offline::{
-        drive, pipe,
+        pipe,
         remote::{
             BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, RefusedCreate, RejectedPush,
             hydrate_batch, resolve_kind, wire_name,
         },
-        source_id,
+        run_verb, source_id,
         state::StoreState,
-        storage::{HeldStore, HydrationSide, hydration_targets, load_side, projection_view},
+        storage::{HydrationSide, hydration_targets, load_side, projection_view},
         submit,
     },
     sync::{
@@ -146,7 +146,7 @@ fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
 fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
     match PimdirStore::open(dir) {
         Ok(store) => Ok(store.for_account(account).for_source(source)),
-        Err(err @ (PimdirError::Version { .. } | PimdirError::Unreconcilable { .. })) => Err(
+        Err(err @ (PimdirError::Version { .. } | PimdirError::Stale { .. })) => Err(
             anyhow::Error::new(err).context(format!(
                 "The replica store predates this neverest; drop it with `neverest sync --reset -a {account}` and let it resync"
             )),
@@ -239,11 +239,11 @@ impl Authority {
     /// `remote` is the endpoint and `local` is the store. Neither authority
     /// records a conflict, which is the point: under `one-way` there is nothing
     /// for a user to resolve.
-    fn conflict_policy(self) -> ReplicaConflictPolicy {
+    fn conflict_policy(self) -> PimdirConflictPolicy {
         match self {
-            Self::Shared => ReplicaConflictPolicy::Manual,
-            Self::Endpoint => ReplicaConflictPolicy::PreferRemote,
-            Self::Store => ReplicaConflictPolicy::PreferLocal,
+            Self::Shared => PimdirConflictPolicy::Manual,
+            Self::Endpoint => PimdirConflictPolicy::PreferRemote,
+            Self::Store => PimdirConflictPolicy::PreferLocal,
         }
     }
 
@@ -271,7 +271,7 @@ struct SourceCtx {
 }
 
 impl SourceCtx {
-    fn conflict_policy(&self) -> ReplicaConflictPolicy {
+    fn conflict_policy(&self) -> PimdirConflictPolicy {
         self.authority.conflict_policy()
     }
 
@@ -285,13 +285,13 @@ impl SourceCtx {
             && (rights.flags || rights.content || rights.add || rights.remove)
     }
 
-    /// The side's configured permissions as io-replica's per-kind push rights.
+    /// The side's configured permissions as io-pimdir's per-kind push rights.
     ///
     /// A mapping rather than a policy, the two vocabularies lining up one to
     /// one. The engine keeps a forbidden kind pending while the others still
     /// propagate, which is what makes a side read-only for some operations.
-    fn push_rights(&self) -> ReplicaPushRights {
-        ReplicaPushRights {
+    fn push_rights(&self) -> PimdirPushRights {
+        PimdirPushRights {
             flags: self.perms.flag.update,
             content: self.perms.item.update,
             add: self.perms.item.create,
@@ -521,7 +521,7 @@ fn run_pair(
     let mut right_store = open_store(work_dir, &right_name, account_name)?;
     let blobs = left_store.blobs();
 
-    drain_queues(&mut left_store, namespace, report);
+    drain_queues(&mut left_store, report);
 
     // NOTE: declared, not derived: `retain` says whether the store is a
     // replica, and `relay` is only how a crossing gets there when it is not.
@@ -668,7 +668,7 @@ fn run_pair(
 }
 
 /// A collection's spine result: its name and the bodies to hydrate.
-type CollectionPlan = (String, Vec<(ReplicaHandle, u64)>);
+type CollectionPlan = (String, Vec<(PimdirHandle, u64)>);
 
 /// The local, one-source sync, run as three account-wide phases.
 ///
@@ -720,7 +720,7 @@ fn run_local(
         ctxs.len()
     ));
 
-    drain_queues(&mut stores[0], source_name, report);
+    drain_queues(&mut stores[0], report);
 
     let raw = ctxs[0].pool.primary().media_type();
     let kind = Kind::from_media_type(raw)
@@ -897,7 +897,7 @@ fn phase1_spine(
 /// Reconciles one collection's spine, without hydration.
 ///
 /// Returns the not-yet-`Full` bodies to hydrate, each with the size its local
-/// envelope meta carries so the download runs largest-first, plus the report
+/// mail summary carries so the download runs largest-first, plus the report
 /// patches. A dry run stops after itemizing, leaving the targets empty.
 fn collection_spine(
     collection: &str,
@@ -906,7 +906,7 @@ fn collection_spine(
     blobs: &PimdirBlobs,
     store_dir: &Path,
     dry_run: bool,
-) -> Result<(Vec<(ReplicaHandle, u64)>, SyncOutput)> {
+) -> Result<(Vec<(PimdirHandle, u64)>, SyncOutput)> {
     let mut report = SyncOutput::default();
 
     let before = flag_snapshot(store, collection, &ctx.name)?;
@@ -945,14 +945,14 @@ fn collection_spine(
     itemize_refused(&ctx.name, mem::take(&mut ctx.refused), &mut report);
     itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
 
-    let mut targets: Vec<(ReplicaHandle, u64)> = Vec::new();
+    let mut targets: Vec<(PimdirHandle, u64)> = Vec::new();
     for placement in projection_view(store, collection, &ctx.name)
         .with_context(|| format!("Project {} {collection}", &ctx.name))?
     {
-        if placement.status == ReplicaStatus::Tombstone || placement.object.is_some() {
+        if placement.status == PimdirStatus::Tombstone || placement.object.is_some() {
             continue;
         }
-        let size = meta_size(&placement.meta).unwrap_or(0) as u64;
+        let size = summary_size(&placement.summary).unwrap_or(0) as u64;
         targets.push((placement.handle, size));
     }
     Ok((targets, report))
@@ -968,15 +968,15 @@ fn phase2_hydrate(
     plans: &[CollectionPlan],
     ctxs: &mut [SourceCtx],
     blobs: &PimdirBlobs,
-) -> Result<HashMap<FetchKey, ReplicaFetchedItem>> {
-    let mut batches: Vec<(u64, String, Vec<ReplicaHandle>)> = Vec::new();
+) -> Result<HashMap<FetchKey, PimdirFetchedItem>> {
+    let mut batches: Vec<(u64, String, Vec<PimdirHandle>)> = Vec::new();
     let mut total_bodies = 0usize;
     for (collection, targets) in plans {
         let mut sorted = targets.clone();
         sorted.sort_by_key(|(_, size)| Reverse(*size));
         for chunk in sorted.chunks(BATCH_SIZE) {
             let max_size = chunk.iter().map(|(_, size)| *size).max().unwrap_or(0);
-            let handles: Vec<ReplicaHandle> = chunk.iter().map(|(h, _)| h.clone()).collect();
+            let handles: Vec<PimdirHandle> = chunk.iter().map(|(h, _)| h.clone()).collect();
             total_bodies += handles.len();
             batches.push((max_size, collection.clone(), handles));
         }
@@ -986,7 +986,7 @@ fn phase2_hydrate(
     }
     batches.sort_by_key(|(max_size, ..)| Reverse(*max_size));
 
-    let queue: SegQueue<(String, Vec<ReplicaHandle>)> = SegQueue::new();
+    let queue: SegQueue<(String, Vec<PimdirHandle>)> = SegQueue::new();
     for (_, collection, handles) in batches {
         queue.push((collection, handles));
     }
@@ -1001,7 +1001,7 @@ fn phase2_hydrate(
         .map(|ctx| ctx.namespace.clone())
         .unwrap_or_default();
 
-    let cache: Mutex<HashMap<FetchKey, ReplicaFetchedItem>> =
+    let cache: Mutex<HashMap<FetchKey, PimdirFetchedItem>> =
         Mutex::new(HashMap::with_capacity(total_bodies));
     let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
     let stop = AtomicBool::new(false);
@@ -1073,7 +1073,7 @@ fn phase3_apply(
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
-    cache: &HashMap<FetchKey, ReplicaFetchedItem>,
+    cache: &HashMap<FetchKey, PimdirFetchedItem>,
 ) -> Result<()> {
     let total = plans.len();
     let s = Spinner::start(format!("Writing {source} (0/{total})"));
@@ -1095,12 +1095,12 @@ fn apply_full(
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
-    cache: &HashMap<FetchKey, ReplicaFetchedItem>,
+    cache: &HashMap<FetchKey, PimdirFetchedItem>,
 ) -> Result<()> {
-    let handles: Vec<ReplicaHandle> = projection_view(store, collection, &ctx.name)
+    let handles: Vec<PimdirHandle> = projection_view(store, collection, &ctx.name)
         .with_context(|| format!("Project {} {collection}", &ctx.name))?
         .into_iter()
-        .filter(|p| p.status != ReplicaStatus::Tombstone && p.level < ReplicaLevel::Full)
+        .filter(|p| p.status != PimdirStatus::Tombstone && p.level < PimdirLevel::Full)
         .map(|p| p.handle)
         .collect();
     if handles.is_empty() {
@@ -1108,10 +1108,10 @@ fn apply_full(
     }
     let fallback = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
     let mut remote = CachedFetchRemote::new(cache, fallback);
-    drive(
+    run_verb(
         store,
         &mut remote,
-        ReplicaUpgrade::new(collection.to_string(), handles, ReplicaTier::Full),
+        PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full),
     )
     .with_context(|| format!("Apply bodies {collection}"))?;
     Ok(())
@@ -1124,7 +1124,7 @@ fn flag_snapshot(
     store: &PimdirSourceStore,
     collection: &str,
     source: &str,
-) -> Result<HashMap<String, ReplicaFlags>> {
+) -> Result<HashMap<String, PimdirFlags>> {
     Ok(load_side(store, collection)
         .with_context(|| format!("Load {source} {collection}"))?
         .into_iter()
@@ -1138,8 +1138,8 @@ fn flag_snapshot(
 /// are recovered from the sync's per-item events. A new remote item is an
 /// `Added` event but the pull plan already reports it as a `Fetch`.
 fn itemize_pulled(
-    events: &[ReplicaEvent],
-    before: &HashMap<String, ReplicaFlags>,
+    events: &[PimdirSyncEvent],
+    before: &HashMap<String, PimdirFlags>,
     store: &PimdirSourceStore,
     collection: &str,
     display: &str,
@@ -1151,7 +1151,7 @@ fn itemize_pulled(
 
     for event in events {
         match event {
-            ReplicaEvent::FlagsChanged(handle) => {
+            PimdirSyncEvent::FlagsChanged(handle) => {
                 let old = before.get(&handle.0).cloned().unwrap_or_default();
                 let Some(new) = after.get(&handle.0) else {
                     continue;
@@ -1182,7 +1182,7 @@ fn itemize_pulled(
                     ));
                 }
             }
-            ReplicaEvent::Vanished(handle) => {
+            PimdirSyncEvent::Vanished(handle) => {
                 report.item.patch.push(PatchEntry::new(
                     ItemHunk::Delete {
                         side: source.to_string(),
@@ -1205,7 +1205,7 @@ fn itemize_pulled(
 /// in one, [`resolve_conflicts`] having run since, so the store is asked which
 /// survived. It notes rather than pushes: one divergence stays one line.
 fn itemize_conflicted(
-    events: &[ReplicaEvent],
+    events: &[PimdirSyncEvent],
     store: &PimdirSourceStore,
     collection: &str,
     display: &str,
@@ -1214,7 +1214,7 @@ fn itemize_conflicted(
 ) -> Result<()> {
     if !events
         .iter()
-        .any(|event| matches!(event, ReplicaEvent::Conflicted(_)))
+        .any(|event| matches!(event, PimdirSyncEvent::Conflicted(_)))
     {
         return Ok(());
     }
@@ -1225,7 +1225,7 @@ fn itemize_conflicted(
         .collect();
 
     for event in events {
-        let ReplicaEvent::Conflicted(handle) = event else {
+        let PimdirSyncEvent::Conflicted(handle) = event else {
             continue;
         };
 
@@ -1254,7 +1254,7 @@ fn itemize_single(
     let view = projection_view(store, collection, &ctx.name)
         .with_context(|| format!("Project {} {display}", ctx.name))?;
     for placement in view {
-        for hunk in placement_hunks(&ctx.name, &ctx.name, display, &placement) {
+        for hunk in placement_hunks(&ctx.name, &ctx.name, &ctx.namespace, display, &placement) {
             report.item.patch.push(PatchEntry::new(hunk, None));
         }
     }
@@ -1276,7 +1276,7 @@ fn itemize_fetches(
     let view =
         load_side(store, collection).with_context(|| format!("Load {source} {collection}"))?;
     for placement in view {
-        if placement.status == ReplicaStatus::Tombstone || placement.object.is_some() {
+        if placement.status == PimdirStatus::Tombstone || placement.object.is_some() {
             continue;
         }
         let id = placement
@@ -1468,12 +1468,12 @@ fn propagate(
 
 /// One cross-copy body to relay.
 ///
-/// `size` is the exact octet length from the item's meta, so the target append
-/// is length-prefixed without buffering the body.
+/// `size` is the exact octet length from the item's summary, so the target
+/// append is length-prefixed without buffering the body.
 struct RelayTarget {
     /// The name of the source holding the body.
     holding: String,
-    handle: ReplicaHandle,
+    handle: PimdirHandle,
     /// The cross-side identity, so a relay is itemized under the hydrating id.
     link: String,
     /// The identity the target addresses the new item by.
@@ -1488,10 +1488,10 @@ struct RelayTarget {
     /// The same markers as the hub holds them, for the placement the
     /// relay records: [`Flag`] equality collapses two wire spellings into
     /// one, so a round trip through it can drop a marker the hub kept.
-    marks: ReplicaFlags,
+    marks: PimdirFlags,
     /// The item's cached summary, which the copy shares: the same message
     /// on the other side, so the same summary.
-    meta: Option<ReplicaMeta>,
+    summary: Option<PimdirSummary>,
 }
 
 /// The relay targets: a one-sided, never-hydrated item its far side may create.
@@ -1514,8 +1514,11 @@ fn relay_targets(
         if !target_creates {
             continue;
         }
-        let Some(size) = meta_size(&item.meta) else {
-            warn!("relay skips {} in {collection}: no size in meta", link.0);
+        let Some(size) = summary_size(&item.summary) else {
+            warn!(
+                "relay skips {} in {collection}: no size in its summary",
+                link.0
+            );
             continue;
         };
         let split = kind.split_link_id(link);
@@ -1528,17 +1531,21 @@ fn relay_targets(
             size,
             flags: to_email_flag_set(&item.flags).into_iter().collect(),
             marks: item.flags.clone(),
-            meta: item.meta.clone(),
+            summary: item.summary.clone(),
         });
     }
     Ok(out)
 }
 
-/// The `size` (octet length) of a `v:1` mail meta, when present.
-fn meta_size(meta: &Option<ReplicaMeta>) -> Option<usize> {
-    let raw = meta.as_ref()?;
-    let value: serde_json::Value = serde_json::from_str(&raw.0).ok()?;
-    value.get("size")?.as_u64().map(|n| n as usize)
+/// The octet length a mail summary carries, when present.
+///
+/// The one kind whose summary records a size (pimdir STORAGE Annex A.1), and
+/// the one kind a body crosses by relay.
+fn summary_size(summary: &Option<PimdirSummary>) -> Option<usize> {
+    match summary.as_ref()? {
+        PimdirSummary::Mail(mail) => mail.size.map(|size| size as usize),
+        _ => None,
+    }
 }
 
 /// Streams each cross-copy body between the sides, keeping only the spine.
@@ -1598,6 +1605,7 @@ fn relay_copies(
                 collection: wire.clone(),
                 source_id: target.link.clone(),
                 flags: target.flags.iter().cloned().collect(),
+                origin: None,
                 content_key: content_key(&target.link),
             },
             None,
@@ -1624,28 +1632,28 @@ fn bind_relayed(
     target: &RelayTarget,
     written: WrittenItem,
 ) -> Result<()> {
-    let placement = ReplicaPlacement {
-        collection: ReplicaCollectionId(collection.to_string()),
-        handle: ReplicaHandle(written.id),
-        link_id: Some(ReplicaLinkId(target.link.clone())),
+    let placement = PimdirPlacement {
+        collection: PimdirCollectionId(collection.to_string()),
+        handle: PimdirHandle(written.id),
+        link_id: Some(PimdirLinkId(target.link.clone())),
         // NOTE: relaying keeps the spine and nothing else, so the copy
         // holds no body: `Full` here would strand it, an upgrade skipping
         // whatever reads as hydrated.
         object: None,
-        level: ReplicaLevel::Meta,
-        meta: target.meta.clone(),
+        level: PimdirLevel::Meta,
+        summary: target.summary.clone(),
         // NOTE: the relay derives no key, as a queued create does not,
         // and an unknown one leaves the hub's own in place.
-        sort_key: ReplicaSortKey::default(),
+        sort_key: PimdirSortKey::default(),
         flags: target.marks.clone(),
-        status: ReplicaStatus::Clean,
+        status: PimdirStatus::Clean,
         conflict_revision: None,
         conflict_object: None,
         // NOTE: the base is the append the server has just accepted, so
         // the next sync of this side reconciles the copy as already in
         // sync. A base-less binding reads as a pending create instead,
         // which is the append again.
-        base: Some(ReplicaBase {
+        base: Some(PimdirBase {
             flags: target.marks.clone(),
             revision: written.revision,
             object: None,
@@ -1654,7 +1662,7 @@ fn bind_relayed(
     };
 
     store
-        .write(vec![ReplicaWriteOp::UpsertPlacement(placement)])
+        .write(vec![PimdirWriteOp::UpsertPlacement(placement)])
         .map_err(|err| anyhow!("Storage write error: {err}"))
 }
 
@@ -1782,7 +1790,7 @@ fn parks_divergences(left: &SourceCtx, right: &SourceCtx, dry_run: bool) -> bool
 /// content change drops the stale body from the item and from that source's
 /// base, so once both endpoints have pulled, the store holds their two new
 /// bodies and nothing they both came from.
-fn shared_bodies(store: &PimdirStore, collection: &str) -> Result<HashMap<String, ReplicaHash>> {
+fn shared_bodies(store: &PimdirStore, collection: &str) -> Result<HashMap<String, PimdirHash>> {
     let hub = store
         .load_hub(collection)
         .with_context(|| format!("Load the hub of {collection}"))?;
@@ -1802,7 +1810,7 @@ fn shared_bodies(store: &PimdirStore, collection: &str) -> Result<HashMap<String
 /// outlives the decision that settled it and says nothing on its own about
 /// what is still owed. Read before the round, it says what a round newly
 /// recorded, which is the divergence a person has not seen yet.
-fn hub_divergences(store: &PimdirStore, collection: &str) -> Result<HashMap<String, ReplicaHash>> {
+fn hub_divergences(store: &PimdirStore, collection: &str) -> Result<HashMap<String, PimdirHash>> {
     let hub = store
         .load_hub(collection)
         .with_context(|| format!("Load the hub of {collection}"))?;
@@ -1820,17 +1828,17 @@ struct Divergence {
     /// The cross-side identity, which names the item in a report.
     link: String,
     /// The body both endpoints came from, the merge's common ancestor.
-    ancestor: ReplicaHash,
+    ancestor: PimdirHash,
     /// The handle the source holds it under, whose body becomes the shared one.
-    source_handle: ReplicaHandle,
+    source_handle: PimdirHandle,
     /// The handle the target holds it under, whose body is the divergence.
-    target_handle: ReplicaHandle,
+    target_handle: PimdirHandle,
     /// The revision the target's own pull observed, which a decision about the
     /// divergence is computed against and refused on once it moves.
     target_revision: Option<String>,
     /// The markers the target last agreed on, so parking moves the content axis
     /// and nothing else.
-    target_flags: ReplicaFlags,
+    target_flags: PimdirFlags,
 }
 
 /// The items both endpoints changed in one round, read from the store alone.
@@ -1842,7 +1850,7 @@ struct Divergence {
 fn diverged_items(
     store: &PimdirStore,
     collection: &str,
-    ancestors: &HashMap<String, ReplicaHash>,
+    ancestors: &HashMap<String, PimdirHash>,
     source: &str,
     target: &str,
 ) -> Result<Vec<Divergence>> {
@@ -1863,7 +1871,7 @@ fn diverged_items(
         ) else {
             continue;
         };
-        let pulled = |binding: &ReplicaSourceBinding| {
+        let pulled = |binding: &PimdirBinding| {
             binding
                 .base
                 .as_ref()
@@ -1909,7 +1917,7 @@ fn park_divergences(
     right_store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     store_dir: &Path,
-    ancestors: &HashMap<String, ReplicaHash>,
+    ancestors: &HashMap<String, PimdirHash>,
     dry_run: bool,
     report: &mut SyncOutput,
 ) -> Result<usize> {
@@ -1931,10 +1939,10 @@ fn park_divergences(
     // the merge's left side: ours, in the merge's own vocabulary.
     let mut remote = PimRemote::new(&mut left.pool, blobs.clone(), left.namespace.clone());
     let handles = diverged.iter().map(|d| d.source_handle.clone()).collect();
-    drive(
+    run_verb(
         left_store,
         &mut remote,
-        ReplicaUpgrade::new(collection.to_string(), handles, ReplicaTier::Full),
+        PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full),
     )
     .with_context(|| format!("Fetch the diverging bodies of {} {collection}", &left.name))?;
 
@@ -1945,7 +1953,7 @@ fn park_divergences(
     let mut marked = Vec::new();
 
     for divergence in diverged {
-        let Some(item) = hub.items.get(&ReplicaLinkId(divergence.link.clone())) else {
+        let Some(item) = hub.items.get(&PimdirLinkId(divergence.link.clone())) else {
             continue;
         };
         let Some(object) = item.object.clone() else {
@@ -1971,19 +1979,19 @@ fn park_divergences(
             .is_some()
             .then_some(divergence.ancestor);
 
-        writes.push(ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-            collection: ReplicaCollectionId(collection.to_string()),
+        writes.push(PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+            collection: PimdirCollectionId(collection.to_string()),
             handle: divergence.target_handle.clone(),
-            link_id: Some(ReplicaLinkId(divergence.link)),
+            link_id: Some(PimdirLinkId(divergence.link)),
             object: Some(object),
-            level: ReplicaLevel::Full,
-            meta: item.meta.clone(),
+            level: PimdirLevel::Full,
+            summary: item.summary.clone(),
             sort_key: item.sort_key.clone(),
             flags: item.flags.clone(),
-            status: ReplicaStatus::Conflict,
+            status: PimdirStatus::Conflict,
             conflict_revision: divergence.target_revision.clone(),
             conflict_object: None,
-            base: Some(ReplicaBase {
+            base: Some(PimdirBase {
                 flags: divergence.target_flags,
                 revision: divergence.target_revision,
                 object: base,
@@ -2027,24 +2035,24 @@ struct HubConflict {
     /// The cross-side identity, which names the item in a report.
     link: String,
     /// The body the hub kept as the shared one, which the source contributed.
-    shared: ReplicaHash,
+    shared: PimdirHash,
     /// The body the hub recorded as diverging from it, the target's own.
-    diverging: ReplicaHash,
+    diverging: PimdirHash,
     /// The summary the shared body carries, so parking restates it rather than
     /// dropping it.
-    meta: Option<ReplicaMeta>,
+    summary: Option<PimdirSummary>,
     /// The key the shared body sorts by, restated for the same reason.
-    sort_key: ReplicaSortKey,
+    sort_key: PimdirSortKey,
     /// The markers the item carries, restated for the same reason.
-    flags: ReplicaFlags,
+    flags: PimdirFlags,
     /// The handle the target holds the item under, whose placement parks.
-    target_handle: ReplicaHandle,
+    target_handle: PimdirHandle,
     /// The revision the target's own pull observed, which a decision about the
     /// divergence is computed against and refused on once it moves.
     target_revision: Option<String>,
     /// The markers the target last agreed on, so parking moves the content axis
     /// and nothing else.
-    target_flags: ReplicaFlags,
+    target_flags: PimdirFlags,
 }
 
 /// The divergences the round itself recorded between the two endpoints.
@@ -2064,7 +2072,7 @@ struct HubConflict {
 fn hub_conflicts(
     store: &PimdirStore,
     collection: &str,
-    before: &HashMap<String, ReplicaHash>,
+    before: &HashMap<String, PimdirHash>,
     source: &str,
     target: &str,
 ) -> Result<Vec<HubConflict>> {
@@ -2099,7 +2107,7 @@ fn hub_conflicts(
             link: link.0.clone(),
             shared,
             diverging,
-            meta: item.meta.clone(),
+            summary: item.summary.clone(),
             sort_key: item.sort_key.clone(),
             flags: item.flags.clone(),
             target_handle: binding.handle.clone(),
@@ -2131,7 +2139,7 @@ fn park_hub_conflicts(
     right: &SourceCtx,
     left_store: &PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
-    before: &HashMap<String, ReplicaHash>,
+    before: &HashMap<String, PimdirHash>,
     dry_run: bool,
     report: &mut SyncOutput,
 ) -> Result<usize> {
@@ -2154,16 +2162,16 @@ fn park_hub_conflicts(
 
     for conflict in conflicts {
         marked.push(conflict.target_handle.0.clone());
-        writes.push(ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-            collection: ReplicaCollectionId(collection.to_string()),
+        writes.push(PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+            collection: PimdirCollectionId(collection.to_string()),
             handle: conflict.target_handle,
-            link_id: Some(ReplicaLinkId(conflict.link)),
+            link_id: Some(PimdirLinkId(conflict.link)),
             object: Some(conflict.shared),
-            level: ReplicaLevel::Full,
-            meta: conflict.meta,
+            level: PimdirLevel::Full,
+            summary: conflict.summary,
             sort_key: conflict.sort_key,
             flags: conflict.flags,
-            status: ReplicaStatus::Conflict,
+            status: PimdirStatus::Conflict,
             conflict_revision: conflict.target_revision.clone(),
             conflict_object: Some(conflict.diverging),
             // NOTE: the base carries no body, the two endpoints never having
@@ -2171,7 +2179,7 @@ fn park_hub_conflicts(
             // merging against the target's own body as the base would read the
             // target as having changed nothing and settle on the source's body,
             // which is the overwrite parking exists to refuse.
-            base: Some(ReplicaBase {
+            base: Some(PimdirBase {
                 flags: conflict.target_flags,
                 revision: conflict.target_revision,
                 object: None,
@@ -2216,7 +2224,7 @@ fn reconcile_side(
     push: bool,
     dry_run: bool,
     report: &mut SyncOutput,
-) -> Result<ReplicaSyncReport> {
+) -> Result<PimdirSyncReport> {
     let push = push && !dry_run && ctx.writable();
     let before = if push {
         None
@@ -2247,7 +2255,7 @@ fn reconcile_side(
 }
 
 /// Whether a side's sync changed anything, used to detect convergence.
-fn moved(report: &ReplicaSyncReport) -> bool {
+fn moved(report: &PimdirSyncReport) -> bool {
     report.pulled > 0 || report.pushed > 0
 }
 
@@ -2262,7 +2270,7 @@ fn sync_side_rebuilding(
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     push: bool,
-) -> Result<ReplicaSyncReport> {
+) -> Result<PimdirSyncReport> {
     let pre = stored_epoch(ctx.pool.primary(), store, collection)?;
 
     let report = sync_side(collection, ctx, store, blobs, push)?;
@@ -2294,8 +2302,8 @@ fn stored_epoch(
 ) -> Result<Option<u64>> {
     let loaded = store
         .load(
-            &ReplicaCollectionId(collection.to_string()),
-            &ReplicaLoadScope::All,
+            &PimdirCollectionId(collection.to_string()),
+            &PimdirLoadScope::All,
         )
         .map_err(|err| anyhow!("Load {collection} checkpoint error: {err}"))?;
     Ok(loaded
@@ -2304,104 +2312,49 @@ fn stored_epoch(
         .and_then(|checkpoint| client.handle_space_epoch(&checkpoint.0)))
 }
 
-/// Drives io-replica's rekey, returning its report and the new generation.
+/// Drives the engine's rekey, returning its report and the new generation.
 ///
-/// The rebuild write batch goes through [`PimdirSourceStore::write_rekeyed`]
-/// rather than the plain storage seam, so "the ids you cached are void" commits
-/// atomically with the rebuild that voided them.
+/// The rebuild batch drops every old handle as `Rekeyed`, which is what makes
+/// the store bump the collection's generation in the transaction applying it
+/// (pimdir SYNC §8), so "the ids you cached are void" commits atomically with
+/// the rebuild that voided them.
 fn rebuild_collection(
     collection: &str,
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
-) -> Result<(ReplicaRekeyReport, i64)> {
+) -> Result<(PimdirRekeyReport, i64)> {
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-    drive_rekey(store, &mut remote, collection)
+    let report = run_verb(store, &mut remote, PimdirRekey::new(collection.to_string()))
+        .with_context(|| format!("Rebuild {collection}"))?;
+    let generation = store
+        .generation(collection)
+        .with_context(|| format!("Read the generation of {collection}"))?
+        .context("Rekey completed without a write")?;
+
+    Ok((report, generation))
 }
 
-/// The rekey pump behind [`rebuild_collection`], seam-typed for a test.
-fn drive_rekey<R>(
-    store: &mut PimdirSourceStore,
-    remote: &mut R,
-    collection: &str,
-) -> Result<(ReplicaRekeyReport, i64)>
-where
-    R: ReplicaRemote,
-    R::Error: std::fmt::Display,
-{
-    let mut coroutine = ReplicaRekey::new(collection.to_string());
-    let mut arg: Option<ReplicaArg> = None;
-    let mut generation: Option<i64> = None;
-
-    loop {
-        match coroutine.resume(arg.take()) {
-            ReplicaCoroutineState::Complete(Ok(report)) => {
-                let generation = generation.context("Rekey completed without a write")?;
-                return Ok((report, generation));
-            }
-            ReplicaCoroutineState::Complete(Err(err)) => {
-                return Err(anyhow!("Rekey engine error: {err}"));
-            }
-            ReplicaCoroutineState::Yielded(ReplicaYield::WantsLoad { collection, scope }) => {
-                let loaded = store
-                    .load(&collection, &scope)
-                    .map_err(|err| anyhow!("Storage load error: {err}"))?;
-                arg = Some(ReplicaArg::Load(loaded));
-            }
-            ReplicaCoroutineState::Yielded(ReplicaYield::WantsLookupObject(links)) => {
-                let known = store
-                    .lookup_objects(&links)
-                    .map_err(|err| anyhow!("Storage lookup error: {err}"))?;
-                arg = Some(ReplicaArg::LookupObject(known));
-            }
-            ReplicaCoroutineState::Yielded(ReplicaYield::WantsEnumerate { collection, cursor }) => {
-                let snapshot = remote
-                    .enumerate(&collection, cursor)
-                    .map_err(|err| anyhow!("Remote enumerate error: {err:#}"))?;
-                arg = Some(ReplicaArg::Enumerate(snapshot));
-            }
-            ReplicaCoroutineState::Yielded(ReplicaYield::WantsFetch {
-                collection,
-                handles,
-                tier,
-            }) => {
-                let items = remote
-                    .fetch(&collection, handles, tier)
-                    .map_err(|err| anyhow!("Remote fetch error: {err:#}"))?;
-                arg = Some(ReplicaArg::Fetch(items));
-            }
-            ReplicaCoroutineState::Yielded(ReplicaYield::WantsWrite(ops)) => {
-                generation = Some(
-                    store
-                        .write_rekeyed(collection, ops)
-                        .map_err(|err| anyhow!("Rekeyed write error: {err}"))?,
-                );
-                arg = Some(ReplicaArg::Write);
-            }
-            ReplicaCoroutineState::Yielded(ReplicaYield::WantsPush { .. }) => {
-                bail!("Rekey asked for a push");
-            }
-        }
-    }
-}
-
-/// The engine options one side syncs under.
+/// The `sync` verb one side runs, under its options.
 ///
 /// Being hub-bound fixes the delete disposition: a refused delete is held, not
-/// reverted. Reverting says "this source still holds the member", and an add
-/// beats a delete, so a side taking no deletes would resurrect on both sides.
-fn sync_options(
+/// reverted, which is what syncing beside other sources means to the engine.
+/// Reverting says "this source still holds the member", and an add beats a
+/// delete, so a side taking no deletes would resurrect on both sides.
+fn sync_verb(
+    collection: &str,
     push: bool,
-    rights: ReplicaPushRights,
-    conflict: ReplicaConflictPolicy,
-) -> ReplicaSyncOptions {
-    ReplicaSyncOptions {
+    rights: PimdirPushRights,
+    conflict: PimdirConflictPolicy,
+) -> PimdirSync {
+    let opts = PimdirSyncOptions {
         push,
         rights,
-        delete: ReplicaDeletePolicy::Keep,
         conflict,
         ..Default::default()
-    }
+    };
+
+    PimdirSync::new(collection.to_string(), opts).beside_other_sources(true)
 }
 
 /// Runs one side's `sync` against its server and returns its report.
@@ -2411,14 +2364,10 @@ fn sync_side(
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     push: bool,
-) -> Result<ReplicaSyncReport> {
-    let opts = sync_options(push, ctx.push_rights(), ctx.conflict_policy());
+) -> Result<PimdirSyncReport> {
+    let verb = sync_verb(collection, push, ctx.push_rights(), ctx.conflict_policy());
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-    let report = drive(
-        store,
-        &mut remote,
-        ReplicaSync::new(collection.to_string(), opts),
-    );
+    let report = run_verb(store, &mut remote, verb);
     // NOTE: kept whether the pass succeeded or not: a later failure does not
     // unlearn a refusal the run already saw.
     let refused = remote.take_refused();
@@ -2434,11 +2383,6 @@ fn sync_side(
 /// Its link id is then known and it enters the hub. `Meta` for mail, whose
 /// envelope carries the identity; `Full` for a kind whose body is the only
 /// thing that does.
-///
-/// This is where identity is settled, so it reads the store through
-/// [`HeldStore`]: a copy the hub is offering this side is another endpoint's
-/// holding, not this one's, and reading it as one would mint a duplicate key
-/// for the card this side already has.
 fn upgrade_probed(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -2446,10 +2390,10 @@ fn upgrade_probed(
     blobs: &PimdirBlobs,
     dry_run: bool,
 ) -> Result<()> {
-    let probed: Vec<ReplicaHandle> = load_side(store, collection)
+    let probed: Vec<PimdirHandle> = load_side(store, collection)
         .with_context(|| format!("Load {} {collection}", &ctx.name))?
         .into_iter()
-        .filter(|p| p.level == ReplicaLevel::Probed && p.status != ReplicaStatus::Tombstone)
+        .filter(|p| p.level == PimdirLevel::Probed && p.status != PimdirStatus::Tombstone)
         .map(|p| p.handle)
         .collect();
     if probed.is_empty() {
@@ -2457,17 +2401,15 @@ fn upgrade_probed(
     }
     let tier = resolve_kind(&mut ctx.pool).probe_tier();
 
-    if dry_run && tier == ReplicaTier::Full {
+    if dry_run && tier == PimdirTier::Full {
         return Ok(());
     }
 
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-    let mut held = HeldStore::open(store, collection)
-        .with_context(|| format!("Read what {} holds in {collection}", &ctx.name))?;
-    drive(
-        &mut held,
+    run_verb(
+        store,
         &mut remote,
-        ReplicaUpgrade::new(collection.to_string(), probed, tier),
+        PimdirUpgrade::new(collection.to_string(), probed, tier),
     )
     .with_context(|| format!("Upgrade probed {} {collection}", &ctx.name))?;
     Ok(())
@@ -2478,11 +2420,11 @@ fn conflicted_placements(
     store: &PimdirSourceStore,
     collection: &str,
     source: &str,
-) -> Result<Vec<ReplicaPlacement>> {
+) -> Result<Vec<PimdirPlacement>> {
     Ok(load_side(store, collection)
         .with_context(|| format!("Load {source} {collection}"))?
         .into_iter()
-        .filter(|placement| placement.status == ReplicaStatus::Conflict)
+        .filter(|placement| placement.status == PimdirStatus::Conflict)
         .collect())
 }
 
@@ -2510,7 +2452,7 @@ fn resolve_conflicts(
 
     debug!("merge {} conflicted item(s) in {collection}", parked.len());
 
-    let wanted: Vec<ReplicaHandle> = parked
+    let wanted: Vec<PimdirHandle> = parked
         .iter()
         .filter(|placement| placement.conflict_object.is_none())
         .map(|placement| placement.handle.clone())
@@ -2518,10 +2460,10 @@ fn resolve_conflicts(
 
     if !wanted.is_empty() {
         let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-        drive(
+        run_verb(
             store,
             &mut remote,
-            ReplicaUpgrade::new(collection.to_string(), wanted, ReplicaTier::Full),
+            PimdirUpgrade::new(collection.to_string(), wanted, PimdirTier::Full),
         )
         .with_context(|| format!("Fetch the diverging bodies of {} {collection}", &ctx.name))?;
     }
@@ -2569,7 +2511,7 @@ fn merge_conflicts(
             continue;
         };
 
-        let read = |hash: &ReplicaHash| -> Result<Option<Vec<u8>>> {
+        let read = |hash: &PimdirHash| -> Result<Option<Vec<u8>>> {
             blobs.get(hash).with_context(|| {
                 format!(
                     "Read the body {} of {handle} in {collection}",
@@ -2614,18 +2556,19 @@ fn merge_conflicts(
         let size = writer
             .commit(&hash)
             .with_context(|| format!("Store the merged body of {handle} in {collection}"))?;
+        let object = PimdirObject {
+            hash,
+            size: size as usize,
+        };
 
-        let (_, meta, _) = kind.parse_body(&body, size);
         producer
             .enqueue(
                 collection,
                 &PimdirAction::Update {
                     seq,
-                    object: hash,
-                    meta: Some(meta),
+                    object: object.hash.clone(),
                 },
-                Some(size),
-                &Utc::now().to_rfc3339(),
+                Some(&object),
             )
             .with_context(|| format!("Stage the merged body of {handle} in {collection}"))?;
 
@@ -2639,7 +2582,7 @@ fn merge_conflicts(
     }
 
     let drained = store
-        .drain_collection(collection)
+        .drain()
         .with_context(|| format!("Apply the merged conflicts of {collection}"))?;
     if drained.parked > 0 {
         warn!(
@@ -2706,10 +2649,10 @@ fn hydrate_copies(
             &tick,
             HashMap::new(),
         );
-        drive(
+        run_verb(
             left_store,
             &mut remote,
-            ReplicaUpgrade::new(collection.to_string(), left_handles, ReplicaTier::Full),
+            PimdirUpgrade::new(collection.to_string(), left_handles, PimdirTier::Full),
         )
         .with_context(|| format!("Hydrate bodies for {} {collection}", left.name))?;
     }
@@ -2721,10 +2664,10 @@ fn hydrate_copies(
             &tick,
             HashMap::new(),
         );
-        drive(
+        run_verb(
             right_store,
             &mut remote,
-            ReplicaUpgrade::new(collection.to_string(), right_handles, ReplicaTier::Full),
+            PimdirUpgrade::new(collection.to_string(), right_handles, PimdirTier::Full),
         )
         .with_context(|| format!("Hydrate bodies for {} {collection}", right.name))?;
     }
@@ -2747,7 +2690,8 @@ fn itemize(
         let view = projection_view(store, collection, &ctx.name)
             .with_context(|| format!("Project {} {display}", ctx.name))?;
         for placement in view {
-            for hunk in placement_hunks(&ctx.name, &other.name, display, &placement) {
+            for hunk in placement_hunks(&ctx.name, &other.name, &ctx.namespace, display, &placement)
+            {
                 report.item.patch.push(PatchEntry::new(hunk, None));
             }
         }
@@ -2761,32 +2705,59 @@ fn itemize(
 fn placement_hunks(
     source: &str,
     other: &str,
+    namespace: &str,
     collection: &str,
-    placement: &ReplicaPlacement,
+    placement: &PimdirPlacement,
 ) -> Vec<ItemHunk> {
     match placement.status {
-        ReplicaStatus::Created => {
+        PimdirStatus::Created => {
             let link = placement
                 .link_id
                 .as_ref()
                 .map(|l| l.0.clone())
                 .unwrap_or_default();
-            vec![ItemHunk::Copy {
-                source_side: other.to_string(),
-                target_side: source.to_string(),
-                collection: collection.to_string(),
-                source_id: link.clone(),
-                flags: to_email_flag_set(&placement.flags),
-                content_key: content_key(&link),
-            }]
+            let flags = to_email_flag_set(&placement.flags);
+            let content_key = content_key(&link);
+            // NOTE: what the create delivers by says what it is (SYNC §5):
+            // a server-side copy from its origin, an upload of a body the
+            // other side holds, or, with no other side, an append a
+            // frontend authored.
+            let hunk = match &placement.origin {
+                Some(origin) => ItemHunk::Copy {
+                    source_side: source.to_string(),
+                    target_side: source.to_string(),
+                    collection: collection.to_string(),
+                    source_id: link,
+                    flags,
+                    origin: Some(wire_name(namespace, &origin.collection.0).to_string()),
+                    content_key,
+                },
+                None if source == other => ItemHunk::Add {
+                    side: source.to_string(),
+                    collection: collection.to_string(),
+                    id: link,
+                    flags,
+                    content_key,
+                },
+                None => ItemHunk::Copy {
+                    source_side: other.to_string(),
+                    target_side: source.to_string(),
+                    collection: collection.to_string(),
+                    source_id: link,
+                    flags,
+                    origin: None,
+                    content_key,
+                },
+            };
+            vec![hunk]
         }
-        ReplicaStatus::Tombstone => vec![ItemHunk::Delete {
+        PimdirStatus::Tombstone => vec![ItemHunk::Delete {
             side: source.to_string(),
             collection: collection.to_string(),
             id: placement.handle.0.clone(),
             content_key: 0,
         }],
-        ReplicaStatus::Dirty => {
+        PimdirStatus::Dirty => {
             let base = placement
                 .base
                 .as_ref()
@@ -2823,7 +2794,7 @@ fn placement_hunks(
             }
             hunks
         }
-        ReplicaStatus::Clean | ReplicaStatus::Conflict => Vec::new(),
+        PimdirStatus::Clean | PimdirStatus::Conflict => Vec::new(),
     }
 }
 
@@ -2918,6 +2889,12 @@ fn names(hunk: &ItemHunk, side: &str, collection: &str, handle: &str) -> bool {
             ..
         }
         | ItemHunk::Update {
+            side: s,
+            collection: c,
+            id,
+            ..
+        } => s == side && c == collection && id == handle,
+        ItemHunk::Add {
             side: s,
             collection: c,
             id,
@@ -3021,7 +2998,7 @@ fn apply_collection_hunk(
     Ok(())
 }
 
-fn to_email_flag_set(flags: &ReplicaFlags) -> BTreeSet<Flag> {
+fn to_email_flag_set(flags: &PimdirFlags) -> BTreeSet<Flag> {
     let Some(flags) = flags.known() else {
         return BTreeSet::new();
     };
@@ -3033,7 +3010,7 @@ fn to_email_flag_set(flags: &ReplicaFlags) -> BTreeSet<Flag> {
 ///
 /// An unknown set holds no markers to compare with, so it reads as empty:
 /// nothing is reported added or removed against a side nobody read.
-fn flag_diff(old: &ReplicaFlags, new: &ReplicaFlags) -> (BTreeSet<Flag>, BTreeSet<Flag>) {
+fn flag_diff(old: &PimdirFlags, new: &PimdirFlags) -> (BTreeSet<Flag>, BTreeSet<Flag>) {
     let empty = BTreeSet::new();
     let old = old.known().unwrap_or(&empty);
     let new = new.known().unwrap_or(&empty);
@@ -3056,44 +3033,63 @@ fn content_key(link: &str) -> u64 {
     acc
 }
 
-/// Drains the pending frontend actions of the collections `namespace` owns.
+/// Drains the pending frontend actions, the whole store's in append order.
 ///
-/// The queue is the whole store's and records no source, so a source drains its
-/// own namespace and nothing else: draining another's robs the drain that could
-/// have applied it, and the first source alphabetically would answer for all.
-fn drain_queues(store: &mut PimdirSourceStore, namespace: &str, report: &mut SyncOutput) {
-    let collections = match store.queued_collections() {
-        Ok(collections) => collections,
+/// The store applies each action as the source syncing its collection, not as
+/// the handle draining (STORAGE §15.2), so whichever side runs first answers
+/// for both. The report names the collections whose rows landed: what the
+/// pending list lost that the parked list did not gain.
+fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutput) {
+    let before = match store.list_pending_actions() {
+        Ok(rows) => rows,
         Err(err) => {
-            warn!("cannot list queued collections: {err}");
+            warn!("cannot list the queued actions: {err}");
             return;
         }
     };
+    if before.is_empty() {
+        return;
+    }
 
-    let prefix = format!("{namespace}/");
-
-    for collection in collections {
-        if !collection.starts_with(&prefix) {
-            continue;
+    let drained = match store.drain() {
+        Ok(drained) => drained,
+        Err(err) => {
+            warn!("drain failed, actions stay queued: {err}");
+            return;
         }
-        match store.drain_collection(&collection) {
-            Ok(drained) => {
-                if drained.applied > 0 || drained.parked > 0 || drained.skipped > 0 {
-                    info!(
-                        "drained {} queued action(s) in {collection} ({} parked, {} skipped)",
-                        drained.applied, drained.parked, drained.skipped
-                    );
-                }
-                if drained.applied > 0 {
-                    report.drained.push(DrainedQueue {
-                        collection: collection.clone(),
-                        applied: drained.applied,
-                    });
-                }
-            }
-            Err(err) => warn!("drain of {collection} failed, actions stay queued: {err}"),
+    };
+    if drained.applied > 0 || drained.parked > 0 || drained.skipped > 0 {
+        info!(
+            "drained {} queued action(s) ({} parked, {} skipped)",
+            drained.applied, drained.parked, drained.skipped
+        );
+    }
+    if drained.applied == 0 {
+        return;
+    }
+
+    let parked: BTreeSet<i64> = store
+        .parked_actions()
+        .map(|rows| rows.into_iter().map(|row| row.id).collect())
+        .unwrap_or_default();
+    let pending: BTreeSet<i64> = store
+        .list_pending_actions()
+        .map(|rows| rows.into_iter().map(|row| row.id).collect())
+        .unwrap_or_default();
+    let mut applied: BTreeMap<String, usize> = BTreeMap::new();
+    for row in before {
+        if !pending.contains(&row.id) && !parked.contains(&row.id) {
+            *applied.entry(row.collection).or_default() += 1;
         }
     }
+    report.drained.extend(
+        applied
+            .into_iter()
+            .map(|(collection, applied)| DrainedQueue {
+                collection,
+                applied,
+            }),
+    );
 }
 
 /// Surfaces the store's parked queue actions, once for the run.
@@ -3379,10 +3375,10 @@ fn hydrate_full_collection(
 ) -> Result<usize> {
     let mut raised = 0;
     for (ctx, store) in [(left, left_store), (right, right_store)] {
-        let targets: Vec<ReplicaHandle> = load_side(store, collection)
+        let targets: Vec<PimdirHandle> = load_side(store, collection)
             .with_context(|| format!("Load {} {collection}", &ctx.name))?
             .into_iter()
-            .filter(|p| p.status != ReplicaStatus::Tombstone && p.level < ReplicaLevel::Full)
+            .filter(|p| p.status != PimdirStatus::Tombstone && p.level < PimdirLevel::Full)
             .map(|p| p.handle)
             .collect();
         if targets.is_empty() {
@@ -3398,10 +3394,10 @@ fn hydrate_full_collection(
             &tick,
             HashMap::new(),
         );
-        drive(
+        run_verb(
             store,
             &mut remote,
-            ReplicaUpgrade::new(collection.to_string(), targets, ReplicaTier::Full),
+            PimdirUpgrade::new(collection.to_string(), targets, PimdirTier::Full),
         )
         .with_context(|| format!("Hydrate all bodies {} {collection}", &ctx.name))?;
         raised += total;
@@ -3538,15 +3534,16 @@ fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> 
 
 #[cfg(test)]
 mod tests {
-    use io_replica::{
-        change::{ReplicaChange, ReplicaChangeKind, ReplicaDropReason, ReplicaWriteOp},
-        collection::ReplicaCheckpoint,
-        object::ReplicaObject,
-        placement::{ReplicaBase, ReplicaLinkId, ReplicaSortKey},
+    use io_pimdir::{
+        change::{PimdirChange, PimdirChangeKind, PimdirDropReason},
+        collection::PimdirCheckpoint,
+        object::PimdirObject,
+        placement::PimdirOrigin,
         remote::{
-            ReplicaFetchedBody, ReplicaFetchedItem, ReplicaPushOutcome, ReplicaPushResult,
-            ReplicaRemoteItem, ReplicaRemoteSnapshot,
+            PimdirFetchedBody, PimdirPushOutcome, PimdirPushResult, PimdirRemote, PimdirRemoteItem,
+            PimdirRemoteSnapshot,
         },
+        summary::mail::PimdirMailSummary,
     };
 
     use super::*;
@@ -3667,54 +3664,62 @@ mod tests {
         assert!(err.contains("left"), "{err}");
     }
 
-    /// A source that drained every collection answered for another's work.
+    /// An action is applied as the source syncing its collection, whichever
+    /// handle drains.
     ///
     /// On an account syncing mail, contacts and calendar, `caldav` sorts first
-    /// and reached every mail action himalaya queued before `imap` did.
+    /// and reaches every mail action himalaya queued before `imap` does; it
+    /// used to answer for `imap`'s work, and now the store hands the action to
+    /// `imap` under `caldav`'s handle.
     #[test]
-    fn a_source_drains_only_the_collections_of_its_own_namespace() {
+    fn a_drain_applies_an_action_as_the_source_of_its_collection() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
-        store
-            .ensure_collection("imap/INBOX", "message/rfc822")
+        let mut imap = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+        imap.ensure_collection("imap/INBOX", "message/rfc822")
             .unwrap();
 
         let mut producer = PimdirProducer::open(dir.path(), "himalaya").unwrap();
-        producer
-            .enqueue(
-                "imap/INBOX",
-                &PimdirAction::Add {
-                    link_id: Some(ReplicaLinkId("mid:queued@x".into())),
-                    flags: ReplicaFlags::default(),
-                    object: None,
-                    meta: None,
-                    handle: None,
-                },
-                None,
-                "2026-08-28T00:00:00Z",
-            )
-            .unwrap();
+        let queue = |producer: &mut PimdirProducer, link: &str| {
+            producer
+                .enqueue(
+                    "imap/INBOX",
+                    &PimdirAction::Add {
+                        link_id: Some(PimdirLinkId(link.into())),
+                        flags: PimdirFlags::default(),
+                        object: None,
+                    },
+                    None,
+                )
+                .unwrap();
+        };
 
+        queue(&mut producer, "mid:first@x");
         let mut report = SyncOutput::default();
-        drain_queues(&mut store, "caldav", &mut report);
-        assert!(
-            report.drained.is_empty(),
-            "a mail collection is not caldav's"
-        );
-
-        drain_queues(&mut store, "imap", &mut report);
+        drain_queues(&mut imap, &mut report);
         assert_eq!(report.drained.len(), 1);
         assert_eq!(report.drained[0].collection, "imap/INBOX");
         assert_eq!(report.drained[0].applied, 1);
+
+        queue(&mut producer, "mid:second@x");
+        let mut caldav = PimdirStore::open(dir.path()).unwrap().for_source("caldav");
+        let mut report = SyncOutput::default();
+        drain_queues(&mut caldav, &mut report);
+        assert_eq!(report.drained.len(), 1);
+        assert_eq!(report.drained[0].collection, "imap/INBOX");
+        assert_eq!(report.drained[0].applied, 1);
+        assert_eq!(
+            caldav.collection_sources("imap/INBOX").unwrap(),
+            vec!["imap".to_string()],
+            "the create is imap's to push"
+        );
     }
 
-    /// A parked row belongs to the store, and every source drains it.
-    ///
-    /// Reading the parked rows where the drain runs reported one row once per
-    /// source, so an account syncing three kinds showed the same warning three
-    /// times.
+    /// A parked row belongs to the store, and is reported once however many
+    /// drains ran: reading the parked rows where the drain runs reported one
+    /// row per drain, so an account syncing three kinds showed the same warning
+    /// three times.
     #[test]
-    fn a_parked_action_is_reported_once_however_many_sources_drained() {
+    fn a_parked_action_is_reported_once_however_many_drains_ran() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
         store
@@ -3727,17 +3732,15 @@ mod tests {
                 "imap/INBOX",
                 &PimdirAction::SetFlags {
                     seq: 6951,
-                    flags: ReplicaFlags::from_iter(["\\Seen"]),
+                    flags: PimdirFlags::from_iter(["\\Seen"]),
                 },
                 None,
-                "2026-08-28T00:00:00Z",
             )
             .unwrap();
 
         let mut report = SyncOutput::default();
-        for source in ["caldav", "carddav", "imap"] {
-            drain_queues(&mut store, source, &mut report);
-        }
+        drain_queues(&mut store, &mut report);
+        drain_queues(&mut store, &mut report);
         report_parked(&store, &mut report);
 
         assert_eq!(report.parked.len(), 1);
@@ -3755,46 +3758,40 @@ mod tests {
         let blobs = store.blobs();
         let mut writer = blobs.writer().unwrap();
         std::io::Write::write_all(&mut writer, b"Subject: queued\r\n\r\nhello").unwrap();
-        let hash = ReplicaHash("cafe0001".into());
-        let size = writer.commit(&hash).unwrap();
+        let hash = PimdirHash("cafe0001".into());
+        let object = PimdirObject {
+            hash: hash.clone(),
+            size: writer.commit(&hash).unwrap() as usize,
+        };
 
         let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
         producer
             .enqueue(
                 "left/INBOX",
                 &PimdirAction::Add {
-                    link_id: Some(ReplicaLinkId("mid:q1@x".into())),
-                    flags: ReplicaFlags::from_iter(["\\Seen"]),
+                    link_id: Some(PimdirLinkId("mid:q1@x".into())),
+                    flags: PimdirFlags::from_iter(["\\Seen"]),
                     object: Some(hash),
-                    meta: Some(ReplicaMeta(r#"{"v":1,"subject":"queued"}"#.into())),
-                    handle: None,
                 },
-                Some(size),
-                "2026-08-07T00:00:00Z",
+                Some(&object),
             )
             .unwrap();
         producer
-            .enqueue(
-                "left/INBOX",
-                &PimdirAction::Remove { seq: 424242 },
-                None,
-                "2026-08-07T00:00:01Z",
-            )
+            .enqueue("left/INBOX", &PimdirAction::Remove { seq: 424242 }, None)
             .unwrap();
         producer
             .enqueue(
                 "left/INBOX",
                 &PimdirAction::SetFlags {
                     seq: 424243,
-                    flags: ReplicaFlags::from_iter(["\\Seen"]),
+                    flags: PimdirFlags::from_iter(["\\Seen"]),
                 },
                 None,
-                "2026-08-07T00:00:02Z",
             )
             .unwrap();
 
         let mut report = SyncOutput::default();
-        drain_queues(&mut store, "left", &mut report);
+        drain_queues(&mut store, &mut report);
         report_parked(&store, &mut report);
 
         assert_eq!(report.drained.len(), 1);
@@ -3806,9 +3803,9 @@ mod tests {
         let placements = load_side(&store, "left/INBOX").unwrap();
         assert_eq!(placements.len(), 1);
         // NOTE: a drained `Add` is a create the next sync owes the source. It
-        // read `Dirty` until io-replica's a-bound-create-is-still-a-create,
+        // read `Dirty` until the engine's a-bound-create-is-still-a-create,
         // the shape that stranded every queued create.
-        assert_eq!(placements[0].status, ReplicaStatus::Created);
+        assert_eq!(placements[0].status, PimdirStatus::Created);
         assert!(placements[0].base.is_none());
         assert_eq!(
             placements[0].link_id.as_ref().map(|l| l.0.as_str()),
@@ -3816,7 +3813,7 @@ mod tests {
         );
 
         let mut second = SyncOutput::default();
-        drain_queues(&mut store, "left", &mut second);
+        drain_queues(&mut store, &mut second);
         report_parked(&store, &mut second);
         assert!(second.drained.is_empty());
         assert_eq!(second.parked.len(), 1);
@@ -3830,8 +3827,8 @@ mod tests {
     fn stored_checkpoint_uid_validity(store: &PimdirSourceStore, collection: &str) -> Option<u32> {
         let loaded = store
             .load(
-                &ReplicaCollectionId(collection.to_string()),
-                &ReplicaLoadScope::All,
+                &PimdirCollectionId(collection.to_string()),
+                &PimdirLoadScope::All,
             )
             .unwrap();
         loaded
@@ -3848,36 +3845,36 @@ mod tests {
     }
 
     #[cfg(feature = "imap")]
-    impl ReplicaRemote for ScriptedRemote {
+    impl PimdirRemote for ScriptedRemote {
         type Error = anyhow::Error;
 
         fn enumerate(
             &mut self,
-            _collection: &ReplicaCollectionId,
-            _cursor: Option<ReplicaCheckpoint>,
-        ) -> Result<ReplicaRemoteSnapshot, Self::Error> {
-            Ok(ReplicaRemoteSnapshot {
+            _collection: &PimdirCollectionId,
+            _cursor: Option<PimdirCheckpoint>,
+        ) -> Result<PimdirRemoteSnapshot, Self::Error> {
+            Ok(PimdirRemoteSnapshot {
                 items: self
                     .spine
                     .iter()
-                    .map(|(handle, _)| ReplicaRemoteItem {
-                        handle: ReplicaHandle(handle.clone()),
-                        flags: ReplicaFlags::default(),
+                    .map(|(handle, _)| PimdirRemoteItem {
+                        handle: PimdirHandle(handle.clone()),
+                        flags: PimdirFlags::default(),
                         revision: None,
                     })
                     .collect(),
                 vanished: Vec::new(),
                 complete: true,
-                checkpoint: ReplicaCheckpoint(crate::imap::backend::encode_checkpoint(2, 1)),
+                checkpoint: PimdirCheckpoint(crate::imap::backend::encode_checkpoint(2, 1)),
             })
         }
 
         fn fetch(
             &mut self,
-            _collection: &ReplicaCollectionId,
-            handles: Vec<ReplicaHandle>,
-            _tier: ReplicaTier,
-        ) -> Result<Vec<ReplicaFetchedItem>, Self::Error> {
+            _collection: &PimdirCollectionId,
+            handles: Vec<PimdirHandle>,
+            _tier: PimdirTier,
+        ) -> Result<Vec<PimdirFetchedItem>, Self::Error> {
             Ok(handles
                 .into_iter()
                 .filter_map(|handle| {
@@ -3886,11 +3883,11 @@ mod tests {
                         .iter()
                         .find(|(h, _)| *h == handle.0)
                         .map(|(_, link)| link.clone())?;
-                    Some(ReplicaFetchedItem {
+                    Some(PimdirFetchedItem {
                         handle,
-                        link_id: ReplicaLinkId(link),
-                        meta: ReplicaMeta(r#"{"v":1,"subject":"s"}"#.into()),
-                        sort_key: ReplicaSortKey::default(),
+                        link_id: PimdirLinkId(link),
+                        summary: None,
+                        sort_key: PimdirSortKey::default(),
                         body: None,
                         revision: None,
                     })
@@ -3900,9 +3897,9 @@ mod tests {
 
         fn push(
             &mut self,
-            _collection: &ReplicaCollectionId,
-            _changes: Vec<ReplicaChange>,
-        ) -> Result<Vec<ReplicaPushResult>, Self::Error> {
+            _collection: &PimdirCollectionId,
+            _changes: Vec<PimdirChange>,
+        ) -> Result<Vec<PimdirPushResult>, Self::Error> {
             anyhow::bail!("scripted remote rejects pushes")
         }
     }
@@ -3916,35 +3913,35 @@ mod tests {
 
         store
             .write(vec![
-                ReplicaWriteOp::StoreObject {
-                    object: ReplicaObject {
-                        hash: ReplicaHash("beef0001".into()),
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: PimdirHash("beef0001".into()),
                         size: 3,
                     },
                     body: Some(b"abc".to_vec()),
                 },
-                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                    collection: ReplicaCollectionId("INBOX".into()),
-                    handle: ReplicaHandle("1".into()),
-                    link_id: Some(ReplicaLinkId("mid:a@x".into())),
-                    object: Some(ReplicaHash("beef0001".into())),
-                    level: ReplicaLevel::Full,
-                    meta: Some(ReplicaMeta(r#"{"v":1,"subject":"s"}"#.into())),
-                    sort_key: ReplicaSortKey::default(),
-                    flags: ReplicaFlags::default(),
-                    status: ReplicaStatus::Clean,
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("INBOX".into()),
+                    handle: PimdirHandle("1".into()),
+                    link_id: Some(PimdirLinkId("mid:a@x".into())),
+                    object: Some(PimdirHash("beef0001".into())),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Clean,
                     conflict_revision: None,
                     conflict_object: None,
-                    base: Some(ReplicaBase {
-                        flags: ReplicaFlags::default(),
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
                         revision: None,
-                        object: Some(ReplicaHash("beef0001".into())),
+                        object: Some(PimdirHash("beef0001".into())),
                     }),
                     origin: None,
                 }),
-                ReplicaWriteOp::SetCheckpoint {
-                    collection: ReplicaCollectionId("INBOX".into()),
-                    checkpoint: ReplicaCheckpoint(crate::imap::backend::encode_checkpoint(1, 1)),
+                PimdirWriteOp::SetCheckpoint {
+                    collection: PimdirCollectionId("INBOX".into()),
+                    checkpoint: PimdirCheckpoint(crate::imap::backend::encode_checkpoint(1, 1)),
                 },
             ])
             .unwrap();
@@ -3953,18 +3950,17 @@ mod tests {
         let mut remote = ScriptedRemote {
             spine: vec![(String::from("7"), String::from("mid:a@x"))],
         };
-        let (rekey, generation) = drive_rekey(&mut store, &mut remote, "INBOX").unwrap();
+        let rekey = run_verb(&mut store, &mut remote, PimdirRekey::new("INBOX")).unwrap();
 
         assert_eq!(rekey.rekeyed, 1);
         assert_eq!(rekey.pulled, 0);
-        assert_eq!(generation, 2);
         assert_eq!(store.generation("INBOX").unwrap(), Some(2));
 
         let placements = load_side(&store, "INBOX").unwrap();
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].handle.0, "7");
-        assert_eq!(placements[0].object, Some(ReplicaHash("beef0001".into())));
-        assert_eq!(placements[0].status, ReplicaStatus::Clean);
+        assert_eq!(placements[0].object, Some(PimdirHash("beef0001".into())));
+        assert_eq!(placements[0].status, PimdirStatus::Clean);
 
         assert_eq!(stored_checkpoint_uid_validity(&store, "INBOX"), Some(2));
     }
@@ -3995,8 +3991,11 @@ mod tests {
         let blobs = store.blobs();
         let mut writer = blobs.writer().unwrap();
         std::io::Write::write_all(&mut writer, b"Subject: hi\r\n\r\nhello").unwrap();
-        let hash = ReplicaHash("cafe0002".into());
-        let size = writer.commit(&hash).unwrap();
+        let hash = PimdirHash("cafe0002".into());
+        let object = PimdirObject {
+            hash: hash.clone(),
+            size: writer.commit(&hash).unwrap() as usize,
+        };
 
         let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
         producer
@@ -4008,13 +4007,12 @@ mod tests {
                         .into(),
                     object_hash: Some(hash),
                 },
-                Some(size),
-                "2026-08-07T00:00:00Z",
+                Some(&object),
             )
             .unwrap();
 
         let mut report = SyncOutput::default();
-        drain_queues(&mut store, "left", &mut report);
+        drain_queues(&mut store, &mut report);
         assert!(report.drained.is_empty());
         assert!(report.parked.is_empty());
         assert!(load_side(&store, "left/Sent").unwrap().is_empty());
@@ -4066,43 +4064,43 @@ mod tests {
 
         source
             .write(vec![
-                ReplicaWriteOp::StoreObject {
-                    object: ReplicaObject {
-                        hash: ReplicaHash("beef0002".into()),
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: PimdirHash("beef0002".into()),
                         size: 3,
                     },
                     body: Some(b"abc".to_vec()),
                 },
-                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                    collection: ReplicaCollectionId("INBOX".into()),
-                    handle: ReplicaHandle("1".into()),
-                    link_id: Some(ReplicaLinkId("mid:gone@x".into())),
-                    object: Some(ReplicaHash("beef0002".into())),
-                    level: ReplicaLevel::Full,
-                    meta: None,
-                    sort_key: ReplicaSortKey::default(),
-                    flags: ReplicaFlags::default(),
-                    status: ReplicaStatus::Clean,
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("INBOX".into()),
+                    handle: PimdirHandle("1".into()),
+                    link_id: Some(PimdirLinkId("mid:gone@x".into())),
+                    object: Some(PimdirHash("beef0002".into())),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Clean,
                     conflict_revision: None,
                     conflict_object: None,
-                    base: Some(ReplicaBase {
-                        flags: ReplicaFlags::default(),
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
                         revision: None,
-                        object: Some(ReplicaHash("beef0002".into())),
+                        object: Some(PimdirHash("beef0002".into())),
                     }),
                     origin: None,
                 }),
             ])
             .unwrap();
 
-        let body = source.blobs().path(&ReplicaHash("beef0002".into()));
+        let body = source.blobs().path(&PimdirHash("beef0002".into()));
         assert!(body.is_file(), "the body was stored");
 
         source
-            .write(vec![ReplicaWriteOp::DropPlacement {
-                collection: ReplicaCollectionId("INBOX".into()),
-                handle: ReplicaHandle("1".into()),
-                reason: ReplicaDropReason::Deleted,
+            .write(vec![PimdirWriteOp::DropPlacement {
+                collection: PimdirCollectionId("INBOX".into()),
+                handle: PimdirHandle("1".into()),
+                reason: PimdirDropReason::Deleted,
             }])
             .unwrap();
         assert!(body.is_file(), "retention keeps the body");
@@ -4139,11 +4137,11 @@ mod tests {
     /// than an engine one.
     struct MutableRemote {
         /// `handle -> (revision, accepted body)`.
-        items: HashMap<String, (String, Option<ReplicaHash>)>,
+        items: HashMap<String, (String, Option<PimdirHash>)>,
         /// The revision handed out by the next accepted write.
         next_revision: String,
         /// Every change this remote was asked to push, in order.
-        pushed: Vec<ReplicaChange>,
+        pushed: Vec<PimdirChange>,
     }
 
     impl MutableRemote {
@@ -4156,45 +4154,45 @@ mod tests {
         }
     }
 
-    impl ReplicaRemote for MutableRemote {
+    impl PimdirRemote for MutableRemote {
         type Error = anyhow::Error;
 
         fn enumerate(
             &mut self,
-            _collection: &ReplicaCollectionId,
-            _cursor: Option<ReplicaCheckpoint>,
-        ) -> Result<ReplicaRemoteSnapshot, Self::Error> {
-            Ok(ReplicaRemoteSnapshot {
+            _collection: &PimdirCollectionId,
+            _cursor: Option<PimdirCheckpoint>,
+        ) -> Result<PimdirRemoteSnapshot, Self::Error> {
+            Ok(PimdirRemoteSnapshot {
                 items: self
                     .items
                     .iter()
-                    .map(|(handle, (revision, _))| ReplicaRemoteItem {
-                        handle: ReplicaHandle(handle.clone()),
-                        flags: ReplicaFlags::default(),
+                    .map(|(handle, (revision, _))| PimdirRemoteItem {
+                        handle: PimdirHandle(handle.clone()),
+                        flags: PimdirFlags::default(),
                         revision: Some(revision.clone()),
                     })
                     .collect(),
                 vanished: Vec::new(),
                 complete: true,
-                checkpoint: ReplicaCheckpoint(b"token-1".to_vec()),
+                checkpoint: PimdirCheckpoint(b"token-1".to_vec()),
             })
         }
 
         fn fetch(
             &mut self,
-            _collection: &ReplicaCollectionId,
-            handles: Vec<ReplicaHandle>,
-            _tier: ReplicaTier,
-        ) -> Result<Vec<ReplicaFetchedItem>, Self::Error> {
+            _collection: &PimdirCollectionId,
+            handles: Vec<PimdirHandle>,
+            _tier: PimdirTier,
+        ) -> Result<Vec<PimdirFetchedItem>, Self::Error> {
             Ok(handles
                 .into_iter()
                 .filter_map(|handle| {
                     let (revision, _) = self.items.get(&handle.0)?;
-                    Some(ReplicaFetchedItem {
+                    Some(PimdirFetchedItem {
                         handle,
-                        link_id: ReplicaLinkId("uid:a".into()),
-                        meta: ReplicaMeta(r#"{"v":1}"#.into()),
-                        sort_key: ReplicaSortKey::default(),
+                        link_id: PimdirLinkId("uid:a".into()),
+                        summary: None,
+                        sort_key: PimdirSortKey::default(),
                         body: None,
                         revision: Some(revision.clone()),
                     })
@@ -4204,14 +4202,14 @@ mod tests {
 
         fn push(
             &mut self,
-            _collection: &ReplicaCollectionId,
-            changes: Vec<ReplicaChange>,
-        ) -> Result<Vec<ReplicaPushResult>, Self::Error> {
+            _collection: &PimdirCollectionId,
+            changes: Vec<PimdirChange>,
+        ) -> Result<Vec<PimdirPushResult>, Self::Error> {
             let mut results = Vec::new();
             for change in changes {
                 self.pushed.push(change.clone());
                 let result = match &change.kind {
-                    ReplicaChangeKind::Update {
+                    PimdirChangeKind::Update {
                         handle,
                         object,
                         if_match,
@@ -4221,16 +4219,16 @@ mod tests {
                             let revision = self.next_revision.clone();
                             self.items
                                 .insert(handle.0.clone(), (revision.clone(), Some(object.clone())));
-                            ReplicaPushResult {
+                            PimdirPushResult {
                                 handle: handle.clone(),
-                                outcome: ReplicaPushOutcome::Accepted,
+                                outcome: PimdirPushOutcome::Accepted,
                                 assigned: None,
                                 revision: Some(revision),
                             }
                         } else {
-                            ReplicaPushResult {
+                            PimdirPushResult {
                                 handle: handle.clone(),
-                                outcome: ReplicaPushOutcome::Rejected,
+                                outcome: PimdirPushOutcome::Rejected,
                                 assigned: None,
                                 revision: None,
                             }
@@ -4265,8 +4263,8 @@ mod tests {
         store.ensure_collection("contacts", "text/vcard").unwrap();
 
         let blobs = store.blobs();
-        let stored = |body: &str| ReplicaWriteOp::StoreObject {
-            object: ReplicaObject {
+        let stored = |body: &str| PimdirWriteOp::StoreObject {
+            object: PimdirObject {
                 hash: blobs.hash(body.as_bytes()),
                 size: body.len(),
             },
@@ -4278,20 +4276,20 @@ mod tests {
                 stored(base),
                 stored(local),
                 stored(remote),
-                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                    collection: ReplicaCollectionId("contacts".into()),
-                    handle: ReplicaHandle("card1".into()),
-                    link_id: Some(ReplicaLinkId("uid:a".into())),
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("contacts".into()),
+                    handle: PimdirHandle("card1".into()),
+                    link_id: Some(PimdirLinkId("uid:a".into())),
                     object: Some(blobs.hash(local.as_bytes())),
-                    level: ReplicaLevel::Full,
-                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
-                    sort_key: ReplicaSortKey::default(),
-                    flags: ReplicaFlags::default(),
-                    status: ReplicaStatus::Conflict,
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Conflict,
                     conflict_revision: Some(String::from("etag-2")),
                     conflict_object: Some(blobs.hash(remote.as_bytes())),
-                    base: Some(ReplicaBase {
-                        flags: ReplicaFlags::default(),
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
                         revision: Some(String::from("etag-1")),
                         object: Some(blobs.hash(base.as_bytes())),
                     }),
@@ -4339,7 +4337,7 @@ mod tests {
         assert_eq!(merged, 1);
 
         let placement = load_side(&store, "contacts").unwrap().remove(0);
-        assert_ne!(placement.status, ReplicaStatus::Conflict);
+        assert_ne!(placement.status, PimdirStatus::Conflict);
         assert!(placement.conflict_object.is_none());
         assert_eq!(
             placement.base.and_then(|base| base.revision).as_deref(),
@@ -4355,7 +4353,7 @@ mod tests {
 
         let mut report = SyncOutput::default();
         itemize_pulled(
-            &[ReplicaEvent::Conflicted(ReplicaHandle("card1".into()))],
+            &[PimdirSyncEvent::Conflicted(PimdirHandle("card1".into()))],
             &HashMap::new(),
             &store,
             "contacts",
@@ -4385,7 +4383,7 @@ mod tests {
         let mut remote = MutableRemote::at("card1", "v9");
 
         let before = flag_snapshot(&store, "contacts", "left").unwrap();
-        let sync = sync_with(&mut store, &mut remote, ReplicaPushRights::all());
+        let sync = sync_with(&mut store, &mut remote, PimdirPushRights::all());
         assert_eq!(sync.conflicts, 1, "the engine parked it");
 
         let mut collection = SyncOutput::default();
@@ -4444,12 +4442,12 @@ mod tests {
         assert_eq!(merged, 0);
 
         let placement = load_side(&store, "contacts").unwrap().remove(0);
-        assert_eq!(placement.status, ReplicaStatus::Conflict);
+        assert_eq!(placement.status, PimdirStatus::Conflict);
         assert_eq!(placement.object, Some(local), "the local side is untouched");
 
         let mut collection = SyncOutput::default();
         itemize_pulled(
-            &[ReplicaEvent::Conflicted(ReplicaHandle("card1".into()))],
+            &[PimdirSyncEvent::Conflicted(PimdirHandle("card1".into()))],
             &HashMap::new(),
             &store,
             "contacts",
@@ -4502,20 +4500,20 @@ mod tests {
         // bodies the store already holds: what the report prints is a number,
         // and one item cannot tell a count from a flag.
         store
-            .write(vec![ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                collection: ReplicaCollectionId("contacts".into()),
-                handle: ReplicaHandle("card2".into()),
-                link_id: Some(ReplicaLinkId("uid:b".into())),
+            .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                collection: PimdirCollectionId("contacts".into()),
+                handle: PimdirHandle("card2".into()),
+                link_id: Some(PimdirLinkId("uid:b".into())),
                 object: Some(blobs.hash(local.as_bytes())),
-                level: ReplicaLevel::Full,
-                meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
-                sort_key: ReplicaSortKey::default(),
-                flags: ReplicaFlags::default(),
-                status: ReplicaStatus::Conflict,
+                level: PimdirLevel::Full,
+                summary: None,
+                sort_key: PimdirSortKey::default(),
+                flags: PimdirFlags::default(),
+                status: PimdirStatus::Conflict,
                 conflict_revision: Some(String::from("etag-2")),
                 conflict_object: Some(blobs.hash(remote.as_bytes())),
-                base: Some(ReplicaBase {
-                    flags: ReplicaFlags::default(),
+                base: Some(PimdirBase {
+                    flags: PimdirFlags::default(),
                     revision: Some(String::from("etag-1")),
                     object: Some(blobs.hash(base.as_bytes())),
                 }),
@@ -4541,7 +4539,7 @@ mod tests {
         let parked = load_side(&store, "contacts").unwrap();
         assert_eq!(parked.len(), 2);
         for placement in &parked {
-            assert_eq!(placement.status, ReplicaStatus::Conflict);
+            assert_eq!(placement.status, PimdirStatus::Conflict);
             assert_eq!(
                 placement.object,
                 Some(blobs.hash(local.as_bytes())),
@@ -4553,8 +4551,8 @@ mod tests {
         let mut collection = SyncOutput::default();
         itemize_pulled(
             &[
-                ReplicaEvent::Conflicted(ReplicaHandle("card1".into())),
-                ReplicaEvent::Conflicted(ReplicaHandle("card2".into())),
+                PimdirSyncEvent::Conflicted(PimdirHandle("card1".into())),
+                PimdirSyncEvent::Conflicted(PimdirHandle("card2".into())),
             ],
             &HashMap::new(),
             &store,
@@ -4649,6 +4647,7 @@ mod tests {
                     collection: String::from("Calendar"),
                     source_id: String::from(id),
                     flags: BTreeSet::new(),
+                    origin: None,
                     content_key: 0,
                 },
                 None,
@@ -4712,7 +4711,7 @@ mod tests {
 
     /// A create a frontend staged must still read back as a create.
     ///
-    /// io-replica pushes an add only for a `Created` placement, so a status the
+    /// The engine pushes an add only for a `Created` placement, so a status the
     /// store cannot hold back never reaches the server. A two-replica account
     /// looped against Fastmail so: six staged cards, six hunks, none received.
     #[test]
@@ -4731,31 +4730,31 @@ mod tests {
         let hash = blobs.hash(body.as_bytes());
         let mut writer = blobs.writer().unwrap();
         writer.write_all(body.as_bytes()).unwrap();
-        let size = writer.commit(&hash).unwrap();
+        let object = PimdirObject {
+            hash: hash.clone(),
+            size: writer.commit(&hash).unwrap() as usize,
+        };
 
         let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
         producer
             .enqueue(
                 "dav/contacts",
                 &PimdirAction::Add {
-                    link_id: Some(ReplicaLinkId("uid:new".into())),
-                    flags: ReplicaFlags::default(),
+                    link_id: Some(PimdirLinkId("uid:new".into())),
+                    flags: PimdirFlags::default(),
                     object: Some(hash),
-                    meta: None,
-                    handle: None,
                 },
-                Some(size),
-                "2026-08-29T00:00:00Z",
+                Some(&object),
             )
             .unwrap();
         drop(producer);
 
-        assert_eq!(store.drain_collection("dav/contacts").unwrap().applied, 1);
+        assert_eq!(store.drain().unwrap().applied, 1);
 
         let placement = load_side(&store, "dav/contacts").unwrap().remove(0);
         assert_eq!(
             placement.status,
-            ReplicaStatus::Created,
+            PimdirStatus::Created,
             "a staged create the store reads back as {:?} is never pushed",
             placement.status,
         );
@@ -4770,36 +4769,36 @@ mod tests {
         store.ensure_collection("contacts", "text/vcard").unwrap();
         store
             .write(vec![
-                ReplicaWriteOp::StoreObject {
-                    object: ReplicaObject {
-                        hash: ReplicaHash("0rig".into()),
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: PimdirHash("0rig".into()),
                         size: 3,
                     },
                     body: Some(b"old".to_vec()),
                 },
-                ReplicaWriteOp::StoreObject {
-                    object: ReplicaObject {
-                        hash: ReplicaHash("ed17".into()),
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: PimdirHash("ed17".into()),
                         size: 3,
                     },
                     body: Some(b"new".to_vec()),
                 },
-                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                    collection: ReplicaCollectionId("contacts".into()),
-                    handle: ReplicaHandle("card1".into()),
-                    link_id: Some(ReplicaLinkId("uid:a".into())),
-                    object: Some(ReplicaHash("ed17".into())),
-                    level: ReplicaLevel::Full,
-                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
-                    sort_key: ReplicaSortKey::default(),
-                    flags: ReplicaFlags::default(),
-                    status: ReplicaStatus::Dirty,
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("contacts".into()),
+                    handle: PimdirHandle("card1".into()),
+                    link_id: Some(PimdirLinkId("uid:a".into())),
+                    object: Some(PimdirHash("ed17".into())),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Dirty,
                     conflict_revision: None,
                     conflict_object: None,
-                    base: Some(ReplicaBase {
-                        flags: ReplicaFlags::default(),
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
                         revision: Some(base_revision.to_string()),
-                        object: Some(ReplicaHash("0rig".into())),
+                        object: Some(PimdirHash("0rig".into())),
                     }),
                     origin: None,
                 }),
@@ -4822,36 +4821,36 @@ mod tests {
         store.ensure_collection("contacts", "text/vcard").unwrap();
         store
             .write(vec![
-                ReplicaWriteOp::StoreObject {
-                    object: ReplicaObject {
-                        hash: ReplicaHash("0rig".into()),
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: PimdirHash("0rig".into()),
                         size: 3,
                     },
                     body: Some(b"old".to_vec()),
                 },
-                ReplicaWriteOp::StoreObject {
-                    object: ReplicaObject {
-                        hash: ReplicaHash("ed17".into()),
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: PimdirHash("ed17".into()),
                         size: 3,
                     },
                     body: Some(b"new".to_vec()),
                 },
-                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                    collection: ReplicaCollectionId("contacts".into()),
-                    handle: ReplicaHandle("card1".into()),
-                    link_id: Some(ReplicaLinkId("uid:a".into())),
-                    object: Some(ReplicaHash("ed17".into())),
-                    level: ReplicaLevel::Full,
-                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
-                    sort_key: ReplicaSortKey::default(),
-                    flags: ReplicaFlags::default(),
-                    status: ReplicaStatus::Dirty,
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("contacts".into()),
+                    handle: PimdirHandle("card1".into()),
+                    link_id: Some(PimdirLinkId("uid:a".into())),
+                    object: Some(PimdirHash("ed17".into())),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Dirty,
                     conflict_revision: None,
                     conflict_object: None,
-                    base: Some(ReplicaBase {
-                        flags: ReplicaFlags::default(),
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
                         revision: Some(base_revision.to_string()),
-                        object: Some(ReplicaHash("0rig".into())),
+                        object: Some(PimdirHash("0rig".into())),
                     }),
                     origin: None,
                 }),
@@ -4868,16 +4867,16 @@ mod tests {
         let mut placement = load_side(store, "contacts").unwrap().remove(0);
         let revision = placement.conflict_revision.take();
 
-        placement.status = ReplicaStatus::Dirty;
+        placement.status = PimdirStatus::Dirty;
         placement.conflict_object = None;
-        placement.base = Some(ReplicaBase {
-            flags: ReplicaFlags::default(),
+        placement.base = Some(PimdirBase {
+            flags: PimdirFlags::default(),
             revision,
-            object: Some(ReplicaHash("0rig".into())),
+            object: Some(PimdirHash("0rig".into())),
         });
 
         store
-            .write(vec![ReplicaWriteOp::UpsertPlacement(placement)])
+            .write(vec![PimdirWriteOp::UpsertPlacement(placement)])
             .unwrap();
     }
 
@@ -4896,7 +4895,7 @@ mod tests {
 
         let mut report = SyncOutput::default();
         for pass in 0..2 {
-            let left_pass = sync_with(&mut left, &mut left_remote, ReplicaPushRights::all());
+            let left_pass = sync_with(&mut left, &mut left_remote, PimdirPushRights::all());
             itemize_conflicted(
                 &left_pass.events,
                 &left,
@@ -4907,7 +4906,7 @@ mod tests {
             )
             .unwrap();
 
-            let right_pass = sync_with(&mut right, &mut right_remote, ReplicaPushRights::all());
+            let right_pass = sync_with(&mut right, &mut right_remote, PimdirPushRights::all());
             itemize_conflicted(
                 &right_pass.events,
                 &right,
@@ -4958,7 +4957,7 @@ mod tests {
             (&mut left, &mut left_remote, "left"),
             (&mut right, &mut right_remote, "right"),
         ] {
-            let pass = sync_with(store, remote, ReplicaPushRights::all());
+            let pass = sync_with(store, remote, PimdirPushRights::all());
             itemize_conflicted(
                 &pass.events,
                 store,
@@ -4987,29 +4986,29 @@ mod tests {
         store.ensure_collection("contacts", "text/vcard").unwrap();
         store
             .write(vec![
-                ReplicaWriteOp::StoreObject {
-                    object: ReplicaObject {
-                        hash: ReplicaHash("0rig".into()),
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: PimdirHash("0rig".into()),
                         size: 3,
                     },
                     body: Some(b"old".to_vec()),
                 },
-                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                    collection: ReplicaCollectionId("contacts".into()),
-                    handle: ReplicaHandle("card1".into()),
-                    link_id: Some(ReplicaLinkId("uid:a".into())),
-                    object: Some(ReplicaHash("0rig".into())),
-                    level: ReplicaLevel::Full,
-                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
-                    sort_key: ReplicaSortKey::default(),
-                    flags: ReplicaFlags::default(),
-                    status: ReplicaStatus::Clean,
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("contacts".into()),
+                    handle: PimdirHandle("card1".into()),
+                    link_id: Some(PimdirLinkId("uid:a".into())),
+                    object: Some(PimdirHash("0rig".into())),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Clean,
                     conflict_revision: None,
                     conflict_object: None,
-                    base: Some(ReplicaBase {
-                        flags: ReplicaFlags::default(),
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
                         revision: Some(revision.to_string()),
-                        object: Some(ReplicaHash("0rig".into())),
+                        object: Some(PimdirHash("0rig".into())),
                     }),
                     origin: None,
                 }),
@@ -5035,23 +5034,21 @@ mod tests {
         left_remote.items.clear();
 
         let before = flag_snapshot(&left, "contacts", "left").unwrap();
-        let pull = drive(
+        let pull = run_verb(
             &mut left,
             &mut left_remote,
-            ReplicaSync::new(
-                String::from("contacts"),
-                sync_options(
-                    false,
-                    ReplicaPushRights::all(),
-                    ReplicaConflictPolicy::Manual,
-                ),
+            sync_verb(
+                "contacts",
+                false,
+                PimdirPushRights::all(),
+                PimdirConflictPolicy::Manual,
             ),
         )
         .unwrap();
         assert!(
             pull.events
                 .iter()
-                .any(|event| matches!(event, ReplicaEvent::Vanished(_))),
+                .any(|event| matches!(event, PimdirSyncEvent::Vanished(_))),
             "the engine saw the card go: {:?}",
             pull.events,
         );
@@ -5070,7 +5067,7 @@ mod tests {
 
         for (source, other) in [("left", "right"), ("right", "left")] {
             for placement in projection_view(&right, "contacts", source).unwrap() {
-                for hunk in placement_hunks(source, other, "contacts", &placement) {
+                for hunk in placement_hunks(source, other, source, "contacts", &placement) {
                     report.item.patch.push(PatchEntry::new(hunk, None));
                 }
             }
@@ -5099,29 +5096,29 @@ mod tests {
         store.ensure_collection("contacts", "text/vcard").unwrap();
         store
             .write(vec![
-                ReplicaWriteOp::StoreObject {
-                    object: ReplicaObject {
-                        hash: ReplicaHash("0rig".into()),
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: PimdirHash("0rig".into()),
                         size: 3,
                     },
                     body: Some(b"old".to_vec()),
                 },
-                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                    collection: ReplicaCollectionId("contacts".into()),
-                    handle: ReplicaHandle("card1".into()),
-                    link_id: Some(ReplicaLinkId("uid:a".into())),
-                    object: Some(ReplicaHash("0rig".into())),
-                    level: ReplicaLevel::Full,
-                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
-                    sort_key: ReplicaSortKey::default(),
-                    flags: ReplicaFlags::default(),
-                    status: ReplicaStatus::Tombstone,
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("contacts".into()),
+                    handle: PimdirHandle("card1".into()),
+                    link_id: Some(PimdirLinkId("uid:a".into())),
+                    object: Some(PimdirHash("0rig".into())),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Tombstone,
                     conflict_revision: None,
                     conflict_object: None,
-                    base: Some(ReplicaBase {
-                        flags: ReplicaFlags::default(),
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
                         revision: Some(String::from("v1")),
-                        object: Some(ReplicaHash("0rig".into())),
+                        object: Some(PimdirHash("0rig".into())),
                     }),
                     origin: None,
                 }),
@@ -5133,15 +5130,12 @@ mod tests {
     fn sync_with(
         store: &mut PimdirSourceStore,
         remote: &mut MutableRemote,
-        rights: ReplicaPushRights,
-    ) -> ReplicaSyncReport {
-        drive(
+        rights: PimdirPushRights,
+    ) -> PimdirSyncReport {
+        run_verb(
             store,
             remote,
-            ReplicaSync::new(
-                String::from("contacts"),
-                sync_options(true, rights, ReplicaConflictPolicy::Manual),
-            ),
+            sync_verb("contacts", true, rights, PimdirConflictPolicy::Manual),
         )
         .unwrap()
     }
@@ -5157,9 +5151,9 @@ mod tests {
         let mut store = store_with_local_delete(dir.path());
         let mut remote = MutableRemote::at("card1", "v1");
 
-        let rights = ReplicaPushRights {
+        let rights = PimdirPushRights {
             remove: false,
-            ..ReplicaPushRights::all()
+            ..PimdirPushRights::all()
         };
         let report = sync_with(&mut store, &mut remote, rights);
 
@@ -5168,15 +5162,15 @@ mod tests {
 
         let placements = store
             .load(
-                &ReplicaCollectionId("contacts".into()),
-                &ReplicaLoadScope::All,
+                &PimdirCollectionId("contacts".into()),
+                &PimdirLoadScope::All,
             )
             .unwrap()
             .placements;
         assert_eq!(placements.len(), 1);
         assert_eq!(
             placements[0].status,
-            ReplicaStatus::Tombstone,
+            PimdirStatus::Tombstone,
             "the removal is still a removal, not undone into a clean row",
         );
     }
@@ -5187,12 +5181,12 @@ mod tests {
         let mut store = store_with_local_edit(dir.path(), "v1");
         let mut remote = MutableRemote::at("card1", "v1");
 
-        let report = sync_with(&mut store, &mut remote, ReplicaPushRights::all());
+        let report = sync_with(&mut store, &mut remote, PimdirPushRights::all());
 
         assert!(
             matches!(
                 remote.pushed.as_slice(),
-                [ReplicaChange { kind: ReplicaChangeKind::Update { if_match, .. }, .. }]
+                [PimdirChange { kind: PimdirChangeKind::Update { if_match, .. }, .. }]
                     if if_match.as_deref() == Some("v1")
             ),
             "expected one If-Match update, got {:?}",
@@ -5203,13 +5197,13 @@ mod tests {
 
         assert_eq!(
             remote.items["card1"],
-            (String::from("v2"), Some(ReplicaHash("ed17".into())))
+            (String::from("v2"), Some(PimdirHash("ed17".into())))
         );
         let placements = load_side(&store, "contacts").unwrap();
-        assert_eq!(placements[0].status, ReplicaStatus::Clean);
+        assert_eq!(placements[0].status, PimdirStatus::Clean);
         let base = placements[0].base.as_ref().expect("a rebased base");
         assert_eq!(base.revision.as_deref(), Some("v2"));
-        assert_eq!(base.object, Some(ReplicaHash("ed17".into())));
+        assert_eq!(base.object, Some(PimdirHash("ed17".into())));
     }
 
     #[test]
@@ -5218,7 +5212,7 @@ mod tests {
         let mut store = store_with_local_edit(dir.path(), "v1");
         let mut remote = MutableRemote::at("card1", "v9");
 
-        let report = sync_with(&mut store, &mut remote, ReplicaPushRights::all());
+        let report = sync_with(&mut store, &mut remote, PimdirPushRights::all());
 
         assert_eq!(
             remote.items["card1"].1, None,
@@ -5229,7 +5223,7 @@ mod tests {
             report
                 .events
                 .iter()
-                .any(|e| matches!(e, ReplicaEvent::Conflicted(h) if h.0 == "card1")),
+                .any(|e| matches!(e, PimdirSyncEvent::Conflicted(h) if h.0 == "card1")),
             "expected a Conflicted event, got {:?}",
             report.events
         );
@@ -5237,7 +5231,7 @@ mod tests {
         let placements = load_side(&store, "contacts").unwrap();
         assert_eq!(
             placements[0].status,
-            ReplicaStatus::Conflict,
+            PimdirStatus::Conflict,
             "the conflict must survive the round trip through the store"
         );
         assert_eq!(
@@ -5253,9 +5247,9 @@ mod tests {
         let mut store = store_with_local_edit(dir.path(), "v1");
         let mut remote = MutableRemote::at("card1", "v1");
 
-        let rights = ReplicaPushRights {
+        let rights = PimdirPushRights {
             content: false,
-            ..ReplicaPushRights::all()
+            ..PimdirPushRights::all()
         };
         sync_with(&mut store, &mut remote, rights);
 
@@ -5265,49 +5259,30 @@ mod tests {
             remote.pushed
         );
         let placements = load_side(&store, "contacts").unwrap();
-        assert_eq!(placements[0].status, ReplicaStatus::Dirty);
-        assert_eq!(placements[0].object, Some(ReplicaHash("ed17".into())));
+        assert_eq!(placements[0].status, PimdirStatus::Dirty);
+        assert_eq!(placements[0].object, Some(PimdirHash("ed17".into())));
     }
 
-    #[test]
-    fn permissions_map_onto_io_replica_push_rights() {
-        let perms = SourcePermissions {
-            collection: crate::config::CollectionPermissions::default(),
-            flag: crate::config::FlagSourcePermissions { update: false },
-            item: crate::config::ItemSourcePermissions {
-                create: true,
-                delete: false,
-                update: true,
-            },
-        };
-        let ctx_rights = ReplicaPushRights {
-            flags: perms.flag.update,
-            content: perms.item.update,
-            add: perms.item.create,
-            remove: perms.item.delete,
-        };
-        assert!(!ctx_rights.flags);
-        assert!(ctx_rights.content);
-        assert!(ctx_rights.add);
-        assert!(!ctx_rights.remove);
-    }
-
-    /// A `Meta`-level placement with a base, as after a first reconcile.
-    fn linked(handle: &str, link: &str, meta: &str) -> ReplicaPlacement {
-        ReplicaPlacement {
-            collection: ReplicaCollectionId("INBOX".into()),
-            handle: ReplicaHandle(handle.into()),
-            link_id: Some(ReplicaLinkId(link.into())),
+    /// A `Meta`-level placement with a base, as after a first reconcile,
+    /// summarised with the octet length a relay needs.
+    fn linked(handle: &str, link: &str, size: Option<u64>) -> PimdirPlacement {
+        PimdirPlacement {
+            collection: PimdirCollectionId("INBOX".into()),
+            handle: PimdirHandle(handle.into()),
+            link_id: Some(PimdirLinkId(link.into())),
             object: None,
-            level: ReplicaLevel::Meta,
-            meta: Some(ReplicaMeta(meta.into())),
-            sort_key: ReplicaSortKey::default(),
-            flags: ReplicaFlags::default(),
-            status: ReplicaStatus::Clean,
+            level: PimdirLevel::Meta,
+            summary: Some(PimdirSummary::Mail(PimdirMailSummary {
+                size,
+                ..Default::default()
+            })),
+            sort_key: PimdirSortKey::default(),
+            flags: PimdirFlags::default(),
+            status: PimdirStatus::Clean,
             conflict_revision: None,
             conflict_object: None,
-            base: Some(ReplicaBase {
-                flags: ReplicaFlags::default(),
+            base: Some(PimdirBase {
+                flags: PimdirFlags::default(),
                 revision: None,
                 object: None,
             }),
@@ -5328,8 +5303,8 @@ mod tests {
 
         store
             .write(vec![
-                ReplicaWriteOp::UpsertPlacement(linked("145", "a@x", r#"{"v":1}"#)),
-                ReplicaWriteOp::UpsertPlacement(linked("146", "dup:a@x#146", r#"{"v":1}"#)),
+                PimdirWriteOp::UpsertPlacement(linked("145", "a@x", None)),
+                PimdirWriteOp::UpsertPlacement(linked("146", "dup:a@x#146", None)),
             ])
             .unwrap();
 
@@ -5341,7 +5316,7 @@ mod tests {
             ..Default::default()
         };
         for placement in &view {
-            for hunk in placement_hunks("left", "right", "INBOX", placement) {
+            for hunk in placement_hunks("left", "right", "left", "INBOX", placement) {
                 report.item.patch.push(PatchEntry::new(hunk, None));
             }
         }
@@ -5454,10 +5429,10 @@ mod tests {
         store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
         store
-            .write(vec![ReplicaWriteOp::UpsertPlacement(linked(
+            .write(vec![PimdirWriteOp::UpsertPlacement(linked(
                 "1",
                 "mid:a@x",
-                r#"{"v":1,"size":42}"#,
+                Some(42),
             ))])
             .unwrap();
 
@@ -5485,6 +5460,7 @@ mod tests {
                 collection: "INBOX".into(),
                 source_id: target.link.clone(),
                 flags: target.flags.iter().cloned().collect(),
+                origin: None,
                 content_key: content_key(&target.link),
             },
             None,
@@ -5508,10 +5484,10 @@ mod tests {
         let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
         left.ensure_collection("INBOX", "message/rfc822").unwrap();
 
-        left.write(vec![ReplicaWriteOp::UpsertPlacement(linked(
+        left.write(vec![PimdirWriteOp::UpsertPlacement(linked(
             "1",
             "mid:a@x",
-            r#"{"v":1,"size":42}"#,
+            Some(42),
         ))])
         .unwrap();
 
@@ -5531,17 +5507,17 @@ mod tests {
         assert!(sides(&right).is_empty(), "the copy is not relayed again");
 
         let hub = right.load_hub("INBOX").unwrap();
-        let item = hub.items.get(&ReplicaLinkId::from("mid:a@x")).unwrap();
+        let item = hub.items.get(&PimdirLinkId::from("mid:a@x")).unwrap();
         assert_eq!(item.sources.len(), 2, "the item is two-sided now");
 
         let binding = &item.sources[&source_id("right")];
-        assert_eq!(binding.handle, ReplicaHandle::from("77"), "as assigned");
+        assert_eq!(binding.handle, PimdirHandle::from("77"), "as assigned");
         assert!(
             binding.base.is_some(),
             "and based, so the next sync reads it as in sync rather than as a create",
         );
         assert!(item.object.is_none(), "the relay stored no body");
-        assert_eq!(item.level, ReplicaLevel::Meta, "so it claims no more");
+        assert_eq!(item.level, PimdirLevel::Meta, "so it claims no more");
     }
 
     /// A hub collection id carries its namespace and the wire name does not.
@@ -5590,7 +5566,7 @@ mod tests {
     fn the_authority_decides_the_conflict_and_the_push() {
         assert_eq!(
             Authority::Shared.conflict_policy(),
-            ReplicaConflictPolicy::Manual,
+            PimdirConflictPolicy::Manual,
         );
         assert!(
             Authority::Shared.writes_back(),
@@ -5599,7 +5575,7 @@ mod tests {
 
         assert_eq!(
             Authority::Endpoint.conflict_policy(),
-            ReplicaConflictPolicy::PreferRemote,
+            PimdirConflictPolicy::PreferRemote,
         );
         assert!(
             !Authority::Endpoint.writes_back(),
@@ -5608,7 +5584,7 @@ mod tests {
 
         assert_eq!(
             Authority::Store.conflict_policy(),
-            ReplicaConflictPolicy::PreferLocal,
+            PimdirConflictPolicy::PreferLocal,
         );
         assert!(
             Authority::Store.writes_back(),
@@ -5629,16 +5605,16 @@ mod tests {
             .unwrap();
 
         store
-            .write(vec![ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                collection: ReplicaCollectionId("dav/contacts".into()),
-                handle: ReplicaHandle("card-1.vcf".into()),
+            .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                collection: PimdirCollectionId("dav/contacts".into()),
+                handle: PimdirHandle("card-1.vcf".into()),
                 link_id: None,
                 object: None,
-                level: ReplicaLevel::Probed,
-                meta: None,
-                sort_key: ReplicaSortKey::default(),
-                flags: ReplicaFlags::default(),
-                status: ReplicaStatus::Clean,
+                level: PimdirLevel::Probed,
+                summary: None,
+                sort_key: PimdirSortKey::default(),
+                flags: PimdirFlags::default(),
+                status: PimdirStatus::Clean,
                 conflict_revision: None,
                 conflict_object: None,
                 base: None,
@@ -5676,16 +5652,16 @@ mod tests {
             .unwrap();
 
         store
-            .write(vec![ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                collection: ReplicaCollectionId("dav/contacts".into()),
-                handle: ReplicaHandle("card-1.vcf".into()),
-                link_id: Some(ReplicaLinkId("uid:card-1".into())),
+            .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                collection: PimdirCollectionId("dav/contacts".into()),
+                handle: PimdirHandle("card-1.vcf".into()),
+                link_id: Some(PimdirLinkId("uid:card-1".into())),
                 object: None,
-                level: ReplicaLevel::Full,
-                meta: Some(ReplicaMeta(r#"{"v":1,"fn":"Jane"}"#.into())),
-                sort_key: ReplicaSortKey::default(),
-                flags: ReplicaFlags::default(),
-                status: ReplicaStatus::Clean,
+                level: PimdirLevel::Full,
+                summary: None,
+                sort_key: PimdirSortKey::default(),
+                flags: PimdirFlags::default(),
+                status: PimdirStatus::Clean,
                 conflict_revision: None,
                 conflict_object: None,
                 base: None,
@@ -5715,36 +5691,36 @@ mod tests {
         fetched: Vec<String>,
     }
 
-    impl ReplicaRemote for FullListingRemote {
+    impl PimdirRemote for FullListingRemote {
         type Error = anyhow::Error;
 
         fn enumerate(
             &mut self,
-            _collection: &ReplicaCollectionId,
-            _cursor: Option<ReplicaCheckpoint>,
-        ) -> Result<ReplicaRemoteSnapshot, Self::Error> {
-            Ok(ReplicaRemoteSnapshot {
+            _collection: &PimdirCollectionId,
+            _cursor: Option<PimdirCheckpoint>,
+        ) -> Result<PimdirRemoteSnapshot, Self::Error> {
+            Ok(PimdirRemoteSnapshot {
                 items: self
                     .items
                     .iter()
-                    .map(|(handle, _, _)| ReplicaRemoteItem {
-                        handle: ReplicaHandle(handle.clone()),
-                        flags: ReplicaFlags::from_iter([] as [String; 0]),
+                    .map(|(handle, _, _)| PimdirRemoteItem {
+                        handle: PimdirHandle(handle.clone()),
+                        flags: PimdirFlags::from_iter([] as [String; 0]),
                         revision: Some(String::from("etag-1")),
                     })
                     .collect(),
                 vanished: Vec::new(),
                 complete: true,
-                checkpoint: ReplicaCheckpoint(Vec::new()),
+                checkpoint: PimdirCheckpoint(Vec::new()),
             })
         }
 
         fn fetch(
             &mut self,
-            _collection: &ReplicaCollectionId,
-            handles: Vec<ReplicaHandle>,
-            _tier: ReplicaTier,
-        ) -> Result<Vec<ReplicaFetchedItem>, Self::Error> {
+            _collection: &PimdirCollectionId,
+            handles: Vec<PimdirHandle>,
+            _tier: PimdirTier,
+        ) -> Result<Vec<PimdirFetchedItem>, Self::Error> {
             let mut items = Vec::new();
             for handle in handles {
                 let Some((_, uid, body)) = self
@@ -5756,13 +5732,13 @@ mod tests {
                     continue;
                 };
                 self.fetched.push(handle.0.clone());
-                items.push(ReplicaFetchedItem {
+                items.push(PimdirFetchedItem {
                     handle,
-                    link_id: ReplicaLinkId(uid),
-                    meta: ReplicaMeta(format!(r#"{{"v":1,"size":{}}}"#, body.len())),
-                    sort_key: ReplicaSortKey::default(),
-                    body: Some(ReplicaFetchedBody::Inline {
-                        hash: ReplicaHash(format!("{:016x}", digest(&body))),
+                    link_id: PimdirLinkId(uid),
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    body: Some(PimdirFetchedBody::Inline {
+                        hash: PimdirHash(format!("{:016x}", digest(&body))),
                         bytes: body,
                     }),
                     revision: Some(String::from("etag-1")),
@@ -5773,9 +5749,9 @@ mod tests {
 
         fn push(
             &mut self,
-            _collection: &ReplicaCollectionId,
-            _changes: Vec<ReplicaChange>,
-        ) -> Result<Vec<ReplicaPushResult>, Self::Error> {
+            _collection: &PimdirCollectionId,
+            _changes: Vec<PimdirChange>,
+        ) -> Result<Vec<PimdirPushResult>, Self::Error> {
             anyhow::bail!("the listing remote is never pushed to")
         }
     }
@@ -5800,32 +5776,30 @@ mod tests {
         collection: &str,
     ) -> SyncOutput {
         let mut report = SyncOutput::default();
-        drive(
+        run_verb(
             store,
             remote,
-            ReplicaSync::new(
-                collection.to_string(),
-                sync_options(
-                    false,
-                    ReplicaPushRights::all(),
-                    ReplicaConflictPolicy::Manual,
-                ),
+            sync_verb(
+                collection,
+                false,
+                PimdirPushRights::all(),
+                PimdirConflictPolicy::Manual,
             ),
         )
         .unwrap();
         itemize_fetches(collection, "agenda", store, "caldav", &mut report).unwrap();
 
-        let probed: Vec<ReplicaHandle> = load_side(store, collection)
+        let probed: Vec<PimdirHandle> = load_side(store, collection)
             .unwrap()
             .into_iter()
-            .filter(|p| p.level == ReplicaLevel::Probed)
+            .filter(|p| p.level == PimdirLevel::Probed)
             .map(|p| p.handle)
             .collect();
         if !probed.is_empty() {
-            drive(
+            run_verb(
                 store,
                 remote,
-                ReplicaUpgrade::new(collection.to_string(), probed, ReplicaTier::Full),
+                PimdirUpgrade::new(collection.to_string(), probed, PimdirTier::Full),
             )
             .unwrap();
         }
@@ -5915,6 +5889,47 @@ mod tests {
             remote.fetched.len(),
             2,
             "no body is downloaded twice, so no blob is orphaned",
+        );
+    }
+
+    /// What a create delivers by names the hunk: a frontend's compose is an
+    /// add, a staged copy is a copy from its origin, and a body the other
+    /// side holds is a copy across.
+    #[test]
+    fn a_create_is_named_by_what_delivers_it() {
+        let created = |origin: Option<PimdirOrigin>| PimdirPlacement {
+            collection: PimdirCollectionId("imap/INBOX".into()),
+            handle: PimdirHandle("\u{1}mid:q@x".into()),
+            link_id: Some(PimdirLinkId("mid:q@x".into())),
+            object: None,
+            level: PimdirLevel::Full,
+            summary: None,
+            sort_key: PimdirSortKey::default(),
+            flags: PimdirFlags::default(),
+            status: PimdirStatus::Created,
+            conflict_revision: None,
+            conflict_object: None,
+            base: None,
+            origin,
+        };
+
+        let add = placement_hunks("imap", "imap", "imap", "INBOX", &created(None));
+        assert_eq!(add[0].to_string(), "add item mid:q@x in INBOX on imap");
+
+        let origin = PimdirOrigin {
+            collection: PimdirCollectionId("imap/Sent".into()),
+            handle: PimdirHandle("7".into()),
+        };
+        let copy = placement_hunks("imap", "imap", "imap", "INBOX", &created(Some(origin)));
+        assert_eq!(
+            copy[0].to_string(),
+            "copy item mid:q@x from Sent to INBOX on imap"
+        );
+
+        let across = placement_hunks("left", "right", "left", "INBOX", &created(None));
+        assert_eq!(
+            across[0].to_string(),
+            "copy item mid:q@x in INBOX from right to left"
         );
     }
 }

@@ -6,8 +6,8 @@ status: current
 
 # Sync
 
-`neverest sync` reconciles an account's named sources through the io-replica
-engine over one pimdir store. It is sync-on-demand: one reconcile per
+`neverest sync` reconciles an account's named sources through the io-pimdir
+engine over its own pimdir store. It is sync-on-demand: one reconcile per
 invocation, no daemon.
 
 ### Requirement: An account holds named sources
@@ -322,16 +322,7 @@ picking its own names bodies where no other reader of the same store looks, and
 it fails silently, as a dedup that never dedups.
 
 ### Requirement: Every item carries a per-kind sort key
-The sync SHALL write a `sort_key` beside the `meta` of every item it summarises
-(pimdir SPEC §9.3), derived by the same per-kind seam and never parsed back out
-of the summary by the store. `message/rfc822` SHALL carry the `Date:` header
-normalised to RFC 3339 in UTC at seconds precision, so byte order is
-chronological order whatever offset the sender wrote; `text/vcard` SHALL carry
-the display name (`FN`) casefolded and trimmed. A kind resolving at two tiers
-SHALL derive the byte-identical key at both, on the same terms as its link id: a
-key that moved when the body arrived would re-sort the item on hydration.
-Content carrying nothing to derive from SHALL keep the empty key, which the
-store reads as unknown.
+The sync SHALL write a `sort_key` beside the summary of every item it summarises (pimdir STORAGE §9.3), derived by the same io-pimdir derivation and never parsed back out of the summary by the store. `message/rfc822` SHALL carry the `Date:` header normalised to RFC 3339 in UTC at seconds precision, so byte order is chronological order whatever offset the sender wrote; `text/vcard` SHALL carry the display name (`FN`) casefolded and trimmed. A kind resolving at two tiers SHALL derive the byte-identical key at both, on the same terms as its link id: a key that moved when the body arrived would re-sort the item on hydration. Content carrying nothing to derive from SHALL keep the empty key, which the store reads as unknown.
 
 ### Requirement: A probed item is raised to the tier its kind resolves at
 Every freshly probed placement SHALL be raised to the tier its kind resolves its
@@ -513,25 +504,6 @@ drops the replica and resyncs it, rather than surfacing the raw refusal: the
 store is a derived cache, so recreating it costs a resync and loses nothing but
 un-pushed local mutation.
 
-### Requirement: The mail summary is a versioned schema
-The `meta` written for a `message/rfc822` item SHALL be `v: 1` JSON — `v`
-(required), `subject` (required), and optional `message_id`, `in_reply_to`,
-`from`, `to`, `date` and `size` (octets), with absent optionals omitted — so a
-reader can render an envelope list without fetching a body. `date` SHALL be the
-UTC instant in RFC 3339, never the local reading the sender wrote, which is what
-lets two writers of one store compare and order items without re-parsing. Flags
-are not in `meta`. Both the enumerate (`Meta`) and the streamed (`Full`) paths
-SHALL emit this schema, the streamed path carrying the message's known octet
-length as `size` rather than the header prefix it read. The schema is
-`PimdirMailMeta`, documented in `pimdir/SPEC.md` Annex A.
-
-`in_reply_to` SHALL be a list of bare msg-ids, the `In-Reply-To:` grammar being
-`1*msg-id`, each normalised like `message_id` so a reply and its parent compare
-byte-for-byte. It SHALL be read from the response the enumeration already makes:
-the 9th `ENVELOPE` element on IMAP (RFC 3501 §7.4.2) and the parsed header at the
-streamed tier. Microsoft Graph SHALL leave it empty, `In-Reply-To` living in
-`internetMessageHeaders`, which a listing selection does not return.
-
 ### Requirement: The report shows remote-originated changes a pull applied
 A sync SHALL report the remote-originated changes a pull applied to already-synced
 items — flag changes and removals — not only the local→remote pushes and the
@@ -541,6 +513,18 @@ afterwards), they SHALL be recovered from the sync's per-item `events`: a
 add/remove flag hunks, and a `Vanished` into a delete hunk. A newly-pulled message
 (`Added`) is already reported by the pull plan (a `Fetch` hunk) and is not
 re-itemized.
+
+### Requirement: A create is named by what delivers it
+A `Created` placement SHALL be itemized by how the push delivers it (pimdir SYNC
+§5): an `Add` hunk, `add item <link id> in <collection> on <side>`, for a create
+with no origin on a side syncing alone, which is a compose or an import a
+frontend queued and the store uploads; a `Copy` hunk carrying `origin`, `copy
+item <link id> from <origin> to <collection> on <side>`, for a create whose
+origin names the collection the server copies it from, a move or a copy a
+frontend staged; and the cross-side `Copy` hunk, `copy item <link id> in
+<collection> from <other> to <side>`, for a body the other side holds. Reading
+every create as a crossing named a single-source account's own compose "from
+imap to imap".
 
 ### Requirement: A dry run works on a replica that shares the bodies
 A dry run SHALL work on a throwaway replica of the pimdir store, so that no
@@ -721,14 +705,7 @@ ticks and connector-triggered scoped runs serialize instead of failing or
 corrupting.
 
 ### Requirement: An IMAP handle-space change rebuilds the collection and bumps its generation
-For an IMAP source, the driver SHALL compare the stored checkpoint's UIDVALIDITY
-before and after the pull; on a change it SHALL drive io-replica's rekey
-(carrying cached bodies, summaries and pending state over by link id) and route
-the rebuild write batch through `write_rekeyed`, so `collections.generation`
-bumps atomically with the rebuild and a frontend derives its epoch (an IMAP
-UIDVALIDITY) from the store alone. Ordinary syncs and full resyncs never bump.
-Graph sources never rebuild: Graph message ids survive a delta reset (an expired
-delta link restarts a full round without changing identity).
+For an IMAP source, the driver SHALL compare the stored checkpoint's UIDVALIDITY before and after the pull; on a change it SHALL run io-pimdir's rekey, carrying cached bodies, summaries and pending state over by link id. The rebuild batch drops every old handle as `Rekeyed`, which the store reads as the rebuild and answers by bumping `collections.generation` in the transaction applying it (pimdir SYNC §8), so a frontend derives its epoch (an IMAP UIDVALIDITY) from the store alone; the driver reads the generation back rather than routing the batch anywhere special. Ordinary syncs and full resyncs never bump. Graph sources never rebuild: Graph message ids survive a delta reset (an expired delta link restarts a full round without changing identity).
 
 ### Requirement: Microsoft Graph is a first-class source
 An `msgraph` source SHALL open protocol-direct over io-msgraph (never through a
@@ -821,16 +798,7 @@ tick is invoked from the concurrent fetch pool and is safe to call from several
 threads at once.
 
 ### Requirement: IMAP enumeration is incremental (QRESYNC)
-Enumeration SHALL carry a per-mailbox cursor `(UIDVALIDITY, HIGHESTMODSEQ)` in the
-`ReplicaCheckpoint`. On a QRESYNC-capable server (ENABLEd on connect) with a cursor
-whose UIDVALIDITY still matches, `enumerate` SHALL issue a QRESYNC
-`SELECT (QRESYNC (uidvalidity highestmodseq))` and return a **delta**
-(`complete = false`): only the messages changed since the modseq plus the vanished
-UIDs — issuing **no FETCH when nothing changed**. Without a usable cursor (first
-sync, UIDVALIDITY change, malformed checkpoint) or on a non-QRESYNC server it SHALL
-return a **full** `FETCH 1:* (UID FLAGS)` snapshot (`complete = true`). Enumeration
-SHALL fetch UID and FLAGS only — never ENVELOPE — since the link id is resolved at
-the `Meta` tier.
+Enumeration SHALL carry a per-mailbox cursor `(UIDVALIDITY, HIGHESTMODSEQ)` in the `PimdirCheckpoint`. On a QRESYNC-capable server (ENABLEd on connect) with a cursor whose UIDVALIDITY still matches, `enumerate` SHALL issue a QRESYNC `SELECT (QRESYNC (uidvalidity highestmodseq))` and return a **delta** (`complete = false`): only the messages changed since the modseq plus the vanished UIDs, issuing **no FETCH when nothing changed**. Without a usable cursor (first sync, UIDVALIDITY change, malformed checkpoint) or on a non-QRESYNC server it SHALL return a **full** `FETCH 1:* (UID FLAGS)` snapshot (`complete = true`). Enumeration SHALL fetch UID and FLAGS only, never ENVELOPE, since the link id is resolved at the `Meta` tier.
 
 ### Requirement: A connection SELECTs a mailbox once per run of commands
 An IMAP connection SHALL cache the mailbox it currently has `SELECT`ed and skip a
@@ -921,30 +889,8 @@ cannot reconcile against an address book. A store MAY hold collections of
 several kinds, which is what pimdir is built for, and an account MAY now feed it
 several.
 
-### Requirement: Link id and meta are per-kind, resolved at one seam
-The cross-collection link id and the `v:1` meta summary SHALL be produced by one
-implementation per media type, selected from the source's declared kind at a single
-dispatch point. `message/rfc822` keeps the bare `Message-ID` identity with
-its `(subject, date, sender)` (`alt:`) fallback. `text/vcard` and `text/calendar`
-SHALL use the bare vCard / iCalendar `UID`, falling back to the content hash
-(`hash:`) for a body carrying no `UID`; an iCalendar `RECURRENCE-ID` SHALL NOT
-enter the link id, so a recurrence override stays the same item. Each kind's meta
-schema SHALL follow the pimdir SPEC Annex A convention registered for it.
-
-The `text/calendar` sort key SHALL be the item's start resolved to RFC 3339 in
-UTC (`DUE` then `DTSTART` for a `VTODO`, `DTSTART` otherwise), read through the
-`VTIMEZONE` the resource itself carries, so an agenda reads chronologically
-without the store holding a time zone database.
-
 ### Requirement: Mutable-content backends carry a revision and push updates
-A backend whose item bodies change in place SHALL report a content revision (an
-ETag) on every enumerate and fetch, and SHALL return the revision the server
-assigned from every accepted write. `ReplicaChange::Update` SHALL be pushed as a
-conditional write against the base revision. A write the server refuses because
-the revision moved SHALL be reported as rejected, so the engine re-merges and
-records the divergence as a conflict rather than overwriting the remote. Item
-bodies on an immutable-content backend (mail) keep no revision, and an update
-there is still rejected as impossible.
+A backend whose item bodies change in place SHALL report a content revision (an ETag) on every enumerate and fetch, and SHALL return the revision the server assigned from every accepted write. `PimdirChangeKind::Update` SHALL be pushed as a conditional write against the base revision. A write the server refuses because the revision moved SHALL be reported as rejected, so the engine re-merges and records the divergence as a conflict rather than overwriting the remote. Item bodies on an immutable-content backend (mail) keep no revision, and an update there is still rejected as impossible.
 
 ### Requirement: Conflicts are surfaced in the run report
 A placement the engine marked `conflicted` SHALL appear in the sync report (text
@@ -1344,21 +1290,11 @@ stages nothing.
 - THEN the next run carries the settled body to both endpoints and neither body was lost on the way
 
 ### Requirement: One identity is one item across an account's endpoints
-An identity two endpoints of one account already hold SHALL bind to a single
-shared item, whichever endpoint the store reads first, and SHALL NOT be minted a
-second key. The minting rule answers one collection holding one identity twice;
-a sibling endpoint holding it once is not that.
+An identity two endpoints of one account already hold SHALL bind to a single shared item, whichever endpoint the store reads first, and SHALL NOT be minted a second key. The minting rule answers one collection holding one identity twice; a sibling endpoint holding it once is not that.
 
-Identity is settled by the fetch that reads it, against the placements the store
-answers with. A source's projection carries the copies its sibling holds and it
-does not, so that the merge can derive the append, and reading those as claims on
-the identity turns the second endpoint's own card into a duplicate of the first
-endpoint's. The store SHALL therefore be read, where identity is settled, as what
-that source holds and nothing else.
+Identity is settled by the fetch that reads it, against the placements the store answers with. A source's whole-collection projection carries the copies its sibling holds and it does not, so that the merge can derive the append, and reading those as claims on the identity turns the second endpoint's own card into a duplicate of the first endpoint's. The store's load by key therefore answers with the rows that source binds and nothing else, which is io-pimdir's rule (its store capability, a load by key answers with the rows the source binds), and neverest reads the store through the plain seam with no narrowing of its own.
 
-A mirror and a migration both start from two servers already holding the same
-items, so binding only when an item propagates from one side is binding in
-exactly the case that does not matter.
+A mirror and a migration both start from two servers already holding the same items, so binding only when an item propagates from one side is binding in exactly the case that does not matter.
 
 #### Scenario: Two servers already holding one card
 - GIVEN the same card on both endpoints before the store has read either
@@ -1452,15 +1388,9 @@ re-probe the item on every run.
 
 
 ### Requirement: A refused delete is held, never reverted
-Every source SHALL sync under `ReplicaDeletePolicy::Keep`. Both refusals (`push`
-off, or `item.delete = false`) run through that one disposition, and each source
-here is bound to the store's hub, which fixes the answer: reverting a tombstone
-states that the source still holds the member, and a hub reads that as the item
-being alive (add-beats-delete across sources), so it clears the deletion for
-every source and mirrors the item back to the one it was deleted on.
+Every source SHALL sync under `PimdirDeletePolicy::Keep`. Both refusals (`push` off, or `item.delete = false`) run through that one disposition, and each source here is bound to the store's hub, which fixes the answer: reverting a tombstone states that the source still holds the member, and a hub reads that as the item being alive (add-beats-delete across sources), so it clears the deletion for every source and mirrors the item back to the one it was deleted on.
 
-A source configured to take no deletes would then resurrect on both what the user
-removed on one, which is the opposite of what that setting is for.
+A source configured to take no deletes would then resurrect on both what the user removed on one, which is the opposite of what that setting is for.
 
 #### Scenario: A read-only source keeps the removal
 - GIVEN a staged delete on a source whose `item.delete` is false
@@ -1492,40 +1422,6 @@ has. It SHALL NOT greet with a bare `localhost`, which is not such a name
 either: RFC 5321 §4.1.4 entitles a server to check, and one that does (Stalwart)
 answers `550 5.5.0 Invalid EHLO domain`, failing the session before `MAIL FROM`
 and leaving every intent pending behind a warning.
-
-### Requirement: The conventions are the format's, the readers are not
-A link id, a summary and a sort key SHALL be what pimdir SPEC Annex A and the
-format's `vectors/meta.json` give, and the summary SHALL be
-`io_pimdir::conventions`'s own type (`PimdirMailMeta`, `PimdirCardMeta`,
-`PimdirCalendarMeta`), so the schema cannot drift from the format's by a field or
-a spelling. This crate SHALL NOT define a summary struct of its own.
-
-A **scanner** stays here only while io-pimdir's loses data this one does not, and
-each gap SHALL be held by a test naming it:
-
-- `conventions::mail` reads headers raw, so an RFC 2047 encoded-word subject
-  reaches a reader as `=?utf-8?q?…?=`;
-- `conventions::card` splits a property on the first colon, cutting the value of
-  a legal quoted parameter that holds one (RFC 6350 §3.3), and leaves RFC 6350
-  §3.4 escaping in place.
-
-The format's vectors are ASCII-only and cover neither, so nothing upstream
-reports the difference. `conventions::calendar` has no such gap and SHALL be
-delegated to outright: it reads the summary fields verbatim, which is how Annex
-A.3 spells them, and it resolves the sort key through the resource's own
-`VTIMEZONE`, which is the answer two writers of one store must not give
-differently. When io-pimdir closes a gap, its `derive` SHALL likewise replace the
-scanner rather than be mirrored beside it.
-
-#### Scenario: A non-ASCII subject reaches a reader readable
-- GIVEN a message whose `Subject:` is RFC 2047 encoded
-- WHEN either tier summarises it
-- THEN `meta.subject` holds the decoded text, not the encoded-word
-
-#### Scenario: A calendar resource longer than the streamed prefix is sized whole
-- GIVEN a calendar resource whose body exceeds the header prefix the stream captures
-- WHEN it is summarised
-- THEN `meta.size` holds the octet count the stream reported, not the prefix's
 
 ### Requirement: A `server` is an authority or a URL, resolved at one seam
 Every backend's `server` SHALL accept either a bare authority, with or without a
@@ -1745,3 +1641,21 @@ so a run whose appends were all refused SHALL report no hunk applied.
 - GIVEN a target collection the server serves read-only
 - WHEN a run tries to copy items into it
 - THEN each refusal names its item plainly, the item patch is empty, and the run exits 2
+
+### Requirement: The summary is the format's typed row
+The summary written for an item SHALL be io-pimdir's `PimdirSummary`, the row of the kind's summary table with the addresses it names (pimdir STORAGE Annex A): `mail_summary` for `message/rfc822`, `contact_summary` for `text/vcard`, `event_summary`, `task_summary` or `journal_summary` for `text/calendar`, plus `item_address`. A reader renders a list from those rows and never parses a blob. Flags are not in the summary. Both the envelope (`Meta`) and the streamed (`Full`) paths of mail SHALL emit the same row, the streamed path carrying the message's known octet length as `size` rather than the header prefix it read.
+
+### Requirement: The derivations are the format's
+A link id, a summary and a sort key SHALL be what pimdir STORAGE Annex A gives, derived by io-pimdir: `summary::derive` at the `Full` tier from the streamed bytes, and `PimdirMailSummary` built from the IMAP or Graph envelope at the `Meta` tier, so the schema cannot drift from the format's by a field or a spelling. This crate SHALL define no summary struct and no scanner of its own.
+
+The streamed tier reads a header prefix rather than the whole body, so it SHALL restate the message's octet length as the summary's `size` and SHALL leave `attachment` unknown, no MIME part having been walked. The envelope tier SHALL carry every `From`, `To`, `Cc` and `Bcc` address the backend surfaces, so the address rows the two tiers write agree.
+
+#### Scenario: A non-ASCII subject reaches a reader readable
+- GIVEN a message whose `Subject:` is RFC 2047 encoded
+- WHEN either tier summarises it
+- THEN the summary's subject holds the decoded text, not the encoded word
+
+### Requirement: Link id and summary are per-kind, resolved at one seam
+The cross-collection link id and the typed summary SHALL be produced by io-pimdir's derivation for the media type, selected from the source's declared kind at a single dispatch point. `message/rfc822` keeps the bare `Message-ID` identity with its `(subject, date, sender)` (`alt:`) fallback. `text/vcard` and `text/calendar` use the bare vCard / iCalendar `UID`, falling back to the content hash (`hash:`) for a body carrying no `UID`; an iCalendar `RECURRENCE-ID` SHALL NOT enter the link id, so a recurrence override stays the same item.
+
+The `text/calendar` sort key SHALL be the item's start resolved to RFC 3339 in UTC (`DUE` then `DTSTART` for a `VTODO`, `DTSTART` otherwise), read through the `VTIMEZONE` the resource itself carries, so an agenda reads chronologically without the store holding a time zone database.

@@ -18,9 +18,12 @@ pub mod report;
 use std::{collections::HashMap, io::Write, path::Path};
 
 use anyhow::{Context, Result, bail};
-use chrono::Utc;
-use io_pimdir::{PimdirBlobs, PimdirProducer, PimdirReader, PimdirStore, codec::PimdirAction};
-use io_replica::{object::ReplicaHash, placement::ReplicaLinkId};
+use io_pimdir::{
+    client::{PimdirStore, blobs::PimdirBlobs, producer::PimdirProducer, reader::PimdirReader},
+    codec::PimdirAction,
+    object::{PimdirHash, PimdirObject},
+    placement::PimdirLinkId,
+};
 use log::{info, warn};
 
 use crate::kind::Kind;
@@ -50,19 +53,19 @@ pub struct Conflict {
     pub handle: String,
     /// The item's cross-source identity, which finds the same binding again
     /// when a decision is applied.
-    pub link_id: ReplicaLinkId,
+    pub link_id: PimdirLinkId,
     /// The remote revision observed when the divergence was recorded.
     ///
     /// `None` from a remote reporting none. A decision computed against it is
     /// stale once it moves, which is what [`Conflict::apply`] refuses on.
     pub revision: Option<String>,
     /// The body the last sync agreed on, the merge's common ancestor.
-    pub base: Option<ReplicaHash>,
+    pub base: Option<PimdirHash>,
     /// The local side of the divergence, the item's own body.
-    pub local: Option<ReplicaHash>,
+    pub local: Option<PimdirHash>,
     /// The remote side at [`revision`](Self::revision), or `None` until a
     /// run's upgrade pass supplies it.
-    pub remote: Option<ReplicaHash>,
+    pub remote: Option<PimdirHash>,
 }
 
 /// What applying a decision concluded.
@@ -120,7 +123,7 @@ impl Conflict {
 
     /// Reads the three bodies out of the blob store.
     pub fn sides(&self, blobs: &PimdirBlobs) -> Result<Sides> {
-        let read = |hash: &Option<ReplicaHash>| -> Result<Option<Vec<u8>>> {
+        let read = |hash: &Option<PimdirHash>| -> Result<Option<Vec<u8>>> {
             let Some(hash) = hash else {
                 return Ok(None);
             };
@@ -188,26 +191,26 @@ impl Conflict {
         let size = writer
             .commit(&hash)
             .with_context(|| format!("Store the settled body of conflict {}", self.id))?;
-
-        let (_, meta, _) = kind.parse_body(body, size);
+        let object = PimdirObject {
+            hash,
+            size: size as usize,
+        };
 
         producer
             .enqueue(
                 &self.collection,
                 &PimdirAction::Update {
                     seq: self.id,
-                    object: hash,
-                    meta: Some(meta),
+                    object: object.hash.clone(),
                 },
-                Some(size),
-                &Utc::now().to_rfc3339(),
+                Some(&object),
             )
             .with_context(|| format!("Stage the settled body of conflict {}", self.id))?;
 
         drop(producer);
 
         let drained = store
-            .drain_collection(&self.collection)
+            .drain()
             .with_context(|| format!("Apply the settled conflict {}", self.id))?;
 
         if drained.parked > 0 {
@@ -326,15 +329,14 @@ pub fn find(conflicts: Vec<Conflict>, id: i64, source: Option<&str>) -> Result<C
 
 #[cfg(test)]
 mod tests {
-    use io_pimdir::PimdirSourceStore;
-    use io_replica::{
-        change::ReplicaWriteOp,
-        client::ReplicaStorage,
-        collection::ReplicaCollectionId,
-        object::ReplicaObject,
+    use io_pimdir::{
+        change::PimdirWriteOp,
+        client::PimdirSourceStore,
+        collection::PimdirCollectionId,
+        object::PimdirObject,
         placement::{
-            ReplicaBase, ReplicaFlags, ReplicaHandle, ReplicaLevel, ReplicaMeta, ReplicaPlacement,
-            ReplicaSortKey, ReplicaStatus,
+            PimdirBase, PimdirFlags, PimdirHandle, PimdirLevel, PimdirPlacement, PimdirSortKey,
+            PimdirStatus,
         },
     };
 
@@ -369,8 +371,8 @@ mod tests {
         store.ensure_collection("contacts", "text/vcard").unwrap();
 
         let blobs = store.blobs();
-        let stored = |body: String| ReplicaWriteOp::StoreObject {
-            object: ReplicaObject {
+        let stored = |body: String| PimdirWriteOp::StoreObject {
+            object: PimdirObject {
                 hash: blobs.hash(body.as_bytes()),
                 size: body.len(),
             },
@@ -382,20 +384,20 @@ mod tests {
                 stored(card("+1")),
                 stored(card("+2")),
                 stored(card("+3")),
-                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                    collection: ReplicaCollectionId("contacts".into()),
-                    handle: ReplicaHandle("card1".into()),
-                    link_id: Some(ReplicaLinkId(UID.into())),
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("contacts".into()),
+                    handle: PimdirHandle("card1".into()),
+                    link_id: Some(PimdirLinkId(UID.into())),
                     object: Some(blobs.hash(card("+2").as_bytes())),
-                    level: ReplicaLevel::Full,
-                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
-                    sort_key: ReplicaSortKey::default(),
-                    flags: ReplicaFlags::default(),
-                    status: ReplicaStatus::Conflict,
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Conflict,
                     conflict_revision: Some(String::from(REVISION)),
                     conflict_object: Some(blobs.hash(card("+3").as_bytes())),
-                    base: Some(ReplicaBase {
-                        flags: ReplicaFlags::default(),
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
                         revision: Some(String::from("etag-1")),
                         object: Some(blobs.hash(card("+1").as_bytes())),
                     }),
@@ -436,7 +438,7 @@ mod tests {
         );
 
         let placement = load_side(&store, "contacts").unwrap().remove(0);
-        assert_eq!(placement.status, ReplicaStatus::Conflict);
+        assert_eq!(placement.status, PimdirStatus::Conflict);
         assert_eq!(placement.object, Some(local), "nothing was pushed");
 
         assert_eq!(
@@ -447,7 +449,7 @@ mod tests {
         );
 
         let placement = load_side(&store, "contacts").unwrap().remove(0);
-        assert_ne!(placement.status, ReplicaStatus::Conflict);
+        assert_ne!(placement.status, PimdirStatus::Conflict);
         let body = blobs.get(&placement.object.unwrap()).unwrap().unwrap();
         assert_eq!(String::from_utf8(body).unwrap(), card("+4"));
         assert!(list(&store, ACCOUNT).unwrap().is_empty());
@@ -514,7 +516,7 @@ mod tests {
         let placement = load_side(&store, "contacts").unwrap().remove(0);
         assert_eq!(
             placement.status,
-            ReplicaStatus::Conflict,
+            PimdirStatus::Conflict,
             "the refusal leaves the divergence exactly as it was",
         );
         assert_eq!(

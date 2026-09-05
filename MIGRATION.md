@@ -28,6 +28,10 @@ This page lists the changes most likely to bite when upgrading. The full configu
 4. Run `neverest sync -a <account> --dry-run` to inspect the first patch.
 5. Drop `--dry-run`, replace the old config, done.
 
+## From v1.0.0
+
+The store format moved with io-pimdir: summaries are typed rows rather than a JSON blob, and a pulled member is a probe row. A store neverest 1.0.0 wrote is refused as stale and cannot be migrated: run `neverest sync --reset -a <account>` to drop it and resync. With `retain = true` beside a target the store is a backup, so the reset destroys what it retained.
+
 ## From v1.0.0-beta to v1.0.0
 
 Everything in the v0.1.0 section below applies too: v1.0.0-beta only added a few cosmetic changes on top of v0.1.0.

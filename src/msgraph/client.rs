@@ -53,7 +53,7 @@ use crate::{
     },
 };
 
-/// The `$select` projection of the delta query: the envelope fields the meta
+/// The `$select` projection of the delta query: the envelope fields the summary
 /// summary and the flag mapping need, so delta pages stay small.
 const DELTA_SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,internetMessageId,isRead,isDraft,flag,parentFolderId";
 
@@ -521,6 +521,8 @@ fn message_envelope(id: &str, message: &MsgraphMessage) -> ItemSummary {
         subject: message.subject.clone().unwrap_or_default(),
         from: message.from.as_ref().map(address).into_iter().collect(),
         to: message.to_recipients.iter().map(address).collect(),
+        cc: Vec::new(),
+        bcc: Vec::new(),
         date: message_date(message),
         size: 0,
         has_attachment: None,

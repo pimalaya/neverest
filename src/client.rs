@@ -62,7 +62,7 @@ pub struct EnumEntry {
     /// The current content revision (a DAV ETag), on a mutable-content
     /// backend.
     ///
-    /// `None` where content is immutable (IMAP, Graph), which io-replica's
+    /// `None` where content is immutable (IMAP, Graph), which io-pimdir's
     /// merge reads as unchanged, never as unknown.
     pub revision: Option<String>,
 }
@@ -255,7 +255,7 @@ impl Client {
     ///
     /// Mutable-content backends only: a mail body is replaced by delete
     /// plus append and never edited, so both mail backends refuse this and
-    /// io-replica never derives an `Update` for them.
+    /// io-pimdir never derives an `Update` for them.
     #[allow(unused_variables)]
     pub fn update_item_stream(
         &mut self,

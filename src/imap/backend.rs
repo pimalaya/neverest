@@ -441,6 +441,8 @@ fn envelope_from(seq: u32, items: Vec<MessageDataItem<'static>>) -> ItemSummary 
     let mut subject = String::new();
     let mut from = Vec::new();
     let mut to = Vec::new();
+    let mut cc = Vec::new();
+    let mut bcc = Vec::new();
     let mut date: Option<DateTime<FixedOffset>> = None;
     let mut size: u64 = 0;
     let mut has_attachment: Option<bool> = None;
@@ -466,6 +468,8 @@ fn envelope_from(seq: u32, items: Vec<MessageDataItem<'static>>) -> ItemSummary 
                 }
                 from = env.from.iter().map(address_from).collect();
                 to = env.to.iter().map(address_from).collect();
+                cc = env.cc.iter().map(address_from).collect();
+                bcc = env.bcc.iter().map(address_from).collect();
             }
             MessageDataItem::Rfc822Size(n) => size = u64::from(n),
             MessageDataItem::BodyStructure(structure) => {
@@ -487,6 +491,8 @@ fn envelope_from(seq: u32, items: Vec<MessageDataItem<'static>>) -> ItemSummary 
         subject,
         from,
         to,
+        cc,
+        bcc,
         date,
         size,
         has_attachment,

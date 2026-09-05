@@ -13,10 +13,10 @@
 //! storage logic of its own, orchestrating the layers below and rendering
 //! what they return.
 //!
-//! The reconcile is [io-replica]'s, which owns the three-way merge, the
-//! checkpoints, the push outcomes, the object dedup and the multi-source
-//! hub. The local replica is [io-pimdir], a SQLite index beside a
-//! content-addressed blob directory implementing io-replica's storage seam.
+//! The reconcile and the local replica are both [io-pimdir]'s: the engine
+//! owns the three-way merge, the checkpoints, the push outcomes, the object
+//! dedup and the multi-source hub, and the store is a SQLite index beside a
+//! content-addressed blob directory servicing the engine's storage seam.
 //!
 //! The protocols are io-imap, io-webdav and io-msgraph, behind the lean
 //! adapters in [`imap`], [`dav`] and [`msgraph`]. Around them, pimalaya-cli,
@@ -25,7 +25,7 @@
 //!
 //! ## The topology mismatch
 //!
-//! The load-bearing design point. io-replica is local-replica-centric: one
+//! The load-bearing design point. The engine is local-replica-centric: one
 //! local replica against one remote, merged three ways against a
 //! per-placement base, its sync verb tying one collection to one remote's
 //! enumerate. neverest is peer-to-peer, several sources reaching each other.
@@ -60,9 +60,9 @@
 //! nouns behind it: an IMAP mailbox stays a mailbox inside [`imap`].
 //!
 //! What varies per media type lives in [`kind`]: an item's link id, its
-//! versioned summary and sort key, and the three-way merge a content
-//! conflict is resolved by, which is here rather than in io-replica so the
-//! engine keeps knowing nothing about formats.
+//! typed summary and sort key, which io-pimdir derives, and the three-way
+//! merge a content conflict is resolved by, which is here so the engine
+//! keeps knowing nothing about merging formats.
 //!
 //! The kind a source syncs comes from its backend's media type and is
 //! recorded on the pimdir collection, so one store may hold several.
@@ -86,7 +86,7 @@
 //!
 //! [`offline`] is the sync engine: `mod` maps sources onto pimdir source
 //! ids, `state` records what the last run derived, `storage` projects and
-//! hydrates one source, `remote` implements io-replica's remote seam,
+//! hydrates one source, `remote` implements io-pimdir's remote seam,
 //! `submit` holds the queued send, and `driver` builds the report.
 //!
 //! [`sync`] keeps the output types alone, the engine having moved to
@@ -100,7 +100,6 @@
 //! per data command, mapping its invocation path to the schema of what it
 //! prints under `--json`.
 //!
-//! [io-replica]: https://github.com/pimalaya/io-replica
 //! [io-pimdir]: https://github.com/pimalaya/io-pimdir
 //! [io-pim-discovery]: https://github.com/pimalaya/io-pim-discovery
 

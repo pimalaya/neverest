@@ -15,11 +15,10 @@ Everything below documents only what differs from the Pimalaya standards.
 
 Neverest is an application: it writes no protocol and no storage logic of its own, so most fixes land upstream rather than here. Triage before patching:
 
-- reconcile semantics (three-way merge, checkpoints, push-outcome discipline, object dedup, the multi-source hub) belong in [io-replica](https://github.com/pimalaya/io-replica);
-- the local replica (the SQLite index, the blob store, the action queue, retention) belongs in [io-pimdir](https://github.com/pimalaya/io-pimdir);
+- the reconcile semantics (three-way merge, checkpoints, push-outcome discipline, object dedup, the multi-source hub), the per-kind summaries and the local replica (the SQLite index, the blob store, the action queue, retention) belong in [io-pimdir](https://github.com/pimalaya/io-pimdir);
 - protocol wire semantics belong in [io-imap](https://github.com/pimalaya/io-imap), [io-msgraph](https://github.com/pimalaya/io-msgraph), [io-webdav](https://github.com/pimalaya/io-webdav) and [io-smtp](https://github.com/pimalaya/io-smtp);
 - service discovery consumed by the wizard belongs in [io-pim-discovery](https://github.com/pimalaya/io-pim-discovery);
-- configuration shape, the per-kind derivations, the sync orchestration and the report live here.
+- configuration shape, the per-kind merge, the sync orchestration and the report live here.
 
 The shared clap, printer, prompt and spinner primitives come from [pimalaya/cli](https://github.com/pimalaya/cli), the TOML loader and secret resolution from [pimalaya/config](https://github.com/pimalaya/config), and the TCP and TLS plumbing from [pimalaya/stream](https://github.com/pimalaya/stream).
 

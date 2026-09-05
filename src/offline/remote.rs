@@ -1,11 +1,11 @@
 //! # One side's remote seam
 //!
-//! [`io_replica::client::ReplicaRemote`] backed by one [`Client`].
+//! [`io_pimdir::remote::PimdirRemote`] backed by one [`Client`].
 //!
 //! `enumerate` passes the stored cursor down opaquely, so the backend decides
 //! whether it can answer a delta or owes a full snapshot. `fetch` resolves the
 //! link id and the summary through [`Kind`]. `push` maps the four
-//! [`ReplicaChangeKind`] variants onto the client's calls.
+//! [`PimdirChangeKind`] variants onto the client's calls.
 //!
 //! Everything kind-specific lives in [`crate::kind`], resolved once per side
 //! from [`Client::media_type`](crate::client::Client::media_type). A
@@ -27,17 +27,18 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use crossbeam_queue::SegQueue;
-use io_pimdir::{PimdirBlobWriter, PimdirBlobs, hash::PimdirHasher};
-use io_replica::{
-    change::{ReplicaChange, ReplicaChangeKind},
-    client::ReplicaRemote,
-    collection::{ReplicaCheckpoint, ReplicaCollectionId},
-    object::ReplicaHash,
-    placement::{ReplicaFlags, ReplicaHandle},
+use io_pimdir::{
+    change::{PimdirChange, PimdirChangeKind},
+    client::blobs::{PimdirBlobWriter, PimdirBlobs},
+    collection::{PimdirCheckpoint, PimdirCollectionId},
+    hash::PimdirHasher,
+    object::PimdirHash,
+    placement::{PimdirFlags, PimdirHandle},
     remote::{
-        ReplicaFetchedBody, ReplicaFetchedItem, ReplicaPushOutcome, ReplicaPushResult,
-        ReplicaRemoteItem, ReplicaRemoteSnapshot, ReplicaTier,
+        PimdirFetchedBody, PimdirFetchedItem, PimdirPushOutcome, PimdirPushResult, PimdirRemote,
+        PimdirRemoteItem, PimdirRemoteSnapshot, PimdirTier,
     },
+    summary::PimdirDerivation,
 };
 use log::warn;
 
@@ -77,7 +78,7 @@ pub struct PimRemote<'a> {
     ///
     /// `Sync` because the fetch pool calls it from several workers at once.
     on_body: Option<&'a (dyn Fn() + Sync)>,
-    /// Handle to body octet size, from the store's meta, so no round trip.
+    /// Handle to body octet size, from the store's summary, so no round trip.
     ///
     /// When present, `Full` fetches run largest-first, so progress accelerates
     /// to a smooth finish rather than stalling on a big body that landed last.
@@ -113,8 +114,8 @@ impl HeldHandles {
     fn remember(
         &mut self,
         collection: &str,
-        items: &[ReplicaRemoteItem],
-        vanished: &[ReplicaHandle],
+        items: &[PimdirRemoteItem],
+        vanished: &[PimdirHandle],
     ) {
         let held = self.0.entry(collection.to_string()).or_default();
         held.extend(items.iter().map(|item| item.handle.0.clone()));
@@ -189,7 +190,7 @@ impl<'a> PimRemote<'a> {
     /// Like [`new`](Self::new), but ticking `on_body` per streamed `Full` body.
     ///
     /// The `Full` fetch runs largest-first by `sizes`, taken from the store's
-    /// envelope meta. An empty map keeps handle order.
+    /// mail summary. An empty map keeps handle order.
     pub fn with_progress(
         pool: &'a mut Pool,
         blob: PimdirBlobs,
@@ -228,16 +229,16 @@ impl<'a> PimRemote<'a> {
 
     /// Records a write that did not land, answering the engine's rejection.
     ///
-    /// A rejection is an outcome rather than an error: it makes io-replica keep
+    /// A rejection is an outcome rather than an error: it makes io-pimdir keep
     /// the change and re-merge instead of clobbering the remote, where an error
     /// would abort the batch. Recording it keeps the run from claiming it.
     fn reject(
         &mut self,
         collection: &str,
-        handle: ReplicaHandle,
+        handle: PimdirHandle,
         action: &'static str,
         reason: impl fmt::Display,
-    ) -> ReplicaPushResult {
+    ) -> PimdirPushResult {
         let reason = reason.to_string();
         warn!("{action} {} in {collection} rejected: {reason}", handle.0);
         self.rejected.push(RejectedPush {
@@ -285,7 +286,7 @@ pub(crate) const BATCH_SIZE: usize = 64;
 ///
 /// A single side is internally consistent, and both sides run the same
 /// normalization for the system flags that matter.
-fn to_offline_flags<'f>(flags: impl IntoIterator<Item = &'f Flag>) -> ReplicaFlags {
+fn to_offline_flags<'f>(flags: impl IntoIterator<Item = &'f Flag>) -> PimdirFlags {
     flags.into_iter().map(|f| f.raw()).collect()
 }
 
@@ -294,7 +295,7 @@ fn to_offline_flags<'f>(flags: impl IntoIterator<Item = &'f Flag>) -> ReplicaFla
 /// An unknown one (nothing has read the markers) yields none, which is what a
 /// push of it would mean anyway: every backend here reports markers as it
 /// enumerates, so only a store written by another owner can carry one.
-fn to_item_flags(flags: &ReplicaFlags) -> Vec<Flag> {
+fn to_item_flags(flags: &PimdirFlags) -> Vec<Flag> {
     let Some(flags) = flags.known() else {
         return Vec::new();
     };
@@ -302,14 +303,14 @@ fn to_item_flags(flags: &ReplicaFlags) -> Vec<Flag> {
     flags.iter().map(|s| Flag::from_raw(s.clone())).collect()
 }
 
-impl ReplicaRemote for PimRemote<'_> {
+impl PimdirRemote for PimRemote<'_> {
     type Error = anyhow::Error;
 
     fn enumerate(
         &mut self,
-        collection: &ReplicaCollectionId,
-        cursor: Option<ReplicaCheckpoint>,
-    ) -> Result<ReplicaRemoteSnapshot, Self::Error> {
+        collection: &PimdirCollectionId,
+        cursor: Option<PimdirCheckpoint>,
+    ) -> Result<PimdirRemoteSnapshot, Self::Error> {
         let collection = self.wire_name(collection.as_str());
         let cursor = cursor.as_ref().map(|c| c.0.as_slice());
         let enumeration = self
@@ -317,54 +318,54 @@ impl ReplicaRemote for PimRemote<'_> {
             .primary()
             .enumerate(collection, cursor)
             .with_context(|| format!("Enumerate {collection} error"))?;
-        let items: Vec<ReplicaRemoteItem> = enumeration
+        let items: Vec<PimdirRemoteItem> = enumeration
             .items
             .into_iter()
-            .map(|entry| ReplicaRemoteItem {
-                handle: ReplicaHandle::from(entry.id),
+            .map(|entry| PimdirRemoteItem {
+                handle: PimdirHandle::from(entry.id),
                 flags: to_offline_flags(&entry.flags),
                 revision: entry.revision,
             })
             .collect();
-        let vanished: Vec<ReplicaHandle> = enumeration
+        let vanished: Vec<PimdirHandle> = enumeration
             .vanished
             .into_iter()
-            .map(ReplicaHandle::from)
+            .map(PimdirHandle::from)
             .collect();
         self.held.remember(collection, &items, &vanished);
-        Ok(ReplicaRemoteSnapshot {
+        Ok(PimdirRemoteSnapshot {
             items,
             vanished,
             complete: enumeration.complete,
-            checkpoint: ReplicaCheckpoint(enumeration.checkpoint),
+            checkpoint: PimdirCheckpoint(enumeration.checkpoint),
         })
     }
 
     fn fetch(
         &mut self,
-        collection: &ReplicaCollectionId,
-        handles: Vec<ReplicaHandle>,
-        tier: ReplicaTier,
-    ) -> Result<Vec<ReplicaFetchedItem>, Self::Error> {
+        collection: &PimdirCollectionId,
+        handles: Vec<PimdirHandle>,
+        tier: PimdirTier,
+    ) -> Result<Vec<PimdirFetchedItem>, Self::Error> {
         let collection = self.wire_name(collection.as_str());
 
         match tier {
-            ReplicaTier::Meta => self.fetch_meta(collection, handles),
-            ReplicaTier::Full => self.fetch_full(collection, handles),
+            PimdirTier::Meta => self.fetch_meta(collection, handles),
+            PimdirTier::Full => self.fetch_full(collection, handles),
         }
     }
 
     fn push(
         &mut self,
-        collection: &ReplicaCollectionId,
-        changes: Vec<ReplicaChange>,
-    ) -> Result<Vec<ReplicaPushResult>, Self::Error> {
+        collection: &PimdirCollectionId,
+        changes: Vec<PimdirChange>,
+    ) -> Result<Vec<PimdirPushResult>, Self::Error> {
         let collection = self.wire_name(collection.as_str()).to_string();
         let mut results = Vec::with_capacity(changes.len());
 
         for change in changes {
             let result = match change.kind {
-                ReplicaChangeKind::SetFlags { handle, flags } => {
+                PimdirChangeKind::SetFlags { handle, flags } => {
                     let email_flags = to_item_flags(&flags);
                     let stored = self.pool.primary().store_flags(
                         &collection,
@@ -380,7 +381,7 @@ impl ReplicaRemote for PimRemote<'_> {
                         }
                     }
                 }
-                ReplicaChangeKind::Remove {
+                PimdirChangeKind::Remove {
                     handle,
                     to,
                     link_id: _,
@@ -415,7 +416,7 @@ impl ReplicaRemote for PimRemote<'_> {
                         }
                     }
                 },
-                ReplicaChangeKind::Add {
+                PimdirChangeKind::Add {
                     handle,
                     link_id,
                     flags,
@@ -428,7 +429,7 @@ impl ReplicaRemote for PimRemote<'_> {
                         .unwrap_or_default();
                     self.append(&collection, handle, &flags, object, link)
                 }
-                ReplicaChangeKind::Update {
+                PimdirChangeKind::Update {
                     handle,
                     object,
                     if_match,
@@ -444,40 +445,40 @@ impl ReplicaRemote for PimRemote<'_> {
 /// The key into the pre-fetch cache: `(collection, handle)`.
 pub type FetchKey = (String, String);
 
-/// A [`ReplicaRemote`] for the Full-apply phase, serving bodies from cache.
+/// A [`PimdirRemote`] for the Full-apply phase, serving bodies from cache.
 ///
 /// The hydrate phase already streamed them in, so the `Full` upgrade does only
 /// index writes. A miss falls back to a real fetch on the wrapped
 /// [`PimRemote`], correcting a gap rather than losing it, and so do the rest.
 pub struct CachedFetchRemote<'a> {
-    cache: &'a HashMap<FetchKey, ReplicaFetchedItem>,
+    cache: &'a HashMap<FetchKey, PimdirFetchedItem>,
     fallback: PimRemote<'a>,
 }
 
 impl<'a> CachedFetchRemote<'a> {
     /// Serves fetches from a round's cache, falling back to the wire.
-    pub fn new(cache: &'a HashMap<FetchKey, ReplicaFetchedItem>, fallback: PimRemote<'a>) -> Self {
+    pub fn new(cache: &'a HashMap<FetchKey, PimdirFetchedItem>, fallback: PimRemote<'a>) -> Self {
         Self { cache, fallback }
     }
 }
 
-impl ReplicaRemote for CachedFetchRemote<'_> {
+impl PimdirRemote for CachedFetchRemote<'_> {
     type Error = anyhow::Error;
 
     fn enumerate(
         &mut self,
-        collection: &ReplicaCollectionId,
-        cursor: Option<ReplicaCheckpoint>,
-    ) -> Result<ReplicaRemoteSnapshot, Self::Error> {
+        collection: &PimdirCollectionId,
+        cursor: Option<PimdirCheckpoint>,
+    ) -> Result<PimdirRemoteSnapshot, Self::Error> {
         self.fallback.enumerate(collection, cursor)
     }
 
     fn fetch(
         &mut self,
-        collection: &ReplicaCollectionId,
-        handles: Vec<ReplicaHandle>,
-        tier: ReplicaTier,
-    ) -> Result<Vec<ReplicaFetchedItem>, Self::Error> {
+        collection: &PimdirCollectionId,
+        handles: Vec<PimdirHandle>,
+        tier: PimdirTier,
+    ) -> Result<Vec<PimdirFetchedItem>, Self::Error> {
         let coll = collection.as_str();
         let mut items = Vec::with_capacity(handles.len());
         let mut misses = Vec::new();
@@ -495,9 +496,9 @@ impl ReplicaRemote for CachedFetchRemote<'_> {
 
     fn push(
         &mut self,
-        collection: &ReplicaCollectionId,
-        changes: Vec<ReplicaChange>,
-    ) -> Result<Vec<ReplicaPushResult>, Self::Error> {
+        collection: &PimdirCollectionId,
+        changes: Vec<PimdirChange>,
+    ) -> Result<Vec<PimdirPushResult>, Self::Error> {
         self.fallback.push(collection, changes)
     }
 }
@@ -510,8 +511,8 @@ impl PimRemote<'_> {
     fn fetch_meta(
         &mut self,
         collection: &str,
-        handles: Vec<ReplicaHandle>,
-    ) -> Result<Vec<ReplicaFetchedItem>> {
+        handles: Vec<PimdirHandle>,
+    ) -> Result<Vec<PimdirFetchedItem>> {
         let ids: Vec<&str> = handles.iter().map(|h| h.as_str()).collect();
         let envelopes = self
             .pool
@@ -526,13 +527,18 @@ impl PimRemote<'_> {
             let Some(env) = by_id.get(handle.as_str()) else {
                 continue;
             };
-            let Some((link_id, meta, sort_key)) = self.kind.parse_summary(env) else {
+            let Some(PimdirDerivation {
+                link_id,
+                summary,
+                sort_key,
+            }) = self.kind.parse_summary(env)
+            else {
                 continue;
             };
-            items.push(ReplicaFetchedItem {
+            items.push(PimdirFetchedItem {
                 handle,
                 link_id,
-                meta,
+                summary,
                 sort_key,
                 body: None,
                 revision: None,
@@ -549,8 +555,8 @@ impl PimRemote<'_> {
     fn fetch_full(
         &mut self,
         collection: &str,
-        mut handles: Vec<ReplicaHandle>,
-    ) -> Result<Vec<ReplicaFetchedItem>> {
+        mut handles: Vec<PimdirHandle>,
+    ) -> Result<Vec<PimdirFetchedItem>> {
         if handles.is_empty() {
             return Ok(Vec::new());
         }
@@ -562,9 +568,9 @@ impl PimRemote<'_> {
 
         let total = handles.len();
         let target = self.pool.max().min(total);
-        let batches: Vec<Vec<ReplicaHandle>> = handles
+        let batches: Vec<Vec<PimdirHandle>> = handles
             .chunks(BATCH_SIZE)
-            .map(<[ReplicaHandle]>::to_vec)
+            .map(<[PimdirHandle]>::to_vec)
             .collect();
 
         if target <= 1 {
@@ -594,14 +600,14 @@ impl PimRemote<'_> {
     fn fetch_full_pooled(
         &mut self,
         collection: &str,
-        batches: Vec<Vec<ReplicaHandle>>,
+        batches: Vec<Vec<PimdirHandle>>,
         target: usize,
-    ) -> Result<Vec<ReplicaFetchedItem>> {
-        let queue: SegQueue<Vec<ReplicaHandle>> = SegQueue::new();
+    ) -> Result<Vec<PimdirFetchedItem>> {
+        let queue: SegQueue<Vec<PimdirHandle>> = SegQueue::new();
         for batch in batches {
             queue.push(batch);
         }
-        let results: Mutex<Vec<ReplicaFetchedItem>> = Mutex::new(Vec::new());
+        let results: Mutex<Vec<PimdirFetchedItem>> = Mutex::new(Vec::new());
         let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
         let stop = AtomicBool::new(false);
 
@@ -651,9 +657,9 @@ fn fetch_one_full(
     kind: Kind,
     client: &mut Client,
     collection: &str,
-    handle: ReplicaHandle,
+    handle: PimdirHandle,
     blob: &PimdirBlobs,
-) -> Result<ReplicaFetchedItem> {
+) -> Result<PimdirFetchedItem> {
     let writer = blob.writer().context("Open blob writer error")?;
     let mut sink = HydrateSink::new(writer, blob.hasher());
     let revision = client
@@ -673,13 +679,17 @@ fn fetch_one_full(
         );
     }
 
-    let (link, meta, sort_key) = kind.parse_body(&header, size as u64);
-    Ok(ReplicaFetchedItem {
-        handle,
-        link_id: link,
-        meta,
+    let PimdirDerivation {
+        link_id,
+        summary,
         sort_key,
-        body: Some(ReplicaFetchedBody::Persisted { hash, size }),
+    } = kind.parse_body(&header, size as u64);
+    Ok(PimdirFetchedItem {
+        handle,
+        link_id,
+        summary,
+        sort_key,
+        body: Some(PimdirFetchedBody::Persisted { hash, size }),
         revision,
     })
 }
@@ -693,12 +703,12 @@ pub(crate) fn hydrate_batch(
     kind: Kind,
     client: &mut Client,
     collection: &str,
-    handles: &[ReplicaHandle],
+    handles: &[PimdirHandle],
     blob: &PimdirBlobs,
     on_body: Option<&(dyn Fn() + Sync)>,
-) -> Result<Vec<ReplicaFetchedItem>> {
+) -> Result<Vec<PimdirFetchedItem>> {
     let ids: Vec<&str> = handles.iter().map(|h| h.as_str()).collect();
-    let mut items: Vec<ReplicaFetchedItem> = Vec::with_capacity(handles.len());
+    let mut items: Vec<PimdirFetchedItem> = Vec::with_capacity(handles.len());
 
     let batched = client.fetch_bodies(
         collection,
@@ -709,13 +719,17 @@ pub(crate) fn hydrate_batch(
         },
         |id, revision, sink: HydrateSink| {
             let (hash, size, header) = sink.finish().map_err(io::Error::other)?;
-            let (link, meta, sort_key) = kind.parse_body(&header, size as u64);
-            items.push(ReplicaFetchedItem {
-                handle: ReplicaHandle::from(id),
-                link_id: link,
-                meta,
+            let PimdirDerivation {
+                link_id,
+                summary,
                 sort_key,
-                body: Some(ReplicaFetchedBody::Persisted { hash, size }),
+            } = kind.parse_body(&header, size as u64);
+            items.push(PimdirFetchedItem {
+                handle: PimdirHandle::from(id),
+                link_id,
+                summary,
+                sort_key,
+                body: Some(PimdirFetchedBody::Persisted { hash, size }),
                 revision: revision.map(str::to_string),
             });
             if let Some(cb) = on_body {
@@ -735,7 +749,7 @@ pub(crate) fn hydrate_batch(
                 .iter()
                 .map(|item| item.handle.as_str().to_owned())
                 .collect();
-            let missing: Vec<ReplicaHandle> = handles
+            let missing: Vec<PimdirHandle> = handles
                 .iter()
                 .filter(|handle| !fetched.contains(handle.as_str()))
                 .cloned()
@@ -790,11 +804,11 @@ impl PimRemote<'_> {
     fn append(
         &mut self,
         collection: &str,
-        handle: ReplicaHandle,
-        flags: &ReplicaFlags,
-        object: Option<ReplicaHash>,
+        handle: PimdirHandle,
+        flags: &PimdirFlags,
+        object: Option<PimdirHash>,
         link: LinkId<'_>,
-    ) -> ReplicaPushResult {
+    ) -> PimdirPushResult {
         let Some(hash) = object else {
             return self.reject(collection, handle, "append", "no body was stored for it");
         };
@@ -843,7 +857,7 @@ impl PimRemote<'_> {
             }
         };
 
-        let assigned = ReplicaHandle::from(written.id);
+        let assigned = PimdirHandle::from(written.id);
         if !self.held.claim(collection, assigned.as_str()) {
             let reason = format!(
                 "the server answered with {}, which it already holds",
@@ -852,9 +866,9 @@ impl PimRemote<'_> {
             return self.reject(collection, handle, "append", reason);
         }
 
-        ReplicaPushResult {
+        PimdirPushResult {
             handle,
-            outcome: ReplicaPushOutcome::Accepted,
+            outcome: PimdirPushOutcome::Accepted,
             assigned: Some(assigned),
             revision: written.revision,
         }
@@ -862,16 +876,16 @@ impl PimRemote<'_> {
 
     /// Replaces an item's body in place, conditional on the synced revision.
     ///
-    /// A refusal is [`ReplicaPushOutcome::Rejected`] rather than an error: it
-    /// is what makes io-replica re-merge and mark the placement conflicted
+    /// A refusal is [`PimdirPushOutcome::Rejected`] rather than an error: it
+    /// is what makes io-pimdir re-merge and mark the placement conflicted
     /// instead of clobbering the remote body, an error aborting the batch.
     fn update(
         &mut self,
         collection: &str,
-        handle: ReplicaHandle,
-        object: ReplicaHash,
+        handle: PimdirHandle,
+        object: PimdirHash,
         if_match: Option<&str>,
-    ) -> ReplicaPushResult {
+    ) -> PimdirPushResult {
         let reader = match self.blob.reader(&object) {
             Ok(Some(file)) => file,
             Ok(None) => {
@@ -898,9 +912,9 @@ impl PimRemote<'_> {
         );
 
         match updated {
-            Ok(revision) => ReplicaPushResult {
+            Ok(revision) => PimdirPushResult {
                 handle,
-                outcome: ReplicaPushOutcome::Accepted,
+                outcome: PimdirPushOutcome::Accepted,
                 assigned: None,
                 revision,
             },
@@ -909,19 +923,19 @@ impl PimRemote<'_> {
     }
 }
 
-fn accepted(handle: ReplicaHandle, assigned: Option<ReplicaHandle>) -> ReplicaPushResult {
-    ReplicaPushResult {
+fn accepted(handle: PimdirHandle, assigned: Option<PimdirHandle>) -> PimdirPushResult {
+    PimdirPushResult {
         handle,
-        outcome: ReplicaPushOutcome::Accepted,
+        outcome: PimdirPushOutcome::Accepted,
         assigned,
         revision: None,
     }
 }
 
-fn rejected_bare(handle: ReplicaHandle) -> ReplicaPushResult {
-    ReplicaPushResult {
+fn rejected_bare(handle: PimdirHandle) -> PimdirPushResult {
+    PimdirPushResult {
         handle,
-        outcome: ReplicaPushOutcome::Rejected,
+        outcome: PimdirPushOutcome::Rejected,
         assigned: None,
         revision: None,
     }
@@ -957,7 +971,7 @@ impl HydrateSink {
     }
 
     /// Commits the blob under its hash, returning `(hash, size, header bytes)`.
-    fn finish(self) -> Result<(ReplicaHash, usize, Vec<u8>)> {
+    fn finish(self) -> Result<(PimdirHash, usize, Vec<u8>)> {
         let hash = self.hasher.finish();
         let size = self.writer.commit(&hash)? as usize;
         Ok((hash, size, self.header))
@@ -1016,10 +1030,10 @@ mod tests {
     }
 
     /// One enumerated member, the shape [`HeldHandles::remember`] folds in.
-    fn member(handle: &str) -> ReplicaRemoteItem {
-        ReplicaRemoteItem {
-            handle: ReplicaHandle(handle.into()),
-            flags: ReplicaFlags::default(),
+    fn member(handle: &str) -> PimdirRemoteItem {
+        PimdirRemoteItem {
+            handle: PimdirHandle(handle.into()),
+            flags: PimdirFlags::default(),
             revision: None,
         }
     }
@@ -1060,7 +1074,7 @@ mod tests {
     fn a_vanished_handle_stops_being_held() {
         let mut held = HeldHandles::default();
         held.remember("agenda", &[member("event-1.ics")], &[]);
-        held.remember("agenda", &[], &[ReplicaHandle("event-1.ics".into())]);
+        held.remember("agenda", &[], &[PimdirHandle("event-1.ics".into())]);
 
         assert!(held.claim("agenda", "event-1.ics"));
     }

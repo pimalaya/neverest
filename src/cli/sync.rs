@@ -1,6 +1,6 @@
 //! # Sync command
 //!
-//! Runs the io-replica-based reconcile and prints the resulting
+//! Runs the io-pimdir reconcile and prints the resulting
 //! [`crate::sync::report::SyncOutput`].
 
 use std::{
@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use clap::{ArgAction, Parser};
-use io_pimdir::PimdirStore;
+use io_pimdir::client::PimdirStore;
 use log::{debug, info};
 use pimalaya_cli::printer::Printer;
 use pimalaya_config::toml::TomlConfig;

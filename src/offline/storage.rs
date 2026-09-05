@@ -1,44 +1,37 @@
 //! # Per-side store views
 //!
-//! The store persists a [`ReplicaHub`](io_replica::hub::ReplicaHub) per
+//! The store persists a [`PimdirHub`](io_pimdir::hub::PimdirHub) per
 //! collection, one shared item plus a base per source, and services the
-//! [`ReplicaStorage`] seam through the [`PimdirSourceStore`] handle itself.
+//! engine's storage seam through the [`PimdirSourceStore`] handle itself.
 //!
 //! This module adds the multi-source reads the driver needs on top of that
 //! seam. [`load_side`] reads through one source handle, so it carries that
-//! source's residual, while [`projection_view`] and [`hydration_targets`]
-//! read the whole hub, both sources' bindings included.
-//!
-//! [`HeldStore`] narrows the seam back to what a source holds, for the one
-//! coroutine that reads a placement as a claim on an identity.
+//! source's probes, while [`projection_view`] and [`hydration_targets`] read
+//! the whole hub, both sources' bindings included.
 
-use std::collections::{BTreeMap, HashSet};
-
-use io_pimdir::{PimdirError, PimdirSourceStore, PimdirStore};
-use io_replica::{
-    change::ReplicaWriteOp,
-    client::ReplicaStorage,
-    collection::ReplicaCollectionId,
-    hub::ReplicaSourceId,
-    object::ReplicaHash,
-    placement::{ReplicaHandle, ReplicaLinkId, ReplicaPlacement},
-    storage::{ReplicaLoadScope, ReplicaLoaded},
+use io_pimdir::{
+    client::{PimdirError, PimdirSourceStore, PimdirStore},
+    collection::PimdirCollectionId,
+    hub::PimdirSourceId,
+    load::PimdirLoadScope,
+    placement::{PimdirHandle, PimdirPlacement},
 };
 
 use crate::offline::source_id;
 
 /// The placements one side's coroutines see for a collection.
 ///
-/// Its hub projection plus this handle's residual (freshly probed items not yet
-/// linked). The handle must be the side's own store, source fixed at open.
+/// Its hub projection plus this source's probes (freshly enumerated handles
+/// not yet named). The handle must be the side's own store, source fixed at
+/// open.
 pub fn load_side(
     store: &PimdirSourceStore,
     collection: &str,
-) -> Result<Vec<ReplicaPlacement>, PimdirError> {
+) -> Result<Vec<PimdirPlacement>, PimdirError> {
     Ok(store
         .load(
-            &ReplicaCollectionId(collection.to_string()),
-            &ReplicaLoadScope::All,
+            &PimdirCollectionId(collection.to_string()),
+            &PimdirLoadScope::All,
         )?
         .placements)
 }
@@ -46,88 +39,18 @@ pub fn load_side(
 /// The cross-source propagation `source` owes for a collection.
 ///
 /// The hub projection alone (a `Created` copy in, a `Dirty` flag change, a
-/// `Tombstone` delete), without the residual probes. Drives the itemized
-/// report, and reads the whole hub, so any source handle serves it.
+/// `Tombstone` delete), without the probes. Drives the itemized report, and
+/// reads the whole hub, so any source handle serves it.
 pub fn projection_view(
     store: &PimdirStore,
     collection: &str,
     source: &str,
-) -> Result<Vec<ReplicaPlacement>, PimdirError> {
+) -> Result<Vec<PimdirPlacement>, PimdirError> {
     let hub = store.load_hub(collection)?;
     Ok(hub.project(
-        &ReplicaCollectionId(collection.to_string()),
+        &PimdirCollectionId(collection.to_string()),
         &source_id(source),
     ))
-}
-
-/// A source's store as an upgrade must read it: what that source holds, without
-/// the copies the hub is offering it.
-///
-/// A projection answers a source with the items it holds plus the ones a
-/// sibling holds and it does not, so that the merge derives the append. An
-/// upgrade asks a different question, who already holds this identity here,
-/// and a copy on offer is not a holder.
-///
-/// Left in, the second endpoint of an account reads its own card as a copy of
-/// the first endpoint's and is minted a key of its own (pimdir SPEC §9), which
-/// strands one identity as two items neither server will take.
-pub struct HeldStore<'a> {
-    store: &'a mut PimdirSourceStore,
-    /// The link ids this store's source is bound to in the collection.
-    held: HashSet<ReplicaLinkId>,
-}
-
-impl<'a> HeldStore<'a> {
-    /// Wraps `store`, reading which identities its source holds in
-    /// `collection`.
-    ///
-    /// Read once: an upgrade writes only after its last load, so nothing it
-    /// does can add a holder behind the wrap.
-    pub fn open(store: &'a mut PimdirSourceStore, collection: &str) -> Result<Self, PimdirError> {
-        let source = source_id(store.source());
-        let held = store
-            .load_hub(collection)?
-            .items
-            .iter()
-            .filter(|(_, item)| item.sources.contains_key(&source))
-            .map(|(link, _)| link.clone())
-            .collect();
-
-        Ok(Self { store, held })
-    }
-}
-
-impl ReplicaStorage for HeldStore<'_> {
-    type Error = PimdirError;
-
-    fn load(
-        &self,
-        collection: &ReplicaCollectionId,
-        scope: &ReplicaLoadScope,
-    ) -> Result<ReplicaLoaded, Self::Error> {
-        let mut loaded = self.store.load(collection, scope)?;
-        // NOTE: an unlinked placement claims no identity yet, so it stays: it
-        // is the freshly probed row the upgrade was called for.
-        loaded
-            .placements
-            .retain(|placement| match &placement.link_id {
-                Some(link) => self.held.contains(link),
-                None => true,
-            });
-
-        Ok(loaded)
-    }
-
-    fn lookup_objects(
-        &self,
-        links: &[ReplicaLinkId],
-    ) -> Result<BTreeMap<ReplicaLinkId, ReplicaHash>, Self::Error> {
-        self.store.lookup_objects(links)
-    }
-
-    fn write(&mut self, ops: Vec<ReplicaWriteOp>) -> Result<(), Self::Error> {
-        self.store.write(ops)
-    }
 }
 
 /// One endpoint of a pair, as hydration reads it.
@@ -165,7 +88,7 @@ pub fn hydration_targets(
     collection: &str,
     left: HydrationSide<'_>,
     right: HydrationSide<'_>,
-) -> Result<Vec<(String, ReplicaHandle)>, PimdirError> {
+) -> Result<Vec<(String, PimdirHandle)>, PimdirError> {
     let hub = store.load_hub(collection)?;
     let left_id = source_id(left.name);
     let mut out = Vec::new();
@@ -175,7 +98,7 @@ pub fn hydration_targets(
             continue;
         }
 
-        let other = |held: &ReplicaSourceId| match *held == left_id {
+        let other = |held: &PimdirSourceId| match *held == left_id {
             true => &right,
             false => &left,
         };
@@ -235,44 +158,39 @@ pub fn hydration_targets(
 
 #[cfg(test)]
 mod tests {
-    use io_replica::{
-        change::ReplicaWriteOp,
-        object::{ReplicaHash, ReplicaObject},
+    use io_pimdir::{
+        change::PimdirWriteOp,
+        object::{PimdirHash, PimdirObject},
         placement::{
-            ReplicaBase, ReplicaFlags, ReplicaLevel, ReplicaLinkId, ReplicaMeta, ReplicaSortKey,
-            ReplicaStatus,
+            PimdirBase, PimdirFlags, PimdirLevel, PimdirLinkId, PimdirSortKey, PimdirStatus,
         },
+        summary::{PimdirSummary, mail::PimdirMailSummary},
     };
 
     use super::*;
 
     /// A `Meta`-level linked placement with a base, as after a first reconcile.
-    fn linked(
-        collection: &str,
-        handle: &str,
-        link: &str,
-        object: Option<&str>,
-    ) -> ReplicaPlacement {
-        ReplicaPlacement {
-            collection: ReplicaCollectionId(collection.into()),
-            handle: ReplicaHandle(handle.into()),
-            link_id: Some(ReplicaLinkId(link.into())),
-            object: object.map(|h| ReplicaHash(h.into())),
+    fn linked(collection: &str, handle: &str, link: &str, object: Option<&str>) -> PimdirPlacement {
+        PimdirPlacement {
+            collection: PimdirCollectionId(collection.into()),
+            handle: PimdirHandle(handle.into()),
+            link_id: Some(PimdirLinkId(link.into())),
+            object: object.map(|h| PimdirHash(h.into())),
             level: if object.is_some() {
-                ReplicaLevel::Full
+                PimdirLevel::Full
             } else {
-                ReplicaLevel::Meta
+                PimdirLevel::Meta
             },
-            meta: Some(ReplicaMeta(String::new())),
-            sort_key: ReplicaSortKey::default(),
-            flags: ReplicaFlags::default(),
-            status: ReplicaStatus::Clean,
+            summary: Some(PimdirSummary::Mail(PimdirMailSummary::default())),
+            sort_key: PimdirSortKey::default(),
+            flags: PimdirFlags::default(),
+            status: PimdirStatus::Clean,
             conflict_revision: None,
             conflict_object: None,
-            base: Some(ReplicaBase {
-                flags: ReplicaFlags::default(),
+            base: Some(PimdirBase {
+                flags: PimdirFlags::default(),
                 revision: None,
-                object: object.map(|h| ReplicaHash(h.into())),
+                object: object.map(|h| PimdirHash(h.into())),
             }),
             origin: None,
         }
@@ -284,21 +202,21 @@ mod tests {
         let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
 
         left.write(vec![
-            ReplicaWriteOp::StoreObject {
-                object: ReplicaObject {
-                    hash: ReplicaHash("abcd0000".into()),
+            PimdirWriteOp::StoreObject {
+                object: PimdirObject {
+                    hash: PimdirHash("abcd0000".into()),
                     size: 3,
                 },
                 body: Some(b"abc".to_vec()),
             },
-            ReplicaWriteOp::UpsertPlacement(linked("INBOX", "1", "mid:a", Some("abcd0000"))),
+            PimdirWriteOp::UpsertPlacement(linked("INBOX", "1", "mid:a", Some("abcd0000"))),
         ])
         .unwrap();
 
         let right_view = projection_view(&left, "INBOX", "right").unwrap();
         assert_eq!(right_view.len(), 1);
-        assert_eq!(right_view[0].status, ReplicaStatus::Created);
-        assert_eq!(right_view[0].object, Some(ReplicaHash("abcd0000".into())));
+        assert_eq!(right_view[0].status, PimdirStatus::Created);
+        assert_eq!(right_view[0].object, Some(PimdirHash("abcd0000".into())));
     }
 
     #[test]
@@ -306,7 +224,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
 
-        left.write(vec![ReplicaWriteOp::UpsertPlacement(linked(
+        left.write(vec![PimdirWriteOp::UpsertPlacement(linked(
             "INBOX", "1", "mid:a", None,
         ))])
         .unwrap();
@@ -333,49 +251,5 @@ mod tests {
             updates: creates,
             decides: false,
         }
-    }
-
-    /// The copy one source is offered is another source's holding, and reading
-    /// it as this one's is what mints a duplicate key for the item the second
-    /// endpoint of an account already has.
-    #[test]
-    fn a_copy_on_offer_is_not_read_as_a_holding_of_the_side_it_is_offered_to() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
-
-        left.write(vec![
-            ReplicaWriteOp::StoreObject {
-                object: ReplicaObject {
-                    hash: ReplicaHash("abcd0000".into()),
-                    size: 3,
-                },
-                body: Some(b"abc".to_vec()),
-            },
-            ReplicaWriteOp::UpsertPlacement(linked("INBOX", "1", "mid:a", Some("abcd0000"))),
-        ])
-        .unwrap();
-
-        let mut right = PimdirStore::open(dir.path()).unwrap().for_source("right");
-        assert_eq!(
-            load_side(&right, "INBOX").unwrap().len(),
-            1,
-            "the projection offers right the copy left holds",
-        );
-
-        let held = HeldStore::open(&mut right, "INBOX").unwrap();
-        let loaded = held
-            .load(&ReplicaCollectionId("INBOX".into()), &ReplicaLoadScope::All)
-            .unwrap();
-        assert!(
-            loaded.placements.is_empty(),
-            "and an upgrade reads right as holding nothing; it read {:?}",
-            loaded.placements,
-        );
-
-        let held = HeldStore::open(&mut left, "INBOX").unwrap();
-        let loaded = held
-            .load(&ReplicaCollectionId("INBOX".into()), &ReplicaLoadScope::All)
-            .unwrap();
-        assert_eq!(loaded.placements.len(), 1, "while left still holds its own",);
     }
 }

@@ -7,7 +7,7 @@ use std::{fmt, fs, path::PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use io_pimdir::PimdirStore;
+use io_pimdir::client::PimdirStore;
 use pimalaya_cli::{printer::Printer, spinner::Spinner};
 use pimalaya_config::toml::TomlConfig;
 use schemars::JsonSchema;

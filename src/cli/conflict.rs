@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Parser, Subcommand};
-use io_pimdir::PimdirReader;
+use io_pimdir::client::reader::PimdirReader;
 use log::warn;
 use pimalaya_cli::printer::Printer;
 use pimalaya_config::toml::TomlConfig;
@@ -348,15 +348,14 @@ mod tests {
     };
 
     use anyhow::Result;
-    use io_pimdir::{PimdirSourceStore, PimdirStore};
-    use io_replica::{
-        change::ReplicaWriteOp,
-        client::ReplicaStorage,
-        collection::ReplicaCollectionId,
-        object::ReplicaObject,
+    use io_pimdir::{
+        change::PimdirWriteOp,
+        client::{PimdirSourceStore, PimdirStore},
+        collection::PimdirCollectionId,
+        object::PimdirObject,
         placement::{
-            ReplicaBase, ReplicaFlags, ReplicaHandle, ReplicaLevel, ReplicaLinkId, ReplicaMeta,
-            ReplicaPlacement, ReplicaSortKey, ReplicaStatus,
+            PimdirBase, PimdirFlags, PimdirHandle, PimdirLevel, PimdirLinkId, PimdirPlacement,
+            PimdirSortKey, PimdirStatus,
         },
     };
     use serde::Serialize;
@@ -406,8 +405,8 @@ mod tests {
         store.ensure_collection("contacts", "text/vcard").unwrap();
 
         let blobs = store.blobs();
-        let stored = |body: String| ReplicaWriteOp::StoreObject {
-            object: ReplicaObject {
+        let stored = |body: String| PimdirWriteOp::StoreObject {
+            object: PimdirObject {
                 hash: blobs.hash(body.as_bytes()),
                 size: body.len(),
             },
@@ -419,20 +418,20 @@ mod tests {
                 stored(card("+1")),
                 stored(card("+2")),
                 stored(card("+3")),
-                ReplicaWriteOp::UpsertPlacement(ReplicaPlacement {
-                    collection: ReplicaCollectionId("contacts".into()),
-                    handle: ReplicaHandle("card1".into()),
-                    link_id: Some(ReplicaLinkId(UID.into())),
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("contacts".into()),
+                    handle: PimdirHandle("card1".into()),
+                    link_id: Some(PimdirLinkId(UID.into())),
                     object: Some(blobs.hash(card("+2").as_bytes())),
-                    level: ReplicaLevel::Full,
-                    meta: Some(ReplicaMeta(r#"{"v":1}"#.into())),
-                    sort_key: ReplicaSortKey::default(),
-                    flags: ReplicaFlags::default(),
-                    status: ReplicaStatus::Conflict,
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Conflict,
                     conflict_revision: Some(String::from(REVISION)),
                     conflict_object: Some(blobs.hash(card("+3").as_bytes())),
-                    base: Some(ReplicaBase {
-                        flags: ReplicaFlags::default(),
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
                         revision: Some(String::from("etag-1")),
                         object: Some(blobs.hash(card("+1").as_bytes())),
                     }),
@@ -514,7 +513,7 @@ mod tests {
                 let mut placement = load_side(&store, "contacts").unwrap().remove(0);
                 placement.conflict_revision = Some(String::from("etag-3"));
                 store
-                    .write(vec![ReplicaWriteOp::UpsertPlacement(placement)])
+                    .write(vec![PimdirWriteOp::UpsertPlacement(placement)])
                     .unwrap();
                 drop(store);
 
@@ -549,7 +548,7 @@ mod tests {
             .for_account(ACCOUNT)
             .for_source("dav");
         let placement = load_side(&store, "contacts").unwrap().remove(0);
-        assert_ne!(placement.status, ReplicaStatus::Conflict);
+        assert_ne!(placement.status, PimdirStatus::Conflict);
         assert_eq!(
             placement.object,
             Some(store.blobs().hash(card("+2").as_bytes())),

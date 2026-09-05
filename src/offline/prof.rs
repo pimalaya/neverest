@@ -1,6 +1,6 @@
 //! # Drive-loop profiling
 //!
-//! Set `NEVEREST_PROFILE=1` to accumulate, per io-replica yield kind, the call
+//! Set `NEVEREST_PROFILE=1` to accumulate, per io-pimdir yield kind, the call
 //! count and wall time spent servicing it. The breakdown is printed to stderr
 //! at the end of a sync run.
 //!
@@ -63,7 +63,7 @@ pub fn report() {
     if !enabled() {
         return;
     }
-    eprintln!("--- neverest drive profile (count / seconds) ---");
+    eprintln!("--- neverest run profile (count / seconds) ---");
     for (name, stat) in [
         ("load    ", &LOAD),
         ("write   ", &WRITE),

@@ -1,7 +1,7 @@
 //! # Item summary
 //!
 //! The per-item summary the sync caches so a reader can render a list
-//! without fetching a body (pimdir SPEC Annex A's `meta`). Still
+//! without fetching a body (pimdir STORAGE Annex A's summary). Still
 //! mail-shaped: phase 2 of the kind seam replaces it with one summary per
 //! media type.
 
@@ -49,6 +49,14 @@ pub struct ItemSummary {
     /// Primary recipient(s).
     #[serde(default)]
     pub to: Vec<Address>,
+
+    /// Carbon-copied recipient(s).
+    #[serde(default)]
+    pub cc: Vec<Address>,
+
+    /// Blind-carbon-copied recipient(s).
+    #[serde(default)]
+    pub bcc: Vec<Address>,
 
     /// Author-claimed send time from the `Date:` header, `None` when the
     /// header is missing or unparseable.

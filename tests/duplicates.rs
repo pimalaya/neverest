@@ -17,8 +17,8 @@
 //!      reset) and sync. The full enumeration must re-append nothing: a bound
 //!      handle keeps the key it was given and is never minted a second one.
 //!
-//! The minting and the keys are upstream (io-replica and io-pimdir, same
-//! change id); what is proved here is that they hold end to end through this
+//! The minting and the keys are upstream (io-pimdir, same change id); what
+//! is proved here is that they hold end to end through this
 //! crate, and that no copy is lost on the way.
 //!
 //! Seeding and verifying use `curl` rather than a backend of this crate, as
@@ -37,10 +37,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use io_pimdir::PimdirStore;
-use io_replica::{
-    change::ReplicaWriteOp,
-    collection::{ReplicaCheckpoint, ReplicaCollectionId},
+use io_pimdir::{
+    change::PimdirWriteOp,
+    client::PimdirStore,
+    collection::{PimdirCheckpoint, PimdirCollectionId},
 };
 
 const A: &str = "imap://127.0.0.1:143/INBOX";
@@ -172,14 +172,12 @@ fn drop_checkpoint(state: &Path, source: &str) {
         .expect("open the account store")
         .for_account(ACCOUNT)
         .for_source(source);
-    io_replica::client::ReplicaStorage::write(
-        &mut store,
-        vec![ReplicaWriteOp::SetCheckpoint {
-            collection: ReplicaCollectionId("left/INBOX".into()),
-            checkpoint: ReplicaCheckpoint(Vec::new()),
-        }],
-    )
-    .expect("drop the checkpoint");
+    store
+        .write(vec![PimdirWriteOp::SetCheckpoint {
+            collection: PimdirCollectionId("left/INBOX".into()),
+            checkpoint: PimdirCheckpoint(Vec::new()),
+        }])
+        .expect("drop the checkpoint");
 }
 
 /// APPENDs `eml` to `url`'s mailbox.

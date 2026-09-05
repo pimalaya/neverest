@@ -34,9 +34,8 @@ use anyhow::{Result, anyhow};
 #[cfg(feature = "msgraph")]
 use io_msgraph::v1::client::MsgraphClientStdError;
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
-use io_pimdir::PimdirBlobs;
-use io_pimdir::{PimdirStore, codec::PimdirAction};
-use io_replica::object::ReplicaHash;
+use io_pimdir::client::blobs::PimdirBlobs;
+use io_pimdir::{client::PimdirStore, codec::PimdirAction, object::PimdirHash};
 #[cfg(feature = "smtp")]
 use io_smtp::{
     client::{SmtpClient as _, SmtpClientError, SmtpClientStd},
@@ -47,7 +46,6 @@ use io_smtp::{
     },
     session::SmtpSessionOpenOptions,
 };
-use log::warn;
 use serde::Deserialize;
 
 #[cfg(feature = "smtp")]
@@ -73,7 +71,7 @@ pub struct SubmitIntent {
     /// The collection the producer anchored the intent on.
     pub collection: String,
     /// The pinned body blob.
-    pub object: Option<ReplicaHash>,
+    pub object: Option<PimdirHash>,
     /// The raw versioned JSON payload.
     pub payload: String,
 }
@@ -164,41 +162,31 @@ impl SubmitFailure {
 /// Every pending `submit` intent in the store, in queue order.
 ///
 /// The drain skips the kinds pimdir does not define (they read back as
-/// [`PimdirAction::Unknown`]), so this reads exactly what it left behind. A
-/// queue that cannot be read is skipped, never blocking the other collections.
+/// [`PimdirAction::Unknown`]), so this reads exactly what it left behind.
 pub fn pending(store: &PimdirStore) -> Result<Vec<SubmitIntent>> {
-    let collections = store
-        .queued_collections()
-        .map_err(|err| anyhow!("Cannot list queued collections: {err}"))?;
+    let rows = store
+        .list_pending_actions()
+        .map_err(|err| anyhow!("Cannot read the queue: {err}"))?;
 
     let mut intents = Vec::new();
-    for collection in collections {
-        let rows = match store.pending_actions(&collection) {
-            Ok(rows) => rows,
-            Err(err) => {
-                warn!("cannot read the queue of {collection}, skipping it: {err}");
-                continue;
-            }
+    for row in rows {
+        let PimdirAction::Unknown {
+            kind,
+            payload,
+            object_hash,
+        } = row.action
+        else {
+            continue;
         };
-        for row in rows {
-            let PimdirAction::Unknown {
-                kind,
-                payload,
-                object_hash,
-            } = row.action
-            else {
-                continue;
-            };
-            if kind != SUBMIT {
-                continue;
-            }
-            intents.push(SubmitIntent {
-                id: row.id,
-                collection: collection.clone(),
-                object: object_hash,
-                payload,
-            });
+        if kind != SUBMIT {
+            continue;
         }
+        intents.push(SubmitIntent {
+            id: row.id,
+            collection: row.collection,
+            object: object_hash,
+            payload,
+        });
     }
     Ok(intents)
 }
@@ -387,7 +375,7 @@ mod tests {
         thread,
     };
 
-    use io_pimdir::{PimdirBlobs, hash::PimdirHashAlgo};
+    use io_pimdir::{client::blobs::PimdirBlobs, hash::PimdirHashAlgo};
 
     use super::*;
     use crate::config::SmtpConfig;
@@ -469,7 +457,7 @@ mod tests {
 
     /// Stages a body in the blob store and returns the intent pointing at it.
     fn stage_intent(blobs: &PimdirBlobs, id: i64, payload: &str, body: &[u8]) -> SubmitIntent {
-        let hash = ReplicaHash(format!("hash-{id}"));
+        let hash = PimdirHash(format!("hash-{id}"));
         let mut writer = blobs.writer().expect("blob writer");
         std::io::Write::write_all(&mut writer, body).expect("write body");
         writer.commit(&hash).expect("commit body");

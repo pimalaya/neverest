@@ -34,7 +34,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use io_pimdir::{PimdirBlobs, PimdirProducer, codec::PimdirAction};
+use io_pimdir::{
+    client::{blobs::PimdirBlobs, producer::PimdirProducer},
+    codec::PimdirAction,
+    object::PimdirObject,
+};
 
 const IMAP_ROOT: &str = "imap://127.0.0.1:143";
 const SMTP: &str = "smtp://127.0.0.1:2525";
@@ -107,7 +111,10 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     let blobs = PimdirBlobs::open(&store, producer.hash_algo());
     let mut writer = blobs.writer().expect("blob writer");
     writer.write_all(&body).unwrap();
-    let size = writer.commit(&hash).expect("commit body");
+    let object = PimdirObject {
+        hash: hash.clone(),
+        size: writer.commit(&hash).expect("commit the body") as usize,
+    };
 
     producer
         .enqueue(
@@ -121,8 +128,7 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
                 ),
                 object_hash: Some(hash.clone()),
             },
-            Some(size),
-            "2026-08-25T10:00:00Z",
+            Some(&object),
         )
         .expect("enqueue the intent");
     drop(producer);

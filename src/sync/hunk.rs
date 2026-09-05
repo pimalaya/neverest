@@ -3,7 +3,7 @@
 //! The collection, item and flag changes a sync applied, rendered in the
 //! printed report and in `--json`.
 //!
-//! Under io-replica these are descriptors the driver emits per cross-side
+//! Under io-pimdir these are descriptors the driver emits per cross-side
 //! propagation step, plus the flag changes and removals its opening pull-only
 //! round found a server had made. `content_key` is the cross-side alignment
 //! key, skipped from JSON to keep the report shape stable.
@@ -78,7 +78,22 @@ impl fmt::Display for CollectionHunk {
     rename_all_fields = "camelCase"
 )]
 pub enum ItemHunk {
-    /// Copy an item from `source_side` to `target_side`.
+    /// Append an item a frontend authored on `side`, uploaded from the store.
+    Add {
+        /// The endpoint the item is appended to.
+        side: String,
+        /// The collection, by the name its server answers to.
+        collection: String,
+        /// The item's link id, the only name it has before the server assigns one.
+        id: String,
+        /// The flags the item is written with.
+        flags: BTreeSet<Flag>,
+        /// The cross-side alignment key, never serialized.
+        #[serde(skip)]
+        content_key: u64,
+    },
+    /// Copy an item from `source_side` to `target_side`, or within
+    /// `target_side` from `origin` when the server copies it in place.
     Copy {
         /// The endpoint the body is read from.
         source_side: String,
@@ -90,6 +105,11 @@ pub enum ItemHunk {
         source_id: String,
         /// The flags the copy is written with.
         flags: BTreeSet<Flag>,
+        /// The collection the server copies from on `target_side`, for a
+        /// move or a copy a frontend staged; `None` for a body uploaded from
+        /// `source_side`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
         /// The cross-side alignment key, never serialized.
         #[serde(skip)]
         content_key: u64,
@@ -166,6 +186,22 @@ pub enum ItemHunk {
 impl fmt::Display for ItemHunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Add {
+                side,
+                collection,
+                id,
+                ..
+            } => write!(f, "add item {id} in {collection} on {side}"),
+            Self::Copy {
+                target_side,
+                collection,
+                source_id,
+                origin: Some(origin),
+                ..
+            } => write!(
+                f,
+                "copy item {source_id} from {origin} to {collection} on {target_side}"
+            ),
             Self::Copy {
                 source_side,
                 target_side,

@@ -8,6 +8,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Ported the sync engine onto io-pimdir 0.4, which folded io-replica in.
+
+  The store services the engine's own storage seam; neverest's driver only answers the remote and times the yields. A second endpoint hydrating an item its sibling already holds binds the shared item by the store's own rule now, rather than by a narrowing neverest made itself.
+
+  A store written by an earlier io-pimdir is refused as stale: drop it with `sync --reset -a <account>` and let it resync, there is no migration.
+
+- Drained the frontend queue store-wide in append order, whichever side runs first: the store applies each action as the source syncing its collection (pimdir STORAGE §15.2), so a `move` into one collection followed by an edit there lands in order, and a queued action no longer waits for the side that owns its namespace.
+
+- Held a refused delete beside another source and reverted it for a source alone, decided by the engine from the collection's sources (pimdir SYNC §5): a local edit whose member the server deleted is re-staged as a pending create rather than dropped, and an item two sources edited apart under `manual` projects `Conflict` on every side until an edit or a delete settles it.
+
+- Replaced the JSON `meta` blob by the format's typed summaries (pimdir STORAGE Annex A).
+
+  A frontend reads `mail_summary`, `contact_summary`, `event_summary`, `task_summary`, `journal_summary` and `item_address` rather than parsing JSON. The envelope tier now records every `Cc` and `Bcc` address, so the address rows agree with the body tier's.
+
+### Fixed
+
+- Fixed a create a frontend queued being reported as a copy from the side to itself: it reads `add item … on <side>`, and a staged move or copy `copy item … from <origin> to <collection> on <side>`; the `--json` copy entry carries an `origin` when the server copies in place.
+
+### Removed
+
+- Removed the per-kind scanners (`kind::vcard`, `kind::ical`, the mail header reader): io-pimdir's derivations decode RFC 2047 words, unescape vCard and iCalendar text and resolve a calendar start through the resource's `VTIMEZONE`.
+
 ## [1.0.0] - 2026-09-02
 
 Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, the configuration schema and the sync engine all changed shape.

@@ -65,7 +65,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
       mkdir -p $out/share/{completions,man,schemas}
       ${exe} manual -d "$out"/share/man
       ${exe} completion -d "$out"/share/completions bash elvish fish powershell zsh
-      ${exe} json-schema "$out"/share/schemas
+      ${exe} json-schema -d "$out"/share/schemas
     ''
     + lib.optionalString installManPages ''
       installManPage "$out"/share/man/*

@@ -24,6 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   A frontend reads `mail_summary`, `contact_summary`, `event_summary`, `task_summary`, `journal_summary` and `item_address` rather than parsing JSON. The envelope tier now records every `Cc` and `Bcc` address, so the address rows agree with the body tier's.
 
+- Named every collection by what it is called rather than by what addresses it, io-pimdir having gained the setter the format was missing (pimdir STORAGE §14).
+
+  `collections.name` had always been a copy of `collections.id`, so a store read `imap/Archives` where a frontend wants `Archives`, and `caldav/ED99C7C8-2741-11F1-9B88-2C202A48A29D` where the server had said `Work`. A DAV collection now carries its `DAV:displayname`, which neverest was fetching and discarding, and a mail collection its mailbox name without the namespace. Collections are keyed by the backend id throughout, the display name having never been safe to address one by.
+
+- Linked the system SQLite by default, the store's own library: `vendored` now builds it from source alongside OpenSSL, so a plain `cargo install` needs sqlite3 headers on the machine.
+
 ### Fixed
 
 - Fixed a create a frontend queued being reported as a copy from the side to itself: it reads `add item … on <side>`, and a staged move or copy `copy item … from <origin> to <collection> on <side>`; the `--json` copy entry carries an `origin` when the server copies in place.

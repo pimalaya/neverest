@@ -24,7 +24,7 @@ msgraph = ["dep:io-msgraph", "io-msgraph/client"]
 native-tls = ["pimalaya-stream/native-tls", "io-pim-discovery/native-tls", "io-webdav?/native-tls", "io-imap?/native-tls", "io-msgraph?/native-tls", "io-smtp?/native-tls"]
 rustls-aws = ["pimalaya-stream/rustls-aws", "io-pim-discovery/rustls-aws", "io-webdav?/rustls-aws", "io-imap?/rustls-aws", "io-msgraph?/rustls-aws", "io-smtp?/rustls-aws"]
 rustls-ring = ["pimalaya-stream/rustls-ring", "io-pim-discovery/rustls-ring", "io-webdav?/rustls-ring", "io-imap?/rustls-ring", "io-msgraph?/rustls-ring", "io-smtp?/rustls-ring"]
-vendored = ["pimalaya-config/vendored", "pimalaya-stream/vendored", "io-webdav?/vendored", "io-imap?/vendored", "io-msgraph?/vendored", "io-smtp?/vendored"]
+vendored = ["io-pimdir/vendored", "pimalaya-config/vendored", "pimalaya-stream/vendored", "io-webdav?/vendored", "io-imap?/vendored", "io-msgraph?/vendored", "io-smtp?/vendored"]
 
 [profile.release]
 lto = "fat"

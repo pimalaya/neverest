@@ -25,7 +25,7 @@
 //! and ETags with no token, rather than not syncing at all.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     io::{ErrorKind, Read, Write},
 };
@@ -193,22 +193,31 @@ impl DavClient {
     /// makes.
     pub fn list_collections(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         let kind = self.kind;
-        let ids: BTreeSet<String> = match kind {
-            DavKind::Card => self
-                .op(WebdavClientStd::list_addressbooks)
-                .map(|books| books.into_iter().map(|book| book.id).collect()),
-            DavKind::Cal => self
-                .op(WebdavClientStd::list_calendars)
-                .map(|calendars| calendars.into_iter().map(|calendar| calendar.id).collect()),
+        let collections: BTreeMap<String, Option<String>> = match kind {
+            DavKind::Card => self.op(WebdavClientStd::list_addressbooks).map(|books| {
+                books
+                    .into_iter()
+                    .map(|book| (book.id, book.display_name))
+                    .collect()
+            }),
+            DavKind::Cal => self.op(WebdavClientStd::list_calendars).map(|calendars| {
+                calendars
+                    .into_iter()
+                    .map(|calendar| (calendar.id, calendar.display_name))
+                    .collect()
+            }),
         }
         .with_context(|| format!("Cannot list the {kind} collections"))?;
 
-        // NOTE: the path segment is the key: a display name may collide or
-        // change.
-        Ok(ids
+        // NOTE: the path segment is the key, a display name being free to
+        // collide, to change and to be absent; it is still what the collection
+        // is called, and servers routinely make the segment a UUID.
+        Ok(collections
             .into_iter()
-            .map(|id| Collection {
-                name: id.clone(),
+            .map(|(id, display)| Collection {
+                name: display
+                    .filter(|name| !name.trim().is_empty())
+                    .unwrap_or_else(|| id.clone()),
                 id,
                 total: None,
                 unread: None,

@@ -620,6 +620,12 @@ fn run_pair(
     let total = common.len();
     for (index, name) in common.iter().enumerate() {
         let collection = &hub_id(namespace, name);
+        declare_name(
+            &left_store,
+            collection,
+            name,
+            &[&left_collections, &right_collections],
+        );
         let label = format!("[{}/{total}] Syncing {name}", index + 1);
         let s = Spinner::start(label.clone());
         let progress = CollectionProgress {
@@ -747,15 +753,14 @@ fn run_local(
     ));
 
     let filter = collection_filter.unwrap_or(source_filter);
-    let filtered: Vec<String> = filter_collections(&collections, &filter)
-        .into_iter()
-        .map(|name| hub_id(source_name, &name))
-        .collect();
+    let kept = filter_collections(&collections, &filter);
+    let filtered: Vec<String> = kept.iter().map(|id| hub_id(source_name, id)).collect();
 
-    for collection in &filtered {
+    for (collection, id) in filtered.iter().zip(&kept) {
         stores[0]
             .ensure_collection(collection, media_type)
             .with_context(|| format!("Declare kind for {collection}"))?;
+        declare_name(&stores[0], collection, id, &[&collections]);
     }
 
     let plans = phase1_spine(
@@ -2919,26 +2924,65 @@ fn source_ctx<'a>(
     if left.name == name { left } else { right }
 }
 
-fn list_collections(client: &mut Client) -> Result<HashSet<String>> {
+/// A source's collections: the id that addresses one, against the name it
+/// is called by.
+///
+/// The two coincide on IMAP and on Graph, a mailbox being addressed by its
+/// name, and part ways on DAV, where a collection is a path segment servers
+/// routinely make a UUID and the name is a `DAV:displayname`. Every hub id
+/// and every wire call is built from the key; the value is the store's
+/// `name` column and nothing reads it back.
+fn list_collections(client: &mut Client) -> Result<BTreeMap<String, String>> {
     Ok(client
         .list_collections(false)
         .context("List collections error")?
         .into_iter()
-        .map(|m| m.name)
+        .map(|collection| (collection.id, collection.name))
         .collect())
 }
 
+/// Records what a collection is called, the id staying what addresses it.
+///
+/// The sources are read in declared order and the first with something to say
+/// wins; one reporting no name leaves the bare id, which is the mailbox name
+/// on IMAP and on Graph and the path segment on DAV. Either way it is the
+/// name without the namespace the hub id carries, which is the whole point of
+/// the column: nothing keys on it, so failing to write one costs a label and
+/// never a sync, and it is logged rather than raised.
+fn declare_name(
+    store: &PimdirSourceStore,
+    collection: &str,
+    id: &str,
+    listed: &[&BTreeMap<String, String>],
+) {
+    let name = listed
+        .iter()
+        .find_map(|names| {
+            names
+                .get(id)
+                .map(String::as_str)
+                .filter(|name| !name.trim().is_empty())
+        })
+        .unwrap_or(id);
+
+    if let Err(err) = store.set_collection_name(collection, name) {
+        warn!("cannot name {collection} `{name}`: {err}");
+    }
+}
+
+/// The ids the filter keeps, matched on the id: a DAV collection is filtered
+/// by its path segment, which is what a configuration names.
 fn filter_collections(
-    collections: &HashSet<String>,
+    collections: &BTreeMap<String, String>,
     filter: &CollectionFilter,
 ) -> BTreeSet<String> {
-    let matches = |name: &str, list: &[String]| list.iter().any(|f| f.eq_ignore_ascii_case(name));
+    let matches = |id: &str, list: &[String]| list.iter().any(|f| f.eq_ignore_ascii_case(id));
     collections
-        .iter()
-        .filter(|name| match filter {
+        .keys()
+        .filter(|id| match filter {
             CollectionFilter::All => true,
-            CollectionFilter::Include(list) => matches(name, list),
-            CollectionFilter::Exclude(list) => !matches(name, list),
+            CollectionFilter::Include(list) => matches(id, list),
+            CollectionFilter::Exclude(list) => !matches(id, list),
         })
         .cloned()
         .collect()
@@ -3536,6 +3580,7 @@ fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> 
 mod tests {
     use io_pimdir::{
         change::{PimdirChange, PimdirChangeKind, PimdirDropReason},
+        client::reader::PimdirReader,
         collection::PimdirCheckpoint,
         object::PimdirObject,
         placement::PimdirOrigin,
@@ -3967,7 +4012,9 @@ mod tests {
 
     #[test]
     fn no_collection_name_is_reserved() {
-        let collections: HashSet<String> = ["INBOX", "Outbox", "Sent"].map(String::from).into();
+        let collections: BTreeMap<String, String> = ["INBOX", "Outbox", "Sent"]
+            .map(|name| (String::from(name), String::from(name)))
+            .into();
 
         let filtered = filter_collections(&collections, &CollectionFilter::All);
         assert_eq!(filtered.len(), 3);
@@ -3978,6 +4025,42 @@ mod tests {
             &CollectionFilter::Include(vec![String::from("Outbox")]),
         );
         assert_eq!(filtered, BTreeSet::from([String::from("Outbox")]));
+    }
+
+    #[test]
+    fn a_collection_is_named_without_the_namespace_that_addresses_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PimdirStore::open(dir.path()).unwrap().for_source("caldav");
+        let read = || {
+            PimdirReader::open(dir.path())
+                .unwrap()
+                .list_collections()
+                .unwrap()
+        };
+
+        // What a CalDAV server answers: the id is the path segment, the name
+        // is the `DAV:displayname` beside it.
+        let dav = BTreeMap::from([(String::from("ED99C7C8"), String::from("Work"))]);
+        store
+            .ensure_collection("caldav/ED99C7C8", "text/calendar")
+            .unwrap();
+        declare_name(&store, "caldav/ED99C7C8", "ED99C7C8", &[&dav]);
+
+        let named = &read()[0];
+        assert_eq!(named.id, "caldav/ED99C7C8", "the address keeps its prefix");
+        assert_eq!(named.name, "Work", "the label carries neither");
+
+        // A source with nothing to say leaves the bare id, which is the
+        // mailbox name on IMAP and the path segment on DAV, and in both cases
+        // the hub id without its namespace.
+        let silent = BTreeMap::from([(String::from("Archives"), String::new())]);
+        store
+            .ensure_collection("caldav/Archives", "text/calendar")
+            .unwrap();
+        declare_name(&store, "caldav/Archives", "Archives", &[&silent, &dav]);
+
+        let fallback = read().into_iter().find(|c| c.id.ends_with("Archives"));
+        assert_eq!(fallback.unwrap().name, "Archives");
     }
 
     #[test]

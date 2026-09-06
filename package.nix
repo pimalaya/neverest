@@ -13,17 +13,19 @@
   openssl,
   pkg-config,
   rustPlatform,
+  sqlite,
   stdenv,
 }:
 
 let
   nativeTls = builtins.elem "native-tls" buildFeatures;
+  vendored = builtins.elem "vendored" buildFeatures;
 
 in
 rustPlatform.buildRustPackage (finalAttrs: {
   __structuredAttrs = true;
 
-  inherit buildFeatures buildNoDefaultFeatures;
+  inherit buildNoDefaultFeatures;
 
   pname = "neverest";
   version = "1.0.0";
@@ -36,37 +38,43 @@ rustPlatform.buildRustPackage (finalAttrs: {
     hash = "";
   };
 
-  # openssl should not be provided by vendors, not even on windows
-  env.OPENSSL_NO_VENDOR = 1;
+  env.OPENSSL_NO_VENDOR = !vendored;
+
+  # pkg-config hands the linker libsqlite3 but no rpath, leaving a binary that
+  # cannot find it: not in postInstall, which runs it, nor once installed.
+  env.NIX_LDFLAGS = lib.optionalString (!vendored) ("-rpath " + lib.getLib sqlite + "/lib");
 
   nativeBuildInputs = [
     pkg-config
     installShellFiles
   ];
 
-  buildInputs = lib.optional nativeTls openssl;
+  buildInputs = lib.optional (!vendored) sqlite ++ lib.optional (!vendored && nativeTls) openssl;
+
+  buildFeatures = buildFeatures ++ lib.optional vendored "vendored";
 
   postInstall =
     let
       exe =
         if stdenv.buildPlatform.canExecute stdenv.hostPlatform then
-          "$out/bin/${finalAttrs.pname}"
+          "$out/bin/${finalAttrs.meta.mainProgram}"
         else
           lib.getExe buildPackages.${finalAttrs.pname};
     in
     ''
-      mkdir -p $out/share/{completions,man}
+      mkdir -p $out/share/{completions,man,schemas}
       ${exe} manual -d "$out"/share/man
       ${exe} completion -d "$out"/share/completions bash elvish fish powershell zsh
+      ${exe} json-schema "$out"/share/schemas
     ''
     + lib.optionalString installManPages ''
       installManPage "$out"/share/man/*
     ''
     + lib.optionalString installShellCompletions ''
-      installShellCompletion --cmd ${finalAttrs.pname} \
-        --bash "$out"/share/completions/${finalAttrs.pname}.bash \
-        --fish "$out"/share/completions/${finalAttrs.pname}.fish \
-        --zsh "$out"/share/completions/_${finalAttrs.pname}
+      installShellCompletion --cmd ${finalAttrs.meta.mainProgram} \
+        --bash "$out"/share/completions/${finalAttrs.meta.mainProgram}.bash \
+        --fish "$out"/share/completions/${finalAttrs.meta.mainProgram}.fish \
+        --zsh "$out"/share/completions/_${finalAttrs.meta.mainProgram}
     '';
 
   # disable impure integration tests: they open sockets against live servers
@@ -74,9 +82,9 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   meta = {
     description = "CLI to synchronize PIM collections: mail, contact, calendar…";
-    mainProgram = finalAttrs.pname;
+    mainProgram = "neverest";
     homepage = "https://github.com/pimalaya/${finalAttrs.pname}";
-    changelog = "https://github.com/pimalaya/${finalAttrs.pname}/releases/${finalAttrs.src.tag}";
+    changelog = "${finalAttrs.meta.homepage}/releases/tag/${finalAttrs.src.tag}";
     license = with lib.licenses; [
       asl20
       mit

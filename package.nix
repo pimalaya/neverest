@@ -22,9 +22,13 @@ let
   nativeTls = builtins.elem "native-tls" buildFeatures;
   vendored = builtins.elem "vendored" buildFeatures;
 
-  sqlite' = sqlite.overrideAttrs (finalAttrs: {
-    buildInputs = (finalAttrs.buildInputs or [ ]) ++ [ windows.pthreads ];
-  });
+  sqlite' =
+    if stdenv.hostPlatform.isWindows then
+      sqlite.overrideAttrs (finalAttrs: {
+        buildInputs = (finalAttrs.buildInputs or [ ]) ++ [ windows.pthreads ];
+      })
+    else
+      sqlite;
 
 in
 rustPlatform.buildRustPackage (finalAttrs: {

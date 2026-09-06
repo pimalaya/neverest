@@ -15,11 +15,16 @@
   rustPlatform,
   sqlite,
   stdenv,
+  windows,
 }:
 
 let
   nativeTls = builtins.elem "native-tls" buildFeatures;
   vendored = builtins.elem "vendored" buildFeatures;
+
+  sqlite' = sqlite.overrideAttrs (finalAttrs: {
+    buildInputs = (finalAttrs.buildInputs or [ ]) ++ [ windows.pthreads ];
+  });
 
 in
 rustPlatform.buildRustPackage (finalAttrs: {
@@ -42,14 +47,14 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   # pkg-config hands the linker libsqlite3 but no rpath, leaving a binary that
   # cannot find it: not in postInstall, which runs it, nor once installed.
-  env.NIX_LDFLAGS = lib.optionalString (!vendored) ("-rpath " + lib.getLib sqlite + "/lib");
+  env.NIX_LDFLAGS = lib.optionalString (!vendored) ("-rpath " + lib.getLib sqlite' + "/lib");
 
   nativeBuildInputs = [
     pkg-config
     installShellFiles
   ];
 
-  buildInputs = lib.optional (!vendored) sqlite ++ lib.optional (!vendored && nativeTls) openssl;
+  buildInputs = lib.optional (!vendored) sqlite' ++ lib.optional (!vendored && nativeTls) openssl;
 
   buildFeatures = buildFeatures ++ lib.optional vendored "vendored";
 

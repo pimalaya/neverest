@@ -15,10 +15,11 @@ This page lists the changes most likely to bite when upgrading. The full configu
 - **`store.retention` and `store.hydration` are gone.** Whether the store keeps bodies is the account's `retain`: true with no target, since the store is the destination, false with targets, a configuration naming both having asked to copy between them. A configuration still carrying either key is refused.
 - **`retain = true` alongside a target makes the store a backup** rather than a cache, so `sync --reset` destroys data rather than a derived copy.
 - A source is a remote. **Local file backends are no longer sync sources**: the local pimdir store is the local replica, so a Maildir or m2dir tree beside it would be a second local copy. Resync from the authoritative server instead.
-- **Microsoft Graph**, **CardDAV** and **CalDAV** are new backends. JMAP and Gmail sources parse but cannot be opened yet.
+- **CardDAV** and **CalDAV** are new backends, behind the `dav` cargo feature and in the default set. **Microsoft Graph** is behind `msgraph`, which is not a default while it syncs mail alone. JMAP and Gmail sources parse but cannot be opened yet.
 - **Notmuch** is removed.
 - **Keyring** and **OAuth** are out of the binary: source secrets from a command instead, such as `pass` or `secret-tool`, and [ortie](https://github.com/pimalaya/ortie) for OAuth access tokens.
-- The sync vocabulary is kind-neutral: **collections** and **items** rather than mailboxes and messages. The old spellings keep working as aliases for one release, except in the `--json` report.
+- The sync vocabulary is kind-neutral: **collections** and **items** rather than mailboxes and messages. The `mailbox`, `message` and `filters` spellings keep working as config aliases for one release; the v0.1 `folder` ones do not, and no alias survives in the `--json` report.
+- **A sync can exit 2.** A run that reconciled every collection and still left something waiting for a person (a parked conflict, a refused duplicate `UID`, a rejected write) exits 2 rather than 0 or 1. A script treating any non-zero code as failure needs to tell 2 from 1.
 
 ## Suggested steps
 
@@ -30,7 +31,11 @@ This page lists the changes most likely to bite when upgrading. The full configu
 
 ## From a git master build
 
-No v1.0.0 was ever released: what was prepared under that number ships as v0.2.0. If you ran a build from master, the store format moved underneath it (summaries are typed rows rather than a JSON blob, and a pulled member is a probe row), so the store is refused as stale and cannot be migrated: run `neverest sync --reset -a <account>` to drop it and resync. With `retain = true` beside a target the store is a backup, so the reset destroys what it retained.
+No v1.0.0 was ever released: what was prepared under that number ships as v0.2.0.
+
+If you ran a build from master, the store format moved underneath it and is refused as stale. There is no migration: run `neverest sync --reset -a <account>` to drop it and resync.
+
+With `retain = true` beside a target the store is a backup rather than a cache, so that reset destroys data.
 
 ## From v1.0.0-beta to v0.2.0
 
@@ -94,12 +99,12 @@ The positional `<account>` argument becomes an optional `-a` / `--account <NAME>
 | `auth.type = "oauth2"` | SASL `oauthbearer` or `xoauth2`, the token coming from [ortie](https://github.com/pimalaya/ortie) |
 | `envelope.filter.{before,after}` | removed |
 
-The sync cache is now the pimdir store at $XDG_STATE_HOME/neverest/&lt;account&gt;/, overridable with `store.root`. The presence of its database is the single source of truth for "this account is initialized".
+The sync cache is now the pimdir store at `$XDG_STATE_HOME/neverest/<account>/`, overridable with `store.root`. The presence of its database is the single source of truth for "this account is initialized".
 
 New account-level settings are `one-way` and `retain` (what the account does), `store.purge-after` (the retention sweep) and `connections`. Per source, `<protocol>.item.update` gates in-place body edits and `<protocol>.pool-size` overrides the connection pool.
 
-A store written before collection ids carried their namespace is not read. Neverest refuses it and names `neverest sync --reset`, which drops the replica and resyncs.
+Nothing of the v0.1 cache is read: `init` builds the store from scratch and the first sync fills it.
 
-Neverest also stamps the account's mode beside the store and compares it every run. Turning `one-way` on over an account that synced both ways is refused once, the run that follows being the one that discards what the previous mode was merging.
+Neverest stamps the account's mode beside the store and compares it every run. Turning `one-way` on over an account that synced both ways is refused once, the run that follows being the one that discards what the previous mode was merging.
 
 `neverest sync --accept-mode` says you meant it and is remembered. A `retain` that drops from true to false, and a change in the number of endpoints, are reported and do not block.

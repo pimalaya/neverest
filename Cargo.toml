@@ -47,7 +47,7 @@ io-http = { version = "0.5", default-features = false, optional = true }
 io-imap = { version = "0.6", default-features = false, optional = true }
 io-msgraph = { version = "0.3", default-features = false, optional = true }
 io-pim-discovery = { version = "0.7", default-features = false, features = ["pacc", "autoconfig", "rfc6186"] }
-io-pimdir = { version = "0.4", default-features = false, features = ["client"] }
+io-pimdir = { version = "0.5", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }
 io-smtp = { version = "0.3", default-features = false, optional = true }
 io-webdav = { version = "0.3", default-features = false, optional = true }
@@ -67,6 +67,3 @@ tempfile = "3"
 toml = "1.1"
 url = { version = "2.2", features = ["serde"] }
 vcard-rs = { version = "0.4", optional = true }
-
-[patch.crates-io]
-io-pimdir.git = "https://github.com/pimalaya/io-pimdir"

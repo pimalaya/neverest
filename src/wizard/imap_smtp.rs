@@ -83,8 +83,7 @@ pub fn configure_discovered(
     Ok((imap, smtp))
 }
 
-/// Configures and tests the send channel from the discovered submission
-/// endpoint, reusing the IMAP `sasl` table on confirmation.
+/// Configures the send channel from discovery, reusing the IMAP `sasl` table.
 ///
 /// `None` when discovery found no endpoint. Declining reuse asks whether the
 /// server authenticates at all, since a relay on a trusted network takes no

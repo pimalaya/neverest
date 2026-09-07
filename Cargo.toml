@@ -1,7 +1,7 @@
 [package]
 name = "neverest"
 description = "CLI to synchronize PIM collections: mail, contact, calendar…"
-version = "1.0.0"
+version = "0.2.0"
 authors = ["Clément DOUIN (soywod) <clement.douin@posteo.net>"]
 rust-version = "1.89"
 edition = "2024"
@@ -16,7 +16,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["rustls-ring", "imap", "smtp", "msgraph", "dav"]
+default = ["rustls-ring", "imap", "smtp", "dav"]
 dav = ["dep:io-webdav", "dep:io-http", "dep:ical-rs", "dep:vcard-rs", "io-pim-discovery/rfc6764"]
 imap = ["dep:io-imap", "io-imap/client", "io-imap/scram"]
 smtp = ["dep:io-smtp", "io-smtp/client", "io-smtp/scram"]
@@ -51,8 +51,8 @@ io-pimdir = { version = "0.4", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }
 io-smtp = { version = "0.3", default-features = false, optional = true }
 io-webdav = { version = "0.3", default-features = false, optional = true }
-mail-parser = { version = "0.11", features = ["serde"] }
 log = "0.4"
+mail-parser = { version = "0.11", features = ["serde"] }
 percent-encoding = "2"
 pimalaya-cli = { version = "0.2", default-features = false, features = ["terminal", "prompt", "wizard", "spinner", "imap", "smtp"] }
 pimalaya-config = { version = "0.2", default-features = false, features = ["toml", "secret"] }

@@ -53,8 +53,7 @@ pub struct Merger<'a> {
 }
 
 impl<'a> Merger<'a> {
-    /// Writes the three bodies into `dir` under the kind's `extension` and
-    /// names the output path beside them.
+    /// Writes the three bodies into `dir`, the output path named beside them.
     ///
     /// A side the store does not hold is refused rather than exported as an
     /// empty file: a merger handed an empty vCard as the common ancestor

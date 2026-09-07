@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 pub struct Address {
     /// Display name (e.g. `Alice`), if any.
     pub name: Option<String>,
-
     /// Email address (e.g. `alice@example.org`).
     pub email: String,
 }

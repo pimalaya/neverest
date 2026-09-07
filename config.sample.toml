@@ -200,6 +200,11 @@ imap.item.delete = false
 # Microsoft Graph config (alternative to the blocks above)
 # https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
 # --------------------------------------------------------------------------------
+#
+# NOT in a released binary: `msgraph` is off by default while Graph carries mail,
+# contacts and calendar and this backend syncs only mail. This block parses in
+# every build, and a source declaring it is refused when the sync opens it unless
+# you built with `--features msgraph`.
 
 # Mail folders are exposed as collections; the API host is fixed, so only the
 # owner, TLS and the credential are configurable.
@@ -290,44 +295,38 @@ imap.item.delete = false
 # Conflict options
 # --------------------------------------------------------------------------------
 
-# Every run three-way merges the diverging bodies of a conflicted card or event
-# against the base the last sync agreed on, and clears the conflict whenever
-# nothing collided. That merge is built in and is not configured. What is left
-# is both sides setting one field two ways: the item parks and the run exits 2.
+# Every run three-way merges a conflicted card or event against the base the
+# last sync agreed on, and clears the conflict when nothing collided. Both
+# sides setting one field two ways parks the item, and the run exits 2.
 #
-# Neverest raises no desktop notification of its own. Every run warns in the
-# log, and `--json` carries both halves a notifier needs: `conflicts` is what
-# this run marked, `outstandingConflicts` what the store holds waiting. Testing
-# the first notifies on entry, once, with no state of its own to keep:
+# Neverest raises no notification of its own: `--json` carries `conflicts`,
+# what this run marked, and `outstandingConflicts`, what the store holds.
+# Testing the first notifies on entry, once, with no state to keep:
 #
 #   neverest sync --json | jq -e '.conflicts | length > 0' >/dev/null \
 #     && notify-send "neverest" "an item needs a decision"
 
-# The interactive merger `neverest conflict resolve --interactive` hands a
-# collision to. UNSET by default, which leaves that flag with nothing to run. It
-# is never reached from a sync, whatever is attached to the terminal.
+# The interactive merger `conflict resolve --interactive` hands a collision
+# to. UNSET by default, and never reached from a sync.
 #
-# Following git mergetool, the three bodies are appended positionally as
-# filesystem paths, base first, then the divergent sides, then the path to
-# write. That is tcal's own argument order, so its name is the whole
-# configuration:
-#conflict.merger = "tcal merge"
-#
-# A command carrying any of the placeholders {base}, {local}, {remote} and
-# {output} is substituted instead of appended. tcard takes its output as a flag:
+# The four paths are appended git-mergetool style: base, the two sides, then
+# the path to write. A command naming {base}, {local}, {remote} or {output} is
+# substituted instead, which is what a tool taking its output as a flag needs.
 #conflict.merger = "tcard merge {base} {local} {remote} --output {output}"
+#conflict.merger = "tcal merge {base} {local} {remote} --output {output}"
 #
-# The result is taken only on a zero exit with the output written: an editor
-# exits zero on a bare quit. The body it writes has to be a body of that item,
-# so one no parser reads and one stating another UID are both refused. A
-# decision is refused when the store observed a newer remote revision since it
-# was computed, the store staying free while the merger runs.
+# A tool taking the four in order needs nothing but its own name:
+#conflict.merger = "my-merge-tool"
+#
+# Taken only on a zero exit with the output written, and only when it is a
+# body of that item: one no parser reads and one stating another UID are
+# refused. A decision is refused when the store saw a newer remote revision.
 
 # --------------------------------------------------------------------------------
 # Store options
 # --------------------------------------------------------------------------------
 
-# Where `pimdir.db` and `objects/` live. Defaults to the XDG state directory.
+# Where pimdir.db and `objects/` live. Defaults to the XDG state directory.
 #store.root = "~/.local/state/neverest/example"
 
 # What the store keeps is `retain`, at the top of this account. Dropping it from

@@ -103,7 +103,6 @@ pub struct ConflictShowCommand {
     /// The item's public id, as `conflict list` shows it.
     #[arg(value_name = "ID")]
     pub id: i64,
-
     /// The source the divergence is on, for an item that diverged on more
     /// than one.
     #[arg(long, short = 's', value_name = "SOURCE")]
@@ -142,20 +141,16 @@ pub struct ConflictResolveCommand {
     /// The item's public id, as `conflict list` shows it.
     #[arg(value_name = "ID")]
     pub id: i64,
-
     /// The source the divergence is on, for an item that diverged on more
     /// than one.
     #[arg(long, short = 's', value_name = "SOURCE")]
     pub source: Option<String>,
-
     /// Keep the store's body and discard the remote's.
     #[arg(long, group = "side")]
     pub prefer_local: bool,
-
     /// Keep the remote's body and discard the store's.
     #[arg(long, group = "side")]
     pub prefer_remote: bool,
-
     /// Hand the three bodies to the `conflict.merger` command and take back
     /// the one it writes.
     #[arg(long, short = 'i', group = "side")]

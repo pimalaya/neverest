@@ -33,8 +33,7 @@ use crate::{
     kind::LinkId,
 };
 
-/// A backend-neutral collection enumeration: the member+flag spine, plus
-/// the opaque cursor a server-side incremental sync advances.
+/// A backend-neutral enumeration: the member+flag spine, plus the cursor.
 ///
 /// `complete` tells a full snapshot, where absence means removed, from a
 /// delta, where `vanished` names the removals. Link ids resolve later at
@@ -174,8 +173,7 @@ impl Client {
         }
     }
 
-    /// Streams the bodies of `ids`, batched when the backend allows it,
-    /// into a sink `open`ed as each item begins and `done` as it ends.
+    /// Streams the bodies of `ids` into a sink `open`ed and `done` per item.
     ///
     /// No body lands in memory whole on the IMAP path. `done` also
     /// receives the revision the body corresponds to when the backend
@@ -222,8 +220,7 @@ impl Client {
         }
     }
 
-    /// Adds an item streamed from `source` (`len` octets) with `flags`,
-    /// returning the handle and revision the server assigned.
+    /// Adds an item from `source` (`len` octets), returning what was assigned.
     ///
     /// `link`'s hint recovers the UID on IMAP servers lacking UIDPLUS and
     /// is the `UID` a DAV href is built from, while its mint keeps a second
@@ -250,8 +247,7 @@ impl Client {
         }
     }
 
-    /// Replaces an item's body in place, conditionally on `if_match` (the
-    /// last-synced revision), returning the revision the remote now holds.
+    /// Replaces a body in place on `if_match`, returning the new revision.
     ///
     /// Mutable-content backends only: a mail body is replaced by delete
     /// plus append and never edited, so both mail backends refuse this and
@@ -351,8 +347,7 @@ impl Client {
         }
     }
 
-    /// The handle-space epoch a stored checkpoint carries: a counter that
-    /// changes when the backend reassigns every handle (a UIDVALIDITY bump).
+    /// The epoch a checkpoint carries, changing when handles are reassigned.
     ///
     /// A change means every cached handle is void, so the driver rebuilds
     /// the collection by link id; `None` is a backend that never rebuilds.

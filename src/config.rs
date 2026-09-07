@@ -143,8 +143,7 @@ impl TomlConfig for Config {
 }
 
 impl Config {
-    /// Loads `Config` from `config_paths`, or offers the wizard when no
-    /// file exists.
+    /// Loads `Config` from `config_paths`, offering the wizard when none is.
     ///
     /// A missing configuration is met with the wizard rather than an error:
     /// the command carries on either way, accepting giving it a chance to
@@ -185,11 +184,9 @@ pub struct AccountConfig {
     /// Whether a command with no `-a` resolves to this account.
     #[serde(default, skip_serializing_if = "is_default")]
     pub default: bool,
-
     /// Named sources, the map key being the pimdir source id.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sources: HashMap<String, SourceConfig>,
-
     /// Named targets, on the same terms as [`sources`](Self::sources).
     ///
     /// Absent means the local store is the destination. Named, not
@@ -197,25 +194,20 @@ pub struct AccountConfig {
     /// is why `left` and `right` are gone and not worth reintroducing.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub targets: HashMap<String, SourceConfig>,
-
-    /// Makes the `sources` side authoritative, the other side's change being
-    /// discarded rather than merged, so no conflict is recorded.
+    /// Makes the `sources` side authoritative, the other's change discarded.
     ///
-    /// The other side is still enumerated every run, or every item would be
-    /// re-pushed; its state decides what is left to do and never who wins.
-    /// Changes are overwritten, not merged.
+    /// Nothing is merged and no conflict is recorded. The other side is still
+    /// enumerated every run, or every item would be re-pushed; its state
+    /// decides what is left to do and never who wins.
     #[serde(default, skip_serializing_if = "is_default")]
     pub one_way: bool,
-
-    /// Whether the store holds bodies and is readable by a frontend, rather
-    /// than being only the ledger of spines and checkpoints.
+    /// Whether the store holds bodies, not spines and checkpoints alone.
     ///
     /// Unset takes the destination's answer: true with no targets, the store
     /// being what the account syncs into; false with targets, which asked to
     /// copy rather than to fill a disk. Set it to keep a copy of a migration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retain: Option<bool>,
-
     /// Direct-backend sugar: an IMAP source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imap: Option<ImapConfig>,
@@ -234,35 +226,29 @@ pub struct AccountConfig {
     /// Direct-backend sugar: a Graph source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub msgraph: Option<MsgraphConfig>,
-
     /// The send channel of the sugar source carrying mail, the flat
     /// spelling of `sources.<name>.smtp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<SmtpConfig>,
-
     /// The local pimdir store this account syncs through.
     ///
     /// Optional: the store is implicit, a per-account state directory, and
     /// is customised only here, never declared as a source.
     #[serde(default)]
     pub store: StoreConfig,
-
     /// How a run announces a content conflict it could not merge away.
     #[serde(default)]
     pub conflict: ConflictConfig,
-
     // TODO: item-level sync filters (date range, sender, subject).
     /// Item-level sync options.
     #[serde(default, alias = "message")]
     pub item: ItemSyncConfig,
-
     /// Max connections per source for concurrent body fetches, 4 by default.
     ///
     /// Keep it under the provider's per-account connection limit. `sync
     /// --connections N` overrides it for one run.
     #[serde(default)]
     pub connections: Option<usize>,
-
     /// Removed keys, kept so a configuration carrying one is refused by name
     /// rather than as an unknown field. See [`AccountConfig::validate`].
     #[serde(default, skip_serializing)]
@@ -305,8 +291,7 @@ const RENDER_ORDER: [&str; 16] = [
 const ENDPOINT_KEYS: [&str; 2] = ["server", "user-id"];
 
 impl AccountConfig {
-    /// Renders this account as an `[accounts.<name>]` block, ready to be
-    /// written to a configuration file or appended to one.
+    /// Renders this account as an `[accounts.<name>]` block, ready to write.
     ///
     /// What it adds to the serializer is reading order, dotted keys coming
     /// out alphabetically: groups are reordered ([`RENDER_ORDER`]), each
@@ -487,8 +472,7 @@ impl AccountConfig {
         Ok(endpoints)
     }
 
-    /// The account's mode: which endpoints, which direction, whether the
-    /// store keeps bodies.
+    /// The account's mode: which endpoints, which way, whether bodies stay.
     ///
     /// Both `check` and the sync go through it, so what a run reports and
     /// what it does cannot drift apart. Every illegal arity is refused here,
@@ -653,8 +637,7 @@ impl<'de> Deserialize<'de> for RemovedKey {
     }
 }
 
-/// How an account announces a content conflict, the only part of conflict
-/// handling anybody configures.
+/// The only part of conflict handling anybody configures.
 ///
 /// Whether a run merges is not a setting: the three-way merge is a pure
 /// function over bodies the store holds, and because nobody can swap it out
@@ -662,11 +645,11 @@ impl<'de> Deserialize<'de> for RemovedKey {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ConflictConfig {
-    /// The merger `conflict resolve --interactive` runs, `"tcal merge"`.
+    /// The merger `conflict resolve --interactive` runs.
     ///
-    /// Unset by default; a sync never runs it. Paths are appended
-    /// git-mergetool style (base, sides, output) unless the command names
-    /// {base}, {local}, {remote} or {output}; only a written output counts.
+    /// Unset by default; a sync never runs it. The four paths are appended
+    /// git-mergetool style, unless the command names {base}, {local}, {remote}
+    /// or {output}: `tcard merge {base} {local} {remote} --output {output}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merger: Option<CommandConfig>,
 }
@@ -681,16 +664,13 @@ pub struct StoreConfig {
     /// Defaults to the per-account XDG state directory.
     #[serde(default, deserialize_with = "shell_expanded_path_opt")]
     pub root: Option<PathBuf>,
-
-    /// How long a retained (soft-deleted) item survives before a sync run
-    /// reclaims it: `store.purge-after = "90d"`.
+    /// How long a retained item survives: `store.purge-after = "90d"`.
     ///
     /// A pimdir store never truly deletes: the row is retained, hidden but
     /// keeping its body, and neverest is the sweeper. Unset means never
     /// purge and `"0"` purges at once; there is deliberately no boolean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purge_after: Option<HumanDuration>,
-
     /// Removed keys, kept so a configuration carrying one is refused by
     /// name. See [`StoreConfig::reject_removed_keys`].
     #[serde(default, skip_serializing)]
@@ -700,8 +680,7 @@ pub struct StoreConfig {
 }
 
 impl StoreConfig {
-    /// Refuses `retention` and `hydration`, whose one answer is now the
-    /// account's `retain`.
+    /// Refuses `retention` and `hydration`, now the account's `retain`.
     ///
     /// A three-point scale described a store holding only the bodies that
     /// happened to cross, which nothing asked for; mapping either key onto
@@ -718,8 +697,7 @@ impl StoreConfig {
         Ok(())
     }
 
-    /// The RFC 3339 purge cutoff of a run starting at `now`: a retained item
-    /// strictly older than it is reclaimed.
+    /// The RFC 3339 cutoff at `now`: an older retained item is reclaimed.
     ///
     /// `None` when `purge-after` is unset, or so large no instant precedes
     /// it, which means the same. The format matches what the store stamps
@@ -731,8 +709,7 @@ impl StoreConfig {
     }
 }
 
-/// A human-written duration: one non-negative integer and one unit suffix
-/// (`"90d"`, `"12h"`, `"30m"`, `"45s"`, `"2w"`), or a bare `"0"`.
+/// A human-written duration (`"90d"`, `"12h"`, `"2w"`), or a bare `"0"`.
 ///
 /// A day is 86400 seconds and a week 7 days: a retention delay is not
 /// calendar arithmetic, so no time zone or DST rule enters into it, and
@@ -816,8 +793,7 @@ impl Serialize for HumanDuration {
     }
 }
 
-/// What an account does: which endpoints, which direction, whether the
-/// store keeps bodies.
+/// What an account does: which endpoints, which direction, whether bodies stay.
 ///
 /// Declared, never derived: the mode is the arity of `sources` and
 /// `targets` plus the two flags, so no behaviour depends on a coincidence
@@ -841,8 +817,7 @@ impl AccountMode {
         self.targets.is_empty()
     }
 
-    /// Whether a crossing between two remotes may be streamed rather than
-    /// staged in the store.
+    /// Whether a crossing may be streamed rather than staged in the store.
     ///
     /// An internal choice, not a mode: what the user declared is `retain`,
     /// which both answers honour. It needs both endpoints on a protocol that
@@ -890,9 +865,8 @@ impl fmt::Display for AccountMode {
 /// `serde` helper: shell-expand an optional path.
 ///
 /// TODO: replace with `pimalaya_config::toml::shell_expanded_path_opt`, the
-/// optional twin of the `shell_expanded_path` and `shell_expanded_string`
-/// the crate already ships. ortie hand-rolls the same function, so the two
-/// copies exist only because the shared one does not.
+/// optional twin of what the crate already ships. ortie hand-rolls the same
+/// function, so the two copies exist only because the shared one does not.
 fn shell_expanded_path_opt<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -901,8 +875,7 @@ where
     Ok(raw.map(|s| PathBuf::from(shellexpand::tilde(&s).into_owned())))
 }
 
-/// One source of the account's hub: the remote it talks to, plus the send
-/// channel its queued submit intents leave through.
+/// One source: the remote it talks to, plus the channel its sends leave by.
 ///
 /// The channel belongs to the source and not the account, since sending
 /// natively (Graph's `sendMail`) or needing a companion SMTP server is a
@@ -913,7 +886,6 @@ pub struct SourceConfig {
     /// The one remote this source names.
     #[serde(flatten)]
     pub backend: SourceBackendConfig,
-
     /// The SMTP server this source's queued submit intents flush through.
     ///
     /// Only meaningful on a backend that cannot send by itself (IMAP), a
@@ -1078,14 +1050,12 @@ pub struct CollectionSourceConfig {
     /// Whether the sync may delete one on this source.
     #[serde(default = "default_true")]
     pub delete: bool,
-
     /// Removed key, kept so a configuration carrying it is refused by name.
     ///
     /// Which endpoints meet is now the account's arity, and which way is
     /// [`AccountConfig::one_way`].
     #[serde(default, skip_serializing)]
     namespace: Option<RemovedKey>,
-
     /// Collection-name filter for this source.
     ///
     /// Per source, because an account may hold several kinds and a mailbox
@@ -1458,8 +1428,7 @@ pub struct SmtpConfig {
     pub sasl: Option<SaslConfig>,
 }
 
-/// Resolves a configured `server` into a URL, `scheme` filling in for a
-/// value carrying none, so a bare authority is as good as a full URL.
+/// Resolves a `server` into a URL, `scheme` filling in for a value with none.
 ///
 /// The presence of `://` tells them apart, and it has to: a bare authority
 /// is not a relative URL, `url` reading `dav.example.org:8443` as a scheme

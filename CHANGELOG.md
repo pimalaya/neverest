@@ -2,45 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
-## [Unreleased]
+## [0.2.0] - 2026-09-07
 
-### Changed
-
-- Ported the sync engine onto io-pimdir 0.4, which folded io-replica in.
-
-  The store services the engine's own storage seam; neverest's driver only answers the remote and times the yields. A second endpoint hydrating an item its sibling already holds binds the shared item by the store's own rule now, rather than by a narrowing neverest made itself.
-
-  A store written by an earlier io-pimdir is refused as stale: drop it with `sync --reset -a <account>` and let it resync, there is no migration.
-
-- Drained the frontend queue store-wide in append order, whichever side runs first: the store applies each action as the source syncing its collection (pimdir STORAGE §15.2), so a `move` into one collection followed by an edit there lands in order, and a queued action no longer waits for the side that owns its namespace.
-
-- Held a refused delete beside another source and reverted it for a source alone, decided by the engine from the collection's sources (pimdir SYNC §5): a local edit whose member the server deleted is re-staged as a pending create rather than dropped, and an item two sources edited apart under `manual` projects `Conflict` on every side until an edit or a delete settles it.
-
-- Replaced the JSON `meta` blob by the format's typed summaries (pimdir STORAGE Annex A).
-
-  A frontend reads `mail_summary`, `contact_summary`, `event_summary`, `task_summary`, `journal_summary` and `item_address` rather than parsing JSON. The envelope tier now records every `Cc` and `Bcc` address, so the address rows agree with the body tier's.
-
-- Named every collection by what it is called rather than by what addresses it, io-pimdir having gained the setter the format was missing (pimdir STORAGE §14).
-
-  `collections.name` had always been a copy of `collections.id`, so a store read `imap/Archives` where a frontend wants `Archives`, and `caldav/ED99C7C8-2741-11F1-9B88-2C202A48A29D` where the server had said `Work`. A DAV collection now carries its `DAV:displayname`, which neverest was fetching and discarding, and a mail collection its mailbox name without the namespace. Collections are keyed by the backend id throughout, the display name having never been safe to address one by.
-
-- Linked the system SQLite by default, the store's own library: `vendored` now builds it from source alongside OpenSSL, so a plain `cargo install` needs sqlite3 headers on the machine.
-
-### Fixed
-
-- Fixed a create a frontend queued being reported as a copy from the side to itself: it reads `add item … on <side>`, and a staged move or copy `copy item … from <origin> to <collection> on <side>`; the `--json` copy entry carries an `origin` when the server copies in place.
-
-### Removed
-
-- Removed the per-kind scanners (`kind::vcard`, `kind::ical`, the mail header reader): io-pimdir's derivations decode RFC 2047 words, unescape vCard and iCalendar text and resolve a calendar start through the resource's `VTIMEZONE`.
-
-## [1.0.0] - 2026-09-02
-
-Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, the configuration schema and the sync engine all changed shape.
+Neverest 0.2 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, the configuration schema and the sync engine all changed shape.
 
 [MIGRATION.md](./MIGRATION.md) carries the upgrade path from v0.1.0. Nothing of an old setup is read: the configuration is rewritten and the first run starts from an empty store.
 
@@ -50,7 +17,7 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   Each account keeps one store at `$XDG_STATE_HOME/neverest/<account>/` (override with `store.root`): a SQLite index beside a content-addressed blob directory. Its presence is the single source of truth for "this account is initialized".
 
-  Every collection is grouped under the account that syncs it (pimdir SPEC §9.2), so a store shared by two hand-written accounts says whose collection is whose. Every item carries a sort key (SPEC §9.3), so a frontend pages a collection in its natural order without reading a body.
+  Every collection is grouped under the account that syncs it (pimdir STORAGE §9.2) and named by what it is called rather than by what addresses it (§14), so a frontend reads `Archives` and `Work` where the id says `imap/Archives` and `caldav/ED99C7C8-2741-11F1-9B88-2C202A48A29D`. Every item carries a sort key (§9.3) and a typed summary row (Annex A), so a frontend pages a collection in its natural order and lists it without reading a body or parsing JSON.
 
 - Added the `init` command, run once per account before the first sync.
 
@@ -84,7 +51,7 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - Added **CardDAV** and **CalDAV** backend support via [io-webdav](https://github.com/pimalaya/io-webdav), behind the `dav` cargo feature.
 
-  Address books and calendars are collections, keyed by their path segment rather than their display name, which is optional, mutable and free to collide.
+  Address books and calendars are collections, keyed by their path segment and named by their `DAV:displayname`, a display name being optional, mutable and free to collide.
 
   Enumeration is RFC 6578 `sync-collection`, the server's token riding as the engine's opaque checkpoint. A rejected token falls back to a full report, a truncated one is drained, and a server implementing no `sync-collection` at all is listed with a `PROPFIND` at Depth 1 instead.
 
@@ -98,11 +65,11 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   A calendar item is the object **resource**, not the component, so a recurring series and its overrides are one item (RFC 4791 §4.1). A DAV source pairs with another source of its own kind or with the store alone, and an `smtp` table on one is refused.
 
-- Added **Microsoft Graph** backend support via `io-msgraph`.
+- Added **Microsoft Graph** backend support via `io-msgraph`, behind the `msgraph` cargo feature, which is **not** in the default set.
 
-  Delta-query enumeration (the `@odata.deltaLink` as the sync checkpoint, an expired link restarting a full round), bodies through the raw MIME endpoint, and flag and delete pushes. Appends and moves into Graph are pull-only.
+  Delta-query enumeration (the `@odata.deltaLink` as the sync checkpoint, an expired link restarting a full round), bodies through the raw MIME endpoint, and flag and delete pushes. Appends and moves into Graph are pull-only. Authentication is a bearer access token, resolved through the standard secret-command idiom; neverest runs no OAuth flow itself.
 
-  Authentication is a bearer access token, resolved through the standard secret-command idiom. Neverest runs no OAuth flow itself.
+  Graph carries mail, contacts and calendar behind one protocol and this backend syncs only mail, so a released binary is built without it rather than shipping a Graph account that silently syncs one domain of three. Build with `--features msgraph` to use it meanwhile.
 
 - Added the queued **`submit` intent** and its send channel.
 
@@ -138,9 +105,7 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - Added `conflict.merger` and `conflict resolve --interactive`, which hand a collision to a program of your own.
 
-  Following git mergetool, the three bodies are appended positionally as filesystem paths, base first, then the divergent sides, then the path to write, which is tcal's own argument order and makes `conflict.merger = "tcal merge"` the whole configuration.
-
-  A command carrying any of `{base}`, `{local}`, `{remote}` and `{output}` is substituted instead, for a tool with an argument shape of its own.
+  Following git mergetool, the four paths are appended positionally: the base, then the divergent sides, then the path to write. A command carrying any of `{base}`, `{local}`, `{remote}` and `{output}` is substituted instead, for a tool whose output is a flag rather than its last argument, which is the form both `tcard merge` and `tcal merge` take.
 
   The result is taken only on a zero exit with the output written, compared by content rather than by timestamp, since an editor exits zero on a bare quit. It is then read as a body of that item, so one no parser reads and one stating another `UID` are both refused.
 
@@ -162,15 +127,19 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   Both are re-reported on every run until a person acts. Neverest repairs neither, which copy to keep being the user's call, in their own client.
 
-- Added the per-account `sync.lock` advisory file lock, so two concurrent runs no longer corrupt the store.
+- Added the per-account sync.lock advisory file lock, so two concurrent runs cannot corrupt the store.
 
   It lives in the actual store directory, honouring `store.root`, and a second run waits up to 60 seconds for the holder before exiting with a clear error.
 
 - Added the store's action queue, neverest being its sole owner: every run drains it before it syncs.
 
-  Each action a frontend enqueued is applied exactly once against the source that owns its collection, and the run reports per-collection applied, skipped and parked counts. The sync then pushes the resulting dirty state.
+  The queue is drained store-wide in append order, whichever side runs first, the store applying each action as the source syncing its collection (pimdir STORAGE §15.2): a `move` into one collection followed by an edit there lands in order, and a queued action never waits for the side that owns its namespace. Each action is applied exactly once, the run reports per-collection applied, skipped and parked counts, and the sync then pushes the resulting dirty state.
 
-- Added the **handle-space rebuild**: an IMAP `UIDVALIDITY` change detected across a pull drives io-replica's rekey.
+- Added the engine's answer to a delete a source may not push: held beside another source of the collection, reverted for a source alone (pimdir SYNC §5).
+
+  A local edit whose member the server deleted is re-staged as a pending create rather than dropped, and an item two sources edited apart under `manual` projects a conflict on every side until an edit or a delete settles it.
+
+- Added the **handle-space rebuild**: an IMAP `UIDVALIDITY` change detected across a pull drives io-pimdir's rekey.
 
   Cached bodies, summaries and pending state are carried over by link id, and the collection's `generation` bumps atomically with the rebuild, so a store frontend derives its epoch from the store alone. Graph sources never bump, their message ids surviving a delta reset.
 
@@ -186,9 +155,9 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 ### Changed
 
-- **BREAKING**: the sync engine runs on the [io-replica](https://github.com/pimalaya/io-replica) replica engine instead of a hand-rolled three-way diff.
+- **BREAKING**: the sync engine runs on the [io-pimdir](https://github.com/pimalaya/io-pimdir) engine instead of a hand-rolled three-way diff.
 
-  An account's sources are the sources of one shared collection in the store, so cross-source propagation of items, flags and deletions falls out of the shared hub.
+  An account's sources are the sources of one shared collection in the store, so cross-source propagation of items, flags and deletions falls out of the shared hub. The store services the engine's own storage seam; neverest's driver answers the remote and times the yields. A second endpoint hydrating an item its sibling already holds binds the shared item by the store's own rule, rather than by a narrowing neverest made itself.
 
 - **BREAKING**: `left` and `right` are gone, replaced by the `sources` and `targets` tables and the `one-way` flag.
 
@@ -204,6 +173,8 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
   It matches the wire formats the endpoints speak (JMAP per RFC 8620, Microsoft Graph, the Google APIs), and keeps every key reachable by dot access in jq and JavaScript, which neither `outstanding_conflicts` nor `message-id` was. A variant travelling as a value keeps its own spelling, and TOML keys stay kebab-case.
 
+  A staged move or copy reads `copy item … from <origin> to <collection> on <side>`, and its `--json` entry carries an `origin` when the server copies in place, so a create a frontend queued is never reported as a copy from a side to itself.
+
 - **BREAKING**: `collection.filter` belongs to the source it filters rather than to the account.
 
   An account may hold sources of several kinds, and an `include = ["INBOX"]` means nothing to a contacts source. Filters are consequently asymmetric: a collection may be synced on one source and skipped on another. An account-level `collection` table is refused, naming its replacement.
@@ -214,7 +185,7 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - **BREAKING**: per-source permissions are enforced per operation.
 
-  They map onto io-replica's per-kind push rights one to one, and a forbidden kind is kept pending by the engine while the others still propagate. A tightened permission block takes effect now where it previously did not.
+  They map onto the engine's per-kind push rights one to one, and a forbidden kind is kept pending while the others still propagate. A tightened permission block takes effect now where it previously did not.
 
 - **BREAKING**: renamed `doctor` back to `check`, and `completions` and `manuals` to `completion` and `manual`, the plurals staying as hidden aliases.
 
@@ -254,11 +225,13 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - Every remote is a cargo feature: `imap`, `msgraph`, `dav` (CardDAV and CalDAV together), plus `smtp` for the submission channel.
 
-  All of them ship in the default set. Every source config parses in every build, and opening a source whose backend was not compiled in reports it at runtime.
+  All of them ship in the default set except `msgraph`, which is mail-only while Graph carries three domains. Every source config parses in every build, and opening a source whose backend was not compiled in reports it at runtime.
+
+- Linked the system SQLite by default, the store's own library: `vendored` builds it from source alongside OpenSSL, so a plain `cargo install` needs sqlite3 headers on the machine and a released binary carries its own.
 
 - Relicensed from `AGPL-3.0-only` to `MIT OR Apache-2.0`, aligning with the rest of the Pimalaya ecosystem.
 
-- Bumped the Pimalaya libraries: io-replica 0.5, io-pimdir 0.4, io-imap 0.6, io-smtp 0.3, io-webdav 0.3, io-http 0.5, io-pim-discovery 0.7, io-msgraph 0.3, ical-rs 0.5, vcard-rs 0.4, pimalaya-stream 0.3, pimalaya-cli 0.2 and pimalaya-config 0.2.
+- Bumped the Pimalaya libraries: io-pimdir 0.5, io-imap 0.6, io-smtp 0.3, io-webdav 0.3, io-http 0.5, io-pim-discovery 0.7, io-msgraph 0.3, ical-rs 0.5, vcard-rs 0.4, pimalaya-stream 0.3, pimalaya-cli 0.2 and pimalaya-config 0.2.
 
   SASL moved out of pimalaya-stream into the new io-sasl crate, so the SCRAM-SHA-256 the configuration has always offered is now runnable. The minimum supported Rust version is 1.89.
 
@@ -305,7 +278,6 @@ Neverest v1 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, 
 
 - Initiated the project from [Himalaya CLI](https://github.com/pimalaya/himalaya).
 
-[Unreleased]: https://github.com/pimalaya/neverest/compare/v1.0.0...HEAD
-[1.0.0]: https://github.com/pimalaya/neverest/compare/v1.0.0-beta...v1.0.0
+[0.2.0]: https://github.com/pimalaya/neverest/compare/v1.0.0-beta...v0.2.0
 [1.0.0-beta]: https://github.com/pimalaya/neverest/compare/v0.1.0...v1.0.0-beta
 [0.1.0]: https://github.com/pimalaya/neverest/compare/root...v0.1.0

@@ -149,8 +149,7 @@ impl DavClient {
         self.kind.media_type()
     }
 
-    /// Runs one WebDAV exchange, reopening the connection and running it again
-    /// when the server had closed it.
+    /// Runs one WebDAV exchange, reopening a connection the server had closed.
     ///
     /// io-webdav holds a single stream and reports no keep-alive hint, so an
     /// HTTP/1.0 or `Connection: close` peer breaks every exchange after the
@@ -262,8 +261,7 @@ impl DavClient {
         .with_context(|| format!("Cannot delete the {kind} collection {collection}"))
     }
 
-    /// Enumerates a collection through `sync-collection`, its sync token riding
-    /// as the engine's opaque checkpoint.
+    /// Enumerates through `sync-collection`, its token the engine's checkpoint.
     ///
     /// RFC 6578 is an extension, so a server may refuse the REPORT with the RFC
     /// 3253 §3.6 `DAV:supported-report` precondition; the collection is listed
@@ -333,8 +331,7 @@ impl DavClient {
         }
     }
 
-    /// One full listing through a `PROPFIND` at Depth 1, for a server with no
-    /// `sync-collection`.
+    /// One full `PROPFIND` listing, for a server with no `sync-collection`.
     ///
     /// It carries no token, so every run lists the whole collection. A
     /// `PROPFIND` rather than the query report: a query filter is evaluated by
@@ -614,8 +611,7 @@ fn href_id(href: &str) -> String {
         .to_owned()
 }
 
-/// The resource name a new item is created under: its `UID`, the minted part of
-/// its key where there is one, and the kind's conventional extension.
+/// The resource name a new item is created under: `UID`, mint, extension.
 ///
 /// The body fallback is only for an item stating no identity at all: a minted
 /// key states one its twin already took, and a colliding `PUT` is not refused
@@ -649,12 +645,11 @@ fn sanitize(uid: &str) -> String {
         .collect()
 }
 
-/// Whether the exchange died on a connection the server had already closed, the
-/// one failure [`DavClient::op`] repairs by reopening it.
+/// Whether the exchange died on an already-closed connection, the one failure
+/// [`DavClient::op`] repairs.
 ///
-/// An end of stream where a response was due says the request was never
-/// answered, and a broken pipe or a reset says it was never written, so neither
-/// leaves a half-applied write behind.
+/// An end of stream says the request was never answered, a broken pipe or
+/// reset that it was never written: neither leaves a half-applied write.
 fn is_connection_closed(err: &WebdavClientStdError) -> bool {
     match err {
         WebdavClientStdError::Send(WebdavSendError::Send(Http11SendError::Eof))
@@ -672,12 +667,11 @@ fn is_connection_closed(err: &WebdavClientStdError) -> bool {
     }
 }
 
-/// Whether a failed write was refused for the `no-uid-conflict` precondition of
-/// RFC 4791 §5.3.2 and RFC 6352 §6.3.2.
+/// Whether a write was refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC
+/// 6352 §6.3.2), the collection already holding that `UID`.
 ///
-/// That is, the collection already holds a resource carrying that `UID`. The
-/// error crosses the client seam as an [`anyhow::Error`], so the typed refusal
-/// is read back out of its chain.
+/// The error crosses the client seam as an [`anyhow::Error`], so the typed
+/// refusal is read back out of its chain.
 pub fn is_duplicate_uid(err: &anyhow::Error) -> bool {
     err.chain().any(|cause| {
         cause

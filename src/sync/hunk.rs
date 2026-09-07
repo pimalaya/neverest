@@ -84,7 +84,7 @@ pub enum ItemHunk {
         side: String,
         /// The collection, by the name its server answers to.
         collection: String,
-        /// The item's link id, the only name it has before the server assigns one.
+        /// The item's link id, its only name before the server assigns one.
         id: String,
         /// The flags the item is written with.
         flags: BTreeSet<Flag>,

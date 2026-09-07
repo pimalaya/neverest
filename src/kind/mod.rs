@@ -120,8 +120,7 @@ impl Kind {
         }
     }
 
-    /// Refuses a body that is not one of this kind, or not one of *this*
-    /// item.
+    /// Refuses a body that is not of this kind, or not of *this* item.
     ///
     /// A settled body is the one body reaching the store that nothing here
     /// derived, so two things are asked of it: it reads as the kind the
@@ -169,13 +168,11 @@ impl Kind {
         }
     }
 
-    /// Splits a link id into the identity a backend can address the item by,
-    /// and what tells this copy from the one already holding that identity.
+    /// Splits a link id into the addressable identity and this copy's mint.
     ///
     /// **The one legitimate place a link id is parsed**: a key is opaque to
-    /// every reader (pimdir STORAGE §9), and only the write side hands a
-    /// server an identity. The engine mints a second copy
-    /// `dup:<hint>#<handle>` (STORAGE §9); this reads it back.
+    /// every reader (pimdir STORAGE §9), only the write side handing a server
+    /// an identity. The engine mints `dup:<hint>#<handle>`; this reads it back.
     pub fn split_link_id<'l>(self, link_id: &'l PimdirLinkId) -> LinkId<'l> {
         let Some(minted) = link_id.0.strip_prefix(MINT_PREFIX) else {
             return LinkId {
@@ -194,12 +191,11 @@ impl Kind {
         }
     }
 
-    /// The identity in a key, or `None` for the kind's own fallback (mail's
-    /// `alt:`, a DAV item's `hash:`), which the server has never heard of.
+    /// The identity in a key, or `None` for the kind's own fallback (`alt:`,
+    /// `hash:`), which no server has heard of.
     ///
-    /// Those are the one case a prefix marks, and a real `Message-ID` or
-    /// `UID` cannot be mistaken for one, RFC 5322 `atext` admitting no colon
-    /// before the `@`.
+    /// The one case a prefix marks: a real `Message-ID` or `UID` cannot be
+    /// mistaken for one, RFC 5322 `atext` admitting no colon before the `@`.
     fn hint(self, key: &str) -> Option<&str> {
         let fallback = match self {
             Self::Mail => "alt:",
@@ -221,8 +217,7 @@ impl Kind {
         }
     }
 
-    /// The link id, summary and sort key from a server-side summary, for a
-    /// kind offering a cheap `Meta` tier (mail's IMAP `ENVELOPE`).
+    /// The derivations from a server-side summary, for a kind with `Meta`.
     ///
     /// `None` for a kind with no such tier: a DAV `sync-collection` report
     /// returns hrefs and ETags but no `UID`, so a DAV item goes straight to

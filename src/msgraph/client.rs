@@ -249,8 +249,7 @@ impl GraphClient {
         })
     }
 
-    /// Runs one full delta round over a folder, paging until the delta link
-    /// closes it.
+    /// Runs one delta round over a folder, paging until the delta link closes.
     ///
     /// Resumes from the saved link when given, falling back to a fresh round on
     /// an expired one (HTTP 410). Returns the rows, whether the round was a
@@ -389,8 +388,7 @@ impl GraphClient {
             .with_context(|| format!("Get raw message {id} error"))
     }
 
-    /// Replaces the flags of a message-id set: `\Seen` maps to `isRead`,
-    /// `\Flagged` to the follow-up flagStatus.
+    /// Replaces flags: `\Seen` is `isRead`, `\Flagged` the follow-up status.
     ///
     /// Only [`FlagOp::Set`] is supported, the engine pushing full flag sets.
     /// `\Draft` is read-only on Graph and other keywords have no equivalent,
@@ -415,8 +413,7 @@ impl GraphClient {
         Ok(())
     }
 
-    /// Sends raw RFC 5322 MIME bytes through the Graph sendMail action, which
-    /// saves the message to Sent itself.
+    /// Sends raw MIME through sendMail, which files the message in Sent itself.
     ///
     /// The client error comes back unwrapped, so the caller can read the HTTP
     /// status off it. sendMail derives the recipients from the MIME headers

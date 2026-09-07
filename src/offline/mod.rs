@@ -38,10 +38,9 @@ pub fn source_id(name: &str) -> PimdirSourceId {
 
 /// Runs an io-pimdir coroutine to completion over borrowed seams.
 ///
-/// io-pimdir's `PimdirSourceStore::run`, but borrowing the remote, timing each
-/// yield for [`prof`] and reporting a failure with its chain, so the driver
-/// keeps its long-lived per-side store handle and client across the ephemeral
-/// coroutine. The storage yields are the store's to service.
+/// io-pimdir's `PimdirSourceStore::run`, but borrowing the remote and timing
+/// each yield for [`prof`], so the driver keeps its long-lived store handle
+/// and client across the ephemeral coroutine.
 pub fn run_verb<R, C, T, E>(
     store: &mut PimdirSourceStore,
     remote: &mut R,

@@ -1555,12 +1555,9 @@ fn summary_size(summary: &Option<PimdirSummary>) -> Option<usize> {
 
 /// Streams each cross-copy body between the sides, keeping only the spine.
 ///
-/// A relay never reaches the projection the hydrating path is reported from, so
-/// each write to the target is itemized here instead. Without that, a run that
-/// relayed would report having written nothing.
-///
-/// The target alternates per item, so both sides' store handles are here: a
-/// copy is recorded against the side that now holds it and no other.
+/// A relay never reaches the projection the hydrating path reports from, so
+/// each write is itemized here instead, or a run that relayed would report
+/// writing nothing. A copy is recorded against the side that now holds it.
 fn relay_copies(
     collection: &str,
     left: &mut SourceCtx,
@@ -1621,16 +1618,11 @@ fn relay_copies(
     Ok(count)
 }
 
-/// Records the copy the target now holds, binding it to the item it was
-/// relayed from.
+/// Records the copy the target holds, bound to the item it was relayed from.
 ///
-/// The relay is a side channel around the engine, so it owes the store what an
-/// accepted push writes back: the handle the server assigned, under the item's
-/// own link id, at the level a body-less spine can claim. Without it the item
-/// stays one-sided and every later pass relays it again.
-///
-/// This is the store's side of the crossing, so `collection` is the hub id it
-/// keys by, never the wire name the append went out under.
+/// The relay is a side channel around the engine, so it owes the store the
+/// assigned handle under the item's own link id, or the item stays one-sided
+/// and every later pass relays it again. `collection` is the hub id.
 fn bind_relayed(
     store: &mut PimdirSourceStore,
     collection: &str,
@@ -1673,10 +1665,9 @@ fn bind_relayed(
 
 /// Relays one message: a fetch thread into the pipe, this one into the append.
 ///
-/// The body therefore crosses without ever being held whole or stored. Both
-/// ends are wire calls, so `collection` is the name the servers answer to and
-/// never the hub id; what the target assigned to the copy is returned for the
-/// store to record.
+/// The body crosses without ever being held whole or stored. Both ends are
+/// wire calls, so `collection` is the name the servers answer to; what the
+/// target assigned is returned for the store to record.
 fn relay_one(
     holding_pool: &mut Pool,
     target_pool: &mut Pool,
@@ -1708,15 +1699,9 @@ fn relay_one(
 
 /// One reconcile round over both sides, answering whether either moved.
 ///
-/// Each side's divergences are itemized right after its own merge, the only
-/// place they can be: the engine's events are this pass's and nothing keeps
-/// them. The report notes rather than appends, so one divergence is one line.
-///
-/// The two endpoints are then reconciled with each other, which no side's own
-/// merge can see: each of them agrees with its own server and only the pair
-/// disagrees. The ancestor that merge needs is read before the round, a pull
-/// dropping it. Where the pair never had one, the hub says so itself and the
-/// divergence parks unmerged.
+/// A side's divergences are itemized right after its own merge, the engine's
+/// events being this pass's alone. The endpoints are then reconciled with each
+/// other, which no side's own merge sees: each agrees with its own server.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_pass(
     collection: &str,
@@ -1781,20 +1766,18 @@ fn reconcile_pass(
 
 /// Whether a pass reconciles the two endpoints with each other.
 ///
-/// Only where neither of them decides: under `one-way` the source is the truth
-/// and the target follows it, so a difference between the two is not a
-/// divergence. A dry run stages nothing, the same bar [`resolve_conflicts`]
-/// holds.
+/// Only where neither decides: under `one-way` the source is the truth and a
+/// difference is not a divergence. A dry run stages nothing, the same bar
+/// [`resolve_conflicts`] holds.
 fn parks_divergences(left: &SourceCtx, right: &SourceCtx, dry_run: bool) -> bool {
     !dry_run && left.authority == Authority::Shared && right.authority == Authority::Shared
 }
 
 /// The body each shared item holds, which is what its two endpoints agreed on.
 ///
-/// Read before a round pulls, because pulling is what loses it: a remote
-/// content change drops the stale body from the item and from that source's
-/// base, so once both endpoints have pulled, the store holds their two new
-/// bodies and nothing they both came from.
+/// Read before a round pulls, because pulling loses it: a remote change drops
+/// the stale body from the item and from that source's base, so once both have
+/// pulled the store holds two new bodies and nothing they both came from.
 fn shared_bodies(store: &PimdirStore, collection: &str) -> Result<HashMap<String, PimdirHash>> {
     let hub = store
         .load_hub(collection)
@@ -1810,11 +1793,9 @@ fn shared_bodies(store: &PimdirStore, collection: &str) -> Result<HashMap<String
 
 /// The diverging body each item already carries, before a round records one.
 ///
-/// The hub keeps its cross-source flag on the item once set: a source
-/// restating the shared body moves neither axis it is cleared on, so the flag
-/// outlives the decision that settled it and says nothing on its own about
-/// what is still owed. Read before the round, it says what a round newly
-/// recorded, which is the divergence a person has not seen yet.
+/// The hub keeps its cross-source flag once set, so the flag outlives the
+/// decision that settled it. Read before the round, it tells what the round
+/// newly recorded, which is the divergence a person has not seen yet.
 fn hub_divergences(store: &PimdirStore, collection: &str) -> Result<HashMap<String, PimdirHash>> {
     let hub = store
         .load_hub(collection)
@@ -1848,10 +1829,9 @@ struct Divergence {
 
 /// The items both endpoints changed in one round, read from the store alone.
 ///
-/// A pull drops the shared body and that source's base body together, so an
-/// item neither endpoint holds a base body for any more, that held one before
-/// the round, is one both of them rewrote. One endpoint alone leaves the
-/// other's base body in place, which is what tells the two cases apart.
+/// A pull drops the shared body and that source's base together, so an item
+/// holding a base before the round and none after is one both rewrote. One
+/// endpoint alone leaves the other's base in place, which tells them apart.
 fn diverged_items(
     store: &PimdirStore,
     collection: &str,
@@ -1905,14 +1885,9 @@ fn diverged_items(
 
 /// Reconciles what both endpoints rewrote, through the three-way merge.
 ///
-/// Neither endpoint's own merge can see this divergence: each agrees with its
-/// own server, and only the pair disagrees, so the hub would absorb both bodies
-/// and project the last one it kept over the other. The pair is given the shape
-/// a one-endpoint divergence already has instead: the source's body is hydrated
-/// as the shared one and the target's is recorded as the divergence against it,
-/// so [`resolve_conflicts`] fetches the target's body, merges the three and
-/// stages what settles. What no merge settles stays parked and is reported,
-/// which is the whole point: neither side's edit is overwritten by the other.
+/// Neither endpoint's own merge sees it: each agrees with its own server, so
+/// the hub would project the last body it kept over the other. The pair gets
+/// a one-endpoint divergence's shape instead; what no merge settles parks.
 #[allow(clippy::too_many_arguments)]
 fn park_divergences(
     collection: &str,
@@ -2062,18 +2037,9 @@ struct HubConflict {
 
 /// The divergences the round itself recorded between the two endpoints.
 ///
-/// This is the hub's own cross-source axis, kept on the shared item rather than
-/// on a binding: an endpoint whose body differs from the shared one, with no
-/// body the two ever agreed on behind them, leaves `conflicted` set and its own
-/// body in `conflict_object`. Both endpoints already holding one identity
-/// before the store has read either is where it happens, which is what a mirror
-/// and a migration start from.
-///
-/// Read against `before`, the same flag as the round found it, so a divergence
-/// is parked the once. The flag outlives the decision that settles it, and
-/// parking again on a body a person has already ruled on would refuse the
-/// resolution's own push and never converge. A target whose binding is already
-/// conflicted is left alone too: it holds a decision of its own.
+/// The hub's cross-source axis, kept on the shared item: both endpoints held
+/// one identity before the store read either. Read against `before` so a
+/// divergence parks once, the flag outliving the decision that settles it.
 fn hub_conflicts(
     store: &PimdirStore,
     collection: &str,
@@ -2126,17 +2092,9 @@ fn hub_conflicts(
 
 /// Parks what the two endpoints disagreed about before they agreed on anything.
 ///
-/// The divergence [`park_divergences`] handles has a common ancestor, the body
-/// both endpoints came from, so the three-way merge can settle most of it. This
-/// one has none: the two servers held one identity under two different bodies
-/// before the store read either of them, and a merge with no base could only
-/// ever park, so it parks directly.
-///
-/// The target's placement is written the shape a decision is read from: the
-/// source's body as its own, the target's recorded against it, and the revision
-/// the target's pull observed. Marking it is also what keeps the source's body
-/// off the target, the hub projecting a conflicted binding as `Conflict` and
-/// never as the `Dirty` the next round would push.
+/// Unlike [`park_divergences`] there is no common ancestor: two servers held
+/// one identity under two bodies before the store read either, so a merge
+/// could only park. Marking it also keeps the source's body off the target.
 #[allow(clippy::too_many_arguments)]
 fn park_hub_conflicts(
     collection: &str,
@@ -2215,10 +2173,9 @@ fn park_hub_conflicts(
 
 /// One side of a reconcile round: its merge, its probes and its report.
 ///
-/// Only a pulling round's events name what the remote itself did. A pushing
-/// round's `FlagsChanged` and `Vanished` also echo the writes this run just
-/// made, so itemizing those would report the run's own work back as the
-/// remote's, on top of the propagation [`itemize`] already plans.
+/// Only a pulling round's events name what the remote did. A pushing round's
+/// `FlagsChanged` and `Vanished` also echo this run's own writes, so itemizing
+/// them would report the run's work back as the remote's.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_side(
     collection: &str,
@@ -2319,10 +2276,9 @@ fn stored_epoch(
 
 /// Drives the engine's rekey, returning its report and the new generation.
 ///
-/// The rebuild batch drops every old handle as `Rekeyed`, which is what makes
-/// the store bump the collection's generation in the transaction applying it
-/// (pimdir SYNC §8), so "the ids you cached are void" commits atomically with
-/// the rebuild that voided them.
+/// The rebuild batch drops every old handle as `Rekeyed`, which makes the
+/// store bump the collection's generation in the same transaction (pimdir
+/// SYNC §8), so "the ids you cached are void" commits with what voided them.
 fn rebuild_collection(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -2343,9 +2299,8 @@ fn rebuild_collection(
 /// The `sync` verb one side runs, under its options.
 ///
 /// Being hub-bound fixes the delete disposition: a refused delete is held, not
-/// reverted, which is what syncing beside other sources means to the engine.
-/// Reverting says "this source still holds the member", and an add beats a
-/// delete, so a side taking no deletes would resurrect on both sides.
+/// reverted. Reverting says "this source still holds the member", and an add
+/// beats a delete, so a side taking no deletes would resurrect on both sides.
 fn sync_verb(
     collection: &str,
     push: bool,
@@ -2924,14 +2879,11 @@ fn source_ctx<'a>(
     if left.name == name { left } else { right }
 }
 
-/// A source's collections: the id that addresses one, against the name it
-/// is called by.
+/// A source's collections: the id addressing one, against the name it goes by.
 ///
-/// The two coincide on IMAP and on Graph, a mailbox being addressed by its
-/// name, and part ways on DAV, where a collection is a path segment servers
-/// routinely make a UUID and the name is a `DAV:displayname`. Every hub id
-/// and every wire call is built from the key; the value is the store's
-/// `name` column and nothing reads it back.
+/// The two coincide on IMAP and Graph and part ways on DAV, where a segment is
+/// routinely a UUID and the name is a `DAV:displayname`. Every hub id and wire
+/// call is built from the key; nothing reads the value back.
 fn list_collections(client: &mut Client) -> Result<BTreeMap<String, String>> {
     Ok(client
         .list_collections(false)
@@ -2943,12 +2895,9 @@ fn list_collections(client: &mut Client) -> Result<BTreeMap<String, String>> {
 
 /// Records what a collection is called, the id staying what addresses it.
 ///
-/// The sources are read in declared order and the first with something to say
-/// wins; one reporting no name leaves the bare id, which is the mailbox name
-/// on IMAP and on Graph and the path segment on DAV. Either way it is the
-/// name without the namespace the hub id carries, which is the whole point of
-/// the column: nothing keys on it, so failing to write one costs a label and
-/// never a sync, and it is logged rather than raised.
+/// Sources are read in declared order, the first with something to say
+/// winning; one reporting no name leaves the bare id. Nothing keys on the
+/// column, so a failure costs a label and never a sync, and is logged.
 fn declare_name(
     store: &PimdirSourceStore,
     collection: &str,
@@ -3081,8 +3030,7 @@ fn content_key(link: &str) -> u64 {
 ///
 /// The store applies each action as the source syncing its collection, not as
 /// the handle draining (STORAGE §15.2), so whichever side runs first answers
-/// for both. The report names the collections whose rows landed: what the
-/// pending list lost that the parked list did not gain.
+/// for both. The report names the collections whose rows landed.
 fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutput) {
     let before = match store.list_pending_actions() {
         Ok(rows) => rows,
@@ -3709,13 +3657,11 @@ mod tests {
         assert!(err.contains("left"), "{err}");
     }
 
-    /// An action is applied as the source syncing its collection, whichever
-    /// handle drains.
+    /// An action is applied as the source syncing its collection.
     ///
-    /// On an account syncing mail, contacts and calendar, `caldav` sorts first
-    /// and reaches every mail action himalaya queued before `imap` does; it
-    /// used to answer for `imap`'s work, and now the store hands the action to
-    /// `imap` under `caldav`'s handle.
+    /// On an account syncing three kinds, `caldav` sorts first and reaches
+    /// every mail action before `imap` does; the store now hands the action
+    /// to `imap` under `caldav`'s handle.
     #[test]
     fn a_drain_applies_an_action_as_the_source_of_its_collection() {
         let dir = tempfile::tempdir().unwrap();
@@ -4038,8 +3984,8 @@ mod tests {
                 .unwrap()
         };
 
-        // What a CalDAV server answers: the id is the path segment, the name
-        // is the `DAV:displayname` beside it.
+        // NOTE: what a CalDAV server answers, the id being the path
+        // segment and the name the `DAV:displayname` beside it.
         let dav = BTreeMap::from([(String::from("ED99C7C8"), String::from("Work"))]);
         store
             .ensure_collection("caldav/ED99C7C8", "text/calendar")
@@ -4050,9 +3996,8 @@ mod tests {
         assert_eq!(named.id, "caldav/ED99C7C8", "the address keeps its prefix");
         assert_eq!(named.name, "Work", "the label carries neither");
 
-        // A source with nothing to say leaves the bare id, which is the
-        // mailbox name on IMAP and the path segment on DAV, and in both cases
-        // the hub id without its namespace.
+        // NOTE: a source with nothing to say leaves the bare id, which is
+        // the mailbox name on IMAP and the path segment on DAV.
         let silent = BTreeMap::from([(String::from("Archives"), String::new())]);
         store
             .ensure_collection("caldav/Archives", "text/calendar")
@@ -4558,9 +4503,8 @@ mod tests {
     /// Two fields disagreeing is one item waiting, and two such items are two.
     ///
     /// The merge counts colliding fields and the report counts parked items,
-    /// which are not the same number: a run whose summary read `1 item(s)
-    /// waiting` over a two-field divergence, or over two of them, would have
-    /// passed everything else pinned at one.
+    /// which are not the same number: a summary reading `1 item(s) waiting`
+    /// over a two-field divergence would have passed everything else.
     #[cfg(feature = "dav")]
     #[test]
     fn two_colliding_fields_park_the_item_and_the_count_reads_past_one() {
@@ -4579,9 +4523,9 @@ mod tests {
         let mut store = store_with_conflict(dir.path(), &base, &local, &remote);
         let blobs = store.blobs();
 
-        // A second item diverging exactly the same way, over the same three
-        // bodies the store already holds: what the report prints is a number,
-        // and one item cannot tell a count from a flag.
+        // NOTE: a second item diverging the same way, over the same three
+        // bodies: the report prints a number, and one item cannot tell a
+        // count from a flag.
         store
             .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
                 collection: PimdirCollectionId("contacts".into()),
@@ -4714,11 +4658,9 @@ mod tests {
 
     /// A refused append names the item and takes its copy back.
     ///
-    /// The hub stages an append under the item's link id with a marker
-    /// appended, the item having no handle on the side it is being created
-    /// on. Reported raw, the marker reads as part of the name, and the copy
-    /// hunk the append came from was left in the patch, so a run every one of
-    /// whose writes a read-only calendar refused still counted them all.
+    /// The hub stages an append under the item's link id with a marker, the
+    /// item having no handle on the side it is created on. Reported raw the
+    /// marker reads as part of the name, and the copy hunk was left in.
     #[test]
     fn a_refused_append_is_named_by_its_link_id_and_its_copy_is_taken_back() {
         let mut report = SyncOutput::default();
@@ -5100,13 +5042,11 @@ mod tests {
         store
     }
 
-    /// A server's own delete is named on the side that pulled it and on the
-    /// side that must apply it, once each.
+    /// A server's own delete is named once on each side.
     ///
     /// The two-endpoint path read only conflicts out of its pass, so a card a
-    /// server dropped reached the report as the propagation alone and never as
-    /// the removal the run had found. Itemizing a pushing pass instead
-    /// double-counts, which is why the opening round only ever pulls.
+    /// server dropped reached the report as the propagation alone. Itemizing
+    /// a pushing pass instead double-counts, so the opening round only pulls.
     #[test]
     fn a_server_delete_is_named_once_on_each_endpoint() {
         let dir = tempfile::tempdir().unwrap();
@@ -5559,8 +5499,7 @@ mod tests {
     ///
     /// A relay bypasses the engine, so nothing else writes the copy down: an
     /// item is selected for being on one source alone, and only the target's
-    /// own binding takes it back out of that selection. Without it every pass
-    /// relays the same body again, which is a duplicate per pass on a server.
+    /// binding takes it out. Without it every pass relays the same body again.
     #[test]
     fn a_relayed_copy_is_bound_to_its_target_and_never_relayed_twice() {
         let dir = tempfile::tempdir().unwrap();

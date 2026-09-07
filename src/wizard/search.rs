@@ -88,8 +88,7 @@ pub struct TcpEndpoint {
     pub security: DiscoverySecurity,
 }
 
-/// The authentication capabilities a service advertised, folded across all
-/// its discovered methods.
+/// The auth capabilities a service advertised, across every discovered method.
 ///
 /// It drives the per-service auth prompt. Neverest reads a token an external
 /// manager issues but never runs a grant, so OAuth is no method of its own

@@ -40,8 +40,7 @@ pub enum Merged {
 }
 
 impl Kind {
-    /// Three-way merges the `local` and `remote` bodies of one conflicted
-    /// item against the `base` the last sync agreed on.
+    /// Three-way merges `local` and `remote` against the `base` last agreed on.
     ///
     /// The ical merge names no attendee the right side speaks for (RFC 5546
     /// §3.2): neverest syncs a calendar rather than acting as one. Preferring

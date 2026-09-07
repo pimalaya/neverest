@@ -18,14 +18,12 @@ use crate::item::{address::Address, flag::Flag};
 pub struct ItemSummary {
     /// Backend-specific identifier: an IMAP UID, a JMAP email id.
     pub id: String,
-
     /// `Message-ID:` (RFC 5322 §3.6.4), `None` when missing or unsurfaced.
     ///
     /// Normalised, so it is stable across every backend that stores the
     /// message.
     #[serde(default)]
     pub message_id: Option<String>,
-
     /// `In-Reply-To:` (RFC 5322 §3.6.4), empty when missing or unsurfaced.
     ///
     /// A list because the grammar is `1*msg-id`, normalised like
@@ -33,40 +31,31 @@ pub struct ItemSummary {
     /// byte-for-byte.
     #[serde(default)]
     pub in_reply_to: Vec<String>,
-
     /// Flags set on the message, a sorted set: wire order means nothing.
     #[serde(default)]
     pub flags: BTreeSet<Flag>,
-
     /// Subject header value.
     #[serde(default)]
     pub subject: String,
-
     /// Sender(s).
     #[serde(default)]
     pub from: Vec<Address>,
-
     /// Primary recipient(s).
     #[serde(default)]
     pub to: Vec<Address>,
-
     /// Carbon-copied recipient(s).
     #[serde(default)]
     pub cc: Vec<Address>,
-
     /// Blind-carbon-copied recipient(s).
     #[serde(default)]
     pub bcc: Vec<Address>,
-
     /// Author-claimed send time from the `Date:` header, `None` when the
     /// header is missing or unparseable.
     #[serde(default)]
     pub date: Option<DateTime<FixedOffset>>,
-
     /// Size of the raw RFC 5322 message in bytes.
     #[serde(default)]
     pub size: u64,
-
     /// Whether the message has an attachment; `None` when not requested
     /// or not detectable on the active backend.
     #[serde(default)]

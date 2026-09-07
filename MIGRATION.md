@@ -1,6 +1,6 @@
 # Migration guide
 
-v0.1.0 and v1.0.0-beta were early releases sitting on top of `email-lib`. v1.0.0 is a full rewrite on top of the I/O-free `io-*` ecosystem, so the CLI, the configuration schema and the sync engine all changed shape.
+v0.1.0 and v1.0.0-beta were early releases sitting on top of `email-lib`. v0.2.0 is a full rewrite on top of the I/O-free `io-*` ecosystem, so the CLI, the configuration schema and the sync engine all changed shape.
 
 This page lists the changes most likely to bite when upgrading. The full configuration schema lives in [config.sample.toml](./config.sample.toml), and the exhaustive list of changes in [CHANGELOG.md](./CHANGELOG.md).
 
@@ -28,17 +28,17 @@ This page lists the changes most likely to bite when upgrading. The full configu
 4. Run `neverest sync -a <account> --dry-run` to inspect the first patch.
 5. Drop `--dry-run`, replace the old config, done.
 
-## From v1.0.0
+## From a git master build
 
-The store format moved with io-pimdir: summaries are typed rows rather than a JSON blob, and a pulled member is a probe row. A store neverest 1.0.0 wrote is refused as stale and cannot be migrated: run `neverest sync --reset -a <account>` to drop it and resync. With `retain = true` beside a target the store is a backup, so the reset destroys what it retained.
+No v1.0.0 was ever released: what was prepared under that number ships as v0.2.0. If you ran a build from master, the store format moved underneath it (summaries are typed rows rather than a JSON blob, and a pulled member is a probe row), so the store is refused as stale and cannot be migrated: run `neverest sync --reset -a <account>` to drop it and resync. With `retain = true` beside a target the store is a backup, so the reset destroys what it retained.
 
-## From v1.0.0-beta to v1.0.0
+## From v1.0.0-beta to v0.2.0
 
 Everything in the v0.1.0 section below applies too: v1.0.0-beta only added a few cosmetic changes on top of v0.1.0.
 
 ### CLI
 
-| v1.0.0-beta | v1.0.0 |
+| v1.0.0-beta | v0.2.0 |
 |---|---|
 | `doctor <account>` (aliases `check`, `check-up`, `checkup`) | `check -a <account>` |
 | `--debug` (alias for `RUST_LOG=debug`) | `--log-level debug` (alias `--log`) |
@@ -46,7 +46,7 @@ Everything in the v0.1.0 section below applies too: v1.0.0-beta only added a few
 
 ### Configuration
 
-| v1.0.0-beta | v1.0.0 |
+| v1.0.0-beta | v0.2.0 |
 |---|---|
 | `folder.filters = "..."` | `collection.filter = "..."` |
 | `envelope.filters.{before,after}` | removed |
@@ -54,11 +54,11 @@ Everything in the v0.1.0 section below applies too: v1.0.0-beta only added a few
 
 `color-eyre`'s spantrace and backtrace output is gone: errors flow through `anyhow` and pimalaya-cli's error report. `tracing` is replaced by `log`.
 
-## From v0.1.0 to v1.0.0
+## From v0.1.0 to v0.2.0
 
 ### CLI
 
-| v0.1.0 | v1.0.0 |
+| v0.1.0 | v0.2.0 |
 |---|---|
 | `synchronize <account>` | `sync -a <account>` |
 | `check-up <account>` | `check -a <account>` |
@@ -75,7 +75,7 @@ The positional `<account>` argument becomes an optional `-a` / `--account <NAME>
 
 ### Configuration
 
-| v0.1.0 | v1.0.0 |
+| v0.1.0 | v0.2.0 |
 |---|---|
 | `folder.filter = "..."` | `collection.filter = "..."` |
 | `folder.filter.{include,exclude}` | `collection.filter.{include,exclude}` |

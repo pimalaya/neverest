@@ -10,8 +10,7 @@ use serde::Serialize;
 
 use crate::sync::hunk::{CollectionHunk, ItemHunk};
 
-/// What `neverest sync` reports: every change the run applied, plus the
-/// work it left for a person to settle.
+/// What `neverest sync` reports: the changes applied, plus what it left.
 ///
 /// The exit code reads off it rather than off the process: a run that
 /// reconciled its collections and still parked something is neither a
@@ -49,8 +48,7 @@ pub struct SyncOutput {
     /// three-way merge could settle.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<ItemConflict>,
-    /// Items the store holds waiting for a decision, whichever run marked
-    /// them; this is what the exit code answers.
+    /// Items waiting for a decision, and what the exit code answers.
     ///
     /// Not the length of [`conflicts`](Self::conflicts): the engine emits
     /// nothing for a placement it already parked, which is what keeps a
@@ -135,8 +133,7 @@ impl SyncOutput {
     }
 }
 
-/// One create a side refused with the CalDAV or CardDAV `no-uid-conflict`
-/// precondition (RFC 4791 §5.3.2, RFC 6352 §6.3.2).
+/// One create refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC 6352 §6.3.2).
 ///
 /// Not about the duplicate, which the store mirrors as two items, but about
 /// the write that could not land, retried and re-reported every run. Giving

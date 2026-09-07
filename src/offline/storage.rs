@@ -66,23 +66,11 @@ pub struct HydrationSide<'a> {
     pub decides: bool,
 }
 
-/// The bodiless items whose body must be hydrated (`Full`) for the pair to
-/// converge in this run.
+/// The bodiless items to hydrate (`Full`) for the pair to converge this run.
 ///
-/// Two shapes qualify, and both are an item the hub holds no body for. An item
-/// held by one of the pair alone is a copy the other may be given, so the
-/// holder's body is fetched and the other side's create pushes it.
-///
-/// An item both of them hold, whose body exactly one of them pulled a change
-/// to, is an update the other side is owed: the changed side's body is fetched
-/// so the projection reads the unchanged side as dirty against it. Without it
-/// the push has nothing to send, the run reports an update it did not make, and
-/// the two endpoints converge a run later or, where no retention hydrates the
-/// body afterwards, never.
-///
-/// An item both of them rewrote is neither: that is a divergence, and it is
-/// merged or parked by the conflict path rather than pushed. Reads the whole
-/// hub, so any source handle serves it.
+/// An item one side alone holds is a copy the other may be given. An item both
+/// hold, changed on exactly one, is an update the other is owed: without the
+/// body the push has nothing to send. An item both rewrote is a divergence.
 pub fn hydration_targets(
     store: &PimdirStore,
     collection: &str,
@@ -126,10 +114,9 @@ pub fn hydration_targets(
             })
             .collect();
 
-        // A difference only one side made is that side's to hand over. One
-        // both of them made is a divergence, which the conflict path merges
-        // or parks, unless an authority is declared: then the deciding side
-        // overwrites the other and its body is what crosses.
+        // NOTE: a difference both sides made is a divergence, which the
+        // conflict path merges or parks, unless an authority is declared:
+        // then the deciding side overwrites the other.
         let changed = match pulled.as_slice() {
             [(source, binding)] => Some((*source, *binding)),
             _ => pulled

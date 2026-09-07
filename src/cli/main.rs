@@ -35,7 +35,6 @@ pub struct Cli {
     /// configuration wizard when no configuration file is found.
     #[command(subcommand)]
     pub command: Option<Command>,
-
     /// Override the default configuration file path.
     ///
     /// Paths are shell-expanded then canonicalized; multiple paths may be

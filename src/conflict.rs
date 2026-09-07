@@ -230,8 +230,7 @@ impl Conflict {
     }
 }
 
-/// The divergences an account's store is holding, by collection then item
-/// then source.
+/// The divergences the store holds, by collection then item then source.
 ///
 /// The store answers off a partial index over the conflicted flag, so a store
 /// with nothing outstanding pays for an empty index rather than for a pass
@@ -293,8 +292,7 @@ pub fn list(store: &PimdirReader, account: &str) -> Result<Vec<Conflict>> {
     Ok(conflicts)
 }
 
-/// The one conflict `id` names, narrowed by `source` when the item diverged
-/// on more than one of them.
+/// The one conflict `id` names, narrowed by `source` when several diverged.
 ///
 /// An id names an item and a divergence is one source's, so the two are not
 /// the same arity. They coincide for every account with one source of a kind,
@@ -526,8 +524,7 @@ mod tests {
         );
     }
 
-    /// A resolution that drops or changes the item's `UID` is a resolution of
-    /// some other item.
+    /// A resolution changing the item's `UID` resolves some other item.
     ///
     /// The bytes read as a card, so nothing structural catches it: the store
     /// would address the row by an identity its content no longer states, a

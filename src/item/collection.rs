@@ -14,14 +14,11 @@ use serde::{Deserialize, Serialize};
 pub struct Collection {
     /// Backend-specific identifier: a JMAP id, a DAV href, the name on IMAP.
     pub id: String,
-
     /// Human-readable collection name.
     pub name: String,
-
     /// Total number of items; `None` when not asked or not cheap to answer.
     #[serde(default)]
     pub total: Option<u64>,
-
     /// Number of unread items, when the caller requested counts.
     ///
     /// `None` when not asked, not cheap to answer, or the kind has no

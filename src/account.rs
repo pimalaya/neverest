@@ -51,8 +51,7 @@ use crate::dav::client::DavKind;
 /// its error, so one broken credential stops one source and not the whole
 /// account.
 pub struct Account {
-    /// Every endpoint declared, keyed by the name that is also its pimdir
-    /// source id.
+    /// Every endpoint declared, keyed by the name that is its pimdir source id.
     ///
     /// A failure is kept as its rendered message: an endpoint is read once
     /// per source syncing against it, and an error carrying a cause chain
@@ -61,8 +60,7 @@ pub struct Account {
 }
 
 impl Account {
-    /// Resolves every endpoint `config` declares, spawning each distinct
-    /// secret command once.
+    /// Resolves every declared endpoint, spawning each secret command once.
     ///
     /// Fails only when the endpoints cannot be enumerated at all, a failed
     /// endpoint being kept for [`Account::get`] and counted by the spinner,

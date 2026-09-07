@@ -4,11 +4,10 @@
 //! sort key. The derivations are io-pimdir's (pimdir STORAGE Annex A.1), so
 //! the schema cannot drift from the format's by a field or a spelling.
 //!
-//! Mail is the one kind with a cheap `Meta` tier, an IMAP or Graph `ENVELOPE`
-//! rather than a body, so there are two derivations and they must agree
-//! byte-for-byte. The `alt:` link id embeds the date, so a date the tiers
-//! spell differently splits a message with no `Message-ID` in two, re-fetched
-//! every sync and stored twice.
+//! Mail is the one kind with a cheap `Meta` tier, so its two derivations
+//! must agree byte-for-byte. The `alt:` link id embeds the date: spell it
+//! differently across tiers and a message with no `Message-ID` splits in
+//! two, re-fetched every sync and stored twice.
 
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use io_pimdir::summary::{

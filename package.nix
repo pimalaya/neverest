@@ -24,8 +24,8 @@ let
 
   sqlite' =
     if stdenv.hostPlatform.isWindows then
-      sqlite.overrideAttrs (finalAttrs: {
-        buildInputs = (finalAttrs.buildInputs or [ ]) ++ [ windows.pthreads ];
+      sqlite.overrideAttrs (old: {
+        buildInputs = (old.buildInputs or [ ]) ++ [ windows.pthreads ];
       })
     else
       sqlite;
@@ -37,7 +37,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   inherit buildNoDefaultFeatures;
 
   pname = "neverest";
-  version = "1.0.0";
+  version = "0.2.0";
   cargoHash = "";
 
   src = fetchFromGitHub {

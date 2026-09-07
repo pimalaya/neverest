@@ -54,7 +54,6 @@ pub struct SyncCommand {
     /// Print the patch that would be applied, without applying it.
     #[arg(long, short = 'd')]
     pub dry_run: bool,
-
     /// Synchronize only the given collection names (repeatable, ASCII
     /// case-insensitive).
     #[arg(long, short = 'm', alias = "include-mailbox")]
@@ -64,7 +63,6 @@ pub struct SyncCommand {
         conflicts_with = "all_collections"
     )]
     pub include_collection: Vec<String>,
-
     /// Skip the given collection names (repeatable, ASCII case-insensitive).
     #[arg(long, short = 'x', alias = "exclude-mailbox")]
     #[arg(value_name = "COLLECTION", action = ArgAction::Append)]
@@ -73,7 +71,6 @@ pub struct SyncCommand {
         conflicts_with = "all_collections"
     )]
     pub exclude_collection: Vec<String>,
-
     /// Synchronize every collection on both sides, ignoring config filters.
     #[arg(long, short = 'A', alias = "all-mailboxes")]
     #[arg(
@@ -81,25 +78,20 @@ pub struct SyncCommand {
         conflicts_with = "exclude_collection"
     )]
     pub all_collections: bool,
-
     /// Drop the persisted replica before running (a full re-reconcile).
     #[arg(long)]
     pub reset: bool,
-
     /// Max connections per side for concurrent body fetches (default 4, or the
     /// account's `connections`). Keep it under your provider's per-account cap.
     #[arg(long, short = 'j', value_name = "N")]
     pub connections: Option<usize>,
-
     /// Skip the retention sweep: keep every retained (soft-deleted) item,
     /// whatever `store.purge-after` says.
     #[arg(long)]
     pub no_purge: bool,
-
     /// Synchronize only the given sources (repeatable).
     #[arg(long, short = 's', value_name = "SOURCE", action = ArgAction::Append)]
     pub source: Vec<String>,
-
     /// Accept a mode change that discards data, and remember the answer.
     ///
     /// Turning `one-way` on makes the sources authoritative, so the next run

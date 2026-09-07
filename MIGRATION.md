@@ -99,7 +99,7 @@ The positional `<account>` argument becomes an optional `-a` / `--account <NAME>
 | `auth.type = "oauth2"` | SASL `oauthbearer` or `xoauth2`, the token coming from [ortie](https://github.com/pimalaya/ortie) |
 | `envelope.filter.{before,after}` | removed |
 
-The sync cache is now the pimdir store at `$XDG_STATE_HOME/neverest/<account>/`, overridable with `store.root`. The presence of its database is the single source of truth for "this account is initialized".
+The sync cache is now the pimdir store at `neverest/<account>/` under the platform's state location: `$XDG_STATE_HOME` on Linux and the BSDs, `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows. Override it with `store.root`. The presence of its database is the single source of truth for "this account is initialized".
 
 New account-level settings are `one-way` and `retain` (what the account does), `store.purge-after` (the retention sweep) and `connections`. Per source, `<protocol>.item.update` gates in-place body edits and `<protocol>.pool-size` overrides the connection pool.
 

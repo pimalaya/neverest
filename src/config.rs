@@ -661,7 +661,9 @@ pub struct ConflictConfig {
 pub struct StoreConfig {
     /// The store directory, holding `pimdir.db` and `objects/`.
     ///
-    /// Defaults to the per-account XDG state directory.
+    /// Defaults to a per-account directory under the platform's state
+    /// location: XDG on Linux and the BSDs, Application Support on macOS,
+    /// `%LOCALAPPDATA%` on Windows.
     #[serde(default, deserialize_with = "shell_expanded_path_opt")]
     pub root: Option<PathBuf>,
     /// How long a retained item survives: `store.purge-after = "90d"`.

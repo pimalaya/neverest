@@ -112,10 +112,39 @@ fn hub_id(namespace: &str, name: &str) -> String {
     format!("{namespace}/{name}")
 }
 
-/// Resolves `<state_dir>/neverest/<account>/`, the default replica root.
+/// Resolves `<state base>/neverest/<account>/`, the default replica root.
 pub fn replica_dir(account: &str) -> Result<PathBuf> {
-    let base = dirs::state_dir().context("Cannot resolve XDG state directory")?;
-    Ok(base.join("neverest").join(account))
+    Ok(state_base()?.join("neverest").join(account))
+}
+
+/// The platform directory the default replica root sits under.
+///
+/// Only the base varies, the layout below it being one shape everywhere.
+/// `dirs` reports a state directory on Linux and the BSDs alone, so a
+/// platform without one takes where its own convention keeps app data.
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))]
+fn state_base() -> Result<PathBuf> {
+    dirs::state_dir().context("Cannot resolve the XDG state directory")
+}
+
+/// The platform directory the default replica root sits under.
+///
+/// `~/Library/Application Support` rather than `~/Library/Caches`: a dropped
+/// store costs a full resync, and holds the only local copy when the account
+/// retains bodies.
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+fn state_base() -> Result<PathBuf> {
+    dirs::data_dir().context("Cannot resolve the Application Support directory")
+}
+
+/// The platform directory the default replica root sits under.
+///
+/// `%LOCALAPPDATA%` rather than the roaming `%APPDATA%`: the store holds
+/// message bodies and a SQLite index, neither of which belongs on a profile
+/// that syncs between machines.
+#[cfg(target_os = "windows")]
+fn state_base() -> Result<PathBuf> {
+    dirs::data_local_dir().context("Cannot resolve the local application data directory")
 }
 
 /// The account's store directory: `store.root`, else [`replica_dir`].
@@ -3541,6 +3570,25 @@ mod tests {
 
     use super::*;
     use crate::{cli::exit::Exit, offline::source_id};
+
+    /// The layout below the platform base is one shape everywhere, so a store
+    /// stays addressable by the same relative path whichever platform wrote
+    /// it, and `store.root` still overrides the whole thing.
+    #[test]
+    fn the_default_replica_root_is_the_account_under_a_platform_base() {
+        let dir = replica_dir("work").unwrap();
+
+        assert!(dir.ends_with("neverest/work"), "{}", dir.display());
+        assert!(dir.is_absolute(), "{}", dir.display());
+
+        let mut config = AccountConfig::default();
+        config.store.root = Some(PathBuf::from("/tmp/elsewhere"));
+
+        assert_eq!(
+            store_dir("work", &config).unwrap(),
+            PathBuf::from("/tmp/elsewhere"),
+        );
+    }
 
     /// A store with one body and the files a dry run writes to.
     fn stub_store(dir: &Path) {

@@ -14,7 +14,7 @@ Neverest 0.2 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI,
 
 - Added the local **pimdir store**, the single local copy an app reads.
 
-  One store per account at `$XDG_STATE_HOME/neverest/<account>/` (override with `store.root`): a SQLite index beside a content-addressed blob directory. Its presence is what says the account is initialized.
+  One store per account at `neverest/<account>/` under the platform's state location (`$XDG_STATE_HOME` on Linux and the BSDs, `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows), overridable with `store.root`: a SQLite index beside a content-addressed blob directory. Its presence is what says the account is initialized.
 
   Every collection is grouped under the account that syncs it and carries a display name, so a frontend reads `Work` where the id says `caldav/ED99C7C8`. Every item carries a sort key and a typed summary row, so a collection lists in its natural order without reading a body.
 

@@ -326,7 +326,9 @@ imap.item.delete = false
 # Store options
 # --------------------------------------------------------------------------------
 
-# Where pimdir.db and `objects/` live. Defaults to the XDG state directory.
+# Where pimdir.db and `objects/` live. Defaults to neverest/<account>/ under
+# the platform's state location: $XDG_STATE_HOME on Linux and the BSDs,
+# ~/Library/Application Support on macOS, %LOCALAPPDATA% on Windows.
 #store.root = "~/.local/state/neverest/example"
 
 # What the store keeps is `retain`, at the top of this account. Dropping it from

@@ -9,8 +9,8 @@
   </p>
 </div>
 
-> [!IMPORTANT]
-> This README documents Neverest v0.2.0. Refer to the [v1.0.0-beta README](https://github.com/pimalaya/neverest/blob/v1.0.0-beta/README.md) or the [v0.1.0 README](https://github.com/pimalaya/neverest/blob/v0.1.0/README.md) for an older release you are running, and to [MIGRATION.md](./MIGRATION.md) for the upgrade path from either.
+> [!CAUTION]
+> Neverest is `v0.x`: expect breaking changes between releases until it stabilises.
 
 ## Table of contents
 
@@ -18,6 +18,7 @@
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
+- [Migration](./MIGRATION.md)
 - [AI policy](https://github.com/pimalaya/.github/blob/master/AI_POLICY.md)
 - [License](#license)
 - [Social](#social)

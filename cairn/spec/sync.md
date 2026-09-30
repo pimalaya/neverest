@@ -376,6 +376,8 @@ The intent's payload SHALL be `v: 1` JSON carrying `object` (the body hash, by t
 
 Neverest SHALL perform each pending intent through the one source offering a send channel: its own `smtp` table, else its native send (the Graph `sendMail` action, which files the message in Sent itself), sources walked in the order the account declares them. At most one source may declare an `smtp` table, so the only pick that order decides is between a declared channel and a natively-sending source. On success the row SHALL be acknowledged, releasing the body's pin. A **transient** failure (an SMTP 4xx, a transport error) SHALL leave the row pending; a **permanent** one (an SMTP 5xx, an undecodable payload, a missing body) SHALL park it with its error. A build with no send channel (neither `smtp` nor `msgraph`) SHALL skip submit intents and warn, never park them. Message content is never logged.
 
+The SMTP channel SHALL remove the body's `Bcc` field before `DATA` (RFC 5322 §3.6.3): a producer may stage the body with it, the payload's `rcpts` alone carrying those recipients to the server. The Graph channel hands the field to `sendMail`, which derives the recipients from it and does not deliver it.
+
 Submission is **at-least-once**: a crash between the server's acceptance and the acknowledgement resends on the next run, so deduplication is the receiving provider's job (`Message-ID`).
 
 ### Requirement: A run reclaims retained items on a schedule

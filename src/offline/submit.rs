@@ -38,14 +38,16 @@ use io_pimdir::client::blobs::PimdirBlobs;
 use io_pimdir::{client::PimdirStore, codec::PimdirAction, object::PimdirHash};
 #[cfg(feature = "smtp")]
 use io_smtp::{
-    client::{SmtpClient as _, SmtpClientError, SmtpClientStd},
-    message::SmtpMessageSendError,
+    client::{SmtpClient as _, SmtpClientError, SmtpClientStd, SmtpClientStdConnectOptions},
+    message::{SmtpMessageSendError, SmtpMessageSendOptions},
     rfc5321::{
         SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox, SmtpReversePath,
         data::SmtpDataError, mail::SmtpMailError, rcpt::SmtpRcptError,
     },
     session::SmtpSessionOpenOptions,
 };
+#[cfg(feature = "smtp")]
+use pimalaya_stream::proxy::Proxy;
 use serde::Deserialize;
 
 #[cfg(feature = "smtp")]
@@ -229,18 +231,17 @@ impl SendChannel<'_> {
 /// with no scheme takes `smtps://`, the implicit TLS RFC 8314 §3.3 asks for.
 #[cfg(feature = "smtp")]
 pub fn connect_smtp(account: &SmtpAccount) -> Result<SmtpClientStd> {
-    let opts = SmtpSessionOpenOptions {
-        starttls: account.starttls,
+    let opts = SmtpClientStdConnectOptions {
+        tls: account.tls.clone(),
+        proxy: Proxy::None,
+        sasl: account.sasl.clone(),
+        session: SmtpSessionOpenOptions {
+            starttls: account.starttls,
+        },
     };
 
-    let (client, _capabilities) = SmtpClientStd::connect(
-        &account.server,
-        &account.tls,
-        ehlo_domain(),
-        account.sasl.clone(),
-        opts,
-    )
-    .context("Cannot connect to the SMTP submission server")?;
+    let (client, _capabilities) = SmtpClientStd::connect(&account.server, ehlo_domain(), opts)
+        .context("Cannot connect to the SMTP submission server")?;
 
     Ok(client)
 }
@@ -286,7 +287,12 @@ pub fn send_one(
                 .map(|rcpt| Ok(SmtpForwardPath(smtp_mailbox(rcpt)?)))
                 .collect::<Result<Vec<_>>>()
                 .map_err(SubmitFailure::permanent)?;
-            client.send(reverse, forwards, bytes).map_err(classify_smtp)
+            // NOTE: the default options remove the Bcc field before DATA,
+            // the envelope alone carrying its recipients (RFC 5322 3.6.3).
+            let opts = SmtpMessageSendOptions::default();
+            client
+                .send(reverse, forwards, bytes, opts)
+                .map_err(classify_smtp)
         }
         #[cfg(feature = "msgraph")]
         SendChannel::Graph(client) => client.send_mime(&bytes).map_err(classify_graph),
@@ -506,6 +512,35 @@ mod tests {
             ]
         );
         assert_eq!(captured.data, [body.as_slice(), b"\r\n"].concat());
+    }
+
+    #[test]
+    fn a_bcc_recipient_is_in_the_envelope_but_not_in_the_transmitted_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let body = b"To: b@y.org\r\nBcc: c@y.org\r\nSubject: hi\r\n\r\nhello".to_vec();
+        let intent = stage_intent(
+            &blobs,
+            1,
+            r#"{"v":1,"from":"a@x.org","rcpts":["b@y.org","c@y.org"],"subject":"hi"}"#,
+            &body,
+        );
+
+        let (port, captured) = spawn_smtp_sink(None);
+        let mut channel = channel_to(port);
+        send_one(&mut channel, &blobs, &intent).expect("send");
+        channel.close();
+
+        let captured = captured.recv().expect("captured session");
+        assert!(
+            captured
+                .commands
+                .contains(&String::from("RCPT TO:<c@y.org>"))
+        );
+        assert_eq!(
+            captured.data,
+            b"To: b@y.org\r\nSubject: hi\r\n\r\nhello\r\n".as_slice()
+        );
     }
 
     #[test]

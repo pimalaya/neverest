@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- Fixed a queued send transmitting its `Bcc` field to every recipient over SMTP (RFC 5322 3.6.3). The Bcc recipients still receive it through the envelope.
+
 ## [0.2.0] - 2026-09-07
 
 Neverest 0.2 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI, the configuration schema and the sync engine all changed shape.
@@ -255,6 +261,7 @@ This version has been yanked, use the [0.2.0] instead.
 
 - Initiated the project from [Himalaya CLI](https://github.com/pimalaya/himalaya).
 
+[Unreleased]: https://github.com/pimalaya/neverest/compare/v0.2.0...HEAD
 [0.2.0]: https://github.com/pimalaya/neverest/compare/v0.1.0...v0.2.0
 [1.0.0-beta]: https://github.com/pimalaya/neverest/compare/v0.1.0...v1.0.0-beta
 [0.1.0]: https://github.com/pimalaya/neverest/compare/root...v0.1.0

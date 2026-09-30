@@ -38,6 +38,7 @@ use io_msgraph::v1::{
 };
 use log::{debug, trace, warn};
 use pimalaya_stream::{
+    proxy::Proxy,
     stream::{Stream, TlsConnectOptions},
     tls::Tls,
 };
@@ -82,6 +83,7 @@ impl GraphClient {
     pub fn connect(token: &SecretString, user: &str, tls: Tls) -> Result<Self> {
         let options = MsgraphClientStdConnectOptions {
             tls: tls.clone(),
+            proxy: Proxy::None,
             user_id: user.to_owned(),
         };
         let inner = MsgraphClientStd::connect(token.expose_secret(), options)

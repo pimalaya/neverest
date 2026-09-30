@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::Result;
 use io_imap::{
-    client::{ImapClient as _, ImapClientStd as Inner},
+    client::{ImapClient as _, ImapClientStd as Inner, ImapClientStdConnectOptions},
     rfc3501::select::ImapMailboxSelectData,
     session::ImapSessionOpenOptions,
     types::{
@@ -23,7 +23,7 @@ use io_imap::{
     },
 };
 use io_sasl::mechanism::Sasl;
-use pimalaya_stream::tls::Tls;
+use pimalaya_stream::{proxy::Proxy, tls::Tls};
 use url::Url;
 
 /// Live IMAP client wrapping the io-imap session.
@@ -46,11 +46,16 @@ impl ImapClient {
     /// Opens the IMAP connection (TCP/TLS/STARTTLS, greeting, SASL), the ALPN
     /// identifiers riding the passed [`Tls`].
     pub fn connect(server: &Url, tls: &Tls, starttls: bool, sasl: Option<Sasl>) -> Result<Self> {
-        let opts = ImapSessionOpenOptions {
-            starttls,
-            ..Default::default()
+        let opts = ImapClientStdConnectOptions {
+            tls: tls.clone(),
+            proxy: Proxy::None,
+            sasl,
+            session: ImapSessionOpenOptions {
+                starttls,
+                ..Default::default()
+            },
         };
-        let (inner, capabilities) = Inner::connect(server, tls, sasl, opts)?;
+        let (inner, capabilities) = Inner::connect(server, opts)?;
         let mut client = Self {
             inner,
             capabilities,

@@ -295,20 +295,25 @@ fn fallback_mechanisms(caps: AuthCaps) -> Vec<SaslMechanism> {
 /// logged, never surfaced, so the wizard falls back rather than stopping.
 fn probe_mechanisms(endpoint: &TcpEndpoint) -> Option<Vec<SaslMechanism>> {
     use io_imap::{
-        client::{ImapClientStd, default_alpn},
+        client::{ImapClientStd, ImapClientStdConnectOptions, default_alpn},
         rfc3501::capability::available_auth_mechanisms,
         session::ImapSessionOpenOptions,
     };
-    use io_sasl::mechanism::Sasl;
+    use pimalaya_stream::proxy::Proxy;
 
     let probe = || -> Result<Vec<SaslMechanism>> {
         let tls = TlsConfig::default().into_tls(default_alpn());
         let server = url::Url::parse(&endpoint_server(endpoint))?;
-        let opts = ImapSessionOpenOptions {
-            starttls: endpoint.security == DiscoverySecurity::Starttls,
-            ..Default::default()
+        let opts = ImapClientStdConnectOptions {
+            tls,
+            proxy: Proxy::None,
+            sasl: None,
+            session: ImapSessionOpenOptions {
+                starttls: endpoint.security == DiscoverySecurity::Starttls,
+                ..Default::default()
+            },
         };
-        let (_client, capabilities) = ImapClientStd::connect(&server, &tls, None::<Sasl>, opts)?;
+        let (_client, capabilities) = ImapClientStd::connect(&server, opts)?;
         Ok(available_auth_mechanisms(&capabilities))
     };
 

@@ -29,10 +29,12 @@ use pimalaya_config::secret::SecretResolver;
     feature = "imap",
     feature = "msgraph",
     feature = "smtp",
-    feature = "dav"
+    feature = "dav",
+    feature = "gpeople",
+    feature = "gcal"
 ))]
 use pimalaya_stream::tls::Tls;
-#[cfg(feature = "msgraph")]
+#[cfg(any(feature = "msgraph", feature = "gpeople", feature = "gcal"))]
 use secrecy::SecretString;
 #[cfg(any(feature = "imap", feature = "smtp", feature = "dav"))]
 use url::Url;
@@ -44,6 +46,8 @@ use crate::config::server_url;
 use crate::config::{AccountConfig, SourceBackendConfig, SourceConfig};
 #[cfg(feature = "dav")]
 use crate::dav::client::DavKind;
+#[cfg(feature = "msgraph")]
+use crate::msgraph::client::GraphKind;
 
 /// An account's endpoints, resolved once for the run.
 ///
@@ -152,10 +156,20 @@ pub enum SourceAccountBackend {
     Dav(DavAccount),
     #[cfg(feature = "msgraph")]
     Msgraph(MsgraphAccount),
+    #[cfg(feature = "gpeople")]
+    Gpeople(GoogleAccount),
+    #[cfg(feature = "gcal")]
+    Gcal(GoogleAccount),
     /// Keeps the type inhabited when no backend is compiled in.
     ///
     /// Never constructed: resolution refuses every backend first.
-    #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+    #[cfg(not(any(
+        feature = "imap",
+        feature = "msgraph",
+        feature = "dav",
+        feature = "gpeople",
+        feature = "gcal"
+    )))]
     #[allow(dead_code)]
     Unavailable,
 }
@@ -164,7 +178,13 @@ impl SourceAccountBackend {
     /// Resolves a backend configuration, refusing one this build cannot
     /// open rather than letting it fail at connect.
     #[cfg_attr(
-        not(any(feature = "imap", feature = "msgraph", feature = "dav")),
+        not(any(
+            feature = "imap",
+            feature = "msgraph",
+            feature = "dav",
+            feature = "gpeople",
+            feature = "gcal"
+        )),
         allow(unused_variables)
     )]
     fn resolve(config: &SourceBackendConfig, resolver: &mut SecretResolver) -> Result<Self> {
@@ -211,13 +231,38 @@ impl SourceAccountBackend {
             })),
             #[cfg(feature = "msgraph")]
             SourceBackendConfig::Msgraph(config) => Ok(Self::Msgraph(MsgraphAccount {
+                kind: GraphKind::Mail,
                 token: resolver.resolve(config.auth.token.clone())?,
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
             })),
+            #[cfg(feature = "msgraph")]
+            SourceBackendConfig::MsgraphContacts(config) => Ok(Self::Msgraph(MsgraphAccount {
+                kind: GraphKind::Contacts,
+                token: resolver.resolve(config.auth.token.clone())?,
+                user_id: config.user_id.clone(),
+                tls: config.tls.clone().into_tls(config.alpn.clone()),
+            })),
+            #[cfg(feature = "msgraph")]
+            SourceBackendConfig::MsgraphCalendar(config) => Ok(Self::Msgraph(MsgraphAccount {
+                kind: GraphKind::Calendar,
+                token: resolver.resolve(config.auth.token.clone())?,
+                user_id: config.user_id.clone(),
+                tls: config.tls.clone().into_tls(config.alpn.clone()),
+            })),
+            #[cfg(feature = "gpeople")]
+            SourceBackendConfig::Gpeople(config) => Ok(Self::Gpeople(GoogleAccount {
+                token: resolver.resolve(config.auth.token.clone())?,
+                tls: config.tls.clone().into_tls(config.alpn.clone()),
+            })),
+            #[cfg(feature = "gcal")]
+            SourceBackendConfig::Gcal(config) => Ok(Self::Gcal(GoogleAccount {
+                token: resolver.resolve(config.auth.token.clone())?,
+                tls: config.tls.clone().into_tls(config.alpn.clone()),
+            })),
             #[allow(unreachable_patterns)]
             _ => bail!(
-                "This side's backend is not available in this build (rebuild with the matching cargo feature; only the imap, msgraph and dav backends exist for now)"
+                "This side's backend is not available in this build (rebuild with the matching cargo feature; only the imap, msgraph, dav, gpeople and gcal backends exist for now)"
             ),
         }
     }
@@ -255,10 +300,22 @@ pub struct DavAccount {
 #[cfg(feature = "msgraph")]
 #[derive(Clone)]
 pub struct MsgraphAccount {
+    /// Which domain the session syncs.
+    pub kind: GraphKind,
     /// The OAuth 2.0 bearer token, as the configured command printed it.
     pub token: SecretString,
     /// The mailbox owner, `me` for the authenticated user.
     pub user_id: String,
+    /// The TLS handle, ALPN folded in.
+    pub tls: Tls,
+}
+
+/// A resolved Google endpoint, People or Calendar.
+#[cfg(any(feature = "gpeople", feature = "gcal"))]
+#[derive(Clone)]
+pub struct GoogleAccount {
+    /// The OAuth 2.0 bearer token, as the configured command printed it.
+    pub token: SecretString,
     /// The TLS handle, ALPN folded in.
     pub tls: Tls,
 }

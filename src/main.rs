@@ -110,6 +110,10 @@ mod config;
 mod conflict;
 #[cfg(feature = "dav")]
 mod dav;
+#[cfg(feature = "gcal")]
+mod gcal;
+#[cfg(feature = "gpeople")]
+mod gpeople;
 #[cfg(feature = "imap")]
 mod imap;
 mod item;

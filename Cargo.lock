@@ -986,12 +986,13 @@ dependencies = [
 
 [[package]]
 name = "ical-rs"
-version = "0.5.1"
+version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd2689df1c11bf13844e25901f0ff9ca53df8105e0a4eb55102acaa1e5b32583"
+checksum = "5e8b293ee52f1d10fe06d1224664d113a51f30285fc36154bfd3d8c1077c7622"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",
+ "jiff",
  "memchr",
  "quoted_printable",
 ]
@@ -1153,6 +1154,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "io-gcal"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3912bb286b937d9055d8139c20ca72f658ff2fa7c4ab365b2df7357cd700fc01"
+dependencies = [
+ "anyhow",
+ "ical-rs",
+ "io-http",
+ "jiff",
+ "log",
+ "pimalaya-stream",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "url",
+]
+
+[[package]]
+name = "io-gpeople"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c98997024af2d20e26ed3ca7e819f5f22dc18ff440b13bbd09a10ea9d2c3e565"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "io-http",
+ "log",
+ "pimalaya-stream",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "url",
+ "vcard-rs",
+]
+
+[[package]]
 name = "io-http"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1171,9 +1208,9 @@ dependencies = [
 
 [[package]]
 name = "io-imap"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ae85f32a2430a3533ca168618b5058fcce00f8169f43e11759e1839d5ef7978"
+checksum = "df059b417ac8888b21787a4464a146260aba38d59f0d1945cd3b727777eb8297"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1190,18 +1227,21 @@ dependencies = [
 
 [[package]]
 name = "io-msgraph"
-version = "0.4.0"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "51140cd0784652d13ba54459fa97276ea150e99b8eca8625cd4e213501db5eaa"
+checksum = "bf5b9c7de32943e38be0e1f99c03c9280aca59d9041f90073404b17e2c861fb9"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
+ "ical-rs",
  "io-http",
+ "jiff",
  "log",
  "pimalaya-stream",
  "serde",
  "serde_json",
  "url",
+ "vcard-rs",
 ]
 
 [[package]]
@@ -1229,9 +1269,9 @@ dependencies = [
 
 [[package]]
 name = "io-pimdir"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1fe9a53f7f303ae84c20591e0a9c7f53880fd7495f4391c08c945c161882e52e"
+checksum = "731a6a53112d974335dfb31724b68434b7f72bb2232b503f3f95d6679f7509bc"
 dependencies = [
  "blake3",
  "fs4",
@@ -1291,9 +1331,9 @@ dependencies = [
 
 [[package]]
 name = "io-webdav"
-version = "0.4.1"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ea2e45d515a9a5970cf51142e375c4935724a03634d9fc46ed2a0efe8c83123"
+checksum = "0910be6c0a525345eed08d5a7e411e5ad67c83e57e1aa141c720419ce5682fa9"
 dependencies = [
  "anyhow",
  "io-http",
@@ -1339,6 +1379,7 @@ dependencies = [
  "defmt",
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb",
  "log",
  "portable-atomic",
  "portable-atomic-util",
@@ -1366,6 +1407,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "142bd39932ad231f10513df9ab62661fead8719872150b7ad02a2df79f4e141e"
 
 [[package]]
 name = "jni"
@@ -1621,6 +1668,8 @@ dependencies = [
  "crossterm",
  "dirs 7.0.0",
  "ical-rs",
+ "io-gcal",
+ "io-gpeople",
  "io-http",
  "io-imap",
  "io-msgraph",
@@ -1629,6 +1678,7 @@ dependencies = [
  "io-sasl",
  "io-smtp",
  "io-webdav",
+ "jiff",
  "log",
  "mail-parser",
  "percent-encoding",
@@ -2800,9 +2850,9 @@ dependencies = [
 
 [[package]]
 name = "vcard-rs"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d18553b315dcd0a649f3e86a4465cd3166b60b4f2cbbff2cabd5a42f7504adc0"
+checksum = "bea378d5fe5266787d2386dfc20cfe37232b24386379d3742ecc4b947471f268"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",

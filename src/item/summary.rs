@@ -67,7 +67,7 @@ pub struct ItemSummary {
 /// RFC 5322 §3.6.4 gives the field as `1*msg-id` in one string, so the ids
 /// are read off their angle brackets, or off whitespace when there are
 /// none. Each is normalised like [`normalize_message_id`].
-#[cfg_attr(not(any(feature = "imap", feature = "msgraph")), allow(dead_code))]
+#[cfg_attr(not(feature = "imap"), allow(dead_code))]
 pub fn parse_message_ids(raw: &str) -> Vec<String> {
     if raw.contains('<') {
         return raw

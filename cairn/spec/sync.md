@@ -110,9 +110,11 @@ A first run with `one-way = true` against a non-empty target has no recorded mod
 - THEN the run proceeds, the recorded mode being unchanged
 
 ### Requirement: A backend under the account is a source named after its protocol
-A backend table written directly under the account (`imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`) SHALL be sugar for `sources.<protocol>.<protocol>`, the source taking the protocol as its name. The sugar SHALL produce a configuration indistinguishable from the expanded form, source id included, so expanding it by hand is a no-op on the store.
+A backend table written directly under the account (`imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `msgraph-contacts`, `msgraph-calendar`, `gpeople`, `gcal`) SHALL be sugar for `sources.<key>.<key>`, the source taking the key as its name. The sugar SHALL produce a configuration indistinguishable from the expanded form, source id included, so expanding it by hand is a no-op on the store.
 
-Declaring the same protocol both directly and under `sources` SHALL be a configuration error rather than a merge.
+A key names a protocol wherever a protocol carries one domain, and a protocol-and-domain pair where it carries several: `carddav` and `caldav` are two keys over one adapter, and so are `msgraph` and `msgraph-contacts`. The key is what the kind falls out of, so it SHALL be distinct per kind even when the transport is shared.
+
+Declaring the same key both directly and under `sources` SHALL be a configuration error rather than a merge.
 
 #### Scenario: Expanding the sugar changes nothing
 - GIVEN an account written as `imap.server = "..."`
@@ -146,7 +148,11 @@ The item a hydration pass picks up SHALL be selected by the absence of a stored 
 `sync --source <name>` SHALL narrow a run to the named sources. Narrowing no longer picks namespaces, there being none: an account is one mode, and a source is addressable on its own.
 
 ### Requirement: A send channel belongs to at most one source
-At most one source per account SHALL declare `smtp`. Two or more SHALL be a configuration error, reported at load, rather than a silent tiebreak on source order. A source that sends by itself (Microsoft Graph, through `sendMail`) needs none. The account root MAY carry the `smtp` table when its mail backend is the direct-backend sugar, in which case it completes that one source; with no direct mail backend, or several, it SHALL be refused.
+At most one source per account SHALL declare `smtp`. Two or more SHALL be a configuration error, reported at load, rather than a silent tiebreak on source order. A source that sends by itself (Microsoft Graph mail, through `sendMail`) needs none.
+
+Sending natively is a property of the source's **kind**, not of its transport: a Graph source of any other kind SHALL NOT be offered as the account's sender, and SHALL refuse an `smtp` table like any other non-mail source, so an account carrying two Graph sources still has at most one channel.
+
+The account root MAY carry the `smtp` table when its mail backend is the direct-backend sugar, in which case it completes that one source; with no direct mail backend, or several, it SHALL be refused.
 
 ### Requirement: The send channel authenticates like the sync side
 A source's `smtp` table SHALL be spelled as its `imap` one: a `server` that is either a bare authority, read as `smtps://<authority>`, or a full `smtp://` or `smtps://` URL; the same `tls` block and `starttls` switch; an optional `alpn` list; and an optional `sasl` table naming exactly one mechanism out of ANONYMOUS, LOGIN, PLAIN, OAUTHBEARER, XOAUTH2 and SCRAM-SHA-256.
@@ -180,7 +186,7 @@ The sync SHALL write a `sort_key` beside the summary of every item it summarises
 Every freshly probed placement SHALL be raised to the tier its kind resolves its link id and summary at: `Meta` where the backend offers a cheap server-side summary (mail's IMAP `ENVELOPE`), `Full` where only the body carries the identity. Raising a DAV item to `Meta` asks its backend for a summary tier it does not have, which fails the scan of every DAV collection.
 
 ### Requirement: Sources are remote backends only
-A sync source SHALL be a remote backend: IMAP and Microsoft Graph for `message/rfc822`, CardDAV for `text/vcard`, CalDAV for `text/calendar` (JMAP and Gmail as their backends land). Local file backends (m2dir, maildir, vdir) SHALL NOT be sync sources: the pimdir store is the local replica, so a local file store is redundant as a source and belongs on the import/export path, which neverest documents rather than syncing directly.
+A sync source SHALL be a remote backend: IMAP and Microsoft Graph for `message/rfc822`, CardDAV, Microsoft Graph and Google People for `text/vcard`, CalDAV, Microsoft Graph and Google Calendar for `text/calendar` (JMAP and Gmail as their backends land). Local file backends (m2dir, maildir, vdir) SHALL NOT be sync sources: the pimdir store is the local replica, so a local file store is redundant as a source and belongs on the import/export path, which neverest documents rather than syncing directly.
 
 ### Requirement: The wizard discovers in parallel and proposes what it found
 The discovery fan-out already resolves CalDAV and CardDAV services alongside IMAP and submission, and the wizard SHALL offer every reachable service whose backend is compiled into the running build, not only the mail ones. A run that finds services of several kinds SHALL offer them as separate entries, one per kind.
@@ -225,18 +231,13 @@ An account naming several sources SHALL render under that same single header, it
 The document SHALL hold only what was actually decided: every field equal to its default SHALL be omitted (the account `default` flag when false, the per-source collection / flag / item permissions, the per-source pool size, the collection filter, the HTTP-backend ALPN list, `starttls`). Omitting a field SHALL be lossless: every skipped field keeps a deserialization default equal to the value that was skipped.
 
 ### Requirement: Every remote backend is a cargo feature
-Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backend, `dav` for the CardDAV and CalDAV backends, `smtp` for the SMTP submission channel.
+Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backends, `dav` for the CardDAV and CalDAV backends, `gpeople` for the Google People backend, `gcal` for the Google Calendar backend, `smtp` for the SMTP submission channel.
 
-CardDAV and CalDAV SHALL share one feature rather than take one each: they are one dependency, one adapter and one discovery mechanism, so separate features would gate nothing that is separately compiled. A feature that merely aliases another is not introduced for the older spelling.
+Backends sharing one adapter and one dependency SHALL share one feature rather than take one each, separate features gating nothing that is separately compiled: `dav` covers CardDAV and CalDAV, `msgraph` covers Graph mail and Graph contacts. A feature that merely aliases another is not introduced for an older spelling.
 
-All of them SHALL ship in the default feature set except `msgraph`. Graph carries mail, contacts and calendar behind one protocol, and the backend syncs mail alone with no way to ask it for anything else, which reads as a misconfiguration and raises no error because nothing went wrong. A backend that answers for one domain of three SHALL NOT be in a released binary: it stays compilable, tested and configurable, and returns to the default set when it declares which domain it syncs.
+All of them SHALL ship in the default feature set, `msgraph` included again: it was held out under `msgraph-waits-for-its-domains` because a Graph account meant mail and nothing said so, and declaring the domain is what lifts that.
 
 A missing backend SHALL surface at runtime, never at build time: every feature combination compiles, the configuration surface stays whole (every source config still parses), and an unavailable backend fails when the source is *opened*, as the JMAP and Gmail sources already do. A build with neither `smtp` nor `msgraph` has no send channel and SHALL warn rather than perform a submit intent. Each optional backend crate SHALL take its TLS provider from neverest's own `native-tls` / `rustls-aws` / `rustls-ring` / `vendored` features rather than pinning one.
-
-#### Scenario: A Graph source in a released build is refused when it opens
-- GIVEN a released binary and an account declaring an `msgraph` source
-- WHEN the account is checked or synced
-- THEN the configuration parses and the source is refused as unavailable in this build, naming the feature that provides it
 
 ### Requirement: A backend owns its ALPN default
 The `alpn` field of a source or channel config that has a backend crate SHALL be optional, and unset SHALL mean that crate's own default (io-imap's `["imap"]`, io-smtp's `["smtp"]`), resolved where the connection is opened. An explicit `[]` SHALL skip ALPN. Neverest SHALL NOT restate a backend's default, in the config schema or in the values the wizard writes, so the default lives in exactly one place.
@@ -367,7 +368,51 @@ A sync run SHALL hold an advisory sync.lock in the **actual** store directory (h
 For an IMAP source, the driver SHALL compare the stored checkpoint's UIDVALIDITY before and after the pull; on a change it SHALL run io-pimdir's rekey, carrying cached bodies, summaries and pending state over by link id. The rebuild batch drops every old handle as `Rekeyed`, which the store reads as the rebuild and answers by bumping `collections.generation` in the transaction applying it (pimdir SYNC §8), so a frontend derives its epoch (an IMAP UIDVALIDITY) from the store alone; the driver reads the generation back rather than routing the batch anywhere special. Ordinary syncs and full resyncs never bump. Graph sources never rebuild: Graph message ids survive a delta reset (an expired delta link restarts a full round without changing identity).
 
 ### Requirement: Microsoft Graph is a first-class source
-An `msgraph` source SHALL open protocol-direct over io-msgraph (never through a frozen aggregator): folders listed two levels deep (`Parent/Child` naming), enumeration through the messages delta query carrying the `@odata.deltaLink` as the engine's opaque checkpoint (HTTP 410 = expired link, restarting a fresh full round; any other failure surfaces), the `Meta` tier served from the cached delta rows (`mid:`/`alt:` link ids, meta v1), the `Full` tier from the raw MIME content streamed into the blob store. Flags map to the IANA wire spellings (`isRead` = `\Seen`, a flagged follow-up = `\Flagged`, `isDraft` = `\Draft`). Auth SHALL be a bearer access token only, resolved through the standard secret-command idiom (`auth.token.raw` / `auth.token.command`) once per run with every other credential; neverest SHALL NOT run any OAuth flow itself (no device sign-in, no client credentials, no token persistence): acquiring and refreshing the token is delegated to an external command, typically ortie. No token is ever logged. Push scope is honest: flag changes push through `message_update` and deletes through `message_delete`; appends, moves and content updates are rejected (pull-only) and documented.
+An `msgraph` source SHALL open protocol-direct over io-msgraph (never through a frozen aggregator). Graph carries several PIM domains behind one protocol, one host and one credential, and which domain a source syncs SHALL fall out of its backend as it does everywhere else: `msgraph` is mail, `msgraph-contacts` is the address book, `msgraph-calendar` the calendars. One adapter SHALL serve both, parameterised by which it speaks, as one adapter serves both DAV protocols. A `kind` field on the configuration SHALL NOT be introduced for this or any other backend.
+
+For **calendars** (`msgraph-calendar`): the user's calendars keyed by id and named by name, events as `text/calendar` through io-msgraph's `ical` projection. Graph's event delta only runs over a calendar view, a time window, and an event leaving a sliding window would read as deleted and be deleted on every other source, so the enumeration SHALL list each calendar's lone events and series masters in full every run, with no window, the master's `changeKey` as the revision and removals reported by absence. A series SHALL be one item, read with its exceptions from the instances of its own date range (five years past an open-ended start), its cancelled occurrences as EXDATEs. The UID SHALL ride the projection's stash extended property, a create whose UID did not survive being deleted again and refused; an update or delete SHALL be refused when the master's `changeKey` moved. Only the series master is written: an exception edited locally does not push, and an edit Graph makes to one occurrence alone is seen once the master's `changeKey` moves.
+
+
+For **mail**: folders listed two levels deep (`Parent/Child` naming), enumeration through the messages delta query carrying the `@odata.deltaLink` as the engine's opaque checkpoint (HTTP 410 = expired link, restarting a fresh full round; any other failure surfaces), the `Meta` tier served from the cached delta rows (`mid:`/`alt:` link ids, meta v1), the `Full` tier from the raw MIME content streamed into the blob store. Flags map to the IANA wire spellings (`isRead` = `\Seen`, a flagged follow-up = `\Flagged`, `isDraft` = `\Draft`). Push scope is honest: flag changes push through `message_update` and deletes through `message_delete`; appends, moves and content updates are rejected (pull-only) and documented.
+
+Auth SHALL be a bearer access token only, resolved through the standard secret-command idiom (`auth.token.raw` / `auth.token.command`) once per run with every other credential; neverest SHALL NOT run any OAuth flow itself (no device sign-in, no client credentials, no token persistence): acquiring and refreshing the token is delegated to an external command, typically ortie. The token SHALL carry the scopes the declared domains need, and the wizard SHALL name them per domain rather than let the first run fail on a bare 403. No token is ever logged.
+
+### Requirement: A Graph contacts source syncs the address book
+A source MAY declare an `msgraph-contacts` backend, whose items are `text/vcard` cards and whose collections are the user's contact folders, listed two levels deep, keyed by folder id and named by display name. The default Contacts folder, which the folders endpoint does not list, SHALL be the collection `contacts`, addressed by omitting the folder segment.
+
+It SHALL accept the same `user-id`, `tls`, `alpn` and `auth` fields as an `msgraph` source, and SHALL carry no send channel: submission is a mail capability, so an `smtp` table on it is refused before any connection is made, and it SHALL NOT be picked as the account's native sender however the sources are ordered.
+
+Enumeration SHALL be the contacts delta query, carrying the `@odata.deltaLink` as the engine's opaque checkpoint under the same rules mail follows: HTTP 410 restarts a fresh full round, any other failure surfaces, and handle identity survives a reset. The delta SHALL select only the handle and `changeKey`.
+
+Contacts are **mutable content**: `change_key` SHALL be reported as the revision on every enumerate and fetch, an update SHALL be a conditional write against it, and a refused write SHALL be reported as rejected so the engine re-merges. Unlike mail, a Graph contacts source pushes creates and updates as well as deletes.
+
+The body SHALL be read per contact with the `$expand` clause returning the stash (`MSGRAPH_CONTACT_STASH_EXPAND`), Graph omitting extended properties otherwise, and SHALL NOT be projected from a delta row: whether the contacts delta honours `$expand` is undocumented, and a row without the stash would read the card under a minted identity. The cost is one request per changed contact.
+
+Graph has no conditional write for contacts, so an update or delete carrying an `If-Match` SHALL first read the contact and be refused when its `changeKey` moved, the next run enumerating the server edit.
+
+Flags SHALL be reported known-empty, Graph contacts having no flag concept.
+
+#### Scenario: An address book syncs, follows a server edit and pushes one back
+- GIVEN a Graph tenant holding two contacts in the default Contacts folder
+- WHEN the account is synced, one contact is edited on the server, another edited in the store, and it is synced again
+- THEN the store holds both cards keyed by their vCard `UID`, follows the server edit, and the store edit reaches Graph as a conditional update
+
+### Requirement: A Graph contact keeps the identity it arrived with
+A Graph contact carries no vCard `UID` of its own, so the `UID` SHALL ride the stash extended property the projection already writes, and SHALL be read back from it: that value is the card's `UID` and therefore its link id. A card written by neverest keeps the identity it arrived with, so `One identity is one item across an account's endpoints` holds across a Graph endpoint and a DAV one.
+
+A contact whose stash carries no `UID` is one Graph itself created, or one an earlier client wrote. Only then SHALL a `UID` be minted, from the Graph id; it is stored the next time the contact is written. The identity SHALL NOT fall back to the content hash, which would repoint it on every field edit. Graph reassigns a contact's id when the contact moves between folders, so such a contact, never written by neverest, reads as removed and re-added after a move.
+
+A create SHALL read the contact back with its stash, and one whose `UID` the server did not keep SHALL be deleted again and the write refused, never completed under a minted identity.
+
+#### Scenario: A card crosses from CardDAV to Graph and back unchanged
+- GIVEN a card with `UID:urn:uuid:…` on a CardDAV endpoint and a Graph contacts endpoint in the same account
+- WHEN the account is synced, then synced again
+- THEN one item exists under that `UID`, the Graph contact carries it as its stored identity, and the second run finds nothing to do
+
+### Requirement: The Graph projection belongs to the protocol crate
+The mapping between a Graph contact and a vCard SHALL live in io-msgraph (its `vcard` feature), beside the resource it projects, and SHALL NOT be written a second time in a consumer. It projects both ways and produces a delta against a base card, and every line the vCard carries that Graph has no slot for SHALL survive on the server through the stash remainder rather than being dropped or folded into another slot.
+
+Two copies of a projection drift silently and lose data at the seam between them, which is the failure this rules out rather than mitigates.
 
 ### Requirement: A queued submission is a `submit` queue intent
 Neverest SHALL NOT reserve a collection for queued sends. Submission is a **mail** capability: a `submit` intent belongs to a `message/rfc822` account, and an `smtp` channel declared on a source of any other kind SHALL be refused before any connection is made, rather than silently ignored. A submission SHALL be a **queue action** whose kind (`submit`) is defined by neverest, not by pimdir: the format carries an action kind and a versioned JSON payload, and which kinds an owner can perform is the owner's business. An owner that does not recognise a kind, or recognises it but lacks the capability, SHALL **skip** the row, leaving it pending, never parking it (parking means permanently unappliable) and never blocking later actions of that collection.
@@ -420,7 +465,6 @@ Full-tier hydration SHALL fetch bodies in **batches**: one `UID FETCH <set> (UID
 > Initial seed spec (Cairn adopted 2026-07-31): captures the sync driver's core
 > guarantees; the CLI surface, mailbox diff, and report are further capabilities
 > to spell out as they are touched.
-
 
 ### Requirement: A source's backend declares the kind it syncs
 Every sync backend SHALL declare the IANA media type of the items it syncs, and that type SHALL be recorded as the pimdir collection's `kind`. The kind SHALL be derived from the source's backend, never declared in the configuration: one backend per source, and no per-kind nesting.
@@ -683,7 +727,6 @@ The per-source permission set SHALL gate item updates (`item.update`, default tr
 ### Requirement: DAV collections enumerate by sync token and resolve at Full
 A CardDAV or CalDAV source SHALL enumerate through `REPORT sync-collection`, storing the returned sync token verbatim as the collection's opaque checkpoint, and SHALL fall back to a tokenless report (the whole member set, reported complete) when the server rejects the stored token. Because that report returns hrefs and ETags but no `UID`, a DAV placement SHALL resolve directly at the `Full` tier, there being no `Meta` tier for DAV, so a DAV item's link id has exactly one derivation and cannot differ between tiers. Bodies SHALL be fetched in batches through `addressbook-multiget` / `calendar-multiget`.
 
-
 ### Requirement: A DAV server without `sync-collection` is listed instead
 `sync-collection` is an extension, so a server MAY implement none of it, advertising a `supported-report-set` of `addressbook-multiget` and `addressbook-query` alone. Such a collection SHALL be enumerated through a `PROPFIND` at Depth 1 requesting the ETag, which yields the same member ids and revisions, rather than failing to enumerate at all.
 
@@ -715,7 +758,6 @@ A DAV source SHALL reopen its connection and run the exchange again when the ser
 
 ### Requirement: A backend without flags reports them known-empty
 A backend with no flag concept (CardDAV, CalDAV) SHALL report an item's flags as *known-empty*, never as *unknown*. The distinction is normative (pimdir SPEC Annex A): reporting unknown makes the engine treat the flag set as unfetched and re-probe the item on every run.
-
 
 ### Requirement: A refused delete is held, never reverted
 Every source SHALL sync under `PimdirDeletePolicy::Keep`. Both refusals (`push` off, or `item.delete = false`) run through that one disposition, and each source here is bound to the store's hub, which fixes the answer: reverting a tombstone states that the source still holds the member, and a hub reads that as the item being alive (add-beats-delete across sources), so it clears the deletion for every source and mirrors the item back to the one it was deleted on.
@@ -889,3 +931,19 @@ The `text/calendar` sort key SHALL be the item's start resolved to RFC 3339 in U
 Every hub collection id, every wire call and the account's collection filter SHALL be built from the backend's own id: the mailbox name on IMAP and on Graph, the path segment on DAV. A display name SHALL NOT address a collection, being optional, mutable and free to collide.
 
 The store SHALL still carry what the collection is called: `set_collection_name` runs beside every `ensure_collection` with the name without the namespace the hub id carries. A DAV source SHALL take it from `DAV:displayname`, falling back to the path segment when it is blank or absent; every other source's id is already its name. Where two sources meet, the first in declared order with a non-blank name wins. Naming SHALL NOT fail a run: nothing keys on the column, so a refused write is logged and the sync continues.
+
+### Requirement: Google contacts and calendars are native sources
+A source MAY declare a `gpeople` backend, syncing Google contacts as `text/vcard` through the People API, or a `gcal` backend, syncing Google calendars as `text/calendar` through the Calendar API. Both SHALL take `tls`, `alpn` and an `auth.token` bearer only, neverest running no OAuth flow, and SHALL carry no send channel.
+
+A `gpeople` source SHALL have one collection, `contacts`, holding every connection: a contact group is a label a person carries any number of, not a folder. A `gcal` source SHALL have one collection per calendar of the user's calendar list, keyed by calendar id and named by the user's own name for it.
+
+Enumeration SHALL be the API's sync-token listing, the token as the engine's opaque checkpoint: a resumed listing reports what changed and names removals, a full one reports removals by absence, and an expired token (HTTP 410) restarts a full listing.
+
+A `gpeople` item SHALL be one person, its `etag` the revision, projected through io-gpeople's `vcard` feature. Its vCard `UID` rides the projection's `clientData` stash, so it keeps the identity it arrived with; a create whose stash People did not keep SHALL be deleted again and refused. An update SHALL carry the etag, which People enforces, and SHALL merge back the `clientData` entries other clients own.
+
+A `gcal` item SHALL be one recurring series with its modified instances, or one lone event, keyed by the series' event id, its revision joining the etags of the series and of its instances so an edit to any of them moves it, projected through io-gcal's `ical` feature. A create SHALL import an object carrying a UID, so the UID survives as the event's `iCalUID`. An update or delete SHALL be refused when the joined revision moved, then be guarded by the series event's own etag. Only the series event SHALL be written: an instance modified locally does not push yet.
+
+#### Scenario: A series edited on one instance moves its item
+- GIVEN a weekly series with one modified instance, synced into the store
+- WHEN the instance is edited on Google and the account synced again
+- THEN the series' item has a new revision and its body carries the edited instance

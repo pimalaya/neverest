@@ -8,15 +8,17 @@ change: a-graph-source-declares-its-domain
 ## ADDED Requirements
 
 ### Requirement: A Graph contacts source syncs the address book
-A source MAY declare an `msgraph-contacts` backend, whose items are `text/vcard` cards and whose collections are the folders under the user's contact folders, listed two levels deep and named `Parent/Child` as the mail folders are. The default Contacts folder SHALL be addressed by the sentinel id Graph omits from the request path.
+A source MAY declare an `msgraph-contacts` backend, whose items are `text/vcard` cards and whose collections are the user's contact folders, listed two levels deep, keyed by folder id and named by display name. The default Contacts folder, which the folders endpoint does not list, SHALL be the collection `contacts`, addressed by omitting the folder segment.
 
 It SHALL accept the same `user-id`, `tls`, `alpn` and `auth` fields as an `msgraph` source, and SHALL carry no send channel: submission is a mail capability, so an `smtp` table on it is refused before any connection is made, and it SHALL NOT be picked as the account's native sender however the sources are ordered.
 
-Enumeration SHALL be the contacts delta query, carrying the `@odata.deltaLink` as the engine's opaque checkpoint under the same rules mail follows: HTTP 410 restarts a fresh full round, any other failure surfaces, and handle identity survives a reset. The delta query SHALL carry the `$expand` clause that returns the extended property the identity lives in, Graph omitting extended properties otherwise.
+Enumeration SHALL be the contacts delta query, carrying the `@odata.deltaLink` as the engine's opaque checkpoint under the same rules mail follows: HTTP 410 restarts a fresh full round, any other failure surfaces, and handle identity survives a reset. The delta SHALL select only the handle and `changeKey`.
 
 Contacts are **mutable content**: `change_key` SHALL be reported as the revision on every enumerate and fetch, an update SHALL be a conditional write against it, and a refused write SHALL be reported as rejected so the engine re-merges. Unlike mail, a Graph contacts source pushes creates and updates as well as deletes.
 
-The body SHALL be projected from the delta row already held, never re-fetched: the row carries the whole contact, so the `Full` tier costs no round trip even though the kind resolves there.
+The body SHALL be read per contact with the `$expand` clause returning the stash (`MSGRAPH_CONTACT_STASH_EXPAND`), Graph omitting extended properties otherwise, and SHALL NOT be projected from a delta row: whether the contacts delta honours `$expand` is undocumented, and a row without the stash would read the card under a minted identity. The cost is one request per changed contact.
+
+Graph has no conditional write for contacts, so an update or delete carrying an `If-Match` SHALL first read the contact and be refused when its `changeKey` moved, the next run enumerating the server edit.
 
 Flags SHALL be reported known-empty, Graph contacts having no flag concept.
 
@@ -26,13 +28,11 @@ Flags SHALL be reported known-empty, Graph contacts having no flag concept.
 - THEN the store holds both cards keyed by their vCard `UID`, follows the server edit, and the store edit reaches Graph as a conditional update
 
 ### Requirement: A Graph contact keeps the identity it arrived with
-A Graph contact carries no vCard `UID` of its own, so the identity SHALL be stored on the contact as a single-valued extended property and read back from it, and that stored value SHALL be the card's `UID` and therefore its link id.
+A Graph contact carries no vCard `UID` of its own, so the `UID` SHALL ride the stash extended property the projection already writes, and SHALL be read back from it: that value is the card's `UID` and therefore its link id. A card written by neverest keeps the identity it arrived with, so `One identity is one item across an account's endpoints` holds across a Graph endpoint and a DAV one.
 
-A contact carrying no stored identity is one Graph itself created. Only then SHALL a `UID` be minted, from the Graph id, and it SHALL be stored on the contact in the same write, so the mint happens once and never again.
+A contact whose stash carries no `UID` is one Graph itself created, or one an earlier client wrote. Only then SHALL a `UID` be minted, from the Graph id; it is stored the next time the contact is written. The identity SHALL NOT fall back to the content hash, which would repoint it on every field edit. Graph reassigns a contact's id when the contact moves between folders, so such a contact, never written by neverest, reads as removed and re-added after a move.
 
-A `UID` SHALL NOT be minted from the Graph id on read, and a card's identity SHALL NOT fall back to the content hash. Minting on read gives one person a Graph-local identity on one side and its real `UID` on the other, so a Graph source paired with a CardDAV one matches nothing and duplicates the whole address book every run; hashing the content repoints the identity on every field edit, so an edit reads as a delete and an add. Both defeat `One identity is one item across an account's endpoints`, which SHALL hold across a Graph endpoint and a DAV one.
-
-A write whose stored identity the server did not accept SHALL be refused, never completed with a minted one.
+A create SHALL read the contact back with its stash, and one whose `UID` the server did not keep SHALL be deleted again and the write refused, never completed under a minted identity.
 
 #### Scenario: A card crosses from CardDAV to Graph and back unchanged
 - GIVEN a card with `UID:urn:uuid:…` on a CardDAV endpoint and a Graph contacts endpoint in the same account
@@ -40,7 +40,7 @@ A write whose stored identity the server did not accept SHALL be refused, never 
 - THEN one item exists under that `UID`, the Graph contact carries it as its stored identity, and the second run finds nothing to do
 
 ### Requirement: The Graph projection belongs to the protocol crate
-The mapping between a Graph contact and a vCard SHALL live in io-msgraph, beside the resource it projects, and SHALL NOT be written a second time in a consumer. It projects both ways and produces a delta against a base card, and every line the vCard carries that Graph has no slot for SHALL survive on the server through the stash remainder rather than being dropped or folded into another slot.
+The mapping between a Graph contact and a vCard SHALL live in io-msgraph (its `vcard` feature), beside the resource it projects, and SHALL NOT be written a second time in a consumer. It projects both ways and produces a delta against a base card, and every line the vCard carries that Graph has no slot for SHALL survive on the server through the stash remainder rather than being dropped or folded into another slot.
 
 Two copies of a projection drift silently and lose data at the seam between them, which is the failure this rules out rather than mitigates.
 

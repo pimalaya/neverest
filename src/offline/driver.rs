@@ -61,6 +61,8 @@ use io_pimdir::{
 use log::{debug, info, warn};
 use pimalaya_cli::spinner::Spinner;
 
+#[cfg(feature = "msgraph")]
+use crate::msgraph::client::GraphKind;
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 use crate::sync::report::SubmitEntry;
 use crate::{
@@ -3344,7 +3346,9 @@ fn open_send_channel<'a>(
         }
         #[cfg(feature = "msgraph")]
         Some(SendChannelPick::Native(index)) => match sides[index].pool.primary() {
-            Client::Msgraph(client) => Some(submit::SendChannel::Graph(client.as_mut())),
+            Client::Msgraph(client) if client.kind() == GraphKind::Mail => {
+                Some(submit::SendChannel::Graph(client.as_mut()))
+            }
             #[allow(unreachable_patterns)]
             _ => {
                 warn!("no send channel available, {queued} intent(s) stay pending");

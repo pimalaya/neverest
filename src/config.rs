@@ -92,6 +92,10 @@ macro_rules! source_accessor {
                 SourceBackendConfig::Jmap(c) => c.$name,
                 SourceBackendConfig::Gmail(c) => c.$name,
                 SourceBackendConfig::Msgraph(c) => c.$name,
+                SourceBackendConfig::MsgraphContacts(c) => c.$name,
+                SourceBackendConfig::MsgraphCalendar(c) => c.$name,
+                SourceBackendConfig::Gpeople(c) => c.$name,
+                SourceBackendConfig::Gcal(c) => c.$name,
             }
         }
     };
@@ -108,6 +112,10 @@ macro_rules! source_ref_accessor {
                 SourceBackendConfig::Jmap(c) => &c.$name,
                 SourceBackendConfig::Gmail(c) => &c.$name,
                 SourceBackendConfig::Msgraph(c) => &c.$name,
+                SourceBackendConfig::MsgraphContacts(c) => &c.$name,
+                SourceBackendConfig::MsgraphCalendar(c) => &c.$name,
+                SourceBackendConfig::Gpeople(c) => &c.$name,
+                SourceBackendConfig::Gcal(c) => &c.$name,
             }
         }
     };
@@ -226,6 +234,22 @@ pub struct AccountConfig {
     /// Direct-backend sugar: a Graph source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub msgraph: Option<MsgraphConfig>,
+    /// Direct-backend sugar: a Graph contacts source named after its
+    /// protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msgraph_contacts: Option<MsgraphConfig>,
+    /// Direct-backend sugar: a Graph calendar source named after its
+    /// protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub msgraph_calendar: Option<MsgraphConfig>,
+    /// Direct-backend sugar: a Google People source named after its
+    /// protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpeople: Option<GoogleConfig>,
+    /// Direct-backend sugar: a Google Calendar source named after its
+    /// protocol.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gcal: Option<GoogleConfig>,
     /// The send channel of the sugar source carrying mail, the flat
     /// spelling of `sources.<name>.smtp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,7 +288,7 @@ pub struct AccountConfig {
 ///
 /// Serialized alphabetically a generated account would open on
 /// `connections` and bury its backend under `conflict`.
-const RENDER_ORDER: [&str; 16] = [
+const RENDER_ORDER: [&str; 20] = [
     "default",
     "imap",
     "carddav",
@@ -272,6 +296,10 @@ const RENDER_ORDER: [&str; 16] = [
     "jmap",
     "gmail",
     "msgraph",
+    "msgraph-contacts",
+    "msgraph-calendar",
+    "gpeople",
+    "gcal",
     "smtp",
     "sources",
     "targets",
@@ -385,6 +413,10 @@ impl AccountConfig {
             SourceBackendConfig::Jmap(config) => self.jmap = Some(config),
             SourceBackendConfig::Gmail(config) => self.gmail = Some(config),
             SourceBackendConfig::Msgraph(config) => self.msgraph = Some(config),
+            SourceBackendConfig::MsgraphContacts(config) => self.msgraph_contacts = Some(config),
+            SourceBackendConfig::MsgraphCalendar(config) => self.msgraph_calendar = Some(config),
+            SourceBackendConfig::Gpeople(config) => self.gpeople = Some(config),
+            SourceBackendConfig::Gcal(config) => self.gcal = Some(config),
         }
     }
 
@@ -403,6 +435,14 @@ impl AccountConfig {
             self.jmap.clone().map(SourceBackendConfig::Jmap),
             self.gmail.clone().map(SourceBackendConfig::Gmail),
             self.msgraph.clone().map(SourceBackendConfig::Msgraph),
+            self.msgraph_contacts
+                .clone()
+                .map(SourceBackendConfig::MsgraphContacts),
+            self.msgraph_calendar
+                .clone()
+                .map(SourceBackendConfig::MsgraphCalendar),
+            self.gpeople.clone().map(SourceBackendConfig::Gpeople),
+            self.gcal.clone().map(SourceBackendConfig::Gcal),
         ];
 
         for backend in sugar.into_iter().flatten() {
@@ -907,6 +947,18 @@ pub enum SourceBackendConfig {
     Jmap(JmapConfig),
     Gmail(GmailConfig),
     Msgraph(MsgraphConfig),
+    /// Microsoft Graph contacts: the same session as `msgraph`, syncing
+    /// contact folders instead of mail folders.
+    #[serde(rename = "msgraph-contacts")]
+    MsgraphContacts(MsgraphConfig),
+    /// Microsoft Graph calendars: the same session as `msgraph`, syncing
+    /// calendars instead of mail folders.
+    #[serde(rename = "msgraph-calendar")]
+    MsgraphCalendar(MsgraphConfig),
+    /// Google contacts through the People API.
+    Gpeople(GoogleConfig),
+    /// Google calendars through the Calendar API.
+    Gcal(GoogleConfig),
 }
 
 impl SourceBackendConfig {
@@ -920,6 +972,10 @@ impl SourceBackendConfig {
             Self::Jmap(_) => "jmap",
             Self::Gmail(_) => "gmail",
             Self::Msgraph(_) => "msgraph",
+            Self::MsgraphContacts(_) => "msgraph-contacts",
+            Self::MsgraphCalendar(_) => "msgraph-calendar",
+            Self::Gpeople(_) => "gpeople",
+            Self::Gcal(_) => "gcal",
         }
     }
 }
@@ -956,12 +1012,17 @@ impl SourceConfig {
             SourceBackendConfig::Jmap(_)
                 | SourceBackendConfig::Gmail(_)
                 | SourceBackendConfig::Msgraph(_)
+                | SourceBackendConfig::MsgraphContacts(_)
+                | SourceBackendConfig::MsgraphCalendar(_)
+                | SourceBackendConfig::Gpeople(_)
+                | SourceBackendConfig::Gcal(_)
                 | SourceBackendConfig::Carddav(_)
                 | SourceBackendConfig::Caldav(_)
         )
     }
 
-    /// Whether this source sends by itself: Graph's `sendMail` today.
+    /// Whether this source sends by itself: Graph's `sendMail` today, on a
+    /// mail source only.
     pub fn sends_natively(&self) -> bool {
         matches!(self.backend, SourceBackendConfig::Msgraph(_))
     }
@@ -973,7 +1034,12 @@ impl SourceConfig {
     pub fn carries_mail(&self) -> bool {
         !matches!(
             self.backend,
-            SourceBackendConfig::Carddav(_) | SourceBackendConfig::Caldav(_)
+            SourceBackendConfig::Carddav(_)
+                | SourceBackendConfig::Caldav(_)
+                | SourceBackendConfig::MsgraphContacts(_)
+                | SourceBackendConfig::MsgraphCalendar(_)
+                | SourceBackendConfig::Gpeople(_)
+                | SourceBackendConfig::Gcal(_)
         )
     }
 
@@ -1394,6 +1460,39 @@ pub struct MsgraphAuthConfig {
     ///
     /// Acquiring and refreshing it is the caller's job: point
     /// `token.command` at any command printing a valid token, ortie say.
+    pub token: Secret,
+}
+
+source_config! {
+    /// A Google source, People contacts or Calendar events: the API host is
+    /// fixed, so only TLS and the OAuth 2.0 credential are configurable.
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    pub struct GoogleConfig {
+        /// How the connection is secured.
+        #[serde(default)]
+        pub tls: TlsConfig,
+        /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]`
+        /// by default; `[]` skips ALPN.
+        #[serde(
+            default = "default_http_alpn",
+            skip_serializing_if = "is_default_http_alpn"
+        )]
+        pub alpn: Vec<String>,
+        /// How the session authenticates.
+        pub auth: GoogleAuthConfig,
+    }
+}
+
+/// Google authentication: OAuth 2.0 bearer tokens only, neverest never
+/// running an OAuth flow itself.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct GoogleAuthConfig {
+    /// OAuth 2.0 bearer token, the `Bearer ` prefix added by the client.
+    ///
+    /// It needs the `contacts` scope for People and the `calendar` scope
+    /// for Calendar; point `token.command` at a broker such as ortie.
     pub token: Secret,
 }
 
@@ -2339,6 +2438,45 @@ msgraph.user-id = "me"
     /// The DAV sources are the non-mail ones, so they are where the account
     /// shape stops being mail-shaped.
     #[cfg(feature = "dav")]
+    #[test]
+    fn google_sources_are_neither_mail_nor_a_send_channel() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            gpeople.auth.token.raw = "tok"
+            gcal.auth.token.raw = "tok"
+            "#,
+        )
+        .unwrap();
+
+        let sources = account.sources().unwrap();
+        for name in ["gpeople", "gcal"] {
+            assert!(!sources[name].carries_mail(), "{name} does not submit");
+            assert!(!sources[name].sends_natively(), "{name} does not send");
+            assert!(sources[name].is_http());
+        }
+        account.validate().unwrap();
+    }
+
+    #[test]
+    fn a_graph_contacts_source_is_neither_mail_nor_a_send_channel() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            msgraph.auth.token.raw = "tok"
+            msgraph-contacts.auth.token.raw = "tok"
+            msgraph-calendar.auth.token.raw = "tok"
+            sources.work.msgraph-contacts.auth.token.raw = "tok"
+            "#,
+        )
+        .unwrap();
+
+        let sources = account.sources().unwrap();
+        assert!(sources["msgraph"].sends_natively());
+        for name in ["msgraph-contacts", "msgraph-calendar", "work"] {
+            assert!(!sources[name].carries_mail(), "{name} does not submit");
+            assert!(!sources[name].sends_natively(), "{name} does not send");
+        }
+    }
+
     #[test]
     fn a_dav_source_carries_no_send_channel() {
         let account: AccountConfig = toml::from_str(

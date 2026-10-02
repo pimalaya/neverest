@@ -17,8 +17,19 @@
 //! yet), so a moved message surfaces as a removal plus an addition. A delta
 //! reset never changes handle identity, so no handle-space rebuild follows,
 //! unlike the IMAP UIDVALIDITY path.
+//!
+//! One client serves one [`GraphKind`], the way one DAV adapter serves
+//! CardDAV and CalDAV: a mail session speaks folders and messages, a
+//! contacts session ([`contacts`]) contact folders and vCards.
 
-use std::{collections::HashMap, io::Write, time::Duration};
+mod calendar;
+mod contacts;
+
+use std::{
+    collections::HashMap,
+    io::{Read, Write},
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, FixedOffset};
@@ -46,7 +57,7 @@ use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
 use crate::{
-    client::{EnumEntry, Enumeration},
+    client::{EnumEntry, Enumeration, WrittenItem},
     item::{
         collection::Collection,
         flag::{Flag, FlagOp, IanaFlag},
@@ -61,8 +72,33 @@ const DELTA_SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,intern
 /// The page size requested when listing mail folders.
 const FOLDER_PAGE_SIZE: u32 = 100;
 
+/// The domain a Graph session syncs, Graph carrying several behind one
+/// host and one credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GraphKind {
+    /// Mail folders and messages, as `message/rfc822`.
+    Mail,
+    /// Contact folders and contacts, as `text/vcard`.
+    Contacts,
+    /// Calendars and events, as `text/calendar`.
+    Calendar,
+}
+
+impl GraphKind {
+    /// The IANA media type of the items this kind syncs.
+    pub fn media_type(self) -> &'static str {
+        match self {
+            Self::Mail => "message/rfc822",
+            Self::Contacts => "text/vcard",
+            Self::Calendar => "text/calendar",
+        }
+    }
+}
+
 /// The live Microsoft Graph session of one side.
 pub struct GraphClient {
+    /// The domain this session syncs.
+    kind: GraphKind,
     inner: MsgraphClientStd,
     /// The TLS configuration, kept for stream reopens.
     tls: Tls,
@@ -79,8 +115,8 @@ pub struct GraphClient {
 
 impl GraphClient {
     /// Opens the TLS connection to the Graph API with the given bearer token,
-    /// scoped to the `user` mailbox owner (`me` or a user id).
-    pub fn connect(token: &SecretString, user: &str, tls: Tls) -> Result<Self> {
+    /// scoped to the `user` mailbox owner (`me` or a user id), for one kind.
+    pub fn connect(kind: GraphKind, token: &SecretString, user: &str, tls: Tls) -> Result<Self> {
         let options = MsgraphClientStdConnectOptions {
             tls: tls.clone(),
             proxy: Proxy::None,
@@ -90,6 +126,7 @@ impl GraphClient {
             .context("Cannot connect to Microsoft Graph")?;
 
         Ok(Self {
+            kind,
             inner,
             tls,
             folders: HashMap::new(),
@@ -131,11 +168,109 @@ impl GraphClient {
         Ok(out.response)
     }
 
+    /// The domain this session syncs.
+    pub fn kind(&self) -> GraphKind {
+        self.kind
+    }
+
+    /// Lists the session's collections: mail folders or contact folders.
+    pub fn list_collections(&mut self, with_counts: bool) -> Result<Vec<Collection>> {
+        match self.kind {
+            GraphKind::Mail => self.list_mailboxes(with_counts),
+            GraphKind::Contacts => self.list_contact_folders(),
+            GraphKind::Calendar => self.list_calendars(),
+        }
+    }
+
+    /// Enumerates a collection through one Graph delta round.
+    pub fn enumerate(&mut self, collection: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
+        match self.kind {
+            GraphKind::Mail => self.enumerate_mailbox(collection, cursor),
+            GraphKind::Contacts => self.enumerate_contacts(collection, cursor),
+            GraphKind::Calendar => self.enumerate_calendar(collection),
+        }
+    }
+
+    /// Fetches summaries for an id set; contacts resolve at `Full` instead.
+    pub fn fetch_summaries(&mut self, collection: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
+        match self.kind {
+            GraphKind::Mail => self.fetch_envelopes(collection, ids),
+            GraphKind::Contacts => {
+                bail!("Graph contacts have no summary tier (they resolve at Full)")
+            }
+            GraphKind::Calendar => {
+                bail!("Graph events have no summary tier (they resolve at Full)")
+            }
+        }
+    }
+
+    /// Streams the bodies of an id set into a sink `open`ed and `done` per
+    /// item, `done` receiving the revision on contacts.
+    pub fn fetch_bodies<S: Write>(
+        &mut self,
+        collection: &str,
+        ids: &[&str],
+        open: impl FnMut(&str) -> std::io::Result<S>,
+        done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
+    ) -> Result<()> {
+        match self.kind {
+            GraphKind::Mail => self.fetch_messages(collection, ids, open, done),
+            GraphKind::Contacts => self.fetch_contacts(ids, open, done),
+            GraphKind::Calendar => self.fetch_events(ids, open, done),
+        }
+    }
+
+    /// Streams one item into `sink`, returning its revision on contacts.
+    pub fn get_item_stream(
+        &mut self,
+        collection: &str,
+        id: &str,
+        sink: impl Write,
+    ) -> Result<Option<String>> {
+        match self.kind {
+            GraphKind::Mail => self.get_message_stream(collection, id, sink).map(|()| None),
+            GraphKind::Contacts => self.get_contact_stream(id, sink),
+            GraphKind::Calendar => self.get_event_stream(id, sink),
+        }
+    }
+
+    /// Creates an item; mail is pull-only on Graph.
+    pub fn add_item_stream(&mut self, collection: &str, source: impl Read) -> Result<WrittenItem> {
+        match self.kind {
+            GraphKind::Mail => bail!("Graph messages are pull-only (append not supported)"),
+            GraphKind::Contacts => self.add_contact(collection, source),
+            GraphKind::Calendar => self.add_event(collection, source),
+        }
+    }
+
+    /// Replaces an item in place on `if_match`; mail bodies are immutable.
+    pub fn update_item_stream(
+        &mut self,
+        id: &str,
+        source: impl Read,
+        if_match: Option<&str>,
+    ) -> Result<Option<String>> {
+        match self.kind {
+            GraphKind::Mail => bail!("Graph message bodies are immutable (in-place update)"),
+            GraphKind::Contacts => self.update_contact(id, source, if_match),
+            GraphKind::Calendar => self.update_event(id, source, if_match),
+        }
+    }
+
+    /// Deletes one item, conditionally on `if_match` for contacts.
+    pub fn delete_item(&mut self, id: &str, if_match: Option<&str>) -> Result<()> {
+        match self.kind {
+            GraphKind::Mail => self.delete_message(id),
+            GraphKind::Contacts => self.delete_contact(id, if_match),
+            GraphKind::Calendar => self.delete_event(id, if_match),
+        }
+    }
+
     /// Lists the synced mail folders as shared mailboxes, every top-level
     /// folder plus one level of children named `Parent/Child`.
     ///
     /// The name map is refreshed as a side effect; counts are not populated.
-    pub fn list_mailboxes(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
+    fn list_mailboxes(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         Ok(self
             .list_folders()?
             .into_iter()
@@ -221,7 +356,7 @@ impl GraphClient {
     /// The opaque `cursor` carries the previous round's `@odata.deltaLink`;
     /// without one (first sync, or an unreadable checkpoint) a fresh full round
     /// runs. The returned checkpoint is the next round's delta link.
-    pub fn enumerate(&mut self, mailbox: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
+    fn enumerate_mailbox(&mut self, mailbox: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
         let link = cursor.and_then(decode_checkpoint);
         let (rows, fresh, delta_link) = self.delta_round(mailbox, link)?;
 
@@ -343,7 +478,7 @@ impl GraphClient {
     ///
     /// Graph exposes no RFC 5322 octet size, so `size` stays 0 and is filled
     /// from the blob length at the `Full` tier.
-    pub fn fetch_envelopes(&mut self, mailbox: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
+    fn fetch_envelopes(&mut self, mailbox: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
         let mut envelopes = Vec::with_capacity(ids.len());
         for id in ids {
             let message = self.row(mailbox, id)?;
@@ -354,7 +489,7 @@ impl GraphClient {
 
     /// Streams the bodies of a message-id set: one raw MIME get per message,
     /// Graph having no batched body fetch.
-    pub fn fetch_bodies<S: Write>(
+    fn fetch_messages<S: Write>(
         &mut self,
         _mailbox: &str,
         ids: &[&str],
@@ -372,12 +507,7 @@ impl GraphClient {
     }
 
     /// Streams one message's raw RFC 5322 bytes into `sink`.
-    pub fn get_message_stream(
-        &mut self,
-        _mailbox: &str,
-        id: &str,
-        mut sink: impl Write,
-    ) -> Result<()> {
+    fn get_message_stream(&mut self, _mailbox: &str, id: &str, mut sink: impl Write) -> Result<()> {
         let raw = self.message_raw(id)?;
         sink.write_all(&raw)
             .with_context(|| format!("Stream body {id} error"))?;
@@ -396,6 +526,12 @@ impl GraphClient {
     /// `\Draft` is read-only on Graph and other keywords have no equivalent,
     /// both ignored.
     pub fn store_flags(&mut self, ids: &[&str], flags: &[Flag], op: FlagOp) -> Result<()> {
+        if self.kind != GraphKind::Mail {
+            bail!(
+                "Graph {} have no flags (store not supported)",
+                self.kind.media_type()
+            );
+        }
         if !matches!(op, FlagOp::Set) {
             bail!("Graph flag updates only support a full set");
         }
@@ -409,7 +545,7 @@ impl GraphClient {
     }
 
     /// Deletes one message by id.
-    pub fn delete_message(&mut self, id: &str) -> Result<()> {
+    fn delete_message(&mut self, id: &str) -> Result<()> {
         self.op(|client| client.message_delete(id))
             .with_context(|| format!("Delete message {id} error"))?;
         Ok(())

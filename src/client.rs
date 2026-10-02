@@ -23,6 +23,10 @@ use anyhow::{Result, bail};
 
 #[cfg(feature = "dav")]
 use crate::dav::client::DavClient;
+#[cfg(feature = "gcal")]
+use crate::gcal::client::GcalClient;
+#[cfg(feature = "gpeople")]
+use crate::gpeople::client::GpeopleClient;
 #[cfg(feature = "imap")]
 use crate::imap::client::ImapClient;
 #[cfg(feature = "msgraph")]
@@ -82,22 +86,44 @@ pub enum Client {
     Dav(Box<DavClient>),
     #[cfg(feature = "msgraph")]
     Msgraph(Box<GraphClient>),
+    #[cfg(feature = "gpeople")]
+    Gpeople(Box<GpeopleClient>),
+    #[cfg(feature = "gcal")]
+    Gcal(Box<GcalClient>),
     /// Keeps the type inhabited when no backend is compiled in.
     ///
     /// Never constructed: [`open`] refuses every side first, so such a
     /// build fails when it opens a side, not when it builds.
-    #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+    #[cfg(not(any(
+        feature = "imap",
+        feature = "msgraph",
+        feature = "dav",
+        feature = "gpeople",
+        feature = "gcal"
+    )))]
     #[allow(dead_code)]
     Unavailable,
 }
 
 /// The error every method reports in a build with no backend at all.
-#[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+#[cfg(not(any(
+    feature = "imap",
+    feature = "msgraph",
+    feature = "dav",
+    feature = "gpeople",
+    feature = "gcal"
+)))]
 const NO_BACKEND: &str =
     "No sync backend is compiled in (rebuild with the `imap`, `msgraph` or `dav` cargo feature)";
 
 #[cfg_attr(
-    not(all(feature = "imap", feature = "msgraph", feature = "dav")),
+    not(all(
+        feature = "imap",
+        feature = "msgraph",
+        feature = "dav",
+        feature = "gpeople",
+        feature = "gcal"
+    )),
     allow(unused_variables)
 )]
 impl Client {
@@ -107,10 +133,20 @@ impl Client {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c.list_mailboxes(with_counts),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.list_mailboxes(with_counts),
+            Client::Msgraph(c) => c.list_collections(with_counts),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.list_collections(with_counts),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(c) => c.list_collections(),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(c) => c.list_collections(),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -124,7 +160,21 @@ impl Client {
             Client::Msgraph(_) => bail!("Graph mailboxes are pull-only (create not supported)"),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.create_collection(collection),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(_) => {
+                bail!("Google address books and calendars are pull-only (create not supported)")
+            }
+            #[cfg(feature = "gcal")]
+            Client::Gcal(_) => {
+                bail!("Google address books and calendars are pull-only (create not supported)")
+            }
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -138,7 +188,21 @@ impl Client {
             Client::Msgraph(_) => bail!("Graph mailboxes are pull-only (delete not supported)"),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.delete_collection(collection),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(_) => {
+                bail!("Google address books and calendars are pull-only (delete not supported)")
+            }
+            #[cfg(feature = "gcal")]
+            Client::Gcal(_) => {
+                bail!("Google address books and calendars are pull-only (delete not supported)")
+            }
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -153,7 +217,17 @@ impl Client {
             Client::Msgraph(c) => c.enumerate(collection, cursor),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.enumerate(collection, cursor),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(c) => c.enumerate(collection, cursor),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(c) => c.enumerate(collection, cursor),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -165,10 +239,22 @@ impl Client {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c.fetch_envelopes(collection, ids),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.fetch_envelopes(collection, ids),
+            Client::Msgraph(c) => c.fetch_summaries(collection, ids),
             #[cfg(feature = "dav")]
             Client::Dav(_) => bail!("DAV items have no summary tier (they resolve at Full)"),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(_) => {
+                bail!("Google contacts have no summary tier (they resolve at Full)")
+            }
+            #[cfg(feature = "gcal")]
+            Client::Gcal(_) => bail!("Google events have no summary tier (they resolve at Full)"),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -192,7 +278,17 @@ impl Client {
             Client::Msgraph(c) => c.fetch_bodies(collection, ids, open, done),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.fetch_bodies(collection, ids, open, done),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(c) => c.fetch_bodies(collection, ids, open, done),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(c) => c.fetch_bodies(collection, ids, open, done),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -212,10 +308,20 @@ impl Client {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c.get_message_stream(collection, id, sink).map(|()| None),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.get_message_stream(collection, id, sink).map(|()| None),
+            Client::Msgraph(c) => c.get_item_stream(collection, id, sink),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.get_item_stream(collection, id, sink),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(c) => c.get_item_stream(collection, id, sink),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(c) => c.get_item_stream(collection, id, sink),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -224,7 +330,8 @@ impl Client {
     ///
     /// `link`'s hint recovers the UID on IMAP servers lacking UIDPLUS and
     /// is the `UID` a DAV href is built from, while its mint keeps a second
-    /// copy off the href its twin holds. Pull-only on Graph (rejected).
+    /// copy off the href its twin holds. Graph assigns its own ids, and takes
+    /// contacts only, its messages being pull-only.
     pub fn add_item_stream(
         &mut self,
         collection: &str,
@@ -239,10 +346,20 @@ impl Client {
                 .add_message_stream(collection, flags, source, len, link.hint)
                 .map(|id| WrittenItem { id, revision: None }),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(_) => bail!("Graph messages are pull-only (append not supported)"),
+            Client::Msgraph(c) => c.add_item_stream(collection, source),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.add_item_stream(collection, source, link),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(c) => c.add_item_stream(collection, source),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(c) => c.add_item_stream(collection, source),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -265,10 +382,20 @@ impl Client {
             #[cfg(feature = "imap")]
             Client::Imap(_) => bail!("IMAP message bodies are immutable (in-place update)"),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(_) => bail!("Graph message bodies are immutable (in-place update)"),
+            Client::Msgraph(c) => c.update_item_stream(id, source, if_match),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.update_item_stream(collection, id, source, if_match),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(c) => c.update_item_stream(id, source, if_match),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(c) => c.update_item_stream(collection, id, source, if_match),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -286,10 +413,20 @@ impl Client {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c.delete_message(collection, id),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.delete_message(id),
+            Client::Msgraph(c) => c.delete_item(id, if_match),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.delete_item(collection, id, if_match),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(c) => c.delete_item(id, if_match),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(c) => c.delete_item(collection, id, if_match),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -303,7 +440,19 @@ impl Client {
             Client::Msgraph(_) => bail!("Graph messages are pull-only (move not supported)"),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.move_items(from, to, ids),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(_) => bail!("Google contacts cannot move (move not supported)"),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(_) => {
+                bail!("Google events cannot move between calendars here (move not supported)")
+            }
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -324,7 +473,17 @@ impl Client {
             Client::Msgraph(c) => c.store_flags(ids, flags, op),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.store_flags(ids, flags, op),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(c) => c.store_flags(ids, flags, op),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(c) => c.store_flags(ids, flags, op),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
     }
@@ -339,10 +498,20 @@ impl Client {
             #[cfg(feature = "imap")]
             Client::Imap(_) => "message/rfc822",
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(_) => "message/rfc822",
+            Client::Msgraph(c) => c.kind().media_type(),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.media_type(),
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(_) => "text/vcard",
+            #[cfg(feature = "gcal")]
+            Client::Gcal(_) => "text/calendar",
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => "",
         }
     }
@@ -362,7 +531,17 @@ impl Client {
             Client::Msgraph(_) => None,
             #[cfg(feature = "dav")]
             Client::Dav(_) => None,
-            #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(_) => None,
+            #[cfg(feature = "gcal")]
+            Client::Gcal(_) => None,
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal"
+            )))]
             Client::Unavailable => None,
         }
     }
@@ -374,7 +553,13 @@ impl Client {
 /// already resolved for the run by [`crate::account`], so a second
 /// connection to a side costs a handshake and nothing else.
 #[cfg_attr(
-    not(any(feature = "imap", feature = "msgraph", feature = "dav")),
+    not(any(
+        feature = "imap",
+        feature = "msgraph",
+        feature = "dav",
+        feature = "gpeople",
+        feature = "gcal"
+    )),
     allow(unused_variables)
 )]
 pub fn open(account: &SourceAccount) -> Result<Client> {
@@ -387,16 +572,36 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
         }
         #[cfg(feature = "msgraph")]
         SourceAccountBackend::Msgraph(msgraph) => {
-            let client =
-                GraphClient::connect(&msgraph.token, &msgraph.user_id, msgraph.tls.clone())?;
+            let client = GraphClient::connect(
+                msgraph.kind,
+                &msgraph.token,
+                &msgraph.user_id,
+                msgraph.tls.clone(),
+            )?;
             Ok(Client::Msgraph(Box::new(client)))
+        }
+        #[cfg(feature = "gpeople")]
+        SourceAccountBackend::Gpeople(google) => {
+            let client = GpeopleClient::connect(&google.token, google.tls.clone())?;
+            Ok(Client::Gpeople(Box::new(client)))
+        }
+        #[cfg(feature = "gcal")]
+        SourceAccountBackend::Gcal(google) => {
+            let client = GcalClient::connect(&google.token, google.tls.clone())?;
+            Ok(Client::Gcal(Box::new(client)))
         }
         #[cfg(feature = "dav")]
         SourceAccountBackend::Dav(dav) => {
             let client = DavClient::connect(dav.kind, &dav.server, &dav.tls, dav.auth.clone())?;
             Ok(Client::Dav(Box::new(client)))
         }
-        #[cfg(not(any(feature = "imap", feature = "msgraph", feature = "dav")))]
+        #[cfg(not(any(
+            feature = "imap",
+            feature = "msgraph",
+            feature = "dav",
+            feature = "gpeople",
+            feature = "gcal"
+        )))]
         SourceAccountBackend::Unavailable => bail!(NO_BACKEND),
     }
 }

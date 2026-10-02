@@ -21,7 +21,12 @@ pub mod mail;
 pub mod merge;
 
 use anyhow::{Result, bail};
-#[cfg(feature = "dav")]
+#[cfg(any(
+    feature = "dav",
+    feature = "msgraph",
+    feature = "gpeople",
+    feature = "gcal"
+))]
 use io_pimdir::summary::{calendar, contact};
 use io_pimdir::{placement::PimdirLinkId, remote::PimdirTier, summary::PimdirDerivation};
 
@@ -61,10 +66,20 @@ pub enum Kind {
     /// `message/rfc822`: mail, over IMAP or Microsoft Graph.
     Mail,
     /// `text/vcard`: contact cards, over CardDAV.
-    #[cfg(feature = "dav")]
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     Vcard,
     /// `text/calendar`: calendar object resources, over CalDAV.
-    #[cfg(feature = "dav")]
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     Ical,
 }
 
@@ -74,9 +89,19 @@ impl Kind {
     pub fn from_media_type(media_type: &str) -> Option<Self> {
         match media_type {
             "message/rfc822" => Some(Self::Mail),
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             "text/vcard" => Some(Self::Vcard),
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             "text/calendar" => Some(Self::Ical),
             _ => None,
         }
@@ -86,9 +111,19 @@ impl Kind {
     pub fn media_type(self) -> &'static str {
         match self {
             Self::Mail => "message/rfc822",
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Vcard => "text/vcard",
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Ical => "text/calendar",
         }
     }
@@ -98,9 +133,19 @@ impl Kind {
     pub fn extension(self) -> &'static str {
         match self {
             Self::Mail => "eml",
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Vcard => "vcf",
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Ical => "ics",
         }
     }
@@ -113,9 +158,19 @@ impl Kind {
     pub fn parse_body(self, raw: &[u8], size: u64) -> PimdirDerivation {
         match self {
             Self::Mail => mail::parse_body(raw, size),
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Vcard => contact::derive(raw),
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Ical => calendar::derive(raw),
         }
     }
@@ -161,9 +216,19 @@ impl Kind {
     fn component(self) -> Option<&'static str> {
         match self {
             Self::Mail => None,
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Vcard => Some("VCARD"),
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Ical => Some("VCALENDAR"),
         }
     }
@@ -199,7 +264,12 @@ impl Kind {
     fn hint(self, key: &str) -> Option<&str> {
         let fallback = match self {
             Self::Mail => "alt:",
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Vcard | Self::Ical => "hash:",
         };
 
@@ -212,7 +282,12 @@ impl Kind {
     pub fn probe_tier(self) -> PimdirTier {
         match self {
             Self::Mail => PimdirTier::Meta,
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Vcard | Self::Ical => PimdirTier::Full,
         }
     }
@@ -225,7 +300,12 @@ impl Kind {
     pub fn parse_summary(self, summary: &ItemSummary) -> Option<PimdirDerivation> {
         match self {
             Self::Mail => Some(mail::parse_summary(summary)),
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Vcard | Self::Ical => None,
         }
     }
@@ -303,7 +383,12 @@ mod tests {
     /// Two copies carrying no `UID` are minted over the kind's fallback, so
     /// the mint is the only part a write can name them by.
     #[test]
-    #[cfg(feature = "dav")]
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     fn a_mint_over_a_fallback_keeps_the_mint_and_no_hint() {
         let link = PimdirLinkId::from("dup:hash:cbf29ce484222325#card-2.vcf");
         assert_eq!(
@@ -318,7 +403,12 @@ mod tests {
     /// The reported shape: one iCalendar `UID` under two hrefs, the second
     /// minted on the href it came from.
     #[test]
-    #[cfg(feature = "dav")]
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     fn a_minted_calendar_key_names_the_href_it_came_from() {
         let link = PimdirLinkId::from("dup:event-1@google.com#event-1%2540google.com.ics");
         assert_eq!(
@@ -346,7 +436,12 @@ mod tests {
 
     /// A card body of this item settles it, a message body settles nothing.
     #[test]
-    #[cfg(feature = "dav")]
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     fn a_settled_body_is_read_as_the_kind_and_the_item_it_claims() {
         let bound = PimdirLinkId::from("uid:a");
         let card = b"BEGIN:VCARD\r\nVERSION:4.0\r\nUID:uid:a\r\nFN:Jane\r\nEND:VCARD\r\n";

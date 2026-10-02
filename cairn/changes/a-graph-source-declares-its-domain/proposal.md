@@ -1,7 +1,7 @@
 ---
 cairn: change
 id: a-graph-source-declares-its-domain
-status: active
+status: landed
 created: 2026-09-07
 ---
 

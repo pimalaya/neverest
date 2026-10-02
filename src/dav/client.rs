@@ -33,7 +33,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use io_http::rfc9112::send::Http11SendError;
 use io_webdav::{
-    client::{WebdavClientStd, WebdavClientStdError},
+    client::{WebdavClientStd, WebdavClientStdConnectOptions, WebdavClientStdError},
     rfc4791::calendar::CaldavCalendar,
     rfc4918::{WebdavAuth, follow_redirects::WebdavFollowRedirectsError, send::WebdavSendError},
     rfc6352::addressbook::CarddavAddressbook,
@@ -43,7 +43,7 @@ use io_webdav::{
     },
 };
 use log::{debug, warn};
-use pimalaya_stream::tls::Tls;
+use pimalaya_stream::{proxy::Proxy, tls::Tls};
 use url::Url;
 
 use crate::{
@@ -124,7 +124,7 @@ impl DavClient {
     /// Opens the session and discovers the home set, so a misconfigured URL or
     /// credential fails here rather than at the first enumeration.
     pub fn connect(kind: DavKind, server: &Url, tls: &Tls, auth: WebdavAuth) -> Result<Self> {
-        let inner = WebdavClientStd::connect(server, tls, auth.clone())
+        let inner = WebdavClientStd::connect(server, auth.clone(), connect_options(tls))
             .with_context(|| format!("Cannot connect to the {kind} server"))?;
         let mut client = Self {
             kind,
@@ -174,7 +174,8 @@ impl DavClient {
     /// discovered: only its own is ever populated, so the other copies an
     /// absence.
     fn reconnect(&mut self) -> Result<(), WebdavClientStdError> {
-        let mut inner = WebdavClientStd::connect(&self.server, &self.tls, self.auth.clone())?;
+        let mut inner =
+            WebdavClientStd::connect(&self.server, self.auth.clone(), connect_options(&self.tls))?;
         inner.principal_url = self.inner.principal_url.clone();
         inner.addressbook_home_set = self.inner.addressbook_home_set.clone();
         inner.addressbook_reports = self.inner.addressbook_reports.clone();
@@ -589,6 +590,15 @@ impl DavClient {
             DavKind::Card => self.op(|dav| dav.delete_card(collection, id, if_match)),
             DavKind::Cal => self.op(|dav| dav.delete_item(collection, id, if_match)),
         }
+    }
+}
+
+/// The connect options of a session: the configured TLS, and a direct
+/// connection, as every other source of the account opens its own.
+fn connect_options(tls: &Tls) -> WebdavClientStdConnectOptions {
+    WebdavClientStdConnectOptions {
+        tls: tls.clone(),
+        proxy: Proxy::None,
     }
 }
 

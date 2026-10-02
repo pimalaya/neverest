@@ -201,10 +201,9 @@ imap.item.delete = false
 # https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
 # --------------------------------------------------------------------------------
 #
-# NOT in a released binary: `msgraph` is off by default while Graph carries mail,
-# contacts and calendar and this backend syncs only mail. This block parses in
-# every build, and a source declaring it is refused when the sync opens it unless
-# you built with `--features msgraph`.
+# Graph carries mail and contacts here: `msgraph` syncs mail folders,
+# `msgraph-contacts` and `msgraph-calendar` (below) contact folders and
+# calendars.
 
 # Mail folders are exposed as collections; the API host is fixed, so only the
 # owner, TLS and the credential are configurable.
@@ -226,8 +225,40 @@ imap.item.delete = false
 #msgraph.item.delete = false
 #msgraph.pool-size = 4
 
+# Graph contacts: the same session and fields as `msgraph`, its contact folders
+# exposed as address books, the default Contacts folder as `contacts`. The token
+# needs the `Contacts.ReadWrite` scope. Contacts push creates, updates and
+# deletes; an edit made on Graph since the last sync is refused and picked up by
+# the next run. A card keeps its vCard UID on Graph, in an extended property.
+#msgraph-contacts.user-id = "me"
+#msgraph-contacts.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
+
+# Graph calendars: the same session and fields as `msgraph`, each calendar a
+# collection, a recurring series and its exceptions one item. The token needs
+# the `Calendars.ReadWrite` scope. Every run lists each calendar in full, and an
+# exception edited locally does not push yet.
+#msgraph-calendar.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
+
+# --------------------------------------------------------------------------------
+# Google config (contacts and calendars, not mail)
+# https://developers.google.com/people  https://developers.google.com/calendar
+# --------------------------------------------------------------------------------
+
+# Google contacts through the People API: every connection syncs as one
+# address book, `contacts`. The token needs the `contacts` scope.
+#gpeople.auth.token.command = ["ortie", "-a", "google", "token", "show", "--auto-refresh"]
+#gpeople.tls.provider = "rustls"
+#gpeople.alpn = ["http/1.1"]
+
+# Google calendars through the Calendar API: each calendar of the user's list
+# is a collection, a recurring series with its modified instances one item.
+# The token needs the `calendar` scope. A locally modified instance of a series
+# does not push yet.
+#gcal.auth.token.command = ["ortie", "-a", "google", "token", "show", "--auto-refresh"]
+
 # --------------------------------------------------------------------------------
 # CardDAV config (contacts, not mail)
+
 # https://www.iana.org/go/rfc6352
 # --------------------------------------------------------------------------------
 

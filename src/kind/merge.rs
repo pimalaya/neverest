@@ -14,9 +14,19 @@
 //! business deciding what a person might have decided differently. The local
 //! body is the left side, so the store's own bytes survive byte for byte.
 
-#[cfg(feature = "dav")]
+#[cfg(any(
+    feature = "dav",
+    feature = "msgraph",
+    feature = "gpeople",
+    feature = "gcal"
+))]
 use ical::tree::{cst::IcalCst, merge::IcalMerge};
-#[cfg(feature = "dav")]
+#[cfg(any(
+    feature = "dav",
+    feature = "msgraph",
+    feature = "gpeople",
+    feature = "gcal"
+))]
 use vcard::tree::{cst::VcardCst, merge::VcardMerge};
 
 use crate::kind::Kind;
@@ -24,7 +34,15 @@ use crate::kind::Kind;
 /// What a three-way merge concluded about one conflicted item.
 // NOTE: a build without `dav` carries no mutable-content kind, so mail is
 // the only arm left and neither resolving variant is ever constructed.
-#[cfg_attr(not(feature = "dav"), allow(dead_code))]
+#[cfg_attr(
+    not(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    )),
+    allow(dead_code)
+)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Merged {
     /// Nobody disagreed: the merged body carries both sides' edits and
@@ -47,11 +65,24 @@ impl Kind {
     /// left decides nothing here, a run merging only on an empty report.
     // NOTE: without `dav` the mail arm is the whole match, and mail is
     // immutable-content, so no side is ever read.
-    #[cfg_attr(not(feature = "dav"), allow(unused_variables))]
+    #[cfg_attr(
+        not(any(
+            feature = "dav",
+            feature = "msgraph",
+            feature = "gpeople",
+            feature = "gcal"
+        )),
+        allow(unused_variables)
+    )]
     pub fn merge(self, base: &[u8], local: &[u8], remote: &[u8]) -> Merged {
         match self {
             Self::Mail => Merged::Unmergeable(String::from("mail bodies are immutable")),
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Vcard => {
                 let (base, local, remote) = match (
                     VcardCst::parse(base),
@@ -76,7 +107,12 @@ impl Kind {
                     collided => Merged::Collided(collided),
                 }
             }
-            #[cfg(feature = "dav")]
+            #[cfg(any(
+                feature = "dav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
             Self::Ical => {
                 let (base, local, remote) = match (
                     IcalCst::parse(base),
@@ -107,7 +143,12 @@ impl Kind {
 
 /// Names the side whose body no parser accepts, for the log line a parked
 /// conflict leaves behind, rather than counting it as a collision.
-#[cfg(feature = "dav")]
+#[cfg(any(
+    feature = "dav",
+    feature = "msgraph",
+    feature = "gpeople",
+    feature = "gcal"
+))]
 fn unparsed<E: core::fmt::Display>(base: Option<E>, local: Option<E>, remote: Option<E>) -> Merged {
     let (side, err) = match (base, local, remote) {
         (Some(err), _, _) => ("base", err),
@@ -125,7 +166,12 @@ mod tests {
 
     /// Disjoint edits are not a disagreement: the base names which side
     /// touched which field, so both survive.
-    #[cfg(feature = "dav")]
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     #[test]
     fn disjoint_edits_on_both_sides_merge_into_one_card() {
         let base =
@@ -145,7 +191,12 @@ mod tests {
     }
 
     /// The same field set two ways is the residual case no merge settles.
-    #[cfg(feature = "dav")]
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     #[test]
     fn a_same_field_collision_is_not_merged_away() {
         let base = b"BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Jane Doe\r\nTEL:+1\r\nEND:VCARD\r\n";
@@ -156,7 +207,12 @@ mod tests {
     }
 
     /// The calendar half of the same rule, over the other library.
-    #[cfg(feature = "dav")]
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     #[test]
     fn a_calendar_merges_disjoint_edits_and_parks_a_collision() {
         let event = |summary: &str, location: &str| {
@@ -188,7 +244,12 @@ mod tests {
 
     /// A body no parser reads is reported as what it is, rather than counted
     /// as a disagreement nobody had.
-    #[cfg(feature = "dav")]
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     #[test]
     fn an_unreadable_body_is_unmergeable_rather_than_collided() {
         let base = b"BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Jane Doe\r\nEND:VCARD\r\n";

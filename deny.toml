@@ -1,3 +1,15 @@
+[advisories]
+ignore = [
+  # Marvin: RSA key recovery through timing sidechannels, with no
+  # patched version, so it cannot be resolved by upgrading.
+  #
+  # rsa reaches this crate only as a dev dependency, through io-oauth's
+  # jwt-bearer feature, and only to sign the assertion the live tests
+  # trade for an access token. It signs locally and never decrypts, so
+  # there is no network-observable oracle to time.
+  { id = "RUSTSEC-2023-0071", reason = "dev-only JWT signing, no decryption oracle exposed" },
+]
+
 [sources]
 allow-git = ["https://github.com/nlnetlabs/domain"]
 allow-org.github = ["pimalaya"]

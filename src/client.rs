@@ -12,7 +12,7 @@
 //! The enumeration cursor is opaque here: each backend encodes its own
 //! incremental-sync state into the checkpoint bytes the engine stores, and
 //! member handles are strings (an IMAP UID in decimal, a Graph message id,
-//! a DAV href). JMAP and Gmail configs parse but do not open yet.
+//! a DAV href, a Gmail message id). JMAP configs parse but do not open yet.
 
 use std::{
     collections::BTreeSet,
@@ -25,6 +25,8 @@ use anyhow::{Result, bail};
 use crate::dav::client::DavClient;
 #[cfg(feature = "gcal")]
 use crate::gcal::client::GcalClient;
+#[cfg(feature = "gmail")]
+use crate::gmail::client::GmailClient;
 #[cfg(feature = "gpeople")]
 use crate::gpeople::client::GpeopleClient;
 #[cfg(feature = "imap")]
@@ -90,6 +92,8 @@ pub enum Client {
     Gpeople(Box<GpeopleClient>),
     #[cfg(feature = "gcal")]
     Gcal(Box<GcalClient>),
+    #[cfg(feature = "gmail")]
+    Gmail(Box<GmailClient>),
     /// Keeps the type inhabited when no backend is compiled in.
     ///
     /// Never constructed: [`open`] refuses every side first, so such a
@@ -99,7 +103,8 @@ pub enum Client {
         feature = "msgraph",
         feature = "dav",
         feature = "gpeople",
-        feature = "gcal"
+        feature = "gcal",
+        feature = "gmail"
     )))]
     #[allow(dead_code)]
     Unavailable,
@@ -111,10 +116,11 @@ pub enum Client {
     feature = "msgraph",
     feature = "dav",
     feature = "gpeople",
-    feature = "gcal"
+    feature = "gcal",
+    feature = "gmail"
 )))]
 const NO_BACKEND: &str =
-    "No sync backend is compiled in (rebuild with the `imap`, `msgraph` or `dav` cargo feature)";
+    "No sync backend is compiled in (rebuild with a backend cargo feature such as `imap`)";
 
 #[cfg_attr(
     not(all(
@@ -122,7 +128,8 @@ const NO_BACKEND: &str =
         feature = "msgraph",
         feature = "dav",
         feature = "gpeople",
-        feature = "gcal"
+        feature = "gcal",
+        feature = "gmail"
     )),
     allow(unused_variables)
 )]
@@ -140,12 +147,15 @@ impl Client {
             Client::Gpeople(c) => c.list_collections(),
             #[cfg(feature = "gcal")]
             Client::Gcal(c) => c.list_collections(),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.list_collections(with_counts),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -168,12 +178,15 @@ impl Client {
             Client::Gcal(_) => {
                 bail!("Google address books and calendars are pull-only (create not supported)")
             }
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.create_collection(collection),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -196,12 +209,15 @@ impl Client {
             Client::Gcal(_) => {
                 bail!("Google address books and calendars are pull-only (delete not supported)")
             }
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.delete_collection(collection),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -221,12 +237,15 @@ impl Client {
             Client::Gpeople(c) => c.enumerate(collection, cursor),
             #[cfg(feature = "gcal")]
             Client::Gcal(c) => c.enumerate(collection, cursor),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.enumerate(collection, cursor),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -248,12 +267,15 @@ impl Client {
             }
             #[cfg(feature = "gcal")]
             Client::Gcal(_) => bail!("Google events have no summary tier (they resolve at Full)"),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.fetch_summaries(ids),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -282,12 +304,15 @@ impl Client {
             Client::Gpeople(c) => c.fetch_bodies(collection, ids, open, done),
             #[cfg(feature = "gcal")]
             Client::Gcal(c) => c.fetch_bodies(collection, ids, open, done),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.fetch_bodies(ids, open, done),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -315,12 +340,15 @@ impl Client {
             Client::Gpeople(c) => c.get_item_stream(collection, id, sink),
             #[cfg(feature = "gcal")]
             Client::Gcal(c) => c.get_item_stream(collection, id, sink),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.get_item_stream(id, sink),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -353,12 +381,15 @@ impl Client {
             Client::Gpeople(c) => c.add_item_stream(collection, source),
             #[cfg(feature = "gcal")]
             Client::Gcal(c) => c.add_item_stream(collection, source),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.add_item_stream(collection, flags, source, link.hint),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -389,12 +420,15 @@ impl Client {
             Client::Gpeople(c) => c.update_item_stream(id, source, if_match),
             #[cfg(feature = "gcal")]
             Client::Gcal(c) => c.update_item_stream(collection, id, source, if_match),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(_) => bail!("Gmail message bodies are immutable (in-place update)"),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -420,12 +454,15 @@ impl Client {
             Client::Gpeople(c) => c.delete_item(id, if_match),
             #[cfg(feature = "gcal")]
             Client::Gcal(c) => c.delete_item(collection, id, if_match),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.delete_item(collection, id),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -446,12 +483,15 @@ impl Client {
             Client::Gcal(_) => {
                 bail!("Google events cannot move between calendars here (move not supported)")
             }
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.move_items(from, to, ids),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -477,12 +517,15 @@ impl Client {
             Client::Gpeople(c) => c.store_flags(ids, flags, op),
             #[cfg(feature = "gcal")]
             Client::Gcal(c) => c.store_flags(ids, flags, op),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.store_flags(ids, flags, op),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
         }
@@ -505,12 +548,15 @@ impl Client {
             Client::Gpeople(_) => "text/vcard",
             #[cfg(feature = "gcal")]
             Client::Gcal(_) => "text/calendar",
+            #[cfg(feature = "gmail")]
+            Client::Gmail(_) => "message/rfc822",
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => "",
         }
@@ -535,12 +581,15 @@ impl Client {
             Client::Gpeople(_) => None,
             #[cfg(feature = "gcal")]
             Client::Gcal(_) => None,
+            #[cfg(feature = "gmail")]
+            Client::Gmail(_) => None,
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
                 feature = "dav",
                 feature = "gpeople",
-                feature = "gcal"
+                feature = "gcal",
+                feature = "gmail"
             )))]
             Client::Unavailable => None,
         }
@@ -558,7 +607,8 @@ impl Client {
         feature = "msgraph",
         feature = "dav",
         feature = "gpeople",
-        feature = "gcal"
+        feature = "gcal",
+        feature = "gmail"
     )),
     allow(unused_variables)
 )]
@@ -595,12 +645,18 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
             let client = DavClient::connect(dav.kind, &dav.server, &dav.tls, dav.auth.clone())?;
             Ok(Client::Dav(Box::new(client)))
         }
+        #[cfg(feature = "gmail")]
+        SourceAccountBackend::Gmail(gmail) => {
+            let client = GmailClient::connect(&gmail.token, &gmail.user_id, gmail.tls.clone())?;
+            Ok(Client::Gmail(Box::new(client)))
+        }
         #[cfg(not(any(
             feature = "imap",
             feature = "msgraph",
             feature = "dav",
             feature = "gpeople",
-            feature = "gcal"
+            feature = "gcal",
+            feature = "gmail"
         )))]
         SourceAccountBackend::Unavailable => bail!(NO_BACKEND),
     }

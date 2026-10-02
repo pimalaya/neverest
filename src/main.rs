@@ -112,6 +112,8 @@ mod conflict;
 mod dav;
 #[cfg(feature = "gcal")]
 mod gcal;
+#[cfg(feature = "gmail")]
+mod gmail;
 #[cfg(feature = "gpeople")]
 mod gpeople;
 #[cfg(feature = "imap")]

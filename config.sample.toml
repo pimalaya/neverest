@@ -176,11 +176,11 @@ imap.item.delete = false
 # https://developers.google.com/gmail/api
 # --------------------------------------------------------------------------------
 #
-# This block parses, but no Gmail backend is compiled in yet, so a side
-# declaring it is refused when the sync opens it.
-
-# Labels are exposed as collections; the API host is fixed, so only the owner,
-# TLS and the credential are configurable.
+# User labels plus INBOX, SENT, DRAFT, SPAM and TRASH are collections, keyed by
+# label name like on IMAP. UNREAD, STARRED and IMPORTANT are flags. A delete
+# removes the label (from INBOX it archives), only one from TRASH is permanent.
+# The token needs the https://mail.google.com/ scope. The API host is fixed,
+# so only the owner, TLS and the credential are configurable.
 #gmail.user-id = "me"
 #gmail.tls.provider = "rustls"
 #gmail.tls.rustls.crypto = "ring"

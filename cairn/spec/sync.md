@@ -186,7 +186,7 @@ The sync SHALL write a `sort_key` beside the summary of every item it summarises
 Every freshly probed placement SHALL be raised to the tier its kind resolves its link id and summary at: `Meta` where the backend offers a cheap server-side summary (mail's IMAP `ENVELOPE`), `Full` where only the body carries the identity. Raising a DAV item to `Meta` asks its backend for a summary tier it does not have, which fails the scan of every DAV collection.
 
 ### Requirement: Sources are remote backends only
-A sync source SHALL be a remote backend: IMAP and Microsoft Graph for `message/rfc822`, CardDAV, Microsoft Graph and Google People for `text/vcard`, CalDAV, Microsoft Graph and Google Calendar for `text/calendar` (JMAP and Gmail as their backends land). Local file backends (m2dir, maildir, vdir) SHALL NOT be sync sources: the pimdir store is the local replica, so a local file store is redundant as a source and belongs on the import/export path, which neverest documents rather than syncing directly.
+A sync source SHALL be a remote backend: IMAP, Microsoft Graph and Gmail for `message/rfc822`, CardDAV, Microsoft Graph and Google People for `text/vcard`, CalDAV, Microsoft Graph and Google Calendar for `text/calendar` (JMAP as its backend lands). Local file backends (m2dir, maildir, vdir) SHALL NOT be sync sources: the pimdir store is the local replica, so a local file store is redundant as a source and belongs on the import/export path, which neverest documents rather than syncing directly.
 
 ### Requirement: The wizard discovers in parallel and proposes what it found
 The discovery fan-out already resolves CalDAV and CardDAV services alongside IMAP and submission, and the wizard SHALL offer every reachable service whose backend is compiled into the running build, not only the mail ones. A run that finds services of several kinds SHALL offer them as separate entries, one per kind.
@@ -231,13 +231,13 @@ An account naming several sources SHALL render under that same single header, it
 The document SHALL hold only what was actually decided: every field equal to its default SHALL be omitted (the account `default` flag when false, the per-source collection / flag / item permissions, the per-source pool size, the collection filter, the HTTP-backend ALPN list, `starttls`). Omitting a field SHALL be lossless: every skipped field keeps a deserialization default equal to the value that was skipped.
 
 ### Requirement: Every remote backend is a cargo feature
-Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backends, `dav` for the CardDAV and CalDAV backends, `gpeople` for the Google People backend, `gcal` for the Google Calendar backend, `smtp` for the SMTP submission channel.
+Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backends, `dav` for the CardDAV and CalDAV backends, `gpeople` for the Google People backend, `gcal` for the Google Calendar backend, `gmail` for the Gmail backend, `smtp` for the SMTP submission channel.
 
 Backends sharing one adapter and one dependency SHALL share one feature rather than take one each, separate features gating nothing that is separately compiled: `dav` covers CardDAV and CalDAV, `msgraph` covers Graph mail and Graph contacts. A feature that merely aliases another is not introduced for an older spelling.
 
 All of them SHALL ship in the default feature set, `msgraph` included again: it was held out under `msgraph-waits-for-its-domains` because a Graph account meant mail and nothing said so, and declaring the domain is what lifts that.
 
-A missing backend SHALL surface at runtime, never at build time: every feature combination compiles, the configuration surface stays whole (every source config still parses), and an unavailable backend fails when the source is *opened*, as the JMAP and Gmail sources already do. A build with neither `smtp` nor `msgraph` has no send channel and SHALL warn rather than perform a submit intent. Each optional backend crate SHALL take its TLS provider from neverest's own `native-tls` / `rustls-aws` / `rustls-ring` / `vendored` features rather than pinning one.
+A missing backend SHALL surface at runtime, never at build time: every feature combination compiles, the configuration surface stays whole (every source config still parses), and an unavailable backend fails when the source is *opened*, as the JMAP source already does. A build with neither `smtp` nor `msgraph` has no send channel and SHALL warn rather than perform a submit intent. Each optional backend crate SHALL take its TLS provider from neverest's own `native-tls` / `rustls-aws` / `rustls-ring` / `vendored` features rather than pinning one.
 
 ### Requirement: A backend owns its ALPN default
 The `alpn` field of a source or channel config that has a backend crate SHALL be optional, and unset SHALL mean that crate's own default (io-imap's `["imap"]`, io-smtp's `["smtp"]`), resolved where the connection is opened. An explicit `[]` SHALL skip ALPN. Neverest SHALL NOT restate a backend's default, in the config schema or in the values the wizard writes, so the default lives in exactly one place.
@@ -928,7 +928,7 @@ The cross-collection link id and the typed summary SHALL be produced by io-pimdi
 The `text/calendar` sort key SHALL be the item's start resolved to RFC 3339 in UTC (`DUE` then `DTSTART` for a `VTODO`, `DTSTART` otherwise), read through the `VTIMEZONE` the resource itself carries, so an agenda reads chronologically without the store holding a time zone database.
 
 ### Requirement: A collection is keyed by its backend id and named by its display name
-Every hub collection id, every wire call and the account's collection filter SHALL be built from the backend's own id: the mailbox name on IMAP and on Graph, the path segment on DAV. A display name SHALL NOT address a collection, being optional, mutable and free to collide.
+Every hub collection id, every wire call and the account's collection filter SHALL be built from the backend's own id: the mailbox name on IMAP and on Graph, the label name on Gmail, the path segment on DAV. A display name SHALL NOT address a collection, being optional, mutable and free to collide.
 
 The store SHALL still carry what the collection is called: `set_collection_name` runs beside every `ensure_collection` with the name without the namespace the hub id carries. A DAV source SHALL take it from `DAV:displayname`, falling back to the path segment when it is blank or absent; every other source's id is already its name. Where two sources meet, the first in declared order with a non-blank name wins. Naming SHALL NOT fail a run: nothing keys on the column, so a refused write is logged and the sync continues.
 
@@ -947,3 +947,14 @@ A `gcal` item SHALL be one recurring series with its modified instances, or one 
 - GIVEN a weekly series with one modified instance, synced into the store
 - WHEN the instance is edited on Google and the account synced again
 - THEN the series' item has a new revision and its body carries the edited instance
+
+### Requirement: Gmail is a native mail source
+A `gmail` source SHALL open protocol-direct over io-gmail and sync `message/rfc822`. Its collections SHALL be the user labels and the `INBOX`, `SENT`, `DRAFT`, `SPAM` and `TRASH` system labels, keyed and named by label name, as IMAP exposes them, so a Gmail endpoint and an IMAP endpoint on one account pair their labels. A label id SHALL NOT key a collection: the driver pairs endpoints and creates missing collections by key, and an opaque id would never meet the IMAP name.
+
+`UNREAD`, `STARRED` and `IMPORTANT` SHALL be flags (`\Seen` by absence, `\Flagged`, `$Important`), never collections, and the categories SHALL NOT be collections. Any other flag SHALL be dropped on push, a keyword turned label filing the message in a new collection.
+
+A handle SHALL be the Gmail message id, stable across labels. Enumeration SHALL carry the mailbox `historyId` as the checkpoint, taken before a full round's first list. A delta SHALL be `history.list` scoped to the collection's label, each touched message's current labels read before it is reported, and an expired `historyId` (404) SHALL restart a full round. A spam or trashed message SHALL be a member of `SPAM` or `TRASH` only.
+
+A delete from a label SHALL remove that label (from `INBOX` it archives), a move SHALL swap two labels in one modify, and only a delete from `TRASH` SHALL delete permanently. An added message SHALL go through `messages.import`, and an answered id that does not exist SHALL be re-found through history by `Message-ID` rather than trusted. A system label SHALL NOT be created or deleted.
+
+Auth SHALL be a bearer access token only, as for every other HTTP source.

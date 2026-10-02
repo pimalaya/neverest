@@ -31,10 +31,16 @@ use pimalaya_config::secret::SecretResolver;
     feature = "smtp",
     feature = "dav",
     feature = "gpeople",
-    feature = "gcal"
+    feature = "gcal",
+    feature = "gmail"
 ))]
 use pimalaya_stream::tls::Tls;
-#[cfg(any(feature = "msgraph", feature = "gpeople", feature = "gcal"))]
+#[cfg(any(
+    feature = "msgraph",
+    feature = "gpeople",
+    feature = "gcal",
+    feature = "gmail"
+))]
 use secrecy::SecretString;
 #[cfg(any(feature = "imap", feature = "smtp", feature = "dav"))]
 use url::Url;
@@ -160,6 +166,8 @@ pub enum SourceAccountBackend {
     Gpeople(GoogleAccount),
     #[cfg(feature = "gcal")]
     Gcal(GoogleAccount),
+    #[cfg(feature = "gmail")]
+    Gmail(GmailAccount),
     /// Keeps the type inhabited when no backend is compiled in.
     ///
     /// Never constructed: resolution refuses every backend first.
@@ -168,7 +176,8 @@ pub enum SourceAccountBackend {
         feature = "msgraph",
         feature = "dav",
         feature = "gpeople",
-        feature = "gcal"
+        feature = "gcal",
+        feature = "gmail"
     )))]
     #[allow(dead_code)]
     Unavailable,
@@ -183,7 +192,8 @@ impl SourceAccountBackend {
             feature = "msgraph",
             feature = "dav",
             feature = "gpeople",
-            feature = "gcal"
+            feature = "gcal",
+            feature = "gmail"
         )),
         allow(unused_variables)
     )]
@@ -260,9 +270,15 @@ impl SourceAccountBackend {
                 token: resolver.resolve(config.auth.token.clone())?,
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
             })),
+            #[cfg(feature = "gmail")]
+            SourceBackendConfig::Gmail(config) => Ok(Self::Gmail(GmailAccount {
+                token: resolver.resolve(config.auth.token.clone())?,
+                user_id: config.user_id.clone(),
+                tls: config.tls.clone().into_tls(config.alpn.clone()),
+            })),
             #[allow(unreachable_patterns)]
             _ => bail!(
-                "This side's backend is not available in this build (rebuild with the matching cargo feature; only the imap, msgraph, dav, gpeople and gcal backends exist for now)"
+                "This side's backend is not available in this build (rebuild with the matching cargo feature; only the imap, msgraph, dav, gpeople, gcal and gmail backends exist for now)"
             ),
         }
     }
@@ -316,6 +332,18 @@ pub struct MsgraphAccount {
 pub struct GoogleAccount {
     /// The OAuth 2.0 bearer token, as the configured command printed it.
     pub token: SecretString,
+    /// The TLS handle, ALPN folded in.
+    pub tls: Tls,
+}
+
+/// A resolved Gmail endpoint.
+#[cfg(feature = "gmail")]
+#[derive(Clone)]
+pub struct GmailAccount {
+    /// The OAuth 2.0 bearer token, as the configured command printed it.
+    pub token: SecretString,
+    /// The mailbox owner, `me` for the authenticated user.
+    pub user_id: String,
     /// The TLS handle, ALPN folded in.
     pub tls: Tls,
 }

@@ -39,7 +39,7 @@
 - **TOML configuration** with multi-account support, and **JSON** output via `--json`, described by `neverest json-schema`
 
 > [!TIP]
-> Neverest is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support: CardDAV and CalDAV need `dav`, Microsoft Graph mail, contacts and calendars need `msgraph`, Google contacts `gpeople` and Google calendars `gcal`. The default feature set is declared in [Cargo.toml](./Cargo.toml). JMAP and Gmail sources configure but have no backend yet.
+> Neverest is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support: CardDAV and CalDAV need `dav`, Microsoft Graph mail, contacts and calendars need `msgraph`, Google contacts `gpeople`, Google calendars `gcal` and Gmail `gmail`. The default feature set is declared in [Cargo.toml](./Cargo.toml). JMAP sources configure but have no backend yet.
 >
 > The default `vendored` feature builds SQLite from source; leave it out (`--no-default-features --features …`) to link the system one.
 

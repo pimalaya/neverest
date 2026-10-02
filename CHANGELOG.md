@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-02
+
 ### Added
 
 - Added Microsoft Graph contacts, the `msgraph-contacts` backend: the user's contact folders sync as address books, the default Contacts folder as `contacts`.
@@ -46,7 +48,9 @@ Neverest 0.2 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI,
 
 - Added the local **pimdir store**, the single local copy an app reads.
 
-  One store per account at `neverest/<account>/` under the platform's state location (`$XDG_STATE_HOME` on Linux and the BSDs, `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows), overridable with `store.root`: a SQLite index beside a content-addressed blob directory. Its presence is what says the account is initialized.
+  One store per account at `neverest/<account>/` under the platform's state location, overridable with `store.root`: a SQLite index beside a content-addressed blob directory. Its presence is what says the account is initialized.
+
+  The state location is `$XDG_STATE_HOME` on Linux and the BSDs, `~/Library/Application Support` on macOS and `%LOCALAPPDATA%` on Windows.
 
   Every collection is grouped under the account that syncs it and carries a display name, so a frontend reads `Work` where the id says `caldav/ED99C7C8`. Every item carries a sort key and a typed summary row, so a collection lists in its natural order without reading a body.
 
@@ -166,33 +170,33 @@ Neverest 0.2 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI,
 
 ### Changed
 
-- **BREAKING**: the sync engine runs on the [io-pimdir](https://github.com/pimalaya/io-pimdir) engine instead of a hand-rolled three-way diff.
+- **BREAKING**: moved the sync onto the [io-pimdir](https://github.com/pimalaya/io-pimdir) engine, replacing a hand-rolled three-way diff.
 
   An account's sources are the sources of one shared collection, so cross-source propagation of items, flags and deletions falls out of the shared hub. The store services the engine's storage seam; neverest's driver answers the remote.
 
-- **BREAKING**: `left` and `right` are gone, replaced by the `sources` and `targets` tables and the `one-way` flag.
+- **BREAKING**: replaced `left` and `right` with the `sources` and `targets` tables and the `one-way` flag.
 
   They are refused at load in any form, naming what declares the direction they never could.
 
-- **BREAKING**: the sync vocabulary is kind-neutral, turning a mail sync into a generic PIM sync.
+- **BREAKING**: made the sync vocabulary kind-neutral, turning a mail sync into a generic PIM sync.
 
   Everything above the backend seam speaks collections and items rather than folders and messages. The `folder` and `message` tables became `collection` and `item`, and so did the per-source permission tables.
 
   `-f` / `--include-folder`, `--exclude-folder` and `--all-folders` became `-m` / `--include-collection`, `--exclude-collection` and `--all-collections`.
 
-- **BREAKING**: every `--json` key is camelCase, and `-o json` is now `--json`.
+- **BREAKING**: switched every `--json` key to camelCase, and replaced `-o json` with `--json`.
 
   camelCase matches the wire formats the endpoints speak and keeps every key reachable by dot access in jq, which neither `outstanding_conflicts` nor `message-id` was. TOML keys stay kebab-case.
 
-- **BREAKING**: `collection.filter` belongs to the source it filters rather than to the account.
+- **BREAKING**: moved `collection.filter` from the account to the source it filters.
 
   An `include = ["INBOX"]` means nothing to a contacts source, so filters are asymmetric: a collection may be synced on one source and skipped on another.
 
-- **BREAKING**: the SMTP submission channel belongs to the source it completes.
+- **BREAKING**: moved the SMTP submission channel onto the source it completes.
 
   Written `sources.<name>.smtp.*`, or `smtp.*` under an account whose mail backend is the sugar. Two channels are refused at load rather than resolved by configuration order.
 
-- **BREAKING**: per-source permissions are enforced per operation.
+- **BREAKING**: enforced per-source permissions per operation.
 
   They map onto the engine's per-kind push rights one to one, and a forbidden kind stays pending while the others propagate. A tightened block takes effect now where it previously did not.
 
@@ -200,37 +204,37 @@ Neverest 0.2 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI,
 
   The positional `<account>` became an optional `-a` / `--account <NAME>`, falling back to the entry marked `default = true`.
 
-- **BREAKING**: `check` and `init` print one payload rather than a run of prose lines.
+- **BREAKING**: made `check` and `init` print one payload rather than a run of prose lines.
 
   Separate messages meant several JSON documents on stdout and nothing a parser could read.
 
-- Every `server` accepts a bare authority, port included, as well as a full URL.
+- Made every `server` accept a bare authority, port included, as well as a full URL.
 
   An authority takes the backend's default scheme, so `posteo.de:8843` resolves rather than reaching a backend hostless.
 
-- Every configured secret resolves once per run instead of once per opened connection.
+- Resolved every configured secret once per run instead of once per opened connection.
 
   A `password.command` used to be spawned inside the connection layer, so one source at `-j 4` ran it four times before its first request. A run now resolves them up front, memoizing identical commands.
 
   A credential that fails resolves against its own endpoint rather than the account, so a stale calendar entry no longer leaves mail unsynced. Nothing is logged but the command and its duration.
 
-- The configuration wizard asks for a single input, an email address, and derives the account name from its domain.
+- Reduced the configuration wizard to a single input, an email address, deriving the account name from its domain.
 
   Discovery runs every mechanism in parallel (provider rules, PACC, Thunderbird Autoconfiguration, RFC 6186 SRV, RFC 6764 DAV) under a deadline, and every reachable service is proposed.
 
   Only backends compiled into the running build are offered, and only the SASL mechanisms the server advertises.
 
-- `neverest configure` generates an account and never edits one.
+- Made `neverest configure` generate an account and never edit one.
 
   It appends the generated `[accounts.<name>]` table as plain text, so comments, ordering and hand-written formatting survive. The name is suffixed until free, and the account claims `default` only when no other does.
 
   `--json` or a redirected stdout prints the account and touches no file, so `neverest configure > config.toml` works. Editing one is a job for your editor, against [config.sample.toml](./config.sample.toml).
 
-- The IMAP and SMTP `alpn` fields are optional rather than defaulted in place, so io-imap and io-smtp own their own default.
+- Made the IMAP and SMTP `alpn` fields optional rather than defaulted in place, so io-imap and io-smtp own their default.
 
   The SMTP channel therefore offers the `smtp` ALPN token (RFC 7595) where it offered none. Set `smtp.alpn = []` to restore the old behaviour.
 
-- Every remote is a cargo feature: `imap`, `msgraph`, `dav` (CardDAV and CalDAV together), plus `smtp`.
+- Put every remote behind a cargo feature: `imap`, `msgraph`, `dav` (CardDAV and CalDAV together), plus `smtp`.
 
   All ship in the default set except `msgraph`. Every source config parses in every build, and opening a backend that was not compiled in reports it at runtime.
 
@@ -264,21 +268,28 @@ Neverest 0.2 is a full rewrite on top of the I/O-free `io-*` ecosystem. The CLI,
 
 ## [1.0.0-beta] - 2024-04-15
 
-This version has been yanked, use the [0.2.0] instead.
+This version has been yanked. Use [0.2.0] instead.
 
 ### Added
 
 - Added `--debug` as an alias for `RUST_LOG=debug`.
+
 - Added `--trace` as an alias for `RUST_LOG=trace`.
-- Added notes about `--debug` and `--trace` when error occurs.
+
+- Added notes about `--debug` and `--trace` when an error occurs.
+
 - Added `left|right.folder.aliases` to define custom folder aliases.
 
 ### Changed
 
 - Replaced `anyhow` by [`color-eyre`](https://crates.io/crates/color-eyre) for better error management.
+
 - Replaced `log` by [`tracing`](https://crates.io/crates/tracing) for better log management.
+
 - Renamed `folder.filter` to `folder.filters` in order to match lib types.
+
 - Renamed `envelope.filter` to `envelope.filters` in order to match lib types.
+
 - Renamed `check` command to `doctor`.
 
 ## [0.1.0] - 2024-04-10
@@ -287,7 +298,8 @@ This version has been yanked, use the [0.2.0] instead.
 
 - Initiated the project from [Himalaya CLI](https://github.com/pimalaya/himalaya).
 
-[Unreleased]: https://github.com/pimalaya/neverest/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/pimalaya/neverest/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/pimalaya/neverest/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/pimalaya/neverest/compare/v0.1.0...v0.2.0
 [1.0.0-beta]: https://github.com/pimalaya/neverest/compare/v0.1.0...v1.0.0-beta
 [0.1.0]: https://github.com/pimalaya/neverest/compare/root...v0.1.0

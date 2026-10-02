@@ -77,9 +77,7 @@ provision() {
             [\"x:NetworkListener/set\",
               {\"accountId\":\"$acc\",\"update\":{\"$imaps_id\":{\"useTls\":false,\"tlsImplicit\":false}}},\"2\"],
             [\"x:Imap/set\",
-              {\"accountId\":\"$acc\",\"update\":{\"singleton\":{\"allowPlainTextAuth\":true}}},\"3\"],
-            [\"x:Action/set\",
-              {\"accountId\":\"$acc\",\"create\":{\"r1\":{\"@type\":\"ReloadSettings\"}}},\"4\"]
+              {\"accountId\":\"$acc\",\"update\":{\"singleton\":{\"allowPlainTextAuth\":true}}},\"3\"]
           ]
         }" \
         "http://localhost:${admin_port}/jmap/" |

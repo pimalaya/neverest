@@ -19,10 +19,9 @@
 #          plain (useTls = false, tlsImplicit = false) so the test can
 #          talk to it without TLS
 #        - x:Imap/set       set allowPlainTextAuth = true
-#        - x:Action/set     trigger ReloadSettings
-#   5. Restart the container so the now-plain listener rebinds. The
-#      ReloadSettings action persists the config but doesn't
-#      re-open sockets.
+#   5. Restart the container so it reads the stored settings and the
+#      now-plain listener rebinds. No ReloadSettings action: the restart
+#      applies them, and current v0.16 images fail its validation.
 #
 # Host port mapping:
 #   8080 → admin HTTP (JMAP + webadmin at /admin)
@@ -112,11 +111,7 @@ curl -fsS -u "admin:${ADMIN_PASS}" \
         [\"x:Imap/set\",
           {\"accountId\":\"$acc\",\"update\":{
             \"singleton\":{\"allowPlainTextAuth\":true}
-          }},\"3\"],
-        [\"x:Action/set\",
-          {\"accountId\":\"$acc\",\"create\":{
-            \"r1\":{\"@type\":\"ReloadSettings\"}
-          }},\"4\"]
+          }},\"3\"]
       ]
     }" \
     "http://localhost:${ADMIN_PORT}/jmap/" |

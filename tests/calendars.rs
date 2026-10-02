@@ -164,7 +164,7 @@ fn disjoint_edits_on_two_calendar_endpoints_merge_into_one_event() {
     // And the merged body is one event, not one per contributor.
     let items = store_items(&state, MERGE_CAL);
     assert_eq!(
-        items.matches(r#""link_id""#).count(),
+        items.matches(r#""linkId""#).count(),
         1,
         "one identity is one item; store held:\n{items}",
     );
@@ -308,11 +308,11 @@ fn a_recurring_series_and_its_override_stay_one_item_through_a_merge() {
     // keyed by that UID, not one per component.
     let items = store_items(&state, SERIES_CAL);
     assert!(
-        items.contains(r#""link_id":"series-1""#),
+        items.contains(r#""linkId":"series-1""#),
         "the series is keyed by its UID; store held:\n{items}",
     );
     assert_eq!(
-        items.matches(r#""link_id""#).count(),
+        items.matches(r#""linkId""#).count(),
         1,
         "a series and its override are ONE item; store held:\n{items}",
     );
@@ -350,7 +350,7 @@ fn a_recurring_series_and_its_override_stay_one_item_through_a_merge() {
 
     let items = store_items(&state, SERIES_CAL);
     assert_eq!(
-        items.matches(r#""link_id""#).count(),
+        items.matches(r#""linkId""#).count(),
         1,
         "the merge kept one item rather than minting one per component; store \
          held:\n{items}",

@@ -324,11 +324,11 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
 
     let items = store_items(&state, BIND_BOOK);
     assert!(
-        items.contains(r#""link_id":"card-1""#) && !items.contains("dup:"),
+        items.contains(r#""linkId":"card-1""#) && !items.contains("dup:"),
         "one identity is one item; store held:\n{items}",
     );
     assert_eq!(
-        items.matches(r#""link_id""#).count(),
+        items.matches(r#""linkId""#).count(),
         1,
         "and only one; store held:\n{items}",
     );

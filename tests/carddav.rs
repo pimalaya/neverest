@@ -127,7 +127,7 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
 
     let items = store_items(&state, ACCOUNT, BOOK);
     assert!(
-        items.contains(r#""link_id":"card-1""#) && items.contains(r#""link_id":"card-2""#),
+        items.contains(r#""linkId":"card-1""#) && items.contains(r#""linkId":"card-2""#),
         "both cards landed, keyed by their UID; store held:\n{items}",
     );
     assert!(
@@ -167,7 +167,7 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
 
     let live = store_items(&state, ACCOUNT, BOOK);
     assert!(
-        !live.contains(r#""link_id":"card-2""#),
+        !live.contains(r#""linkId":"card-2""#),
         "the deleted card left the live listing; store held:\n{live}",
     );
     let retained = pimdir(
@@ -176,7 +176,7 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
         &["item", "list", &collection(BOOK), "--retained", "--json"],
     );
     assert!(
-        retained.contains(r#""link_id":"card-2""#),
+        retained.contains(r#""linkId":"card-2""#),
         "the deleted card is retained, not lost; retained listing:\n{retained}",
     );
 

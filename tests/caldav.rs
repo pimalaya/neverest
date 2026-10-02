@@ -101,7 +101,7 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
 
     let items = store_items(&state, COLLECTION);
     assert!(
-        items.contains(r#""link_id":"event-1""#) && items.contains(r#""link_id":"event-2""#),
+        items.contains(r#""linkId":"event-1""#) && items.contains(r#""linkId":"event-2""#),
         "both events landed, keyed by their UID; store held:\n{items}",
     );
     assert!(
@@ -143,7 +143,7 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
 
     let live = store_items(&state, COLLECTION);
     assert!(
-        !live.contains(r#""link_id":"event-2""#),
+        !live.contains(r#""linkId":"event-2""#),
         "the deleted event left the live listing; store held:\n{live}",
     );
     let retained = pimdir(
@@ -151,7 +151,7 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
         &["item", "list", COLLECTION, "--retained", "--json"],
     );
     assert!(
-        retained.contains(r#""link_id":"event-2""#),
+        retained.contains(r#""linkId":"event-2""#),
         "the deleted event is retained, not lost; retained listing:\n{retained}",
     );
 

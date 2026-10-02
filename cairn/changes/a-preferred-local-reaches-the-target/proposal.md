@@ -7,7 +7,7 @@ created: 2026-10-02
 
 # A `--prefer-local` resolution reaches the target
 
-Self-contained: a session with no prior context can take it from here.
+Self-contained: a session with no prior context can take it from here. Reported as https://github.com/pimalaya/neverest/issues/31.
 
 ## Why
 

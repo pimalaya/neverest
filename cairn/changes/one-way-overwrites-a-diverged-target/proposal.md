@@ -7,7 +7,7 @@ created: 2026-10-02
 
 # A one-way account overwrites a diverged target
 
-Self-contained: a session with no prior context can take it from here.
+Self-contained: a session with no prior context can take it from here. Reported as https://github.com/pimalaya/neverest/issues/30.
 
 ## Why
 

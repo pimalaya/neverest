@@ -958,3 +958,20 @@ A handle SHALL be the Gmail message id, stable across labels. Enumeration SHALL 
 A delete from a label SHALL remove that label (from `INBOX` it archives), a move SHALL swap two labels in one modify, and only a delete from `TRASH` SHALL delete permanently. An added message SHALL go through `messages.import`, and an answered id that does not exist SHALL be re-found through history by `Message-ID` rather than trusted. A system label SHALL NOT be created or deleted.
 
 Auth SHALL be a bearer access token only, as for every other HTTP source.
+
+### Requirement: Every source declares its capabilities before the drain
+At every run, before it drains an action, neverest SHALL declare each source it runs in the store (pimdir STORAGE §15.6): every Annex B capability of the source's kind, from its backend and its configured rights alone, `none` with the reason. A right the configuration withholds SHALL be `none`; a one-way source SHALL support no write. A JMAP source stays undeclared.
+
+#### Scenario: A source is declared with no network
+- **GIVEN** a Graph source whose token command fails
+- **WHEN** neverest runs
+- **THEN** the source's declaration is in the store before the credential is read
+
+### Requirement: An intent is performed by the source it names
+A `submit` SHALL be sent by the source its payload names, and left pending for another run when it names a source this run does not perform.
+
+### Requirement: A sent copy is filed once sent
+A `submit` asking for `copy` SHALL file the message in that collection only after the send succeeds: natively where the provider files sent mail itself (Gmail, Graph), otherwise by replacing the intent with an `add` of the message, `\Seen` set, drained in the same run (pimdir STORAGE §15.5, Annex B.2).
+
+### Requirement: Google Calendar notifies as the resource asks
+An update SHALL notify the attendees only when the resource is scheduled (pimdir Annex B.1); a delete SHALL notify them when the event has attendees.

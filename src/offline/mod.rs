@@ -19,6 +19,7 @@ use io_pimdir::{
     client::PimdirSourceStore, coroutine::*, hub::PimdirSourceId, remote::PimdirRemote,
 };
 
+pub mod capability;
 pub mod driver;
 pub mod pipe;
 pub mod prof;

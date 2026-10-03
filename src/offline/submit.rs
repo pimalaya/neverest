@@ -96,6 +96,21 @@ impl SubmitIntent {
         Ok(meta)
     }
 
+    /// The collection the producer asked the sent copy filed in, best
+    /// effort.
+    pub fn copy(&self) -> Option<String> {
+        serde_json::from_str::<SubmitMeta>(&self.payload)
+            .ok()
+            .and_then(|meta| meta.copy)
+    }
+
+    /// The source the producer named to perform it, best effort.
+    pub fn source(&self) -> Option<String> {
+        serde_json::from_str::<SubmitMeta>(&self.payload)
+            .ok()
+            .and_then(|meta| meta.source)
+    }
+
     /// The subject for the report, best effort.
     ///
     /// An intent whose payload is too broken to decode still has to be
@@ -125,6 +140,14 @@ pub struct SubmitMeta {
     /// The subject, for the report only.
     #[serde(default)]
     pub subject: Option<String>,
+    /// The source named to perform it (pimdir STORAGE §15.6), absent from
+    /// a producer predating the field.
+    #[serde(default)]
+    pub source: Option<String>,
+    /// The collection a copy of the sent message is filed in (pimdir
+    /// STORAGE Annex B.2), none when the producer asked for none.
+    #[serde(default)]
+    pub copy: Option<String>,
 }
 
 /// How a failed submission is dispositioned.

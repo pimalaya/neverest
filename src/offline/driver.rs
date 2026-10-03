@@ -72,7 +72,7 @@ use crate::{
     item::flag::Flag,
     kind::{Kind, LinkId, merge::Merged},
     offline::{
-        pipe,
+        capability, pipe,
         remote::{
             BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, RefusedCreate, RejectedPush,
             hydrate_batch, resolve_kind, wire_name,
@@ -374,6 +374,12 @@ pub fn run(
     // NOTE: before any endpoint is opened.
     state.check_mode(&mode)?;
 
+    // NOTE: before any credential is read, a declaration coming from the
+    // configuration alone (pimdir STORAGE §15.6).
+    if !dry_run {
+        declare(&work_dir, &account_name, account_config, &mode)?;
+    }
+
     // NOTE: every credential the run needs, read once rather than per
     // connection.
     let account = Account::resolve(account_config)?;
@@ -456,6 +462,29 @@ pub fn run(
 
     crate::offline::prof::report();
     Ok(report)
+}
+
+/// Declares what every source of the account can do (pimdir STORAGE §15.6),
+/// replacing what an earlier run or configuration declared.
+fn declare(dir: &Path, account: &str, config: &AccountConfig, mode: &AccountMode) -> Result<()> {
+    let sources = config.sources()?;
+    let first = mode
+        .sources
+        .first()
+        .expect("a validated account has at least one source");
+    let mut store = open_store(dir, first, account)?;
+
+    for name in &mode.sources {
+        let Some(source) = sources.get(name) else {
+            continue;
+        };
+        let capabilities = capability::declaration(source, mode.one_way);
+        store
+            .declare(name, &capabilities)
+            .with_context(|| format!("Declare the capabilities of source {name}"))?;
+    }
+
+    Ok(())
 }
 
 /// The sources this run touches: all of them, or those `--source` named.
@@ -3182,10 +3211,31 @@ fn drain_submits(
             return;
         }
     };
+    // NOTE: an intent naming another source is that source's to send, on its
+    // own run (pimdir STORAGE §15.6); one naming none predates the field.
+    let sender = sending_source(account_config, sides);
+    let intents: Vec<_> = intents
+        .into_iter()
+        .filter(|intent| {
+            intent
+                .source()
+                .is_none_or(|source| Some(&source) == sender.as_ref())
+        })
+        .collect();
     if intents.is_empty() {
         return;
     }
     info!("performing {} queued submit intent(s)", intents.len());
+    // NOTE: a provider filing what it sends (Gmail, Graph) answers a copy
+    // by itself; any other gets it as an `add`, queued once sent (pimdir
+    // STORAGE Annex B.2).
+    let files_copy = sender.as_ref().is_some_and(|sender| {
+        account_config
+            .sources()
+            .ok()
+            .and_then(|sources| sources.get(sender).map(capability::files_sent_copy))
+            .unwrap_or(false)
+    });
 
     #[cfg(any(feature = "smtp", feature = "msgraph"))]
     {
@@ -3195,11 +3245,25 @@ fn drain_submits(
         };
 
         let mut sent = 0;
+        let mut copies = 0;
         for intent in &intents {
             let subject = intent.subject();
             let entry = match submit::send_one(&mut channel, blobs, intent) {
                 Ok(()) => {
-                    match store.drop_action(intent.id) {
+                    let copy = intent.copy().filter(|_| !files_copy);
+                    let acknowledged = match &copy {
+                        Some(collection) => {
+                            let action = PimdirAction::Add {
+                                link_id: None,
+                                flags: PimdirFlags::from_iter(["\\Seen"]),
+                                object: intent.object.clone(),
+                            };
+                            store.replace_action(intent.id, "neverest", collection, &action)
+                        }
+                        None => store.drop_action(intent.id),
+                    };
+                    copies += usize::from(copy.is_some());
+                    match acknowledged {
                         Ok(true) => {}
                         Ok(false) => warn!(
                             "submit intent #{} vanished from the queue before its acknowledgement",
@@ -3243,11 +3307,22 @@ fn drain_submits(
         if sent > 0 {
             info!("submitted {sent} of {} queued intent(s)", intents.len());
         }
+        if copies > 0 {
+            drain_queues(store, report);
+        }
     }
 
     #[cfg(not(any(feature = "smtp", feature = "msgraph")))]
     {
-        let _ = (account_config, account, sides, blobs, store, report);
+        let _ = (
+            account_config,
+            account,
+            sides,
+            blobs,
+            store,
+            report,
+            files_copy,
+        );
         warn!(
             "this build has no send channel (needs the `smtp` or the `msgraph` cargo feature), {} submit intent(s) stay pending",
             intents.len()
@@ -3297,6 +3372,20 @@ fn sweep_retained(
         objects: collected.objects,
         bytes: collected.bytes,
     });
+}
+
+/// The source whose channel a run over `sides` sends through, found as
+/// [`open_send_channel`] picks it.
+fn sending_source(account_config: &AccountConfig, sides: &[&mut SourceCtx]) -> Option<String> {
+    let configured = account_config.sources().ok()?;
+    sides
+        .iter()
+        .find(|ctx| {
+            configured
+                .get(&ctx.name)
+                .is_some_and(|source| source.smtp.is_some() || source.sends_natively())
+        })
+        .map(|ctx| ctx.name.clone())
 }
 
 /// Resolves the account's send channel: an `smtp` table, else a native send.

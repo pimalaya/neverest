@@ -33,13 +33,14 @@ use io_gcal::v3::{
     rest::{
         calendar_list::list::GcalCalendarListListParams,
         events::{
-            GcalEvent, GcalEventStatus, import::GcalEventImportParams,
+            GcalEvent, GcalEventStatus, GcalSendUpdates, import::GcalEventImportParams,
             insert::GcalEventInsertParams, list::GcalEventsListParams,
             update::GcalEventUpdateParams,
         },
     },
     send::{GCAL_API_BASE, GcalSendOutput},
 };
+use io_pimdir::summary::calendar;
 use log::{debug, trace, warn};
 use pimalaya_stream::{
     stream::{Stream, TlsConnectOptions},
@@ -381,6 +382,12 @@ impl GcalClient {
         check_revision(id, &events, if_match)?;
         let current = events.remove(0);
 
+        // NOTE: the attendees are notified unless the resource marks them
+        // for the client or for nobody (pimdir STORAGE Annex B.1).
+        let send_updates = match calendar::scheduled(&ical) {
+            true => GcalSendUpdates::All,
+            false => GcalSendUpdates::None,
+        };
         let event = projected.merge(&current);
         let updated = self
             .op(|gcal| {
@@ -388,7 +395,10 @@ impl GcalClient {
                     calendar,
                     id,
                     &event,
-                    &GcalEventUpdateParams::default(),
+                    &GcalEventUpdateParams {
+                        send_updates: Some(send_updates),
+                        ..Default::default()
+                    },
                     current.etag.as_deref(),
                 )
             })
@@ -403,8 +413,15 @@ impl GcalClient {
         let events = self.series(calendar, id)?;
         check_revision(id, &events, if_match)?;
         let etag = events.first().and_then(|event| event.etag.clone());
+        let send_updates = match events
+            .first()
+            .is_some_and(|event| !event.attendees.is_empty())
+        {
+            true => GcalSendUpdates::All,
+            false => GcalSendUpdates::None,
+        };
 
-        self.op(|gcal| gcal.event_delete(calendar, id, None, etag.as_deref()))
+        self.op(|gcal| gcal.event_delete(calendar, id, Some(send_updates), etag.as_deref()))
             .with_context(|| format!("Delete event {id} of {calendar} error"))?;
         Ok(())
     }

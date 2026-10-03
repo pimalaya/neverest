@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Added capability declarations (pimdir draft-03, STORAGE §15.6): every run, before the queue drains, each mail, contacts and calendar source declares in the store what it can push or perform, from its backend and its configured rights alone, so himalaya, cardamum and calendula refuse an unsupported action before it is queued. JMAP sources stay undeclared.
+- Added the sent copy: a `submit` asking for `copy` files the message there once sent, by an `add` queued in the same run, unless the provider files sent mail itself (Gmail, Graph). A failed send files no copy.
+
+### Changed
+
+- Changed a `submit` naming its sending source to be sent by that source alone.
+- Changed Google Calendar updates and deletes to notify the attendees (`sendUpdates`): an update when the event leaves them to the server (`SCHEDULE-AGENT`), a delete when the event has attendees.
+
 ## [0.3.0] - 2026-10-02
 
 ### Added

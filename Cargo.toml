@@ -53,7 +53,7 @@ io-http = { version = "0.5", default-features = false, optional = true }
 io-imap = { version = "0.7", default-features = false, optional = true }
 io-msgraph = { version = "0.4.4", default-features = false, optional = true }
 io-pim-discovery = { version = "0.8", default-features = false, features = ["pacc", "autoconfig", "rfc6186"] }
-io-pimdir = { version = "0.5.1", default-features = false, features = ["client"] }
+io-pimdir = { version = "0.6", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }
 jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
 io-smtp = { version = "0.5", default-features = false, optional = true }

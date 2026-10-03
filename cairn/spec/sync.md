@@ -373,7 +373,7 @@ An `msgraph` source SHALL open protocol-direct over io-msgraph (never through a 
 For **calendars** (`msgraph-calendar`): the user's calendars keyed by id and named by name, events as `text/calendar` through io-msgraph's `ical` projection. Graph's event delta only runs over a calendar view, a time window, and an event leaving a sliding window would read as deleted and be deleted on every other source, so the enumeration SHALL list each calendar's lone events and series masters in full every run, with no window, the master's `changeKey` as the revision and removals reported by absence. A series SHALL be one item, read with its exceptions from the instances of its own date range (five years past an open-ended start), its cancelled occurrences as EXDATEs. The UID SHALL ride the projection's stash extended property, a create whose UID did not survive being deleted again and refused; an update or delete SHALL be refused when the master's `changeKey` moved. Only the series master is written: an exception edited locally does not push, and an edit Graph makes to one occurrence alone is seen once the master's `changeKey` moves.
 
 
-For **mail**: folders listed two levels deep (`Parent/Child` naming), enumeration through the messages delta query carrying the `@odata.deltaLink` as the engine's opaque checkpoint (HTTP 410 = expired link, restarting a fresh full round; any other failure surfaces), the `Meta` tier served from the cached delta rows (`mid:`/`alt:` link ids, meta v1), the `Full` tier from the raw MIME content streamed into the blob store. Flags map to the IANA wire spellings (`isRead` = `\Seen`, a flagged follow-up = `\Flagged`, `isDraft` = `\Draft`). Push scope is honest: flag changes push through `message_update` and deletes through `message_delete`; appends, moves and content updates are rejected (pull-only) and documented.
+For **mail**: folders listed two levels deep (`Parent/Child` naming), enumeration through the messages delta query carrying the `@odata.deltaLink` as the engine's opaque checkpoint (HTTP 410 = expired link, restarting a fresh full round; any other failure surfaces), the `Meta` tier served from the cached delta rows (`mid:`/`alt:` link ids, meta v1), the `Full` tier from the raw MIME content streamed into the blob store. Flags map to the IANA wire spellings (`isRead` = `\Seen`, a flagged follow-up = `\Flagged`, `isDraft` = `\Draft`). Push scope is honest: flag changes push through `message_update`, deletes through `message_delete`, moves and copies as the requirement "Graph mail moves, copies and adds drafts" says; an append lands in Drafts only, and content updates are rejected and documented.
 
 Auth SHALL be a bearer access token only, resolved through the standard secret-command idiom (`auth.token.raw` / `auth.token.command`) once per run with every other credential; neverest SHALL NOT run any OAuth flow itself (no device sign-in, no client credentials, no token persistence): acquiring and refreshing the token is delegated to an external command, typically ortie. The token SHALL carry the scopes the declared domains need, and the wizard SHALL name them per domain rather than let the first run fail on a bare 403. No token is ever logged.
 
@@ -983,3 +983,18 @@ Scans and fetches MAY run over several connections, but no two collections of on
 - **GIVEN** a message in one IMAP mailbox and four connections
 - **WHEN** a move to another mailbox is staged and the account syncs, several times back and forth
 - **THEN** the message is held once, on the server and in the store, after every run
+
+### Requirement: Graph mail moves, copies and adds drafts
+An `msgraph` source SHALL relocate a move's remove with `message_move` and SHALL deliver a create carrying an origin (pimdir SYNC §4) by `message_copy` from it, accepted under the id the copy answers with. Graph message ids change on a move or a copy, and immutable ids SHALL NOT be asked for, which would change the ids stores already bind: like an IMAP `MOVE`, a relocation reports no handle, and the target's next enumeration lists the member under its new id, whose fetch lands the pending create by its `Message-ID` (pimdir SYNC §6). A failed copy SHALL be rejected rather than uploaded.
+
+Graph creates every MIME message as a draft, so an append SHALL land in the well-known Drafts folder only, through `message_create_mime`, its `\Seen` and `\Flagged` patched in after, and SHALL be rejected anywhere else, never filed there as a draft. The source declares `mail.message.move` and `mail.message.copy` full, `mail.message.add` partial ("Drafts only") and `mail.flags.draft` partial, Graph setting it on what it creates in Drafts and never changing it.
+
+#### Scenario: A message bounced between the Inbox and a folder
+- **GIVEN** a message in a Graph Inbox
+- **WHEN** a move to another folder is staged and the account syncs, back and forth, then a move to Deleted Items
+- **THEN** after every run the message is held once on the server and once in the store, under the same `seq`
+
+#### Scenario: A draft staged in Drafts
+- **GIVEN** a message added to Drafts with `\Draft` and `\Seen`
+- **WHEN** the account syncs
+- **THEN** Graph holds it once in Drafts, read, the item bound to its id, and the same add into another folder is a rejected push that files nothing

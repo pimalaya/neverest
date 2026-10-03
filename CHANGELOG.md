@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- Added Microsoft Graph mail writes through the store: a move pushes through Graph's own move, a copy through its copy, and an added message lands in Drafts, the one folder where Graph can create it, Graph filing every uploaded message as a draft. An add into another folder is rejected rather than filed there as a draft. Graph gives a moved or copied message a new id, and the store follows it.
 - Added the `wizard` cargo feature, on by default, gating the interactive configuration: the `configure` command and the offer a first run makes. A build without it drops the prompts and the dependencies only they use, and a missing configuration points at the documented sample instead.
 - Added capability declarations (pimdir draft-03, STORAGE §15.6): every run, before the queue drains, each mail, contacts and calendar source declares in the store what it can push or perform, from its backend and its configured rights alone, so himalaya, cardamum and calendula refuse an unsupported action before it is queued. JMAP sources stay undeclared.
 - Added the sent copy: a `submit` asking for `copy` files the message there once sent, by an `add` queued in the same run, unless the provider files sent mail itself (Gmail, Graph). A failed send files no copy.

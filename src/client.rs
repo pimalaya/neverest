@@ -32,7 +32,7 @@ use crate::gpeople::client::GpeopleClient;
 #[cfg(feature = "imap")]
 use crate::imap::client::ImapClient;
 #[cfg(feature = "msgraph")]
-use crate::msgraph::client::GraphClient;
+use crate::msgraph::client::{GraphClient, GraphKind};
 use crate::{
     account::{SourceAccount, SourceAccountBackend},
     item::{collection::Collection, flag::Flag, flag::FlagOp, summary::ItemSummary},
@@ -359,7 +359,7 @@ impl Client {
     /// `link`'s hint recovers the UID on IMAP servers lacking UIDPLUS and
     /// is the `UID` a DAV href is built from, while its mint keeps a second
     /// copy off the href its twin holds. Graph assigns its own ids, and takes
-    /// contacts only, its messages being pull-only.
+    /// a message into Drafts only, creating every MIME message as a draft.
     pub fn add_item_stream(
         &mut self,
         collection: &str,
@@ -374,7 +374,7 @@ impl Client {
                 .add_message_stream(collection, flags, source, len, link.hint)
                 .map(|id| WrittenItem { id, revision: None }),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.add_item_stream(collection, source),
+            Client::Msgraph(c) => c.add_item_stream(collection, flags, source),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.add_item_stream(collection, source, link),
             #[cfg(feature = "gpeople")]
@@ -468,13 +468,26 @@ impl Client {
         }
     }
 
-    /// Moves an item set from `from` to `to`. Pull-only on Graph (rejected).
+    /// Copies one item from `from` to `to` server side, returning the copy,
+    /// or `None` for a backend that uploads the body instead.
+    ///
+    /// Graph mail copies: an upload would land a draft, and Drafts only.
+    #[allow(unused_variables)]
+    pub fn copy_item(&mut self, from: &str, to: &str, id: &str) -> Result<Option<WrittenItem>> {
+        match self {
+            #[cfg(feature = "msgraph")]
+            Client::Msgraph(c) if c.kind() == GraphKind::Mail => c.copy_message(to, id).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// Moves an item set from `from` to `to`.
     pub fn move_items(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
         match self {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c.move_messages(from, to, ids),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(_) => bail!("Graph messages are pull-only (move not supported)"),
+            Client::Msgraph(c) => c.move_messages(to, ids),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.move_items(from, to, ids),
             #[cfg(feature = "gpeople")]

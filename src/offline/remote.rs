@@ -33,7 +33,7 @@ use io_pimdir::{
     collection::{PimdirCheckpoint, PimdirCollectionId},
     hash::PimdirHasher,
     object::PimdirHash,
-    placement::{PimdirFlags, PimdirHandle},
+    placement::{PimdirFlags, PimdirHandle, PimdirOrigin},
     remote::{
         PimdirFetchedBody, PimdirFetchedItem, PimdirPushOutcome, PimdirPushResult, PimdirRemote,
         PimdirRemoteItem, PimdirRemoteSnapshot, PimdirTier,
@@ -45,7 +45,7 @@ use log::warn;
 #[cfg(feature = "dav")]
 use crate::dav::client::is_duplicate_uid;
 use crate::{
-    client::{Client, Pool},
+    client::{Client, Pool, WrittenItem},
     item::{
         flag::{Flag, FlagOp},
         summary::ItemSummary,
@@ -164,7 +164,8 @@ pub struct RejectedPush {
     pub collection: String,
     /// The item's handle on this side.
     pub handle: String,
-    /// What the run tried: `update`, `append`, `delete`, `move`, `set flags`.
+    /// What the run tried: `update`, `append`, `copy`, `delete`, `move`,
+    /// `set flags`.
     pub action: &'static str,
     /// Why it did not land, as the backend put it.
     pub reason: String,
@@ -420,14 +421,19 @@ impl PimdirRemote for PimRemote<'_> {
                     handle,
                     link_id,
                     flags,
+                    origin,
                     object,
-                    ..
                 } => {
                     let link = link_id
                         .as_ref()
                         .map(|link| self.kind.split_link_id(link))
                         .unwrap_or_default();
-                    self.append(&collection, handle, &flags, object, link)
+                    match origin {
+                        Some(origin) => {
+                            self.copy(&collection, handle, &flags, &origin, object, link)
+                        }
+                        None => self.append(&collection, handle, &flags, object, link),
+                    }
                 }
                 PimdirChangeKind::Update {
                     handle,
@@ -857,13 +863,54 @@ impl PimRemote<'_> {
             }
         };
 
+        self.assign(collection, handle, "append", written)
+    }
+
+    /// Creates a member by server-side copy from `origin` (pimdir SYNC §4)
+    /// on a backend that copies, else by appending the stored body.
+    ///
+    /// The copy is accepted under the handle the server gives it, as an
+    /// append is. A failed copy is rejected rather than uploaded: the create
+    /// stays pending, and once the origin is gone the store offers it with
+    /// none, as an append.
+    fn copy(
+        &mut self,
+        collection: &str,
+        handle: PimdirHandle,
+        flags: &PimdirFlags,
+        origin: &PimdirOrigin,
+        object: Option<PimdirHash>,
+        link: LinkId<'_>,
+    ) -> PimdirPushResult {
+        let from = wire_name(&self.namespace, origin.collection.as_str()).to_string();
+        let copied = self
+            .pool
+            .primary()
+            .copy_item(&from, collection, origin.handle.as_str());
+
+        match copied {
+            Ok(Some(written)) => self.assign(collection, handle, "copy", written),
+            Ok(None) => self.append(collection, handle, flags, object, link),
+            Err(err) => self.reject(collection, handle, "copy", format!("{err:#}")),
+        }
+    }
+
+    /// Accepts a create under the handle the server assigned it, unless this
+    /// side already holds that handle.
+    fn assign(
+        &mut self,
+        collection: &str,
+        handle: PimdirHandle,
+        action: &'static str,
+        written: WrittenItem,
+    ) -> PimdirPushResult {
         let assigned = PimdirHandle::from(written.id);
         if !self.held.claim(collection, assigned.as_str()) {
             let reason = format!(
                 "the server answered with {}, which it already holds",
                 assigned.as_str(),
             );
-            return self.reject(collection, handle, "append", reason);
+            return self.reject(collection, handle, action, reason);
         }
 
         PimdirPushResult {

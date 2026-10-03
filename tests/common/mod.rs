@@ -44,6 +44,7 @@ use io_pimdir::{
         reader::{PimdirItem, PimdirReader},
     },
     codec::PimdirAction,
+    collection::PimdirCollectionId,
     object::PimdirObject,
     placement::PimdirFlags,
 };
@@ -122,6 +123,16 @@ impl Replica {
             .1
     }
 
+    /// Syncs the account narrowed to the collections `keys` in one run,
+    /// which must end on one of `codes`, returning the code it ended on.
+    pub fn sync_keys(&self, keys: &[&str], codes: &[i32]) -> i32 {
+        let mut args = vec!["sync", "-a", ACCOUNT, "--json"];
+        for key in keys {
+            args.extend(["-m", key]);
+        }
+        self.run(&args, codes).0
+    }
+
     /// Runs neverest on the account, which must end on one of `codes`.
     fn run(&self, args: &[&str], codes: &[i32]) -> (i32, String) {
         let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
@@ -180,6 +191,17 @@ impl Replica {
             .find(|item| item.link_id.0.contains(tag))
     }
 
+    /// Every live item of `key` whose link id contains `tag`.
+    pub fn items(&self, key: &str, tag: &str) -> Vec<PimdirItem> {
+        PimdirReader::open(self.store())
+            .expect("open the store")
+            .list_items(self.collection(key), None, 10_000)
+            .expect("list the collection")
+            .into_iter()
+            .filter(|item| item.link_id.0.contains(tag))
+            .collect()
+    }
+
     /// The body of a stored item, empty when it holds none.
     pub fn body(&self, item: &PimdirItem) -> String {
         let Some(hash) = &item.object else {
@@ -228,6 +250,15 @@ impl Replica {
     /// Stages the removal of an item.
     pub fn remove(&self, key: &str, seq: i64) {
         self.enqueue(key, PimdirAction::Remove { seq }, None);
+    }
+
+    /// Stages the move of an item from `key` into `to`.
+    pub fn move_to(&self, key: &str, seq: i64, to: &str) {
+        let action = PimdirAction::Move {
+            seq,
+            to: PimdirCollectionId(self.collection(to)),
+        };
+        self.enqueue(key, action, None);
     }
 
     /// Writes a body to the blob tree, durably, before any queue row names it.

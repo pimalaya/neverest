@@ -8,8 +8,8 @@ use io_pimdir::capability::{
     CALENDAR, CALENDAR_CANCEL, CALENDAR_OCCURRENCE_UPDATE, CALENDAR_ONLINE_MEETING, CALENDAR_REPLY,
     CALENDAR_SCHEDULING, CONTACTS, CONTACTS_CARD_COPY, CONTACTS_CARD_MOVE, MAIL,
     MAIL_FLAGS_ANSWERED, MAIL_FLAGS_DRAFT, MAIL_FLAGS_FLAGGED, MAIL_FLAGS_KEYWORDS,
-    MAIL_FLAGS_SEEN, MAIL_MESSAGE_ADD, MAIL_MESSAGE_COPY, MAIL_MESSAGE_MOVE, MAIL_MESSAGE_REMOVE,
-    MAIL_SUBMIT, MAIL_SUBMIT_COPY, PimdirCapability, PimdirSupport,
+    MAIL_FLAGS_SEEN, MAIL_MESSAGE_ADD, MAIL_MESSAGE_REMOVE, MAIL_SUBMIT, MAIL_SUBMIT_COPY,
+    PimdirCapability, PimdirSupport,
 };
 
 use crate::config::{SourceBackendConfig, SourceConfig};
@@ -132,21 +132,21 @@ fn gmail(name: &str, smtp: bool) -> Support {
 
 fn msgraph(name: &str, _smtp: bool) -> Support {
     match name {
-        MAIL_MESSAGE_ADD | MAIL_MESSAGE_COPY => (
-            PimdirSupport::None,
-            Some("Graph mail is pull-only: no append"),
-        ),
-        MAIL_MESSAGE_MOVE => (
-            PimdirSupport::None,
-            Some("Graph mail is pull-only: no move"),
+        MAIL_MESSAGE_ADD => (
+            PimdirSupport::Partial,
+            Some("Drafts only: Graph creates every MIME message as a draft"),
         ),
         MAIL_MESSAGE_REMOVE => (
             PimdirSupport::Partial,
             Some("a soft delete, out of sight, not into Deleted Items"),
         ),
-        MAIL_FLAGS_ANSWERED | MAIL_FLAGS_DRAFT => (
+        MAIL_FLAGS_ANSWERED => (
             PimdirSupport::None,
             Some("Graph takes isRead and flag only"),
+        ),
+        MAIL_FLAGS_DRAFT => (
+            PimdirSupport::Partial,
+            Some("set by Graph on what it creates in Drafts, never changed after"),
         ),
         MAIL_FLAGS_KEYWORDS => (PimdirSupport::None, Some("Graph categories are not mapped")),
         MAIL_SUBMIT => (
@@ -223,7 +223,7 @@ fn msgraph_calendar(name: &str, _smtp: bool) -> Support {
 
 #[cfg(test)]
 mod tests {
-    use io_pimdir::capability::CALENDAR_ITEM_ADD;
+    use io_pimdir::capability::{CALENDAR_ITEM_ADD, MAIL_MESSAGE_COPY, MAIL_MESSAGE_MOVE};
 
     use super::*;
     use crate::config::AccountConfig;
@@ -260,6 +260,25 @@ mod tests {
             support(&declaration, CALENDAR_ONLINE_MEETING),
             PimdirSupport::None
         );
+    }
+
+    #[test]
+    fn a_graph_mail_source_moves_copies_and_adds_drafts() {
+        let account: AccountConfig = toml::from_str("msgraph.auth.token.raw = \"token\"").unwrap();
+        let source = account.sources().unwrap().remove("msgraph").unwrap();
+        let declaration = declaration(&source, false);
+        let row = |name: &str| declaration.iter().find(|row| row.name == name).unwrap();
+
+        assert_eq!(declaration.len(), MAIL.len());
+        assert_eq!(row(MAIL_MESSAGE_MOVE).support, PimdirSupport::Full);
+        assert_eq!(row(MAIL_MESSAGE_COPY).support, PimdirSupport::Full);
+        assert_eq!(row(MAIL_MESSAGE_ADD).support, PimdirSupport::Partial);
+        assert_eq!(
+            row(MAIL_MESSAGE_ADD).detail.as_deref(),
+            Some("Drafts only: Graph creates every MIME message as a draft")
+        );
+        assert_eq!(row(MAIL_FLAGS_DRAFT).support, PimdirSupport::Partial);
+        assert_eq!(row(MAIL_FLAGS_ANSWERED).support, PimdirSupport::None);
     }
 
     #[test]

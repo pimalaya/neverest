@@ -9,14 +9,17 @@
 //! restarts a fresh full round). Folders are listed two levels deep, named
 //! `Parent/Child`; deeper nesting is not replicated.
 //!
-//! Push scope is honest: flag changes and deletes push, appends, moves and
-//! mailbox mutations are rejected, so a mirror with a Graph side propagates
-//! flags and deletions but no new message into Graph.
+//! Push scope is honest: flag changes, deletes, moves and copies push, an
+//! append lands in Drafts only (Graph creates every MIME message as a draft)
+//! and mailbox mutations are rejected.
 //!
-//! Graph message ids are mutable across folder moves (no immutable-id support
-//! yet), so a moved message surfaces as a removal plus an addition. A delta
-//! reset never changes handle identity, so no handle-space rebuild follows,
-//! unlike the IMAP UIDVALIDITY path.
+//! Graph message ids are mutable across folder moves (no immutable-id support,
+//! which would change the ids stores already bind), so a moved message is
+//! listed by its new folder under a new id. A copy reports that id; a move
+//! leaves it to the target's next enumeration, whose fetch lands the pending
+//! create by its `Message-ID`, as after an IMAP `MOVE`. A delta reset never
+//! changes handle identity, so no handle-space rebuild follows, unlike the
+//! IMAP UIDVALIDITY path.
 //!
 //! One client serves one [`GraphKind`], the way one DAV adapter serves
 //! CardDAV and CalDAV: a mail session speaks folders and messages, a
@@ -108,6 +111,8 @@ pub struct GraphClient {
     /// The delta rows of the last enumerations, keyed by collection then
     /// handle, serving the `Meta` tier without re-fetching.
     rows: HashMap<String, HashMap<String, MsgraphMessage>>,
+    /// The id of the well-known Drafts folder, resolved on the first append.
+    drafts: Option<String>,
     /// Whether the server allowed reusing the stream after the last exchange;
     /// when false the next operation reopens it.
     alive: bool,
@@ -131,6 +136,7 @@ impl GraphClient {
             tls,
             folders: HashMap::new(),
             rows: HashMap::new(),
+            drafts: None,
             alive: true,
         })
     }
@@ -234,10 +240,15 @@ impl GraphClient {
         }
     }
 
-    /// Creates an item; mail is pull-only on Graph.
-    pub fn add_item_stream(&mut self, collection: &str, source: impl Read) -> Result<WrittenItem> {
+    /// Creates an item; a message lands in Drafts only, with `flags`.
+    pub fn add_item_stream(
+        &mut self,
+        collection: &str,
+        flags: &[Flag],
+        source: impl Read,
+    ) -> Result<WrittenItem> {
         match self.kind {
-            GraphKind::Mail => bail!("Graph messages are pull-only (append not supported)"),
+            GraphKind::Mail => self.add_message(collection, flags, source),
             GraphKind::Contacts => self.add_contact(collection, source),
             GraphKind::Calendar => self.add_event(collection, source),
         }
@@ -542,6 +553,108 @@ impl GraphClient {
                 .with_context(|| format!("Update flags of {id} error"))?;
         }
         Ok(())
+    }
+
+    /// Uploads a message into the Drafts folder, then sets its flags.
+    ///
+    /// Graph creates every MIME message as a draft, so an append anywhere
+    /// else is refused rather than filed there as a draft. The upload
+    /// ignores flags, so `\Seen` and `\Flagged` are patched in after; a
+    /// failed patch is only warned about, the message being created, and the
+    /// next enumeration reports the flags it holds.
+    fn add_message(
+        &mut self,
+        mailbox: &str,
+        flags: &[Flag],
+        mut source: impl Read,
+    ) -> Result<WrittenItem> {
+        let folder = self.folder_id(mailbox)?;
+        if folder != self.drafts_id()? {
+            bail!(
+                "Graph creates every MIME message as a draft, so it appends to Drafts only, not to {mailbox}"
+            );
+        }
+
+        let mut raw = Vec::new();
+        source
+            .read_to_end(&mut raw)
+            .context("Read message to append error")?;
+        let id = self
+            .op(|client| client.message_create_mime(Some(&folder), &raw))
+            .with_context(|| format!("Create message in {mailbox} error"))?
+            .id;
+        if id.is_empty() {
+            bail!("Graph created a message in {mailbox} but named no id");
+        }
+
+        let patch = flags_patch(flags);
+        if let Err(err) = self.op(|client| client.message_update(&id, &patch)) {
+            warn!("cannot set the flags of the message created in {mailbox}: {err}");
+        }
+
+        Ok(WrittenItem { id, revision: None })
+    }
+
+    /// The id of the well-known Drafts folder, whatever its display name.
+    fn drafts_id(&mut self) -> Result<String> {
+        if let Some(id) = &self.drafts {
+            return Ok(id.clone());
+        }
+
+        let id = self
+            .op(|client| client.mail_folder_get("drafts"))
+            .context("Get the Drafts folder error")?
+            .id;
+        self.drafts = Some(id.clone());
+        Ok(id)
+    }
+
+    /// Moves messages into the folder `to`.
+    ///
+    /// Graph answers each move with the message's new id, which is only
+    /// logged: the target's next enumeration lists the message under it, and
+    /// the fetch naming it lands the move's pending create there (pimdir
+    /// SYNC §5, §6), as after an IMAP `MOVE`.
+    pub fn move_messages(&mut self, to: &str, ids: &[&str]) -> Result<()> {
+        if self.kind != GraphKind::Mail {
+            bail!(
+                "Graph {} cannot move between folders here (move not supported)",
+                self.kind.media_type()
+            );
+        }
+
+        let folder = self.folder_id(to)?;
+        for id in ids {
+            let moved = self
+                .op(|client| client.message_move(id, &folder))
+                .with_context(|| format!("Move message {id} to {to} error"))?;
+            debug!("moved message {id} to {to}, now {}", moved.id);
+        }
+        Ok(())
+    }
+
+    /// Copies a message into the folder `to`, returning the copy's id.
+    pub fn copy_message(&mut self, to: &str, id: &str) -> Result<WrittenItem> {
+        if self.kind != GraphKind::Mail {
+            bail!(
+                "Graph {} cannot copy between folders here (copy not supported)",
+                self.kind.media_type()
+            );
+        }
+
+        let folder = self.folder_id(to)?;
+        let copy = self
+            .op(|client| client.message_copy(id, &folder))
+            .with_context(|| format!("Copy message {id} to {to} error"))?;
+        if copy.id.is_empty() {
+            bail!("Graph copied message {id} to {to} but named no id");
+        }
+        debug!("copied message {id} to {to} as {}", copy.id);
+
+        Ok(WrittenItem {
+            id: copy.id,
+            revision: None,
+        })
     }
 
     /// Deletes one message by id.

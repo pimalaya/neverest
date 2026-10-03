@@ -974,7 +974,15 @@ A `submit` SHALL be sent by the source its payload names, and left pending for a
 A `submit` asking for `copy` SHALL file the message in that collection only after the send succeeds: natively where the provider files sent mail itself (Gmail, Graph), otherwise by replacing the intent with an `add` of the message, `\Seen` set, drained in the same run (pimdir STORAGE §15.5, Annex B.2).
 
 ### Requirement: Google Calendar notifies as the resource asks
-An update SHALL notify the attendees only when the resource is scheduled (pimdir Annex B.1); a delete SHALL notify them when the event has attendees.
+A new event carrying a UID SHALL be inserted with it as `iCalUID` and notify its attendees when the resource is scheduled (pimdir Annex B.1) and the account organises it (no organizer, the calendar itself or the account's address); otherwise it SHALL be imported, notifying nobody. An update SHALL notify the attendees only when the resource is scheduled; a delete SHALL notify them when the event has attendees.
+
+### Requirement: A calendar intent is performed through the provider's verbs
+Neverest SHALL perform the `calendar-reply` and `calendar-cancel` intents (pimdir STORAGE Annex B.2) at the start of each sync, one-way included, through the source the payload names, on the item that source binds: Graph through the event's `accept`, `tentativelyAccept`, `decline` and `cancel` actions with the comment, Google by answering the account's own attendee or deleting the meeting it organises, both with `sendUpdates=all`. A performed intent SHALL be acknowledged; a refusal (the account attends nothing, or organises nothing), a 4xx, a gone item or an undecodable payload SHALL park it; a 408, 412, 429, 5xx, transport error or an item not pushed yet SHALL leave it pending. Each attempt is reported under `intents`. Both SHALL be declared on each calendar the source syncs and `none` source-wide; CalDAV declares them `none`.
+
+#### Scenario: An invitation answered on Google
+- **GIVEN** an event of a Google calendar the calendar attends
+- **WHEN** a `calendar-reply` `TENTATIVE` is queued on it and the account syncs
+- **THEN** the intent is acknowledged and the next sync reads `PARTSTAT=TENTATIVE`
 
 ### Requirement: A source's collections push one at a time
 Scans and fetches MAY run over several connections, but no two collections of one source SHALL push at once: the two halves of a move derive from the store, and overlapping pushes would both read the create as pending, the target uploading the member while the source relocates it (pimdir SYNC §5). The second to push reads what the first delivered.

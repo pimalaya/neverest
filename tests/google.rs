@@ -211,3 +211,236 @@ fn a_google_calendar_syncs_both_ways() {
         },
     );
 }
+
+/// The Workspace user the invitations go to: the delegated subject itself,
+/// so nothing leaves the Pimalaya domain.
+#[cfg(feature = "gcal")]
+fn google_subject() -> String {
+    std::env::var("GOOGLE_SERVICE_ACCOUNT_SUBJECT")
+        .unwrap_or_else(|_| String::from("google@pimalaya.org"))
+}
+
+/// A one-hour event `marker`, organised by `organizer` and attended by
+/// `attendee`, both left to the server's own scheduling.
+#[cfg(feature = "gcal")]
+fn meeting(uid: &str, marker: &str, organizer: &str, attendee: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\n\
+         VERSION:2.0\r\n\
+         PRODID:-//pimalaya//neverest live tests//EN\r\n\
+         BEGIN:VEVENT\r\n\
+         UID:{uid}\r\n\
+         DTSTAMP:20260101T000000Z\r\n\
+         DTSTART:20261110T090000Z\r\n\
+         DTEND:20261110T100000Z\r\n\
+         SUMMARY:Live {marker} {uid}\r\n\
+         ORGANIZER:mailto:{organizer}\r\n\
+         ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{attendee}\r\n\
+         END:VEVENT\r\n\
+         END:VCALENDAR\r\n",
+    )
+}
+
+/// A throwaway calendar, deleted with every copy of the run's events
+/// however the run ends.
+#[cfg(feature = "gcal")]
+fn with_google_calendar(token: &str, uid: &str, body: impl FnOnce(&str)) {
+    use io_gcal::v3::rest::events::list::GcalEventsListParams;
+
+    let connect = || GcalClientStd::connect(token, GcalClientStdConnectOptions::default()).unwrap();
+    let calendar = connect()
+        .calendar_insert(&GcalCalendar {
+            summary: Some(tag()),
+            ..Default::default()
+        })
+        .expect("create the calendar")
+        .response
+        .id
+        .expect("the calendar has an id");
+
+    with_cleanup(
+        || body(&calendar),
+        || {
+            let mut client = connect();
+            // NOTE: the invitation's copy on the attendee's own calendar.
+            let params = GcalEventsListParams {
+                ical_uid: Some(uid),
+                ..Default::default()
+            };
+            if let Ok(copies) = client.events_list("primary", &params) {
+                for event in copies.response.items {
+                    let Some(id) = event.id else { continue };
+                    if let Err(err) = client.event_delete("primary", &id, None, None) {
+                        eprintln!("WARNING: leftover invitation {id}: {err:?}");
+                    }
+                }
+            }
+            if let Err(err) = client.calendar_delete(&calendar) {
+                eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
+            }
+            #[cfg(feature = "gmail")]
+            delete_mail_about(uid);
+        },
+    );
+}
+
+/// Deletes the notices a run's invitations left in the Workspace user's
+/// mailbox: the invitations, the replies and the cancellations naming `uid`.
+///
+/// Delivery lags behind the calendar, so the search runs a few times, some
+/// seconds apart.
+#[cfg(all(feature = "gcal", feature = "gmail"))]
+fn delete_mail_about(uid: &str) {
+    use std::{thread, time::Duration};
+
+    let token = google_token(GMAIL_SCOPE);
+    let mut client = GmailClientStd::connect(&token, GmailClientStdConnectOptions::default())
+        .expect("connect to Gmail");
+    for _ in 0..3 {
+        thread::sleep(Duration::from_secs(10));
+        let params = GmailMessagesListParams {
+            q: Some(uid),
+            include_spam_trash: true,
+            ..Default::default()
+        };
+        let Ok(found) = client.messages_list(&params) else {
+            continue;
+        };
+        for message in found.response.messages {
+            if let Err(err) = client.message_delete(&message.id) {
+                eprintln!("WARNING: leftover notice {}: {err:?}", message.id);
+            }
+        }
+    }
+}
+
+/// A meeting added through the store keeps its UID and invites its
+/// attendee, a reply to it is refused since the account organises it, and a
+/// cancel removes it.
+#[test]
+#[ignore = "live: needs a Google service account key"]
+#[cfg(feature = "gcal")]
+fn a_google_meeting_is_invited_to_and_cancelled() {
+    use io_gcal::v3::rest::events::list::GcalEventsListParams;
+
+    let token = google_token(CALENDAR_SCOPE);
+    let uid = tag();
+    let subject = google_subject();
+
+    with_google_calendar(&token, &uid, |calendar| {
+        let a = Replica::open("gcal", "", &token);
+        a.sync(calendar);
+
+        a.add(calendar, &meeting(&uid, "meeting", &subject, &subject), &[]);
+        a.sync(calendar);
+
+        let mut client = GcalClientStd::connect(&token, GcalClientStdConnectOptions::default())
+            .expect("connect to Calendar");
+        let params = GcalEventsListParams {
+            ical_uid: Some(&uid),
+            ..Default::default()
+        };
+        let created = client
+            .events_list(calendar, &params)
+            .expect("list the meeting")
+            .response
+            .items;
+        assert_eq!(created.len(), 1, "one event holds the UID");
+        let event = &created[0];
+        assert_eq!(event.ical_uid.as_deref(), Some(uid.as_str()));
+        assert_eq!(
+            event.organizer.as_ref().and_then(|o| o.is_self),
+            Some(true),
+            "inserted, so Google organises it and invites, not imported",
+        );
+        assert!(
+            event
+                .attendees
+                .iter()
+                .any(|attendee| attendee.email.as_deref() == Some(subject.as_str())),
+            "with its attendee",
+        );
+
+        a.sync_until(calendar, "the meeting is bound", |a| {
+            a.item(calendar, &uid).is_some()
+        });
+        let seq = a.item(calendar, &uid).unwrap().seq;
+
+        a.intent(
+            calendar,
+            "calendar-reply",
+            serde_json::json!({ "v": 1, "source": "gcal", "seq": seq, "partstat": "ACCEPTED" }),
+        );
+        let intents = a.sync_intents(calendar);
+        assert_eq!(intents.len(), 1, "{intents:?}");
+        assert_eq!(
+            intents[0]["parked"], true,
+            "the organizer has nothing to reply to"
+        );
+
+        a.intent(
+            calendar,
+            "calendar-cancel",
+            serde_json::json!({ "v": 1, "source": "gcal", "seq": seq, "comment": "Cancelled by the neverest live tests" }),
+        );
+        let intents = a.sync_intents(calendar);
+        assert_eq!(intents.len(), 1, "{intents:?}");
+        assert!(intents[0]["error"].is_null(), "{intents:?}");
+        assert_eq!(a.queue().0, 0, "the cancel is acknowledged");
+
+        a.sync_until(calendar, "the cancelled meeting leaves the store", |a| {
+            a.item(calendar, &uid).is_none()
+        });
+    });
+}
+
+/// An invitation the calendar attends is answered: the reply reaches
+/// Google and its `PARTSTAT` comes back with the next sync.
+#[test]
+#[ignore = "live: needs a Google service account key"]
+#[cfg(feature = "gcal")]
+fn a_google_invitation_is_answered() {
+    use io_gcal::v3::rest::events::{GcalEvent, import::GcalEventImportParams};
+
+    let token = google_token(CALENDAR_SCOPE);
+    let uid = tag();
+    let subject = google_subject();
+
+    with_google_calendar(&token, &uid, |calendar| {
+        // NOTE: the organizer is the Workspace user and the attendee the
+        // throwaway calendar, so the reply stays in the domain.
+        let invitation = meeting(&uid, "invitation", &subject, calendar);
+        let event = GcalEvent::from_ical(invitation.as_bytes()).expect("project the invitation");
+        GcalClientStd::connect(&token, GcalClientStdConnectOptions::default())
+            .expect("connect to Calendar")
+            .event_import(calendar, &event, &GcalEventImportParams::default())
+            .expect("import the invitation");
+
+        let a = Replica::open("gcal", "", &token);
+        a.sync_until(calendar, "the invitation reaches the store", |a| {
+            a.item(calendar, &uid).is_some()
+        });
+        let seq = a.item(calendar, &uid).unwrap().seq;
+
+        a.intent(
+            calendar,
+            "calendar-reply",
+            serde_json::json!({
+                "v": 1,
+                "source": "gcal",
+                "seq": seq,
+                "partstat": "TENTATIVE",
+                "comment": "Sent by the neverest live tests",
+            }),
+        );
+        let intents = a.sync_intents(calendar);
+        assert_eq!(intents.len(), 1, "{intents:?}");
+        assert!(intents[0]["error"].is_null(), "{intents:?}");
+        assert_eq!(a.queue(), (0, Vec::new()), "the reply is acknowledged");
+
+        a.sync_until(calendar, "the answer comes back", |a| {
+            a.item(calendar, &uid)
+                .is_some_and(|item| a.body(&item).contains("PARTSTAT=TENTATIVE"))
+        });
+    });
+}

@@ -12,11 +12,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Added the `wizard` cargo feature, on by default, gating the interactive configuration: the `configure` command and the offer a first run makes. A build without it drops the prompts and the dependencies only they use, and a missing configuration points at the documented sample instead.
 - Added capability declarations (pimdir draft-03, STORAGE §15.6): every run, before the queue drains, each mail, contacts and calendar source declares in the store what it can push or perform, from its backend and its configured rights alone, so himalaya, cardamum and calendula refuse an unsupported action before it is queued. JMAP sources stay undeclared.
 - Added the sent copy: a `submit` asking for `copy` files the message there once sent, by an `add` queued in the same run, unless the provider files sent mail itself (Gmail, Graph). A failed send files no copy.
+- Added the calendar invitation intents (pimdir Annex B.2): a queued `calendar-reply` answers an invitation and a `calendar-cancel` cancels a meeting the account organises, through Graph's event actions (the comment carried) or Google's own notifications (`sendUpdates=all`, a cancellation without the comment). Each sync performs them first, one-way included, and reports them under `intents`; a refusal or a gone item parks, a transient failure retries. They are declared on each calendar the source syncs; CalDAV declares them `none`.
 
 ### Changed
 
 - Changed a `submit` naming its sending source to be sent by that source alone.
 - Changed Google Calendar updates and deletes to notify the attendees (`sendUpdates`): an update when the event leaves them to the server (`SCHEDULE-AGENT`), a delete when the event has attendees.
+- Changed a new Google Calendar event the account organises, scheduled on the server, to be inserted with its UID and invite its attendees, rather than imported, which notified nobody.
 
 ### Fixed
 

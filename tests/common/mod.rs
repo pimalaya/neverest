@@ -261,6 +261,37 @@ impl Replica {
         self.enqueue(key, action, None);
     }
 
+    /// Queues an intent of `kind` (pimdir STORAGE Annex B.2) carrying
+    /// `payload`, as a frontend does.
+    pub fn intent(&self, key: &str, kind: &str, payload: serde_json::Value) {
+        let action = PimdirAction::Unknown {
+            kind: kind.to_owned(),
+            payload: payload.to_string(),
+            object_hash: None,
+        };
+        self.enqueue(key, action, None);
+    }
+
+    /// Syncs once and returns the report's `intents` entries.
+    pub fn sync_intents(&self, key: &str) -> Vec<serde_json::Value> {
+        let report: serde_json::Value =
+            serde_json::from_str(&self.sync(key)).expect("the report is JSON");
+        report["intents"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// The pending or parked queue rows, their kind and error.
+    pub fn queue(&self) -> (usize, Vec<String>) {
+        let reader = PimdirReader::open(self.store()).expect("open the store");
+        let pending = reader.list_pending_actions().expect("list the queue").len();
+        let parked = reader
+            .parked_actions()
+            .expect("list the parked actions")
+            .into_iter()
+            .map(|row| row.error)
+            .collect();
+        (pending, parked)
+    }
+
     /// Writes a body to the blob tree, durably, before any queue row names it.
     fn stage(&self, body: &str) -> (io_pimdir::object::PimdirHash, PimdirObject) {
         let producer = PimdirProducer::open(self.store(), "neverest-live").expect("open producer");

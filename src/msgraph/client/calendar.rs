@@ -15,6 +15,10 @@
 //! engine is checked against the server's current revision right before
 //! the write. Only the series master is written: an exception edited
 //! locally does not push.
+//!
+//! The invitation intents go through the event's own actions, `accept`,
+//! `tentativelyAccept`, `decline` and `cancel`, Graph sending the iTIP
+//! message with the comment.
 
 use std::io::{Read, Write};
 
@@ -28,16 +32,18 @@ use io_msgraph::v1::{
             list::MsgraphEventsListParams,
         },
     },
-    send::MsgraphSend,
+    send::{MSGRAPH_API_BASE, MsgraphNoResponse, MsgraphSend, user_path},
 };
 use jiff::{Timestamp, ToSpan, civil::Date, tz::TimeZone};
 use log::{debug, trace, warn};
+use serde_json::json;
 use url::Url;
 
 use super::GraphClient;
 use crate::{
     client::{EnumEntry, Enumeration, WrittenItem},
     item::collection::Collection,
+    offline::invitation::Partstat,
 };
 
 /// The `$select` of the enumeration: what tells an event's identity, its
@@ -295,6 +301,56 @@ impl GraphClient {
             .with_context(|| format!("Update event {id} error"))?;
 
         Ok(updated.change_key)
+    }
+
+    /// Answers an invitation, Graph sending the reply to the organizer with
+    /// `comment` (pimdir STORAGE Annex B.2 `calendar.reply`).
+    ///
+    /// Graph refuses it (400) on an event the account organises.
+    pub fn reply_event(
+        &mut self,
+        id: &str,
+        partstat: Partstat,
+        comment: Option<&str>,
+    ) -> Result<()> {
+        let verb = match partstat {
+            Partstat::Accepted => "accept",
+            Partstat::Tentative => "tentativelyAccept",
+            Partstat::Declined => "decline",
+        };
+        let body = json!({
+            "comment": comment.unwrap_or_default(),
+            "sendResponse": true,
+        });
+
+        self.event_action(id, verb, &body)
+            .with_context(|| format!("Reply to event {id} error"))
+    }
+
+    /// Cancels a meeting the account organises, Graph sending the
+    /// cancellation to the attendees with `comment` (pimdir STORAGE Annex
+    /// B.2 `calendar.cancel`).
+    ///
+    /// Graph refuses it (400) on an event the account does not organise.
+    pub fn cancel_event(&mut self, id: &str, comment: Option<&str>) -> Result<()> {
+        let body = json!({ "comment": comment.unwrap_or_default() });
+
+        self.event_action(id, "cancel", &body)
+            .with_context(|| format!("Cancel event {id} error"))
+    }
+
+    /// Posts one of an event's actions, which answer 202 with no body.
+    fn event_action(&mut self, id: &str, verb: &str, body: &serde_json::Value) -> Result<()> {
+        let path = format!("{}/events/{id}/{verb}", user_path(&self.inner.user_id));
+        let url = Url::parse(MSGRAPH_API_BASE)
+            .and_then(|base| base.join(&path))
+            .context("Cannot build the event action URL")?;
+
+        self.op(|graph| {
+            let coroutine = MsgraphSend::<MsgraphNoResponse>::post_json(&graph.auth, url, body)?;
+            graph.run(coroutine)
+        })?;
+        Ok(())
     }
 
     /// Deletes an event, the whole series for a master, conditionally on

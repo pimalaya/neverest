@@ -364,8 +364,9 @@ pub struct SmtpAccount {
 
 #[cfg(feature = "smtp")]
 impl SmtpAccount {
-    /// Resolves a send channel on its own, for the wizard's check.
-    #[cfg(all(feature = "wizard", feature = "imap"))]
+    /// Resolves a send channel on its own, for the wizard's check and
+    /// the submission tests.
+    #[cfg(any(test, all(feature = "wizard", feature = "imap")))]
     pub fn resolve(config: &SmtpConfig) -> Result<Self> {
         Self::resolve_with(config, &mut SecretResolver::new())
     }

@@ -39,6 +39,9 @@ pub struct SyncOutput {
     /// The queued submit intents attempted this run, one entry each.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub submitted: Vec<SubmitEntry>,
+    /// The queued calendar intents attempted this run, one entry each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intents: Vec<IntentEntry>,
     /// What the retention sweep reclaimed, when one ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purged: Option<PurgedItems>,
@@ -88,6 +91,7 @@ impl SyncOutput {
             drained,
             parked,
             submitted,
+            intents,
             purged: _,
             conflicts,
             outstanding_conflicts: _,
@@ -101,6 +105,7 @@ impl SyncOutput {
         self.drained.extend(drained);
         self.parked.extend(parked);
         self.submitted.extend(submitted);
+        self.intents.extend(intents);
         self.conflicts.extend(conflicts);
         self.refused.extend(refused);
         self.rejected.extend(rejected);
@@ -314,6 +319,43 @@ impl fmt::Display for SubmitEntry {
     }
 }
 
+/// One calendar intent attempted this run (pimdir STORAGE Annex B.2).
+///
+/// Acknowledged when `error` is `None`, its queue row dropped; parked when
+/// the failure is permanent, pending otherwise. The effect itself, the new
+/// `PARTSTAT` or the removal, arrives with the next sync.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentEntry {
+    /// The queue row's global append id.
+    pub id: i64,
+    /// The collection of the item it addresses.
+    pub collection: String,
+    /// The intent kind: `calendar-reply` or `calendar-cancel`.
+    pub kind: String,
+    /// The source that performed it.
+    pub source: String,
+    /// The public id of the item, when the payload named one.
+    pub seq: Option<i64>,
+    /// Formatted provider error; `None` on success.
+    pub error: Option<String>,
+    /// Whether the failure parked the row rather than leaving it pending.
+    pub parked: bool,
+}
+
+impl fmt::Display for IntentEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            id, kind, source, ..
+        } = self;
+        match (&self.error, self.parked) {
+            (None, _) => write!(f, "{kind} #{id} performed by {source}"),
+            (Some(err), true) => write!(f, "{kind} #{id} parked, never retried: {err}"),
+            (Some(err), false) => write!(f, "{kind} #{id} not performed, retried next run: {err}"),
+        }
+    }
+}
+
 /// What the retention sweep reclaimed past `store.purge-after`.
 ///
 /// Two operations, because a purge releases a body without reclaiming one:
@@ -437,7 +479,8 @@ impl fmt::Display for SyncOutput {
             .count();
         let item_errors = self.item.patch.iter().filter(|e| e.error.is_some()).count();
         let submit_errors = self.submitted.iter().filter(|e| e.error.is_some()).count();
-        let errors = mailbox_errors + item_errors + submit_errors;
+        let intent_errors = self.intents.iter().filter(|e| e.error.is_some()).count();
+        let errors = mailbox_errors + item_errors + submit_errors + intent_errors;
         let warnings = self.collisions.len()
             + self.parked.len()
             + self.conflicts.len()
@@ -455,6 +498,14 @@ impl fmt::Display for SyncOutput {
         if !self.submitted.is_empty() {
             writeln!(f, "Submissions ({n}):", n = self.submitted.len())?;
             for entry in &self.submitted {
+                writeln!(f, " - {entry}")?;
+            }
+            writeln!(f)?;
+        }
+
+        if !self.intents.is_empty() {
+            writeln!(f, "Calendar intents ({n}):", n = self.intents.len())?;
+            for entry in &self.intents {
                 writeln!(f, " - {entry}")?;
             }
             writeln!(f)?;

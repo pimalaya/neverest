@@ -20,6 +20,12 @@
 //! An update and a delete are checked against that joined revision, then
 //! guarded natively by the series event's own etag. Only the series event
 //! is written: an instance modified locally does not push yet.
+//!
+//! A new event the account organises and whose attendees are to be told
+//! is inserted with its UID as `iCalUID`, which Google keeps and announces;
+//! any other is imported, which keeps the UID and notifies nobody. The
+//! invitation intents patch the account's own attendee, or delete the
+//! meeting it organises, both with `sendUpdates=all`.
 
 use std::{
     collections::BTreeMap,
@@ -33,9 +39,9 @@ use io_gcal::v3::{
     rest::{
         calendar_list::list::GcalCalendarListListParams,
         events::{
-            GcalEvent, GcalEventStatus, GcalSendUpdates, import::GcalEventImportParams,
-            insert::GcalEventInsertParams, list::GcalEventsListParams,
-            update::GcalEventUpdateParams,
+            GcalEvent, GcalEventAttendeeResponseStatus, GcalEventStatus, GcalSendUpdates,
+            import::GcalEventImportParams, insert::GcalEventInsertParams,
+            list::GcalEventsListParams, patch::GcalEventPatchParams, update::GcalEventUpdateParams,
         },
     },
     send::{GCAL_API_BASE, GcalSendOutput},
@@ -55,6 +61,7 @@ use crate::{
         collection::Collection,
         flag::{Flag, FlagOp},
     },
+    offline::invitation::{Partstat, Refusal},
 };
 
 /// The page size requested from the events listing.
@@ -68,6 +75,9 @@ pub struct GcalClient {
     /// Whether the server allowed reusing the stream after the last
     /// exchange; when false the next operation reopens it.
     alive: bool,
+    /// The account's own address, its primary calendar's id, read once
+    /// when a new event first needs it.
+    owner: Option<String>,
 }
 
 impl GcalClient {
@@ -81,6 +91,7 @@ impl GcalClient {
             inner,
             tls,
             alive: true,
+            owner: None,
         })
     }
 
@@ -339,20 +350,33 @@ impl GcalClient {
 
     /// Creates an event from an iCalendar object.
     ///
-    /// One carrying a UID is imported, so the UID survives as the event's
-    /// `iCalUID` and matches its copy on another source; one carrying none
-    /// is inserted, Google minting it.
+    /// One carrying no UID is inserted, Google minting it. One carrying a
+    /// UID keeps it as the event's `iCalUID`, so it matches its copy on
+    /// another source: inserted with it when the resource is scheduled and
+    /// the account organises it, Google then inviting the attendees, and
+    /// imported otherwise, which notifies nobody (pimdir STORAGE Annex B.1).
     pub fn add_item_stream(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
         let ical = read_ical(source)?;
-        let event = GcalEvent::from_ical(&ical)?;
+        let mut event = GcalEvent::from_ical(&ical)?;
 
-        let created = match event.ical_uid.as_deref().filter(|uid| !uid.is_empty()) {
-            Some(_) => self
-                .op(|gcal| gcal.event_import(calendar, &event, &GcalEventImportParams::default()))
-                .with_context(|| format!("Import event into {calendar} error"))?,
-            None => self
-                .op(|gcal| gcal.event_insert(calendar, &event, &GcalEventInsertParams::default()))
-                .with_context(|| format!("Insert event into {calendar} error"))?,
+        let has_uid = event.ical_uid.as_deref().is_some_and(|uid| !uid.is_empty());
+        let invites = has_uid && calendar::scheduled(&ical) && self.organises(calendar, &event)?;
+        let created = if invites {
+            // NOTE: on an insert the organizer is Google's to set: the
+            // calendar the event lands on.
+            event.organizer = None;
+            let params = GcalEventInsertParams {
+                send_updates: Some(GcalSendUpdates::All),
+                ..Default::default()
+            };
+            self.op(|gcal| gcal.event_insert(calendar, &event, &params))
+                .with_context(|| format!("Insert scheduled event into {calendar} error"))?
+        } else if has_uid {
+            self.op(|gcal| gcal.event_import(calendar, &event, &GcalEventImportParams::default()))
+                .with_context(|| format!("Import event into {calendar} error"))?
+        } else {
+            self.op(|gcal| gcal.event_insert(calendar, &event, &GcalEventInsertParams::default()))
+                .with_context(|| format!("Insert event into {calendar} error"))?
         };
 
         let revision = revision(std::slice::from_ref(&created));
@@ -364,6 +388,35 @@ impl GcalClient {
             id,
             revision: Some(revision),
         })
+    }
+
+    /// Whether the account organises a new event: it names no organizer,
+    /// or the calendar it lands on, or the account's own address.
+    fn organises(&mut self, calendar: &str, event: &GcalEvent) -> Result<bool> {
+        let Some(organizer) = event
+            .organizer
+            .as_ref()
+            .and_then(|organizer| organizer.email.as_deref())
+            .filter(|email| !email.is_empty())
+        else {
+            return Ok(true);
+        };
+        if organizer.eq_ignore_ascii_case(calendar) {
+            return Ok(true);
+        }
+
+        let owner = match &self.owner {
+            Some(owner) => owner.clone(),
+            None => {
+                let primary = self
+                    .op(|gcal| gcal.calendar_list_entry_get("primary"))
+                    .context("Get the primary Google calendar error")?;
+                let owner = primary.id.unwrap_or_default();
+                self.owner = Some(owner.clone());
+                owner
+            }
+        };
+        Ok(organizer.eq_ignore_ascii_case(&owner))
     }
 
     /// Replaces a series event from an iCalendar object, merged onto the
@@ -426,10 +479,107 @@ impl GcalClient {
         Ok(())
     }
 
+    /// Answers an invitation as the calendar's own attendee, the organizer
+    /// told with `comment` (pimdir STORAGE Annex B.2 `calendar.reply`).
+    ///
+    /// Only that attendee changes, on the attendee list read right before
+    /// and guarded by its etag.
+    pub fn reply(
+        &mut self,
+        calendar: &str,
+        id: &str,
+        partstat: Partstat,
+        comment: Option<&str>,
+    ) -> Result<()> {
+        let current = self
+            .op(|gcal| gcal.event_get(calendar, id, None, None))
+            .with_context(|| format!("Get event {id} of {calendar} error"))?;
+        let patch = reply_patch(&current, partstat, comment)?;
+        let params = GcalEventPatchParams {
+            send_updates: Some(GcalSendUpdates::All),
+            ..Default::default()
+        };
+
+        self.op(|gcal| gcal.event_patch(calendar, id, &patch, &params, current.etag.as_deref()))
+            .with_context(|| format!("Reply to event {id} of {calendar} error"))?;
+        Ok(())
+    }
+
+    /// Cancels a meeting the account organises, Google telling its
+    /// attendees (pimdir STORAGE Annex B.2 `calendar.cancel`). Google sends
+    /// its own notice, which carries no comment.
+    pub fn cancel(&mut self, calendar: &str, id: &str) -> Result<()> {
+        let current = self
+            .op(|gcal| gcal.event_get(calendar, id, None, None))
+            .with_context(|| format!("Get event {id} of {calendar} error"))?;
+        if is_cancelled(&current) {
+            return Ok(());
+        }
+        let organises = current
+            .organizer
+            .as_ref()
+            .is_some_and(|organizer| organizer.is_self == Some(true));
+        if !organises {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "The account does not organise event {id}, so it cannot cancel it"
+            ))));
+        }
+
+        self.op(|gcal| {
+            gcal.event_delete(
+                calendar,
+                id,
+                Some(GcalSendUpdates::All),
+                current.etag.as_deref(),
+            )
+        })
+        .with_context(|| format!("Cancel event {id} of {calendar} error"))?;
+        Ok(())
+    }
+
     /// Rejected: calendar events have no flags.
     pub fn store_flags(&mut self, _ids: &[&str], _flags: &[Flag], _op: FlagOp) -> Result<()> {
         bail!("Google calendar events have no flags (store not supported)")
     }
+}
+
+/// The patch answering an invitation: the attendee list with the account's
+/// own entry answered, refused when the account is no attendee or
+/// organises the event.
+fn reply_patch(
+    current: &GcalEvent,
+    partstat: Partstat,
+    comment: Option<&str>,
+) -> Result<GcalEvent> {
+    let mut attendees = current.attendees.clone();
+    let id = current.id.as_deref().unwrap_or_default();
+    let Some(me) = attendees
+        .iter_mut()
+        .find(|attendee| attendee.is_self == Some(true))
+    else {
+        return Err(anyhow::Error::new(Refusal(format!(
+            "The account is not an attendee of event {id}, so it cannot reply"
+        ))));
+    };
+    if me.organizer == Some(true) {
+        return Err(anyhow::Error::new(Refusal(format!(
+            "The account organises event {id}, so it has no invitation to reply to"
+        ))));
+    }
+
+    me.response_status = Some(match partstat {
+        Partstat::Accepted => GcalEventAttendeeResponseStatus::Accepted,
+        Partstat::Tentative => GcalEventAttendeeResponseStatus::Tentative,
+        Partstat::Declined => GcalEventAttendeeResponseStatus::Declined,
+    });
+    if let Some(comment) = comment {
+        me.comment = Some(comment.to_owned());
+    }
+
+    Ok(GcalEvent {
+        attendees,
+        ..Default::default()
+    })
 }
 
 /// The joined revision of a series: its events' etags, the series first
@@ -489,7 +639,59 @@ fn read_ical(mut source: impl Read) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    use io_gcal::v3::rest::events::GcalEventAttendee;
+
     use super::*;
+
+    fn attendee(email: &str, me: bool, organizer: bool) -> GcalEventAttendee {
+        GcalEventAttendee {
+            email: Some(email.to_owned()),
+            is_self: me.then_some(true),
+            organizer: organizer.then_some(true),
+            response_status: Some(GcalEventAttendeeResponseStatus::NeedsAction),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_reply_answers_the_account_alone() {
+        let current = GcalEvent {
+            id: Some("meeting".into()),
+            attendees: vec![
+                attendee("alice@example.org", false, true),
+                attendee("me@example.org", true, false),
+                attendee("bob@example.org", false, false),
+            ],
+            ..Default::default()
+        };
+
+        let patch = reply_patch(&current, Partstat::Declined, Some("Away")).unwrap();
+
+        assert_eq!(patch.attendees.len(), 3);
+        assert_eq!(patch.attendees[0], current.attendees[0]);
+        assert_eq!(patch.attendees[2], current.attendees[2]);
+        assert_eq!(
+            patch.attendees[1].response_status,
+            Some(GcalEventAttendeeResponseStatus::Declined)
+        );
+        assert_eq!(patch.attendees[1].comment.as_deref(), Some("Away"));
+        assert!(patch.summary.is_none() && patch.start.is_none());
+    }
+
+    #[test]
+    fn a_reply_is_refused_to_the_organizer_and_to_a_stranger() {
+        let organised = GcalEvent {
+            attendees: vec![attendee("me@example.org", true, true)],
+            ..Default::default()
+        };
+        let foreign = GcalEvent {
+            attendees: vec![attendee("alice@example.org", false, true)],
+            ..Default::default()
+        };
+
+        assert!(reply_patch(&organised, Partstat::Accepted, None).is_err());
+        assert!(reply_patch(&foreign, Partstat::Accepted, None).is_err());
+    }
 
     fn event(id: &str, master: Option<&str>, etag: &str) -> GcalEvent {
         GcalEvent {

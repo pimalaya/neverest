@@ -27,9 +27,22 @@ const NOT_PERFORMED: Support = (
     Some("neverest does not perform it yet"),
 );
 
+/// Why a source-wide row refuses an intent its source performs on the
+/// calendars it holds.
+const HELD_ONLY: &str = "performed on the calendars this source syncs only";
+
 /// The declaration of one source, every capability of its kind included,
 /// `none` ones with their reason; empty for a source left undeclared.
-pub fn declaration(source: &SourceConfig, one_way: bool) -> Vec<PimdirCapability> {
+///
+/// `collections` are the store collections the source syncs. An intent the
+/// source performs through its provider's own verbs reaches only the items
+/// it holds, so it is declared on each of them and `none` source-wide
+/// (pimdir STORAGE §15.6 Implementations).
+pub fn declaration(
+    source: &SourceConfig,
+    one_way: bool,
+    collections: &[String],
+) -> Vec<PimdirCapability> {
     let (names, backend): (&[&str], Backend) = match &source.backend {
         SourceBackendConfig::Imap(_) => (MAIL, imap),
         SourceBackendConfig::Gmail(_) => (MAIL, gmail),
@@ -47,7 +60,7 @@ pub fn declaration(source: &SourceConfig, one_way: bool) -> Vec<PimdirCapability
 
     names
         .iter()
-        .map(|&name| {
+        .flat_map(|&name| {
             let (create, delete) = (perms.item.create, perms.item.delete);
             let refused = match name {
                 MAIL_SUBMIT | MAIL_SUBMIT_COPY | CALENDAR_REPLY | CALENDAR_CANCEL => None,
@@ -75,11 +88,24 @@ pub fn declaration(source: &SourceConfig, one_way: bool) -> Vec<PimdirCapability
                 None => backend(name, smtp),
             };
 
-            PimdirCapability {
-                collection: None,
-                name: name.to_string(),
-                support,
-                detail: detail.map(String::from),
+            let row =
+                |collection: Option<&String>, support, detail: Option<&str>| PimdirCapability {
+                    collection: collection.cloned(),
+                    name: name.to_string(),
+                    support,
+                    detail: detail.map(String::from),
+                };
+            let held_only =
+                matches!(name, CALENDAR_REPLY | CALENDAR_CANCEL) && support != PimdirSupport::None;
+            match held_only {
+                false => vec![row(None, support, detail)],
+                true => std::iter::once(row(None, PimdirSupport::None, Some(HELD_ONLY)))
+                    .chain(
+                        collections
+                            .iter()
+                            .map(|collection| row(Some(collection), support, detail)),
+                    )
+                    .collect(),
             }
         })
         .collect()
@@ -186,7 +212,16 @@ fn caldav(name: &str, _smtp: bool) -> Support {
             Some("the server's own scheduling (RFC 6638), when it has one"),
         ),
         CALENDAR_ONLINE_MEETING => (PimdirSupport::None, Some("CalDAV has no online meeting")),
-        CALENDAR_REPLY | CALENDAR_CANCEL => NOT_PERFORMED,
+        CALENDAR_REPLY => (
+            PimdirSupport::None,
+            Some(
+                "CalDAV has no verb: an update of the account's PARTSTAT replies through the server's scheduling (RFC 6638)",
+            ),
+        ),
+        CALENDAR_CANCEL => (
+            PimdirSupport::None,
+            Some("CalDAV has no verb: a remove cancels through the server's scheduling (RFC 6638)"),
+        ),
         _ => (PimdirSupport::Full, None),
     }
 }
@@ -199,9 +234,13 @@ fn gcal(name: &str, _smtp: bool) -> Support {
         ),
         CALENDAR_SCHEDULING => (
             PimdirSupport::Partial,
-            Some("a new event is imported to keep its UID, which notifies nobody"),
+            Some("Google notifies every attendee, SCHEDULE-AGENT aside"),
         ),
-        CALENDAR_ONLINE_MEETING | CALENDAR_REPLY | CALENDAR_CANCEL => NOT_PERFORMED,
+        CALENDAR_CANCEL => (
+            PimdirSupport::Partial,
+            Some("Google sends its own cancellation, without the comment"),
+        ),
+        CALENDAR_ONLINE_MEETING => NOT_PERFORMED,
         _ => (PimdirSupport::Full, None),
     }
 }
@@ -216,7 +255,7 @@ fn msgraph_calendar(name: &str, _smtp: bool) -> Support {
             PimdirSupport::Partial,
             Some("Graph notifies every attendee, SCHEDULE-AGENT aside"),
         ),
-        CALENDAR_ONLINE_MEETING | CALENDAR_REPLY | CALENDAR_CANCEL => NOT_PERFORMED,
+        CALENDAR_ONLINE_MEETING => NOT_PERFORMED,
         _ => (PimdirSupport::Full, None),
     }
 }
@@ -228,28 +267,51 @@ mod tests {
     use super::*;
     use crate::config::AccountConfig;
 
+    fn source(toml: &str, name: &str) -> SourceConfig {
+        let account: AccountConfig = toml::from_str(toml).unwrap();
+        account.sources().unwrap().remove(name).unwrap()
+    }
+
     fn caldav() -> SourceConfig {
-        let account: AccountConfig = toml::from_str(
+        source(
             "caldav.server = \"https://dav.example.org/\"\n\
              caldav.auth.basic.username = \"user\"\n\
              caldav.auth.basic.password.raw = \"pw\"",
+            "caldav",
         )
-        .unwrap();
-        account.sources().unwrap().remove("caldav").unwrap()
+    }
+
+    fn gcal() -> SourceConfig {
+        source("gcal.auth.token.raw = \"token\"", "gcal")
+    }
+
+    fn msgraph_calendar() -> SourceConfig {
+        source(
+            "msgraph-calendar.auth.token.raw = \"token\"",
+            "msgraph-calendar",
+        )
+    }
+
+    /// The row of `name` on `collection`, `None` for the source-wide one.
+    fn row<'a>(
+        declaration: &'a [PimdirCapability],
+        name: &str,
+        collection: Option<&str>,
+    ) -> &'a PimdirCapability {
+        declaration
+            .iter()
+            .find(|row| row.name == name && row.collection.as_deref() == collection)
+            .unwrap()
     }
 
     fn support(declaration: &[PimdirCapability], name: &str) -> PimdirSupport {
-        declaration
-            .iter()
-            .find(|row| row.name == name)
-            .map(|row| row.support)
-            .unwrap()
+        row(declaration, name, None).support
     }
 
     #[test]
     fn a_calendar_source_declares_every_calendar_capability() {
         let source = caldav();
-        let declaration = declaration(&source, false);
+        let declaration = declaration(&source, false, &["caldav/work".into()]);
 
         assert_eq!(declaration.len(), CALENDAR.len());
         assert_eq!(
@@ -264,21 +326,78 @@ mod tests {
 
     #[test]
     fn a_one_way_source_refuses_writes_but_not_intents() {
-        let source = caldav();
-        let declaration = declaration(&source, true);
+        let collections = ["gcal/primary".to_string()];
+        let declaration = declaration(&gcal(), true, &collections);
 
         assert_eq!(
             support(&declaration, CALENDAR_ITEM_ADD),
             PimdirSupport::None
         );
         assert_eq!(
-            declaration
-                .iter()
-                .find(|row| row.name == CALENDAR_REPLY)
-                .unwrap()
-                .detail
-                .as_deref(),
-            NOT_PERFORMED.1
+            row(&declaration, CALENDAR_REPLY, Some("gcal/primary")).support,
+            PimdirSupport::Full
         );
+    }
+
+    #[test]
+    fn a_caldav_source_points_its_intents_at_scheduling() {
+        let declaration = declaration(&caldav(), false, &["caldav/work".into()]);
+
+        for name in [CALENDAR_REPLY, CALENDAR_CANCEL] {
+            let row = row(&declaration, name, None);
+            assert_eq!(row.support, PimdirSupport::None);
+            assert!(row.detail.as_deref().unwrap().contains("RFC 6638"));
+        }
+        assert!(declaration.iter().all(|row| row.collection.is_none()));
+    }
+
+    #[test]
+    fn a_provider_performs_its_intents_on_the_calendars_it_holds() {
+        let collections = ["gcal/primary".to_string(), "gcal/team".to_string()];
+        let declaration = declaration(&gcal(), false, &collections);
+
+        assert_eq!(declaration.len(), CALENDAR.len() + 2 * collections.len());
+        for name in [CALENDAR_REPLY, CALENDAR_CANCEL] {
+            let wide = row(&declaration, name, None);
+            assert_eq!(wide.support, PimdirSupport::None);
+            assert_eq!(wide.detail.as_deref(), Some(HELD_ONLY));
+        }
+        for collection in &collections {
+            let collection = Some(collection.as_str());
+            assert_eq!(
+                row(&declaration, CALENDAR_REPLY, collection).support,
+                PimdirSupport::Full
+            );
+            assert_eq!(
+                row(&declaration, CALENDAR_CANCEL, collection).support,
+                PimdirSupport::Partial
+            );
+        }
+        assert_eq!(
+            support(&declaration, CALENDAR_SCHEDULING),
+            PimdirSupport::Partial
+        );
+    }
+
+    #[test]
+    fn graph_performs_both_intents_fully() {
+        let collections = ["msgraph-calendar/AAMk".to_string()];
+        let declaration = declaration(&msgraph_calendar(), false, &collections);
+
+        for name in [CALENDAR_REPLY, CALENDAR_CANCEL] {
+            assert_eq!(support(&declaration, name), PimdirSupport::None);
+            assert_eq!(
+                row(&declaration, name, Some("msgraph-calendar/AAMk")).support,
+                PimdirSupport::Full
+            );
+        }
+    }
+
+    #[test]
+    fn a_source_with_no_calendar_yet_declares_its_intents_nowhere() {
+        let declaration = declaration(&gcal(), false, &[]);
+
+        assert_eq!(declaration.len(), CALENDAR.len());
+        assert_eq!(support(&declaration, CALENDAR_REPLY), PimdirSupport::None);
     }
 }

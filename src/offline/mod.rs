@@ -21,6 +21,7 @@ use io_pimdir::{
 
 pub mod capability;
 pub mod driver;
+pub mod invitation;
 pub mod pipe;
 pub mod prof;
 pub mod remote;

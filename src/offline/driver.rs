@@ -42,7 +42,7 @@ use io_pimdir::{
     },
     codec::PimdirAction,
     collection::PimdirCollectionId,
-    hub::PimdirBinding,
+    hub::{PimdirBinding, PimdirSourceId},
     load::PimdirLoadScope,
     object::{PimdirHash, PimdirObject},
     placement::{
@@ -72,7 +72,11 @@ use crate::{
     item::flag::Flag,
     kind::{Kind, LinkId, merge::Merged},
     offline::{
-        capability, pipe,
+        capability,
+        invitation::{
+            self, Failure as InvitationFailure, Invitation, InvitationIntent, Refusal, Target,
+        },
+        pipe,
         remote::{
             BATCH_SIZE, CachedFetchRemote, FetchKey, PimRemote, RefusedCreate, RejectedPush,
             hydrate_batch, resolve_kind, wire_name,
@@ -85,7 +89,7 @@ use crate::{
     sync::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
-            DrainedQueue, ItemConflict, ParkedQueueAction, PatchEntry, PurgedItems,
+            DrainedQueue, IntentEntry, ItemConflict, ParkedQueueAction, PatchEntry, PurgedItems,
             RefusedDuplicate, RejectedWrite, SyncOutput,
         },
     },
@@ -448,6 +452,12 @@ pub fn run(
     if !dry_run {
         state.record_mode(&mode, accept_mode);
 
+        // NOTE: again, so a calendar met for the first time this run takes
+        // the intents its source performs there (pimdir STORAGE §15.6).
+        if let Err(err) = declare(&work_dir, &account_name, account_config, &mode) {
+            warn!("cannot declare what the sources hold after the run: {err:#}");
+        }
+
         let sweeper = running
             .first()
             .expect("a validated account has at least one source");
@@ -473,12 +483,24 @@ fn declare(dir: &Path, account: &str, config: &AccountConfig, mode: &AccountMode
         .first()
         .expect("a validated account has at least one source");
     let mut store = open_store(dir, first, account)?;
+    let collections = store
+        .list_collections_by_account(Some(account))
+        .context("List the collections the account syncs")?;
 
     for name in &mode.sources {
         let Some(source) = sources.get(name) else {
             continue;
         };
-        let capabilities = capability::declaration(source, mode.one_way);
+        let mut held = Vec::new();
+        for collection in &collections {
+            let syncing = store
+                .collection_sources(&collection.id)
+                .with_context(|| format!("List the sources of {}", collection.id))?;
+            if syncing.contains(name) {
+                held.push(collection.id.clone());
+            }
+        }
+        let capabilities = capability::declaration(source, mode.one_way, &held);
         store
             .declare(name, &capabilities)
             .with_context(|| format!("Declare the capabilities of source {name}"))?;
@@ -636,6 +658,7 @@ fn run_pair(
             &blobs,
             report,
         );
+        drain_invitations(&mut [&mut left, &mut right], &mut left_store, report);
     }
 
     let s = Spinner::start("Listing collections…");
@@ -798,11 +821,12 @@ fn run_local(
         drain_submits(
             account_config,
             account,
-            &mut [first],
+            &mut [&mut *first],
             &mut stores[0],
             &blobs,
             report,
         );
+        drain_invitations(&mut [first], &mut stores[0], report);
     }
 
     let s = Spinner::start(format!("Listing collections on {source_name}…"));
@@ -3351,6 +3375,206 @@ fn drain_submits(
     }
 }
 
+/// Performs the queue's calendar intents, which the store's drain leaves
+/// alone (pimdir STORAGE Annex B.2).
+///
+/// Each is performed by the side its payload names, on the item that side
+/// binds, through the provider's own verbs. A performed intent is
+/// acknowledged; a permanent failure parks the row with its error, a
+/// transient one leaves it pending. An intent naming a source this run does
+/// not drive waits for that source's own run.
+fn drain_invitations(
+    sides: &mut [&mut SourceCtx],
+    store: &mut PimdirSourceStore,
+    report: &mut SyncOutput,
+) {
+    let intents = match invitation::pending(store) {
+        Ok(intents) => intents,
+        Err(err) => {
+            warn!("cannot read the queued calendar intents: {err:#}");
+            return;
+        }
+    };
+    if intents.is_empty() {
+        return;
+    }
+
+    for intent in &intents {
+        let located = locate_invitation(store, intent);
+        // NOTE: an intent naming no source predates pimdir STORAGE §15.6,
+        // and is performed by a side of its collection's namespace, the
+        // one binding the item when two do.
+        let index = match intent.source() {
+            Some(name) => sides.iter().position(|ctx| ctx.name == name),
+            None => {
+                let candidates: Vec<usize> = (0..sides.len())
+                    .filter(|&index| {
+                        let prefix = format!("{}/", sides[index].namespace);
+                        intent.collection.starts_with(&prefix)
+                    })
+                    .collect();
+                let holder = candidates.iter().copied().find(|&index| {
+                    located
+                        .as_ref()
+                        .is_ok_and(|bindings| bindings.contains_key(&source_id(&sides[index].name)))
+                });
+                holder.or(candidates.first().copied())
+            }
+        };
+        let Some(index) = index else {
+            continue;
+        };
+
+        let side = &mut *sides[index];
+        let outcome = located.and_then(|bindings| perform_invitation(side, intent, &bindings));
+        let performer = side.name.clone();
+        settle_invitation(store, intent, &performer, outcome, report);
+    }
+}
+
+/// Every source's binding of the item an intent addresses.
+fn locate_invitation(
+    store: &PimdirSourceStore,
+    intent: &InvitationIntent,
+) -> Result<BTreeMap<PimdirSourceId, PimdirBinding>, InvitationFailure> {
+    let collection = &intent.collection;
+    let transient = |err: PimdirError| {
+        InvitationFailure::Transient(anyhow!("Cannot read the item from the store: {err}"))
+    };
+
+    let link = match intent.target()? {
+        Target::Seq(seq) => match store.get_item(collection, seq).map_err(transient)? {
+            Some(item) => item.link_id.0,
+            None => {
+                return Err(InvitationFailure::Permanent(anyhow!(
+                    "Item #{seq} is gone from {collection}"
+                )));
+            }
+        },
+        // NOTE: the producer's own add, which the drain stages first.
+        Target::Link(link) => match store.seq_for_link(collection, &link).map_err(transient)? {
+            Some(_) => link,
+            None => {
+                return Err(InvitationFailure::Transient(anyhow!(
+                    "No item of {collection} is keyed {link} yet"
+                )));
+            }
+        },
+    };
+
+    store.item_bindings(collection, &link).map_err(transient)
+}
+
+/// Performs one intent on the item `side` binds.
+fn perform_invitation(
+    side: &mut SourceCtx,
+    intent: &InvitationIntent,
+    bindings: &BTreeMap<PimdirSourceId, PimdirBinding>,
+) -> Result<(), InvitationFailure> {
+    let invitation = intent.invitation()?;
+    let Some(binding) = bindings.get(&source_id(&side.name)) else {
+        return Err(InvitationFailure::Permanent(anyhow!(
+            "Source {} does not hold the item {} addresses",
+            side.name,
+            intent.kind
+        )));
+    };
+    // NOTE: a pending create holds a provisional handle until its add is
+    // accepted, the next push (pimdir SYNC §4).
+    let handle = binding.handle.as_str();
+    if binding.base.is_none() || handle.starts_with('\u{1}') {
+        return Err(InvitationFailure::Transient(anyhow!(
+            "The item is not on {} yet, the intent waits for its push",
+            side.name
+        )));
+    }
+
+    let collection = wire_name(&side.namespace, &intent.collection).to_string();
+    let handle = handle.to_string();
+    let name = side.name.clone();
+
+    let outcome = match side.pool.primary() {
+        #[cfg(feature = "gcal")]
+        Client::Gcal(client) => match invitation {
+            Invitation::Reply { partstat, comment } => {
+                client.reply(&collection, &handle, partstat, comment.as_deref())
+            }
+            Invitation::Cancel { .. } => client.cancel(&collection, &handle),
+        },
+        #[cfg(feature = "msgraph")]
+        Client::Msgraph(client) if client.kind() == GraphKind::Calendar => match invitation {
+            Invitation::Reply { partstat, comment } => {
+                client.reply_event(&handle, partstat, comment.as_deref())
+            }
+            Invitation::Cancel { comment } => client.cancel_event(&handle, comment.as_deref()),
+        },
+        #[allow(unreachable_patterns)]
+        _ => {
+            // NOTE: read here too, so a build performing no intent at all
+            // still uses what the arms above read.
+            let _: (&Invitation, &str, &str) = (&invitation, &collection, &handle);
+            Err(anyhow::Error::new(Refusal(format!(
+                "Source {name} cannot perform {}",
+                intent.kind
+            ))))
+        }
+    };
+
+    outcome.map_err(InvitationFailure::classify)
+}
+
+/// Acknowledges or fails one performed intent, and reports it.
+fn settle_invitation(
+    store: &mut PimdirSourceStore,
+    intent: &InvitationIntent,
+    performer: &str,
+    outcome: Result<(), InvitationFailure>,
+    report: &mut SyncOutput,
+) {
+    let (error, parked) = match outcome {
+        Ok(()) => {
+            info!(
+                "{} intent #{} performed by {performer}",
+                intent.kind, intent.id
+            );
+            match store.drop_action(intent.id) {
+                Ok(true) => {}
+                Ok(false) => warn!(
+                    "{} intent #{} vanished from the queue before its acknowledgement",
+                    intent.kind, intent.id
+                ),
+                Err(err) => warn!(
+                    "{} intent #{} was performed but could not be acknowledged, it will be performed again: {err}",
+                    intent.kind, intent.id
+                ),
+            }
+            (None, false)
+        }
+        Err(failure) => {
+            let error = format!("{:#}", failure.error());
+            let parked = failure.parks();
+            warn!("{} intent #{} failed: {error}", intent.kind, intent.id);
+            if let Err(err) = store.fail_action(intent.id, parked.then_some(error.as_str())) {
+                warn!(
+                    "cannot record {} intent #{} failure: {err}",
+                    intent.kind, intent.id
+                );
+            }
+            (Some(error), parked)
+        }
+    };
+
+    report.intents.push(IntentEntry {
+        id: intent.id,
+        collection: intent.collection.clone(),
+        kind: intent.kind.clone(),
+        source: performer.to_string(),
+        seq: intent.seq(),
+        error,
+        parked,
+    });
+}
+
 /// Reclaims the retained items older than `store.purge-after`, unset never.
 ///
 /// It runs after the sync, so an item this run retired starts its delay rather
@@ -4218,6 +4442,73 @@ mod tests {
 
         assert!(store.drop_action(intents[0].id).unwrap());
         assert!(submit::pending(&store).unwrap().is_empty());
+    }
+
+    /// A store whose `gcal` source declares the intents on `gcal/primary`,
+    /// with one `calendar-reply` queued there naming `target`.
+    fn queued_reply(dir: &Path, target: &str) -> PimdirSourceStore {
+        let mut store = PimdirStore::open(dir)
+            .unwrap()
+            .for_account("live")
+            .for_source("gcal");
+        store
+            .ensure_collection("gcal/primary", "text/calendar")
+            .unwrap();
+        let config: AccountConfig = toml::from_str(r#"gcal.auth.token.raw = "token""#).unwrap();
+        let source = config.sources().unwrap().remove("gcal").unwrap();
+        let declared = capability::declaration(&source, false, &["gcal/primary".into()]);
+        store.declare("gcal", &declared).unwrap();
+
+        PimdirProducer::open(dir, "test-frontend")
+            .unwrap()
+            .enqueue(
+                "gcal/primary",
+                &PimdirAction::Unknown {
+                    kind: invitation::REPLY.into(),
+                    payload: format!(r#"{{"v":1,"source":"gcal",{target},"partstat":"ACCEPTED"}}"#),
+                    object_hash: None,
+                },
+                None,
+            )
+            .unwrap();
+        store
+    }
+
+    #[test]
+    fn a_calendar_intent_survives_the_drain_where_its_source_performs_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = queued_reply(dir.path(), r#""seq":1"#);
+
+        let mut report = SyncOutput::default();
+        drain_queues(&mut store, &mut report);
+        assert!(report.parked.is_empty());
+
+        let intents = invitation::pending(&store).unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].collection, "gcal/primary");
+        assert_eq!(intents[0].source().as_deref(), Some("gcal"));
+    }
+
+    #[test]
+    fn an_intent_on_a_gone_item_parks_and_one_on_a_pending_add_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = queued_reply(dir.path(), r#""seq":42"#);
+        let intent = invitation::pending(&store).unwrap().remove(0);
+
+        let failure = locate_invitation(&store, &intent).unwrap_err();
+        assert!(failure.parks(), "{:#}", failure.error());
+
+        let mut report = SyncOutput::default();
+        settle_invitation(&mut store, &intent, "gcal", Err(failure), &mut report);
+        assert!(invitation::pending(&store).unwrap().is_empty());
+        assert_eq!(store.parked_actions().unwrap().len(), 1);
+        assert!(report.intents[0].parked);
+        assert_eq!(report.intents[0].seq, Some(42));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = queued_reply(dir.path(), r#""link_id":"uid:not-yet""#);
+        let intent = invitation::pending(&store).unwrap().remove(0);
+        assert!(!locate_invitation(&store, &intent).unwrap_err().parks());
     }
 
     #[test]

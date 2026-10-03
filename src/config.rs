@@ -19,17 +19,37 @@ use io_sasl::{
     rfc7628::oauthbearer::SaslOauthbearerCreds, xoauth2::SaslXoauth2Creds,
 };
 use pimalaya_cli::printer::Printer;
+#[cfg(any(feature = "wizard", test))]
+use pimalaya_config::toml as config_toml;
 use pimalaya_config::{
     command::CommandConfig,
     secret::{Secret, SecretResolver},
-    toml as config_toml,
     toml::{TomlConfig, shell_expanded_string},
 };
 use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::{cli::configure::offer_configuration, wizard::discover::CONFIG_SAMPLE_URL};
+#[cfg(feature = "wizard")]
+use crate::cli::configure::offer_configuration;
+#[cfg(not(feature = "wizard"))]
+use crate::cli::offer_configuration;
+
+/// The documented sample configuration, shown in the welcome banner and
+/// pointed at when no configuration is found.
+#[cfg(feature = "wizard")]
+pub const CONFIG_SAMPLE_URL: &str =
+    "https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
+
+/// How to get a configuration, for the errors meeting none.
+#[cfg(feature = "wizard")]
+pub const NO_CONFIG_HINT: &str = "run `neverest configure` to generate one, or write it by hand: \
+     https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
+
+/// How to get a configuration, for the errors meeting none.
+#[cfg(not(feature = "wizard"))]
+pub const NO_CONFIG_HINT: &str = "write one by hand: \
+     https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
 
 /// `skip_serializing_if` predicate omitting a defaulted field, so what the
 /// wizard writes carries only what the user chose.
@@ -174,7 +194,7 @@ impl Config {
         match Config::from_paths_or_default(config_paths)? {
             Some(config) => Ok(config),
             None => bail!(
-                "No configuration found at {}, run `neverest configure` to generate one or write it by hand: {CONFIG_SAMPLE_URL}",
+                "No configuration found at {}, {NO_CONFIG_HINT}",
                 target.display(),
             ),
         }
@@ -288,6 +308,7 @@ pub struct AccountConfig {
 ///
 /// Serialized alphabetically a generated account would open on
 /// `connections` and bury its backend under `conflict`.
+#[cfg(feature = "wizard")]
 const RENDER_ORDER: [&str; 20] = [
     "default",
     "imap",
@@ -316,6 +337,7 @@ const RENDER_ORDER: [&str; 20] = [
 ///
 /// Serialized alphabetically, `imap.server` would read under the
 /// `imap.sasl` credential authenticating against it.
+#[cfg(feature = "wizard")]
 const ENDPOINT_KEYS: [&str; 2] = ["server", "user-id"];
 
 impl AccountConfig {
@@ -324,6 +346,7 @@ impl AccountConfig {
     /// What it adds to the serializer is reading order, dotted keys coming
     /// out alphabetically: groups are reordered ([`RENDER_ORDER`]), each
     /// endpoint is lifted to the top of its own ([`ENDPOINT_KEYS`]).
+    #[cfg(feature = "wizard")]
     pub fn render(&self, name: &str) -> Result<String> {
         // NOTE: borrowed rather than built into a `Config`, which would
         // mean cloning the account to render it. The emitter only looks
@@ -393,6 +416,7 @@ impl AccountConfig {
     ///
     /// The `default` flag is left to the caller, which claims it only when
     /// no account already in the configuration holds it.
+    #[cfg(feature = "wizard")]
     pub fn with_source(source: SourceConfig) -> Self {
         let mut account = Self::default();
         account.set_direct_source(source);
@@ -401,6 +425,7 @@ impl AccountConfig {
 
     /// Writes `source` as the direct-backend sugar, replacing the backend of
     /// that protocol and lifting its send channel to the account `smtp`.
+    #[cfg(feature = "wizard")]
     pub fn set_direct_source(&mut self, source: SourceConfig) {
         let SourceConfig { backend, smtp } = source;
 

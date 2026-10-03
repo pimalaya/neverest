@@ -125,6 +125,7 @@ mod kind;
 mod msgraph;
 mod offline;
 mod sync;
+#[cfg(feature = "wizard")]
 mod wizard;
 
 use std::{
@@ -142,8 +143,12 @@ use pimalaya_cli::{
 };
 use pimalaya_config::toml::TomlConfig;
 
+#[cfg(feature = "wizard")]
+use crate::cli::configure::offer_configuration;
+#[cfg(not(feature = "wizard"))]
+use crate::cli::offer_configuration;
 use crate::{
-    cli::{configure::offer_configuration, exit::Exit, main::Cli},
+    cli::{exit::Exit, main::Cli},
     config::Config,
 };
 

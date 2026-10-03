@@ -16,10 +16,12 @@ use pimalaya_cli::{
     printer::Printer,
 };
 
+#[cfg(feature = "wizard")]
+use crate::cli::configure::ConfigureCommand;
 use crate::{
     cli::{
-        check::CheckCommand, configure::ConfigureCommand, conflict::ConflictCommand, exit::Exit,
-        init::InitCommand, sync::SyncCommand,
+        check::CheckCommand, conflict::ConflictCommand, exit::Exit, init::InitCommand,
+        sync::SyncCommand,
     },
     json_schema,
 };
@@ -63,6 +65,7 @@ pub enum Command {
     #[command(arg_required_else_help = true)]
     #[command(alias = "conflicts")]
     Conflict(ConflictCommand),
+    #[cfg(feature = "wizard")]
     #[command(alias = "cfg")]
     Configure(ConfigureCommand),
     #[command(arg_required_else_help = true)]
@@ -93,6 +96,7 @@ impl Command {
             Self::Check(cmd) => cmd.execute(printer, config_paths, account),
             Self::Conflict(cmd) => cmd.execute(printer, config_paths, account),
             Self::Init(cmd) => cmd.execute(printer, config_paths, account),
+            #[cfg(feature = "wizard")]
             Self::Configure(cmd) => cmd.execute(printer, config_paths),
             Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
             Self::Completion(cmd) => cmd.execute(printer, Cli::command()),

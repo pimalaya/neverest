@@ -119,10 +119,10 @@ pub struct SourceAccount {
 
 impl SourceAccount {
     /// Resolves one endpoint on its own, for the wizard's checks.
-    #[cfg_attr(
-        not(any(feature = "imap", feature = "msgraph", feature = "dav")),
-        allow(dead_code)
-    )]
+    #[cfg(all(
+        feature = "wizard",
+        any(feature = "imap", feature = "msgraph", feature = "dav")
+    ))]
     pub fn resolve(name: &str, config: &SourceConfig) -> Result<Self> {
         Self::resolve_with(name, config, &mut SecretResolver::new())
     }
@@ -365,7 +365,7 @@ pub struct SmtpAccount {
 #[cfg(feature = "smtp")]
 impl SmtpAccount {
     /// Resolves a send channel on its own, for the wizard's check.
-    #[cfg_attr(not(feature = "imap"), allow(dead_code))]
+    #[cfg(all(feature = "wizard", feature = "imap"))]
     pub fn resolve(config: &SmtpConfig) -> Result<Self> {
         Self::resolve_with(config, &mut SecretResolver::new())
     }

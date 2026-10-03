@@ -30,18 +30,13 @@ use crate::wizard::msgraph;
 #[cfg(any(feature = "imap", feature = "msgraph", feature = "dav"))]
 use crate::wizard::search::DiscoveredKind;
 use crate::{
-    config::{AccountConfig, SourceConfig},
+    config::{AccountConfig, CONFIG_SAMPLE_URL, SourceConfig},
     wizard::search::{self, Discovered},
 };
 
 /// The one prompt of the wizard. Discovery also accepts a bare domain, but
 /// the label names what users actually have.
 const EMAIL_PROMPT: &str = "Email address:";
-
-/// The documented sample configuration, shown in the welcome banner and
-/// pointed at when discovery finds nothing.
-pub const CONFIG_SAMPLE_URL: &str =
-    "https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
 
 /// Discovers one account from a single prompt, tests it, and hands back the
 /// name it proposes beside the account itself.

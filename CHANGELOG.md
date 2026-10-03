@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Changed a `submit` naming its sending source to be sent by that source alone.
 - Changed Google Calendar updates and deletes to notify the attendees (`sendUpdates`): an update when the event leaves them to the server (`SCHEDULE-AGENT`), a delete when the event has attendees.
 
+### Fixed
+
+- Fixed a move staged through the store landing twice in its target on IMAP: the run scans collections over several connections, and the target uploaded the message while the source relocated it. A source's collections now push one at a time, scans and fetches staying parallel.
+
 ## [0.3.0] - 2026-10-02
 
 ### Added

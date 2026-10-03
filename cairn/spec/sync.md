@@ -975,3 +975,11 @@ A `submit` asking for `copy` SHALL file the message in that collection only afte
 
 ### Requirement: Google Calendar notifies as the resource asks
 An update SHALL notify the attendees only when the resource is scheduled (pimdir Annex B.1); a delete SHALL notify them when the event has attendees.
+
+### Requirement: A source's collections push one at a time
+Scans and fetches MAY run over several connections, but no two collections of one source SHALL push at once: the two halves of a move derive from the store, and overlapping pushes would both read the create as pending, the target uploading the member while the source relocates it (pimdir SYNC §5). The second to push reads what the first delivered.
+
+#### Scenario: A move bounced between two mailboxes
+- **GIVEN** a message in one IMAP mailbox and four connections
+- **WHEN** a move to another mailbox is staged and the account syncs, several times back and forth
+- **THEN** the message is held once, on the server and in the store, after every run

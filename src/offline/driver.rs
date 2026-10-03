@@ -25,7 +25,7 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        Mutex,
+        Mutex, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
@@ -912,6 +912,7 @@ fn phase1_spine(
     let plans: Mutex<Vec<CollectionPlan>> = Mutex::new(Vec::new());
     let merged: Mutex<SyncOutput> = Mutex::new(SyncOutput::default());
     let scanned = AtomicUsize::new(0);
+    let pushing: Mutex<()> = Mutex::new(());
     let s = Spinner::start(format!("Scanning {source} (0/{total})"));
 
     let queue_ref = &queue;
@@ -919,12 +920,21 @@ fn phase1_spine(
     let merged_ref = &merged;
     let scanned_ref = &scanned;
     let s_ref = &s;
+    let pushing_ref = &pushing;
 
     thread::scope(|scope| {
         for (ctx, store) in ctxs.iter_mut().zip(stores.iter_mut()) {
             scope.spawn(move || {
                 while let Some(collection) = queue_ref.pop() {
-                    match collection_spine(&collection, ctx, store, blobs, store_dir, dry_run) {
+                    match collection_spine(
+                        &collection,
+                        ctx,
+                        store,
+                        blobs,
+                        store_dir,
+                        pushing_ref,
+                        dry_run,
+                    ) {
                         Ok((targets, rep)) => {
                             plans_ref.lock().unwrap().push((collection, targets));
                             merged_ref.lock().unwrap().absorb(rep);
@@ -964,12 +974,18 @@ fn phase1_spine(
 /// Returns the not-yet-`Full` bodies to hydrate, each with the size its local
 /// mail summary carries so the download runs largest-first, plus the report
 /// patches. A dry run stops after itemizing, leaving the targets empty.
+///
+/// Scans run in parallel, but `pushing` lets one collection of the source
+/// push at a time: the two halves of a move derive from the store, and two
+/// overlapping pushes would both read the create as pending, the target
+/// uploading it while the source relocates it (pimdir SYNC §5).
 fn collection_spine(
     collection: &str,
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     store_dir: &Path,
+    pushing: &Mutex<()>,
     dry_run: bool,
 ) -> Result<(Vec<(PimdirHandle, u64)>, SyncOutput)> {
     let mut report = SyncOutput::default();
@@ -1000,6 +1016,10 @@ fn collection_spine(
         return Ok((Vec::new(), report));
     }
 
+    // NOTE: held across the passes, so a move's halves never push at once:
+    // the second reads the first delivered, the target's create meeting the
+    // relocated member as a probe, the source's remove no destination left.
+    let push = pushing.lock().unwrap_or_else(PoisonError::into_inner);
     for _ in 0..=MAX_EXTRA_PASSES {
         let pass = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable())?;
         upgrade_probed(collection, ctx, store, blobs, false)?;
@@ -1007,6 +1027,7 @@ fn collection_spine(
             break;
         }
     }
+    drop(push);
     itemize_refused(&ctx.name, mem::take(&mut ctx.refused), &mut report);
     itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
 

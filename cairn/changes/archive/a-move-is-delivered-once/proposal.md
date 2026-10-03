@@ -1,7 +1,7 @@
 ---
 cairn: change
 id: a-move-is-delivered-once
-status: active
+status: landed
 created: 2026-10-03
 ---
 

@@ -20,7 +20,10 @@
 //! `tentativelyAccept`, `decline` and `cancel`, Graph sending the iTIP
 //! message with the comment.
 
-use std::io::{Read, Write};
+use std::{
+    collections::BTreeMap,
+    io::{Read, Write},
+};
 
 use anyhow::{Context, Result, bail};
 use io_msgraph::v1::{
@@ -120,18 +123,9 @@ impl GraphClient {
             .op(|graph| graph.events_list(Some(calendar), &params))
             .with_context(|| format!("List events of {calendar} error"))?;
 
-        let mut items = Vec::new();
+        let mut events = Vec::new();
         loop {
-            for event in page.value {
-                if event.id.is_empty() || event.series_master_id.is_some() {
-                    continue;
-                }
-                items.push(EnumEntry {
-                    id: event.id,
-                    flags: Default::default(),
-                    revision: event.change_key,
-                });
-            }
+            events.extend(page.value);
 
             let Some(next) = page.next_link else {
                 break;
@@ -140,6 +134,16 @@ impl GraphClient {
                 .op(|graph| graph.events_list_from_link(&next))
                 .with_context(|| format!("Page events of {calendar} error"))?;
         }
+
+        let items: Vec<EnumEntry> = unique(events)?
+            .into_iter()
+            .filter(|event| !event.id.is_empty() && event.series_master_id.is_none())
+            .map(|event| EnumEntry {
+                id: event.id,
+                flags: Default::default(),
+                revision: event.change_key,
+            })
+            .collect();
 
         debug!("end of graph events listing");
         trace!("events: {}", items.len());
@@ -203,7 +207,7 @@ impl GraphClient {
                 .with_context(|| format!("Page instances of {id} error"))?;
         }
 
-        Ok((master, exceptions))
+        Ok((master, unique(exceptions)?))
     }
 
     /// Reads one item as iCalendar with the revision it corresponds to.
@@ -367,13 +371,35 @@ impl GraphClient {
     }
 }
 
+/// Drops the events a page boundary repeated, Graph overlapping
+/// consecutive `nextLink` pages; one id read at two revisions is an error.
+fn unique(events: Vec<MsgraphEvent>) -> Result<Vec<MsgraphEvent>> {
+    let mut seen = BTreeMap::new();
+    let mut unique = Vec::with_capacity(events.len());
+
+    for event in events {
+        match seen.get(&event.id) {
+            None => {
+                seen.insert(event.id.clone(), event.change_key.clone());
+                unique.push(event);
+            }
+            Some(change_key) if *change_key == event.change_key => {}
+            Some(_) => bail!(
+                "Event {} listed twice at different revisions by Graph",
+                event.id
+            ),
+        }
+    }
+
+    Ok(unique)
+}
+
 /// The window a series' exceptions fall in: its range, an open-ended one
 /// capped past its start.
 fn series_window(master: &MsgraphEvent) -> Option<(String, String)> {
-    let range = &master.recurrence.as_option()?.range;
-    let start = range.start_date.as_deref()?.parse::<Date>().ok()?;
-    let end = match range.end_date.as_deref() {
-        Some(end) => end.parse::<Date>().ok()?,
+    let (start, end) = master.recurrence.as_option()?.bounds()?;
+    let end = match end {
+        Some(end) => end,
         None => start.checked_add(OPEN_SERIES_YEARS.years()).ok()?,
     };
 
@@ -408,18 +434,29 @@ fn read_bytes(mut source: impl Read) -> Result<Vec<u8>> {
 mod tests {
     use io_msgraph::v1::{
         field::MsgraphField,
-        rest::users::events::{MsgraphPatternedRecurrence, MsgraphRecurrenceRange},
+        rest::users::events::{
+            MsgraphPatternedRecurrence, MsgraphRecurrenceRange, MsgraphRecurrenceRangeType,
+        },
     };
 
     use super::*;
 
+    fn event(id: &str, change_key: &str) -> MsgraphEvent {
+        MsgraphEvent {
+            id: id.into(),
+            change_key: Some(change_key.into()),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn a_series_window_spans_its_range_or_years_past_an_open_start() {
-        let series = |end: Option<&str>| MsgraphEvent {
+        let series = |range_type, end: &str| MsgraphEvent {
             recurrence: MsgraphField::Set(MsgraphPatternedRecurrence {
                 range: MsgraphRecurrenceRange {
+                    range_type: Some(range_type),
                     start_date: Some("2026-08-14".into()),
-                    end_date: end.map(str::to_owned),
+                    end_date: Some(end.into()),
                     ..Default::default()
                 },
                 ..Default::default()
@@ -428,13 +465,32 @@ mod tests {
         };
 
         assert_eq!(
-            series_window(&series(Some("2026-09-30"))),
+            series_window(&series(MsgraphRecurrenceRangeType::EndDate, "2026-09-30")),
             Some(("2026-08-14T00:00:00Z".into(), "2026-10-01T00:00:00Z".into()))
         );
+        // NOTE: Graph fills the endDate of a noEnd range with a sentinel.
         assert_eq!(
-            series_window(&series(None)).map(|(_, end)| end),
+            series_window(&series(MsgraphRecurrenceRangeType::NoEnd, "0001-01-01"))
+                .map(|(_, end)| end),
             Some("2031-08-15T00:00:00Z".into())
         );
+    }
+
+    #[test]
+    fn an_event_repeated_across_pages_lists_once() {
+        let events = vec![event("A", "1"), event("B", "1"), event("B", "1")];
+        let ids: Vec<String> = unique(events)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.id)
+            .collect();
+
+        assert_eq!(ids, ["A", "B"]);
+    }
+
+    #[test]
+    fn an_event_repeated_at_another_revision_is_refused() {
+        assert!(unique(vec![event("A", "1"), event("A", "2")]).is_err());
     }
 
     #[test]

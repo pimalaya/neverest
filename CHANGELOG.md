@@ -22,6 +22,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Fixed a Graph calendar series with a `numbered` range failing to read: Graph fills its `endDate` with `0001-01-01`, which ended the instances window before its start. The window now follows the range type (io-msgraph 0.4.5).
+- Fixed a Graph calendar enumeration listing an event twice when Graph repeated it across a page boundary; one id at two revisions now fails the enumeration.
 - Fixed a move staged through the store landing twice in its target on IMAP: the run scans collections over several connections, and the target uploaded the message while the source relocated it. A source's collections now push one at a time, scans and fetches staying parallel.
 
 ## [0.3.0] - 2026-10-02

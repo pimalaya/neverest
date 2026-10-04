@@ -411,6 +411,39 @@ fn every_graph_calendar_of_the_mailbox_syncs() {
     a.sync_keys(&[], &[0]);
 }
 
+/// A check names the folders Graph knows by their use, whatever the
+/// mailbox's language calls them, and the Drafts folder among them: the one
+/// place Graph creates a message.
+#[test]
+#[ignore = "live: needs the app registration's client secret"]
+fn a_graph_check_names_the_well_known_folders() {
+    let token = msgraph_token();
+    let report = Replica::open("msgraph", &user_line("msgraph"), &token).check();
+    let collections = report["sources"][0]["collections"]
+        .as_array()
+        .unwrap_or_else(|| panic!("collections listed: {report}"));
+    let mut client = connect(&token);
+
+    for (well_known, role) in [
+        ("inbox", "inbox"),
+        ("drafts", "drafts"),
+        ("sentitems", "sent"),
+        ("deleteditems", "trash"),
+    ] {
+        let name = client
+            .mail_folder_get(well_known)
+            .expect("get the well-known folder")
+            .response
+            .display_name;
+        let stated: Vec<&str> = collections
+            .iter()
+            .filter(|collection| collection["role"] == role)
+            .filter_map(|collection| collection["id"].as_str())
+            .collect();
+        assert_eq!(stated, [name.as_str()], "{role}: {report}");
+    }
+}
+
 /// The join link of a Teams meeting created on Graph reaches the store.
 ///
 /// A tenant without Teams gives the meeting no link: the test then says it

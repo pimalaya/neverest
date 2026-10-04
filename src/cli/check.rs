@@ -63,15 +63,26 @@ impl CheckCommand {
     }
 }
 
-/// Opens the source and probes it with a `list_collections` call, then
-/// opens its SMTP channel, if it declares one, up to authentication.
+/// Opens the source and lists its collections with the role each states on
+/// the server, then opens its SMTP channel, if it declares one, up to
+/// authentication.
 fn check_source(label: &str, account: &Account) -> Result<SourceCheck> {
     let s = Spinner::start(format!("Checking source {label}…"));
     let source = account.get(label)?;
     let mut client = client::open(&source)?;
-    let collections = client.list_collections(false)?.len();
+    let mut roles = client.collection_roles()?;
+    let collections: Vec<CheckedCollection> = client
+        .list_collections(false)?
+        .into_iter()
+        .map(|collection| CheckedCollection {
+            role: roles.remove(&collection.id),
+            id: collection.id,
+            name: collection.name,
+        })
+        .collect();
     s.success(format!(
-        "Checked source {label} ({collections} collections)"
+        "Checked source {label} ({} collections)",
+        collections.len()
     ));
 
     // NOTE: nothing is sent: the session is opened, upgraded and
@@ -134,8 +145,8 @@ impl fmt::Display for CheckOutput {
 pub struct SourceCheck {
     /// The endpoint's pimdir source id.
     pub source: String,
-    /// How many collections it listed.
-    pub collections: usize,
+    /// Every collection it listed, with the role the server states.
+    pub collections: Vec<CheckedCollection>,
     /// Whether its SMTP channel was opened and authenticated, `false` when
     /// it declares none.
     pub smtp: bool,
@@ -148,10 +159,27 @@ impl fmt::Display for SourceCheck {
             collections,
             smtp,
         } = self;
-        write!(f, "{source} ({collections} collection(s))")?;
+        write!(f, "{source} ({} collection(s))", collections.len())?;
         if *smtp {
             write!(f, ", SMTP channel authenticated")?;
         }
         Ok(())
     }
+}
+
+/// One collection a source listed, and what the server says it is for.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckedCollection {
+    /// The collection's id on its source: the mailbox name on IMAP, the
+    /// folder path on Graph, the label name on Gmail, the href on DAV.
+    pub id: String,
+    /// Its display name.
+    pub name: String,
+    /// The role the server states for it (`inbox`, `sent`, `drafts`,
+    /// `trash`, `junk`, `all`, `archive`), never guessed from its name:
+    /// IMAP SPECIAL-USE and `INBOX`, Graph's well-known folders, Gmail's
+    /// system labels.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }

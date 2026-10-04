@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- Changed `check` to list each source's collections, `collections: [{ id, name, role? }]`, instead of counting them, `role` being what the server states the collection is for: `inbox`, `sent`, `drafts`, `trash`, `junk`, `all` or `archive`, from IMAP SPECIAL-USE and `INBOX`, Graph's well-known mail folders, or Gmail's system labels; never guessed from a name. A caller adding an account can propose its folders from it. Nothing is written to the store.
 - Changed the one-source sync to keep each body as it arrives: every downloaded batch is written to the store at once, instead of the whole account once everything had downloaded. A mail is readable minutes after a first sync starts, and a run stopped halfway (quit, sleep, a lost connection, a caller's time limit) keeps what it downloaded, the next run fetching only the rest.
 - Changed `sync` to exit 3 when the run could not do all its work, a rerun picking it up: a source it could not reach, or a hunk, a send or an intent that failed without parking. An unreachable server used to exit 0, like a run with nothing to do. Exit 3 wins over the conflict code 2.
 - Changed `check` to also open and authenticate the SMTP channel a source declares, without sending anything, so a wrong submission server or password fails the check rather than the first send. Each endpoint now reports `smtp`, whether its channel was checked.

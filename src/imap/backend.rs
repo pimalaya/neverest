@@ -5,7 +5,7 @@
 //! [`crate::item`] types and io_imap's wire types.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     num::NonZeroU32,
     str::from_utf8,
@@ -77,6 +77,29 @@ impl ImapClient {
         }
 
         Ok(mailboxes)
+    }
+
+    /// The role each mailbox states, by mailbox name: the SPECIAL-USE
+    /// attributes of the `LIST` rows (RFC 6154), and `INBOX` (RFC 3501
+    /// §5.1). A check-only probe: the shared [`Collection`] stays free of
+    /// protocol data.
+    pub fn mailbox_roles(&mut self) -> Result<BTreeMap<String, String>> {
+        let reference: ImapMailbox<'static> = ""
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IMAP list reference"))?;
+        let pattern: ListMailbox<'static> = "*"
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IMAP list pattern"))?;
+
+        Ok(self
+            .list(reference, pattern)?
+            .into_iter()
+            .filter(is_selectable)
+            .filter_map(|row| {
+                let role = role_of(&row)?;
+                Some((mailbox_from(row).id, role.to_owned()))
+            })
+            .collect())
     }
 
     /// Enumerates a mailbox's UID+flag spine, incrementally when possible.
@@ -361,6 +384,26 @@ type ListRow = (
 /// Drops `\Noselect` containers (RFC 3501 §6.3.8), which cannot hold messages.
 fn is_selectable(row: &ListRow) -> bool {
     !row.2.contains(&FlagNameAttribute::Noselect)
+}
+
+/// The role a LIST row states: `INBOX`, or its first SPECIAL-USE attribute
+/// (RFC 6154). An attribute neverest does not know states nothing.
+fn role_of(row: &ListRow) -> Option<&'static str> {
+    if matches!(row.0, ImapMailbox::Inbox) {
+        return Some("inbox");
+    }
+
+    row.2.iter().find_map(
+        |attribute| match attribute.to_string().to_ascii_lowercase().as_str() {
+            "\\sent" => Some("sent"),
+            "\\drafts" => Some("drafts"),
+            "\\trash" => Some("trash"),
+            "\\junk" => Some("junk"),
+            "\\all" => Some("all"),
+            "\\archive" => Some("archive"),
+            _ => None,
+        },
+    )
 }
 
 /// Converts one IMAP LIST row into the shared [`Collection`] shape.
@@ -688,5 +731,33 @@ mod tests {
         assert_eq!(decode_checkpoint(&[0; 8]), None);
         assert_eq!(checkpoint_uid_validity(&[0; 3]), None);
         assert_eq!(decode_checkpoint(&encode_checkpoint(42, 0)), Some((42, 0)));
+    }
+
+    fn row(name: &str, attributes: &[&str]) -> ListRow {
+        let mailbox: ImapMailbox<'static> = name.to_owned().try_into().unwrap();
+        let attributes = attributes
+            .iter()
+            .map(|attribute| {
+                FlagNameAttribute::from(Atom::try_from(attribute.to_string()).unwrap())
+            })
+            .collect();
+        (mailbox, None, attributes)
+    }
+
+    #[test]
+    fn a_list_row_states_its_role_by_its_attributes_never_its_name() {
+        assert_eq!(role_of(&row("INBOX", &[])), Some("inbox"));
+        assert_eq!(role_of(&row("inbox", &[])), Some("inbox"));
+        assert_eq!(
+            role_of(&row("[Gmail]/Bin", &["HasNoChildren", "Trash"])),
+            Some("trash")
+        );
+        assert_eq!(role_of(&row("[Gmail]/All Mail", &["All"])), Some("all"));
+        assert_eq!(role_of(&row("Sent Items", &["SENT"])), Some("sent"));
+        assert_eq!(role_of(&row("Drafts", &["Drafts"])), Some("drafts"));
+        assert_eq!(role_of(&row("Spam", &["Junk"])), Some("junk"));
+        assert_eq!(role_of(&row("Archives", &["Archive"])), Some("archive"));
+        assert_eq!(role_of(&row("Sent", &[])), None);
+        assert_eq!(role_of(&row("Important", &["Important"])), None);
     }
 }

@@ -15,7 +15,7 @@
 //! a DAV href, a Gmail message id). JMAP configs parse but do not open yet.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
 };
 
@@ -158,6 +158,33 @@ impl Client {
                 feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
+        }
+    }
+
+    /// The role each collection states on the server (`inbox`, `sent`,
+    /// `drafts`, `trash`, `junk`, `all`, `archive`), by collection id.
+    ///
+    /// A check-only probe, never stored: roles stay out of [`Collection`].
+    /// Backends without roles (DAV, Google Calendar and People) answer none.
+    pub fn collection_roles(&mut self) -> Result<BTreeMap<String, String>> {
+        match self {
+            #[cfg(feature = "imap")]
+            Client::Imap(c) => c.mailbox_roles(),
+            #[cfg(feature = "msgraph")]
+            Client::Msgraph(c) => c.mailbox_roles(),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.mailbox_roles(),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal",
+                feature = "gmail"
+            )))]
+            Client::Unavailable => bail!(NO_BACKEND),
+            #[allow(unreachable_patterns)]
+            _ => Ok(BTreeMap::new()),
         }
     }
 

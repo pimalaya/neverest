@@ -111,6 +111,12 @@ impl Replica {
         replica
     }
 
+    /// Checks the account, answering its JSON report.
+    pub fn check(&self) -> serde_json::Value {
+        let (_, out) = self.run(&["--json", "check", "-a", ACCOUNT], &[0]);
+        serde_json::from_str(&out).expect("one JSON document")
+    }
+
     /// The store collection id of the backend's collection `key`.
     pub fn collection(&self, key: &str) -> String {
         format!("{}/{key}", self.backend)

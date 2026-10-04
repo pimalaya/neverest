@@ -29,7 +29,7 @@ mod calendar;
 mod contacts;
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     io::{Read, Write},
     time::Duration,
 };
@@ -74,6 +74,16 @@ const DELTA_SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,intern
 
 /// The page size requested when listing mail folders.
 const FOLDER_PAGE_SIZE: u32 = 100;
+
+/// Graph's well-known mail folders, with the role each states.
+const WELL_KNOWN_FOLDERS: [(&str, &str); 6] = [
+    ("inbox", "inbox"),
+    ("sentitems", "sent"),
+    ("drafts", "drafts"),
+    ("deleteditems", "trash"),
+    ("junkemail", "junk"),
+    ("archive", "archive"),
+];
 
 /// The domain a Graph session syncs, Graph carrying several behind one
 /// host and one credential.
@@ -292,6 +302,28 @@ impl GraphClient {
                 unread: None,
             })
             .collect())
+    }
+
+    /// The role each mail folder states, by folder name: one well-known
+    /// folder lookup per role, the answered id matched to the listing. A
+    /// well-known folder the mailbox does not have (often `archive`) is
+    /// skipped. A check-only probe; no role on contacts or calendars.
+    pub fn mailbox_roles(&mut self) -> Result<BTreeMap<String, String>> {
+        if self.kind != GraphKind::Mail {
+            return Ok(BTreeMap::new());
+        }
+
+        let folders = self.list_folders()?;
+        let mut stated = Vec::new();
+
+        for (well_known, role) in WELL_KNOWN_FOLDERS {
+            match self.op(|client| client.mail_folder_get(well_known)) {
+                Ok(folder) => stated.push((folder.id, role)),
+                Err(err) => debug!("no well-known {well_known} folder: {err}"),
+            }
+        }
+
+        Ok(roles_by_id(&folders, &stated))
     }
 
     /// Lists the replicated folder names with their ids, refreshing the name
@@ -681,6 +713,22 @@ fn is_expired_link(err: &MsgraphClientStdError) -> bool {
     matches!(err, MsgraphClientStdError::Send(send) if send.status() == Some(410))
 }
 
+/// Names the listed folders whose id a well-known lookup answered with, by
+/// the role it states. A well-known folder outside the listing (deeper than
+/// two levels) names nothing.
+fn roles_by_id(
+    folders: &[(String, String)],
+    stated: &[(String, &str)],
+) -> BTreeMap<String, String> {
+    folders
+        .iter()
+        .filter_map(|(name, id)| {
+            let (_, role) = stated.iter().find(|(stated, _)| stated == id)?;
+            Some((name.clone(), (*role).to_owned()))
+        })
+        .collect()
+}
+
 /// Folds one folder listing page into `(name, id)` entries, prefixing child
 /// folders with their parent name. Folders missing a name or an id are skipped.
 fn fold_folder_page(
@@ -794,6 +842,34 @@ mod tests {
     use io_msgraph::v1::send::MsgraphSendError;
 
     use super::*;
+
+    #[test]
+    fn a_listed_folder_takes_the_role_its_well_known_id_states() {
+        let folders = [
+            ("Boîte de réception".to_owned(), "AQ-inbox".to_owned()),
+            ("Éléments envoyés".to_owned(), "AQ-sent".to_owned()),
+            ("Brouillons".to_owned(), "AQ-drafts".to_owned()),
+            ("Sent".to_owned(), "AQ-other".to_owned()),
+        ];
+        let stated = [
+            ("AQ-inbox".to_owned(), "inbox"),
+            ("AQ-sent".to_owned(), "sent"),
+            ("AQ-drafts".to_owned(), "drafts"),
+            ("AQ-deep".to_owned(), "archive"),
+        ];
+        let roles = roles_by_id(&folders, &stated);
+        assert_eq!(
+            roles.get("Boîte de réception").map(String::as_str),
+            Some("inbox")
+        );
+        assert_eq!(
+            roles.get("Éléments envoyés").map(String::as_str),
+            Some("sent")
+        );
+        assert_eq!(roles.get("Brouillons").map(String::as_str), Some("drafts"));
+        assert_eq!(roles.get("Sent"), None);
+        assert_eq!(roles.len(), 3);
+    }
 
     /// A delta row fixture as Graph would serialize it, exercising the serde
     /// shape along the way.

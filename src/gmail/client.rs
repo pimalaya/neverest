@@ -22,7 +22,7 @@
 //! answered id is checked before it is trusted.
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::{Read, Write},
     thread,
     time::Duration,
@@ -204,6 +204,16 @@ impl GmailClient {
         }
 
         Ok(collections)
+    }
+
+    /// The role each system label states, by collection name. A check-only
+    /// probe; user labels state none.
+    pub fn mailbox_roles(&mut self) -> Result<BTreeMap<String, String>> {
+        Ok(self
+            .list_labels()?
+            .into_iter()
+            .filter_map(|label| Some((label.name, system_role(&label.id)?.to_owned())))
+            .collect())
     }
 
     /// Lists the labels synced as collections, refreshing the name map.
@@ -685,6 +695,18 @@ fn is_collection(label: &GmailLabel) -> bool {
     }
 }
 
+/// The role a system label states, by its id.
+fn system_role(id: &str) -> Option<&'static str> {
+    match id {
+        "INBOX" => Some("inbox"),
+        "SENT" => Some("sent"),
+        "DRAFT" => Some("drafts"),
+        SPAM => Some("junk"),
+        TRASH => Some("trash"),
+        _ => None,
+    }
+}
+
 /// Whether a collection name is one of the [`SYSTEM_COLLECTIONS`], whose
 /// name is their id.
 fn is_system(name: &str) -> bool {
@@ -873,6 +895,14 @@ mod tests {
     use io_gmail::v1::send::GmailSendError;
 
     use super::*;
+
+    #[test]
+    fn system_labels_state_their_role_user_labels_none() {
+        assert_eq!(system_role("INBOX"), Some("inbox"));
+        assert_eq!(system_role("DRAFT"), Some("drafts"));
+        assert_eq!(system_role("SPAM"), Some("junk"));
+        assert_eq!(system_role("Label_12"), None);
+    }
 
     fn labels(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|id| id.to_string()).collect()

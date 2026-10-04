@@ -211,6 +211,56 @@ fn check_opens_the_smtp_channel_a_source_declares() {
     assert!(printed.contains("Check the SMTP channel"), "{printed}");
 }
 
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
+fn check_lists_collections_with_the_roles_the_server_states() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let state = tmp.path().join("state");
+    let config = tmp.path().join("config.toml");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "[accounts.roles]\n\
+             imap.server = \"{IMAP_ROOT}\"\n\
+             imap.starttls = false\n\
+             imap.sasl.plain.username = \"{USER}\"\n\
+             imap.sasl.plain.password.raw = \"{PASS}\"\n",
+        ),
+    )
+    .unwrap();
+
+    let checked = neverest(&["--json", "check", "-a", "roles"], &config, &state);
+    let report: serde_json::Value = serde_json::from_str(&checked).expect("one JSON document");
+    let collections = report["sources"][0]["collections"]
+        .as_array()
+        .unwrap_or_else(|| panic!("collections listed: {checked}"));
+    let role_of = |role: &str| {
+        collections
+            .iter()
+            .find(|collection| collection["role"] == role)
+            .map(|collection| collection["id"].as_str().unwrap_or_default().to_owned())
+    };
+
+    // NOTE: Stalwart creates its default folders with SPECIAL-USE roles.
+    assert_eq!(role_of("inbox").as_deref(), Some("INBOX"), "{checked}");
+    for role in ["sent", "drafts", "trash", "junk"] {
+        assert!(
+            role_of(role).is_some(),
+            "no {role} folder stated: {checked}"
+        );
+    }
+    // A folder the server states nothing about carries no role.
+    assert!(
+        collections
+            .iter()
+            .all(|collection| collection["role"].is_null()
+                || ["inbox", "sent", "drafts", "trash", "junk", "all", "archive"]
+                    .contains(&collection["role"].as_str().unwrap_or_default())),
+        "{checked}"
+    );
+}
+
 /// Polls the account's mailboxes for the marker until one holds it, and
 /// answers which. Delivery is queued: the `250` that acknowledged the `DATA`
 /// is the server taking the message, not the server having filed it.

@@ -644,6 +644,16 @@ The fallback that derives a name from the body is the trap: a duplicate's body c
 - WHEN both are appended to a source that holds neither
 - THEN they are created under two distinct resource names
 
+### Requirement: A resource has one spelling
+A DAV member SHALL be addressed by one spelling of its name, whichever way the server writes its href: an encoded unreserved octet decoded, a `:` encoded as `%3A`, every escape in upper case, and every other escape kept. A name neverest derives for a new resource SHALL be written in that spelling.
+
+A server is free to percent-encode what a path segment may carry literally. Stalwart lists `urn:uuid:x.vcf`, created under that name, as `urn%3Auuid%3Ax.vcf`, and read as two names the one resource became two items, re-copied on every run. The colon is the one spelled encoded rather than literal: a relative reference whose first segment carries one reads as a scheme (RFC 3986 §4.2), and a read addressed `urn:uuid:x.vcf` answered 404.
+
+#### Scenario: A card named after a urn UID is one item
+- GIVEN a card whose `UID` is a `urn:uuid:`, on a server listing its href encoded
+- WHEN it is copied to another server and synced again
+- THEN the second run copies nothing, and the target holds one card
+
 ### Requirement: A create is refused when the server hands back a bound handle
 A create whose assigned handle is already bound by that source in that collection SHALL be recorded as a rejected push, never as a binding. The engine binds one handle per item per source, and two items pointing at one handle make the next enumeration read one of them as vanished, which propagates a delete of a resource nobody removed.
 

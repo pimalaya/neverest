@@ -613,13 +613,58 @@ fn entry(change: WebdavSyncChange) -> EnumEntry {
 }
 
 /// The addressing id of a member href: its last non-empty path segment,
-/// exactly as io-webdav addresses resources.
+/// as io-webdav addresses resources, in the one spelling of it
+/// [`canonical_segment`] gives.
+///
+/// A server is free to spell a segment's octets literally or
+/// percent-encoded: Stalwart lists `urn:uuid:x.vcf`, created under that
+/// name, as `urn%3Auuid%3Ax.vcf`, which read as a second resource and
+/// duplicated the item.
 fn href_id(href: &str) -> String {
-    href.trim_end_matches('/')
+    let segment = href
+        .trim_end_matches('/')
         .rsplit('/')
         .next()
-        .unwrap_or(href)
-        .to_owned()
+        .unwrap_or(href);
+    canonical_segment(segment)
+}
+
+/// One spelling for every way of writing a segment neverest names: an
+/// encoded unreserved octet decoded (RFC 3986 §6.2.2.2), a literal `:`
+/// encoded, and every escape in upper case.
+///
+/// The colon goes encoded rather than literal: a relative reference whose
+/// first segment carries one reads as a scheme (RFC 3986 §4.2), and
+/// io-webdav reading `urn:uuid:x.vcf` back got a 404. Any other escape, a
+/// `/` or a space, stays encoded, decoding it would name another resource.
+fn canonical_segment(segment: &str) -> String {
+    let mut canonical = String::with_capacity(segment.len());
+    let mut rest = segment;
+    while let Some(char) = rest.chars().next() {
+        let escaped = rest
+            .strip_prefix('%')
+            .and_then(|tail| tail.get(..2))
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match (char, escaped) {
+            (_, Some(byte)) => {
+                if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                    canonical.push(char::from(byte));
+                } else {
+                    canonical.push_str(&format!("%{byte:02X}"));
+                }
+                rest = &rest[3..];
+            }
+            (':', None) => {
+                canonical.push_str("%3A");
+                rest = &rest[1..];
+            }
+            (char, None) => {
+                canonical.push(char);
+                rest = &rest[char.len_utf8()..];
+            }
+        }
+    }
+    canonical
 }
 
 /// The resource name a new item is created under: `UID`, mint, extension.
@@ -646,12 +691,14 @@ fn resource_id(kind: DavKind, link: LinkId<'_>, body: &[u8]) -> String {
 
 /// Keeps a `UID` addressable as one path segment: a `UID` is free-form text
 /// and may legally carry a `/` or a space, neither of which survives being
-/// spliced into a URL path.
+/// spliced into a URL path. A `:` is kept, encoded as [`canonical_segment`]
+/// spells it, so a `urn:uuid:` stays recognisable.
 fn sanitize(uid: &str) -> String {
     uid.chars()
         .map(|char| match char {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' | ':' => char,
-            _ => '-',
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => String::from(char),
+            ':' => String::from("%3A"),
+            _ => String::from('-'),
         })
         .collect()
 }
@@ -728,6 +775,34 @@ mod tests {
         assert_eq!(href_id("card-1.vcf"), "card-1.vcf");
     }
 
+    /// A `UID` a server lists encoded is the resource neverest created under
+    /// it, not a second one.
+    #[test]
+    fn an_encoded_colon_names_the_resource_created_with_it() {
+        let created = resource_id(DavKind::Card, stated("urn:uuid:4fbe8971-0bc3"), b"");
+        assert_eq!(
+            href_id("/dav/card/test/default/urn%3Auuid%3A4fbe8971-0bc3.vcf"),
+            created
+        );
+        assert_eq!(
+            href_id("/dav/card/test/default/urn%3auuid%3a4fbe8971-0bc3.vcf"),
+            created
+        );
+        // NOTE: a server listing the colon literally names it too.
+        assert_eq!(
+            href_id("/dav/card/test/default/urn:uuid:4fbe8971-0bc3.vcf"),
+            created
+        );
+        assert_eq!(href_id("/books/card%2D1%2Evcf"), "card-1.vcf");
+
+        // NOTE: decoding these would name another resource, or none.
+        assert_eq!(href_id("/books/a%2fb.vcf"), "a%2Fb.vcf");
+        assert_eq!(href_id("/books/a%20b.vcf"), "a%20b.vcf");
+        assert_eq!(href_id("/books/100%25.vcf"), "100%25.vcf");
+        assert_eq!(href_id("/books/bad%zz%4.vcf"), "bad%zz%4.vcf");
+        assert_eq!(href_id("/books/é:.vcf"), "é%3A.vcf");
+    }
+
     /// The link id of an item whose content states its identity, as
     /// [`Kind::split_link_id`] reads it.
     fn stated(uid: &str) -> LinkId<'_> {
@@ -750,7 +825,7 @@ mod tests {
 
         assert_eq!(
             resource_id(DavKind::Card, stated("urn:uuid:4fbe8971-0bc3"), b""),
-            "urn:uuid:4fbe8971-0bc3.vcf"
+            "urn%3Auuid%3A4fbe8971-0bc3.vcf"
         );
         assert_eq!(
             resource_id(DavKind::Card, stated("a b/c"), b""),

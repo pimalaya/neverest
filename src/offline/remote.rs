@@ -448,27 +448,33 @@ impl PimdirRemote for PimRemote<'_> {
     }
 }
 
-/// The key into the pre-fetch cache: `(collection, handle)`.
-pub type FetchKey = (String, String);
-
-/// A [`PimdirRemote`] for the Full-apply phase, serving bodies from cache.
+/// A [`PimdirRemote`] for applying one hydrated batch, serving its bodies.
 ///
-/// The hydrate phase already streamed them in, so the `Full` upgrade does only
-/// index writes. A miss falls back to a real fetch on the wrapped
-/// [`PimRemote`], correcting a gap rather than losing it, and so do the rest.
-pub struct CachedFetchRemote<'a> {
-    cache: &'a HashMap<FetchKey, PimdirFetchedItem>,
-    fallback: PimRemote<'a>,
+/// The batch already streamed them in, so the `Full` upgrade does only index
+/// writes. A miss falls back to a real fetch on the wrapped remote, correcting
+/// a gap rather than losing it, and so do the rest.
+pub struct CachedFetchRemote<R> {
+    collection: String,
+    cache: HashMap<String, PimdirFetchedItem>,
+    fallback: R,
 }
 
-impl<'a> CachedFetchRemote<'a> {
-    /// Serves fetches from a round's cache, falling back to the wire.
-    pub fn new(cache: &'a HashMap<FetchKey, PimdirFetchedItem>, fallback: PimRemote<'a>) -> Self {
-        Self { cache, fallback }
+impl<R> CachedFetchRemote<R> {
+    /// Serves one collection's fetched batch, falling back to `fallback`.
+    pub fn new(collection: &str, items: Vec<PimdirFetchedItem>, fallback: R) -> Self {
+        let cache = items
+            .into_iter()
+            .map(|item| (item.handle.0.clone(), item))
+            .collect();
+        Self {
+            collection: collection.to_string(),
+            cache,
+            fallback,
+        }
     }
 }
 
-impl PimdirRemote for CachedFetchRemote<'_> {
+impl<R: PimdirRemote<Error = anyhow::Error>> PimdirRemote for CachedFetchRemote<R> {
     type Error = anyhow::Error;
 
     fn enumerate(
@@ -485,12 +491,14 @@ impl PimdirRemote for CachedFetchRemote<'_> {
         handles: Vec<PimdirHandle>,
         tier: PimdirTier,
     ) -> Result<Vec<PimdirFetchedItem>, Self::Error> {
-        let coll = collection.as_str();
         let mut items = Vec::with_capacity(handles.len());
         let mut misses = Vec::new();
         for handle in handles {
-            match self.cache.get(&(coll.to_string(), handle.0.clone())) {
-                Some(item) => items.push(item.clone()),
+            let cached = (collection.as_str() == self.collection)
+                .then(|| self.cache.remove(&handle.0))
+                .flatten();
+            match cached {
+                Some(item) => items.push(item),
                 None => misses.push(handle),
             }
         }

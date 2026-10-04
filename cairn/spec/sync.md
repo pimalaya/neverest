@@ -875,6 +875,16 @@ Every such output type SHALL be registered in the schema registry under its invo
 - WHEN `neverest check --json` runs
 - THEN one document is printed, naming the account, its mode and every endpoint that answered
 
+### Requirement: A check opens the send channel too
+`neverest check` SHALL open the SMTP channel an endpoint declares, upgrade it and authenticate, then quit without sending, and SHALL fail on the first channel that does not open, naming its endpoint. Each endpoint's entry SHALL say whether its channel was checked (`smtp`).
+
+A send channel holds its own server and often its own credential. Checking the sources alone left a wrong SMTP password to surface at the first send, a queued submission parked for a reason the check had said nothing about.
+
+#### Scenario: A wrong submission server fails the check
+- GIVEN an account whose IMAP source answers and whose SMTP channel does not
+- WHEN `neverest check` runs
+- THEN it fails naming the SMTP channel of that source
+
 ### Requirement: JSON keys are camelCase
 Every output type neverest prints SHALL serialize its keys as camelCase, matching the wire formats the endpoints speak (JMAP per RFC 8620, Microsoft Graph, the Google APIs) and keeping every key reachable by dot access in jq and JavaScript, which is how the README's notifier reads a report.
 

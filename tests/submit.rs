@@ -168,6 +168,49 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     );
 }
 
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143/:2525 and --ignored"]
+fn check_opens_the_smtp_channel_a_source_declares() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let state = tmp.path().join("state");
+    let config = tmp.path().join("config.toml");
+    fs::create_dir_all(&state).unwrap();
+    let write = |smtp: &str| {
+        fs::write(
+            &config,
+            format!(
+                "[accounts.submit]\n\
+                 imap.server = \"{IMAP_ROOT}\"\n\
+                 imap.starttls = false\n\
+                 imap.sasl.plain.username = \"{USER}\"\n\
+                 imap.sasl.plain.password.raw = \"{PASS}\"\n\
+                 smtp.server = \"{smtp}\"\n",
+            ),
+        )
+        .unwrap();
+    };
+
+    write(SMTP);
+    let checked = neverest(&["--json", "check", "-a", "submit"], &config, &state);
+    assert!(checked.contains("\"smtp\":true"), "{checked}");
+
+    // NOTE: the sources still answer, so only the send channel fails.
+    write("smtp://127.0.0.1:1");
+    let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &config.to_string_lossy(), "check", "-a", "submit"])
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .expect("spawn neverest");
+    // NOTE: the error lands on either stream depending on the printer.
+    let printed = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success(), "{printed}");
+    assert!(printed.contains("Check the SMTP channel"), "{printed}");
+}
+
 /// Polls the account's mailboxes for the marker until one holds it, and
 /// answers which. Delivery is queued: the `250` that acknowledged the `DATA`
 /// is the server taking the message, not the server having filed it.

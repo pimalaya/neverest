@@ -1,8 +1,8 @@
 //! # Check command
 //!
 //! Reports what the store keeps, then opens every source and lists its
-//! collections, surfacing credential, network or config errors before a real
-//! sync.
+//! collections, and opens the send channel a source declares, surfacing
+//! credential, network or config errors before a real sync.
 
 use std::{fmt, path::PathBuf};
 
@@ -19,8 +19,9 @@ use crate::{account::Account, client, config::Config};
 /// Probes every configured source before a real sync.
 ///
 /// Reports the account's namespaces, then opens each source and lists its
-/// collections, surfacing credential, network or config errors before a real
-/// sync.
+/// collections, and opens and authenticates the SMTP channel a source
+/// declares, surfacing credential, network or config errors before a real
+/// sync or a first send.
 #[derive(Debug, Parser)]
 pub struct CheckCommand {}
 
@@ -62,18 +63,38 @@ impl CheckCommand {
     }
 }
 
-/// Opens the source and probes it with a `list_collections` call.
+/// Opens the source and probes it with a `list_collections` call, then
+/// opens its SMTP channel, if it declares one, up to authentication.
 fn check_source(label: &str, account: &Account) -> Result<SourceCheck> {
     let s = Spinner::start(format!("Checking source {label}…"));
-    let mut client = client::open(&account.get(label)?)?;
+    let source = account.get(label)?;
+    let mut client = client::open(&source)?;
     let collections = client.list_collections(false)?.len();
     s.success(format!(
         "Checked source {label} ({collections} collections)"
     ));
 
+    // NOTE: nothing is sent: the session is opened, upgraded and
+    // authenticated, then quit.
+    #[cfg(feature = "smtp")]
+    let smtp = match &source.smtp {
+        Some(smtp) => {
+            let s = Spinner::start(format!("Checking the SMTP channel of {label}…"));
+            let mut session = crate::offline::submit::connect_smtp(smtp)
+                .map_err(|err| err.context(format!("Check the SMTP channel of {label}")))?;
+            let _ = io_smtp::client::SmtpClient::quit(&mut session);
+            s.success(format!("Checked the SMTP channel of {label}"));
+            true
+        }
+        None => false,
+    };
+    #[cfg(not(feature = "smtp"))]
+    let smtp = false;
+
     Ok(SourceCheck {
         source: label.to_owned(),
         collections,
+        smtp,
     })
 }
 
@@ -115,6 +136,9 @@ pub struct SourceCheck {
     pub source: String,
     /// How many collections it listed.
     pub collections: usize,
+    /// Whether its SMTP channel was opened and authenticated, `false` when
+    /// it declares none.
+    pub smtp: bool,
 }
 
 impl fmt::Display for SourceCheck {
@@ -122,7 +146,12 @@ impl fmt::Display for SourceCheck {
         let Self {
             source,
             collections,
+            smtp,
         } = self;
-        write!(f, "{source} ({collections} collection(s))")
+        write!(f, "{source} ({collections} collection(s))")?;
+        if *smtp {
+            write!(f, ", SMTP channel authenticated")?;
+        }
+        Ok(())
     }
 }

@@ -20,7 +20,10 @@ use pimalaya_config::toml::TomlConfig;
 use crate::{
     cli::exit::Exit,
     config::{CollectionFilter, Config},
-    offline::{driver, state::StoreState},
+    offline::{
+        driver::{self, DownloadOrder},
+        state::StoreState,
+    },
 };
 
 /// How long a run waits for another run's store lock before giving up.
@@ -103,6 +106,10 @@ pub struct SyncCommand {
     /// is refused until this says otherwise.
     #[arg(long)]
     pub accept_mode: bool,
+    /// The order bodies download in: `largest` first, the fastest whole run,
+    /// or `newest` first, so recent mail is readable early on a large account.
+    #[arg(long, value_enum, value_name = "ORDER", default_value_t)]
+    pub download_order: DownloadOrder,
 }
 
 impl SyncCommand {
@@ -159,6 +166,7 @@ impl SyncCommand {
             self.no_purge,
             &self.source,
             self.accept_mode,
+            self.download_order,
         )?;
 
         // NOTE: read before printing, which consumes the report.

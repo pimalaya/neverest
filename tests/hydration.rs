@@ -149,6 +149,122 @@ fn a_body_is_kept_as_it_arrives() {
     }
 }
 
+/// Under `--download-order newest`, recent mail downloads first even when an
+/// older folder holds the larger bodies, which the default order fetches
+/// first: over one connection, the first batch applied is the recent one.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
+fn recent_mail_downloads_first_on_request() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let store = root.join("store");
+    let config = root.join("config.toml");
+
+    let id = std::process::id();
+    let old = format!("Newest{id}Old");
+    let recent = format!("Newest{id}Recent");
+    let line = "x".repeat(76);
+    let large: String = (0..BODY / 78).map(|_| format!("{line}\r\n")).collect();
+    let eml = root.join("msg.eml");
+    for (folder, date, body) in [
+        (&old, "Wed, 01 May 2019 10:00:00 +0000", large.as_str()),
+        (&recent, "Sun, 04 Oct 2026 10:00:00 +0000", "hello\r\n"),
+    ] {
+        imap(&format!("CREATE {folder}"));
+        for n in 0..MESSAGES {
+            fs::write(
+                &eml,
+                format!(
+                    "Message-ID: <newest-{id}-{folder}-{n}@pimalaya.org>\r\n\
+                     From: alice@pimalaya.org\r\n\
+                     To: bob@pimalaya.org\r\n\
+                     Subject: neverest order {n}\r\n\
+                     Date: {date}\r\n\
+                     \r\n\
+                     {body}",
+                ),
+            )
+            .unwrap();
+            let append = Command::new("curl")
+                .args(["-fsS", "-T"])
+                .arg(&eml)
+                .arg(format!("{SERVER}/{folder}"))
+                .args(["--user", CRED])
+                .output()
+                .expect("spawn curl append");
+            assert!(append.status.success(), "seed append failed");
+        }
+    }
+
+    fs::write(
+        &config,
+        format!(
+            "[accounts.newest]\n\
+             store.root = \"{}\"\n\
+             imap.server = \"{SERVER}\"\n\
+             imap.starttls = false\n\
+             imap.sasl.plain.username = \"test@pimalaya.org\"\n\
+             imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
+             imap.collection.filter.include = [\"{old}\", \"{recent}\"]\n",
+            store.display(),
+        ),
+    )
+    .unwrap();
+    neverest(&["init", "-a", "newest"], &config);
+
+    let mut run = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &config.to_string_lossy()])
+        .args([
+            "sync",
+            "-a",
+            "newest",
+            "-j",
+            "1",
+            "--download-order",
+            "newest",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn neverest");
+    let folders = [old.clone(), recent.clone()];
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while bodies(&store, &folders) < MESSAGES {
+        assert!(Instant::now() < deadline, "no batch was applied in time");
+        assert!(
+            run.try_wait().unwrap().is_none(),
+            "the run ended before it could be stopped"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    run.kill().unwrap();
+    run.wait().unwrap();
+
+    assert_eq!(
+        bodies(&store, std::slice::from_ref(&recent)),
+        MESSAGES,
+        "the recent folder's batch came first"
+    );
+    assert!(
+        bodies(&store, std::slice::from_ref(&old)) < MESSAGES,
+        "the old, larger folder came after"
+    );
+
+    neverest(
+        &["sync", "-a", "newest", "--download-order", "newest"],
+        &config,
+    );
+    assert_eq!(
+        bodies(&store, &folders),
+        2 * MESSAGES,
+        "every body is stored"
+    );
+
+    for folder in &folders {
+        imap(&format!("DELETE {folder}"));
+    }
+}
+
 /// How many messages of `folders` the store holds a body for.
 fn bodies(store: &Path, folders: &[String]) -> usize {
     let Ok(reader) = PimdirReader::open(store) else {

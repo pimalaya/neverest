@@ -17,7 +17,7 @@
 //! its opening pull-only round found the servers had already done.
 
 use std::{
-    cmp::Reverse,
+    cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::Write,
@@ -34,6 +34,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
+use clap::ValueEnum;
 use crossbeam_queue::SegQueue;
 use io_pimdir::{
     change::PimdirWriteOp,
@@ -350,6 +351,7 @@ pub fn run(
     no_purge: bool,
     only_sources: &[String],
     accept_mode: bool,
+    download_order: DownloadOrder,
 ) -> Result<SyncOutput> {
     let account_name = account_name.into();
     let endpoints = account_config.endpoints()?;
@@ -403,6 +405,7 @@ pub fn run(
                 &work_dir,
                 dry_run,
                 connections,
+                download_order,
                 &mut report,
             )
         } else {
@@ -757,7 +760,39 @@ fn run_pair(
 }
 
 /// A collection's spine result: its name and the bodies to hydrate.
-type CollectionPlan = (String, Vec<(PimdirHandle, u64)>);
+type CollectionPlan = (String, Vec<HydrateTarget>);
+
+/// A body to hydrate, with what orders its download.
+#[derive(Clone, Debug)]
+struct HydrateTarget {
+    handle: PimdirHandle,
+    /// The size its local mail summary carries, 0 when unknown.
+    size: u64,
+    /// Its date, the mail summary's RFC 3339 instant in UTC.
+    date: Option<String>,
+}
+
+/// The order phase 2 downloads bodies in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum DownloadOrder {
+    /// Largest first: the fastest whole run, the pool ending on small bodies.
+    #[default]
+    Largest,
+    /// Newest first: recent mail is readable early on a large account.
+    Newest,
+}
+
+impl DownloadOrder {
+    /// Whether `a` downloads before `b`; a stable sort keeps ties in order.
+    fn compare(self, a: &HydrateTarget, b: &HydrateTarget) -> CmpOrdering {
+        match self {
+            Self::Largest => b.size.cmp(&a.size),
+            // NOTE: one fixed RFC 3339 shape in UTC, so the strings sort as
+            // the instants do; `None` sorts below any date, hence last.
+            Self::Newest => b.date.cmp(&a.date),
+        }
+    }
+}
 
 /// The local, one-source sync, run as two account-wide phases.
 ///
@@ -776,6 +811,7 @@ fn run_local(
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
+    download_order: DownloadOrder,
     report: &mut SyncOutput,
 ) -> Result<()> {
     let source = source_name.to_string();
@@ -862,7 +898,14 @@ fn run_local(
         return Ok(());
     }
 
-    phase2_hydrate(source_name, &plans, &mut ctxs, &mut stores[0], &blobs)
+    phase2_hydrate(
+        source_name,
+        &plans,
+        download_order,
+        &mut ctxs,
+        &mut stores[0],
+        &blobs,
+    )
 }
 
 /// Opens `count` single-connection [`SourceCtx`]s with overlapping handshakes.
@@ -985,8 +1028,8 @@ fn phase1_spine(
 
 /// Reconciles one collection's spine, without hydration.
 ///
-/// Returns the not-yet-`Full` bodies to hydrate, each with the size its local
-/// mail summary carries so the download runs largest-first, plus the report
+/// Returns the not-yet-`Full` bodies to hydrate, each with the size and the
+/// date its local mail summary carries to order the download, plus the report
 /// patches. A dry run stops after itemizing, leaving the targets empty.
 ///
 /// Scans run in parallel, but `pushing` lets one collection of the source
@@ -1001,7 +1044,7 @@ fn collection_spine(
     store_dir: &Path,
     pushing: &Mutex<()>,
     dry_run: bool,
-) -> Result<(Vec<(PimdirHandle, u64)>, SyncOutput)> {
+) -> Result<(Vec<HydrateTarget>, SyncOutput)> {
     let mut report = SyncOutput::default();
 
     let before = flag_snapshot(store, collection, &ctx.name)?;
@@ -1045,15 +1088,18 @@ fn collection_spine(
     itemize_refused(&ctx.name, mem::take(&mut ctx.refused), &mut report);
     itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
 
-    let mut targets: Vec<(PimdirHandle, u64)> = Vec::new();
+    let mut targets: Vec<HydrateTarget> = Vec::new();
     for placement in projection_view(store, collection, &ctx.name)
         .with_context(|| format!("Project {} {collection}", &ctx.name))?
     {
         if placement.status == PimdirStatus::Tombstone || placement.object.is_some() {
             continue;
         }
-        let size = summary_size(&placement.summary).unwrap_or(0) as u64;
-        targets.push((placement.handle, size));
+        targets.push(HydrateTarget {
+            size: summary_size(&placement.summary).unwrap_or(0) as u64,
+            date: summary_date(&placement.summary),
+            handle: placement.handle,
+        });
     }
     Ok((targets, report))
 }
@@ -1064,18 +1110,19 @@ type HydrateBatch = (String, Vec<PimdirHandle>);
 /// Phase 2, hydrating every body through one global work-stealing pool.
 ///
 /// A batched fetch stays within one selected collection, so bodies are chunked
-/// per collection and the biggest batches queued first for a global
-/// largest-first order. A worker steals the next, idling at no collection edge.
+/// per collection and the batches queued in the chosen order across the
+/// account. A worker steals the next, idling at no collection edge.
 /// Each batch is raised to `Full` as soon as it is fetched, so its bodies are
 /// readable at once and an interrupted run keeps them.
 fn phase2_hydrate(
     source: &str,
     plans: &[CollectionPlan],
+    order: DownloadOrder,
     ctxs: &mut [SourceCtx],
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
 ) -> Result<()> {
-    let batches = hydrate_batches(plans);
+    let batches = hydrate_batches(plans, order);
     let total_bodies: usize = batches.iter().map(|(_, handles)| handles.len()).sum();
     if total_bodies == 0 {
         return Ok(());
@@ -1128,22 +1175,21 @@ fn phase2_hydrate(
     Ok(())
 }
 
-/// Chunks each collection's bodies into batches, the biggest queued first.
+/// Chunks each collection's bodies into batches, queued in `order`.
 ///
-/// Largest-first within a collection and, by each batch's largest body, across
-/// the account.
-fn hydrate_batches(plans: &[CollectionPlan]) -> Vec<HydrateBatch> {
-    let mut batches: Vec<(u64, HydrateBatch)> = Vec::new();
+/// The order holds within a collection and, by each batch's first body (its
+/// largest or its newest), across the account.
+fn hydrate_batches(plans: &[CollectionPlan], order: DownloadOrder) -> Vec<HydrateBatch> {
+    let mut batches: Vec<(&HydrateTarget, HydrateBatch)> = Vec::new();
     for (collection, targets) in plans {
-        let mut sorted = targets.clone();
-        sorted.sort_by_key(|(_, size)| Reverse(*size));
+        let mut sorted: Vec<&HydrateTarget> = targets.iter().collect();
+        sorted.sort_by(|a, b| order.compare(a, b));
         for chunk in sorted.chunks(BATCH_SIZE) {
-            let max_size = chunk.iter().map(|(_, size)| *size).max().unwrap_or(0);
-            let handles: Vec<PimdirHandle> = chunk.iter().map(|(h, _)| h.clone()).collect();
-            batches.push((max_size, (collection.clone(), handles)));
+            let handles = chunk.iter().map(|target| target.handle.clone()).collect();
+            batches.push((chunk[0], (collection.clone(), handles)));
         }
     }
-    batches.sort_by_key(|(max_size, _)| Reverse(*max_size));
+    batches.sort_by(|(a, _), (b, _)| order.compare(a, b));
     batches.into_iter().map(|(_, batch)| batch).collect()
 }
 
@@ -1661,6 +1707,14 @@ fn relay_targets(
 fn summary_size(summary: &Option<PimdirSummary>) -> Option<usize> {
     match summary.as_ref()? {
         PimdirSummary::Mail(mail) => mail.size.map(|size| size as usize),
+        _ => None,
+    }
+}
+
+/// The date a mail summary carries; other kinds carry none.
+fn summary_date(summary: &Option<PimdirSummary>) -> Option<String> {
+    match summary.as_ref()? {
+        PimdirSummary::Mail(mail) => mail.date.clone(),
         _ => None,
     }
 }
@@ -6550,5 +6604,93 @@ mod tests {
         assert_eq!(kept("imap/Archive"), ["1", "2"]);
         assert_eq!(kept("imap/INBOX"), ["1", "2", "3"]);
         assert_eq!(fetched.load(Ordering::Relaxed), 3, "the pool stopped");
+    }
+
+    fn target(handle: &str, size: u64, date: Option<&str>) -> HydrateTarget {
+        HydrateTarget {
+            handle: PimdirHandle(handle.into()),
+            size,
+            date: date.map(String::from),
+        }
+    }
+
+    fn queued(batches: Vec<HydrateBatch>) -> Vec<(String, Vec<String>)> {
+        batches
+            .into_iter()
+            .map(|(collection, handles)| (collection, handles.into_iter().map(|h| h.0).collect()))
+            .collect()
+    }
+
+    /// The download order is the caller's: largest first by default, the
+    /// fastest whole run, or newest first, so that on a large account today's
+    /// mail does not wait behind years of large attachments.
+    #[test]
+    fn bodies_download_largest_or_newest_first() {
+        let plans: Vec<CollectionPlan> = vec![
+            (
+                "imap/Archive".into(),
+                vec![
+                    target("a", 900, Some("2019-05-01T08:00:00Z")),
+                    target("b", 10, Some("2026-10-03T08:00:00Z")),
+                ],
+            ),
+            (
+                "imap/INBOX".into(),
+                vec![
+                    target("c", 50, Some("2026-10-04T08:00:00Z")),
+                    target("d", 20, None),
+                    target("e", 500, Some("2025-01-01T08:00:00Z")),
+                ],
+            ),
+        ];
+        let owned = |list: &[&str]| list.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            queued(hydrate_batches(&plans, DownloadOrder::Largest)),
+            [
+                ("imap/Archive".to_string(), owned(&["a", "b"])),
+                ("imap/INBOX".to_string(), owned(&["e", "c", "d"])),
+            ],
+        );
+        assert_eq!(
+            queued(hydrate_batches(&plans, DownloadOrder::Newest)),
+            [
+                ("imap/INBOX".to_string(), owned(&["c", "e", "d"])),
+                ("imap/Archive".to_string(), owned(&["b", "a"])),
+            ],
+            "newest first, a mail without a date last",
+        );
+    }
+
+    /// Newest first holds across collections batch by batch: an older batch
+    /// of the Inbox waits behind a newer one of another folder.
+    #[test]
+    fn newest_first_interleaves_collections_by_batch() {
+        let inbox = (0..BATCH_SIZE + 1)
+            .map(|i| {
+                let date = format!("2026-10-04T{:02}:{:02}:00Z", i / 60, i % 60);
+                target(&i.to_string(), 1, Some(&date))
+            })
+            .collect();
+        let plans: Vec<CollectionPlan> = vec![
+            ("imap/INBOX".into(), inbox),
+            (
+                "imap/Archive".into(),
+                vec![target("x", 1, Some("2026-10-04T00:30:00Z"))],
+            ),
+        ];
+
+        let order: Vec<(String, usize, String)> = hydrate_batches(&plans, DownloadOrder::Newest)
+            .into_iter()
+            .map(|(collection, handles)| (collection, handles.len(), handles[0].0.clone()))
+            .collect();
+        assert_eq!(
+            order,
+            [
+                ("imap/INBOX".to_string(), BATCH_SIZE, BATCH_SIZE.to_string()),
+                ("imap/Archive".to_string(), 1, "x".to_string()),
+                ("imap/INBOX".to_string(), 1, "0".to_string()),
+            ],
+        );
     }
 }

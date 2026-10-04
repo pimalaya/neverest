@@ -419,7 +419,7 @@ Neverest SHALL NOT reserve a collection for queued sends. Submission is a **mail
 
 The intent's payload SHALL be `v: 1` JSON carrying `object` (the body hash, by the convention every action kind follows), `from` (empty means the null reverse path), `rcpts` and an optional `subject`. The body SHALL be written durably before the enqueue, so the queue row pins it (queued bodies are pinned, and no GC can sweep it between the enqueue and the send); it belongs to no collection. The intent SHALL anchor on whatever collection the producer chose: neverest scans every collection's pending actions, so there is no anchor rule.
 
-Neverest SHALL perform each pending intent through the one source offering a send channel: its own `smtp` table, else its native send (the Graph `sendMail` action, which files the message in Sent itself), sources walked in the order the account declares them. At most one source may declare an `smtp` table, so the only pick that order decides is between a declared channel and a natively-sending source. On success the row SHALL be acknowledged, releasing the body's pin. A **transient** failure (an SMTP 4xx, a transport error) SHALL leave the row pending; a **permanent** one (an SMTP 5xx, an undecodable payload, a missing body) SHALL park it with its error. A build with no send channel (neither `smtp` nor `msgraph`) SHALL skip submit intents and warn, never park them. Message content is never logged.
+Neverest SHALL perform each pending intent through the one source offering a send channel: its own `smtp` table, else its native send (the Graph `sendMail` action, which files the message in Sent itself), sources walked in the order the account declares them. At most one source may declare an `smtp` table, so the only pick that order decides is between a declared channel and a natively-sending source. On success the row SHALL be acknowledged with its receipt, releasing the body's pin. A **transient** failure (an SMTP 4xx, a transport error) SHALL leave the row pending; a **permanent** one (an SMTP 5xx, an undecodable payload, a missing body) SHALL park it with its error. A build with no send channel (neither `smtp` nor `msgraph`) SHALL skip submit intents and warn, never park them. Message content is never logged.
 
 The SMTP channel SHALL remove the body's `Bcc` field before `DATA` (RFC 5322 §3.6.3): a producer may stage the body with it, the payload's `rcpts` alone carrying those recipients to the server. The Graph channel hands the field to `sendMail`, which derives the recipients from it and does not deliver it.
 
@@ -1064,6 +1064,14 @@ A `submit` SHALL be sent by the source its payload names, and left pending for a
 
 ### Requirement: A sent copy is filed once sent
 A `submit` asking for `copy` SHALL file the message in that collection only after the send succeeds: natively where the provider files sent mail itself (Gmail, Graph), otherwise by replacing the intent with an `add` of the message, `\Seen` set, drained in the same run (pimdir STORAGE §15.5, Annex B.2).
+
+### Requirement: A performed intent leaves a receipt
+Every intent neverest performs successfully (`submit`, `calendar-reply`, `calendar-cancel`, `collection-create`) SHALL be acknowledged with its receipt (io-pimdir `acknowledge_action`, or `replace_action` for a `submit` whose copy neverest files), so its producer reads it applied rather than withdrawn (pimdir STORAGE §15.4, §15.5). The receipt SHALL name no `seq`: a created collection and a provider-filed copy arrive with a later listing, a copy neverest files is an `add` followed by its own id, and an invitation leaves its event where the producer found it. A parked or pending intent keeps its row and gets no receipt.
+
+#### Scenario: A send and a folder followed by their producer
+- **GIVEN** a producer that queued a `submit` and a `collection-create` and kept their ids
+- **WHEN** a sync sends the message and creates the folder
+- **THEN** `action_status` reads both `Applied` with no `seq`, where a withdrawn row reads `Unknown`
 
 ### Requirement: Google Calendar notifies as the resource asks
 A new event carrying a UID SHALL be inserted with it as `iCalUID` and notify its attendees when the resource is scheduled (pimdir Annex B.1) and the account organises it (no organizer, the calendar itself or the account's address); otherwise it SHALL be imported, notifying nobody. An update SHALL notify the attendees only when the resource is scheduled; a delete SHALL notify them when the event has attendees.

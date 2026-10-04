@@ -3382,7 +3382,8 @@ fn warn_conflicts(report: &SyncOutput) -> usize {
 
 /// Performs the queue's `submit` intents, which the store's drain leaves alone.
 ///
-/// A sent intent is acknowledged, releasing its body's pin; a permanent failure
+/// A sent intent is acknowledged with a receipt, releasing its body's pin, so a
+/// producer reads it applied rather than withdrawn; a permanent failure
 /// parks the row with its error, a transient one leaves it pending. With no
 /// channel they stay pending, never parked, another build being able to send.
 fn drain_submits(
@@ -3440,6 +3441,10 @@ fn drain_submits(
             let entry = match submit::send_one(&mut channel, blobs, intent) {
                 Ok(()) => {
                     let copy = intent.copy().filter(|_| !files_copy);
+                    // NOTE: both leave the intent's receipt with no seq: the
+                    // copy is not in the store yet, a queued `add` of its
+                    // own or one the provider files for the next sync
+                    // (pimdir STORAGE §15.5).
                     let acknowledged = match &copy {
                         Some(collection) => {
                             let action = PimdirAction::Add {
@@ -3449,7 +3454,7 @@ fn drain_submits(
                             };
                             store.replace_action(intent.id, "neverest", collection, &action)
                         }
-                        None => store.drop_action(intent.id),
+                        None => store.acknowledge_action(intent.id, None),
                     };
                     copies += usize::from(copy.is_some());
                     match acknowledged {
@@ -3787,6 +3792,11 @@ struct QueuedIntent<'a> {
 }
 
 /// Acknowledges or fails one performed intent, and reports it.
+///
+/// A performed intent is acknowledged with its receipt, so a producer reads it
+/// applied rather than withdrawn (pimdir STORAGE §15.4). The receipt names no
+/// item: a created collection arrives with a later listing, and an invitation
+/// answered or cancelled leaves its event where the producer found it.
 fn settle_intent(
     store: &mut PimdirSourceStore,
     intent: QueuedIntent<'_>,
@@ -3800,7 +3810,7 @@ fn settle_intent(
                 "{} intent #{} performed by {performer}",
                 intent.kind, intent.id
             );
-            match store.drop_action(intent.id) {
+            match store.acknowledge_action(intent.id, None) {
                 Ok(true) => {}
                 Ok(false) => warn!(
                     "{} intent #{} vanished from the queue before its acknowledgement",
@@ -4853,6 +4863,32 @@ mod tests {
         let store = queued_reply(dir.path(), r#""link_id":"uid:not-yet""#);
         let intent = invitation::pending(&store).unwrap().remove(0);
         assert!(!locate_invitation(&store, &intent).unwrap_err().parks());
+    }
+
+    /// A performed intent leaves a receipt, so its producer reads it applied
+    /// rather than withdrawn (pimdir STORAGE §15.4, §15.5).
+    #[test]
+    fn a_performed_intent_reads_as_applied_by_its_producer() {
+        use io_pimdir::client::producer::PimdirActionStatus;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = queued_reply(dir.path(), r#""seq":1"#);
+        let intent = invitation::pending(&store).unwrap().remove(0);
+
+        let mut report = SyncOutput::default();
+        settle_invitation(&mut store, &intent, "gcal", Ok(()), &mut report);
+        assert!(invitation::pending(&store).unwrap().is_empty());
+        assert!(report.intents[0].error.is_none());
+
+        let producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
+        let PimdirActionStatus::Applied {
+            collection, seq, ..
+        } = producer.action_status(intent.id).unwrap()
+        else {
+            panic!("a performed intent leaves its receipt");
+        };
+        assert_eq!(collection, "gcal/primary");
+        assert_eq!(seq, None);
     }
 
     #[test]

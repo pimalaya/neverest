@@ -54,7 +54,7 @@ io-http = { version = "0.5", default-features = false, optional = true }
 io-imap = { version = "0.7", default-features = false, optional = true }
 io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "240af150cd43acf79bbad68dc42c9a56177ea8d1", default-features = false, optional = true }
 io-pim-discovery = { version = "0.8", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "stream"], optional = true }
-io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "3a9ffb84a053ab3ef1099513a500f2214c133769", default-features = false, features = ["client"] }
+io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "8c83c0486fafc67a9598052cfee6df8017e84e8f", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }
 jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
 io-smtp = { version = "0.5", default-features = false, optional = true }

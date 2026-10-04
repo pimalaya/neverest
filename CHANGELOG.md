@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- Added receipts for the intents neverest performs (pimdir draft-04, io-pimdir `8c83c04`): a `submit` sent, a `calendar-reply` or `calendar-cancel` performed and a `collection-create` done are acknowledged with a receipt, so the frontend that queued them reads them applied (`himalaya pimdir queue show`) rather than unknown, as a cancelled row reads.
 - Added the `collection-create` intent (pimdir draft-04): performed at the start of a sync, before the listing, so the same run lists the new collection. IMAP creates the mailbox under its parent with the server's delimiter, Gmail the label `parent/name`, CalDAV and CardDAV a top-level collection displayed as the name; one already listed is success. Declared as `collection.create` on each collection an IMAP, Gmail or DAV source syncs, `none` on Graph and Google Calendar and People.
 - Added occurrence replies and cancels: a `calendar-reply` or `calendar-cancel` naming a `recurrence_id` acts on that instance of the series on Graph and Google, found among the instances two days either side of its date; one not found parks. Declared as `calendar.reply.occurrence` and `calendar.cancel.occurrence`, `none` on CalDAV.
 - Added `sync --download-order <largest|newest>`: bodies download largest first by default, the fastest whole run, or newest first, so recent mail is readable early in the first sync of a large account. Items without a date come last.

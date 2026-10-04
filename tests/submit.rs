@@ -35,7 +35,10 @@ use std::{
 };
 
 use io_pimdir::{
-    client::{blobs::PimdirBlobs, producer::PimdirProducer},
+    client::{
+        blobs::PimdirBlobs,
+        producer::{PimdirActionStatus, PimdirProducer},
+    },
     codec::PimdirAction,
     object::PimdirObject,
 };
@@ -116,7 +119,7 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
         size: writer.commit(&hash).expect("commit the body") as usize,
     };
 
-    producer
+    let id = producer
         .enqueue(
             "INBOX",
             &PimdirAction::Unknown {
@@ -154,6 +157,14 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     assert!(
         !queued.contains(SUBMIT),
         "an acknowledged intent leaves the queue; queue held:\n{queued}",
+    );
+
+    // Its receipt tells the producer it was sent, not withdrawn.
+    let producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
+    let status = producer.action_status(id).expect("read the row's status");
+    assert!(
+        matches!(status, PimdirActionStatus::Applied { seq: None, .. }),
+        "a sent intent reads as applied; it read {status:?}",
     );
 
     // 4. The server delivered it back to the same account, and the IMAP side

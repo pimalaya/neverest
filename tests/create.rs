@@ -21,7 +21,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use io_pimdir::client::producer::PimdirProducer;
+use io_pimdir::client::producer::{PimdirActionStatus, PimdirProducer};
 use serde_json::Value;
 
 const IMAP_ROOT: &str = "imap://127.0.0.1:143";
@@ -65,13 +65,21 @@ fn a_queued_folder_and_its_child_are_created_on_the_imap_server() {
     let folder = unique("Archives");
     let store = state.join("neverest").join("create");
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
-    producer
+    let id = producer
         .enqueue_collection_create("imap/INBOX", &folder, None, None)
         .expect("queue the folder");
 
     let report = sync(&config, &state, &folder);
     assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
     assert!(listed(&config, &state).contains(&folder));
+
+    // The producer follows its row to a receipt, which a withdrawn row
+    // would not leave.
+    let PimdirActionStatus::Applied { seq: None, .. } =
+        producer.action_status(id).expect("read the row's status")
+    else {
+        panic!("the performed collection-create reads as applied");
+    };
 
     // The folder now in the store, a child goes under it, joined by the
     // server's hierarchy delimiter.

@@ -510,10 +510,17 @@ It SHALL resolve on an empty report and on nothing else. Being unswappable is wh
 
 Most divergence is not disagreement. Two sides editing different fields of one card have said nothing contradictory, and the stored base is what proves it, by naming which side touched which field. Reporting those to a person is a background tool asking to be switched off.
 
+A calendar's stamps SHALL NOT collide. `DTSTAMP`, `LAST-MODIFIED`, `CREATED` and `SEQUENCE` say when and how often a side wrote, never what anybody decided, and a server rewrites them on its own: Graph moves `LAST-MODIFIED` when it sends a meeting's invitations and carries no `SEQUENCE` at all. They SHALL leave the base and the diverging side before the merge, the local side keeping its own, and each merged component SHALL carry the higher `SEQUENCE` of the two sides, a revision count only growing.
+
 #### Scenario: Disjoint edits need no one
 - GIVEN a conflicted contact whose sides changed different fields
 - WHEN the run merges it
 - THEN both changes survive, the conflict clears through the queue, and nothing is reported
+
+#### Scenario: Restamped sides need no one
+- GIVEN a conflicted event edited locally while the server only restamped its copy
+- WHEN the run merges it
+- THEN the local edit survives with the higher `SEQUENCE`, and nothing is reported
 
 #### Scenario: A collision is not merged away
 - GIVEN a conflicted contact whose sides set the same field differently

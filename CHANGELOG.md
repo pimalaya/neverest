@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Added the `wizard` cargo feature, on by default, gating the interactive configuration: the `configure` command and the offer a first run makes. A build without it drops the prompts and the dependencies only they use, and a missing configuration points at the documented sample instead.
 - Added capability declarations (pimdir draft-03, STORAGE §15.6): every run, before the queue drains, each mail, contacts and calendar source declares in the store what it can push or perform, from its backend and its configured rights alone, so himalaya, cardamum and calendula refuse an unsupported action before it is queued. JMAP sources stay undeclared.
 - Added the sent copy: a `submit` asking for `copy` files the message there once sent, by an `add` queued in the same run, unless the provider files sent mail itself (Gmail, Graph). A failed send files no copy.
+- Added the join link of a Graph online meeting (Teams) to the iCalendar of its event, as `X-MICROSOFT-SKYPETEAMSMEETINGURL` (io-msgraph 0.4.6).
 - Added the calendar invitation intents (pimdir Annex B.2): a queued `calendar-reply` answers an invitation and a `calendar-cancel` cancels a meeting the account organises, through Graph's event actions (the comment carried) or Google's own notifications (`sendUpdates=all`, a cancellation without the comment). Each sync performs them first, one-way included, and reports them under `intents`; a refusal or a gone item parks, a transient failure retries. They are declared on each calendar the source syncs; CalDAV declares them `none`.
 
 ### Changed
@@ -22,7 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
-- Fixed a Graph calendar series with a `numbered` range failing to read: Graph fills its `endDate` with `0001-01-01`, which ended the instances window before its start. The window now follows the range type (io-msgraph 0.4.5).
+- Fixed a Graph calendar series with a `numbered` or `noEnd` range failing to read, the Birthdays calendar among them: Graph fills its `endDate` with `0001-01-01`, which ended the instances window before its start, and Graph refused it (400) on every run. The window now follows the range type (io-msgraph 0.4.5).
 - Fixed a Graph calendar enumeration listing an event twice when Graph repeated it across a page boundary; one id at two revisions now fails the enumeration.
 - Fixed a move staged through the store landing twice in its target on IMAP: the run scans collections over several connections, and the target uploaded the message while the source relocated it. A source's collections now push one at a time, scans and fetches staying parallel.
 

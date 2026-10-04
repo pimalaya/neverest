@@ -546,6 +546,18 @@ The two conflict counts differ and the difference matters: the engine emits noth
 - WHEN the run ends
 - THEN it exits with the same code, rather than reporting success over a change that stayed in the store
 
+### Requirement: An incomplete run has its own exit code
+A run that could not do all its work SHALL exit with a code of its own, distinct from success, failure and the conflict code: a source it could not scan, a hunk it could not apply, or a send or an intent that failed without parking. It SHALL win over the conflict code, the report still counting what waits for a person.
+
+An unreachable server is the common case. The run stops nothing else over it, so it is no failure, yet a run with nothing to do and a run that could not reach its server both exited 0, and a caller told offline from idle by parsing error strings. A rerun clears this state on its own, which is what sets it apart from the conflict code: that one waits for a person, this one for the network.
+
+A send or an intent that parked is not this: it waits for a person, and its row says why.
+
+#### Scenario: An unreachable source is not an idle run
+- GIVEN an account whose only source refuses the connection
+- WHEN it is synced
+- THEN the scan error is reported and the run exits with the incomplete code
+
 ### Requirement: Entering a conflict is said once
 A run SHALL warn once for each placement that entered conflict during it, and SHALL say nothing about one an earlier run already parked. Neverest SHALL raise no desktop notification of its own, and SHALL NOT link a notification daemon.
 

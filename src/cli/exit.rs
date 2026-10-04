@@ -8,10 +8,11 @@ use crate::sync::report::SyncOutput;
 
 /// How a command ended, beyond the success or failure its `Result` carries.
 ///
-/// One code beyond success exists, for a run that reconciled and left
-/// something behind. Failing instead would stop the other ten thousand items
-/// over one duplicated phone number, and would loop forever under a
-/// supervisor restarting on failure.
+/// Two codes beyond success exist: one for a run that reconciled and left
+/// something behind for a person, one for a run that could not do all its
+/// work, a rerun picking it up. Failing instead would stop the other ten
+/// thousand items over one duplicated phone number, and would loop forever
+/// under a supervisor restarting on failure.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Exit {
     /// The command did what it was asked and left nothing waiting.
@@ -22,14 +23,23 @@ pub enum Exit {
     /// A parked conflict, a duplicate `UID` a side refuses, or a write it
     /// would not take: all three say a rerun on its own changes nothing.
     Conflicted,
+    /// A sync left work a rerun picks up: a source it could not reach, or
+    /// a hunk, a send or an intent that failed without parking.
+    ///
+    /// It wins over [`Exit::Conflicted`]: the run did not see everything,
+    /// and the report still counts what waits for a person.
+    Incomplete,
 }
 
 impl From<&SyncOutput> for Exit {
     /// A run ends the way its report reads: delivered, or still waiting.
     fn from(report: &SyncOutput) -> Self {
-        match report.left_waiting() {
-            false => Self::Success,
-            true => Self::Conflicted,
+        if report.incomplete() {
+            Self::Incomplete
+        } else if report.left_waiting() {
+            Self::Conflicted
+        } else {
+            Self::Success
         }
     }
 }
@@ -41,6 +51,58 @@ impl From<Exit> for ExitCode {
             // NOTE: 1 belongs to a failed command, which exits through
             // `ErrorReport::eval` before this conversion runs.
             Exit::Conflicted => ExitCode::from(2),
+            Exit::Incomplete => ExitCode::from(3),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+
+    use super::*;
+    use crate::sync::{
+        hunk::CollectionHunk,
+        report::{PatchEntry, SubmitEntry},
+    };
+
+    fn unreachable() -> PatchEntry<CollectionHunk> {
+        let scan = CollectionHunk::Scan {
+            side: String::from("imap"),
+            collection: String::from("*"),
+        };
+        PatchEntry::new(scan, Some(anyhow!("Open connection: connection refused")))
+    }
+
+    /// A run that could not reach a source is not a run with nothing to
+    /// do, and it says so even with a conflict waiting.
+    #[test]
+    fn an_unreachable_source_makes_the_run_incomplete() {
+        let mut report = SyncOutput::default();
+        assert_eq!(Exit::from(&report), Exit::Success);
+
+        report.collection.patch.push(unreachable());
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
+        assert_eq!(ExitCode::from(Exit::Incomplete), ExitCode::from(3));
+
+        report.outstanding_conflicts = 1;
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
+    }
+
+    /// A send that parked waits for a person, not for a rerun.
+    #[test]
+    fn a_parked_send_is_not_incomplete() {
+        let mut report = SyncOutput::default();
+        report.submitted.push(SubmitEntry {
+            id: 1,
+            collection: String::from("INBOX"),
+            subject: None,
+            error: Some(String::from("550 rejected")),
+            parked: true,
+        });
+        assert_eq!(Exit::from(&report), Exit::Success);
+
+        report.submitted[0].parked = false;
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
     }
 }

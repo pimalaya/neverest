@@ -48,7 +48,10 @@ const LOCK_POLL: Duration = Duration::from_millis(500);
 /// something waiting: a parked conflict, a duplicate `UID` the other side
 /// refuses, or a write it would not take. None is a failure: each is one item
 /// wide and halts nothing, and under a supervisor restarting on failure they
-/// would loop over a state no supervisor can fix.
+/// would loop over a state no supervisor can fix. Exit code 3 means the run
+/// could not do all its work and a rerun picks it up: a source it could not
+/// reach (offline), or a hunk, a send or an intent that failed without
+/// parking. It wins over 2.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
     /// Print the patch that would be applied, without applying it.

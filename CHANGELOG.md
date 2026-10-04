@@ -17,6 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- Changed `sync` to exit 3 when the run could not do all its work, a rerun picking it up: a source it could not reach, or a hunk, a send or an intent that failed without parking. An unreachable server used to exit 0, like a run with nothing to do. Exit 3 wins over the conflict code 2.
 - Changed `check` to also open and authenticate the SMTP channel a source declares, without sending anything, so a wrong submission server or password fails the check rather than the first send. Each endpoint now reports `smtp`, whether its channel was checked.
 - Changed a `submit` naming its sending source to be sent by that source alone.
 - Changed Google Calendar updates and deletes to notify the attendees (`sendUpdates`): an update when the event leaves them to the server (`SCHEDULE-AGENT`), a delete when the event has attendees.

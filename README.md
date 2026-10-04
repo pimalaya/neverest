@@ -141,7 +141,7 @@ An account is initialized once, which opens every source so credential and netwo
 
 ### Conflicts
 
-A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What no merge settles is both sides setting one field two ways: the item parks, everything else keeps syncing, and the run exits 2.
+A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What no merge settles is both sides setting one field two ways: the item parks, everything else keeps syncing, and the run exits 2. A run that could not reach a source, or apply part of its work, exits 3, and the next run picks it up.
 
 Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries the two numbers a notifier needs: `conflicts` is what this run marked, `outstandingConflicts` what the store holds waiting. Testing the first notifies on entry, once, with no state of its own to keep:
 

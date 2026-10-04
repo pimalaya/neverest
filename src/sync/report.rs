@@ -136,6 +136,26 @@ impl SyncOutput {
     pub fn left_waiting(&self) -> bool {
         self.outstanding_conflicts > 0 || !self.refused.is_empty() || !self.rejected.is_empty()
     }
+
+    /// Whether the run left work a rerun picks up: a source it could not
+    /// scan, a hunk it could not apply, a send or an intent that failed
+    /// without parking. An unreachable server reads this way, and only
+    /// this way, a run with nothing to do never carrying an error.
+    pub fn incomplete(&self) -> bool {
+        self.collection
+            .patch
+            .iter()
+            .any(|entry| entry.error.is_some())
+            || self.item.patch.iter().any(|entry| entry.error.is_some())
+            || self
+                .submitted
+                .iter()
+                .any(|entry| entry.error.is_some() && !entry.parked)
+            || self
+                .intents
+                .iter()
+                .any(|entry| entry.error.is_some() && !entry.parked)
+    }
 }
 
 /// One create refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC 6352 §6.3.2).

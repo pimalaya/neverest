@@ -958,7 +958,7 @@ A caller choosing one calendar and one address book for an account takes the mar
 - THEN that calendar is listed with `default: true`, and no other
 
 ### Requirement: A check reports what each source declares it can do
-`neverest check` SHALL list, for each source, the capabilities a sync declares for it in the store (pimdir STORAGE §15.6) as `capabilities: [{ name, support, detail? }]`, `support` being `full`, `partial` or `none`, from its backend and configured rights alone. Only the source-wide rows SHALL be listed, the store's collections being unknown to a check: an intent performed on the calendars a source holds reads `none` there. A target and an undeclared (JMAP) source SHALL list none. A capability a source learns to declare is reported by the check with no change to it.
+`neverest check` SHALL list, for each source, the capabilities a sync declares for it in the store (pimdir STORAGE §15.6) as `capabilities: [{ name, support, detail? }]`, one row per capability, `support` being `full`, `partial` or `none`, from its backend and configured rights alone. An intent a source performs on the collections it holds (`calendar.reply`, `calendar.cancel`, their `.occurrence` options, `collection.create`), which the store gets as a `none` source-wide row and one row per collection, SHALL read as it does on those collections: the store's collections are unknown to a check. A target and an undeclared (JMAP) source SHALL list none. A capability a source learns to declare is reported by the check with no change to it.
 
 ### Requirement: JSON keys are camelCase
 Every output type neverest prints SHALL serialize its keys as camelCase, matching the wire formats the endpoints speak (JMAP per RFC 8620, Microsoft Graph, the Google APIs) and keeping every key reachable by dot access in jq and JavaScript, which is how the README's notifier reads a report.
@@ -1075,6 +1075,26 @@ Neverest SHALL perform the `calendar-reply` and `calendar-cancel` intents (pimdi
 - **GIVEN** an event of a Google calendar the calendar attends
 - **WHEN** a `calendar-reply` `TENTATIVE` is queued on it and the account syncs
 - **THEN** the intent is acknowledged and the next sync reads `PARTSTAT=TENTATIVE`
+
+### Requirement: An intent limited to one occurrence acts on that instance
+A `calendar-reply` or `calendar-cancel` naming a `recurrence_id` (pimdir Annex B.2, `YYYYMMDD` or `YYYYMMDDTHHMMSS[Z]` in the form of the series' `DTSTART`) SHALL be performed on that occurrence alone, through the same verbs on its instance: the instance of the series whose original start the projection writes as that `RECURRENCE-ID` (the wall time in the series' zone, a date, or a UTC stamp), among those the provider lists two days either side of its date. An occurrence not found, or a series that is not one, SHALL park the row; a malformed value SHALL park it. `calendar.reply.occurrence` and `calendar.cancel.occurrence` SHALL be declared as their intents are: on each calendar a Graph or Google source syncs (`partial` for a Google cancel, which carries no comment), `none` source-wide, and `none` on CalDAV.
+
+An occurrence moved more than two days from its original date is not found, the providers listing instances by their current times.
+
+#### Scenario: One meeting of a series declined
+- **GIVEN** a weekly series on a Graph calendar the account attends
+- **WHEN** a `calendar-reply` `DECLINED` naming one occurrence's `RECURRENCE-ID` is queued and the account syncs
+- **THEN** that instance is declined, the series and its other occurrences unchanged
+
+### Requirement: A collection is created through the queue
+Neverest SHALL perform the `collection-create` intent (pimdir STORAGE Annex B.2) at the start of each sync, before the submissions and the calendar intents and before the listing, so the collection is listed by the same run: through the source the payload names, or a source of the anchor's namespace for a payload naming none. IMAP SHALL create the mailbox `name` at the top level or under `parent`, joined by the delimiter the parent's `LIST` row states, refusing a parent with `\Noinferiors` or a flat namespace; Gmail SHALL create the label `parent/name`, refusing a system label as parent or as name; CalDAV and CardDAV SHALL create a collection displayed as `name` and keyed by a path segment made from it, refusing a parent, DAV collections not nesting. A collection the server already lists there SHALL be success, so a repeated intent creates nothing. A refusal, a parent outside the performer's namespace or an undecodable payload SHALL park the row; any other failure SHALL leave it pending. Each attempt is reported under `intents`.
+
+`collection.create` SHALL be declared on each collection an IMAP, Gmail, CalDAV or CardDAV source syncs, `none` source-wide, and `none` where the backend creates no collection (Graph mail, contacts and calendars, Google Calendar, Google People) or `collection.create` is disabled; under `one-way` it stays declared, a creation being asked for rather than derived.
+
+#### Scenario: A folder and its child
+- **GIVEN** an IMAP account whose store holds `INBOX`
+- **WHEN** a `collection-create` `Archives` anchored on `INBOX` is queued and the account syncs, then one named `2026` under `Archives`
+- **THEN** the server lists `Archives` and `Archives/2026`, each listed by the run that created it, and the same intent queued again is acknowledged without creating anything
 
 ### Requirement: A source's collections push one at a time
 Scans and fetches MAY run over several connections, but no two collections of one source SHALL push at once: the two halves of a move derive from the store, and overlapping pushes would both read the create as pending, the target uploading the member while the source relocates it (pimdir SYNC §5). The second to push reads what the first delivered.

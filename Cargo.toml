@@ -25,7 +25,7 @@ smtp = ["dep:io-smtp", "io-smtp/client", "io-smtp/scram"]
 dav = ["dep:io-webdav", "dep:io-http", "dep:ical-rs", "dep:vcard-rs", "io-pim-discovery?/rfc6764"]
 msgraph = ["dep:io-msgraph", "dep:ical-rs", "dep:jiff", "dep:vcard-rs", "io-msgraph/client", "io-msgraph/ical", "io-msgraph/vcard"]
 gpeople = ["dep:io-gpeople", "dep:ical-rs", "dep:vcard-rs", "io-gpeople/client", "io-gpeople/vcard"]
-gcal = ["dep:io-gcal", "dep:ical-rs", "dep:vcard-rs", "io-gcal/client", "io-gcal/ical"]
+gcal = ["dep:io-gcal", "dep:ical-rs", "dep:jiff", "dep:vcard-rs", "io-gcal/client", "io-gcal/ical"]
 gmail = ["dep:io-gmail", "io-gmail/client"]
 vendored = ["io-pimdir/vendored", "pimalaya-config/vendored", "pimalaya-stream/vendored", "io-webdav?/vendored", "io-imap?/vendored", "io-msgraph?/vendored", "io-smtp?/vendored", "io-gpeople?/vendored", "io-gcal?/vendored", "io-gmail?/vendored"]
 wizard = ["dep:io-pim-discovery", "pimalaya-cli/prompt", "pimalaya-cli/wizard", "pimalaya-cli/imap", "pimalaya-cli/smtp"]
@@ -52,9 +52,9 @@ io-gmail = { version = "0.4", default-features = false, optional = true }
 io-gpeople = { version = "0.4.2", default-features = false, optional = true }
 io-http = { version = "0.5", default-features = false, optional = true }
 io-imap = { version = "0.7", default-features = false, optional = true }
-io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "43f65f9d10a55c9e700d8952bae0d0aa8f697117", default-features = false, optional = true }
+io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "240af150cd43acf79bbad68dc42c9a56177ea8d1", default-features = false, optional = true }
 io-pim-discovery = { version = "0.8", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "stream"], optional = true }
-io-pimdir = { version = "0.6", default-features = false, features = ["client"] }
+io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "3a9ffb84a053ab3ef1099513a500f2214c133769", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }
 jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
 io-smtp = { version = "0.5", default-features = false, optional = true }

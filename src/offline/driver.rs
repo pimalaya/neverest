@@ -44,6 +44,7 @@ use io_pimdir::{
     codec::PimdirAction,
     collection::PimdirCollectionId,
     hub::{PimdirBinding, PimdirSourceId},
+    intent::{COLLECTION_CREATE, PimdirCollectionCreate},
     load::PimdirLoadScope,
     object::{PimdirHash, PimdirObject},
     placement::{
@@ -76,7 +77,7 @@ use crate::{
     item::flag::Flag,
     kind::{Kind, LinkId, merge::Merged},
     offline::{
-        capability,
+        capability, create,
         invitation::{
             self, Failure as InvitationFailure, Invitation, InvitationIntent, Refusal, Target,
         },
@@ -656,6 +657,7 @@ fn run_pair(
     let media_type = kind.media_type();
 
     if !dry_run {
+        drain_collection_creates(&mut [&mut left, &mut right], &mut left_store, report);
         drain_submits(
             account_config,
             account,
@@ -882,6 +884,7 @@ fn run_local(
 
     if !dry_run {
         let (first, _) = ctxs.split_first_mut().expect("at least one connection");
+        drain_collection_creates(&mut [&mut *first], &mut stores[0], report);
         drain_submits(
             account_config,
             account,
@@ -3516,6 +3519,83 @@ fn drain_submits(
     }
 }
 
+/// Performs the queued collection-create intents (pimdir STORAGE Annex
+/// B.2), each by the side it names, and settles their rows.
+///
+/// It runs before the listing, so a collection created here is listed, and
+/// synced, by the same run.
+fn drain_collection_creates(
+    sides: &mut [&mut SourceCtx],
+    store: &mut PimdirSourceStore,
+    report: &mut SyncOutput,
+) {
+    let intents = match create::pending(store) {
+        Ok(intents) => intents,
+        Err(err) => {
+            warn!("cannot read the queued collection intents: {err:#}");
+            return;
+        }
+    };
+
+    for intent in &intents {
+        // NOTE: an intent naming no source predates pimdir STORAGE §15.6,
+        // and is performed by a side of its anchor's namespace.
+        let index = match intent.source() {
+            Some(name) => sides.iter().position(|ctx| ctx.name == name),
+            None => sides.iter().position(|ctx| {
+                intent
+                    .collection
+                    .starts_with(&format!("{}/", ctx.namespace))
+            }),
+        };
+        let Some(index) = index else {
+            continue;
+        };
+
+        let side = &mut *sides[index];
+        let outcome = intent
+            .request()
+            .and_then(|request| perform_collection_create(side, &request));
+        let row = QueuedIntent {
+            id: intent.id,
+            collection: &intent.collection,
+            kind: COLLECTION_CREATE,
+            seq: None,
+        };
+        let performer = side.name.clone();
+        settle_intent(store, row, &performer, outcome, report);
+    }
+}
+
+/// Creates the collection a collection-create asks for on `side`'s server.
+fn perform_collection_create(
+    side: &mut SourceCtx,
+    request: &PimdirCollectionCreate,
+) -> Result<(), InvitationFailure> {
+    let prefix = format!("{}/", side.namespace);
+    let parent = match &request.parent {
+        Some(parent) => match parent.as_str().strip_prefix(&prefix) {
+            Some(parent) => Some(parent.to_owned()),
+            None => {
+                return Err(InvitationFailure::Permanent(anyhow!(
+                    "Parent {} is not a collection of source {}",
+                    parent.as_str(),
+                    side.name
+                )));
+            }
+        },
+        None => None,
+    };
+
+    let id = side
+        .pool
+        .primary()
+        .create_named_collection(parent.as_deref(), &request.name)
+        .map_err(InvitationFailure::classify)?;
+    info!("collection {id} created on {}", side.name);
+    Ok(())
+}
+
 /// Performs the queue's calendar intents, which the store's drain leaves
 /// alone (pimdir STORAGE Annex B.2).
 ///
@@ -3633,27 +3713,43 @@ fn perform_invitation(
     let collection = wire_name(&side.namespace, &intent.collection).to_string();
     let handle = handle.to_string();
     let name = side.name.clone();
+    let occurrence = intent.occurrence()?;
 
+    // NOTE: an occurrence is acted on as its own instance, which the
+    // provider's verbs take like any event.
     let outcome = match side.pool.primary() {
         #[cfg(feature = "gcal")]
-        Client::Gcal(client) => match invitation {
-            Invitation::Reply { partstat, comment } => {
-                client.reply(&collection, &handle, partstat, comment.as_deref())
-            }
-            Invitation::Cancel { .. } => client.cancel(&collection, &handle),
-        },
+        Client::Gcal(client) => {
+            let target = match &occurrence {
+                Some(recurrence_id) => client.occurrence(&collection, &handle, recurrence_id),
+                None => Ok(handle.clone()),
+            };
+            target.and_then(|target| match invitation {
+                Invitation::Reply { partstat, comment } => {
+                    client.reply(&collection, &target, partstat, comment.as_deref())
+                }
+                Invitation::Cancel { .. } => client.cancel(&collection, &target),
+            })
+        }
         #[cfg(feature = "msgraph")]
-        Client::Msgraph(client) if client.kind() == GraphKind::Calendar => match invitation {
-            Invitation::Reply { partstat, comment } => {
-                client.reply_event(&handle, partstat, comment.as_deref())
-            }
-            Invitation::Cancel { comment } => client.cancel_event(&handle, comment.as_deref()),
-        },
+        Client::Msgraph(client) if client.kind() == GraphKind::Calendar => {
+            let target = match &occurrence {
+                Some(recurrence_id) => client.occurrence_event(&handle, recurrence_id),
+                None => Ok(handle.clone()),
+            };
+            target.and_then(|target| match invitation {
+                Invitation::Reply { partstat, comment } => {
+                    client.reply_event(&target, partstat, comment.as_deref())
+                }
+                Invitation::Cancel { comment } => client.cancel_event(&target, comment.as_deref()),
+            })
+        }
         #[allow(unreachable_patterns)]
         _ => {
             // NOTE: read here too, so a build performing no intent at all
             // still uses what the arms above read.
-            let _: (&Invitation, &str, &str) = (&invitation, &collection, &handle);
+            let _: (&Invitation, &str, &str, &Option<String>) =
+                (&invitation, &collection, &handle, &occurrence);
             Err(anyhow::Error::new(Refusal(format!(
                 "Source {name} cannot perform {}",
                 intent.kind
@@ -3664,10 +3760,36 @@ fn perform_invitation(
     outcome.map_err(InvitationFailure::classify)
 }
 
-/// Acknowledges or fails one performed intent, and reports it.
+/// Acknowledges or fails one performed invitation intent, and reports it.
 fn settle_invitation(
     store: &mut PimdirSourceStore,
     intent: &InvitationIntent,
+    performer: &str,
+    outcome: Result<(), InvitationFailure>,
+    report: &mut SyncOutput,
+) {
+    let row = QueuedIntent {
+        id: intent.id,
+        collection: &intent.collection,
+        kind: &intent.kind,
+        seq: intent.seq(),
+    };
+    settle_intent(store, row, performer, outcome, report);
+}
+
+/// The queue row of an intent neverest performs, as it is settled and
+/// reported.
+struct QueuedIntent<'a> {
+    id: i64,
+    collection: &'a str,
+    kind: &'a str,
+    seq: Option<i64>,
+}
+
+/// Acknowledges or fails one performed intent, and reports it.
+fn settle_intent(
+    store: &mut PimdirSourceStore,
+    intent: QueuedIntent<'_>,
     performer: &str,
     outcome: Result<(), InvitationFailure>,
     report: &mut SyncOutput,
@@ -3707,10 +3829,10 @@ fn settle_invitation(
 
     report.intents.push(IntentEntry {
         id: intent.id,
-        collection: intent.collection.clone(),
-        kind: intent.kind.clone(),
+        collection: intent.collection.to_owned(),
+        kind: intent.kind.to_owned(),
         source: performer.to_string(),
-        seq: intent.seq(),
+        seq: intent.seq,
         error,
         parked,
     });

@@ -286,8 +286,14 @@ impl DavClient {
 
     /// Creates a collection, named after the collection key.
     pub fn create_collection(&mut self, collection: &str) -> Result<()> {
+        self.create_collection_named(collection, collection)
+    }
+
+    /// Creates the collection keyed `collection` (its path segment) and
+    /// displayed as `name`.
+    pub fn create_collection_named(&mut self, collection: &str, name: &str) -> Result<()> {
         let kind = self.kind;
-        let name = Some(collection.to_owned());
+        let name = Some(name.to_owned());
 
         match kind {
             DavKind::Card => {

@@ -20,6 +20,7 @@ use io_pimdir::{
 };
 
 pub mod capability;
+pub mod create;
 pub mod driver;
 pub mod invitation;
 pub mod pipe;

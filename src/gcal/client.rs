@@ -39,9 +39,10 @@ use io_gcal::v3::{
     rest::{
         calendar_list::list::GcalCalendarListListParams,
         events::{
-            GcalEvent, GcalEventAttendeeResponseStatus, GcalEventStatus, GcalSendUpdates,
-            import::GcalEventImportParams, insert::GcalEventInsertParams,
-            list::GcalEventsListParams, patch::GcalEventPatchParams, update::GcalEventUpdateParams,
+            GcalEvent, GcalEventAttendeeResponseStatus, GcalEventDateTime, GcalEventStatus,
+            GcalSendUpdates, import::GcalEventImportParams, insert::GcalEventInsertParams,
+            instances::GcalEventInstancesParams, list::GcalEventsListParams,
+            patch::GcalEventPatchParams, update::GcalEventUpdateParams,
         },
     },
     send::{GCAL_API_BASE, GcalSendOutput},
@@ -61,7 +62,7 @@ use crate::{
         collection::Collection,
         flag::{Flag, FlagOp},
     },
-    offline::invitation::{Partstat, Refusal},
+    offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp, wall_stamp},
 };
 
 /// The page size requested from the events listing.
@@ -494,6 +495,50 @@ impl GcalClient {
         Ok(())
     }
 
+    /// The id of the instance of series `id` that a `RECURRENCE-ID` value
+    /// names, compared the way the projection writes it (the wall time of
+    /// its original start, a date, or a UTC stamp), among the instances
+    /// Google lists two days either side of its date. None found refuses.
+    pub fn occurrence(&mut self, calendar: &str, id: &str, recurrence_id: &str) -> Result<String> {
+        let Some((start, end)) = occurrence_window(recurrence_id) else {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "{recurrence_id} names no occurrence"
+            ))));
+        };
+
+        let mut page_token: Option<String> = None;
+        loop {
+            let params = GcalEventInstancesParams {
+                time_min: Some(&start),
+                time_max: Some(&end),
+                page_token: page_token.as_deref(),
+                ..Default::default()
+            };
+            let page = self
+                .op(|gcal| gcal.event_instances(calendar, id, &params))
+                .with_context(|| format!("List instances of {id} error"))?;
+
+            let found = page.items.into_iter().find(|instance| {
+                instance
+                    .original_start_time
+                    .as_ref()
+                    .is_some_and(|original| names_occurrence(original, recurrence_id))
+            });
+            if let Some(instance_id) = found.and_then(|instance| instance.id) {
+                return Ok(instance_id);
+            }
+
+            match page.next_page_token {
+                Some(next) => page_token = Some(next),
+                None => break,
+            }
+        }
+
+        Err(anyhow::Error::new(Refusal(format!(
+            "Series {id} has no occurrence {recurrence_id}"
+        ))))
+    }
+
     /// Answers an invitation as the calendar's own attendee, the organizer
     /// told with `comment` (pimdir STORAGE Annex B.2 `calendar.reply`).
     ///
@@ -652,11 +697,42 @@ fn read_ical(mut source: impl Read) -> Result<Vec<u8>> {
     Ok(ical)
 }
 
+/// Whether an instance's original start is the occurrence a
+/// `RECURRENCE-ID` value names: its date, its wall time, or its UTC stamp.
+fn names_occurrence(original: &GcalEventDateTime, recurrence_id: &str) -> bool {
+    let stamps = [
+        original.date.as_deref().and_then(wall_stamp),
+        original.date_time.as_deref().and_then(wall_stamp),
+        original.date_time.as_deref().and_then(utc_stamp),
+    ];
+    stamps.iter().flatten().any(|stamp| stamp == recurrence_id)
+}
+
 #[cfg(test)]
 mod tests {
     use io_gcal::v3::rest::events::GcalEventAttendee;
 
     use super::*;
+
+    #[test]
+    fn an_instance_is_the_occurrence_its_original_start_names() {
+        let timed = GcalEventDateTime {
+            date_time: Some("2026-10-06T09:00:00+02:00".into()),
+            time_zone: Some("Europe/Paris".into()),
+            ..Default::default()
+        };
+        assert!(names_occurrence(&timed, "20261006T090000"));
+        assert!(names_occurrence(&timed, "20261006T070000Z"));
+        assert!(!names_occurrence(&timed, "20261006T080000"));
+        assert!(!names_occurrence(&timed, "20261013T090000"));
+
+        let all_day = GcalEventDateTime {
+            date: Some("2026-10-06".into()),
+            ..Default::default()
+        };
+        assert!(names_occurrence(&all_day, "20261006"));
+        assert!(!names_occurrence(&all_day, "20261007"));
+    }
 
     fn attendee(email: &str, me: bool, organizer: bool) -> GcalEventAttendee {
         GcalEventAttendee {

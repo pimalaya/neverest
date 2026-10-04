@@ -64,6 +64,7 @@ use crate::{
         flag::{Flag, FlagOp, IanaFlag},
         summary::{ItemSummary, normalize_message_id},
     },
+    offline::invitation::Refusal,
 };
 
 /// Gmail system label marking an unread message; its absence means seen.
@@ -243,6 +244,28 @@ impl GmailClient {
         }
         self.list_labels()?;
         lookup_label(&self.labels, name).with_context(|| format!("Unknown Gmail label {name}"))
+    }
+
+    /// Creates the label `name` under `parent`, the top level when `None`,
+    /// unless a label already goes by that name, and answers the collection
+    /// name it is listed under (pimdir Annex B.2 `collection-create`).
+    pub fn create_child_label(&mut self, parent: Option<&str>, name: &str) -> Result<String> {
+        let label = child_label(parent, name)?;
+        self.list_labels()?;
+        if let Some((existing, _)) = self
+            .labels
+            .iter()
+            .find(|(existing, _)| existing.eq_ignore_ascii_case(&label.name))
+        {
+            return Ok(existing.clone());
+        }
+
+        let created = self
+            .op(|client| client.label_create(&label))
+            .with_context(|| format!("Create label {} error", label.name))?;
+        let name = created.name.clone();
+        self.labels.insert(created.name, created.id);
+        Ok(name)
     }
 
     /// Creates a user label; a system label is never created.
@@ -707,6 +730,36 @@ fn system_role(id: &str) -> Option<&'static str> {
     }
 }
 
+/// The label a `collection-create` asks Gmail for: `name` under `parent`,
+/// Gmail nesting a label by its name (`Parent/Child`). A system label
+/// takes no child, and a name holding `/` would nest by itself.
+fn child_label(parent: Option<&str>, name: &str) -> Result<GmailLabel> {
+    if name.trim().is_empty() || name.contains('/') {
+        return Err(anyhow::Error::new(Refusal(format!(
+            "A Gmail label name is not blank and holds no /: {name}"
+        ))));
+    }
+    let name = match parent {
+        Some(parent) if is_system(parent) => {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "Gmail system label {parent} takes no child label"
+            ))));
+        }
+        Some(parent) => format!("{parent}/{name}"),
+        None if is_system(name) => {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "Gmail system label {name} cannot be created"
+            ))));
+        }
+        None => name.to_owned(),
+    };
+
+    Ok(GmailLabel {
+        name,
+        ..Default::default()
+    })
+}
+
 /// Whether a collection name is one of the [`SYSTEM_COLLECTIONS`], whose
 /// name is their id.
 fn is_system(name: &str) -> bool {
@@ -895,6 +948,26 @@ mod tests {
     use io_gmail::v1::send::GmailSendError;
 
     use super::*;
+
+    #[test]
+    fn a_created_label_nests_under_its_parent_by_name() {
+        assert_eq!(child_label(None, "Archives").unwrap().name, "Archives");
+        assert_eq!(
+            child_label(Some("Projects"), "2026").unwrap().name,
+            "Projects/2026"
+        );
+
+        let refused = |parent: Option<&str>, name: &str| {
+            child_label(parent, name)
+                .unwrap_err()
+                .chain()
+                .any(|cause| cause.is::<Refusal>())
+        };
+        assert!(refused(Some("INBOX"), "Sub"));
+        assert!(refused(None, "TRASH"));
+        assert!(refused(None, "a/b"));
+        assert!(refused(None, " "));
+    }
 
     #[test]
     fn system_labels_state_their_role_user_labels_none() {

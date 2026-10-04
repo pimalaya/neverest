@@ -46,7 +46,7 @@ use super::GraphClient;
 use crate::{
     client::{EnumEntry, Enumeration, WrittenItem},
     item::collection::Collection,
-    offline::invitation::Partstat,
+    offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp},
 };
 
 /// The `$select` of the enumeration: what tells an event's identity, its
@@ -328,6 +328,56 @@ impl GraphClient {
             .with_context(|| format!("Update event {id} error"))?;
 
         Ok(updated.change_key)
+    }
+
+    /// The id of the instance of series `id` that a `RECURRENCE-ID` value
+    /// names, compared the way the projection writes it (the wall time in
+    /// the series' zone, a date, or a UTC stamp), among the instances Graph
+    /// lists two days either side of its date. None found refuses.
+    pub fn occurrence_event(&mut self, id: &str, recurrence_id: &str) -> Result<String> {
+        let master = self.event(id)?;
+        if master.event_type != Some(MsgraphEventType::SeriesMaster) {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "Event {id} is not a series, it has no occurrence {recurrence_id}"
+            ))));
+        }
+        let Some((start, end)) = occurrence_window(recurrence_id) else {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "{recurrence_id} names no occurrence"
+            ))));
+        };
+
+        let params = MsgraphEventsListParams {
+            top: Some(PAGE_SIZE),
+            select: Some(MSGRAPH_EVENT_ICAL_SELECT),
+            ..Default::default()
+        };
+        let mut page = self
+            .op(|graph| graph.event_instances(id, &start, &end, &params))
+            .with_context(|| format!("List instances of {id} error"))?;
+
+        loop {
+            let found = page.value.into_iter().find(|instance| {
+                instance.original_start.as_deref().is_some_and(|original| {
+                    master.recurrence_id_of(original).as_deref() == Some(recurrence_id)
+                        || utc_stamp(original).as_deref() == Some(recurrence_id)
+                })
+            });
+            if let Some(instance) = found {
+                return Ok(instance.id);
+            }
+
+            let Some(next) = page.next_link else {
+                break;
+            };
+            page = self
+                .op(|graph| graph.events_list_from_link(&next))
+                .with_context(|| format!("Page instances of {id} error"))?;
+        }
+
+        Err(anyhow::Error::new(Refusal(format!(
+            "Series {id} has no occurrence {recurrence_id}"
+        ))))
     }
 
     /// Answers an invitation, Graph sending the reply to the organizer with

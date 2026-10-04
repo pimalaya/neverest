@@ -7,7 +7,13 @@
 //! ```json
 //! {"v":1,"source":"gcal","seq":42,"partstat":"ACCEPTED","comment":"See you"}
 //! {"v":1,"source":"msgraph-calendar","seq":42,"comment":"Postponed"}
+//! {"v":1,"source":"gcal","seq":42,"partstat":"DECLINED","recurrence_id":"20261006T090000"}
 //! ```
+//!
+//! A `recurrence_id` limits it to one occurrence of a series, named by its
+//! `RECURRENCE-ID` value in the form of the series' `DTSTART`; the
+//! performer acts on that instance, and an occurrence it cannot find
+//! parks the row.
 //!
 //! An intent addresses one item of the collection it is anchored on, by
 //! `seq`, or by `link_id` while the item is still the producer's pending
@@ -97,6 +103,8 @@ struct Payload {
     partstat: Option<String>,
     #[serde(default)]
     comment: Option<String>,
+    #[serde(default)]
+    recurrence_id: Option<String>,
 }
 
 impl InvitationIntent {
@@ -136,6 +144,18 @@ impl InvitationIntent {
         self.payload().ok().and_then(|payload| payload.seq)
     }
 
+    /// The occurrence it is limited to, by its `RECURRENCE-ID` value in the
+    /// form of the series' `DTSTART` (`YYYYMMDD` or
+    /// `YYYYMMDDTHHMMSS[Z]`), `None` for the whole series.
+    pub fn occurrence(&self) -> Result<Option<String>, Failure> {
+        let Some(recurrence_id) = self.payload()?.recurrence_id else {
+            return Ok(None);
+        };
+        io_pimdir::intent::validate_recurrence_id(&recurrence_id)
+            .map_err(|err| Failure::Permanent(anyhow!("Malformed {} payload: {err}", self.kind)))?;
+        Ok(Some(recurrence_id))
+    }
+
     /// What it asks for.
     pub fn invitation(&self) -> Result<Invitation, Failure> {
         let payload = self.payload()?;
@@ -155,6 +175,48 @@ impl InvitationIntent {
             }
             _ => Ok(Invitation::Cancel { comment }),
         }
+    }
+}
+
+/// The window an occurrence named by `recurrence_id` is looked for in, as
+/// RFC 3339 instants: two days either side of its date, wider than any
+/// zone's offset. `None` for a value without a date.
+#[cfg(any(feature = "gcal", feature = "msgraph"))]
+pub fn occurrence_window(recurrence_id: &str) -> Option<(String, String)> {
+    use jiff::{Span, civil::Date};
+
+    let digits = recurrence_id.get(..8)?;
+    let year = digits.get(..4)?.parse().ok()?;
+    let month = digits.get(4..6)?.parse().ok()?;
+    let day = digits.get(6..8)?.parse().ok()?;
+    let date = Date::new(year, month, day).ok()?;
+    let start = date.checked_sub(Span::new().days(2)).ok()?;
+    let end = date.checked_add(Span::new().days(3)).ok()?;
+    Some((format!("{start}T00:00:00Z"), format!("{end}T00:00:00Z")))
+}
+
+/// An instant's UTC `RECURRENCE-ID` value (`YYYYMMDDTHHMMSSZ`), from an
+/// RFC 3339 timestamp of any offset.
+#[cfg(any(feature = "gcal", feature = "msgraph"))]
+pub fn utc_stamp(instant: &str) -> Option<String> {
+    let instant: jiff::Timestamp = instant.parse().ok()?;
+    Some(instant.strftime("%Y%m%dT%H%M%SZ").to_string())
+}
+
+/// A timestamp's wall-time `RECURRENCE-ID` value (`YYYYMMDDTHHMMSS`), the
+/// time as written whatever its offset, or a date's (`YYYYMMDD`).
+#[cfg(feature = "gcal")]
+pub fn wall_stamp(stamp: &str) -> Option<String> {
+    let date = stamp.get(..10)?;
+    let digits = |part: &str| {
+        part.chars()
+            .filter(char::is_ascii_digit)
+            .collect::<String>()
+    };
+    match stamp.get(10..11) {
+        None => Some(digits(date)),
+        Some("T") => Some(format!("{}T{}", digits(date), digits(stamp.get(11..19)?))),
+        Some(_) => None,
     }
 }
 
@@ -318,6 +380,60 @@ mod tests {
             CANCEL,
             r#"{"v":1,"seq":1,"link_id":"uid:abc"}"#
         )));
+    }
+
+    #[test]
+    fn an_occurrence_is_read_and_a_malformed_one_parks() {
+        let whole = intent(REPLY, r#"{"v":1,"seq":1,"partstat":"ACCEPTED"}"#);
+        assert_eq!(whole.occurrence().unwrap(), None);
+
+        let one = intent(
+            CANCEL,
+            r#"{"v":1,"seq":1,"recurrence_id":"20261006T090000"}"#,
+        );
+        assert_eq!(
+            one.occurrence().unwrap().as_deref(),
+            Some("20261006T090000")
+        );
+
+        let bad = intent(CANCEL, r#"{"v":1,"seq":1,"recurrence_id":"next monday"}"#);
+        assert!(bad.occurrence().unwrap_err().parks());
+    }
+
+    #[cfg(any(feature = "gcal", feature = "msgraph"))]
+    #[test]
+    fn an_occurrence_is_looked_for_around_its_date_in_each_form() {
+        assert_eq!(
+            occurrence_window("20261006T090000").unwrap(),
+            (
+                "2026-10-04T00:00:00Z".to_string(),
+                "2026-10-09T00:00:00Z".to_string()
+            )
+        );
+        assert_eq!(
+            occurrence_window("20260301").unwrap().0,
+            "2026-02-27T00:00:00Z"
+        );
+        assert_eq!(occurrence_window("2026"), None);
+
+        assert_eq!(
+            utc_stamp("2026-10-06T09:00:00+02:00").as_deref(),
+            Some("20261006T070000Z")
+        );
+        assert_eq!(
+            utc_stamp("2026-10-06T07:00:00.0000000Z").as_deref(),
+            Some("20261006T070000Z")
+        );
+    }
+
+    #[cfg(feature = "gcal")]
+    #[test]
+    fn a_wall_stamp_is_the_time_as_written() {
+        assert_eq!(
+            wall_stamp("2026-10-06T09:00:00+02:00").as_deref(),
+            Some("20261006T090000")
+        );
+        assert_eq!(wall_stamp("2026-10-06").as_deref(), Some("20261006"));
     }
 
     #[test]

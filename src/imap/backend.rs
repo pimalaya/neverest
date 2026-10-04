@@ -44,6 +44,7 @@ use crate::{
         flag::{Flag, FlagOp, IanaFlag},
         summary::{ItemSummary, normalize_message_id, parse_message_ids},
     },
+    offline::invitation::Refusal,
 };
 
 impl ImapClient {
@@ -338,6 +339,43 @@ impl ImapClient {
         self.r#move(sequence_set, target, ImapMessageMoveOptions { uid: true })?;
 
         Ok(())
+    }
+
+    /// The name a mailbox `name` takes under `parent`: the two joined by
+    /// the hierarchy delimiter the parent's `LIST` row states. A server
+    /// with a flat namespace (no delimiter) nests nothing.
+    pub fn child_mailbox(&mut self, parent: &str, name: &str) -> Result<String> {
+        let reference: ImapMailbox<'static> = ""
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IMAP list reference"))?;
+        let pattern: ListMailbox<'static> = String::from(parent)
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IMAP mailbox {parent}"))?;
+
+        let rows = self.list(reference, pattern)?;
+        let Some((_, delimiter, attributes)) = rows.first() else {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "No IMAP mailbox {parent} to create {name} under"
+            ))));
+        };
+        if attributes.contains(&FlagNameAttribute::Noinferiors) {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "IMAP mailbox {parent} takes no child mailbox"
+            ))));
+        }
+        let Some(delimiter) = delimiter else {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "The IMAP server has a flat namespace, {name} cannot go under {parent}"
+            ))));
+        };
+        let delimiter = delimiter.inner();
+        if name.contains(delimiter) {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "A mailbox name holds no {delimiter}, the server's hierarchy delimiter"
+            ))));
+        }
+
+        Ok(format!("{parent}{delimiter}{name}"))
     }
 
     /// Creates a mailbox.

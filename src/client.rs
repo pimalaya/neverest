@@ -37,6 +37,7 @@ use crate::{
     account::{SourceAccount, SourceAccountBackend},
     item::{collection::Collection, flag::Flag, flag::FlagOp, summary::ItemSummary},
     kind::LinkId,
+    offline::invitation::Refusal,
 };
 
 /// A backend-neutral enumeration: the member+flag spine, plus the cursor.
@@ -247,6 +248,60 @@ impl Client {
                 feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
+        }
+    }
+
+    /// Creates the collection `name` under `parent`, the top level when
+    /// `None`, and answers the id it is listed under; one the server
+    /// already lists there is success (pimdir Annex B.2
+    /// `collection-create`).
+    ///
+    /// IMAP joins the two with the parent's hierarchy delimiter, Gmail
+    /// nests a label by its name (`Parent/name`), and DAV, whose
+    /// collections do not nest, keys a new one by a path segment made from
+    /// `name` and displays it as `name`. Graph and Google Calendar and
+    /// People create none. A request no run can perform fails with a
+    /// [`Refusal`].
+    pub fn create_named_collection(&mut self, parent: Option<&str>, name: &str) -> Result<String> {
+        let refused = |why: String| Err(anyhow::Error::new(Refusal(why)));
+
+        match self {
+            #[cfg(feature = "imap")]
+            Client::Imap(c) => {
+                let id = match parent {
+                    Some(parent) => c.child_mailbox(parent, name)?,
+                    None => name.to_owned(),
+                };
+                let listed = c.list_mailboxes(false)?;
+                if !listed.iter().any(|collection| collection.id == id) {
+                    c.create_mailbox(&id)?;
+                }
+                Ok(id)
+            }
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.create_child_label(parent, name),
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => {
+                if let Some(parent) = parent {
+                    return refused(format!(
+                        "DAV collections do not nest, {name} cannot go under {parent}"
+                    ));
+                }
+                let listed = c.list_collections(false)?;
+                if let Some(found) = listed
+                    .iter()
+                    .find(|collection| collection.name == name || collection.id == name)
+                {
+                    return Ok(found.id.clone());
+                }
+                let id = free_segment(name, &listed);
+                c.create_collection_named(&id, name)?;
+                Ok(id)
+            }
+            #[allow(unreachable_patterns)]
+            _ => refused(format!(
+                "This source creates no collection, so {name} cannot be created"
+            )),
         }
     }
 
@@ -779,5 +834,61 @@ impl Pool {
         }
         let take = want.min(self.clients.len());
         Ok(&mut self.clients[..take])
+    }
+}
+
+/// The path segment a new DAV collection named `name` is keyed by: its
+/// letters, digits, `-`, `_` and `.` kept, every other run of characters
+/// one `-`, and a number appended while a listed collection holds it.
+#[cfg(feature = "dav")]
+fn free_segment(name: &str, listed: &[Collection]) -> String {
+    let mut base = String::new();
+    for c in name.chars() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' | '.' => base.push(c),
+            _ if !base.ends_with('-') => base.push('-'),
+            _ => {}
+        }
+    }
+    let base = match base.trim_matches(|c| c == '-' || c == '.') {
+        "" => "collection",
+        trimmed => trimmed,
+    }
+    .to_owned();
+
+    let taken = |id: &str| listed.iter().any(|collection| collection.id == id);
+    let mut id = base.clone();
+    let mut n = 2;
+    while taken(&id) {
+        id = format!("{base}-{n}");
+        n += 1;
+    }
+    id
+}
+
+#[cfg(all(test, feature = "dav"))]
+mod tests {
+    use super::*;
+
+    fn listed(ids: &[&str]) -> Vec<Collection> {
+        ids.iter()
+            .map(|id| Collection {
+                id: id.to_string(),
+                name: id.to_string(),
+                total: None,
+                unread: None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_new_dav_collection_is_keyed_by_a_free_segment_of_its_name() {
+        assert_eq!(free_segment("Work", &listed(&[])), "Work");
+        assert_eq!(
+            free_segment("Mes réunions / 2026", &listed(&[])),
+            "Mes-r-unions-2026"
+        );
+        assert_eq!(free_segment("../", &listed(&[])), "collection");
+        assert_eq!(free_segment("Work", &listed(&["Work", "Work-2"])), "Work-3");
     }
 }

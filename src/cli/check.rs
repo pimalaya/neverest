@@ -55,7 +55,7 @@ impl CheckCommand {
         for (endpoint, endpoint_config) in account_config.endpoints()? {
             // NOTE: a target is written to, never declared, as in a sync.
             let capabilities = match account_mode.sources.contains(&endpoint) {
-                true => capability::declaration(&endpoint_config, account_mode.one_way, &[])
+                true => capability::supports(&endpoint_config, account_mode.one_way)
                     .into_iter()
                     .map(CheckedCapability::from)
                     .collect(),
@@ -163,10 +163,10 @@ pub struct SourceCheck {
     pub source: String,
     /// Every collection it listed, with the role the server states.
     pub collections: Vec<CheckedCollection>,
-    /// What the source declares it can do, as a sync declares it in the
-    /// store (pimdir STORAGE §15.6), source-wide rows only: an intent
-    /// performed on the calendars a source holds reads `none` here. Empty
-    /// for a target and for an undeclared (JMAP) source.
+    /// What the source can do, as a sync declares it in the store (pimdir
+    /// STORAGE §15.6), one row per capability: an intent performed on the
+    /// collections the source holds reads as it does on them. Empty for a
+    /// target and for an undeclared (JMAP) source.
     pub capabilities: Vec<CheckedCapability>,
     /// Whether its SMTP channel was opened and authenticated, `false` when
     /// it declares none.
@@ -227,12 +227,12 @@ pub struct CheckedCapability {
     pub detail: Option<String>,
 }
 
-impl From<io_pimdir::capability::PimdirCapability> for CheckedCapability {
-    fn from(capability: io_pimdir::capability::PimdirCapability) -> Self {
+impl From<capability::SupportRow> for CheckedCapability {
+    fn from((name, support, detail): capability::SupportRow) -> Self {
         Self {
-            name: capability.name,
-            support: capability.support.as_str().to_owned(),
-            detail: capability.detail,
+            name: name.to_owned(),
+            support: support.as_str().to_owned(),
+            detail: detail.map(str::to_owned),
         }
     }
 }

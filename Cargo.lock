@@ -1307,8 +1307,7 @@ dependencies = [
 [[package]]
 name = "io-msgraph"
 version = "0.4.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8435d693bf037c8061715ffd1fd0e80337a41af4def3a0bfad508fdfff65920e"
+source = "git+https://github.com/pimalaya/io-msgraph?rev=43f65f9d10a55c9e700d8952bae0d0aa8f697117#43f65f9d10a55c9e700d8952bae0d0aa8f697117"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

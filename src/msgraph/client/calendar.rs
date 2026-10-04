@@ -66,6 +66,17 @@ const MAX_WINDOW_YEARS: i16 = 5;
 impl GraphClient {
     /// Lists the user's calendars, keyed by id and named by their name.
     pub(super) fn list_calendars(&mut self) -> Result<Vec<Collection>> {
+        Ok(self.calendars()?.0)
+    }
+
+    /// The id of the user's default calendar (`isDefaultCalendar`), the
+    /// one an invitation lands in.
+    pub(super) fn default_calendar(&mut self) -> Result<Option<String>> {
+        Ok(self.calendars()?.1)
+    }
+
+    /// Lists the user's calendars, and names the default one.
+    fn calendars(&mut self) -> Result<(Vec<Collection>, Option<String>)> {
         debug!("begin graph calendar listing");
 
         let params = MsgraphCalendarsListParams {
@@ -77,10 +88,14 @@ impl GraphClient {
             .context("List calendars error")?;
 
         let mut collections = Vec::new();
+        let mut default = None;
         loop {
             for calendar in page.value {
                 if calendar.id.is_empty() {
                     continue;
+                }
+                if default.is_none() && calendar.is_default_calendar == Some(true) {
+                    default = Some(calendar.id.clone());
                 }
                 let name = calendar
                     .name
@@ -110,7 +125,7 @@ impl GraphClient {
 
         debug!("end of graph calendar listing");
         trace!("calendars: {}", collections.len());
-        Ok(collections)
+        Ok((collections, default))
     }
 
     /// Enumerates a calendar's lone events and series masters, in full.

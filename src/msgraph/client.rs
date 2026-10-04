@@ -304,6 +304,17 @@ impl GraphClient {
             .collect())
     }
 
+    /// The collection a new item goes to when none is named: the default
+    /// calendar (`isDefaultCalendar`), the default Contacts folder; none for
+    /// mail, whose folders have roles instead. A check-only probe.
+    pub fn default_collection(&mut self) -> Result<Option<String>> {
+        match self.kind {
+            GraphKind::Mail => Ok(None),
+            GraphKind::Contacts => Ok(Some(contacts::CONTACTS_FOLDER.to_owned())),
+            GraphKind::Calendar => self.default_calendar(),
+        }
+    }
+
     /// The role each mail folder states, by folder name: one well-known
     /// folder lookup per role, the answered id matched to the listing. A
     /// well-known folder the mailbox does not have (often `archive`) is

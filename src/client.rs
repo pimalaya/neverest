@@ -188,6 +188,37 @@ impl Client {
         }
     }
 
+    /// The collection a new item goes to when none is named, by collection
+    /// id: Google's primary calendar, Graph's default calendar and default
+    /// Contacts folder, the one People address book, the CalDAV calendar
+    /// the scheduling inbox names (RFC 6638), when the server gives it.
+    ///
+    /// A check-only probe, never stored. Mail (whose folders have roles)
+    /// and CardDAV answer none.
+    pub fn default_collection(&mut self) -> Result<Option<String>> {
+        match self {
+            #[cfg(feature = "msgraph")]
+            Client::Msgraph(c) => c.default_collection(),
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.default_collection(),
+            #[cfg(feature = "gpeople")]
+            Client::Gpeople(c) => Ok(c.default_collection()),
+            #[cfg(feature = "gcal")]
+            Client::Gcal(c) => c.default_collection(),
+            #[cfg(not(any(
+                feature = "imap",
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal",
+                feature = "gmail"
+            )))]
+            Client::Unavailable => bail!(NO_BACKEND),
+            #[allow(unreachable_patterns)]
+            _ => Ok(None),
+        }
+    }
+
     /// Creates a collection. Pull-only on Graph (rejected).
     pub fn create_collection(&mut self, collection: &str) -> Result<()> {
         match self {

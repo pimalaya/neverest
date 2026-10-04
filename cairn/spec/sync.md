@@ -930,6 +930,19 @@ Display names are localised (`[Gmail]/Bin`, "Éléments envoyés") and an IMAP s
 - WHEN `neverest check --json` runs
 - THEN the folder is listed without a role, whatever its name
 
+### Requirement: A check names the default calendar and address book
+`neverest check` SHALL mark with `default: true` the collection of an endpoint where a new item goes when none is named, as the server states it: on Google Calendar the calendar the calendar list marks `primary`; on Google People the one address book; on a Graph calendar source the calendar with `isDefaultCalendar`; on a Graph contacts source the default Contacts folder; on CalDAV the calendar the principal's scheduling inbox names as `schedule-default-calendar-URL` (RFC 6638 §9.2), when the server gives it. CardDAV states none, nor does mail, whose folders have roles. At most one collection per endpoint SHALL carry the mark, and the key SHALL be left out when false. A failed CalDAV scheduling lookup SHALL be no default, never a failed check.
+
+A caller choosing one calendar and one address book for an account takes the marked one, and the first listed when none is marked.
+
+#### Scenario: A CalDAV server with scheduling
+- GIVEN a CalDAV account whose scheduling inbox names its default calendar
+- WHEN `neverest check --json` runs
+- THEN that calendar is listed with `default: true`, and no other
+
+### Requirement: A check reports what each source declares it can do
+`neverest check` SHALL list, for each source, the capabilities a sync declares for it in the store (pimdir STORAGE §15.6) as `capabilities: [{ name, support, detail? }]`, `support` being `full`, `partial` or `none`, from its backend and configured rights alone. Only the source-wide rows SHALL be listed, the store's collections being unknown to a check: an intent performed on the calendars a source holds reads `none` there. A target and an undeclared (JMAP) source SHALL list none. A capability a source learns to declare is reported by the check with no change to it.
+
 ### Requirement: JSON keys are camelCase
 Every output type neverest prints SHALL serialize its keys as camelCase, matching the wire formats the endpoints speak (JMAP per RFC 8620, Microsoft Graph, the Google APIs) and keeping every key reachable by dot access in jq and JavaScript, which is how the README's notifier reads a report.
 

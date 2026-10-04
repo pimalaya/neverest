@@ -34,8 +34,12 @@ use anyhow::{Context, Result, bail};
 use io_http::rfc9112::send::Http11SendError;
 use io_webdav::{
     client::{WebdavClientStd, WebdavClientStdConnectOptions, WebdavClientStdError},
-    rfc4791::calendar::CaldavCalendar,
-    rfc4918::{WebdavAuth, follow_redirects::WebdavFollowRedirectsError, send::WebdavSendError},
+    coroutine::{WebdavCoroutine, WebdavCoroutineState, WebdavYield},
+    rfc4791::calendar::{CALDAV, CaldavCalendar},
+    rfc4918::{
+        WebdavAuth, WebdavProperty, follow_redirects::WebdavFollowRedirectsError,
+        propfind::WebdavPropfind, resolve_href, send::WebdavSendError,
+    },
     rfc6352::addressbook::CarddavAddressbook,
     rfc6578::sync_collection::{
         SYNC_COLLECTION, WebdavSyncChange, WebdavSyncCollectionError, WebdavSyncCollectionOptions,
@@ -224,6 +228,60 @@ impl DavClient {
                 unread: None,
             })
             .collect())
+    }
+
+    /// The collection a new item goes to when none is named, by id.
+    ///
+    /// For CalDAV, the calendar the scheduling inbox names as
+    /// `schedule-default-calendar-URL` (RFC 6638 §9.2), when the server
+    /// gives it; a server without scheduling answers none. CardDAV names
+    /// no default address book. A check-only probe: a failed lookup is no
+    /// default, never an error.
+    pub fn default_collection(&mut self) -> Result<Option<String>> {
+        if self.kind == DavKind::Card {
+            return Ok(None);
+        }
+
+        match self.schedule_default_calendar() {
+            Ok(id) => Ok(id),
+            Err(err) => {
+                debug!("no default calendar stated: {err}");
+                Ok(None)
+            }
+        }
+    }
+
+    /// Follows the principal's `schedule-inbox-URL` to the inbox's
+    /// `schedule-default-calendar-URL`, and keys it as a listing does.
+    fn schedule_default_calendar(&mut self) -> Result<Option<String>, WebdavClientStdError> {
+        let principal = self.op(WebdavClientStd::current_user_principal)?;
+        let Some(inbox) = self.propfind_href(principal.path(), SCHEDULE_INBOX_URL)? else {
+            return Ok(None);
+        };
+        let Some(calendar) = self.propfind_href(inbox.path(), SCHEDULE_DEFAULT_CALENDAR_URL)?
+        else {
+            return Ok(None);
+        };
+        Ok(collection_key(calendar.path()))
+    }
+
+    /// The href a `Depth: 0` PROPFIND of `path` states for `prop`.
+    fn propfind_href(
+        &mut self,
+        path: &str,
+        prop: WebdavProperty,
+    ) -> Result<Option<Url>, WebdavClientStdError> {
+        let multistatus = self.op(|dav| {
+            let coroutine =
+                WebdavPropfind::new(&dav.base_url, dav.auth(), &dav.user_agent, path, 0, &[prop]);
+            run(dav, coroutine)
+        })?;
+        let base = self.inner.base_url.clone();
+        Ok(multistatus
+            .responses
+            .iter()
+            .find_map(|entry| entry.text(prop))
+            .and_then(|href| resolve_href(&base, href)))
     }
 
     /// Creates a collection, named after the collection key.
@@ -594,6 +652,51 @@ impl DavClient {
     }
 }
 
+/// The scheduling inbox of a principal (RFC 6638 §2.2.1).
+const SCHEDULE_INBOX_URL: WebdavProperty = WebdavProperty {
+    ns: CALDAV,
+    local: "schedule-inbox-URL",
+};
+
+/// The calendar a scheduling inbox files new invitations in (RFC 6638
+/// §9.2).
+const SCHEDULE_DEFAULT_CALENDAR_URL: WebdavProperty = WebdavProperty {
+    ns: CALDAV,
+    local: "schedule-default-calendar-URL",
+};
+
+/// The key a listing gives the collection at `path`: its last non-empty
+/// segment, as io-webdav keys a calendar.
+fn collection_key(path: &str) -> Option<String> {
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_owned)
+}
+
+/// Runs a coroutine io-webdav's client has no method for over its stream.
+fn run<C, T, E>(dav: &mut WebdavClientStd, mut coroutine: C) -> Result<T, WebdavClientStdError>
+where
+    C: WebdavCoroutine<Yield = WebdavYield, Return = Result<T, E>>,
+    E: Into<WebdavClientStdError>,
+{
+    let mut buf = [0u8; 8192];
+    let mut read = None;
+
+    loop {
+        let arg = read.take().map(|n| &buf[..n]);
+        match coroutine.resume(arg) {
+            WebdavCoroutineState::Complete(out) => return out.map_err(Into::into),
+            WebdavCoroutineState::Yielded(WebdavYield::WantsWrite(bytes)) => {
+                dav.stream.write_all(&bytes)?;
+            }
+            WebdavCoroutineState::Yielded(WebdavYield::WantsRead) => {
+                read = Some(dav.stream.read(&mut buf)?);
+            }
+        }
+    }
+}
 /// The connect options of a session: the configured TLS, and a direct
 /// connection, as every other source of the account opens its own.
 fn connect_options(tls: &Tls) -> WebdavClientStdConnectOptions {
@@ -762,6 +865,16 @@ fn is_invalid_sync_token(err: &WebdavClientStdError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_default_calendar_url_is_keyed_as_a_listing_keys_it() {
+        assert_eq!(
+            collection_key("/dav/cal/test%40pimalaya.org/default/").as_deref(),
+            Some("default")
+        );
+        assert_eq!(collection_key("/cal/work").as_deref(), Some("work"));
+        assert_eq!(collection_key("/"), None);
+    }
 
     #[test]
     fn a_member_href_addresses_by_its_last_segment() {

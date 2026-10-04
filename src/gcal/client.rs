@@ -135,7 +135,19 @@ impl GcalClient {
     /// Lists the calendars of the user's calendar list, keyed by id and
     /// named by the user's own name for them.
     pub fn list_collections(&mut self) -> Result<Vec<Collection>> {
+        Ok(self.calendars()?.0)
+    }
+
+    /// The id of the user's primary calendar, the one the calendar list
+    /// marks `primary`. A check-only probe.
+    pub fn default_collection(&mut self) -> Result<Option<String>> {
+        Ok(self.calendars()?.1)
+    }
+
+    /// Lists the calendars, and names the primary one.
+    fn calendars(&mut self) -> Result<(Vec<Collection>, Option<String>)> {
         let mut collections = Vec::new();
+        let mut primary = None;
         let mut page_token: Option<String> = None;
 
         loop {
@@ -151,6 +163,9 @@ impl GcalClient {
                 let Some(id) = entry.id.filter(|id| !id.is_empty()) else {
                     continue;
                 };
+                if primary.is_none() && entry.primary == Some(true) {
+                    primary = Some(id.clone());
+                }
                 let name = entry
                     .summary_override
                     .or(entry.summary)
@@ -165,7 +180,7 @@ impl GcalClient {
 
             match page.next_page_token {
                 Some(next) => page_token = Some(next),
-                None => return Ok(collections),
+                None => return Ok((collections, primary)),
             }
         }
     }

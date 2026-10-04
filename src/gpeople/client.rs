@@ -128,6 +128,12 @@ impl GpeopleClient {
         }])
     }
 
+    /// The one address book, the default by construction. A check-only
+    /// probe.
+    pub fn default_collection(&self) -> Option<String> {
+        Some(CONTACTS.to_owned())
+    }
+
     /// Enumerates the connections, incrementally from the checkpoint's sync
     /// token when it holds one and the token has not expired.
     pub fn enumerate(&mut self, collection: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {

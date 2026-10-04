@@ -14,7 +14,7 @@ use pimalaya_config::toml::TomlConfig;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::{account::Account, client, config::Config};
+use crate::{account::Account, client, config::Config, offline::capability};
 
 /// Probes every configured source before a real sync.
 ///
@@ -43,7 +43,8 @@ impl CheckCommand {
 
         info!("checking account {name}");
 
-        let mode = account_config.mode()?.to_string();
+        let account_mode = account_config.mode()?;
+        let mode = account_mode.to_string();
 
         // NOTE: every credential at once, so a check costs one unlock per
         // password command rather than one per endpoint.
@@ -51,8 +52,16 @@ impl CheckCommand {
 
         let mut sources = Vec::new();
 
-        for endpoint in account_config.endpoints()?.keys() {
-            sources.push(check_source(endpoint, &account)?);
+        for (endpoint, endpoint_config) in account_config.endpoints()? {
+            // NOTE: a target is written to, never declared, as in a sync.
+            let capabilities = match account_mode.sources.contains(&endpoint) {
+                true => capability::declaration(&endpoint_config, account_mode.one_way, &[])
+                    .into_iter()
+                    .map(CheckedCapability::from)
+                    .collect(),
+                false => Vec::new(),
+            };
+            sources.push(check_source(&endpoint, &account, capabilities)?);
         }
 
         printer.out(CheckOutput {
@@ -66,16 +75,22 @@ impl CheckCommand {
 /// Opens the source and lists its collections with the role each states on
 /// the server, then opens its SMTP channel, if it declares one, up to
 /// authentication.
-fn check_source(label: &str, account: &Account) -> Result<SourceCheck> {
+fn check_source(
+    label: &str,
+    account: &Account,
+    capabilities: Vec<CheckedCapability>,
+) -> Result<SourceCheck> {
     let s = Spinner::start(format!("Checking source {label}…"));
     let source = account.get(label)?;
     let mut client = client::open(&source)?;
     let mut roles = client.collection_roles()?;
+    let default = client.default_collection()?;
     let collections: Vec<CheckedCollection> = client
         .list_collections(false)?
         .into_iter()
         .map(|collection| CheckedCollection {
             role: roles.remove(&collection.id),
+            default: default.as_ref() == Some(&collection.id),
             id: collection.id,
             name: collection.name,
         })
@@ -105,6 +120,7 @@ fn check_source(label: &str, account: &Account) -> Result<SourceCheck> {
     Ok(SourceCheck {
         source: label.to_owned(),
         collections,
+        capabilities,
         smtp,
     })
 }
@@ -147,6 +163,11 @@ pub struct SourceCheck {
     pub source: String,
     /// Every collection it listed, with the role the server states.
     pub collections: Vec<CheckedCollection>,
+    /// What the source declares it can do, as a sync declares it in the
+    /// store (pimdir STORAGE §15.6), source-wide rows only: an intent
+    /// performed on the calendars a source holds reads `none` here. Empty
+    /// for a target and for an undeclared (JMAP) source.
+    pub capabilities: Vec<CheckedCapability>,
     /// Whether its SMTP channel was opened and authenticated, `false` when
     /// it declares none.
     pub smtp: bool,
@@ -158,6 +179,7 @@ impl fmt::Display for SourceCheck {
             source,
             collections,
             smtp,
+            ..
         } = self;
         write!(f, "{source} ({} collection(s))", collections.len())?;
         if *smtp {
@@ -182,4 +204,35 @@ pub struct CheckedCollection {
     /// system labels.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Whether it is where a new item goes when none is named, as the
+    /// server states it: Google's primary calendar, Graph's default
+    /// calendar and default Contacts folder, the one People address book,
+    /// the CalDAV calendar the scheduling inbox names (RFC 6638
+    /// `schedule-default-calendar-URL`). Never set on mail nor CardDAV, at
+    /// most once per source, and left out when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default: bool,
+}
+
+/// One capability a source declares.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckedCapability {
+    /// Its pimdir name, e.g. `mail.message.add`, `calendar.reply`.
+    pub name: String,
+    /// `full`, `partial` or `none`.
+    pub support: String,
+    /// Why it is partial or refused.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl From<io_pimdir::capability::PimdirCapability> for CheckedCapability {
+    fn from(capability: io_pimdir::capability::PimdirCapability) -> Self {
+        Self {
+            name: capability.name,
+            support: capability.support.as_str().to_owned(),
+            detail: capability.detail,
+        }
+    }
 }

@@ -12,6 +12,8 @@ MOA saw a Graph meeting edited right after its creation come back as a conflict,
 
 - src/kind/merge.rs: the calendar merge drops `DTSTAMP`, `LAST-MODIFIED`, `CREATED` and `SEQUENCE` from the base and the remote side before merging, the local side keeping its own, and raises each merged component's `SEQUENCE` to the remote's where it counted further.
 
+- tests/msgraph.rs: `a_graph_meeting_edited_right_after_creation_is_pushed_then_cancelled`, live on the test tenant: a meeting with an attendee, edited as a calendar client does (new `DTSTAMP`, `SEQUENCE:1`) right after its creation, then cancelled. With the previous merge the edit never reached Graph; with this one it does, and the cancelled meeting stays gone after two more runs.
+
 ## Capabilities moved
 
 - sync: a run merges what nobody disagreed about (calendar stamps).

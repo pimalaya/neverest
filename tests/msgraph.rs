@@ -541,6 +541,112 @@ fn a_graph_meeting_is_cancelled() {
     );
 }
 
+/// A meeting edited right after its creation reaches Graph, and its
+/// cancellation stays one.
+///
+/// Exchange restamps a meeting once it has sent the invitations, so the
+/// first push of the edit parks and the next run merges it. The edit is the
+/// one a calendar client makes, a new `DTSTAMP` and a raised `SEQUENCE`,
+/// which used to collide with Graph's own stamps: the item parked for good,
+/// and the cancellation was undone by the edit still pending.
+#[test]
+#[ignore = "live: needs the app registration's client secret"]
+fn a_graph_meeting_edited_right_after_creation_is_pushed_then_cancelled() {
+    let token = msgraph_token();
+    let uid = tag();
+    let calendar = connect(&token)
+        .calendar_create(&MsgraphCalendar {
+            name: MsgraphField::Set(tag()),
+            ..Default::default()
+        })
+        .expect("create the calendar")
+        .response
+        .id;
+
+    with_cleanup(
+        || {
+            let extra = user_line("msgraph-calendar");
+            let a = Replica::open("msgraph-calendar", &extra, &token);
+            a.sync(&calendar);
+
+            let attendee = tenant_stranger(&uid);
+            a.add(
+                &calendar,
+                &meeting(&uid, "meeting", &msgraph_user(), &attendee),
+                &[],
+            );
+            a.sync_until(&calendar, "the meeting is bound", |a| {
+                a.item(&calendar, &uid).is_some()
+            });
+
+            let item = a.item(&calendar, &uid).unwrap();
+            let edited = a
+                .body(&item)
+                .replace("SUMMARY:Live meeting", "SUMMARY:Live edited")
+                .replace("BEGIN:VEVENT\r\n", "BEGIN:VEVENT\r\nSEQUENCE:1\r\n");
+            let edited = edited
+                .lines()
+                .map(|line| match line.starts_with("DTSTAMP:") {
+                    true => "DTSTAMP:20261004T120000Z",
+                    false => line,
+                })
+                .collect::<Vec<_>>()
+                .join("\r\n")
+                + "\r\n";
+            a.update(&calendar, item.seq, &edited);
+
+            // NOTE: Graph mints its own iCalUId, so the calendar is listed.
+            let subject = |token: &str| {
+                let path = format!("calendars/{calendar}/events?$select=subject");
+                graph(token, "GET", &path, None)["value"][0]["subject"]
+                    .as_str()
+                    .map(str::to_owned)
+            };
+            a.sync_until(&calendar, "the edit reaches Graph", |_| {
+                subject(&token).is_some_and(|subject| subject.contains("Live edited"))
+            });
+
+            let seq = a.item(&calendar, &uid).unwrap().seq;
+            a.intent(
+                &calendar,
+                "calendar-cancel",
+                serde_json::json!({
+                    "v": 1,
+                    "source": "msgraph-calendar",
+                    "seq": seq,
+                    "comment": "Cancelled by the neverest live tests",
+                }),
+            );
+            let intents = a.sync_intents(&calendar);
+            assert!(intents[0]["error"].is_null(), "{intents:?}");
+            a.sync_until(&calendar, "the cancelled meeting leaves the store", |a| {
+                a.item(&calendar, &uid).is_none()
+            });
+
+            // NOTE: two more runs, so a pending edit would have had its chance
+            // to bring the meeting back.
+            a.sync(&calendar);
+            a.sync(&calendar);
+            let path = format!("calendars/{calendar}/events?$select=subject,isCancelled");
+            let live: Vec<_> = graph(&token, "GET", &path, None)["value"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|event| event["isCancelled"] != true)
+                .collect();
+            assert!(live.is_empty(), "the cancelled meeting came back: {live:?}");
+            assert!(a.item(&calendar, &uid).is_none());
+        },
+        || {
+            if let Err(err) = connect(&token).calendar_delete(&calendar) {
+                eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
+            }
+            delete_messages_about(&token, &uid);
+        },
+    );
+}
+
 /// An invitation received by mail is answered: Graph accepts it and the
 /// answer is on the event.
 ///

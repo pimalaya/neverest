@@ -25,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Fixed a Graph series over more than five years failing to read, open-ended ones (the Birthdays and holidays calendars) among them: Graph refuses an instances listing over more than five years. A series is now read in windows of at most five years, an open-ended one within five years either side of today.
 - Fixed a CardDAV or CalDAV item whose `UID` holds a `:` (a `urn:uuid:`) read as two resources and copied again on every run: Stalwart lists `urn:uuid:x.vcf` as `urn%3Auuid%3Ax.vcf`. A member now has one spelling, a `:` encoded as `%3A`, and a new resource is named in it. An item an older version created with a literal `:` is read under the new spelling.
 - Fixed a calendar conflict parking over stamps alone: a side rewriting `DTSTAMP`, `LAST-MODIFIED`, `CREATED` or `SEQUENCE` is no longer a collision, so a Graph meeting edited right after its creation, while Graph restamped it on sending the invitations, merges instead of parking, and a later cancellation no longer recreates it. The merged event keeps the higher `SEQUENCE`.
 - Fixed a Graph calendar series with a `numbered` or `noEnd` range failing to read, the Birthdays calendar among them: Graph fills its `endDate` with `0001-01-01`, which ended the instances window before its start, and Graph refused it (400) on every run. The window now follows the range type (io-msgraph 0.4.5).

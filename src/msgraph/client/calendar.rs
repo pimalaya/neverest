@@ -56,8 +56,12 @@ const LIST_SELECT: &str = "id,changeKey,type,seriesMasterId";
 /// The page size requested when listing events.
 const PAGE_SIZE: u32 = 500;
 
-/// How far past its start an open-ended series is searched for exceptions.
+/// How far either side of today an open-ended series is searched for
+/// exceptions.
 const OPEN_SERIES_YEARS: i16 = 5;
+
+/// The longest window Graph lists a series' instances over.
+const MAX_WINDOW_YEARS: i16 = 5;
 
 impl GraphClient {
     /// Lists the user's calendars, keyed by id and named by their name.
@@ -175,7 +179,8 @@ impl GraphClient {
             return Ok((master, Vec::new()));
         }
 
-        let Some((start, end)) = series_window(&master) else {
+        let today = Timestamp::now().to_zoned(TimeZone::UTC).date();
+        let Some(windows) = series_windows(&master, today) else {
             warn!("series {id} has no readable range, its exceptions are skipped");
             return Ok((master, Vec::new()));
         };
@@ -187,24 +192,27 @@ impl GraphClient {
             select: Some(MSGRAPH_EVENT_ICAL_SELECT),
             ..Default::default()
         };
-        let mut page = self
-            .op(|graph| graph.event_instances(id, &start, &end, &params))
-            .with_context(|| format!("List instances of {id} error"))?;
 
         let mut exceptions = Vec::new();
-        loop {
-            exceptions.extend(
-                page.value
-                    .into_iter()
-                    .filter(|event| event.event_type == Some(MsgraphEventType::Exception)),
-            );
+        for (start, end) in windows {
+            let mut page = self
+                .op(|graph| graph.event_instances(id, &start, &end, &params))
+                .with_context(|| format!("List instances of {id} error"))?;
 
-            let Some(next) = page.next_link else {
-                break;
-            };
-            page = self
-                .op(|graph| graph.events_list_from_link(&next))
-                .with_context(|| format!("Page instances of {id} error"))?;
+            loop {
+                exceptions.extend(
+                    page.value
+                        .into_iter()
+                        .filter(|event| event.event_type == Some(MsgraphEventType::Exception)),
+                );
+
+                let Some(next) = page.next_link else {
+                    break;
+                };
+                page = self
+                    .op(|graph| graph.events_list_from_link(&next))
+                    .with_context(|| format!("Page instances of {id} error"))?;
+            }
         }
 
         Ok((master, unique(exceptions)?))
@@ -394,13 +402,23 @@ fn unique(events: Vec<MsgraphEvent>) -> Result<Vec<MsgraphEvent>> {
     Ok(unique)
 }
 
-/// The window a series' exceptions fall in: its range, an open-ended one
-/// capped past its start.
-fn series_window(master: &MsgraphEvent) -> Option<(String, String)> {
+/// The windows a series' exceptions are read in, none longer than the five
+/// years Graph allows an instances listing (it answers 400 past them).
+///
+/// A bounded series is read over its whole range. An open-ended one, as
+/// Birthdays are, is read within [`OPEN_SERIES_YEARS`] either side of
+/// `today`: one born in 1604, Outlook's year for a birthday without one,
+/// would otherwise take dozens of requests, and an exception that far back
+/// changes no occurrence anybody looks at.
+fn series_windows(master: &MsgraphEvent, today: Date) -> Option<Vec<(String, String)>> {
     let (start, end) = master.recurrence.as_option()?.bounds()?;
-    let end = match end {
-        Some(end) => end,
-        None => start.checked_add(OPEN_SERIES_YEARS.years()).ok()?,
+    let (start, end) = match end {
+        Some(end) => (start, end.checked_add(1.day()).ok()?),
+        None => {
+            let years = OPEN_SERIES_YEARS.years();
+            let floor = today.checked_sub(years).ok()?;
+            (start.max(floor), today.checked_add(years).ok()?)
+        }
     };
 
     let instant = |date: Date| -> Option<String> {
@@ -408,7 +426,20 @@ fn series_window(master: &MsgraphEvent) -> Option<(String, String)> {
         Some(timestamp.strftime("%Y-%m-%dT%H:%M:%SZ").to_string())
     };
 
-    Some((instant(start)?, instant(end.checked_add(1.day()).ok()?)?))
+    let mut windows = Vec::new();
+    let mut from = start;
+    while from < end {
+        let longest = from
+            .checked_add(MAX_WINDOW_YEARS.years())
+            .ok()?
+            .checked_sub(1.day())
+            .ok()?;
+        let to = longest.min(end);
+        windows.push((instant(from)?, instant(to)?));
+        from = to;
+    }
+
+    Some(windows)
 }
 
 /// Refuses a write when the event moved on Graph since `if_match`.
@@ -450,12 +481,12 @@ mod tests {
     }
 
     #[test]
-    fn a_series_window_spans_its_range_or_years_past_an_open_start() {
-        let series = |range_type, end: &str| MsgraphEvent {
+    fn series_windows_span_the_range_within_what_graph_allows() {
+        let series = |range_type, start: &str, end: &str| MsgraphEvent {
             recurrence: MsgraphField::Set(MsgraphPatternedRecurrence {
                 range: MsgraphRecurrenceRange {
                     range_type: Some(range_type),
-                    start_date: Some("2026-08-14".into()),
+                    start_date: Some(start.into()),
                     end_date: Some(end.into()),
                     ..Default::default()
                 },
@@ -463,16 +494,57 @@ mod tests {
             }),
             ..Default::default()
         };
+        let today: Date = "2026-10-04".parse().unwrap();
+        let windows = |range_type, start, end| {
+            series_windows(&series(range_type, start, end), today).unwrap()
+        };
+        let pair = |from: &str, to: &str| (format!("{from}T00:00:00Z"), format!("{to}T00:00:00Z"));
 
         assert_eq!(
-            series_window(&series(MsgraphRecurrenceRangeType::EndDate, "2026-09-30")),
-            Some(("2026-08-14T00:00:00Z".into(), "2026-10-01T00:00:00Z".into()))
+            windows(
+                MsgraphRecurrenceRangeType::EndDate,
+                "2026-08-14",
+                "2026-09-30"
+            ),
+            [pair("2026-08-14", "2026-10-01")]
         );
-        // NOTE: Graph fills the endDate of a noEnd range with a sentinel.
+        // NOTE: twelve years, read in windows Graph accepts.
         assert_eq!(
-            series_window(&series(MsgraphRecurrenceRangeType::NoEnd, "0001-01-01"))
-                .map(|(_, end)| end),
-            Some("2031-08-15T00:00:00Z".into())
+            windows(
+                MsgraphRecurrenceRangeType::EndDate,
+                "2020-01-01",
+                "2031-12-31"
+            ),
+            [
+                pair("2020-01-01", "2024-12-31"),
+                pair("2024-12-31", "2029-12-30"),
+                pair("2029-12-30", "2032-01-01"),
+            ]
+        );
+        // NOTE: Graph fills the endDate of a noEnd range with a sentinel;
+        // a birthday from 1604 is read around today, not since then.
+        assert_eq!(
+            windows(
+                MsgraphRecurrenceRangeType::NoEnd,
+                "1604-03-12",
+                "0001-01-01"
+            ),
+            [
+                pair("2021-10-04", "2026-10-03"),
+                pair("2026-10-03", "2031-10-02"),
+                pair("2031-10-02", "2031-10-04"),
+            ]
+        );
+        assert_eq!(
+            windows(
+                MsgraphRecurrenceRangeType::NoEnd,
+                "2026-08-14",
+                "0001-01-01"
+            ),
+            [
+                pair("2026-08-14", "2031-08-13"),
+                pair("2031-08-13", "2031-10-04")
+            ]
         );
     }
 

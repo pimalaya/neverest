@@ -398,6 +398,74 @@ fn a_graph_calendar_syncs_both_ways() {
     );
 }
 
+/// Every calendar of the mailbox syncs, the ones Graph makes itself
+/// (Birthdays, holidays) among them: their series have no end, which Graph
+/// writes as `0001-01-01`, and a window ending there was refused on every
+/// run. A run that cannot read a calendar now exits 3.
+#[test]
+#[ignore = "live: needs the app registration's client secret"]
+fn every_graph_calendar_of_the_mailbox_syncs() {
+    let token = msgraph_token();
+    let extra = user_line("msgraph-calendar");
+    let a = Replica::open("msgraph-calendar", &extra, &token);
+    a.sync_keys(&[], &[0]);
+}
+
+/// The join link of a Teams meeting created on Graph reaches the store.
+///
+/// A tenant without Teams gives the meeting no link: the test then says it
+/// was skipped and proves nothing (the Pimalaya test tenant, 2026-10-04).
+#[test]
+#[ignore = "live: needs the app registration's client secret"]
+fn a_graph_teams_meeting_carries_its_join_link() {
+    let token = msgraph_token();
+    let calendar = connect(&token)
+        .calendar_create(&MsgraphCalendar {
+            name: MsgraphField::Set(tag()),
+            ..Default::default()
+        })
+        .expect("create the calendar")
+        .response
+        .id;
+
+    with_cleanup(
+        || {
+            let created = graph(
+                &token,
+                "POST",
+                &format!("calendars/{calendar}/events"),
+                Some(serde_json::json!({
+                    "subject": format!("Live Teams {}", tag()),
+                    "start": { "dateTime": "2026-11-10T09:00:00", "timeZone": "UTC" },
+                    "end": { "dateTime": "2026-11-10T10:00:00", "timeZone": "UTC" },
+                    "isOnlineMeeting": true,
+                    "onlineMeetingProvider": "teamsForBusiness",
+                })),
+            );
+            let Some(url) = created["onlineMeeting"]["joinUrl"].as_str() else {
+                eprintln!("SKIPPED: Graph gave the meeting no join link, the tenant lacks Teams");
+                return;
+            };
+
+            let extra = user_line("msgraph-calendar");
+            let a = Replica::open("msgraph-calendar", &extra, &token);
+            a.sync(&calendar);
+            let items = a.items(&calendar, "");
+            assert_eq!(items.len(), 1, "{items:?}");
+            let body = a.body(&items[0]).replace("\r\n ", "");
+            assert!(
+                body.contains(&format!("X-MICROSOFT-SKYPETEAMSMEETINGURL:{url}")),
+                "{body}"
+            );
+        },
+        || {
+            if let Err(err) = connect(&token).calendar_delete(&calendar) {
+                eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
+            }
+        },
+    );
+}
+
 /// A one-hour event `marker`, organised by `organizer` and attended by
 /// `attendee`.
 fn meeting(uid: &str, marker: &str, organizer: &str, attendee: &str) -> String {

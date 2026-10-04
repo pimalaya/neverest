@@ -45,6 +45,8 @@ const MERGE_BOOK: &str = "merge";
 const BIND_BOOK: &str = "bind";
 /// The address book the ancestor-less divergence test owns on both principals.
 const SEED_BOOK: &str = "seed";
+/// The address book the collection lifecycle test owns on both principals.
+const LIFECYCLE_BOOK: &str = "lifecycle";
 /// The address book the one-way test owns on both principals.
 const AUTHORITY_BOOK: &str = "authority";
 /// The source endpoint's principal, whose password is its own name.
@@ -295,6 +297,57 @@ fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
 
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
+fn a_book_deleted_on_one_endpoint_is_deleted_on_the_other_not_recreated() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let state = root.join("state");
+    let config = root.join("config.toml");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(&config, account()).unwrap();
+
+    // NOTE: new on the source only, so the first run creates it on the
+    // target, which is what makes both endpoints known to hold it.
+    create_book(root, SOURCE, LIFECYCLE_BOOK);
+    delete_book(TARGET, LIFECYCLE_BOOK);
+    put(
+        root,
+        SOURCE,
+        LIFECYCLE_BOOK,
+        "card-1",
+        &card("card-1", "+1"),
+    );
+
+    neverest(&["init", "-a", "div"], &config, &state, 0);
+    let report = sync(&config, &state, LIFECYCLE_BOOK, 0);
+    assert!(
+        report.contains(r#""kind":"create""#),
+        "a book new on the source is created on the target; report was:\n{report}",
+    );
+    assert!(book_exists(TARGET, LIFECYCLE_BOOK));
+
+    // Deleted on the target: the delete crosses, the book is not made again.
+    delete_book(TARGET, LIFECYCLE_BOOK);
+    let report = sync(&config, &state, LIFECYCLE_BOOK, 0);
+    assert!(
+        report.contains(r#""kind":"delete""#) && !report.contains(r#""kind":"create""#),
+        "a book both held and one deleted is deleted on the other; report was:\n{report}",
+    );
+    assert!(!book_exists(SOURCE, LIFECYCLE_BOOK));
+    assert!(!book_exists(TARGET, LIFECYCLE_BOOK));
+
+    // Made again later under the same name, it reads as new.
+    create_book(root, SOURCE, LIFECYCLE_BOOK);
+    let report = sync(&config, &state, LIFECYCLE_BOOK, 0);
+    assert!(
+        report.contains(r#""kind":"create""#) && !report.contains(r#""kind":"delete""#),
+        "a book made again after a crossed delete is new; report was:\n{report}",
+    );
+    assert!(book_exists(SOURCE, LIFECYCLE_BOOK));
+    assert!(book_exists(TARGET, LIFECYCLE_BOOK));
+}
+
+#[test]
+#[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
@@ -527,6 +580,29 @@ fn create_book(root: &Path, user: &str, book: &str) {
         "MKCOL {user}/{book} failed: {}",
         String::from_utf8_lossy(&output.stderr),
     );
+}
+
+/// Deletes a principal's address book, whether or not it exists.
+fn delete_book(user: &str, book: &str) {
+    let output = Command::new("curl")
+        .args(["-sS", "-o", "/dev/null", "-X", "DELETE"])
+        .args(["-u", &format!("{user}:{user}")])
+        .arg(format!("{DAV}/{user}/{book}/"))
+        .output()
+        .expect("spawn curl delete book");
+    assert!(output.status.success(), "DELETE of {user}/{book} failed");
+}
+
+/// Whether a principal's address book exists on the server.
+fn book_exists(user: &str, book: &str) -> bool {
+    let output = Command::new("curl")
+        .args(["-sS", "-o", "/dev/null", "-w", "%{http_code}"])
+        .args(["-X", "PROPFIND", "-H", "Depth: 0"])
+        .args(["-u", &format!("{user}:{user}")])
+        .arg(format!("{DAV}/{user}/{book}/"))
+        .output()
+        .expect("spawn curl propfind book");
+    String::from_utf8_lossy(&output.stdout).trim() == "207"
 }
 
 /// Writes a card to one principal's address book.

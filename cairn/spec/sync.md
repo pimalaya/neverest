@@ -720,6 +720,23 @@ Under `one-way` there is no divergence to reconcile: the source is the truth and
 - WHEN the account is synced
 - THEN the divergence is parked and counted, each endpoint still holds its own body, and rerunning changes neither
 
+### Requirement: A collection deleted on one endpoint is deleted on the other
+A collection one endpoint of a pair lists and the other does not SHALL be read three ways, the store being the base: where the store knows both endpoints held it (a binding or a checkpoint of each, pimdir SYNC §5), the other endpoint deleted it, and the delete SHALL cross to the one still holding it, as that endpoint's `collection.delete` allows; otherwise it is new on the endpoint listing it, and SHALL be created on the other, as that endpoint's `collection.create` allows. A delete the remaining endpoint forbids SHALL leave the collection where it is, and SHALL NOT create it again where it was deleted.
+
+Once the delete has crossed, the collection SHALL be dropped from the store with what it holds (pimdir §14), the operator having removed it from the account: a collection made again later under its name then reads as new rather than as deleted on the other side. A dry run reports the hunk and changes nothing.
+
+Without a base, a collection deleted on one endpoint was created again from the other on every run, which no deletion could outlast.
+
+#### Scenario: A deleted address book does not come back
+- GIVEN an address book both endpoints held, deleted on one of them
+- WHEN the account is synced
+- THEN it is deleted on the other, the report naming the delete, and the next run creates nothing
+
+#### Scenario: An address book made again is new
+- GIVEN an address book deleted on both endpoints by a crossed delete, then made again on one
+- WHEN the account is synced
+- THEN it is created on the other
+
 ### Requirement: A divergence with no common ancestor parks rather than resolving itself
 Two endpoints of one account holding one identity under two different bodies, with no body they ever agreed on behind them, SHALL park the divergence and SHALL NOT write either body over the other. A three-way merge SHALL NOT be attempted: with no base it could only ever park, and merging against the target's own body as the base would read the target as having changed nothing and settle on the source's, which is the overwrite parking exists to refuse.
 

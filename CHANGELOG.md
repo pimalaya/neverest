@@ -30,6 +30,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Fixed a collection deleted on one endpoint of a two-endpoint account being created again from the other on the next run: the store tells a collection both endpoints held, now deleted on the other (`collection.delete` permitting), from one new on one side, created on the other as before. After a crossed delete the store drops the collection, so one made again later reads as new.
 - Fixed a Graph series over more than five years failing to read, open-ended ones (the Birthdays and holidays calendars) among them: Graph refuses an instances listing over more than five years. A series is now read in windows of at most five years, an open-ended one within five years either side of today.
 - Fixed a CardDAV or CalDAV item whose `UID` holds a `:` (a `urn:uuid:`) read as two resources and copied again on every run: Stalwart lists `urn:uuid:x.vcf` as `urn%3Auuid%3Ax.vcf`. A member now has one spelling, a `:` encoded as `%3A`, and a new resource is named in it. An item an older version created with a literal `:` is read under the new spelling.
 - Fixed a calendar conflict parking over stamps alone: a side rewriting `DTSTAMP`, `LAST-MODIFIED`, `CREATED` or `SEQUENCE` is no longer a collision, so a Graph meeting edited right after its creation, while Graph restamped it on sending the invitations, merges instead of parking, and a later cancellation no longer recreates it. The merged event keeps the higher `SEQUENCE`.

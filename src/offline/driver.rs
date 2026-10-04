@@ -69,7 +69,10 @@ use crate::sync::report::SubmitEntry;
 use crate::{
     account::{Account, SourceAccount},
     client::{Client, Pool, WrittenItem},
-    config::{AccountConfig, AccountMode, CollectionFilter, SourceConfig, SourcePermissions},
+    config::{
+        AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceConfig,
+        SourcePermissions,
+    },
     item::flag::Flag,
     kind::{Kind, LinkId, merge::Merged},
     offline::{
@@ -677,13 +680,38 @@ fn run_pair(
     let left_filtered = filter_collections(&left_collections, &filter);
     let right_filtered = filter_collections(&right_collections, &filter);
 
-    let collection_hunks = diff_collections(&left_filtered, &right_filtered, &left, &right);
+    let held = held_by_both(
+        &left_store,
+        namespace,
+        left_filtered.symmetric_difference(&right_filtered),
+        &left_name,
+        &right_name,
+    )?;
+    let collection_hunks = diff_collections(
+        &left_filtered,
+        &right_filtered,
+        &held,
+        (&left_name, &left.perms.collection),
+        (&right_name, &right.perms.collection),
+    );
     for hunk in collection_hunks {
         let error = if dry_run {
             None
         } else {
             apply_collection_hunk(&hunk, &mut left, &mut right).err()
         };
+        // NOTE: gone from both endpoints, the collection leaves the store
+        // too, so one created again under its name later reads as new
+        // rather than as deleted on the other side.
+        if !dry_run
+            && error.is_none()
+            && let CollectionHunk::Delete { collection, .. } = &hunk
+        {
+            let id = hub_id(namespace, collection);
+            if let Err(err) = left_store.delete_collection(&id) {
+                warn!("cannot drop {id} from the store: {err}");
+            }
+        }
         report.collection.patch.push(PatchEntry::new(hunk, error));
     }
 
@@ -3103,31 +3131,83 @@ fn filter_collections(
         .collect()
 }
 
-/// Create-only collection diff, gated by each side's create permission.
+/// One endpoint as the collection diff reads it: its name and what it lets
+/// a run do to its collection set.
+type DiffSide<'a> = (&'a str, &'a CollectionPermissions);
+
+/// Three-way collection diff, gated by each side's permissions.
+///
+/// A collection one side lists and the other does not is new on the first,
+/// and created on the other, unless the store knows both held it
+/// (`held_by_both`, the base): then the other deleted it, and the delete
+/// crosses instead. A delete the remaining side forbids leaves it there,
+/// never created again where it was deleted.
 fn diff_collections(
     left: &BTreeSet<String>,
     right: &BTreeSet<String>,
-    left_ctx: &SourceCtx,
-    right_ctx: &SourceCtx,
+    held_by_both: &BTreeSet<String>,
+    (left_name, left_perms): DiffSide<'_>,
+    (right_name, right_perms): DiffSide<'_>,
 ) -> Vec<CollectionHunk> {
     let mut hunks = Vec::new();
-    for collection in left.difference(right) {
-        if right_ctx.perms.collection.create {
-            hunks.push(CollectionHunk::Create {
-                side: right_ctx.name.clone(),
-                collection: collection.clone(),
-            });
-        }
-    }
-    for collection in right.difference(left) {
-        if left_ctx.perms.collection.create {
-            hunks.push(CollectionHunk::Create {
-                side: left_ctx.name.clone(),
-                collection: collection.clone(),
-            });
+    let sides = [
+        (
+            left.difference(right),
+            (left_name, left_perms),
+            right_name,
+            right_perms,
+        ),
+        (
+            right.difference(left),
+            (right_name, right_perms),
+            left_name,
+            left_perms,
+        ),
+    ];
+    for (only, (here, here_perms), there, there_perms) in sides {
+        for collection in only {
+            let hunk = match held_by_both.contains(collection) {
+                true if here_perms.delete => CollectionHunk::Delete {
+                    side: here.to_owned(),
+                    collection: collection.clone(),
+                },
+                true => {
+                    info!("{collection} was deleted on {there}, which {here} does not allow");
+                    continue;
+                }
+                false if there_perms.create => CollectionHunk::Create {
+                    side: there.to_owned(),
+                    collection: collection.clone(),
+                },
+                false => continue,
+            };
+            hunks.push(hunk);
         }
     }
     hunks
+}
+
+/// The listed collections, among `names`, that the store knows both
+/// endpoints held: the base of the three-way collection diff, read from the
+/// sources holding a binding or a checkpoint in each (pimdir SYNC §5).
+fn held_by_both<'a>(
+    store: &PimdirSourceStore,
+    namespace: &str,
+    names: impl IntoIterator<Item = &'a String>,
+    left: &str,
+    right: &str,
+) -> Result<BTreeSet<String>> {
+    let mut held = BTreeSet::new();
+    for name in names {
+        let collection = hub_id(namespace, name);
+        let sources = store
+            .collection_sources(&collection)
+            .with_context(|| format!("List the sources of {collection}"))?;
+        if sources.iter().any(|source| source == left) && sources.iter().any(|s| s == right) {
+            held.insert(name.clone());
+        }
+    }
+    Ok(held)
 }
 
 fn apply_collection_hunk(
@@ -4401,6 +4481,87 @@ mod tests {
         assert_eq!(placements[0].status, PimdirStatus::Clean);
 
         assert_eq!(stored_checkpoint_uid_validity(&store, "INBOX"), Some(2));
+    }
+
+    fn names(names: &[&str]) -> BTreeSet<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// The hunks as `(kind, side, collection)`, the hunk type having no
+    /// equality of its own.
+    fn hunk_list(hunks: &[CollectionHunk]) -> Vec<(&'static str, String, String)> {
+        hunks
+            .iter()
+            .map(|hunk| match hunk {
+                CollectionHunk::Create { side, collection } => {
+                    ("create", side.clone(), collection.clone())
+                }
+                CollectionHunk::Delete { side, collection } => {
+                    ("delete", side.clone(), collection.clone())
+                }
+                CollectionHunk::Scan { .. } => ("scan", String::new(), String::new()),
+            })
+            .collect()
+    }
+
+    const GRANTED: CollectionPermissions = CollectionPermissions {
+        create: true,
+        delete: true,
+    };
+
+    #[test]
+    fn a_collection_new_on_one_side_is_created_on_the_other() {
+        let hunks = diff_collections(
+            &names(&["both", "new-a"]),
+            &names(&["both", "new-b"]),
+            &names(&[]),
+            ("a", &GRANTED),
+            ("b", &GRANTED),
+        );
+
+        assert_eq!(
+            hunk_list(&hunks),
+            vec![
+                ("create", "b".into(), "new-a".into()),
+                ("create", "a".into(), "new-b".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_collection_both_held_and_one_deleted_is_deleted_on_the_other() {
+        let hunks = diff_collections(
+            &names(&["kept", "gone-on-b"]),
+            &names(&["kept", "gone-on-a"]),
+            &names(&["gone-on-a", "gone-on-b"]),
+            ("a", &GRANTED),
+            ("b", &GRANTED),
+        );
+
+        assert_eq!(
+            hunk_list(&hunks),
+            vec![
+                ("delete", "a".into(), "gone-on-b".into()),
+                ("delete", "b".into(), "gone-on-a".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_delete_the_remaining_side_forbids_is_not_undone_by_a_create() {
+        let keep = CollectionPermissions {
+            create: true,
+            delete: false,
+        };
+        let hunks = diff_collections(
+            &names(&["gone-on-b"]),
+            &names(&[]),
+            &names(&["gone-on-b"]),
+            ("a", &keep),
+            ("b", &GRANTED),
+        );
+
+        assert!(hunks.is_empty(), "{hunks:?}");
     }
 
     #[test]

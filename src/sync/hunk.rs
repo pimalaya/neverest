@@ -17,15 +17,14 @@ use crate::item::flag::Flag;
 
 /// Collection-level change: create or delete a collection on one side.
 ///
-/// `Delete` is kept for the report and `--json` shape, though collection
-/// deletion is not propagated yet.
+/// `Delete` crosses a collection deleted on one endpoint of a pair, which
+/// the store knew both held.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(
     tag = "kind",
     rename_all = "kebab-case",
     rename_all_fields = "camelCase"
 )]
-#[allow(dead_code)]
 pub enum CollectionHunk {
     /// Create the collection on `side`.
     Create {

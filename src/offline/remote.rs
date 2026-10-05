@@ -278,7 +278,7 @@ pub(crate) fn resolve_kind(pool: &mut Pool) -> Kind {
     })
 }
 
-/// How many bodies to request per batched fetch.
+/// How many items to request per metadata or body batch.
 ///
 /// Larger cuts round trips but coarsens the retry unit and the command size.
 pub(crate) const BATCH_SIZE: usize = 64;

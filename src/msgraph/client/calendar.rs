@@ -94,7 +94,8 @@ impl GraphClient {
                 if calendar.id.is_empty() {
                     continue;
                 }
-                if default.is_none() && calendar.is_default_calendar == Some(true) {
+                let is_default = default.is_none() && calendar.is_default_calendar == Some(true);
+                if is_default {
                     default = Some(calendar.id.clone());
                 }
                 let name = calendar
@@ -107,6 +108,7 @@ impl GraphClient {
                     name,
                     total: None,
                     unread: None,
+                    role: is_default.then(|| String::from("default")),
                 });
             }
 

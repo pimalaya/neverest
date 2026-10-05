@@ -300,6 +300,7 @@ impl GraphClient {
                 name,
                 total: None,
                 unread: None,
+                role: None,
             })
             .collect())
     }

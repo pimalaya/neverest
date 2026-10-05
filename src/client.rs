@@ -165,8 +165,9 @@ impl Client {
     /// The role each collection states on the server (`inbox`, `sent`,
     /// `drafts`, `trash`, `junk`, `all`, `archive`), by collection id.
     ///
-    /// A check-only probe, never stored: roles stay out of [`Collection`].
-    /// Backends without roles (DAV, Google Calendar and People) answer none.
+    /// What `check` prints; a sync reads [`Collection::role`] and
+    /// [`Client::lookup_roles`] instead. Backends without mail roles (DAV,
+    /// Google Calendar and People) answer none.
     pub fn collection_roles(&mut self) -> Result<BTreeMap<String, String>> {
         match self {
             #[cfg(feature = "imap")]
@@ -215,6 +216,29 @@ impl Client {
                 feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
+            #[allow(unreachable_patterns)]
+            _ => Ok(None),
+        }
+    }
+
+    /// The roles a listing does not carry, which cost requests of their
+    /// own, by collection id: Graph's well-known mail folders (one lookup
+    /// each) and the CalDAV default calendar (two `PROPFIND`s). `None` for
+    /// a backend whose listing states every role it has ([`Collection::role`]).
+    ///
+    /// A sync asks only when the source's collection set moved since it
+    /// last asked, and keeps the answer in the store's sidecar.
+    pub fn lookup_roles(&mut self) -> Result<Option<BTreeMap<String, String>>> {
+        match self {
+            #[cfg(feature = "msgraph")]
+            Client::Msgraph(c) if c.kind() == GraphKind::Mail => c.mailbox_roles().map(Some),
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => Ok(Some(
+                c.default_collection()?
+                    .map(|id| (id, String::from("default")))
+                    .into_iter()
+                    .collect(),
+            )),
             #[allow(unreachable_patterns)]
             _ => Ok(None),
         }
@@ -877,6 +901,7 @@ mod tests {
                 name: id.to_string(),
                 total: None,
                 unread: None,
+                role: None,
             })
             .collect()
     }

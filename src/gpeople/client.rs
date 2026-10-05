@@ -125,6 +125,7 @@ impl GpeopleClient {
             name: String::from("Contacts"),
             total: None,
             unread: None,
+            role: Some(String::from("default")),
         }])
     }
 

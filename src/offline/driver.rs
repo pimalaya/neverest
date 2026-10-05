@@ -74,7 +74,7 @@ use crate::{
         AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceConfig,
         SourcePermissions,
     },
-    item::flag::Flag,
+    item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId, merge::Merged},
     offline::{
         capability, create,
@@ -87,7 +87,7 @@ use crate::{
             resolve_kind, wire_name,
         },
         run_verb, source_id,
-        state::StoreState,
+        state::{LookedUpRoles, StoreState},
         storage::{HydrationSide, hydration_targets, load_side, projection_view},
         submit,
     },
@@ -345,6 +345,10 @@ impl SourceCtx {
 /// An account is one hub and one mode (see [`AccountConfig::mode`]). With no
 /// target a source is reconciled against the store the app reads; with targets,
 /// against each of them. Sources never see each other, their ids differing.
+///
+/// Under `declare_only`, each source lists every collection it holds and the
+/// store records its kind, name and role, the filter aside, and no item
+/// moves: what a client reads to offer the collections it could sync.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     account_name: impl Into<String>,
@@ -356,11 +360,18 @@ pub fn run(
     only_sources: &[String],
     accept_mode: bool,
     download_order: DownloadOrder,
+    declare_only: bool,
 ) -> Result<SyncOutput> {
     let account_name = account_name.into();
     let endpoints = account_config.endpoints()?;
     let mode = account_config.mode()?;
     let running = select_sources(&mode, only_sources)?;
+
+    if declare_only && !mode.is_local() {
+        bail!(
+            "Declaring collections without syncing reads a local store only (an account with no target)"
+        );
+    }
 
     let real_dir = store_dir(&account_name, account_config)?;
     // NOTE: held for the whole run: dropping it removes the replica, so an
@@ -410,6 +421,8 @@ pub fn run(
                 dry_run,
                 connections,
                 download_order,
+                declare_only,
+                &mut state,
                 &mut report,
             )
         } else {
@@ -842,12 +855,19 @@ fn run_local(
     dry_run: bool,
     connections: usize,
     download_order: DownloadOrder,
+    declare_only: bool,
+    state: &mut StoreState,
     report: &mut SyncOutput,
 ) -> Result<()> {
     let source = source_name.to_string();
     let source_filter = source_config.collection().filter.clone();
 
-    let workers = connection_budget(&source_config, connections);
+    // NOTE: a declaration lists and fetches nothing, one connection is enough.
+    let workers = if declare_only {
+        1
+    } else {
+        connection_budget(&source_config, connections)
+    };
     let s = Spinner::start(format!("Opening connections to {source_name}…"));
     // NOTE: with no target the store is the destination: `one-way` discards
     // what was staged locally, leaving it off merges the two.
@@ -875,7 +895,11 @@ fn run_local(
         ctxs.len()
     ));
 
-    drain_queues(&mut stores[0], report);
+    // NOTE: a declaration moves no item, so it leaves the queue alone but
+    // for the collections to create, which it then lists.
+    if !declare_only {
+        drain_queues(&mut stores[0], report);
+    }
 
     let raw = ctxs[0].pool.primary().media_type();
     let kind = Kind::from_media_type(raw)
@@ -885,25 +909,39 @@ fn run_local(
     if !dry_run {
         let (first, _) = ctxs.split_first_mut().expect("at least one connection");
         drain_collection_creates(&mut [&mut *first], &mut stores[0], report);
-        drain_submits(
-            account_config,
-            account,
-            &mut [&mut *first],
-            &mut stores[0],
-            &blobs,
-            report,
-        );
-        drain_invitations(&mut [first], &mut stores[0], report);
+        if !declare_only {
+            drain_submits(
+                account_config,
+                account,
+                &mut [&mut *first],
+                &mut stores[0],
+                &blobs,
+                report,
+            );
+            drain_invitations(&mut [first], &mut stores[0], report);
+        }
     }
 
     let s = Spinner::start(format!("Listing collections on {source_name}…"));
-    let collections = list_collections(ctxs[0].pool.primary())?;
+    let listed = ctxs[0]
+        .pool
+        .primary()
+        .list_collections(false)
+        .context("List collections error")?;
+    let collections: BTreeMap<String, String> = listed
+        .iter()
+        .map(|collection| (collection.id.clone(), collection.name.clone()))
+        .collect();
     s.success(format!(
         "Listed {} collection(s) on {source_name}",
         collections.len()
     ));
 
-    let filter = collection_filter.unwrap_or(source_filter);
+    let filter = if declare_only {
+        CollectionFilter::All
+    } else {
+        collection_filter.unwrap_or(source_filter)
+    };
     let kept = filter_collections(&collections, &filter);
     let filtered: Vec<String> = kept.iter().map(|id| hub_id(source_name, id)).collect();
 
@@ -912,6 +950,21 @@ fn run_local(
             .ensure_collection(collection, media_type)
             .with_context(|| format!("Declare kind for {collection}"))?;
         declare_name(&stores[0], collection, id, &[&collections]);
+    }
+
+    if let Some(roles) = stated_roles(
+        || ctxs[0].pool.primary().lookup_roles(),
+        source_name,
+        &listed,
+        state,
+    ) {
+        for (collection, id) in filtered.iter().zip(&kept) {
+            declare_role(&stores[0], collection, roles.get(id).map(String::as_str));
+        }
+    }
+
+    if declare_only {
+        return Ok(());
     }
 
     let plans = phase1_spine(
@@ -3116,6 +3169,59 @@ fn declare_name(
     }
 }
 
+/// The role each collection of `listed` states, by id: what the listing
+/// carries, plus what [`Client::lookup_roles`] answers for a backend whose
+/// listing does not, asked again only when the source's collection set
+/// moved since it was last asked (kept in the sidecar). `None` when a
+/// lookup failed: the roles recorded stay as they are rather than cleared.
+fn stated_roles(
+    lookup: impl FnOnce() -> Result<Option<BTreeMap<String, String>>>,
+    source: &str,
+    listed: &[Collection],
+    state: &mut StoreState,
+) -> Option<BTreeMap<String, String>> {
+    let mut roles: BTreeMap<String, String> = listed
+        .iter()
+        .filter_map(|c| Some((c.id.clone(), c.role.clone()?)))
+        .collect();
+
+    let mut listing: Vec<String> = listed.iter().map(|c| c.id.clone()).collect();
+    listing.sort();
+
+    let looked_up = match state.looked_up_roles.get(source) {
+        Some(cached) if cached.listing == listing => cached.roles.clone(),
+        _ => match lookup() {
+            Ok(None) => BTreeMap::new(),
+            Ok(Some(found)) => {
+                state.looked_up_roles.insert(
+                    source.to_owned(),
+                    LookedUpRoles {
+                        listing,
+                        roles: found.clone(),
+                    },
+                );
+                found
+            }
+            Err(err) => {
+                warn!("cannot look up the roles {source} states: {err:#}");
+                return None;
+            }
+        },
+    };
+
+    roles.extend(looked_up);
+    Some(roles)
+}
+
+/// Records the role a source states for a collection, or clears one it no
+/// longer states. Only from the source, never from a name; nothing keys on
+/// it, so a failure costs a role and never a sync, and is logged.
+fn declare_role(store: &PimdirSourceStore, collection: &str, role: Option<&str>) {
+    if let Err(err) = store.set_collection_role(collection, role) {
+        warn!("cannot record the role of {collection} as {role:?}: {err}");
+    }
+}
+
 /// The ids the filter keeps, matched on the id: a DAV collection is filtered
 /// by its path segment, which is what a configuration names.
 fn filter_collections(
@@ -4181,6 +4287,63 @@ mod tests {
 
     use super::*;
     use crate::{cli::exit::Exit, offline::source_id};
+
+    fn listed(roles: &[(&str, Option<&str>)]) -> Vec<Collection> {
+        roles
+            .iter()
+            .map(|(id, role)| Collection {
+                id: id.to_string(),
+                name: id.to_string(),
+                total: None,
+                unread: None,
+                role: role.map(String::from),
+            })
+            .collect()
+    }
+
+    /// A listing carrying its roles asks nothing more, and a lookup the
+    /// listing needs is asked once per collection set, reused while the
+    /// set holds, asked again when it moves.
+    #[test]
+    fn roles_a_listing_lacks_are_looked_up_once_per_collection_set() {
+        let mut state = StoreState::default();
+        let carried = listed(&[
+            ("INBOX", Some("inbox")),
+            ("Sent", Some("sent")),
+            ("Work", None),
+        ]);
+        let roles = stated_roles(|| Ok(None), "imap", &carried, &mut state).unwrap();
+        assert_eq!(roles.len(), 2);
+        assert_eq!(roles["Sent"], "sent");
+        assert!(state.looked_up_roles.is_empty(), "nothing to keep");
+
+        let folders = listed(&[("AAA", None), ("BBB", None)]);
+        let found = || Ok(Some(BTreeMap::from([("BBB".into(), "sent".into())])));
+        let roles = stated_roles(found, "graph", &folders, &mut state).unwrap();
+        assert_eq!(roles["BBB"], "sent");
+
+        let roles = stated_roles(
+            || panic!("the same set is not looked up again"),
+            "graph",
+            &folders,
+            &mut state,
+        )
+        .unwrap();
+        assert_eq!(roles["BBB"], "sent", "the kept answer");
+
+        let moved = listed(&[("AAA", None), ("BBB", None), ("CCC", None)]);
+        let found = || Ok(Some(BTreeMap::from([("CCC".into(), "sent".into())])));
+        let roles = stated_roles(found, "graph", &moved, &mut state).unwrap();
+        assert_eq!(roles.get("BBB"), None, "the server moved its role");
+        assert_eq!(roles["CCC"], "sent");
+
+        let failed = || Err(anyhow!("offline"));
+        let more = listed(&[("DDD", None)]);
+        assert!(
+            stated_roles(failed, "graph", &more, &mut state).is_none(),
+            "a failed lookup clears nothing"
+        );
+    }
 
     /// The layout below the platform base is one shape everywhere, so a store
     /// stays addressable by the same relative path whichever platform wrote

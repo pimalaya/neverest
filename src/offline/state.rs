@@ -11,6 +11,7 @@
 //! it is this crate's bookkeeping, not part of the pimdir format.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -75,6 +76,21 @@ pub struct StoreState {
     /// Set once the user accepted the mode, so the refusal stops coming back.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mode_accepted: bool,
+    /// The roles a source's listing does not carry, looked up when its
+    /// collection set last moved ([`crate::client::Client::lookup_roles`]),
+    /// by source.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub looked_up_roles: BTreeMap<String, LookedUpRoles>,
+}
+
+/// One source's looked-up roles, with the collection set they were
+/// looked up against: the same set reuses them, another asks again.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LookedUpRoles {
+    /// The ids the source listed, sorted.
+    pub listing: Vec<String>,
+    /// The role each collection states, by id.
+    pub roles: BTreeMap<String, String>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -133,6 +149,7 @@ impl StoreState {
             layout: LAYOUT,
             mode: mode.map(ModeStamp::from),
             mode_accepted: false,
+            looked_up_roles: BTreeMap::new(),
         }
         .save(dir)
     }

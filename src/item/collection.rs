@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// Strict least-common-denominator: protocol-specific data (IMAP
 /// delimiter and SPECIAL-USE attributes, JMAP rights, DAV privileges, …)
-/// is intentionally absent.
+/// is intentionally absent; only the role it states, in a
+/// protocol-neutral vocabulary, is kept.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Collection {
@@ -25,4 +26,11 @@ pub struct Collection {
     /// notion of unread (every kind but mail).
     #[serde(default)]
     pub unread: Option<u64>,
+    /// What the server states the collection is for, in pimdir's vocabulary
+    /// (STORAGE §14): a mail role (`inbox`, `sent`, `drafts`, `trash`,
+    /// `junk`, `archive`, `all`, `flagged`, `important`), or `default` for
+    /// the calendar or address book a new item goes to. Filled where the
+    /// listing states it; `None` otherwise, never guessed from a name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }

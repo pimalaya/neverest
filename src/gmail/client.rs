@@ -196,11 +196,13 @@ impl GmailClient {
                 (None, None)
             };
 
+            let role = system_role(&label.id).map(String::from);
             collections.push(Collection {
                 id: label.name.clone(),
                 name: label.name,
                 total,
                 unread,
+                role,
             });
         }
 

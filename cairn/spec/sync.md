@@ -933,7 +933,7 @@ A send channel holds its own server and often its own credential. Checking the s
 - THEN it fails naming the SMTP channel of that source
 
 ### Requirement: A check lists collections with their roles
-`neverest check` SHALL list, for each endpoint, every collection it answered with: its id, its name and, when the server states one, its role among `inbox`, `sent`, `drafts`, `trash`, `junk`, `all` and `archive`. A role SHALL come from the server alone, never from a collection's name: on IMAP the SPECIAL-USE attributes of the `LIST` rows (RFC 6154) and `INBOX` (RFC 3501 §5.1); on Graph mail the well-known folders, one lookup per role, a well-known folder the mailbox does not have being skipped; on the Gmail API the system labels. Other backends state no role. The check SHALL write nothing to the store, and roles SHALL stay out of the shared collection shape.
+`neverest check` SHALL list, for each endpoint, every collection it answered with: its id, its name and, when the server states one, its role among `inbox`, `sent`, `drafts`, `trash`, `junk`, `all`, `archive`, `flagged` and `important`. A role SHALL come from the server alone, never from a collection's name: on IMAP the SPECIAL-USE attributes of the `LIST` rows (RFC 6154) and `INBOX` (RFC 3501 §5.1); on Graph mail the well-known folders, one lookup per role, a well-known folder the mailbox does not have being skipped; on the Gmail API the system labels. Other backends state no role. The check SHALL write nothing to the store. It is a doctor: what it prints is for a person, and a program reads roles from the store a sync fills.
 
 Display names are localised (`[Gmail]/Bin`, "Éléments envoyés") and an IMAP server need not name its folders after their use: only the server's statement lets a caller propose the right folder for each use. On Graph, the Drafts folder is the one place a message can be created, so a caller has to know which listed folder it is.
 
@@ -1126,3 +1126,19 @@ Graph creates every MIME message as a draft, so an append SHALL land in the well
 - **GIVEN** a message added to Drafts with `\Draft` and `\Seen`
 - **WHEN** the account syncs
 - **THEN** Graph holds it once in Drafts, read, the item bound to its id, and the same add into another folder is a rejected push that files nothing
+
+### Requirement: A sync records the role each server states
+Every one-source sync SHALL record in the store (`set_collection_role`, pimdir STORAGE §14), for each collection it declares, the role the server states for it, and SHALL clear a role the server no longer states: the mail roles `check` lists, from the listing on IMAP and the Gmail API and from the well-known folders on Graph mail; `default` for the calendar or address book `check` marks so. A role the listing does not carry (Graph mail, CalDAV) SHALL be looked up only when the source's set of collection ids differs from the one it was last looked up against, the answer kept in the sidecar (`looked_up_roles`), and a failed lookup SHALL leave the recorded roles as they are. A role SHALL never come from a name.
+
+#### Scenario: A server moves its Sent folder
+- **GIVEN** a store where `imap/Sent` holds `sent`
+- **WHEN** the server marks `Sent Items` `\Sent` and the next sync runs
+- **THEN** `imap/Sent Items` holds `sent` and `imap/Sent` none
+
+### Requirement: A declaration syncs no item
+`neverest sync --declare-only` SHALL list every collection each source holds, whatever the collection filter, and record its kind, name and role, perform the queued `collection-create` intents first, and move no item: no queue drain, no send, no other intent, no enumeration and no fetch. It SHALL refuse an account with targets.
+
+#### Scenario: A frontend adding an account
+- **GIVEN** an account whose filter keeps `INBOX` alone
+- **WHEN** it runs `sync --declare-only`
+- **THEN** the store holds every folder with its role and no item, and a later sync keeps syncing `INBOX` alone

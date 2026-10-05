@@ -439,6 +439,8 @@ fn role_of(row: &ListRow) -> Option<&'static str> {
             "\\junk" => Some("junk"),
             "\\all" => Some("all"),
             "\\archive" => Some("archive"),
+            "\\flagged" => Some("flagged"),
+            "\\important" => Some("important"),
             _ => None,
         },
     )
@@ -446,6 +448,7 @@ fn role_of(row: &ListRow) -> Option<&'static str> {
 
 /// Converts one IMAP LIST row into the shared [`Collection`] shape.
 fn mailbox_from(row: ListRow) -> Collection {
+    let role = role_of(&row).map(String::from);
     let name = match row.0 {
         ImapMailbox::Inbox => "INBOX".to_string(),
         ImapMailbox::Other(other) => String::from_utf8_lossy(other.inner().as_ref()).into_owned(),
@@ -456,6 +459,7 @@ fn mailbox_from(row: ListRow) -> Collection {
         name,
         total: None,
         unread: None,
+        role,
     }
 }
 
@@ -796,6 +800,11 @@ mod tests {
         assert_eq!(role_of(&row("Spam", &["Junk"])), Some("junk"));
         assert_eq!(role_of(&row("Archives", &["Archive"])), Some("archive"));
         assert_eq!(role_of(&row("Sent", &[])), None);
-        assert_eq!(role_of(&row("Important", &["Important"])), None);
+        assert_eq!(
+            role_of(&row("Important", &["Important"])),
+            Some("important")
+        );
+        assert_eq!(role_of(&row("Starred", &["Flagged"])), Some("flagged"));
+        assert_eq!(role_of(&row("Lists", &["Subscribed"])), None);
     }
 }

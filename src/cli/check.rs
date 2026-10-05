@@ -22,6 +22,11 @@ use crate::{account::Account, client, config::Config, offline::capability};
 /// collections, and opens and authenticates the SMTP channel a source
 /// declares, surfacing credential, network or config errors before a real
 /// sync or a first send.
+///
+/// A doctor, not a data source: the collections, roles and capabilities it
+/// prints are diagnostics for a person. A program reads whether each
+/// endpoint answered; what an account holds it reads from the store, which
+/// `sync --declare-only` fills without fetching an item.
 #[derive(Debug, Parser)]
 pub struct CheckCommand {}
 

@@ -110,6 +110,13 @@ pub struct SyncCommand {
     /// or `newest` first, so recent mail is readable early on a large account.
     #[arg(long, value_enum, value_name = "ORDER", default_value_t)]
     pub download_order: DownloadOrder,
+    /// List every collection the sources hold and record its kind, name
+    /// and role in the store, whatever the collection filter, syncing no
+    /// item. What a client reads to offer the collections it could sync,
+    /// and to learn which one is the inbox or the default calendar. Only
+    /// the queued collection creations run; sends and intents wait.
+    #[arg(long, conflicts_with = "reset")]
+    pub declare_only: bool,
 }
 
 impl SyncCommand {
@@ -167,6 +174,7 @@ impl SyncCommand {
             &self.source,
             self.accept_mode,
             self.download_order,
+            self.declare_only,
         )?;
 
         // NOTE: read before printing, which consumes the report.

@@ -164,7 +164,8 @@ impl GcalClient {
                 let Some(id) = entry.id.filter(|id| !id.is_empty()) else {
                     continue;
                 };
-                if primary.is_none() && entry.primary == Some(true) {
+                let is_primary = primary.is_none() && entry.primary == Some(true);
+                if is_primary {
                     primary = Some(id.clone());
                 }
                 let name = entry
@@ -176,6 +177,7 @@ impl GcalClient {
                     name,
                     total: None,
                     unread: None,
+                    role: is_primary.then(|| String::from("default")),
                 });
             }
 

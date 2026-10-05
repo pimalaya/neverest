@@ -226,6 +226,7 @@ impl DavClient {
                 id,
                 total: None,
                 unread: None,
+                role: None,
             })
             .collect())
     }

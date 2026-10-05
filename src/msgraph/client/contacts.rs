@@ -60,6 +60,7 @@ impl GraphClient {
             name: String::from("Contacts"),
             total: None,
             unread: None,
+            role: Some(String::from("default")),
         }];
 
         let top = self
@@ -299,6 +300,7 @@ fn push_folder(collections: &mut Vec<Collection>, folder: &MsgraphContactFolder)
         name: folder.display_name.clone(),
         total: None,
         unread: None,
+        role: None,
     });
 }
 

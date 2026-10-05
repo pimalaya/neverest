@@ -377,14 +377,24 @@ fn ensure_contacts(collection: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether a listing failed on an expired sync token (HTTP 410).
+/// Whether a listing failed on an expired sync token: HTTP 410, or the 400
+/// People answers as often, naming the expired token
+/// (`FAILED_PRECONDITION`, `EXPIRED_SYNC_TOKEN`).
 fn is_expired(err: &anyhow::Error) -> bool {
-    err.chain().any(|cause| {
-        matches!(
-            cause.downcast_ref::<GpeopleClientStdError>(),
-            Some(GpeopleClientStdError::Send(send)) if send.status() == Some(410)
-        )
-    })
+    err.chain().any(
+        |cause| match cause.downcast_ref::<GpeopleClientStdError>() {
+            Some(GpeopleClientStdError::Send(send)) => {
+                send.status() == Some(410)
+                    || (send.status() == Some(400) && names_expired_token(&cause.to_string()))
+            }
+            _ => false,
+        },
+    )
+}
+
+/// Whether an error text names an expired sync token.
+fn names_expired_token(text: &str) -> bool {
+    text.contains("EXPIRED_SYNC_TOKEN") || text.contains("Sync token is expired")
 }
 
 /// Reads a whole vCard body as UTF-8 text.
@@ -399,6 +409,21 @@ fn read_vcard(mut source: impl Read) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// People answers an expired sync token with a 400 as often as a 410
+    /// (seen on CI, 2026-10-05), which restarts a full listing too.
+    #[test]
+    fn an_expired_sync_token_is_named_in_a_400() {
+        assert!(names_expired_token(
+            "People API returned HTTP 400: Sync token is expired. Clear local cache and retry call without the sync token."
+        ));
+        assert!(names_expired_token(
+            "400 FAILED_PRECONDITION EXPIRED_SYNC_TOKEN"
+        ));
+        assert!(!names_expired_token(
+            "People API returned HTTP 400: Invalid personFields mask"
+        ));
+    }
 
     #[test]
     fn people_has_one_address_book() {

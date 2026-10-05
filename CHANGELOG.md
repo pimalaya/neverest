@@ -23,6 +23,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- Changed Microsoft Graph mail body fetches to JSON batches: twenty raw MIME gets per request instead of one, the first sync of a large Microsoft 365 box no longer paying a round trip per message. A request Graph throttles (429, common 5xx) is sent again after its `Retry-After`; any other refusal still falls back to a single get.
+
 - Changed `check` to be documented as a doctor: what it prints about collections, roles and capabilities is for a person, and a program reads the store instead (`sync --declare-only`). IMAP `\Flagged` and `\Important` now state the `flagged` and `important` roles.
 - Changed `check` to mark the default calendar and address book with `default: true` (Google Calendar `primary`, the Google People address book, Graph `isDefaultCalendar` and the default Contacts folder, CalDAV `schedule-default-calendar-URL` per RFC 6638 when the server gives it; none on CardDAV and mail), and to list each source's `capabilities: [{ name, support, detail? }]`, the source-wide rows a sync declares in the store.
 - Changed the UID of a Microsoft Graph event that came in by mail: Exchange files it under its global object id, which wraps the organizer's UID; the event is now stored under that UID (io-msgraph `ical::original_uid`). Stored UIDs of such events change at the next sync.

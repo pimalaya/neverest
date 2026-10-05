@@ -35,9 +35,14 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
+};
 use chrono::{DateTime, FixedOffset};
 use io_msgraph::v1::{
     client::{MsgraphClientStd, MsgraphClientStdConnectOptions, MsgraphClientStdError},
+    rest::batch::{MSGRAPH_BATCH_MAX_REQUESTS, MsgraphBatchRequest, MsgraphBatchResponses},
     rest::users::{
         mail_folders::{
             MsgraphMailFolder,
@@ -48,7 +53,7 @@ use io_msgraph::v1::{
             delta::{MsgraphMessageDelta, MsgraphMessagesDeltaResponse},
         },
     },
-    send::{MSGRAPH_API_BASE, MsgraphSend, MsgraphSendOutput},
+    send::{MSGRAPH_API_BASE, MsgraphSend, MsgraphSendOutput, user_path},
 };
 use log::{debug, trace, warn};
 use pimalaya_stream::{
@@ -542,8 +547,15 @@ impl GraphClient {
         Ok(envelopes)
     }
 
-    /// Streams the bodies of a message-id set: one raw MIME get per message,
-    /// Graph having no batched body fetch.
+    /// Streams the bodies of a message-id set through JSON batches: up to
+    /// [`MSGRAPH_BATCH_MAX_REQUESTS`] raw MIME gets per HTTP call, each body
+    /// answered base64-encoded, committed in request order.
+    ///
+    /// A request Graph throttles (429, or a common 5xx) is sent again in the
+    /// next batch after the longest `Retry-After` it stated, at most
+    /// [`BATCH_RETRY_ROUNDS`] times. A body still missing after that, or
+    /// refused for another reason, is left out: the caller fetches every
+    /// handle a batch did not answer one by one, which surfaces its error.
     fn fetch_messages<S: Write>(
         &mut self,
         _mailbox: &str,
@@ -551,13 +563,54 @@ impl GraphClient {
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
     ) -> Result<()> {
-        for id in ids {
-            let raw = self.message_raw(id)?;
-            let mut sink = open(id).with_context(|| format!("Open body sink for {id} error"))?;
-            sink.write_all(&raw)
-                .with_context(|| format!("Store body {id} error"))?;
-            done(id, None, sink).with_context(|| format!("Commit body {id} error"))?;
+        let user = user_path(&self.inner.user_id);
+
+        for chunk in ids.chunks(MSGRAPH_BATCH_MAX_REQUESTS) {
+            let mut bodies: HashMap<&str, Vec<u8>> = HashMap::with_capacity(chunk.len());
+            let mut pending: Vec<&str> = chunk.to_vec();
+
+            for round in 0..=BATCH_RETRY_ROUNDS {
+                if pending.is_empty() {
+                    break;
+                }
+
+                let requests = raw_requests(&user, &pending);
+                let answered = match self.op(|client| client.batch(&requests)) {
+                    Ok(responses) => read_raw_responses(&pending, responses),
+                    Err(err) if is_throttled(&err) => BatchAnswer::retry_all(&pending),
+                    Err(err) => return Err(err).context("Send raw message batch error"),
+                };
+
+                bodies.extend(answered.bodies);
+                pending = answered.retry;
+
+                if !pending.is_empty() && round < BATCH_RETRY_ROUNDS {
+                    let wait = answered
+                        .retry_after
+                        .unwrap_or_else(|| Duration::from_secs(1 << round))
+                        .min(BATCH_RETRY_MAX_WAIT);
+                    warn!(
+                        "graph throttled {} of {} body requests, retrying in {}s",
+                        pending.len(),
+                        chunk.len(),
+                        wait.as_secs()
+                    );
+                    std::thread::sleep(wait);
+                }
+            }
+
+            for id in chunk {
+                let Some(raw) = bodies.remove(id) else {
+                    continue;
+                };
+                let mut sink =
+                    open(id).with_context(|| format!("Open body sink for {id} error"))?;
+                sink.write_all(&raw)
+                    .with_context(|| format!("Store body {id} error"))?;
+                done(id, None, sink).with_context(|| format!("Commit body {id} error"))?;
+            }
         }
+
         Ok(())
     }
 
@@ -717,6 +770,115 @@ impl GraphClient {
         self.op(|client| client.mail_send_mime(raw))?;
         Ok(())
     }
+}
+
+/// How many times a throttled body request is sent again in a later batch.
+const BATCH_RETRY_ROUNDS: u32 = 4;
+
+/// The longest wait between two batch rounds, whatever `Retry-After` says.
+const BATCH_RETRY_MAX_WAIT: Duration = Duration::from_secs(120);
+
+/// The raw MIME gets of a batch, each request id being the index of its
+/// message id in `ids`.
+fn raw_requests(user: &str, ids: &[&str]) -> Vec<MsgraphBatchRequest> {
+    ids.iter()
+        .enumerate()
+        .map(|(index, id)| MsgraphBatchRequest {
+            id: index.to_string(),
+            method: String::from("GET"),
+            url: format!("/{user}/messages/{id}/$value"),
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// What a batch of raw gets answered.
+#[derive(Debug, Default, PartialEq)]
+struct BatchAnswer<'a> {
+    /// The decoded bodies, by message id.
+    bodies: HashMap<&'a str, Vec<u8>>,
+    /// The message ids Graph throttled, to send again, in request order.
+    retry: Vec<&'a str>,
+    /// The longest `Retry-After` the throttled responses stated.
+    retry_after: Option<Duration>,
+}
+
+impl<'a> BatchAnswer<'a> {
+    /// A batch throttled as a whole: every request to send again.
+    fn retry_all(ids: &[&'a str]) -> Self {
+        Self {
+            retry: ids.to_vec(),
+            ..Default::default()
+        }
+    }
+}
+
+/// Reads the responses of a batch of raw gets sent for `ids`, matched by
+/// request id (Graph answers in any order). A 2xx body is the raw MIME,
+/// base64-encoded because it is not JSON; a throttled request is kept to
+/// retry; any other answer, or a body that does not decode, is left out.
+fn read_raw_responses<'a>(ids: &[&'a str], responses: MsgraphBatchResponses) -> BatchAnswer<'a> {
+    let mut answer = BatchAnswer::default();
+    let mut retry = Vec::new();
+
+    for response in responses.responses {
+        let Some(index) = response.id.parse::<usize>().ok().filter(|i| *i < ids.len()) else {
+            warn!(
+                "graph batch answered an unknown request id {:?}",
+                response.id
+            );
+            continue;
+        };
+        let id = ids[index];
+
+        if matches!(response.status, 429 | 500 | 502 | 503 | 504) {
+            let after = response
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
+                .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+                .map(Duration::from_secs);
+            answer.retry_after = answer.retry_after.max(after);
+            retry.push(index);
+            continue;
+        }
+
+        if !(200..300).contains(&response.status) {
+            debug!("graph batch get of {id} answered {}", response.status);
+            continue;
+        }
+
+        let decoded = match &response.body {
+            Some(serde_json::Value::String(encoded)) => decode_batch_body(encoded),
+            _ => None,
+        };
+        match decoded {
+            Some(raw) => {
+                answer.bodies.insert(id, raw);
+            }
+            None => warn!("graph batch body of {id} is not base64 text"),
+        }
+    }
+
+    retry.sort_unstable();
+    retry.dedup();
+    answer.retry = retry.into_iter().map(|index| ids[index]).collect();
+    answer
+}
+
+/// Decodes a non-JSON batch body: base64 in the standard alphabet, as Graph
+/// answers it, or the URL-safe one its batching docs name for bodies.
+fn decode_batch_body(encoded: &str) -> Option<Vec<u8>> {
+    STANDARD
+        .decode(encoded)
+        .or_else(|_| URL_SAFE.decode(encoded))
+        .or_else(|_| URL_SAFE_NO_PAD.decode(encoded))
+        .ok()
+}
+
+/// Whether a client error is Graph throttling the whole batch call.
+fn is_throttled(err: &MsgraphClientStdError) -> bool {
+    matches!(err, MsgraphClientStdError::Send(send) if send.is_retryable())
 }
 
 /// Whether a client error is an expired delta link (HTTP 410), the signal to
@@ -1037,5 +1199,107 @@ mod tests {
             "lookup is case-insensitive"
         );
         assert_eq!(lookup_folder(&map, "Missing"), None);
+    }
+
+    #[test]
+    fn a_batch_of_raw_gets_names_each_message_by_its_index() {
+        let requests = raw_requests("users/u@example.test", &["AAMk-a=", "AAMk-b="]);
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].id, "0");
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].url,
+            "/users/u@example.test/messages/AAMk-a=/$value"
+        );
+        assert_eq!(requests[1].id, "1");
+        assert_eq!(
+            requests[1].url,
+            "/users/u@example.test/messages/AAMk-b=/$value"
+        );
+    }
+
+    #[test]
+    fn batch_bodies_decode_out_of_order_and_throttled_ones_are_retried() {
+        let ids = ["m0", "m1", "m2", "m3", "m4"];
+        let raw0 = b"Subject: zero\r\n\r\nbody".to_vec();
+        let raw2 = b"Subject: two\r\n\r\n\xff\xfe".to_vec();
+        let responses: MsgraphBatchResponses = serde_json::from_value(serde_json::json!({
+            "responses": [
+                {
+                    "id": "2",
+                    "status": 200,
+                    "headers": { "Content-Type": "text/plain" },
+                    "body": URL_SAFE.encode(&raw2),
+                },
+                {
+                    "id": "4",
+                    "status": 429,
+                    "headers": { "Retry-After": "7" },
+                    "body": { "error": { "code": "TooManyRequests" } },
+                },
+                {
+                    "id": "0",
+                    "status": 200,
+                    "headers": { "Content-Type": "text/plain" },
+                    "body": STANDARD.encode(&raw0),
+                },
+                {
+                    "id": "3",
+                    "status": 503,
+                    "headers": { "retry-after": "3" },
+                },
+                {
+                    "id": "1",
+                    "status": 404,
+                    "body": { "error": { "code": "ErrorItemNotFound" } },
+                },
+                { "id": "9", "status": 200, "body": "AAAA" },
+            ]
+        }))
+        .unwrap();
+
+        let answer = read_raw_responses(&ids, responses);
+
+        assert_eq!(answer.bodies.len(), 2, "a refused get is left out");
+        assert_eq!(answer.bodies["m0"], raw0);
+        assert_eq!(answer.bodies["m2"], raw2);
+        assert_eq!(answer.retry, ["m3", "m4"], "in request order");
+        assert_eq!(answer.retry_after, Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn a_batch_body_that_is_not_base64_text_is_left_out() {
+        let ids = ["m0", "m1"];
+        let responses: MsgraphBatchResponses = serde_json::from_value(serde_json::json!({
+            "responses": [
+                { "id": "0", "status": 200, "body": { "subject": "json" } },
+                { "id": "1", "status": 200, "body": "not base64!" },
+            ]
+        }))
+        .unwrap();
+
+        let answer = read_raw_responses(&ids, responses);
+
+        assert!(answer.bodies.is_empty());
+        assert!(answer.retry.is_empty());
+    }
+
+    #[test]
+    fn a_batch_throttled_as_a_whole_is_sent_again() {
+        let throttled = MsgraphClientStdError::Send(MsgraphSendError::Api {
+            status: 429,
+            code: String::from("TooManyRequests"),
+            message: String::new(),
+        });
+        let refused = MsgraphClientStdError::Send(MsgraphSendError::Api {
+            status: 403,
+            code: String::from("ErrorAccessDenied"),
+            message: String::new(),
+        });
+
+        assert!(is_throttled(&throttled));
+        assert!(!is_throttled(&refused));
+        assert_eq!(BatchAnswer::retry_all(&["m0", "m1"]).retry, ["m0", "m1"]);
     }
 }

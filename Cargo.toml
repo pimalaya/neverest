@@ -48,12 +48,12 @@ crossbeam-queue = "0.3"
 crossterm = { version = "0.29", default-features = false, features = ["serde"] }
 dirs = "7"
 ical-rs = { version = "0.5.3", optional = true }
-io-gcal = { version = "0.1.3", default-features = false, optional = true }
+io-gcal = { git = "https://github.com/pimalaya/io-gcal", rev = "1268ef625d70fbebfc0bf6d876aa2330ad469461", default-features = false, optional = true }
 io-gmail = { version = "0.4", default-features = false, optional = true }
 io-gpeople = { version = "0.4.2", default-features = false, optional = true }
 io-http = { version = "0.5", default-features = false, optional = true }
 io-imap = { version = "0.7", default-features = false, optional = true }
-io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "240af150cd43acf79bbad68dc42c9a56177ea8d1", default-features = false, optional = true }
+io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "d6cb9582e9175fea8ee5b858b4ca9a49991a4a71", default-features = false, optional = true }
 io-pim-discovery = { version = "0.8", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "stream"], optional = true }
 io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "ef8eae06a2088d9cf805cbfbc62287abd4d6f1ea", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }

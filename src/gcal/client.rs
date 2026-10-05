@@ -68,6 +68,22 @@ use crate::{
 /// The page size requested from the events listing.
 const PAGE_SIZE: u32 = 2500;
 
+/// The conference data version every event write declares: `1` honours a
+/// create request and keeps the conference the merged payload carries.
+const CONFERENCE_DATA_VERSION: Option<u8> = Some(1);
+
+/// Whether the written event asks for a new Google Meet
+/// (`X-PIMDIR-ONLINE-MEETING`, pimdir STORAGE Annex B.1).
+///
+/// Its write then reports no revision: the next sync reads the event back,
+/// the meeting's `CONFERENCE` in and the request property out.
+fn asks_meeting(event: &GcalEvent) -> bool {
+    event
+        .conference_data
+        .as_ref()
+        .is_some_and(|conference| conference.create_request.is_some())
+}
+
 /// The live Google Calendar session of one side.
 pub struct GcalClient {
     inner: GcalClientStd,
@@ -376,6 +392,7 @@ impl GcalClient {
     pub fn add_item_stream(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
         let ical = read_ical(source)?;
         let mut event = GcalEvent::from_ical(&ical)?;
+        let meeting = asks_meeting(&event);
 
         let has_uid = event.ical_uid.as_deref().is_some_and(|uid| !uid.is_empty());
         let invites = has_uid && calendar::scheduled(&ical) && self.organises(calendar, &event)?;
@@ -385,15 +402,24 @@ impl GcalClient {
             event.organizer = None;
             let params = GcalEventInsertParams {
                 send_updates: Some(GcalSendUpdates::All),
+                conference_data_version: CONFERENCE_DATA_VERSION,
                 ..Default::default()
             };
             self.op(|gcal| gcal.event_insert(calendar, &event, &params))
                 .with_context(|| format!("Insert scheduled event into {calendar} error"))?
         } else if has_uid {
-            self.op(|gcal| gcal.event_import(calendar, &event, &GcalEventImportParams::default()))
+            let params = GcalEventImportParams {
+                conference_data_version: CONFERENCE_DATA_VERSION,
+                ..Default::default()
+            };
+            self.op(|gcal| gcal.event_import(calendar, &event, &params))
                 .with_context(|| format!("Import event into {calendar} error"))?
         } else {
-            self.op(|gcal| gcal.event_insert(calendar, &event, &GcalEventInsertParams::default()))
+            let params = GcalEventInsertParams {
+                conference_data_version: CONFERENCE_DATA_VERSION,
+                ..Default::default()
+            };
+            self.op(|gcal| gcal.event_insert(calendar, &event, &params))
                 .with_context(|| format!("Insert event into {calendar} error"))?
         };
 
@@ -404,7 +430,7 @@ impl GcalClient {
 
         Ok(WrittenItem {
             id,
-            revision: Some(revision),
+            revision: (!meeting).then_some(revision),
         })
     }
 
@@ -448,6 +474,7 @@ impl GcalClient {
     ) -> Result<Option<String>> {
         let ical = read_ical(source)?;
         let projected = GcalEvent::from_ical(&ical)?;
+        let meeting = asks_meeting(&projected);
 
         let mut events = self.series(calendar, id)?;
         check_revision(id, &events, if_match)?;
@@ -468,12 +495,17 @@ impl GcalClient {
                     &event,
                     &GcalEventUpdateParams {
                         send_updates: Some(send_updates),
+                        conference_data_version: CONFERENCE_DATA_VERSION,
                         ..Default::default()
                     },
                     current.etag.as_deref(),
                 )
             })
             .with_context(|| format!("Update event {id} of {calendar} error"))?;
+
+        if meeting {
+            return Ok(None);
+        }
 
         events.insert(0, updated);
         Ok(Some(revision(&events)))

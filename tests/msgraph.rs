@@ -487,7 +487,7 @@ fn a_graph_teams_meeting_carries_its_join_link() {
             assert_eq!(items.len(), 1, "{items:?}");
             let body = a.body(&items[0]).replace("\r\n ", "");
             assert!(
-                body.contains(&format!("X-MICROSOFT-SKYPETEAMSMEETINGURL:{url}")),
+                body.contains(&format!("CONFERENCE;VALUE=URI;FEATURE=AUDIO,VIDEO:{url}")),
                 "{body}"
             );
         },
@@ -495,6 +495,70 @@ fn a_graph_teams_meeting_carries_its_join_link() {
             if let Err(err) = connect(&token).calendar_delete(&calendar) {
                 eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
             }
+        },
+    );
+}
+
+/// An event added through the store with `X-PIMDIR-ONLINE-MEETING:TRUE` is
+/// created as an online meeting, and the store reads it back without the
+/// request property (pimdir STORAGE Annex B.1).
+///
+/// A tenant without Teams gives the meeting no link: the CONFERENCE check
+/// is then skipped (the Pimalaya test tenant, 2026-10-04).
+#[test]
+#[ignore = "live: needs the app registration's client secret"]
+fn a_graph_online_meeting_is_created_with_its_event() {
+    let token = msgraph_token();
+    let uid = tag();
+    let calendar = connect(&token)
+        .calendar_create(&MsgraphCalendar {
+            name: MsgraphField::Set(tag()),
+            ..Default::default()
+        })
+        .expect("create the calendar")
+        .response
+        .id;
+
+    with_cleanup(
+        || {
+            let extra = user_line("msgraph-calendar");
+            let a = Replica::open("msgraph-calendar", &extra, &token);
+            a.sync(&calendar);
+
+            let user = msgraph_user();
+            let event = meeting(&uid, "online", &user, &user)
+                .replace("END:VEVENT", "X-PIMDIR-ONLINE-MEETING:TRUE\r\nEND:VEVENT");
+            a.add(&calendar, &event, &[]);
+            a.sync_until(&calendar, "the event is read back", |a| {
+                a.item(&calendar, &uid)
+                    .is_some_and(|item| !a.body(&item).contains("X-PIMDIR-ONLINE-MEETING"))
+            });
+
+            let path = format!("calendars/{calendar}/events?$select=isOnlineMeeting,onlineMeeting");
+            let created = graph(&token, "GET", &path, None)["value"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert_eq!(created.len(), 1, "{created:?}");
+            assert_eq!(created[0]["isOnlineMeeting"], true, "{created:?}");
+
+            let Some(url) = created[0]["onlineMeeting"]["joinUrl"].as_str() else {
+                eprintln!("SKIPPED: Graph gave the meeting no join link, the tenant lacks Teams");
+                return;
+            };
+            let body = a
+                .body(&a.item(&calendar, &uid).unwrap())
+                .replace("\r\n ", "");
+            assert!(
+                body.contains(&format!("CONFERENCE;VALUE=URI;FEATURE=AUDIO,VIDEO:{url}")),
+                "{body}"
+            );
+        },
+        || {
+            if let Err(err) = connect(&token).calendar_delete(&calendar) {
+                eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
+            }
+            delete_messages_about(&token, &uid);
         },
     );
 }

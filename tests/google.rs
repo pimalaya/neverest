@@ -394,6 +394,59 @@ fn a_google_meeting_is_invited_to_and_cancelled() {
     });
 }
 
+/// An event added through the store with `X-PIMDIR-ONLINE-MEETING:TRUE`
+/// gets a Google Meet: the store reads it back as a `CONFERENCE`, the
+/// request property gone (pimdir STORAGE Annex B.1).
+#[test]
+#[ignore = "live: needs a Google service account key"]
+#[cfg(feature = "gcal")]
+fn a_google_meet_is_created_with_its_event() {
+    use io_gcal::v3::rest::events::list::GcalEventsListParams;
+
+    let token = google_token(CALENDAR_SCOPE);
+    let uid = tag();
+    let subject = google_subject();
+
+    with_google_calendar(&token, &uid, |calendar| {
+        let a = Replica::open("gcal", "", &token);
+        a.sync(calendar);
+
+        let event = meeting(&uid, "meet", &subject, &subject)
+            .replace("END:VEVENT", "X-PIMDIR-ONLINE-MEETING:TRUE\r\nEND:VEVENT");
+        a.add(calendar, &event, &[]);
+        a.sync(calendar);
+
+        let mut client = GcalClientStd::connect(&token, GcalClientStdConnectOptions::default())
+            .expect("connect to Calendar");
+        let params = GcalEventsListParams {
+            ical_uid: Some(&uid),
+            ..Default::default()
+        };
+        let created = client
+            .events_list(calendar, &params)
+            .expect("list the meeting")
+            .response
+            .items;
+        assert_eq!(created.len(), 1, "one event holds the UID");
+        let conference = created[0]
+            .conference_data
+            .as_ref()
+            .expect("Google attached a conference");
+        assert!(
+            conference.create_request.is_some() || !conference.entry_points.is_empty(),
+            "{conference:?}"
+        );
+
+        a.sync_until(calendar, "the Meet link reaches the store", |a| {
+            a.item(calendar, &uid)
+                .map(|item| a.body(&item).replace("\r\n ", ""))
+                .is_some_and(|body| body.contains("CONFERENCE;VALUE=URI;FEATURE=AUDIO,VIDEO"))
+        });
+        let body = a.body(&a.item(calendar, &uid).unwrap());
+        assert!(!body.contains("X-PIMDIR-ONLINE-MEETING"), "{body}");
+    });
+}
+
 /// An invitation the calendar attends is answered: the reply reaches
 /// Google and its `PARTSTAT` comes back with the next sync.
 #[test]

@@ -304,7 +304,7 @@ impl GraphClient {
 
         Ok(WrittenItem {
             id: stored.id,
-            revision: stored.change_key,
+            revision: stored.change_key.filter(|_| !asks_meeting(&event)),
         })
     }
 
@@ -329,7 +329,7 @@ impl GraphClient {
             .op(|graph| graph.event_update(id, &patch))
             .with_context(|| format!("Update event {id} error"))?;
 
-        Ok(updated.change_key)
+        Ok(updated.change_key.filter(|_| !asks_meeting(&patch)))
     }
 
     /// The id of the instance of series `id` that a `RECURRENCE-ID` value
@@ -517,6 +517,15 @@ fn check_revision(id: &str, current: &MsgraphEvent, if_match: Option<&str>) -> R
         }
         _ => Ok(()),
     }
+}
+
+/// Whether the written event asks for an online meeting
+/// (`X-PIMDIR-ONLINE-MEETING`, pimdir STORAGE Annex B.1).
+///
+/// Its write then reports no revision: the next sync reads the event back,
+/// the meeting's `CONFERENCE` in and the request property out.
+fn asks_meeting(event: &MsgraphEvent) -> bool {
+    event.is_online_meeting.as_option() == Some(&true)
 }
 
 /// Reads a whole body.

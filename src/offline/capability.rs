@@ -24,12 +24,6 @@ type Backend = fn(&str, bool) -> Support;
 /// One capability a source supports: its name, how well, and why.
 pub type SupportRow = (&'static str, PimdirSupport, Option<&'static str>);
 
-/// What neverest does not perform yet for any calendar backend.
-const NOT_PERFORMED: Support = (
-    PimdirSupport::None,
-    Some("neverest does not perform it yet"),
-);
-
 /// Why a source-wide row refuses an intent its source performs on the
 /// collections it holds.
 const HELD_ONLY: &str = "performed on the collections this source syncs only";
@@ -293,7 +287,10 @@ fn gcal(name: &str, _smtp: bool) -> Support {
             PimdirSupport::Partial,
             Some("Google sends its own cancellation, without the comment"),
         ),
-        CALENDAR_ONLINE_MEETING => NOT_PERFORMED,
+        CALENDAR_ONLINE_MEETING => (
+            PimdirSupport::Partial,
+            Some("a Google Meet, unless the Workspace domain turns Meet off"),
+        ),
         COLLECTION_CREATE => (
             PimdirSupport::None,
             Some("Google calendars are not created yet"),
@@ -312,7 +309,10 @@ fn msgraph_calendar(name: &str, _smtp: bool) -> Support {
             PimdirSupport::Partial,
             Some("Graph notifies every attendee, SCHEDULE-AGENT aside"),
         ),
-        CALENDAR_ONLINE_MEETING => NOT_PERFORMED,
+        CALENDAR_ONLINE_MEETING => (
+            PimdirSupport::Partial,
+            Some("the calendar's default provider (Teams); none on an account without one"),
+        ),
         COLLECTION_CREATE => (
             PimdirSupport::None,
             Some("Graph calendars are not created yet"),
@@ -493,6 +493,16 @@ mod tests {
                 row(&declaration, name, Some("msgraph-calendar/AAMk")).support,
                 PimdirSupport::Full
             );
+        }
+    }
+
+    #[test]
+    fn google_and_graph_create_online_meetings_with_their_provider() {
+        for source in [gcal(), msgraph_calendar()] {
+            let declaration = declaration(&source, false, &[]);
+            let online = row(&declaration, CALENDAR_ONLINE_MEETING, None);
+            assert_eq!(online.support, PimdirSupport::Partial);
+            assert!(online.detail.is_some());
         }
     }
 

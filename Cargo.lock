@@ -1218,8 +1218,7 @@ dependencies = [
 [[package]]
 name = "io-gcal"
 version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3912bb286b937d9055d8139c20ca72f658ff2fa7c4ab365b2df7357cd700fc01"
+source = "git+https://github.com/pimalaya/io-gcal?rev=1268ef625d70fbebfc0bf6d876aa2330ad469461#1268ef625d70fbebfc0bf6d876aa2330ad469461"
 dependencies = [
  "anyhow",
  "ical-rs",
@@ -1306,8 +1305,8 @@ dependencies = [
 
 [[package]]
 name = "io-msgraph"
-version = "0.4.6"
-source = "git+https://github.com/pimalaya/io-msgraph?rev=240af150cd43acf79bbad68dc42c9a56177ea8d1#240af150cd43acf79bbad68dc42c9a56177ea8d1"
+version = "0.4.7"
+source = "git+https://github.com/pimalaya/io-msgraph?rev=d6cb9582e9175fea8ee5b858b4ca9a49991a4a71#d6cb9582e9175fea8ee5b858b4ca9a49991a4a71"
 dependencies = [
  "anyhow",
  "base64 0.23.1",

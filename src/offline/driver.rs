@@ -511,12 +511,15 @@ fn declare(dir: &Path, account: &str, config: &AccountConfig, mode: &AccountMode
         let Some(source) = sources.get(name) else {
             continue;
         };
+        // NOTE: a collection keyed in the source's namespace is on its
+        // server, synced yet or only declared (`sync --declare-only`).
+        let namespace = format!("{name}/");
         let mut held = Vec::new();
         for collection in &collections {
             let syncing = store
                 .collection_sources(&collection.id)
                 .with_context(|| format!("List the sources of {}", collection.id))?;
-            if syncing.contains(name) {
+            if syncing.contains(name) || collection.id.starts_with(&namespace) {
                 held.push(collection.id.clone());
             }
         }

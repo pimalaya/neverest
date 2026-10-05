@@ -795,15 +795,12 @@ fn a_graph_invitation_is_answered() {
                 .as_str()
                 .expect("the default calendar has an id")
                 .to_owned();
-            // NOTE: Exchange files a mailed invitation under its own global
-            // object id, which wraps the UID in hex (`vCal-Uid`).
-            let key: String = uid.bytes().map(|byte| format!("{byte:02X}")).collect();
             let extra = user_line("msgraph-calendar");
             let a = Replica::open("msgraph-calendar", &extra, &token);
             a.sync_until(&calendar, "the invitation reaches the store", |a| {
-                a.item(&calendar, &key).is_some()
+                a.item(&calendar, &uid).is_some()
             });
-            let seq = a.item(&calendar, &key).unwrap().seq;
+            let seq = a.item(&calendar, &uid).unwrap().seq;
 
             a.intent(
                 &calendar,

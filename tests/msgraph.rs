@@ -503,8 +503,10 @@ fn a_graph_teams_meeting_carries_its_join_link() {
 /// created as an online meeting, and the store reads it back without the
 /// request property (pimdir STORAGE Annex B.1).
 ///
-/// A tenant without Teams gives the meeting no link: the CONFERENCE check
-/// is then skipped (the Pimalaya test tenant, 2026-10-04).
+/// Graph creates the meeting through the calendar's default provider and,
+/// with none, keeps the event without it: the check is then skipped, as it
+/// is for a meeting without a join link (a tenant without Teams, the
+/// Pimalaya test tenant since 2026-10-04).
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_online_meeting_is_created_with_its_event() {
@@ -540,7 +542,29 @@ fn a_graph_online_meeting_is_created_with_its_event() {
                 .cloned()
                 .unwrap_or_default();
             assert_eq!(created.len(), 1, "{created:?}");
-            assert_eq!(created[0]["isOnlineMeeting"], true, "{created:?}");
+
+            // NOTE: Graph stores `isOnlineMeeting: false` without a word when
+            // the calendar has no provider, which is why the capability is
+            // `partial`.
+            let providers = graph(
+                &token,
+                "GET",
+                &format!(
+                    "calendars/{calendar}?$select=defaultOnlineMeetingProvider,allowedOnlineMeetingProviders"
+                ),
+                None,
+            );
+            if matches!(
+                providers["defaultOnlineMeetingProvider"].as_str(),
+                None | Some("unknown")
+            ) {
+                eprintln!("SKIPPED: the calendar has no online meeting provider: {providers}");
+                return;
+            }
+            assert_eq!(
+                created[0]["isOnlineMeeting"], true,
+                "{created:?} {providers}"
+            );
 
             let Some(url) = created[0]["onlineMeeting"]["joinUrl"].as_str() else {
                 eprintln!("SKIPPED: Graph gave the meeting no join link, the tenant lacks Teams");

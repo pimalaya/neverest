@@ -19,7 +19,7 @@
 use std::{
     cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fs,
+    fmt, fs,
     io::Write,
     mem,
     path::{Path, PathBuf},
@@ -95,7 +95,7 @@ use crate::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
             DrainedQueue, IntentEntry, ItemConflict, ParkedQueueAction, PatchEntry, PurgedItems,
-            RefusedDuplicate, RejectedWrite, SyncOutput,
+            RefusedDuplicate, RejectedWrite, SyncOutput, UnreachedEndpoint,
         },
     },
 };
@@ -194,6 +194,33 @@ pub(crate) fn open_store(dir: &Path, source: &str, account: &str) -> Result<Pimd
         Err(err) => Err(anyhow::Error::new(err).context(format!("Open {source} store"))),
     }
 }
+
+/// Marks the failure to open an endpoint's connections, which the run
+/// reports as the endpoint unreached rather than as any failure of its sync.
+#[derive(Debug)]
+pub(crate) struct Unreached {
+    /// The source or target that could not be opened.
+    pub(crate) endpoint: String,
+    /// What was being opened, the message this layer of the chain shows.
+    what: String,
+}
+
+impl Unreached {
+    fn new(endpoint: &str, what: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.to_owned(),
+            what: what.into(),
+        }
+    }
+}
+
+impl fmt::Display for Unreached {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.what)
+    }
+}
+
+impl std::error::Error for Unreached {}
 
 /// The one kind a two-side account syncs, refusing a disagreeing pair.
 ///
@@ -458,6 +485,12 @@ pub fn run(
         // is no reason to leave the others unsynced.
         if let Err(err) = outcome {
             warn!("source {source_name} sync error: {err:#}");
+            if let Some(unreached) = err.downcast_ref::<Unreached>() {
+                report.unreached.push(UnreachedEndpoint {
+                    endpoint: unreached.endpoint.clone(),
+                    error: format!("{err:#}"),
+                });
+            }
             report.collection.patch.push(PatchEntry::new(
                 CollectionHunk::Scan {
                     side: source_name.clone(),
@@ -668,7 +701,7 @@ fn run_pair(
         perms: left_config.permissions(),
         authority: left_authority,
         pool: Pool::open(left_account, left_budget)
-            .with_context(|| format!("Open source {left_name}"))?,
+            .with_context(|| Unreached::new(&left_name, format!("Open source {left_name}")))?,
         refused: Vec::new(),
         rejected: Vec::new(),
     };
@@ -678,7 +711,7 @@ fn run_pair(
         perms: right_config.permissions(),
         authority: right_authority,
         pool: Pool::open(right_account, right_budget)
-            .with_context(|| format!("Open target {right_name}"))?,
+            .with_context(|| Unreached::new(&right_name, format!("Open target {right_name}")))?,
         refused: Vec::new(),
         rejected: Vec::new(),
     };
@@ -1033,7 +1066,7 @@ fn open_source_contexts(
             namespace: namespace.to_string(),
             perms,
             authority,
-            pool: pool.context("Open connection")?,
+            pool: pool.with_context(|| Unreached::new(name, "Open connection"))?,
             refused: Vec::new(),
             rejected: Vec::new(),
         });
@@ -4298,6 +4331,24 @@ mod tests {
     };
 
     use super::*;
+
+    /// The marker survives the context a caller adds on top of the open,
+    /// and a failure that is not an open carries none.
+    #[test]
+    fn an_open_failure_reads_as_unreached_through_later_context() {
+        let refused = anyhow!("connect 127.0.0.1:1: Connection refused")
+            .context(Unreached::new("imap", "Open connection"))
+            .context("Sync source imap");
+        let unreached = refused.downcast_ref::<Unreached>().expect("marked");
+        assert_eq!(unreached.endpoint, "imap");
+        assert_eq!(
+            format!("{refused:#}"),
+            "Sync source imap: Open connection: connect 127.0.0.1:1: Connection refused"
+        );
+
+        let unreadable = anyhow!("NO Mailbox does not exist").context("Select INBOX");
+        assert!(unreadable.downcast_ref::<Unreached>().is_none());
+    }
     use crate::{cli::exit::Exit, offline::source_id};
 
     fn listed(roles: &[(&str, Option<&str>)]) -> Vec<Collection> {

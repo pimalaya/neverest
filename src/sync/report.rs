@@ -70,6 +70,14 @@ pub struct SyncOutput {
     /// removes the reason (counted as warnings).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rejected: Vec<RejectedWrite>,
+    /// The endpoints the run could not open: a server it could not reach, or
+    /// one refusing the connection or its credentials.
+    ///
+    /// Each also reads as a failed `*` scan in the collection patch, the run
+    /// exiting 3; this names it for a program. A collection that failed to
+    /// read on an endpoint that opened never lands here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreached: Vec<UnreachedEndpoint>,
 }
 
 impl SyncOutput {
@@ -97,6 +105,7 @@ impl SyncOutput {
             outstanding_conflicts: _,
             refused,
             rejected,
+            unreached,
         } = other;
 
         self.collection.patch.extend(collection.patch);
@@ -109,6 +118,7 @@ impl SyncOutput {
         self.conflicts.extend(conflicts);
         self.refused.extend(refused);
         self.rejected.extend(rejected);
+        self.unreached.extend(unreached);
     }
 
     /// Records a divergence this run parked, unless the run named it already.
@@ -156,6 +166,16 @@ impl SyncOutput {
                 .iter()
                 .any(|entry| entry.error.is_some() && !entry.parked)
     }
+}
+
+/// An endpoint whose connections the run could not open.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreachedEndpoint {
+    /// The source or target, as the account names it.
+    pub endpoint: String,
+    /// Why, the whole error chain.
+    pub error: String,
 }
 
 /// One create refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC 6352 §6.3.2).

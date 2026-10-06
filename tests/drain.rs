@@ -298,3 +298,24 @@ fn remove_event(uid: &str) {
         .arg(format!("{DAV}/cal/test%40pimalaya.org/default/{uid}.ics"))
         .output();
 }
+
+/// A server the run cannot reach is named in the report, beside the failed
+/// scan, so a program reads it without parsing the error.
+#[test]
+fn an_unreachable_endpoint_is_named_in_the_report() {
+    let fixture = Fixture::new(CLOSED, "user", "pass");
+    fixture.offline_store();
+
+    let report = fixture.json(&["--json", "sync", "-a", ACCOUNT], 3);
+
+    let unreached = report["unreached"].as_array().expect("unreached endpoints");
+    assert_eq!(unreached.len(), 1, "{report}");
+    assert_eq!(unreached[0]["endpoint"], "caldav", "{report}");
+    assert!(
+        unreached[0]["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Open connection"),
+        "{report}"
+    );
+}

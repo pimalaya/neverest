@@ -191,14 +191,7 @@ impl SyncCommand {
 /// serialize instead of failing, then errors out. The kernel releases the
 /// lock on FD close, so there is no PID file to clean up.
 pub fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
-    let lock_path = store_dir.join("sync.lock");
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&lock_path)
-        .with_context(|| format!("Open sync lock {} error", lock_path.display()))?;
+    let (lock_path, file) = open_store_lock(store_dir)?;
 
     let deadline = Instant::now() + timeout;
     let mut waiting = false;
@@ -225,6 +218,33 @@ pub fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
             }
         }
     }
+}
+
+/// Takes the store's sync.lock without waiting: `None` while another run
+/// holds it.
+pub fn try_store_lock(store_dir: &Path) -> Result<Option<File>> {
+    let (lock_path, file) = open_store_lock(store_dir)?;
+
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Ok(None),
+        Err(TryLockError::Error(err)) => {
+            Err(err).with_context(|| format!("Acquire sync lock {} error", lock_path.display()))
+        }
+    }
+}
+
+/// Opens, creating it if needed, the file the sync.lock is taken on.
+fn open_store_lock(store_dir: &Path) -> Result<(PathBuf, File)> {
+    let lock_path = store_dir.join("sync.lock");
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("Open sync lock {} error", lock_path.display()))?;
+    Ok((lock_path, file))
 }
 
 /// Drops the pimdir store and blobs so the next sync re-reconciles.

@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Added
 
+- Added `drain`: applies what frontends queued in the store (himalaya, calendula, cardamum), reading no credential and opening no endpoint, so a created item gets its id and readers list it at once, offline included; the next sync pushes it. It never waits for a sync holding the store: it answers `busy` with exit 3. It reports each applied row with the `seq` an `add` created, the parked rows, and how many rows wait for a sync (intents).
 - Added collection roles in the store (pimdir draft-04, io-pimdir `ef8eae0`): every sync records the role each server states for a collection it syncs (`collections.role`: `inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`, `all`, `flagged`, `important` for mail, `default` for a calendar or an address book), and clears one the server no longer states. IMAP and Gmail state theirs in the listing the sync already reads, as do Graph calendars and contacts, Google Calendar and People; Graph mail (one well-known folder lookup per role) and CalDAV (`schedule-default-calendar-URL`) are looked up again only when the source's collection set moved, the answer kept in `neverest.json`. Never guessed from a name. A paired sync (with targets) records none yet.
 - Added `sync --declare-only`: lists every collection the sources hold and records its kind, name and role in the store, whatever the collection filter, syncing no item; only queued collection creations run. What a frontend reads to offer the collections it could sync and to learn the inbox or the default calendar, without a throwaway store. Its collections count as held by their source, so the intents a source performs on what it holds (`collection.create`) are declared on them before any sync.
 - Added receipts for the intents neverest performs (pimdir draft-04, io-pimdir `8c83c04`): a `submit` sent, a `calendar-reply` or `calendar-cancel` performed and a `collection-create` done are acknowledged with a receipt, so the frontend that queued them reads them applied (`himalaya pimdir queue show`) rather than unknown, as a cancelled row reads.
@@ -24,6 +25,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
+- Changed `sync` to drain the queue once, at its start, before reading any credential or opening any endpoint, rather than per source after connecting: a run that cannot reach its server (offline, an expired token) still applies what frontends queued. `--declare-only` still drains nothing.
 - Changed Microsoft Graph mail body fetches to JSON batches: twenty raw MIME gets per request instead of one, the first sync of a large Microsoft 365 box no longer paying a round trip per message. A request Graph throttles (429, common 5xx) is sent again after its `Retry-After`; any other refusal still falls back to a single get.
 
 - Changed `check` to be documented as a doctor: what it prints about collections, roles and capabilities is for a person, and a program reads the store instead (`sync --declare-only`). IMAP `\Flagged` and `\Important` now state the `flagged` and `important` roles.

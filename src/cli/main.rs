@@ -20,8 +20,8 @@ use pimalaya_cli::{
 use crate::cli::configure::ConfigureCommand;
 use crate::{
     cli::{
-        check::CheckCommand, conflict::ConflictCommand, exit::Exit, init::InitCommand,
-        sync::SyncCommand,
+        check::CheckCommand, conflict::ConflictCommand, drain::DrainCommand, exit::Exit,
+        init::InitCommand, sync::SyncCommand,
     },
     json_schema,
 };
@@ -62,6 +62,7 @@ pub enum Command {
     Check(CheckCommand),
     Init(InitCommand),
     Sync(SyncCommand),
+    Drain(DrainCommand),
     #[command(arg_required_else_help = true)]
     #[command(alias = "conflicts")]
     Conflict(ConflictCommand),
@@ -82,9 +83,9 @@ impl Command {
     /// Runs the subcommand against the account `-a` names, or the default.
     ///
     /// The flag is global and declared once, on [`Cli`], as in every other
-    /// pimalaya CLI: the account is a property of the invocation. Sync is the
-    /// one command with an outcome beyond succeeding or failing, so it
-    /// returns its own [`Exit`]; every other works or errors.
+    /// pimalaya CLI: the account is a property of the invocation. Sync and drain
+    /// have an outcome beyond succeeding or failing, so they return their own
+    /// [`Exit`]; every other works or errors.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -93,6 +94,7 @@ impl Command {
     ) -> Result<Exit> {
         let done = match self {
             Self::Sync(cmd) => return cmd.execute(printer, config_paths, account),
+            Self::Drain(cmd) => return cmd.execute(printer, config_paths, account),
             Self::Check(cmd) => cmd.execute(printer, config_paths, account),
             Self::Conflict(cmd) => cmd.execute(printer, config_paths, account),
             Self::Init(cmd) => cmd.execute(printer, config_paths, account),

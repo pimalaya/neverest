@@ -7,6 +7,7 @@ pub mod check;
 #[cfg(feature = "wizard")]
 pub mod configure;
 pub mod conflict;
+pub mod drain;
 pub mod exit;
 pub mod init;
 pub mod main;

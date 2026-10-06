@@ -336,30 +336,25 @@ An account is resolved once and never re-read within a run. This is exact for a 
 ### Requirement: Sync is one-shot
 A `sync` run SHALL perform a bounded number of reconcile passes until quiescent and exit. Watch and real-time triggers are out of scope: watching belongs to carillon (carillon-core and its frontends), whose content-free ring kicks a sync run through its cmd consumer.
 
-### Requirement: A source drains the collections of its own namespace
-The pre-sync drain SHALL narrow the store's queued collections to the ones the draining source's namespace owns, a hub collection id being `<namespace>/<name>`. The queue is the whole store's and records no source, so the narrowing cannot come from it.
-
-A source SHALL NOT drain another's collections. Staging an existing item's action resolves that item's binding for the draining source, and a source holding no binding for it cannot place the action: at best the drain does nothing, and the owner it robbed of its turn is the one that could have applied it. Sources run in name order, so an unnarrowed drain is not an occasional race but a rule: the first source alphabetically answers for every frontend write on the account.
-
-The drain SHALL report what it skipped beside what it applied and parked, a skipped action being one left for another source rather than one done.
-
-#### Scenario: A calendar source leaves the mail queue alone
-- GIVEN an account declaring `caldav`, `carddav` and `imap`, with an action
-queued against `imap/INBOX`
-- WHEN the run drains, `caldav` sorting first
-- THEN `caldav` drains nothing and `imap` applies the action
-
 ### Requirement: Neverest is the store's sole owner and drains the queue first
-Neverest SHALL be the only process writing a pimdir store; frontends read it and enqueue mutations through io-pimdir's producer queue. At the start of every sync run, before any network work, each collection with pending queue work SHALL be drained (`drain_collection`: exactly-once apply-and-delete per action, permanently bad actions parked, transient failures left queued in order). The applied counts SHALL be logged (info when nonzero) and reported.
+Neverest SHALL be the only process writing a pimdir store; frontends read it and enqueue mutations through io-pimdir's producer queue. A sync run SHALL drain the store's queue once, at its start, after declaring the sources and before reading any credential or opening any endpoint, so a run that cannot reach its servers still applies what was queued: exactly-once apply-and-delete per action, permanently bad actions parked, transient failures left queued in order. The store applies each action as the source syncing its collection (pimdir STORAGE §15.2), so the drain is the store's and not a source's. `--declare-only` SHALL NOT drain; a dry run drains its replica. The applied counts SHALL be logged (info when nonzero) and reported.
 
-Every parked action SHALL surface in the run report until repaired, and SHALL surface **once per run**. A parked row belongs to the store rather than to a source, the queue recording none, so reading them where the drain runs reports each of them once per source that ran: one row read as three problems on an account syncing mail, contacts and calendar. They SHALL therefore be read once, after every source has drained, in a dry run as much as in a real one.
+Every parked action SHALL surface in the run report until repaired, and SHALL surface **once per run**, read after every source has run, in a dry run as much as in a real one.
 
 The subsequent sync of a drained collection pushes the resulting dirty state. An action kind the drain cannot apply itself (a capability-bound intent such as `submit`) SHALL be left pending for the phase that can, never parked.
 
-#### Scenario: One parked row on a three-source account
-- GIVEN an account whose mail, contacts and calendar sources all drain
-- WHEN one queue action is parked
-- THEN the run reports one warning, not one per source
+#### Scenario: A sync that cannot connect
+- **GIVEN** an event queued on a calendar whose server is unreachable
+- **WHEN** the account syncs and exits 3
+- **THEN** the event is in the store, with its `seq`
+
+### Requirement: A drain applies the queue without syncing
+`neverest drain` SHALL apply the account's queued actions as a sync's drain does, after declaring the sources from the configuration, reading no credential and opening no endpoint. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report `busy` and exit 3, the queue untouched. It SHALL report each row it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync.
+
+#### Scenario: An event created offline
+- **GIVEN** a calendar whose server is unreachable, and an event calendula queued there
+- **WHEN** `neverest drain` runs
+- **THEN** the event is in the store under the `seq` the drain reports, and the next sync pushes it under that same `seq`
 
 ### Requirement: A run holds the store lock, waiting bounded
 A sync run SHALL hold an advisory sync.lock in the **actual** store directory (honouring `store.root`) for the whole run. A second run SHALL wait for the holder up to a bounded timeout (60 s) and then exit with a clear error, so cron ticks and connector-triggered scoped runs serialize instead of failing or corrupting.

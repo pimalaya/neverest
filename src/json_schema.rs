@@ -33,6 +33,7 @@ pub fn schemas() -> BTreeMap<String, Value> {
     }
 
     insert!("neverest-check", crate::cli::check::CheckOutput);
+    insert!("neverest-drain", crate::cli::drain::DrainOutput);
     #[cfg(feature = "wizard")]
     insert!("neverest-configure", crate::cli::configure::ConfigureOutput);
     insert!("neverest-init", crate::cli::init::InitOutput);

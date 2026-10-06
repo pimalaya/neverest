@@ -133,11 +133,14 @@ neverest init  -a <account>
 neverest sync  -a <account> --dry-run
 neverest sync  -a <account> --include-collection INBOX
 neverest check -a <account>
+neverest drain -a <account>
 neverest conflict list -a <account>
 neverest conflict resolve <id> -a <account> --interactive
 ```
 
 An account is initialized once, which opens every source so credential and network errors surface up front, then creates the empty store. `sync` refuses to run without it, and `init` refuses to run over it. `--reset` drops the cached state before a run, rebuilding it as a first sync would.
+
+What himalaya, calendula and cardamum write is queued in the store, and only neverest applies it. A sync does so first, before reaching any server; `drain` does it alone, offline, so a frontend reads a created item back at once, the next sync pushing it.
 
 ### Conflicts
 

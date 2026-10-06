@@ -183,7 +183,7 @@ fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
 /// Every collection it writes is grouped under `account` (pimdir SPEC §9.2),
 /// so a store shared by two accounts tells whose is whose. A store an earlier
 /// format wrote cannot be migrated, so the refusal names the `--reset` fix.
-fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
+pub(crate) fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
     match PimdirStore::open(dir) {
         Ok(store) => Ok(store.for_account(account).for_source(source)),
         Err(err @ (PimdirError::Version { .. } | PimdirError::Stale { .. })) => Err(
@@ -401,6 +401,18 @@ pub fn run(
         declare(&work_dir, &account_name, account_config, &mode)?;
     }
 
+    // NOTE: once, before any credential is read or any endpoint opened, so a
+    // run that cannot reach its servers still applies what frontends queued,
+    // which they then read back. A declaration moves no item, so it leaves
+    // the queue alone but for the collections to create, which it lists.
+    if !declare_only {
+        let first = running
+            .first()
+            .expect("a validated account has at least one source");
+        let mut store = open_store(&work_dir, first, &account_name)?;
+        drain_queues(&mut store, &mut report);
+    }
+
     // NOTE: every credential the run needs, read once rather than per
     // connection.
     let account = Account::resolve(account_config)?;
@@ -496,7 +508,12 @@ pub fn run(
 
 /// Declares what every source of the account can do (pimdir STORAGE §15.6),
 /// replacing what an earlier run or configuration declared.
-fn declare(dir: &Path, account: &str, config: &AccountConfig, mode: &AccountMode) -> Result<()> {
+pub(crate) fn declare(
+    dir: &Path,
+    account: &str,
+    config: &AccountConfig,
+    mode: &AccountMode,
+) -> Result<()> {
     let sources = config.sources()?;
     let first = mode
         .sources
@@ -625,8 +642,6 @@ fn run_pair(
     let mut left_store = open_store(work_dir, &left_name, account_name)?;
     let mut right_store = open_store(work_dir, &right_name, account_name)?;
     let blobs = left_store.blobs();
-
-    drain_queues(&mut left_store, report);
 
     // NOTE: declared, not derived: `retain` says whether the store is a
     // replica, and `relay` is only how a crossing gets there when it is not.
@@ -897,12 +912,6 @@ fn run_local(
         "Opened {} connection(s) to {source_name}",
         ctxs.len()
     ));
-
-    // NOTE: a declaration moves no item, so it leaves the queue alone but
-    // for the collections to create, which it then lists.
-    if !declare_only {
-        drain_queues(&mut stores[0], report);
-    }
 
     let raw = ctxs[0].pool.primary().media_type();
     let kind = Kind::from_media_type(raw)
@@ -3389,7 +3398,7 @@ fn content_key(link: &str) -> u64 {
 /// The store applies each action as the source syncing its collection, not as
 /// the handle draining (STORAGE §15.2), so whichever side runs first answers
 /// for both. The report names the collections whose rows landed.
-fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutput) {
+pub(crate) fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutput) {
     let before = match store.list_pending_actions() {
         Ok(rows) => rows,
         Err(err) => {

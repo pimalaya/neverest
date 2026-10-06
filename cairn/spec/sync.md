@@ -1153,7 +1153,7 @@ A Graph mail source SHALL fetch the `Full` tier of an id set through JSON batche
 
 ### Requirement: Metadata probes are upgraded in bounded batches
 
-The driver SHALL upgrade live Probed placements at the Meta tier in sequential batches of at most 64 handles. Each successful batch SHALL commit before the next fetch. A failure SHALL stop the upgrade without undoing earlier batches. A later run SHALL select only placements still Probed, excluding tombstones. Missing summaries SHALL remain eligible for a later run, without a same-run retry loop.
+The driver SHALL upgrade live Probed placements at the Meta tier in sequential batches of at most 1000 handles. Each successful batch SHALL commit before the next fetch. A failure SHALL stop the upgrade without undoing earlier batches. A later run SHALL select only placements still Probed, excluding tombstones. Missing summaries SHALL remain eligible for a later run, without a same-run retry loop.
 
 ### Requirement: Metadata batches preserve duplicate identity order
 

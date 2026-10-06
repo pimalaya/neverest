@@ -2591,6 +2591,9 @@ fn sync_side(
     report.with_context(|| format!("Sync {} {collection}", &ctx.name))
 }
 
+/// How many light metadata probes to fetch and commit per sequential batch.
+const META_BATCH_SIZE: usize = 1000;
+
 /// Raises every freshly probed placement to [`Kind::probe_tier`].
 ///
 /// Its link id is then known and it enters the hub. `Meta` for mail, whose
@@ -2629,7 +2632,7 @@ fn upgrade_probed_with<R: PimdirRemote<Error = anyhow::Error>>(
     let batch_size = match tier {
         PimdirTier::Meta => {
             probed.sort();
-            BATCH_SIZE
+            META_BATCH_SIZE
         }
         PimdirTier::Full => probed.len(),
     };
@@ -4768,10 +4771,13 @@ mod tests {
         for (count, lengths) in [
             (0, vec![]),
             (1, vec![1]),
-            (BATCH_SIZE - 1, vec![BATCH_SIZE - 1]),
-            (BATCH_SIZE, vec![BATCH_SIZE]),
-            (BATCH_SIZE + 1, vec![BATCH_SIZE, 1]),
-            (2 * BATCH_SIZE + 1, vec![BATCH_SIZE, BATCH_SIZE, 1]),
+            (META_BATCH_SIZE - 1, vec![META_BATCH_SIZE - 1]),
+            (META_BATCH_SIZE, vec![META_BATCH_SIZE]),
+            (META_BATCH_SIZE + 1, vec![META_BATCH_SIZE, 1]),
+            (
+                2 * META_BATCH_SIZE + 1,
+                vec![META_BATCH_SIZE, META_BATCH_SIZE, 1],
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let mut store = PimdirStore::open(dir.path()).unwrap().for_source("mail");
@@ -4825,7 +4831,7 @@ mod tests {
     fn meta_upgrade_reopens_committed_batches_and_resumes_only_probes() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("mail");
-        let handles = seed_probes(&mut store, 3 * BATCH_SIZE + 1);
+        let handles = seed_probes(&mut store, 3 * META_BATCH_SIZE + 1);
         let checkpoint = PimdirCheckpoint(b"kept cursor".to_vec());
         store
             .write(vec![PimdirWriteOp::SetCheckpoint {
@@ -4858,7 +4864,7 @@ mod tests {
             .map(|p| p.handle)
             .collect();
         upgraded.sort();
-        assert_eq!(upgraded, handles[..2 * BATCH_SIZE]);
+        assert_eq!(upgraded, handles[..2 * META_BATCH_SIZE]);
 
         let mut retry = ProbeRemote::default();
         upgrade_probed_with("INBOX", &mut store, &mut retry, PimdirTier::Meta, false).unwrap();
@@ -4868,7 +4874,7 @@ mod tests {
                 .iter()
                 .map(|(_, h)| h.len())
                 .collect::<Vec<_>>(),
-            [BATCH_SIZE, 1]
+            [META_BATCH_SIZE, 1]
         );
         assert_eq!(
             retry
@@ -4876,7 +4882,7 @@ mod tests {
                 .iter()
                 .flat_map(|(_, h)| h.clone())
                 .collect::<Vec<_>>(),
-            handles[2 * BATCH_SIZE..]
+            handles[2 * META_BATCH_SIZE..]
         );
         assert!(
             load_side(&store, "INBOX")
@@ -4908,7 +4914,7 @@ mod tests {
         let mut unbatched = PimdirStore::open(reference.path())
             .unwrap()
             .for_source("mail");
-        let handles = seed_probes(&mut store, 2 * BATCH_SIZE + 1);
+        let handles = seed_probes(&mut store, 2 * META_BATCH_SIZE + 1);
         seed_probes(&mut unbatched, handles.len());
         let links = BTreeMap::from([
             (
@@ -5041,7 +5047,7 @@ mod tests {
     fn meta_upgrade_leaves_missing_replies_for_a_later_run() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("mail");
-        seed_probes(&mut store, BATCH_SIZE + 1);
+        seed_probes(&mut store, META_BATCH_SIZE + 1);
         let mut remote = ProbeRemote {
             missing: Some(PimdirHandle("1".into())),
             ..Default::default()
@@ -5077,7 +5083,7 @@ mod tests {
         let parent = tempfile::tempdir().unwrap();
         let real = parent.path().join("store");
         let mut store = PimdirStore::open(&real).unwrap().for_source("mail");
-        let handles = seed_probes(&mut store, BATCH_SIZE + 1);
+        let handles = seed_probes(&mut store, META_BATCH_SIZE + 1);
         let before = load_side(&store, "INBOX").unwrap();
         drop(store);
         let replica = DryRunReplica::new(&real).unwrap();
@@ -5091,7 +5097,7 @@ mod tests {
                 .iter()
                 .map(|(_, h)| h.len())
                 .collect::<Vec<_>>(),
-            [BATCH_SIZE, 1]
+            [META_BATCH_SIZE, 1]
         );
         assert!(
             load_side(&preview, "INBOX")

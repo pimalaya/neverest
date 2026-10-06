@@ -39,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Fixed a first mail sync requesting every new message's metadata at once: metadata upgrades now fetch and commit at most 1000 handles per batch. A later failure keeps completed batches, and the next run resolves only the remaining probes.
 - Fixed a Google People sync failing when People answers an expired sync token with HTTP 400 rather than 410: the token is dropped and a full listing restarts, as for a 410.
 - Fixed a collection deleted on one endpoint of a two-endpoint account being created again from the other on the next run: the store tells a collection both endpoints held, now deleted on the other (`collection.delete` permitting), from one new on one side, created on the other as before. After a crossed delete the store drops the collection, so one made again later reads as new.
 - Fixed a Graph series over more than five years failing to read, open-ended ones (the Birthdays and holidays calendars) among them: Graph refuses an instances listing over more than five years. A series is now read in windows of at most five years, an open-ended one within five years either side of today.

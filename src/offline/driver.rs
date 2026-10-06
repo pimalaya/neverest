@@ -2591,6 +2591,9 @@ fn sync_side(
     report.with_context(|| format!("Sync {} {collection}", &ctx.name))
 }
 
+/// How many light metadata probes to fetch and commit per sequential batch.
+const META_BATCH_SIZE: usize = 1000;
+
 /// Raises every freshly probed placement to [`Kind::probe_tier`].
 ///
 /// Its link id is then known and it enters the hub. `Meta` for mail, whose
@@ -2603,28 +2606,43 @@ fn upgrade_probed(
     blobs: &PimdirBlobs,
     dry_run: bool,
 ) -> Result<()> {
-    let probed: Vec<PimdirHandle> = load_side(store, collection)
-        .with_context(|| format!("Load {} {collection}", &ctx.name))?
+    let tier = resolve_kind(&mut ctx.pool).probe_tier();
+    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
+    upgrade_probed_with(collection, store, &mut remote, tier, dry_run)
+        .with_context(|| format!("Upgrade probed {} {collection}", ctx.name))
+}
+
+/// Resolves live probes through the engine, keeping each completed upgrade.
+fn upgrade_probed_with<R: PimdirRemote<Error = anyhow::Error>>(
+    collection: &str,
+    store: &mut PimdirSourceStore,
+    remote: &mut R,
+    tier: PimdirTier,
+    dry_run: bool,
+) -> Result<()> {
+    let mut probed: Vec<PimdirHandle> = load_side(store, collection)?
         .into_iter()
         .filter(|p| p.level == PimdirLevel::Probed && p.status != PimdirStatus::Tombstone)
         .map(|p| p.handle)
         .collect();
-    if probed.is_empty() {
-        return Ok(());
-    }
-    let tier = resolve_kind(&mut ctx.pool).probe_tier();
-
-    if dry_run && tier == PimdirTier::Full {
+    if probed.is_empty() || (dry_run && tier == PimdirTier::Full) {
         return Ok(());
     }
 
-    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-    run_verb(
-        store,
-        &mut remote,
-        PimdirUpgrade::new(collection.to_string(), probed, tier),
-    )
-    .with_context(|| format!("Upgrade probed {} {collection}", &ctx.name))?;
+    let batch_size = match tier {
+        PimdirTier::Meta => {
+            probed.sort();
+            META_BATCH_SIZE
+        }
+        PimdirTier::Full => probed.len(),
+    };
+    for handles in probed.chunks(batch_size) {
+        run_verb(
+            store,
+            remote,
+            PimdirUpgrade::new(collection.to_string(), handles.to_vec(), tier),
+        )?;
+    }
     Ok(())
 }
 
@@ -4651,6 +4669,450 @@ mod tests {
             .checkpoint
             .as_ref()
             .and_then(|checkpoint| crate::imap::backend::checkpoint_uid_validity(&checkpoint.0))
+    }
+
+    /// A fetch boundary recording requests, with missing replies and failures.
+    #[derive(Default)]
+    struct ProbeRemote {
+        requests: Vec<(PimdirTier, Vec<PimdirHandle>)>,
+        fail_at: Option<usize>,
+        missing: Option<PimdirHandle>,
+        links: BTreeMap<PimdirHandle, PimdirLinkId>,
+    }
+
+    impl PimdirRemote for ProbeRemote {
+        type Error = anyhow::Error;
+
+        fn enumerate(
+            &mut self,
+            _collection: &PimdirCollectionId,
+            _cursor: Option<PimdirCheckpoint>,
+        ) -> Result<PimdirRemoteSnapshot> {
+            bail!("a probe upgrade does not enumerate")
+        }
+
+        fn fetch(
+            &mut self,
+            collection: &PimdirCollectionId,
+            handles: Vec<PimdirHandle>,
+            tier: PimdirTier,
+        ) -> Result<Vec<PimdirFetchedItem>> {
+            assert_eq!(collection.0, "INBOX");
+            self.requests.push((tier, handles.clone()));
+            if self.fail_at == Some(self.requests.len()) {
+                bail!("connection lost");
+            }
+            Ok(handles
+                .into_iter()
+                .rev()
+                .filter(|handle| self.missing.as_ref() != Some(handle))
+                .map(|handle| {
+                    let link_id = self
+                        .links
+                        .get(&handle)
+                        .cloned()
+                        .unwrap_or_else(|| PimdirLinkId(format!("{}@example.org", handle.0)));
+                    PimdirFetchedItem {
+                        summary: Some(PimdirSummary::Mail(PimdirMailSummary {
+                            message_id: Some(link_id.0.clone()),
+                            subject: format!("summary {}", handle.0),
+                            size: Some(42),
+                            ..Default::default()
+                        })),
+                        handle,
+                        link_id,
+                        sort_key: PimdirSortKey::default(),
+                        body: None,
+                        revision: None,
+                    }
+                })
+                .collect())
+        }
+
+        fn push(
+            &mut self,
+            _collection: &PimdirCollectionId,
+            _changes: Vec<PimdirChange>,
+        ) -> Result<Vec<PimdirPushResult>> {
+            bail!("a probe upgrade does not push")
+        }
+    }
+
+    /// A freshly enumerated mail item, without its identity or summary.
+    fn bare_probe(handle: &str) -> PimdirPlacement {
+        let mut placement = linked(handle, "unused", None);
+        placement.link_id = None;
+        placement.summary = None;
+        placement.level = PimdirLevel::Probed;
+        placement.base = None;
+        placement.flags = PimdirFlags::from_iter(["\\Seen"]);
+        placement
+    }
+
+    /// Stores numeric handles whose lexical and numeric orders disagree.
+    fn seed_probes(store: &mut PimdirSourceStore, count: usize) -> Vec<PimdirHandle> {
+        store.ensure_collection("INBOX", "message/rfc822").unwrap();
+        let mut handles: Vec<_> = (1..=count).map(|n| PimdirHandle(n.to_string())).collect();
+        store
+            .write(
+                handles
+                    .iter()
+                    .rev()
+                    .map(|h| PimdirWriteOp::UpsertPlacement(bare_probe(&h.0)))
+                    .collect(),
+            )
+            .unwrap();
+        handles.sort();
+        handles
+    }
+
+    #[test]
+    fn meta_upgrade_bounds_requests_and_keeps_every_summary() {
+        for (count, lengths) in [
+            (0, vec![]),
+            (1, vec![1]),
+            (META_BATCH_SIZE - 1, vec![META_BATCH_SIZE - 1]),
+            (META_BATCH_SIZE, vec![META_BATCH_SIZE]),
+            (META_BATCH_SIZE + 1, vec![META_BATCH_SIZE, 1]),
+            (
+                2 * META_BATCH_SIZE + 1,
+                vec![META_BATCH_SIZE, META_BATCH_SIZE, 1],
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut store = PimdirStore::open(dir.path()).unwrap().for_source("mail");
+            let handles = seed_probes(&mut store, count);
+            let mut remote = ProbeRemote::default();
+
+            upgrade_probed_with("INBOX", &mut store, &mut remote, PimdirTier::Meta, false).unwrap();
+
+            assert_eq!(
+                remote
+                    .requests
+                    .iter()
+                    .map(|(_, h)| h.len())
+                    .collect::<Vec<_>>(),
+                lengths,
+                "{count} probes",
+            );
+            assert!(
+                remote
+                    .requests
+                    .iter()
+                    .all(|(tier, _)| *tier == PimdirTier::Meta)
+            );
+            assert_eq!(
+                remote
+                    .requests
+                    .into_iter()
+                    .flat_map(|(_, h)| h)
+                    .collect::<Vec<_>>(),
+                handles,
+            );
+            let placements = load_side(&store, "INBOX").unwrap();
+            assert_eq!(placements.len(), count);
+            for placement in placements {
+                assert_eq!(placement.level, PimdirLevel::Meta);
+                assert_eq!(
+                    placement.link_id,
+                    Some(PimdirLinkId(format!("{}@example.org", placement.handle.0)))
+                );
+                assert_eq!(placement.flags, PimdirFlags::from_iter(["\\Seen"]));
+                assert!(placement.object.is_none());
+                assert!(
+                    matches!(placement.summary, Some(PimdirSummary::Mail(summary))
+                    if summary.subject == format!("summary {}", placement.handle.0))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn meta_upgrade_reopens_committed_batches_and_resumes_only_probes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("mail");
+        let handles = seed_probes(&mut store, 3 * META_BATCH_SIZE + 1);
+        let checkpoint = PimdirCheckpoint(b"kept cursor".to_vec());
+        store
+            .write(vec![PimdirWriteOp::SetCheckpoint {
+                collection: PimdirCollectionId("INBOX".into()),
+                checkpoint: checkpoint.clone(),
+            }])
+            .unwrap();
+        let generation = store.generation("INBOX").unwrap();
+        let mut remote = ProbeRemote {
+            fail_at: Some(3),
+            ..Default::default()
+        };
+
+        let error = upgrade_probed_with("INBOX", &mut store, &mut remote, PimdirTier::Meta, false)
+            .unwrap_err();
+        assert!(error.to_string().contains("connection lost"));
+        assert_eq!(remote.requests.len(), 3, "no fetch after the failure");
+        drop(store);
+
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("mail");
+        let loaded = store
+            .load(&PimdirCollectionId("INBOX".into()), &PimdirLoadScope::All)
+            .unwrap();
+        assert_eq!(loaded.checkpoint, Some(checkpoint.clone()));
+        assert_eq!(store.generation("INBOX").unwrap(), generation);
+        let mut upgraded: Vec<_> = loaded
+            .placements
+            .into_iter()
+            .filter(|p| p.level == PimdirLevel::Meta)
+            .map(|p| p.handle)
+            .collect();
+        upgraded.sort();
+        assert_eq!(upgraded, handles[..2 * META_BATCH_SIZE]);
+
+        let mut retry = ProbeRemote::default();
+        upgrade_probed_with("INBOX", &mut store, &mut retry, PimdirTier::Meta, false).unwrap();
+        assert_eq!(
+            retry
+                .requests
+                .iter()
+                .map(|(_, h)| h.len())
+                .collect::<Vec<_>>(),
+            [META_BATCH_SIZE, 1]
+        );
+        assert_eq!(
+            retry
+                .requests
+                .iter()
+                .flat_map(|(_, h)| h.clone())
+                .collect::<Vec<_>>(),
+            handles[2 * META_BATCH_SIZE..]
+        );
+        assert!(
+            load_side(&store, "INBOX")
+                .unwrap()
+                .iter()
+                .all(|p| p.level == PimdirLevel::Meta)
+        );
+        upgrade_probed_with("INBOX", &mut store, &mut retry, PimdirTier::Meta, false).unwrap();
+        assert_eq!(
+            retry.requests.len(),
+            2,
+            "finished probes are not fetched again"
+        );
+        assert_eq!(
+            store
+                .load(&PimdirCollectionId("INBOX".into()), &PimdirLoadScope::All)
+                .unwrap()
+                .checkpoint,
+            Some(checkpoint)
+        );
+        assert_eq!(store.generation("INBOX").unwrap(), generation);
+    }
+
+    #[test]
+    fn meta_upgrade_preserves_duplicate_claims_across_batches() {
+        let dir = tempfile::tempdir().unwrap();
+        let reference = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("mail");
+        let mut unbatched = PimdirStore::open(reference.path())
+            .unwrap()
+            .for_source("mail");
+        let handles = seed_probes(&mut store, 2 * META_BATCH_SIZE + 1);
+        seed_probes(&mut unbatched, handles.len());
+        let links = BTreeMap::from([
+            (
+                PimdirHandle("10".into()),
+                PimdirLinkId("same@example.org".into()),
+            ),
+            (
+                PimdirHandle("9".into()),
+                PimdirLinkId("same@example.org".into()),
+            ),
+        ]);
+        let mut remote = ProbeRemote {
+            links: links.clone(),
+            ..Default::default()
+        };
+        let mut reference_remote = ProbeRemote {
+            links,
+            ..Default::default()
+        };
+
+        upgrade_probed_with("INBOX", &mut store, &mut remote, PimdirTier::Meta, false).unwrap();
+        run_verb(
+            &mut unbatched,
+            &mut reference_remote,
+            PimdirUpgrade::new("INBOX", handles, PimdirTier::Meta),
+        )
+        .unwrap();
+
+        assert!(remote.requests[0].1.contains(&PimdirHandle("10".into())));
+        assert!(!remote.requests[0].1.contains(&PimdirHandle("9".into())));
+        assert_eq!(
+            load_side(&store, "INBOX").unwrap(),
+            load_side(&unbatched, "INBOX").unwrap()
+        );
+        let placements = load_side(&store, "INBOX").unwrap();
+        assert_eq!(
+            placements
+                .iter()
+                .find(|p| p.handle.0 == "10")
+                .unwrap()
+                .link_id,
+            Some(PimdirLinkId("same@example.org".into()))
+        );
+        assert_eq!(
+            placements
+                .iter()
+                .find(|p| p.handle.0 == "9")
+                .unwrap()
+                .link_id,
+            Some(PimdirLinkId("dup:same@example.org#9".into()))
+        );
+    }
+
+    #[test]
+    fn meta_upgrade_selects_live_probes_of_only_this_source_and_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("mail");
+        store.ensure_collection("INBOX", "message/rfc822").unwrap();
+        store
+            .ensure_collection("Archive", "message/rfc822")
+            .unwrap();
+        let mut tombstone = bare_probe("gone");
+        tombstone.link_id = Some(PimdirLinkId("gone@example.org".into()));
+        tombstone.status = PimdirStatus::Tombstone;
+        let meta = linked("meta", "meta@example.org", Some(42));
+        let body = b"Subject: held\r\n\r\nbody\r\n";
+        let object = PimdirObject {
+            hash: store.blobs().hash(body),
+            size: body.len(),
+        };
+        let mut full = linked("full", "full@example.org", Some(body.len() as u64));
+        full.level = PimdirLevel::Full;
+        full.object = Some(object.hash.clone());
+        full.base.as_mut().unwrap().object = Some(object.hash.clone());
+        let mut archived = bare_probe("archived");
+        archived.collection = PimdirCollectionId("Archive".into());
+        store
+            .write(vec![
+                PimdirWriteOp::StoreObject {
+                    object,
+                    body: Some(body.to_vec()),
+                },
+                PimdirWriteOp::UpsertPlacement(bare_probe("live")),
+                PimdirWriteOp::UpsertPlacement(tombstone),
+                PimdirWriteOp::UpsertPlacement(meta),
+                PimdirWriteOp::UpsertPlacement(full),
+                PimdirWriteOp::UpsertPlacement(archived),
+            ])
+            .unwrap();
+        let before: Vec<_> = load_side(&store, "INBOX")
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.handle.0 != "live")
+            .collect();
+        assert!(before.iter().any(|p| p.handle.0 == "gone"
+            && p.level == PimdirLevel::Probed
+            && p.status == PimdirStatus::Tombstone));
+        assert!(
+            before.iter().any(|p| p.handle.0 == "full"
+                && p.level == PimdirLevel::Full
+                && p.object.is_some())
+        );
+        let mut other = PimdirStore::open(dir.path()).unwrap().for_source("other");
+        other
+            .write(vec![PimdirWriteOp::UpsertPlacement(bare_probe("other"))])
+            .unwrap();
+        let other_before = load_side(&other, "INBOX").unwrap();
+        let archive_before = load_side(&store, "Archive").unwrap();
+        let mut remote = ProbeRemote::default();
+
+        upgrade_probed_with("INBOX", &mut store, &mut remote, PimdirTier::Meta, false).unwrap();
+
+        assert_eq!(
+            remote.requests,
+            [(PimdirTier::Meta, vec![PimdirHandle("live".into())])]
+        );
+        assert_eq!(
+            load_side(&store, "INBOX")
+                .unwrap()
+                .into_iter()
+                .filter(|p| p.handle.0 != "live")
+                .collect::<Vec<_>>(),
+            before
+        );
+        assert_eq!(load_side(&store, "Archive").unwrap(), archive_before);
+        assert_eq!(load_side(&other, "INBOX").unwrap(), other_before);
+    }
+
+    #[test]
+    fn meta_upgrade_leaves_missing_replies_for_a_later_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("mail");
+        seed_probes(&mut store, META_BATCH_SIZE + 1);
+        let mut remote = ProbeRemote {
+            missing: Some(PimdirHandle("1".into())),
+            ..Default::default()
+        };
+
+        upgrade_probed_with("INBOX", &mut store, &mut remote, PimdirTier::Meta, false).unwrap();
+        assert_eq!(
+            remote.requests.len(),
+            2,
+            "no same-run retry of a missing reply"
+        );
+        let pending: Vec<_> = load_side(&store, "INBOX")
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.level == PimdirLevel::Probed)
+            .map(|p| p.handle)
+            .collect();
+        assert_eq!(pending, [PimdirHandle("1".into())]);
+        remote.missing = None;
+        remote.requests.clear();
+        upgrade_probed_with("INBOX", &mut store, &mut remote, PimdirTier::Meta, false).unwrap();
+        assert_eq!(remote.requests, [(PimdirTier::Meta, pending)]);
+        assert!(
+            load_side(&store, "INBOX")
+                .unwrap()
+                .iter()
+                .all(|p| p.level == PimdirLevel::Meta)
+        );
+    }
+
+    #[test]
+    fn meta_upgrade_keeps_dry_run_and_full_tier_behavior() {
+        let parent = tempfile::tempdir().unwrap();
+        let real = parent.path().join("store");
+        let mut store = PimdirStore::open(&real).unwrap().for_source("mail");
+        let handles = seed_probes(&mut store, META_BATCH_SIZE + 1);
+        let before = load_side(&store, "INBOX").unwrap();
+        drop(store);
+        let replica = DryRunReplica::new(&real).unwrap();
+        let mut preview = PimdirStore::open(&replica.dir).unwrap().for_source("mail");
+        let mut remote = ProbeRemote::default();
+
+        upgrade_probed_with("INBOX", &mut preview, &mut remote, PimdirTier::Meta, true).unwrap();
+        assert_eq!(
+            remote
+                .requests
+                .iter()
+                .map(|(_, h)| h.len())
+                .collect::<Vec<_>>(),
+            [META_BATCH_SIZE, 1]
+        );
+        assert!(
+            load_side(&preview, "INBOX")
+                .unwrap()
+                .iter()
+                .all(|p| p.level == PimdirLevel::Meta)
+        );
+        let mut store = PimdirStore::open(&real).unwrap().for_source("mail");
+        assert_eq!(load_side(&store, "INBOX").unwrap(), before);
+        let mut full = ProbeRemote::default();
+        upgrade_probed_with("INBOX", &mut store, &mut full, PimdirTier::Full, true).unwrap();
+        assert!(full.requests.is_empty());
+        assert_eq!(load_side(&store, "INBOX").unwrap(), before);
+        upgrade_probed_with("INBOX", &mut store, &mut full, PimdirTier::Full, false).unwrap();
+        assert_eq!(full.requests, [(PimdirTier::Full, handles)]);
     }
 
     /// A scripted remote for the rekey pump: a fixed spine, rejecting pushes.

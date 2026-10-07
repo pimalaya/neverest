@@ -129,6 +129,16 @@ impl Replica {
             .1
     }
 
+    /// Syncs the collection `key` under the scope from `since` (a date),
+    /// which must succeed with nothing left to decide.
+    pub fn sync_since(&self, key: &str, since: &str) -> String {
+        self.run(
+            &["sync", "-a", ACCOUNT, "-m", key, "--since", since, "--json"],
+            &[0],
+        )
+        .1
+    }
+
     /// Syncs the account narrowed to the collections `keys` in one run,
     /// which must end on one of `codes`, returning the code it ended on.
     pub fn sync_keys(&self, keys: &[&str], codes: &[i32]) -> i32 {

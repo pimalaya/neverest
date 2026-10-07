@@ -15,12 +15,12 @@
 //! a DAV href, a Gmail message id). JMAP configs parse but do not open yet.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::{Read, Write},
 };
 
 use anyhow::{Result, bail};
-use io_pimdir::{remote::PimdirEnumerate, summary::PimdirDerivation};
+use io_pimdir::{collection::PimdirScope, remote::PimdirEnumerate, summary::PimdirDerivation};
 
 #[cfg(feature = "dav")]
 use crate::dav::client::DavClient;
@@ -145,6 +145,14 @@ pub struct Held<'a> {
     /// can be reassigned (an IMAP `UIDVALIDITY`) whether they still name
     /// what they named.
     pub checkpoint: Option<&'a [u8]>,
+    /// The scope of the source's last closed round, which tells a Graph
+    /// mail source whether a delta link stored before it tagged its links
+    /// was made under a `$filter`.
+    pub coverage: Option<&'a PimdirScope>,
+    /// The bound messages with no date, by their last-synced flags: in
+    /// every scope, a band round included, which a Graph band listing on
+    /// `sentDateTime` never lists.
+    pub undated: &'a HashMap<String, BTreeSet<Flag>>,
 }
 
 #[cfg_attr(
@@ -519,7 +527,7 @@ impl Client {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c.enumerate(collection, request, held),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.enumerate(collection, request),
+            Client::Msgraph(c) => c.enumerate(collection, request, held),
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.enumerate(collection, checkpoint).map(Listed::Page),
             #[cfg(feature = "gpeople")]
@@ -541,15 +549,18 @@ impl Client {
     }
 
     /// Whether this backend's checkpoint is bound to the scope it was made
-    /// under (pimdir SYNC §4): a Graph delta link made under a `$filter` is;
-    /// IMAP's modseq and Gmail's history, checked locally, are not, and widen
-    /// a scope by listing only the band their coverage lacks.
+    /// under (pimdir SYNC §4): IMAP's modseq, Gmail's history and Graph
+    /// mail's delta link, made over the whole folder and checked locally,
+    /// are not, and widen a scope by listing only the band their coverage
+    /// lacks. The kinds that take no scope keep the default.
     pub fn scope_bound(&self) -> bool {
         match self {
             #[cfg(feature = "imap")]
             Client::Imap(_) => false,
             #[cfg(feature = "gmail")]
             Client::Gmail(_) => false,
+            #[cfg(feature = "msgraph")]
+            Client::Msgraph(c) => c.kind() != GraphKind::Mail,
             #[allow(unreachable_patterns)]
             _ => true,
         }

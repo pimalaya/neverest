@@ -175,6 +175,88 @@ fn a_graph_mail_folder_syncs_both_ways() {
     );
 }
 
+/// A scope widens by its band alone and keeps the folder's delta link: three
+/// messages dated a year apart arrive one widening at a time, and a flag set
+/// on the server on the oldest reaches the store through the link.
+#[test]
+#[ignore = "live: needs the app registration's client secret"]
+fn a_graph_scope_widens_by_its_band() {
+    let token = msgraph_token();
+    let folder = tag();
+    let mut client = connect(&token);
+    let folder_id = client
+        .mail_folder_create(&MsgraphMailFolder {
+            display_name: folder.clone(),
+            ..Default::default()
+        })
+        .expect("create the folder")
+        .response
+        .id;
+    let years = ["2024", "2025", "2026"];
+    for year in years {
+        let marker = format!("{folder}-{year}");
+        let raw = message(&marker, &msgraph_user()).replace(
+            "Date: Thu, 01 Jan 2026 00:00:00 +0000",
+            &format!("Date: Fri, 01 Mar {year} 10:00:00 +0000"),
+        );
+        client
+            .message_create_mime(Some(&folder_id), raw.as_bytes())
+            .expect("seed a dated message");
+    }
+
+    with_cleanup(
+        || {
+            // NOTE: the account's own scope is the widest the run asks for, so
+            // a run without `--since` follows the link.
+            let extra = format!(
+                "{}\nitem.filter.since = \"2024-01-01\"",
+                user_line("msgraph")
+            );
+            let replica = Replica::open("msgraph", &extra, &token);
+            let stored = |replica: &Replica| -> Vec<&str> {
+                years
+                    .into_iter()
+                    .filter(|year| replica.item(&folder, &format!("{folder}-{year}")).is_some())
+                    .collect()
+            };
+
+            replica.sync_since(&folder, "2025-12-01");
+            assert_eq!(stored(&replica), ["2026"], "the scope lists by Date");
+            replica.sync_since(&folder, "2025-01-01");
+            assert_eq!(stored(&replica), ["2025", "2026"], "the band below it");
+            replica.sync_since(&folder, "2024-01-01");
+            assert_eq!(stored(&replica), years, "and the one below that");
+
+            let oldest = format!("{folder}-2024");
+            let mut client = connect(&token);
+            let id = messages(&mut client, &folder_id, &oldest)
+                .pop()
+                .expect("the oldest message")
+                .id;
+            client
+                .message_update(
+                    &id,
+                    &MsgraphMessage {
+                        is_read: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .expect("mark it read");
+
+            replica.sync_until(&folder, "the flag crosses through the link", |replica| {
+                replica
+                    .item(&folder, &oldest)
+                    .is_some_and(|item| flags(&item).contains("\\Seen"))
+            });
+        },
+        || {
+            if let Err(err) = connect(&token).mail_folder_delete(&folder_id) {
+                eprintln!("WARNING: leftover folder {folder}: {err:?}");
+            }
+        },
+    );
+}
+
 /// A move staged through the store lands once on Graph, whichever of its
 /// halves delivers: the source relocating the message (its new id read by
 /// the target's next enumeration) or the target copying it (its new id the

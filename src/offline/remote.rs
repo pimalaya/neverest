@@ -119,20 +119,36 @@ pub struct Bound {
     handles: HashSet<String>,
     /// The name of each, by handle.
     metas: HashMap<String, BoundMeta>,
+    /// The last-synced flags of each bound message with no date.
+    undated: HashMap<String, BTreeSet<Flag>>,
     /// The checkpoint the store holds.
     checkpoint: Option<Vec<u8>>,
+    /// The scope of the source's last closed round.
+    coverage: Option<PimdirScope>,
 }
 
 impl Bound {
     /// What a load of the collection binds: every based placement that
     /// carries its link id.
     pub fn from_loaded(loaded: PimdirLoaded) -> Self {
+        let mut undated = HashMap::new();
         let metas: HashMap<String, BoundMeta> = loaded
             .placements
             .into_iter()
             .filter_map(|placement| {
                 let base = placement.base?;
                 let link_id = placement.link_id?;
+                // NOTE: a message with no date is in every scope, a band
+                // round included, which a provider may not list it in.
+                let undated_mail = match &placement.summary {
+                    Some(PimdirSummary::Mail(mail)) => mail.date.is_none(),
+                    Some(_) => false,
+                    None => true,
+                };
+                if undated_mail {
+                    let flags = to_item_flags(&base.flags).into_iter().collect();
+                    undated.insert(placement.handle.0.clone(), flags);
+                }
                 let meta = BoundMeta {
                     revision: base.revision,
                     link_id,
@@ -145,7 +161,9 @@ impl Bound {
         Self {
             handles: metas.keys().cloned().collect(),
             metas,
+            undated,
             checkpoint: loaded.checkpoint.map(|checkpoint| checkpoint.0),
+            coverage: loaded.coverage.map(|coverage| coverage.scope),
         }
     }
 }
@@ -173,9 +191,39 @@ impl BoundMeta {
 /// SYNC §5): a connector narrows its listing by the provider's reception
 /// date to a superset at most, and the `Date` decides, a member with no
 /// usable date being in every scope.
-fn keep_in_scope(items: &mut Vec<PimdirRemoteItem>, scope: &PimdirScope) {
+pub(crate) fn keep_in_scope(items: &mut Vec<PimdirRemoteItem>, scope: &PimdirScope) {
     if !scope.is_unbounded() {
         items.retain(|item| scope.contains(listed_date(&item.meta)));
+    }
+}
+
+/// The seam's page of a backend's listing, its members named: a page of a
+/// round when `complete`, the last one when it carries no `cursor`, else
+/// the one page of a delta.
+pub(crate) fn snapshot(
+    complete: bool,
+    cursor: Option<Vec<u8>>,
+    checkpoint: Option<Vec<u8>>,
+    items: Vec<PimdirRemoteItem>,
+    vanished: Vec<PimdirHandle>,
+) -> PimdirRemoteSnapshot {
+    match complete {
+        true => PimdirRemoteSnapshot {
+            vanished,
+            ..PimdirRemoteSnapshot::page(
+                items,
+                cursor.map(PimdirCursor),
+                checkpoint.map(PimdirCheckpoint),
+            )
+        },
+        false => PimdirRemoteSnapshot {
+            items,
+            vanished,
+            complete: false,
+            last: true,
+            cursor: None,
+            checkpoint: checkpoint.map(PimdirCheckpoint),
+        },
     }
 }
 
@@ -433,6 +481,8 @@ impl PimdirRemote for PimRemote<'_> {
         let held = Held {
             handles: &bound.handles,
             checkpoint: bound.checkpoint.as_deref(),
+            coverage: bound.coverage.as_ref(),
+            undated: &bound.undated,
         };
 
         let listed = self
@@ -490,25 +540,13 @@ impl PimdirRemote for PimRemote<'_> {
             page.vanished.into_iter().map(PimdirHandle::from).collect();
         self.held.remember(collection, &items, &vanished);
 
-        let snapshot = match page.complete {
-            true => PimdirRemoteSnapshot {
-                vanished,
-                ..PimdirRemoteSnapshot::page(
-                    items,
-                    page.cursor.map(PimdirCursor),
-                    page.checkpoint.map(PimdirCheckpoint),
-                )
-            },
-            false => PimdirRemoteSnapshot {
-                items,
-                vanished,
-                complete: false,
-                last: true,
-                cursor: None,
-                checkpoint: page.checkpoint.map(PimdirCheckpoint),
-            },
-        };
-        Ok(PimdirEnumerated::Page(snapshot))
+        Ok(PimdirEnumerated::Page(snapshot(
+            page.complete,
+            page.cursor,
+            page.checkpoint,
+            items,
+            vanished,
+        )))
     }
 
     fn scope_bound(&self) -> bool {

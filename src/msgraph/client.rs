@@ -4,10 +4,11 @@
 //! adapter surface as the IMAP backend, with the folder name map, the delta row
 //! cache serving the `Meta` tier and stream reopens.
 //!
-//! `enumerate` drives the messages delta query, carrying the `@odata.deltaLink`
-//! as the engine's opaque checkpoint (HTTP 410 means an expired link and
-//! restarts a fresh full round). Folders are listed two levels deep, named
-//! `Parent/Child`; deeper nesting is not replicated.
+//! `enumerate` lists mail as [`mail`] describes: a folder-wide message delta
+//! link as the engine's opaque checkpoint (HTTP 410 means an expired link and
+//! restarts a round), the mail of a scope listed by its `sentDateTime`.
+//! Folders are listed two levels deep, named `Parent/Child`; deeper nesting
+//! is not replicated.
 //!
 //! Push scope is honest: flag changes, deletes, moves and copies push, an
 //! append lands in Drafts only (Graph creates every MIME message as a draft)
@@ -27,6 +28,7 @@
 
 mod calendar;
 mod contacts;
+mod mail;
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -40,7 +42,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
 };
-use chrono::{DateTime, FixedOffset, SecondsFormat};
+use chrono::{DateTime, FixedOffset};
 use io_msgraph::v1::{
     client::{MsgraphClientStd, MsgraphClientStdConnectOptions, MsgraphClientStdError},
     rest::batch::{MSGRAPH_BATCH_MAX_REQUESTS, MsgraphBatchRequest, MsgraphBatchResponses},
@@ -49,19 +51,11 @@ use io_msgraph::v1::{
             MsgraphMailFolder,
             list::{MsgraphMailFoldersListParams, MsgraphMailFoldersListResponse},
         },
-        messages::{
-            MsgraphFlagStatus, MsgraphFollowupFlag, MsgraphMessage,
-            delta::{
-                MsgraphMessageDelta, MsgraphMessagesDeltaParams, MsgraphMessagesDeltaResponse,
-            },
-        },
+        messages::{MsgraphFlagStatus, MsgraphFollowupFlag, MsgraphMessage},
     },
     send::{MSGRAPH_API_BASE, MsgraphSend, MsgraphSendError, MsgraphSendOutput, user_path},
 };
-use io_pimdir::{
-    collection::PimdirScope,
-    remote::{PimdirEnumerate, PimdirListing},
-};
+use io_pimdir::remote::PimdirEnumerate;
 use log::{debug, trace, warn};
 use pimalaya_stream::{
     proxy::Proxy,
@@ -72,31 +66,14 @@ use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
 use crate::{
-    client::{EnumEntry, Enumeration, Listed, WrittenItem},
+    client::{Held, Listed, WrittenItem},
     item::{
         collection::Collection,
         flag::{Flag, FlagOp, IanaFlag},
         summary::{ItemSummary, normalize_message_id},
     },
-    kind::mail,
     throttle::{self, Request, Throttle},
 };
-
-/// The `$select` projection of the delta query: what names a message (pimdir
-/// STORAGE Annex A.1) and its flags, so a page is small enough to hold a
-/// thousand.
-const DELTA_SELECT: &str = "id,subject,from,toRecipients,ccRecipients,sentDateTime,receivedDateTime,isRead,isDraft,flag,hasAttachments,internetMessageId,conversationId,parentFolderId";
-
-/// The messages a delta page holds at most (`Prefer: odata.maxpagesize`),
-/// sent again with every next link: Graph pages ten by default, and with
-/// [`DELTA_SELECT`] a page of a thousand answers in under three seconds
-/// (measured on a test tenant, 2026-10-07).
-const DELTA_PAGE_SIZE: u32 = 1000;
-
-/// How far below a scope's `since` the reception-date filter starts: a
-/// message received after it may carry an older `Date` (clock skew, zones,
-/// a slow relay), which the local check on `Date` then decides.
-const SCOPE_MARGIN_DAYS: i64 = 2;
 
 /// The page size requested when listing mail folders.
 const FOLDER_PAGE_SIZE: u32 = 100;
@@ -280,14 +257,27 @@ impl GraphClient {
         }
     }
 
-    /// Lists one page of a collection: a page of a mail delta round, or a
-    /// whole contacts delta or calendar listing.
-    pub fn enumerate(&mut self, collection: &str, request: &PimdirEnumerate) -> Result<Listed> {
+    /// Lists one page of a collection: a page of a mail round or a mail
+    /// delta ([`mail`]), or a whole contacts delta or calendar listing.
+    /// `held` is what the store binds of a mail folder.
+    pub fn enumerate(
+        &mut self,
+        collection: &str,
+        request: &PimdirEnumerate,
+        held: Held<'_>,
+    ) -> Result<Listed> {
         let checkpoint = request
             .checkpoint()
             .map(|checkpoint| checkpoint.0.as_slice());
         match self.kind {
-            GraphKind::Mail => self.enumerate_mailbox(collection, request),
+            GraphKind::Mail => {
+                // NOTE: the row cache is taken out for the listing, which
+                // borrows the session as its wire.
+                let mut rows = self.rows.remove(collection).unwrap_or_default();
+                let listed = mail::enumerate(self, &mut rows, collection, request, held);
+                self.rows.insert(collection.to_owned(), rows);
+                listed
+            }
             GraphKind::Contacts => self
                 .enumerate_contacts(collection, checkpoint)
                 .map(Listed::Page),
@@ -495,121 +485,6 @@ impl GraphClient {
         lookup_folder(&self.folders, name).with_context(|| format!("Unknown Graph folder {name}"))
     }
 
-    /// Lists one page of a mailbox through Graph's message delta (pimdir
-    /// SYNC §4).
-    ///
-    /// A round is a fresh delta under the scope's `$filter` (the reception
-    /// date two days below `since`, a superset of the scope on `Date`),
-    /// [`DELTA_PAGE_SIZE`] messages a page, newest first as Graph answers;
-    /// each page is one page of the round, its cursor the next link, and the
-    /// last carries the delta link as the checkpoint. A delta follows the
-    /// stored link to its end in one page. An expired link (HTTP 410), or
-    /// one the checkpoint no longer reads as, is a rejected cursor.
-    fn enumerate_mailbox(&mut self, mailbox: &str, request: &PimdirEnumerate) -> Result<Listed> {
-        let (first, round) = match &request.listing {
-            PimdirListing::Delta(checkpoint) => match decode_checkpoint(&checkpoint.0) {
-                Some(link) => (self.delta_from(mailbox, &link)?, false),
-                None => return Ok(Listed::CursorRejected),
-            },
-            PimdirListing::Round {
-                cursor: Some(cursor),
-                ..
-            } => match decode_checkpoint(&cursor.0) {
-                Some(link) => (self.delta_from(mailbox, &link)?, true),
-                None => return Ok(Listed::CursorRejected),
-            },
-            PimdirListing::Round { cursor: None, .. } => {
-                (Some(self.fresh_delta(mailbox, &request.scope)?), true)
-            }
-        };
-        let Some(mut page) = first else {
-            return Ok(Listed::CursorRejected);
-        };
-
-        let mut rows = Vec::new();
-        let (cursor, checkpoint) = loop {
-            let MsgraphMessagesDeltaResponse {
-                value,
-                next_link,
-                delta_link,
-            } = page;
-            rows.extend(value);
-
-            if let Some(delta) = delta_link {
-                break (None, Some(encode_checkpoint(&delta)));
-            }
-            let next = next_link
-                .with_context(|| format!("Delta page of {mailbox} carries no paging link"))?;
-            if round {
-                break (Some(encode_checkpoint(&next)), None);
-            }
-            page = self
-                .op(|client| {
-                    client.messages_delta_from_link_with_page_size(&next, Some(DELTA_PAGE_SIZE))
-                })
-                .with_context(|| format!("Page delta of {mailbox} error"))?;
-        };
-        trace!("graph delta page of {mailbox}: {} rows", rows.len());
-
-        self.cache_rows(mailbox, &rows);
-        Ok(Listed::Page(delta_page(&rows, round, cursor, checkpoint)))
-    }
-
-    /// The first page a stored link answers, `None` when it expired.
-    fn delta_from(
-        &mut self,
-        mailbox: &str,
-        link: &str,
-    ) -> Result<Option<MsgraphMessagesDeltaResponse>> {
-        match self.op(|client| {
-            client.messages_delta_from_link_with_page_size(link, Some(DELTA_PAGE_SIZE))
-        }) {
-            Ok(page) => Ok(Some(page)),
-            Err(err) if is_expired_link(&err) => {
-                warn!("graph delta link of {mailbox} expired, restarting the round");
-                Ok(None)
-            }
-            Err(err) => {
-                Err(anyhow::Error::new(err).context(format!("Resume delta of {mailbox} error")))
-            }
-        }
-    }
-
-    /// Starts a fresh folder-scoped delta round over `scope`: the summary
-    /// `$select`, the reception date filtered from two days below `since`,
-    /// the page size asked for.
-    fn fresh_delta(
-        &mut self,
-        mailbox: &str,
-        scope: &PimdirScope,
-    ) -> Result<MsgraphMessagesDeltaResponse> {
-        let folder = self.folder_id(mailbox)?;
-        let filter = scope.since.as_deref().and_then(received_filter);
-        let params = MsgraphMessagesDeltaParams {
-            select: Some(DELTA_SELECT),
-            filter: filter.as_deref(),
-            max_page_size: Some(DELTA_PAGE_SIZE),
-        };
-        self.op(|client| client.messages_delta_with_params(Some(&folder), &params))
-            .with_context(|| format!("Start delta of {mailbox} error"))
-    }
-
-    /// Folds a delta round's rows into the per-collection cache: changed rows
-    /// are stored by handle, removed rows are dropped.
-    fn cache_rows(&mut self, mailbox: &str, rows: &[MsgraphMessageDelta]) {
-        let cache = self.rows.entry(mailbox.to_owned()).or_default();
-        for row in rows {
-            if row.message.id.is_empty() {
-                continue;
-            }
-            if row.removed.is_some() {
-                cache.remove(&row.message.id);
-            } else {
-                cache.insert(row.message.id.clone(), row.message.clone());
-            }
-        }
-    }
-
     /// The delta row of a handle: the enumeration cache when it holds it, else
     /// a targeted single-message get.
     fn row(&mut self, mailbox: &str, id: &str) -> Result<MsgraphMessage> {
@@ -639,10 +514,8 @@ impl GraphClient {
     /// [`MSGRAPH_BATCH_MAX_REQUESTS`] raw MIME gets per HTTP call, each body
     /// answered base64-encoded, committed in request order.
     ///
-    /// A request Graph throttles (429, or a common 5xx) is sent again in the
-    /// next batch after the longest `Retry-After` it stated, at most
-    /// [`BATCH_RETRY_ROUNDS`] times. A body still missing after that, or
-    /// refused for another reason, is left out: the caller fetches every
+    /// A body still missing after [`batch_get`](Self::batch_get)'s retries,
+    /// or refused for another reason, is left out: the caller fetches every
     /// handle a batch did not answer one by one, which surfaces its error.
     fn fetch_messages<S: Write>(
         &mut self,
@@ -654,55 +527,16 @@ impl GraphClient {
         let user = user_path(&self.inner.user_id);
 
         for chunk in ids.chunks(MSGRAPH_BATCH_MAX_REQUESTS) {
-            let mut bodies: HashMap<&str, Vec<u8>> = HashMap::with_capacity(chunk.len());
-            let mut pending: Vec<&str> = chunk.to_vec();
-
-            for round in 0..=BATCH_RETRY_ROUNDS {
-                // NOTE: a source that gave up sends nothing until its wait
-                // is over, the bodies left to the next run.
-                if pending.is_empty() || self.throttle.blocked().is_some() {
-                    break;
-                }
-
-                let requests = raw_requests(&user, &pending);
-                let answered = match self.op(|client| client.batch(&requests)) {
-                    Ok(responses) => read_raw_responses(&pending, responses),
-                    Err(err) if is_throttled(&err) => {
-                        let throttled = matches!(
-                            &err,
-                            MsgraphClientStdError::Send(send) if matches!(send.status(), Some(429 | 503))
-                        );
-                        BatchAnswer::retry_all(&pending, throttled)
-                    }
-                    Err(err) => return Err(err).context("Send raw message batch error"),
-                };
-
-                bodies.extend(answered.bodies);
-                pending = answered.retry;
-
-                let wait = answered
-                    .retry_after
-                    .unwrap_or_else(|| Duration::from_secs(1 << round));
-                // NOTE: a body Graph failed to serve (500, 502, 504) is retried
-                // the same, but is no throttle: the source goes on, the body
-                // left to the per-item fetch that surfaces its error.
-                if !pending.is_empty() && round == BATCH_RETRY_ROUNDS && answered.throttled {
-                    self.throttle.give_up(SystemTime::now() + wait);
-                }
-                if !pending.is_empty() && round < BATCH_RETRY_ROUNDS {
-                    let wait = wait.min(BATCH_RETRY_MAX_WAIT);
-                    warn!(
-                        "graph throttled {} of {} body requests, retrying in {}s",
-                        pending.len(),
-                        chunk.len(),
-                        wait.as_secs()
-                    );
-                    std::thread::sleep(wait);
-                }
-            }
+            let mut answer = self
+                .batch_get(
+                    chunk,
+                    |id| format!("/{user}/messages/{id}/$value"),
+                    raw_body,
+                )
+                .context("Send raw message batch error")?;
 
             for id in chunk {
-                let Some(raw) = bodies.remove(id) else {
+                let Some(raw) = answer.bodies.remove(id) else {
                     continue;
                 };
                 let mut sink =
@@ -714,6 +548,72 @@ impl GraphClient {
         }
 
         Ok(())
+    }
+
+    /// Sends the gets of `ids` (at most [`MSGRAPH_BATCH_MAX_REQUESTS`]) in
+    /// one JSON batch, each at the URL `url` builds for its id, its body
+    /// read by `decode`.
+    ///
+    /// A request Graph throttles (429, or a common 5xx) is sent again in the
+    /// next batch after the longest `Retry-After` it stated, at most
+    /// [`BATCH_RETRY_ROUNDS`] times; still throttled then, it is answered
+    /// under `retry`, and a throttle (429, 503) gives the source up. A 404 is
+    /// answered under `gone`; any other refusal is left out.
+    fn batch_get<'a, T>(
+        &mut self,
+        ids: &[&'a str],
+        url: impl Fn(&str) -> String,
+        decode: impl Fn(&str, Option<serde_json::Value>) -> Option<T>,
+    ) -> Result<BatchAnswer<'a, T>, MsgraphClientStdError> {
+        let mut out = BatchAnswer::default();
+        let mut pending: Vec<&str> = ids.to_vec();
+
+        for round in 0..=BATCH_RETRY_ROUNDS {
+            // NOTE: a source that gave up sends nothing until its wait is
+            // over, what is left going to the next run.
+            if pending.is_empty() || self.throttle.blocked().is_some() {
+                break;
+            }
+
+            let requests = get_requests(&pending, &url);
+            let answered = match self.op(|client| client.batch(&requests)) {
+                Ok(responses) => read_responses(&pending, responses, &decode),
+                Err(err) if is_throttled(&err) => {
+                    let throttled = matches!(
+                        &err,
+                        MsgraphClientStdError::Send(send) if matches!(send.status(), Some(429 | 503))
+                    );
+                    BatchAnswer::retry_all(&pending, throttled)
+                }
+                Err(err) => return Err(err),
+            };
+
+            out.bodies.extend(answered.bodies);
+            out.gone.extend(answered.gone);
+            pending = answered.retry;
+
+            let wait = answered
+                .retry_after
+                .unwrap_or_else(|| Duration::from_secs(1 << round));
+            // NOTE: a request Graph failed to serve (500, 502, 504) is
+            // retried the same, but is no throttle: the source goes on.
+            if !pending.is_empty() && round == BATCH_RETRY_ROUNDS && answered.throttled {
+                self.throttle.give_up(SystemTime::now() + wait);
+            }
+            if !pending.is_empty() && round < BATCH_RETRY_ROUNDS {
+                let wait = wait.min(BATCH_RETRY_MAX_WAIT);
+                warn!(
+                    "graph throttled {} of {} batched requests, retrying in {}s",
+                    pending.len(),
+                    ids.len(),
+                    wait.as_secs()
+                );
+                std::thread::sleep(wait);
+            }
+        }
+
+        out.retry = pending;
+        Ok(out)
     }
 
     /// Streams one message's raw RFC 5322 bytes into `sink`.
@@ -880,27 +780,36 @@ const BATCH_RETRY_ROUNDS: u32 = 4;
 /// The longest wait between two batch rounds, whatever `Retry-After` says.
 const BATCH_RETRY_MAX_WAIT: Duration = Duration::from_secs(120);
 
-/// The raw MIME gets of a batch, each request id being the index of its
-/// message id in `ids`.
-fn raw_requests(user: &str, ids: &[&str]) -> Vec<MsgraphBatchRequest> {
+/// The gets of a batch, each at the URL `url` builds for its id, each
+/// request id being the index of its id in `ids`.
+fn get_requests(ids: &[&str], url: impl Fn(&str) -> String) -> Vec<MsgraphBatchRequest> {
     ids.iter()
         .enumerate()
         .map(|(index, id)| MsgraphBatchRequest {
             id: index.to_string(),
             method: String::from("GET"),
-            url: format!("/{user}/messages/{id}/$value"),
+            url: url(id),
             ..Default::default()
         })
         .collect()
 }
 
-/// What a batch of raw gets answered.
-#[derive(Debug, Default, PartialEq)]
-struct BatchAnswer<'a> {
-    /// The decoded bodies, by message id.
-    bodies: HashMap<&'a str, Vec<u8>>,
-    /// The message ids Graph throttled, to send again, in request order.
+/// The raw MIME gets of a batch, each request id being the index of its
+/// message id in `ids`.
+#[cfg(test)]
+fn raw_requests(user: &str, ids: &[&str]) -> Vec<MsgraphBatchRequest> {
+    get_requests(ids, |id| format!("/{user}/messages/{id}/$value"))
+}
+
+/// What a batch of gets answered.
+#[derive(Debug, PartialEq)]
+struct BatchAnswer<'a, T = Vec<u8>> {
+    /// The decoded bodies, by id.
+    bodies: HashMap<&'a str, T>,
+    /// The ids Graph throttled, to send again, in request order.
     retry: Vec<&'a str>,
+    /// The ids Graph answered 404, gone since they were listed.
+    gone: Vec<&'a str>,
     /// The longest `Retry-After` the throttled responses stated.
     retry_after: Option<Duration>,
     /// Whether Graph throttled any of `retry` (429, 503), rather than
@@ -908,7 +817,19 @@ struct BatchAnswer<'a> {
     throttled: bool,
 }
 
-impl<'a> BatchAnswer<'a> {
+impl<T> Default for BatchAnswer<'_, T> {
+    fn default() -> Self {
+        Self {
+            bodies: HashMap::new(),
+            retry: Vec::new(),
+            gone: Vec::new(),
+            retry_after: None,
+            throttled: false,
+        }
+    }
+}
+
+impl<'a, T> BatchAnswer<'a, T> {
     /// A batch throttled as a whole: every request to send again.
     fn retry_all(ids: &[&'a str], throttled: bool) -> Self {
         Self {
@@ -919,11 +840,21 @@ impl<'a> BatchAnswer<'a> {
     }
 }
 
-/// Reads the responses of a batch of raw gets sent for `ids`, matched by
-/// request id (Graph answers in any order). A 2xx body is the raw MIME,
-/// base64-encoded because it is not JSON; a throttled request is kept to
-/// retry; any other answer, or a body that does not decode, is left out.
+/// Reads the responses of a batch of raw gets sent for `ids`.
+#[cfg(test)]
 fn read_raw_responses<'a>(ids: &[&'a str], responses: MsgraphBatchResponses) -> BatchAnswer<'a> {
+    read_responses(ids, responses, raw_body)
+}
+
+/// Reads the responses of a batch of gets sent for `ids`, matched by
+/// request id (Graph answers in any order). A 2xx body is read by
+/// `decode`; a throttled request is kept to retry, a 404 named gone; any
+/// other answer, or a body `decode` refuses, is left out.
+fn read_responses<'a, T>(
+    ids: &[&'a str],
+    responses: MsgraphBatchResponses,
+    decode: impl Fn(&str, Option<serde_json::Value>) -> Option<T>,
+) -> BatchAnswer<'a, T> {
     let mut answer = BatchAnswer::default();
     let mut retry = Vec::new();
 
@@ -949,20 +880,18 @@ fn read_raw_responses<'a>(ids: &[&'a str], responses: MsgraphBatchResponses) -> 
             continue;
         }
 
+        if response.status == 404 {
+            answer.gone.push(id);
+            continue;
+        }
+
         if !(200..300).contains(&response.status) {
             debug!("graph batch get of {id} answered {}", response.status);
             continue;
         }
 
-        let decoded = match &response.body {
-            Some(serde_json::Value::String(encoded)) => decode_batch_body(encoded),
-            _ => None,
-        };
-        match decoded {
-            Some(raw) => {
-                answer.bodies.insert(id, raw);
-            }
-            None => warn!("graph batch body of {id} is not base64 text"),
+        if let Some(body) = decode(id, response.body) {
+            answer.bodies.insert(id, body);
         }
     }
 
@@ -970,6 +899,19 @@ fn read_raw_responses<'a>(ids: &[&'a str], responses: MsgraphBatchResponses) -> 
     retry.dedup();
     answer.retry = retry.into_iter().map(|index| ids[index]).collect();
     answer
+}
+
+/// The raw MIME of a batch body: base64 text, as Graph answers a body
+/// that is not JSON.
+fn raw_body(id: &str, body: Option<serde_json::Value>) -> Option<Vec<u8>> {
+    let decoded = match &body {
+        Some(serde_json::Value::String(encoded)) => decode_batch_body(encoded),
+        _ => None,
+    };
+    if decoded.is_none() {
+        warn!("graph batch body of {id} is not base64 text");
+    }
+    decoded
 }
 
 /// Decodes a non-JSON batch body: base64 in the standard alphabet, as Graph
@@ -1108,60 +1050,6 @@ fn message_envelope(id: &str, message: &MsgraphMessage) -> ItemSummary {
         // which the walk of the parts replaces once the body is in.
         has_attachment: message.has_attachments,
     }
-}
-
-/// One page of a message delta as the seam takes it: every listed message
-/// named by its summary (pimdir STORAGE Annex A.1), every `@removed` one
-/// vanished; a page of a round when `round`, its `cursor` the next link and
-/// its `checkpoint` the delta link on the last page.
-fn delta_page(
-    rows: &[MsgraphMessageDelta],
-    round: bool,
-    cursor: Option<Vec<u8>>,
-    checkpoint: Option<Vec<u8>>,
-) -> Enumeration {
-    let mut items = Vec::new();
-    let mut vanished = Vec::new();
-    let mut bytes = 0;
-    for row in rows {
-        if row.message.id.is_empty() {
-            continue;
-        }
-        if row.removed.is_some() {
-            vanished.push(row.message.id.clone());
-            continue;
-        }
-        bytes += serde_json::to_vec(&row.message).map_or(0, |json| json.len() as u64);
-        let summary = message_envelope(&row.message.id, &row.message);
-        items.push(EnumEntry {
-            id: row.message.id.clone(),
-            flags: message_flags(&row.message),
-            revision: None,
-            meta: Some(mail::parse_summary(&summary)),
-        });
-    }
-
-    Enumeration {
-        items,
-        vanished,
-        complete: round,
-        cursor,
-        checkpoint,
-        bytes,
-    }
-}
-
-/// The `$filter` narrowing a message delta to a scope floor: the reception
-/// date from [`SCOPE_MARGIN_DAYS`] below `since`, a superset of the messages
-/// whose `Date` is in scope. `None` for a floor that does not read as an
-/// instant, which lists the whole folder.
-fn received_filter(since: &str) -> Option<String> {
-    let since = DateTime::parse_from_rfc3339(since).ok()?.to_utc();
-    let floor = since.checked_sub_signed(chrono::Duration::days(SCOPE_MARGIN_DAYS))?;
-    Some(format!(
-        "receivedDateTime ge {}",
-        floor.to_rfc3339_opts(SecondsFormat::Secs, true)
-    ))
 }
 
 /// Encodes the delta link into checkpoint bytes (plain UTF-8).
@@ -1440,6 +1328,7 @@ mod tests {
         assert_eq!(answer.bodies["m0"], raw0);
         assert_eq!(answer.bodies["m2"], raw2);
         assert_eq!(answer.retry, ["m3", "m4"], "in request order");
+        assert_eq!(answer.gone, ["m1"], "a 404 is gone since it was listed");
         assert_eq!(answer.retry_after, Some(Duration::from_secs(7)));
     }
 
@@ -1476,52 +1365,9 @@ mod tests {
         assert!(is_throttled(&throttled));
         assert!(!is_throttled(&refused));
         assert_eq!(
-            BatchAnswer::retry_all(&["m0", "m1"], true).retry,
+            BatchAnswer::<Vec<u8>>::retry_all(&["m0", "m1"], true).retry,
             ["m0", "m1"]
         );
-    }
-
-    /// A delta row of `message`, or of its removal.
-    fn delta_row(message: MsgraphMessage, removed: bool) -> MsgraphMessageDelta {
-        let mut row = serde_json::to_value(&message).unwrap();
-        if removed {
-            row["@removed"] = serde_json::json!({ "reason": "deleted" });
-        }
-        serde_json::from_value(row).unwrap()
-    }
-
-    /// A page of a round is a page of the seam: its members named by their
-    /// summary (the date from `sentDateTime`, the attachment mark Graph
-    /// states), its removals vanished, its next link the cursor, and the
-    /// delta link on the last page the checkpoint.
-    #[test]
-    fn a_delta_page_is_a_page_of_the_round() {
-        let mut gone = fixture_row();
-        gone.id = String::from("AAMkAD-gone");
-        let rows = vec![delta_row(fixture_row(), false), delta_row(gone, true)];
-
-        let page = delta_page(&rows, true, Some(b"next".to_vec()), None);
-        assert!(page.complete);
-        assert_eq!(page.cursor.as_deref(), Some(&b"next"[..]));
-        assert_eq!(page.checkpoint, None, "Graph states its delta link last");
-        assert_eq!(page.vanished, ["AAMkAD-gone"]);
-        assert_eq!(page.items.len(), 1);
-        assert!(page.bytes > 0, "the listed meta counts toward the download");
-
-        let meta = page.items[0].meta.as_ref().expect("named in the listing");
-        assert_eq!(meta.link_id.as_str(), "m1@example.org");
-        assert_eq!(
-            meta.sort_key.as_str(),
-            "2026-07-06T12:00:00Z",
-            "sentDateTime, never receivedDateTime"
-        );
-
-        let last = delta_page(&rows, true, None, Some(b"delta".to_vec()));
-        assert_eq!(last.cursor, None);
-        assert_eq!(last.checkpoint.as_deref(), Some(&b"delta"[..]));
-
-        let delta = delta_page(&rows, false, None, Some(b"delta".to_vec()));
-        assert!(!delta.complete);
     }
 
     /// Graph's own `hasAttachments` is the mark, both ways, until the body
@@ -1537,20 +1383,6 @@ mod tests {
         assert_eq!(message_envelope("b", &without).has_attachment, Some(false));
 
         assert_eq!(message_envelope("c", &fixture_row()).has_attachment, None);
-    }
-
-    /// The reception-date filter starts two days below the scope's floor.
-    #[test]
-    fn a_scope_floor_filters_the_reception_date_with_a_margin() {
-        assert_eq!(
-            received_filter("2026-10-01T00:00:00Z").as_deref(),
-            Some("receivedDateTime ge 2026-09-29T00:00:00Z")
-        );
-        assert_eq!(
-            received_filter("2026-10-01T01:00:00+02:00").as_deref(),
-            Some("receivedDateTime ge 2026-09-28T23:00:00Z")
-        );
-        assert_eq!(received_filter("soon"), None);
     }
 
     /// A body Graph failed to serve (500, 502, 504) is sent again, but only

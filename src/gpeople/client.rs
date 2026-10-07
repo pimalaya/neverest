@@ -45,7 +45,7 @@ use crate::{
         collection::Collection,
         flag::{Flag, FlagOp},
     },
-    throttle::{Throttle, google_throttled},
+    throttle::{Request, Throttle, google_throttled_for},
 };
 
 /// The one collection a People account syncs: every connection.
@@ -110,9 +110,29 @@ impl GpeopleClient {
     /// server closed it, and records the new keep-alive hint.
     ///
     /// The source's [`Throttle`] sends it again while Google throttles it
-    /// (429, 503, or a 403 rate limit).
+    /// (429, 503, or a 403 rate limit). A request creating a contact goes
+    /// through [`create`](Self::create) instead.
     fn op<T>(
         &mut self,
+        run: impl FnMut(&mut GpeopleClientStd) -> Result<GpeopleSendOutput<T>, GpeopleClientStdError>,
+    ) -> Result<T, GpeopleClientStdError> {
+        self.send(Request::Idempotent, run)
+    }
+
+    /// Runs one People request creating a contact: sent again on a refusal
+    /// Google answers before doing anything (429, a rate limit), never on a
+    /// 503, after which the contact may exist.
+    fn create<T>(
+        &mut self,
+        run: impl FnMut(&mut GpeopleClientStd) -> Result<GpeopleSendOutput<T>, GpeopleClientStdError>,
+    ) -> Result<T, GpeopleClientStdError> {
+        self.send(Request::Create, run)
+    }
+
+    /// Runs one People request of `request`, as [`op`](Self::op) describes.
+    fn send<T>(
+        &mut self,
+        request: Request,
         mut run: impl FnMut(
             &mut GpeopleClientStd,
         ) -> Result<GpeopleSendOutput<T>, GpeopleClientStdError>,
@@ -133,7 +153,7 @@ impl GpeopleClient {
             },
             |err| match err {
                 GpeopleClientStdError::Send(GpeopleSendError::Api { status, message }) => {
-                    google_throttled(*status, message)
+                    google_throttled_for(request, *status, message)
                 }
                 _ => None,
             },
@@ -197,11 +217,11 @@ impl GpeopleClient {
                     vanished.push(id);
                 }
             } else {
-                items.push(EnumEntry {
+                items.push(EnumEntry::bare(
                     id,
-                    flags: Default::default(),
-                    revision: Some(person.etag).filter(|etag| !etag.is_empty()),
-                });
+                    Default::default(),
+                    Some(person.etag).filter(|etag| !etag.is_empty()),
+                ));
             }
         }
 
@@ -209,7 +229,8 @@ impl GpeopleClient {
             items,
             vanished,
             complete,
-            checkpoint: next.into_bytes(),
+            checkpoint: Some(next.into_bytes()),
+            ..Default::default()
         })
     }
 
@@ -306,7 +327,7 @@ impl GpeopleClient {
         let uid = person.stashed_uid();
 
         let created = self
-            .op(|people| people.contact_create(&person, GPEOPLE_PERSON_VCARD_FIELDS, &[]))
+            .create(|people| people.contact_create(&person, GPEOPLE_PERSON_VCARD_FIELDS, &[]))
             .context("Create People contact error")?;
 
         if uid.is_some() && created.stashed_uid() != uid {

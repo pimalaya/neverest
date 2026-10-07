@@ -15,11 +15,12 @@
 //! a DAV href, a Gmail message id). JMAP configs parse but do not open yet.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     io::{Read, Write},
 };
 
 use anyhow::{Result, bail};
+use io_pimdir::{remote::PimdirEnumerate, summary::PimdirDerivation};
 
 #[cfg(feature = "dav")]
 use crate::dav::client::DavClient;
@@ -40,26 +41,135 @@ use crate::{
     offline::invitation::Refusal,
 };
 
-/// A backend-neutral enumeration: the member+flag spine, plus the cursor.
+/// One page of a backend-neutral enumeration (pimdir SYNC §4).
 ///
-/// `complete` tells a full snapshot, where absence means removed, from a
-/// delta, where `vanished` names the removals. Link ids resolve later at
-/// the `Meta` tier, so an entry carries no summary.
+/// `complete` tells a page of a round, where absence across the round's
+/// pages means removed in scope, from a delta, where `vanished` names the
+/// removals. A round of one page (no `cursor`) is the whole listing of a
+/// backend that does not page. Every entry carries what names it, read in
+/// the listing itself, unless the store already holds it or its kind is
+/// named by its body, which [`crate::offline::remote::PimRemote`] fetches.
+#[derive(Debug, Default)]
 pub struct Enumeration {
-    /// The members the listing answered with, in the server's own order.
+    /// The members the page answered with, in the server's own order.
     pub items: Vec<EnumEntry>,
-    /// The handles a delta reports as removed, empty on a full snapshot.
+    /// The handles the backend states removed, applied whatever the scope.
     pub vanished: Vec<String>,
-    /// Whether the listing is the whole collection rather than a delta.
+    /// Whether the page belongs to a round rather than a delta.
     pub complete: bool,
-    /// The next sync's cursor, in the backend's own encoding.
-    pub checkpoint: Vec<u8>,
+    /// The resume cursor, on every page of a round but the last.
+    pub cursor: Option<Vec<u8>>,
+    /// The next sync's checkpoint, in the backend's own encoding, on the
+    /// page the backend gives it: a delta's, a round's first (IMAP
+    /// `HIGHESTMODSEQ`, Gmail's `historyId`) or its last (a Graph delta
+    /// link).
+    pub checkpoint: Option<Vec<u8>>,
+    /// The octets of meta the page carried (headers, summaries), for the
+    /// source's download count.
+    pub bytes: u64,
 }
 
-/// One enumerated member: its handle and current flags.
+#[cfg_attr(
+    not(all(
+        feature = "imap",
+        feature = "msgraph",
+        feature = "dav",
+        feature = "gpeople",
+        feature = "gcal",
+        feature = "gmail"
+    )),
+    allow(dead_code)
+)]
+impl Enumeration {
+    /// A round of one page: every member, and the checkpoint.
+    pub fn round(items: Vec<EnumEntry>, checkpoint: Vec<u8>) -> Self {
+        Self {
+            items,
+            complete: true,
+            checkpoint: Some(checkpoint),
+            ..Default::default()
+        }
+    }
+
+    /// A delta: what changed, what was removed, and the next checkpoint.
+    pub fn delta(items: Vec<EnumEntry>, vanished: Vec<String>, checkpoint: Vec<u8>) -> Self {
+        Self {
+            items,
+            vanished,
+            checkpoint: Some(checkpoint),
+            ..Default::default()
+        }
+    }
+}
+
+/// What a backend answered an enumeration with.
+#[derive(Debug)]
+#[cfg_attr(
+    not(all(
+        feature = "imap",
+        feature = "msgraph",
+        feature = "dav",
+        feature = "gpeople",
+        feature = "gcal",
+        feature = "gmail"
+    )),
+    allow(dead_code)
+)]
+pub enum Listed {
+    /// One page of the listing asked for.
+    Page(Enumeration),
+    /// The backend refused the resume cursor or the checkpoint (an expired
+    /// Graph link, a Gmail page token): the engine restarts the round, or
+    /// opens one where a delta's checkpoint was refused.
+    CursorRejected,
+}
+
+/// What the store already binds of a collection, which a mail listing reads
+/// no meta for: a message, immutable, bound once is never named again.
+#[derive(Clone, Copy)]
+#[cfg_attr(
+    not(all(
+        feature = "imap",
+        feature = "msgraph",
+        feature = "dav",
+        feature = "gpeople",
+        feature = "gcal",
+        feature = "gmail"
+    )),
+    allow(dead_code)
+)]
+pub struct Held<'a> {
+    /// The handles this source binds in the collection.
+    pub handles: &'a HashSet<String>,
+    /// The checkpoint the store holds, which tells a backend whose handles
+    /// can be reassigned (an IMAP `UIDVALIDITY`) whether they still name
+    /// what they named.
+    pub checkpoint: Option<&'a [u8]>,
+}
+
+#[cfg_attr(
+    not(all(
+        feature = "imap",
+        feature = "msgraph",
+        feature = "dav",
+        feature = "gpeople",
+        feature = "gcal",
+        feature = "gmail"
+    )),
+    allow(dead_code)
+)]
+impl Held<'_> {
+    /// Whether the store binds `handle`.
+    pub fn holds(&self, handle: &str) -> bool {
+        self.handles.contains(handle)
+    }
+}
+
+/// One enumerated member: its handle, current flags and what names it.
 ///
 /// A backend with no flag concept reports an empty set, which the engine
 /// reads as known-empty and never as unknown.
+#[derive(Debug)]
 pub struct EnumEntry {
     /// The member's handle on its own backend: an IMAP UID, a DAV href.
     pub id: String,
@@ -71,6 +181,33 @@ pub struct EnumEntry {
     /// `None` where content is immutable (IMAP, Graph), which io-pimdir's
     /// merge reads as unchanged, never as unknown.
     pub revision: Option<String>,
+    /// The identity hint, summary and sort key the listing read (pimdir
+    /// STORAGE Annex A): `None` for a member the store already binds, or
+    /// one of a kind whose body is what names it.
+    pub meta: Option<PimdirDerivation>,
+}
+
+#[cfg_attr(
+    not(all(
+        feature = "imap",
+        feature = "msgraph",
+        feature = "dav",
+        feature = "gpeople",
+        feature = "gcal",
+        feature = "gmail"
+    )),
+    allow(dead_code)
+)]
+impl EnumEntry {
+    /// A member named by its body, or one the store already binds.
+    pub fn bare(id: String, flags: BTreeSet<Flag>, revision: Option<String>) -> Self {
+        Self {
+            id,
+            flags,
+            revision,
+            meta: None,
+        }
+    }
 }
 
 /// What a backend assigned to an item it just wrote.
@@ -84,7 +221,7 @@ pub struct WrittenItem {
 /// A live sync client: exactly one compiled-in backend per side.
 pub enum Client {
     #[cfg(feature = "imap")]
-    Imap(ImapClient),
+    Imap(Box<ImapClient>),
     #[cfg(feature = "dav")]
     Dav(Box<DavClient>),
     #[cfg(feature = "msgraph")]
@@ -360,22 +497,37 @@ impl Client {
         }
     }
 
-    /// Enumerates a collection's member+flag spine, incrementally when the
-    /// backend and `cursor` (the previous checkpoint) allow it.
-    pub fn enumerate(&mut self, collection: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
+    /// Lists one page of a collection (pimdir SYNC §4): of a delta from the
+    /// checkpoint `request` holds, or of a round over its scope, from its
+    /// start or its cursor. `held` is what the store binds already, which a
+    /// mail listing names from the store rather than reading its meta again.
+    ///
+    /// A backend that does not page answers a round in one page, and one
+    /// whose kind is named by its body (DAV, Google Calendar and People,
+    /// Graph contacts and events) answers bare entries.
+    pub fn enumerate(
+        &mut self,
+        collection: &str,
+        request: &PimdirEnumerate,
+        held: Held<'_>,
+    ) -> Result<Listed> {
+        let checkpoint = request
+            .checkpoint()
+            .map(|checkpoint| checkpoint.0.as_slice());
+
         match self {
             #[cfg(feature = "imap")]
-            Client::Imap(c) => c.enumerate(collection, cursor),
+            Client::Imap(c) => c.enumerate(collection, request, held),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.enumerate(collection, cursor),
+            Client::Msgraph(c) => c.enumerate(collection, request),
             #[cfg(feature = "dav")]
-            Client::Dav(c) => c.enumerate(collection, cursor),
+            Client::Dav(c) => c.enumerate(collection, checkpoint).map(Listed::Page),
             #[cfg(feature = "gpeople")]
-            Client::Gpeople(c) => c.enumerate(collection, cursor),
+            Client::Gpeople(c) => c.enumerate(collection, checkpoint).map(Listed::Page),
             #[cfg(feature = "gcal")]
-            Client::Gcal(c) => c.enumerate(collection, cursor),
+            Client::Gcal(c) => c.enumerate(collection, checkpoint).map(Listed::Page),
             #[cfg(feature = "gmail")]
-            Client::Gmail(c) => c.enumerate(collection, cursor),
+            Client::Gmail(c) => c.enumerate(collection, request, held),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
@@ -385,6 +537,21 @@ impl Client {
                 feature = "gmail"
             )))]
             Client::Unavailable => bail!(NO_BACKEND),
+        }
+    }
+
+    /// Whether this backend's checkpoint is bound to the scope it was made
+    /// under (pimdir SYNC §4): a Graph delta link made under a `$filter` is;
+    /// IMAP's modseq and Gmail's history, checked locally, are not, and widen
+    /// a scope by listing only the band their coverage lacks.
+    pub fn scope_bound(&self) -> bool {
+        match self {
+            #[cfg(feature = "imap")]
+            Client::Imap(_) => false,
+            #[cfg(feature = "gmail")]
+            Client::Gmail(_) => false,
+            #[allow(unreachable_patterns)]
+            _ => true,
         }
     }
 
@@ -768,7 +935,7 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
         SourceAccountBackend::Imap(imap) => {
             let client =
                 ImapClient::connect(&imap.server, &imap.tls, imap.starttls, imap.sasl.clone())?;
-            Ok(Client::Imap(client))
+            Ok(Client::Imap(Box::new(client)))
         }
         #[cfg(feature = "msgraph")]
         SourceAccountBackend::Msgraph(msgraph) => {
@@ -859,6 +1026,13 @@ impl Pool {
     /// The connection budget, the account's `connections` (default 4).
     pub fn max(&self) -> usize {
         self.max
+    }
+
+    /// Counts `bytes` received from the endpoint toward the run's report.
+    pub fn downloaded(&self, bytes: u64) {
+        self.account
+            .downloaded
+            .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// The always-present primary connection, for sequential operations.

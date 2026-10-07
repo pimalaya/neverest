@@ -24,8 +24,9 @@ use io_imap::{
     types::{
         body::BodyStructure,
         core::{AString, Atom, QuotedChar, Vec1},
+        datetime::NaiveDate as ImapDate,
         envelope::Address as ImapAddress,
-        fetch::{MacroOrMessageDataItemNames, MessageDataItem, MessageDataItemName},
+        fetch::{MacroOrMessageDataItemNames, MessageDataItem, MessageDataItemName, Section},
         flag::{Flag as ImapFlag, FlagFetch, FlagNameAttribute, StoreType},
         mailbox::{ListMailbox, Mailbox as ImapMailbox},
         search::SearchKey,
@@ -33,11 +34,17 @@ use io_imap::{
         status::{StatusDataItem, StatusDataItemName},
     },
 };
+use io_pimdir::{
+    collection::PimdirScope,
+    remote::{PimdirEnumerate, PimdirListing},
+    summary::{PimdirDerivation, mail},
+};
+use log::debug;
 use rfc2047_decoder::{Decoder, RecoverStrategy};
 
 use crate::{
-    client::{EnumEntry, Enumeration},
-    imap::client::ImapClient,
+    client::{EnumEntry, Enumeration, Held, Listed},
+    imap::client::{ImapClient, RoundUids},
     item::{
         address::Address,
         collection::Collection,
@@ -103,70 +110,293 @@ impl ImapClient {
             .collect())
     }
 
-    /// Enumerates a mailbox's UID+flag spine, incrementally when possible.
+    /// Lists one page of a mailbox (pimdir SYNC §4).
     ///
-    /// The opaque `cursor` carries the last `(UIDVALIDITY, HIGHESTMODSEQ)`
-    /// pair; with one and a matching QRESYNC server, only what changed since
-    /// the modseq is streamed. Otherwise a full `FETCH 1:* (UID FLAGS)`.
-    pub fn enumerate(&mut self, mailbox: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
-        let mbox = parse_mailbox(mailbox)?;
-        let cursor = cursor.and_then(decode_checkpoint);
-
-        if let Some((cv, cmodseq)) = cursor
-            && cmodseq > 0
-            && self.supports_qresync()
-            && let Some(cv_nz) = NonZeroU32::new(cv)
-        {
-            let data = self.select_delta(mbox.clone(), cv_nz, cmodseq)?;
-            self.mark_selected(mailbox);
-            let uid_validity = data.uid_validity.map(|v| v.get()).unwrap_or(cv);
-            let highest_mod_seq = data.highest_mod_seq.unwrap_or(cmodseq);
-            if uid_validity == cv {
-                let items = data
-                    .changed
-                    .iter()
-                    .filter_map(|fetch| enum_entry(&fetch.items.clone().into_inner()))
-                    .collect();
-                let vanished = data
-                    .vanished_earlier
-                    .iter()
-                    .map(|u| u.get().to_string())
-                    .collect();
-                return Ok(Enumeration {
-                    items,
-                    vanished,
-                    complete: false,
-                    checkpoint: encode_checkpoint(uid_validity, highest_mod_seq),
-                });
+    /// A delta reads what changed since the checkpoint's modseq through a
+    /// QRESYNC `SELECT`; a server without QRESYNC, or a checkpoint whose
+    /// `UIDVALIDITY` moved, answers the first page of a round instead. A
+    /// round lists the scope newest first, [`PAGE_SIZE`] UIDs a page, its
+    /// cursor the lowest UID listed; its first page carries the checkpoint
+    /// taken at the `SELECT`, so what moves during the round is the next
+    /// delta's.
+    pub fn enumerate(
+        &mut self,
+        mailbox: &str,
+        request: &PimdirEnumerate,
+        held: Held<'_>,
+    ) -> Result<Listed> {
+        match &request.listing {
+            PimdirListing::Delta(checkpoint) => {
+                self.delta_page(mailbox, &checkpoint.0, &request.scope, held)
             }
+            PimdirListing::Round { cursor, band } => self.round_page(
+                mailbox,
+                cursor.as_ref().map(|cursor| cursor.0.as_slice()),
+                *band,
+                &request.scope,
+                held,
+            ),
         }
+    }
 
+    /// What changed since `checkpoint`, or a round's first page when the
+    /// server cannot say.
+    fn delta_page(
+        &mut self,
+        mailbox: &str,
+        checkpoint: &[u8],
+        scope: &PimdirScope,
+        held: Held<'_>,
+    ) -> Result<Listed> {
+        let Some((cv, cmodseq)) = decode_checkpoint(checkpoint) else {
+            return self.round_page(mailbox, None, false, scope, held);
+        };
+        let Some(cv_nz) = NonZeroU32::new(cv).filter(|_| cmodseq > 0 && self.supports_qresync())
+        else {
+            return self.round_page(mailbox, None, false, scope, held);
+        };
+
+        let mbox = parse_mailbox(mailbox)?;
+        let data = self.select_delta(mbox, cv_nz, cmodseq)?;
+        self.mark_selected(mailbox);
+        let uid_validity = data.uid_validity.map(|v| v.get()).unwrap_or(cv);
+        if uid_validity != cv {
+            debug!("UIDVALIDITY of {mailbox} moved, listing it in a round");
+            return self.round_page(mailbox, None, false, scope, held);
+        }
+        let highest_mod_seq = data.highest_mod_seq.unwrap_or(cmodseq);
+
+        let changed: Vec<Spine> = data
+            .changed
+            .iter()
+            .filter_map(|fetch| spine(&fetch.items.clone().into_inner()))
+            .collect();
+        let vanished = data
+            .vanished_earlier
+            .iter()
+            .map(|uid| uid.get().to_string())
+            .collect();
+
+        // NOTE: the handles still name what the store binds, the
+        // `UIDVALIDITY` being the checkpoint's.
+        let unheld: Vec<u32> = changed
+            .iter()
+            .filter(|row| !held.holds(&row.uid.to_string()))
+            .map(|row| row.uid)
+            .collect();
+        let (metas, bytes) = self.fetch_metas(&unheld)?;
+        let items = entries(changed, metas);
+
+        let mut page = Enumeration::delta(
+            items,
+            vanished,
+            encode_checkpoint(uid_validity, highest_mod_seq),
+        );
+        page.bytes = bytes;
+        Ok(Listed::Page(page))
+    }
+
+    /// One page of a round over `scope`, from its start or from `cursor`.
+    fn round_page(
+        &mut self,
+        mailbox: &str,
+        cursor: Option<&[u8]>,
+        band: bool,
+        scope: &PimdirScope,
+        held: Held<'_>,
+    ) -> Result<Listed> {
+        let cursor = match cursor {
+            None => None,
+            Some(bytes) => match decode_cursor(bytes) {
+                Some(cursor) => Some(cursor),
+                None => return Ok(Listed::CursorRejected),
+            },
+        };
+
+        let mbox = parse_mailbox(mailbox)?;
         let select = self.select(mbox, ImapMailboxSelectOptions::default())?;
         self.mark_selected(mailbox);
         let uid_validity = select.uid_validity.map(|v| v.get()).unwrap_or(0);
         let highest_mod_seq = select.highest_mod_seq.unwrap_or(0);
-        let exists = select.exists.unwrap_or(0);
-        let items = if exists == 0 {
-            Vec::new()
-        } else {
-            let sequence_set: SequenceSet = "1:*"
-                .try_into()
-                .map_err(|_| anyhow!("Invalid IMAP sequence-set `1:*`"))?;
-            let data = self.fetch(
-                sequence_set,
-                uid_flag_names(),
-                ImapMessageFetchOptions::default(),
-            )?;
-            data.into_values()
-                .filter_map(|items| enum_entry(&items.into_inner()))
-                .collect()
+
+        if let Some((validity, _)) = cursor
+            && validity != uid_validity
+        {
+            debug!("UIDVALIDITY of {mailbox} moved under the round, restarting it");
+            return Ok(Listed::CursorRejected);
+        }
+
+        let key = (scope.since.clone(), scope.until.clone());
+        let below = cursor.map(|(_, lowest)| lowest);
+        let cached = self.round.take().filter(|round| {
+            round.mailbox == mailbox
+                && round.uid_validity == uid_validity
+                && round.scope == key
+                && below.is_some()
+        });
+        let mut left = match cached {
+            Some(round) => round
+                .left
+                .into_iter()
+                .filter(|uid| below.is_none_or(|below| *uid < below))
+                .collect(),
+            None => self.search_round(scope, below, select.exists.unwrap_or(0))?,
         };
-        Ok(Enumeration {
+
+        let rest = left.split_off(left.len().min(PAGE_SIZE));
+        let page_uids = left;
+        let next = rest
+            .first()
+            .and(page_uids.last())
+            .map(|lowest| encode_cursor(uid_validity, *lowest));
+        if !rest.is_empty() {
+            self.round = Some(RoundUids {
+                mailbox: mailbox.to_owned(),
+                uid_validity,
+                scope: key,
+                left: rest,
+            });
+        }
+
+        // NOTE: a handle names what the store binds only under the
+        // `UIDVALIDITY` its checkpoint was made under.
+        let trusted = held
+            .checkpoint
+            .and_then(checkpoint_uid_validity)
+            .is_some_and(|validity| validity == uid_validity);
+        let (heldset, unheld): (Vec<u32>, Vec<u32>) = page_uids
+            .iter()
+            .partition(|uid| trusted && held.holds(&uid.to_string()));
+
+        let mut rows = self.fetch_spines(&heldset)?;
+        let (metas, bytes) = self.fetch_metas(&unheld)?;
+        rows.extend(metas.iter().map(|(uid, meta)| Spine {
+            uid: *uid,
+            flags: meta.flags.clone(),
+        }));
+        let items = entries(rows, metas);
+
+        let first = cursor.is_none();
+        Ok(Listed::Page(Enumeration {
             items,
             vanished: Vec::new(),
             complete: true,
-            checkpoint: encode_checkpoint(uid_validity, highest_mod_seq),
-        })
+            cursor: next,
+            checkpoint: (first && !band).then(|| encode_checkpoint(uid_validity, highest_mod_seq)),
+            bytes,
+        }))
+    }
+
+    /// The UIDs of a round, highest first: every message, or the ones
+    /// `SENTSINCE` and `SENTBEFORE` keep with a day's margin around the
+    /// scope (the server compares dates, not instants, in its own zone) and
+    /// the ones with no `Date`, below `below` when a round resumes.
+    fn search_round(
+        &mut self,
+        scope: &PimdirScope,
+        below: Option<u32>,
+        exists: u32,
+    ) -> Result<Vec<u32>> {
+        if exists == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut criteria = Vec::new();
+        if let Some(below) = below {
+            if below <= 1 {
+                return Ok(Vec::new());
+            }
+            let range: SequenceSet = format!("1:{}", below - 1)
+                .as_str()
+                .try_into()
+                .map_err(|_| anyhow!("Invalid IMAP UID range below {below}"))?;
+            criteria.push(SearchKey::Uid(range));
+        }
+        // NOTE: a message with no `Date` is in every scope, and `SENTSINCE`
+        // matches none: it is searched for apart.
+        let undated = || {
+            let field = AString::try_from("Date").map_err(|_| anyhow!("Invalid IMAP field"))?;
+            let empty = AString::try_from("").map_err(|_| anyhow!("Invalid IMAP value"))?;
+            Ok::<_, anyhow::Error>(SearchKey::Not(Box::new(SearchKey::Header(field, empty))))
+        };
+        if let Some(day) = scope.since.as_deref().and_then(|since| imap_day(since, -1)) {
+            criteria.push(SearchKey::Or(
+                Box::new(SearchKey::SentSince(day)),
+                Box::new(undated()?),
+            ));
+        }
+        if let Some(day) = scope.until.as_deref().and_then(|until| imap_day(until, 2)) {
+            criteria.push(SearchKey::Or(
+                Box::new(SearchKey::SentBefore(day)),
+                Box::new(undated()?),
+            ));
+        }
+        if criteria.is_empty() {
+            criteria.push(SearchKey::All);
+        }
+        let criteria = Vec1::try_from(criteria).map_err(|_| anyhow!("Empty IMAP search"))?;
+
+        let mut uids: Vec<u32> = self
+            .search(criteria, ImapMessageSearchOptions { uid: true })?
+            .into_iter()
+            .map(NonZeroU32::get)
+            .collect();
+        uids.sort_unstable_by(|a, b| b.cmp(a));
+        uids.dedup();
+        Ok(uids)
+    }
+
+    /// The flags of a UID set, by `UID FETCH (UID FLAGS)`.
+    fn fetch_spines(&mut self, uids: &[u32]) -> Result<Vec<Spine>> {
+        let mut rows = Vec::with_capacity(uids.len());
+        for chunk in uids.chunks(PAGE_SIZE) {
+            let Some(set) = uid_set(chunk)? else {
+                continue;
+            };
+            let data = self.fetch(
+                set,
+                uid_flag_names(),
+                ImapMessageFetchOptions {
+                    uid: true,
+                    ..Default::default()
+                },
+            )?;
+            rows.extend(
+                data.into_values()
+                    .filter_map(|items| spine(&items.into_inner())),
+            );
+        }
+        Ok(rows)
+    }
+
+    /// What names each of a UID set, read in one `UID FETCH (UID FLAGS
+    /// RFC822.SIZE BODY.PEEK[HEADER.FIELDS (…)])` a page: the header fields
+    /// Annex A reads, `Content-Type` for the attachment mark, and no
+    /// `BODYSTRUCTURE`. Answers the metas by UID and the header octets read.
+    fn fetch_metas(&mut self, uids: &[u32]) -> Result<(BTreeMap<u32, Meta>, u64)> {
+        let mut metas = BTreeMap::new();
+        let mut bytes = 0;
+        for chunk in uids.chunks(PAGE_SIZE) {
+            let Some(set) = uid_set(chunk)? else {
+                continue;
+            };
+            let data = self.fetch(
+                set,
+                meta_names()?,
+                ImapMessageFetchOptions {
+                    uid: true,
+                    ..Default::default()
+                },
+            )?;
+            for items in data.into_values() {
+                let Some((uid, meta, read)) = meta_from(items.into_inner()) else {
+                    continue;
+                };
+                bytes += read;
+                metas.insert(uid, meta);
+            }
+        }
+        Ok((metas, bytes))
     }
 
     /// SELECTs `mailbox` unless it is already selected, so a run of fetches on
@@ -501,6 +731,37 @@ fn build_item_names(with_attachment: bool) -> MacroOrMessageDataItemNames<'stati
     MacroOrMessageDataItemNames::MessageDataItemNames(names)
 }
 
+/// How many UIDs one page of a round lists (pimdir SYNC §4): the flags,
+/// the size and a few header fields are under a kilobyte a message, half a
+/// megabyte a response, short enough to resume cheaply.
+pub(crate) const PAGE_SIZE: usize = 500;
+
+/// The header fields a listing reads to name a message (pimdir STORAGE
+/// Annex A.1), `Content-Type` for the attachment mark without the body.
+const META_FIELDS: [&str; 9] = [
+    "Date",
+    "From",
+    "To",
+    "Cc",
+    "Bcc",
+    "Subject",
+    "Message-ID",
+    "In-Reply-To",
+    "Content-Type",
+];
+
+/// One listed message: its UID and its flags.
+struct Spine {
+    uid: u32,
+    flags: BTreeSet<Flag>,
+}
+
+/// What names one listed message, with its flags.
+struct Meta {
+    flags: BTreeSet<Flag>,
+    derivation: PimdirDerivation,
+}
+
 /// The lean FETCH item set for enumeration: UID + FLAGS only (no ENVELOPE).
 fn uid_flag_names() -> MacroOrMessageDataItemNames<'static> {
     MacroOrMessageDataItemNames::MessageDataItemNames(vec![
@@ -509,8 +770,29 @@ fn uid_flag_names() -> MacroOrMessageDataItemNames<'static> {
     ])
 }
 
-/// Extracts one enumeration entry from a FETCH row; `None` without a UID.
-fn enum_entry(items: &[MessageDataItem<'static>]) -> Option<EnumEntry> {
+/// The FETCH item set naming a message: UID, FLAGS, RFC822.SIZE and the
+/// [`META_FIELDS`], peeked so `\Seen` stays as it is.
+fn meta_names() -> Result<MacroOrMessageDataItemNames<'static>> {
+    let fields = META_FIELDS
+        .iter()
+        .map(|field| AString::try_from(*field).map_err(|_| anyhow!("Invalid IMAP field {field}")))
+        .collect::<Result<Vec<_>>>()?;
+    let fields = Vec1::try_from(fields).map_err(|_| anyhow!("Empty IMAP header field list"))?;
+
+    Ok(MacroOrMessageDataItemNames::MessageDataItemNames(vec![
+        MessageDataItemName::Uid,
+        MessageDataItemName::Flags,
+        MessageDataItemName::Rfc822Size,
+        MessageDataItemName::BodyExt {
+            section: Some(Section::HeaderFields(None, fields)),
+            partial: None,
+            peek: true,
+        },
+    ]))
+}
+
+/// The UID and flags of one FETCH row; `None` without a UID.
+fn spine(items: &[MessageDataItem<'static>]) -> Option<Spine> {
     let mut uid = None;
     let mut flags = BTreeSet::new();
     for item in items {
@@ -522,11 +804,95 @@ fn enum_entry(items: &[MessageDataItem<'static>]) -> Option<EnumEntry> {
             _ => {}
         }
     }
-    Some(EnumEntry {
-        revision: None,
-        id: uid?.to_string(),
-        flags,
-    })
+    Some(Spine { uid: uid?, flags })
+}
+
+/// What one FETCH row of [`meta_names`] names, with the header octets it
+/// carried; `None` without a UID.
+///
+/// The header block is read the way io-pimdir reads a whole message, so a
+/// message named here and later hydrated derives the same key and summary.
+fn meta_from(items: Vec<MessageDataItem<'static>>) -> Option<(u32, Meta, u64)> {
+    let mut uid = None;
+    let mut flags = BTreeSet::new();
+    let mut size = None;
+    let mut header = Vec::new();
+
+    for item in items {
+        match item {
+            MessageDataItem::Uid(u) => uid = Some(u.get()),
+            MessageDataItem::Flags(fs) => {
+                flags = fs.into_iter().filter_map(flag_from_fetch).collect();
+            }
+            MessageDataItem::Rfc822Size(n) => size = Some(u64::from(n)),
+            MessageDataItem::BodyExt { data, .. } => {
+                if let Some(bytes) = data.into_option() {
+                    header = bytes.into_owned();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let read = header.len() as u64;
+    let derivation = mail::derive_meta(&header, size.filter(|size| *size > 0), None);
+    Some((uid?, Meta { flags, derivation }, read))
+}
+
+/// The entries of listed rows, each named by its meta when one was read.
+fn entries(rows: Vec<Spine>, mut metas: BTreeMap<u32, Meta>) -> Vec<EnumEntry> {
+    rows.into_iter()
+        .map(|row| EnumEntry {
+            id: row.uid.to_string(),
+            flags: row.flags,
+            revision: None,
+            meta: metas.remove(&row.uid).map(|meta| meta.derivation),
+        })
+        .collect()
+}
+
+/// A UID set from UIDs, `None` when empty.
+fn uid_set(uids: &[u32]) -> Result<Option<SequenceSet>> {
+    let uids: Vec<NonZeroU32> = uids
+        .iter()
+        .filter_map(|uid| NonZeroU32::new(*uid))
+        .collect();
+    if uids.is_empty() {
+        return Ok(None);
+    }
+    SequenceSet::try_from(uids)
+        .map(Some)
+        .map_err(|_| anyhow!("Invalid UID set"))
+}
+
+/// The day an RFC 3339 instant falls on in UTC, moved by `shift` days, as
+/// an IMAP search date.
+fn imap_day(instant: &str, shift: i64) -> Option<ImapDate> {
+    let day = DateTime::parse_from_rfc3339(instant)
+        .ok()?
+        .to_utc()
+        .date_naive();
+    let day = day.checked_add_signed(chrono::Duration::days(shift))?;
+    ImapDate::try_from(day).ok()
+}
+
+/// Encodes a round's resume cursor `(UIDVALIDITY, lowest UID listed)`:
+/// little-endian, 4 bytes each.
+fn encode_cursor(uid_validity: u32, lowest: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(8);
+    bytes.extend_from_slice(&uid_validity.to_le_bytes());
+    bytes.extend_from_slice(&lowest.to_le_bytes());
+    bytes
+}
+
+/// Decodes a round's resume cursor; `None` for bytes that are not one.
+fn decode_cursor(bytes: &[u8]) -> Option<(u32, u32)> {
+    if bytes.len() != 8 {
+        return None;
+    }
+    let uid_validity = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+    let lowest = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+    Some((uid_validity, lowest))
 }
 
 /// Folds one FETCH row into a shared [`ItemSummary`].
@@ -818,5 +1184,119 @@ mod tests {
         );
         assert_eq!(role_of(&row("Starred", &["Flagged"])), Some("flagged"));
         assert_eq!(role_of(&row("Lists", &["Subscribed"])), None);
+    }
+
+    /// One FETCH row of [`meta_names`]: UID, flags, size and header block.
+    fn meta_row(uid: u32, size: u32, header: &str) -> Vec<MessageDataItem<'static>> {
+        use io_imap::types::core::{Literal, NString};
+
+        let literal = Literal::try_from(header.as_bytes().to_vec()).unwrap();
+        vec![
+            MessageDataItem::Uid(NonZeroU32::new(uid).unwrap()),
+            MessageDataItem::Flags(vec![FlagFetch::Flag(ImapFlag::Seen)]),
+            MessageDataItem::Rfc822Size(size),
+            MessageDataItem::BodyExt {
+                section: None,
+                origin: None,
+                data: NString::from(literal),
+            },
+        ]
+    }
+
+    fn summary(derivation: &PimdirDerivation) -> &io_pimdir::summary::mail::PimdirMailSummary {
+        match derivation.summary.as_ref() {
+            Some(io_pimdir::summary::PimdirSummary::Mail(summary)) => summary,
+            other => panic!("expected a mail summary, got {other:?}"),
+        }
+    }
+
+    /// A listed message is named off its header fields, as its body would
+    /// name it: the `Date` header (never the server's arrival), the size the
+    /// server states, and the attachment mark from the top-level
+    /// `Content-Type`, both ways, with no `BODYSTRUCTURE`.
+    #[test]
+    fn a_listed_message_is_named_by_its_header_fields() {
+        let mixed = "Message-ID: <a@example.org>\r\n\
+                     Date: Wed, 01 Jan 2020 10:00:00 +0100\r\n\
+                     From: Alice <alice@example.org>\r\n\
+                     Subject: Report\r\n\
+                     Content-Type: multipart/mixed; boundary=x\r\n\r\n";
+        let (uid, meta, read) = meta_from(meta_row(42, 9_000, mixed)).unwrap();
+
+        assert_eq!(uid, 42);
+        assert_eq!(read, mixed.len() as u64, "the header octets are counted");
+        assert!(meta.flags.contains(&Flag::from_iana(IanaFlag::Seen)));
+        assert_eq!(meta.derivation.link_id.as_str(), "a@example.org");
+        let named = summary(&meta.derivation);
+        assert_eq!(named.date.as_deref(), Some("2020-01-01T09:00:00Z"));
+        assert_eq!(meta.derivation.sort_key.as_str(), "2020-01-01T09:00:00Z");
+        assert_eq!(named.size, Some(9_000));
+        assert_eq!(named.attachment, Some(true));
+        assert_eq!(named.sender.as_deref(), Some("alice@example.org"));
+
+        let plain = "Message-ID: <b@example.org>\r\nContent-Type: text/plain\r\n\r\n";
+        let (_, meta, _) = meta_from(meta_row(43, 10, plain)).unwrap();
+        let named = summary(&meta.derivation);
+        assert_eq!(named.attachment, Some(false));
+        assert_eq!(named.date, None, "no Date header, no date");
+    }
+
+    /// A row the server answered without a UID names nothing.
+    #[test]
+    fn a_row_without_a_uid_is_skipped() {
+        let mut row = meta_row(1, 1, "Subject: x\r\n\r\n");
+        row.remove(0);
+        assert!(meta_from(row).is_none());
+    }
+
+    /// The resume cursor carries the `UIDVALIDITY` and the lowest UID
+    /// listed, and anything else is no cursor at all.
+    #[test]
+    fn a_round_cursor_round_trips_and_rejects_garbage() {
+        let cursor = encode_cursor(1_774_329_954, 501);
+        assert_eq!(decode_cursor(&cursor), Some((1_774_329_954, 501)));
+        assert_eq!(decode_cursor(&[]), None);
+        assert_eq!(
+            decode_cursor(&encode_checkpoint(1, 2)),
+            None,
+            "a checkpoint is no cursor"
+        );
+    }
+
+    /// `SENTSINCE` and `SENTBEFORE` compare dates in the server's own zone,
+    /// so the search reaches a day below the floor and two above the
+    /// ceiling, the `Date` deciding afterwards.
+    #[test]
+    fn a_scope_narrows_the_search_with_a_day_of_margin() {
+        let since = imap_day("2026-10-01T00:00:00Z", -1).unwrap();
+        assert_eq!(since.as_ref().to_string(), "2026-09-30");
+        let before = imap_day("2026-10-01T23:30:00+02:00", 2).unwrap();
+        assert_eq!(before.as_ref().to_string(), "2026-10-03");
+        assert!(imap_day("last week", -1).is_none());
+    }
+
+    /// Listed rows keep their flags, and each takes the meta read for it.
+    #[test]
+    fn listed_rows_take_their_meta_by_uid() {
+        let (uid, meta, _) = meta_from(meta_row(9, 1, "Message-ID: <c@x>\r\n\r\n")).unwrap();
+        let rows = vec![
+            Spine {
+                uid: 8,
+                flags: BTreeSet::new(),
+            },
+            Spine {
+                uid,
+                flags: meta.flags.clone(),
+            },
+        ];
+        let entries = entries(rows, BTreeMap::from([(uid, meta)]));
+
+        assert_eq!(entries[0].id, "8");
+        assert!(entries[0].meta.is_none(), "a bound message reads no meta");
+        assert_eq!(entries[1].id, "9");
+        assert_eq!(
+            entries[1].meta.as_ref().map(|meta| meta.link_id.as_str()),
+            Some("c@x")
+        );
     }
 }

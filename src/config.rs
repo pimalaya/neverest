@@ -12,7 +12,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{DateTime, Days, Months, NaiveDate, NaiveTime, SecondsFormat, Utc};
+use io_pimdir::collection::PimdirScope;
 use io_sasl::{
     login::SaslLoginCreds, mechanism::Sasl, rfc4505::anonymous::SaslAnonymousCreds,
     rfc4616::plain::SaslPlainCreds, rfc5801::SaslGs2ChannelBinding, rfc5802::SaslScramCreds,
@@ -621,6 +622,10 @@ impl AccountConfig {
         // mode.
         self.mode()?;
 
+        if let Some(since) = &self.item.filter.since {
+            resolve_since(since, Utc::now()).context("Invalid `item.filter.since`")?;
+        }
+
         let mut senders: Vec<_> = sources
             .iter()
             .filter(|(_, source)| source.smtp.is_some())
@@ -637,6 +642,51 @@ impl AccountConfig {
         }
 
         Ok(())
+    }
+
+    /// The scope a run syncs mail under (pimdir SYNC §5): from `since`, the
+    /// run's `--since`, when given, else from `item.filter.since`; unbounded
+    /// without either.
+    ///
+    /// A scope bounds mail by its `Date` and nothing else, so one is refused
+    /// by the key it came from when an endpoint the run syncs (a source of
+    /// `only`, every source when empty, or a target) holds contacts or
+    /// calendars: CardDAV, CalDAV, Google People and Calendar, Graph
+    /// contacts and calendars.
+    pub fn scope(
+        &self,
+        since: Option<&str>,
+        only: &[String],
+        now: DateTime<Utc>,
+    ) -> Result<PimdirScope> {
+        let (raw, key) = match since {
+            Some(raw) => (raw, "--since"),
+            None => match &self.item.filter.since {
+                Some(raw) => (raw.as_str(), "item.filter.since"),
+                None => return Ok(PimdirScope::unbounded()),
+            },
+        };
+        let since = resolve_since(raw, now).with_context(|| format!("Invalid `{key}`"))?;
+
+        let mut unscoped: Vec<String> = self
+            .sources()?
+            .into_iter()
+            .filter(|(name, _)| only.is_empty() || only.contains(name))
+            .chain(self.targets.clone())
+            .filter(|(_, source)| !source.carries_mail())
+            .map(|(name, _)| name)
+            .collect();
+        unscoped.sort();
+        if !unscoped.is_empty() {
+            bail!(
+                "`{key}` bounds mail by its date, and {} sync(s) contacts or calendars, which \
+                 take no scope: drop `{key}`, narrow the run to the mail sources with \
+                 `--source`, or keep these in an account of their own.",
+                unscoped.join(", "),
+            );
+        }
+
+        Ok(PimdirScope::since(since))
     }
 
     /// Refuses a key this version removed, naming what replaces it.
@@ -1110,10 +1160,66 @@ pub struct SourcePermissions {
     pub item: ItemSourcePermissions,
 }
 
-/// Item-level sync options; none is settled yet.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+/// Item-level sync options.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ItemSyncConfig {}
+pub struct ItemSyncConfig {
+    /// Which items a sync lists.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub filter: ItemFilter,
+}
+
+/// Which items a sync lists (pimdir SYNC §5).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ItemFilter {
+    /// The floor of the scope a mail collection syncs under, on the `Date`
+    /// header: a duration back from today (`30d`, `12w`, `6mo`, `1y`), a
+    /// date (`2026-01-01`, midnight UTC) or an RFC 3339 instant.
+    ///
+    /// Mail outside it is neither listed nor deleted: what an earlier,
+    /// wider sync stored stays. Mail only, refused on an account syncing
+    /// contacts or calendars. `sync --since` overrides it for one run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+}
+
+/// The RFC 3339 instant in UTC a scope floor `raw` names at `now`: a
+/// duration back from `now` (`30d`, `12w`, `6mo`, `1y`, or spelled out:
+/// `30 days`), taken to the start of its UTC day so a run resumes the
+/// round an earlier run of the same day opened; a date (`2026-01-01`) at
+/// midnight UTC; or an instant, normalised to UTC.
+pub fn resolve_since(raw: &str, now: DateTime<Utc>) -> Result<String> {
+    let raw = raw.trim();
+    let format = |at: DateTime<Utc>| at.to_rfc3339_opts(SecondsFormat::Secs, true);
+
+    if let Ok(at) = DateTime::parse_from_rfc3339(raw) {
+        return Ok(format(at.to_utc()));
+    }
+    if let Ok(day) = NaiveDate::parse_from_str(raw, "%Y-%m-%d") {
+        return Ok(format(day.and_time(NaiveTime::MIN).and_utc()));
+    }
+
+    let digits = raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len());
+    let (count, unit) = raw.split_at(digits);
+    let count: u32 = count.parse().with_context(|| {
+        format!("{raw:?} is neither a duration (`30d`), a date (`2026-01-01`) nor an instant")
+    })?;
+    let today = now.date_naive();
+    let floor = match unit.trim().to_ascii_lowercase().as_str() {
+        "d" | "day" | "days" => today.checked_sub_days(Days::new(u64::from(count))),
+        "w" | "week" | "weeks" => today.checked_sub_days(Days::new(u64::from(count) * 7)),
+        "mo" | "month" | "months" => today.checked_sub_months(Months::new(count)),
+        "y" | "year" | "years" => today.checked_sub_months(Months::new(count.saturating_mul(12))),
+        unit => bail!(
+            "{raw:?} counts in {unit:?}, which is none of d (days), w (weeks), mo (months), y \
+             (years)"
+        ),
+    }
+    .with_context(|| format!("{raw:?} reaches before any date"))?;
+
+    Ok(format(floor.and_time(NaiveTime::MIN).and_utc()))
+}
 
 /// Collection-name filter: include-list, exclude-list, or keep all.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -2567,5 +2673,99 @@ msgraph.user-id = "me"
 
         let err = account.validate().unwrap_err().to_string();
         assert!(err.contains("both a source and a target"), "got {err}");
+    }
+
+    fn at(instant: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(instant).unwrap().to_utc()
+    }
+
+    /// A duration counts back from today to the start of its UTC day, so
+    /// two runs of one day list one scope; a date is its midnight UTC, and
+    /// an instant is normalised to UTC.
+    #[test]
+    fn a_scope_floor_reads_as_a_duration_a_date_or_an_instant() {
+        let now = at("2026-10-07T15:42:10+02:00");
+
+        assert_eq!(resolve_since("30d", now).unwrap(), "2026-09-07T00:00:00Z");
+        assert_eq!(
+            resolve_since(" 30 days ", now).unwrap(),
+            "2026-09-07T00:00:00Z"
+        );
+        assert_eq!(resolve_since("2w", now).unwrap(), "2026-09-23T00:00:00Z");
+        assert_eq!(resolve_since("6mo", now).unwrap(), "2026-04-07T00:00:00Z");
+        assert_eq!(resolve_since("1y", now).unwrap(), "2025-10-07T00:00:00Z");
+        assert_eq!(resolve_since("0d", now).unwrap(), "2026-10-07T00:00:00Z");
+        assert_eq!(
+            resolve_since("2026-01-01", now).unwrap(),
+            "2026-01-01T00:00:00Z"
+        );
+        assert_eq!(
+            resolve_since("2026-01-01T10:00:00+02:00", now).unwrap(),
+            "2026-01-01T08:00:00Z"
+        );
+
+        assert!(resolve_since("30m", now).is_err(), "minutes are not a unit");
+        assert!(resolve_since("soon", now).is_err());
+        assert!(resolve_since("", now).is_err());
+    }
+
+    /// `item.filter.since` scopes mail, `--since` overrides it, and either is
+    /// refused by its own name on an account syncing contacts.
+    #[test]
+    fn a_scope_is_read_from_the_flag_or_the_key_and_refused_beside_contacts() {
+        let now = at("2026-10-07T12:00:00Z");
+        let mail: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            item.filter.since = "30d"
+            "#,
+        )
+        .unwrap();
+        mail.validate().unwrap();
+
+        assert_eq!(
+            mail.scope(None, &[], now).unwrap(),
+            PimdirScope::since("2026-09-07T00:00:00Z")
+        );
+        assert_eq!(
+            mail.scope(Some("2026-01-01"), &[], now).unwrap(),
+            PimdirScope::since("2026-01-01T00:00:00Z")
+        );
+        assert!(
+            AccountConfig::default()
+                .scope(None, &[], now)
+                .unwrap()
+                .is_unbounded()
+        );
+
+        let mixed: AccountConfig = toml::from_str(
+            r#"
+            sources.mail.imap.server = "imaps://imap.example.org:993"
+            sources.dav.carddav.server = "https://carddav.example.org/"
+            sources.dav.carddav.auth.basic.username = "user"
+            sources.dav.carddav.auth.basic.password.raw = "pw"
+            item.filter.since = "30d"
+            "#,
+        )
+        .unwrap();
+        let err = mixed.scope(None, &[], now).unwrap_err().to_string();
+        assert!(err.contains("`item.filter.since`"), "got {err}");
+        assert!(err.contains("dav"), "got {err}");
+        let err = mixed.scope(Some("7d"), &[], now).unwrap_err().to_string();
+        assert!(err.contains("`--since`"), "got {err}");
+        assert!(
+            mixed.scope(None, &[String::from("mail")], now).is_ok(),
+            "a run narrowed to the mail source takes it"
+        );
+
+        let bad: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            item.filter.since = "a while"
+            "#,
+        )
+        .unwrap();
+        let err = format!("{:#}", bad.validate().unwrap_err());
+        assert!(err.contains("item.filter.since"), "got {err}");
     }
 }

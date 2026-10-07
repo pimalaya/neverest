@@ -42,7 +42,7 @@ use io_pimdir::{
         PimdirError, PimdirSourceStore, PimdirStore, blobs::PimdirBlobs, producer::PimdirProducer,
     },
     codec::PimdirAction,
-    collection::PimdirCollectionId,
+    collection::{PimdirCollectionId, PimdirScope},
     hub::{PimdirBinding, PimdirSourceId},
     intent::{COLLECTION_CREATE, PimdirCollectionCreate},
     load::PimdirLoadScope,
@@ -83,8 +83,8 @@ use crate::{
         },
         pipe,
         remote::{
-            BATCH_SIZE, CachedFetchRemote, PimRemote, RefusedCreate, RejectedPush, hydrate_batch,
-            resolve_kind, wire_name,
+            BATCH_SIZE, Bound, CachedFetchRemote, PimRemote, RefusedCreate, RejectedPush,
+            body_bytes, hydrate_batch, resolve_kind, wire_name,
         },
         run_verb, source_id,
         state::{LookedUpRoles, StoreState},
@@ -94,8 +94,9 @@ use crate::{
     sync::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
-            DrainedQueue, IntentEntry, ItemConflict, ParkedQueueAction, PatchEntry, PurgedItems,
-            RefusedDuplicate, RejectedWrite, SyncOutput, ThrottledSource, UnreachedEndpoint,
+            CollectionCoverage, DrainedQueue, IntentEntry, ItemConflict, OpenRound,
+            ParkedQueueAction, PatchEntry, PurgedItems, RefusedDuplicate, RejectedWrite,
+            SourceDownload, SyncOutput, ThrottledSource, UnreachedEndpoint,
         },
     },
     throttle,
@@ -336,6 +337,10 @@ struct SourceCtx {
     ///
     /// That drain also un-counts the hunks the run had derived for them.
     rejected: Vec<RejectedPush>,
+    /// The scope a mail collection of this endpoint lists (pimdir SYNC §5).
+    scope: PimdirScope,
+    /// Whether the run only plans, downloading no body.
+    dry_run: bool,
 }
 
 impl SourceCtx {
@@ -382,6 +387,7 @@ pub fn run(
     account_name: impl Into<String>,
     account_config: &AccountConfig,
     collection_filter: Option<CollectionFilter>,
+    scope: &PimdirScope,
     dry_run: bool,
     connections: usize,
     no_purge: bool,
@@ -457,6 +463,7 @@ pub fn run(
                 source_name,
                 source,
                 collection_filter.clone(),
+                scope,
                 &work_dir,
                 dry_run,
                 connections,
@@ -475,6 +482,7 @@ pub fn run(
                 source_name,
                 source,
                 collection_filter.clone(),
+                scope,
                 &work_dir,
                 dry_run,
                 connections,
@@ -509,6 +517,9 @@ pub fn run(
             source,
             until: throttle::rfc3339(until),
         });
+    }
+    for (source, bytes) in account.downloaded() {
+        report.downloaded.push(SourceDownload { source, bytes });
     }
 
     // NOTE: once for the run: the parked rows and the outstanding conflicts
@@ -631,6 +642,7 @@ fn run_targets(
     source_name: &str,
     source_config: SourceConfig,
     collection_filter: Option<CollectionFilter>,
+    scope: &PimdirScope,
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
@@ -650,6 +662,7 @@ fn run_targets(
             target_name.clone(),
             endpoints[target_name].clone(),
             collection_filter.clone(),
+            scope,
             relay,
             work_dir,
             dry_run,
@@ -674,6 +687,7 @@ fn run_pair(
     right_name: String,
     right_config: SourceConfig,
     collection_filter: Option<CollectionFilter>,
+    scope: &PimdirScope,
     relay: bool,
     work_dir: &Path,
     dry_run: bool,
@@ -714,6 +728,8 @@ fn run_pair(
             .with_context(|| Unreached::new(&left_name, format!("Open source {left_name}")))?,
         refused: Vec::new(),
         rejected: Vec::new(),
+        scope: scope.clone(),
+        dry_run,
     };
     let mut right = SourceCtx {
         name: right_name.clone(),
@@ -724,6 +740,8 @@ fn run_pair(
             .with_context(|| Unreached::new(&right_name, format!("Open target {right_name}")))?,
         refused: Vec::new(),
         rejected: Vec::new(),
+        scope: scope.clone(),
+        dry_run,
     };
     s.success("Opened endpoints");
 
@@ -912,6 +930,7 @@ fn run_local(
     source_name: &str,
     source_config: SourceConfig,
     collection_filter: Option<CollectionFilter>,
+    scope: &PimdirScope,
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
@@ -946,6 +965,8 @@ fn run_local(
         source_account,
         authority,
         workers,
+        scope,
+        dry_run,
     )?;
     let mut stores: Vec<PimdirSourceStore> = (0..workers)
         .map(|_| open_store(work_dir, &source, account_name))
@@ -1048,6 +1069,7 @@ fn run_local(
 }
 
 /// Opens `count` single-connection [`SourceCtx`]s with overlapping handshakes.
+#[allow(clippy::too_many_arguments)]
 fn open_source_contexts(
     name: &str,
     namespace: &str,
@@ -1055,6 +1077,8 @@ fn open_source_contexts(
     account: SourceAccount,
     authority: Authority,
     count: usize,
+    scope: &PimdirScope,
+    dry_run: bool,
 ) -> Result<Vec<SourceCtx>> {
     let perms = config.permissions();
     let opened: Vec<Result<Pool>> = thread::scope(|scope| {
@@ -1079,6 +1103,8 @@ fn open_source_contexts(
             pool: pool.with_context(|| Unreached::new(name, "Open connection"))?,
             refused: Vec::new(),
             rejected: Vec::new(),
+            scope: scope.clone(),
+            dry_run,
         });
     }
     Ok(ctxs)
@@ -1150,6 +1176,14 @@ fn phase1_spine(
                                     },
                                     Some(err),
                                 ));
+                            // NOTE: a round the failure interrupted stays open,
+                            // which the next run resumes.
+                            report_coverage(
+                                store,
+                                &collection,
+                                ctx,
+                                &mut merged_ref.lock().unwrap(),
+                            );
                         }
                     }
                     let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1202,11 +1236,14 @@ fn collection_spine(
         &ctx.name,
         &mut report,
     )?;
-    // NOTE: before the probe, which resolves a bodiless kind's link ids by
-    // downloading. Read after it, a card is already hydrated and reports
-    // nothing, so a run that pulled a whole address book called itself quiet.
-    itemize_fetches(collection, display, store, &ctx.name, &mut report)?;
-    upgrade_probed(collection, ctx, store, blobs, dry_run)?;
+    itemize_fetches(
+        collection,
+        display,
+        store,
+        &ctx.name,
+        &pull.events,
+        &mut report,
+    )?;
     itemize_single(collection, store, ctx, &mut report)?;
     if dry_run {
         return Ok((Vec::new(), report));
@@ -1218,12 +1255,12 @@ fn collection_spine(
     let push = pushing.lock().unwrap_or_else(PoisonError::into_inner);
     for _ in 0..=MAX_EXTRA_PASSES {
         let pass = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable())?;
-        upgrade_probed(collection, ctx, store, blobs, false)?;
         if !moved(&pass) {
             break;
         }
     }
     drop(push);
+    report_coverage(store, collection, ctx, &mut report);
     itemize_refused(&ctx.name, mem::take(&mut ctx.refused), &mut report);
     itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
 
@@ -1292,14 +1329,16 @@ fn phase2_hydrate(
         store,
         batches,
         |ctx, collection, handles| {
-            hydrate_batch(
+            let items = hydrate_batch(
                 kind,
                 ctx.pool.primary(),
                 wire_name(&namespace, collection),
                 handles,
                 blobs,
                 Some(&on_body),
-            )
+            )?;
+            ctx.pool.downloaded(body_bytes(&items));
+            Ok(items)
         },
         |ctx, store, collection, items| {
             let fallback = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
@@ -1563,22 +1602,35 @@ fn itemize_single(
     Ok(())
 }
 
-/// Reports the pull plan: every not-yet-`Full`, non-tombstone item.
+/// Reports the pull plan: every not-yet-`Full`, non-tombstone item, and every
+/// item the pull brought in with its body.
 ///
-/// Runs before the probe rather than after it. A kind with no cheap `Meta` tier
-/// resolves its link id from the body, so the probe hydrates it, and a plan
-/// read afterwards would be empty for exactly what the run is about to pull.
+/// A kind named by its body (DAV, Google, Graph contacts and events) arrives
+/// with it, its page fetching the bodies before it lands, so the plan read
+/// off the store alone would be empty for exactly what the run pulled: those
+/// are read off the pull's events.
 fn itemize_fetches(
     collection: &str,
     display: &str,
     store: &PimdirSourceStore,
     source: &str,
+    events: &[PimdirSyncEvent],
     report: &mut SyncOutput,
 ) -> Result<()> {
+    let pulled: HashSet<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            PimdirSyncEvent::Added(handle) | PimdirSyncEvent::ContentChanged(handle) => {
+                Some(handle.as_str())
+            }
+            _ => None,
+        })
+        .collect();
     let view =
         load_side(store, collection).with_context(|| format!("Load {source} {collection}"))?;
     for placement in view {
-        if placement.status == PimdirStatus::Tombstone || placement.object.is_some() {
+        let arrived = placement.object.is_some() && pulled.contains(placement.handle.as_str());
+        if placement.status == PimdirStatus::Tombstone || (placement.object.is_some() && !arrived) {
             continue;
         }
         let id = placement
@@ -1637,6 +1689,9 @@ fn sync_collection(
         progress,
         &mut report,
     );
+
+    report_coverage(left_store, collection, left, &mut report);
+    report_coverage(right_store, collection, right, &mut report);
 
     // NOTE: folded whether the collection reconciled or failed: what it
     // reported before it stopped is still what happened.
@@ -2500,7 +2555,6 @@ fn reconcile_side(
     };
 
     let side = sync_side_rebuilding(collection, ctx, store, blobs, push)?;
-    upgrade_probed(collection, ctx, store, blobs, dry_run)?;
     resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
 
     let display = display_name(&ctx.namespace, collection);
@@ -2611,15 +2665,20 @@ fn sync_verb(
     push: bool,
     rights: PimdirPushRights,
     conflict: PimdirConflictPolicy,
+    scope: PimdirScope,
+    scope_bound: bool,
 ) -> PimdirSync {
     let opts = PimdirSyncOptions {
         push,
         rights,
         conflict,
+        scope,
         ..Default::default()
     };
 
-    PimdirSync::new(collection.to_string(), opts).beside_other_sources(true)
+    PimdirSync::new(collection.to_string(), opts)
+        .beside_other_sources(true)
+        .scope_bound(scope_bound)
 }
 
 /// Runs one side's `sync` against its server and returns its report.
@@ -2630,8 +2689,24 @@ fn sync_side(
     blobs: &PimdirBlobs,
     push: bool,
 ) -> Result<PimdirSyncReport> {
-    let verb = sync_verb(collection, push, ctx.push_rights(), ctx.conflict_policy());
-    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
+    let bound = store
+        .load(
+            &PimdirCollectionId(collection.to_string()),
+            &PimdirLoadScope::All,
+        )
+        .map(Bound::from_loaded)
+        .map_err(|err| anyhow!("Load {collection} error: {err}"))?;
+    let verb = sync_verb(
+        collection,
+        push,
+        ctx.push_rights(),
+        ctx.conflict_policy(),
+        ctx.scope.clone(),
+        ctx.pool.primary().scope_bound(),
+    );
+    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone())
+        .with_bound(collection, bound)
+        .with_bodies(!ctx.dry_run);
     let report = run_verb(store, &mut remote, verb);
     // NOTE: kept whether the pass succeeded or not: a later failure does not
     // unlearn a refusal the run already saw.
@@ -2641,43 +2716,6 @@ fn sync_side(
     ctx.rejected.extend(rejected);
 
     report.with_context(|| format!("Sync {} {collection}", &ctx.name))
-}
-
-/// Raises every freshly probed placement to [`Kind::probe_tier`].
-///
-/// Its link id is then known and it enters the hub. `Meta` for mail, whose
-/// envelope carries the identity; `Full` for a kind whose body is the only
-/// thing that does.
-fn upgrade_probed(
-    collection: &str,
-    ctx: &mut SourceCtx,
-    store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
-    dry_run: bool,
-) -> Result<()> {
-    let probed: Vec<PimdirHandle> = load_side(store, collection)
-        .with_context(|| format!("Load {} {collection}", &ctx.name))?
-        .into_iter()
-        .filter(|p| p.level == PimdirLevel::Probed && p.status != PimdirStatus::Tombstone)
-        .map(|p| p.handle)
-        .collect();
-    if probed.is_empty() {
-        return Ok(());
-    }
-    let tier = resolve_kind(&mut ctx.pool).probe_tier();
-
-    if dry_run && tier == PimdirTier::Full {
-        return Ok(());
-    }
-
-    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-    run_verb(
-        store,
-        &mut remote,
-        PimdirUpgrade::new(collection.to_string(), probed, tier),
-    )
-    .with_context(|| format!("Upgrade probed {} {collection}", &ctx.name))?;
-    Ok(())
 }
 
 /// One side's placements the engine left marked conflicted in `collection`.
@@ -3492,6 +3530,46 @@ pub(crate) fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutpu
                 applied,
             }),
     );
+}
+
+/// Reports what one endpoint holds of a collection it just synced (pimdir
+/// SYNC §5): the last closed round's scope and when, and a round left open.
+fn report_coverage(
+    store: &PimdirStore,
+    collection: &str,
+    ctx: &SourceCtx,
+    report: &mut SyncOutput,
+) {
+    let rows = match store.list_coverage(collection) {
+        Ok(rows) => rows,
+        Err(err) => {
+            warn!("cannot read the coverage of {collection}: {err}");
+            return;
+        }
+    };
+
+    for row in rows.into_iter().filter(|row| row.source == ctx.name) {
+        let (since, until, at) = match row.coverage {
+            Some(coverage) => (
+                coverage.scope.since,
+                coverage.scope.until,
+                Some(coverage.at),
+            ),
+            None => (None, None, None),
+        };
+        report.coverage.push(CollectionCoverage {
+            source: row.source,
+            collection: display_name(&ctx.namespace, collection).to_owned(),
+            since,
+            until,
+            at,
+            round: row.round.map(|round| OpenRound {
+                since: round.scope.since,
+                until: round.scope.until,
+                started_at: round.started_at,
+            }),
+        });
+    }
 }
 
 /// Surfaces the store's parked queue actions, once for the run.
@@ -4330,17 +4408,28 @@ mod tests {
     use io_pimdir::{
         change::{PimdirChange, PimdirChangeKind, PimdirDropReason},
         client::reader::PimdirReader,
-        collection::PimdirCheckpoint,
+        collection::{PimdirCheckpoint, PimdirCursor},
         object::PimdirObject,
         placement::PimdirOrigin,
         remote::{
-            PimdirFetchedBody, PimdirPushOutcome, PimdirPushResult, PimdirRemote, PimdirRemoteItem,
+            PimdirEnumerate, PimdirEnumerated, PimdirFetchedBody, PimdirListing, PimdirPushOutcome,
+            PimdirPushResult, PimdirRemote, PimdirRemoteItem, PimdirRemoteMeta,
             PimdirRemoteSnapshot,
         },
         summary::mail::PimdirMailSummary,
     };
 
     use super::*;
+
+    /// What names a listed member by `link` alone, as a store binding does.
+    fn named(link: &str) -> PimdirRemoteMeta {
+        PimdirRemoteMeta {
+            link_id: PimdirLinkId(link.into()),
+            summary: None,
+            sort_key: PimdirSortKey::default(),
+            body: None,
+        }
+    }
 
     /// The marker survives the context a caller adds on top of the open,
     /// and a failure that is not an open carries none.
@@ -4737,22 +4826,24 @@ mod tests {
         fn enumerate(
             &mut self,
             _collection: &PimdirCollectionId,
-            _cursor: Option<PimdirCheckpoint>,
-        ) -> Result<PimdirRemoteSnapshot, Self::Error> {
-            Ok(PimdirRemoteSnapshot {
-                items: self
-                    .spine
-                    .iter()
-                    .map(|(handle, _)| PimdirRemoteItem {
-                        handle: PimdirHandle(handle.clone()),
-                        flags: PimdirFlags::default(),
-                        revision: None,
-                    })
-                    .collect(),
-                vanished: Vec::new(),
-                complete: true,
-                checkpoint: PimdirCheckpoint(crate::imap::backend::encode_checkpoint(2, 1)),
-            })
+            _request: PimdirEnumerate,
+        ) -> Result<PimdirEnumerated, Self::Error> {
+            let items = self
+                .spine
+                .iter()
+                .map(|(handle, link)| PimdirRemoteItem {
+                    handle: PimdirHandle(handle.clone()),
+                    flags: PimdirFlags::default(),
+                    revision: None,
+                    meta: named(link),
+                })
+                .collect();
+            Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::round(
+                items,
+                Some(PimdirCheckpoint(crate::imap::backend::encode_checkpoint(
+                    2, 1,
+                ))),
+            )))
         }
 
         fn fetch(
@@ -5257,22 +5348,22 @@ mod tests {
         fn enumerate(
             &mut self,
             _collection: &PimdirCollectionId,
-            _cursor: Option<PimdirCheckpoint>,
-        ) -> Result<PimdirRemoteSnapshot, Self::Error> {
-            Ok(PimdirRemoteSnapshot {
-                items: self
-                    .items
-                    .iter()
-                    .map(|(handle, (revision, _))| PimdirRemoteItem {
-                        handle: PimdirHandle(handle.clone()),
-                        flags: PimdirFlags::default(),
-                        revision: Some(revision.clone()),
-                    })
-                    .collect(),
-                vanished: Vec::new(),
-                complete: true,
-                checkpoint: PimdirCheckpoint(b"token-1".to_vec()),
-            })
+            _request: PimdirEnumerate,
+        ) -> Result<PimdirEnumerated, Self::Error> {
+            let items = self
+                .items
+                .iter()
+                .map(|(handle, (revision, _))| PimdirRemoteItem {
+                    handle: PimdirHandle(handle.clone()),
+                    flags: PimdirFlags::default(),
+                    revision: Some(revision.clone()),
+                    meta: named("uid:a"),
+                })
+                .collect();
+            Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::round(
+                items,
+                Some(PimdirCheckpoint(b"token-1".to_vec())),
+            )))
         }
 
         fn fetch(
@@ -6134,6 +6225,8 @@ mod tests {
                 false,
                 PimdirPushRights::all(),
                 PimdirConflictPolicy::Manual,
+                PimdirScope::unbounded(),
+                true,
             ),
         )
         .unwrap();
@@ -6227,7 +6320,14 @@ mod tests {
         run_verb(
             store,
             remote,
-            sync_verb("contacts", true, rights, PimdirConflictPolicy::Manual),
+            sync_verb(
+                "contacts",
+                true,
+                rights,
+                PimdirConflictPolicy::Manual,
+                PimdirScope::unbounded(),
+                true,
+            ),
         )
         .unwrap()
     }
@@ -6683,50 +6783,71 @@ mod tests {
         );
     }
 
-    /// A freshly probed item carries no link id, so it never enters the hub.
+    /// A kind named by its body arrives with it, its page fetching the bodies.
     ///
-    /// The pull plan has to read the side, not the projection, or a first sync
-    /// of a kind whose identity lives in the body reports nothing at all.
+    /// The plan read off the store alone would call it done, so a first sync of
+    /// a whole address book reported nothing at all: the pull's events name it.
     #[test]
-    fn the_pull_plan_names_an_item_that_has_no_link_id_yet() {
+    fn the_pull_plan_names_an_item_its_listing_brought_with_its_body() {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("dav");
         store
             .ensure_collection("dav/contacts", "text/vcard")
             .unwrap();
 
+        let object = PimdirHash("beef0001".into());
         store
-            .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
-                collection: PimdirCollectionId("dav/contacts".into()),
-                handle: PimdirHandle("card-1.vcf".into()),
-                link_id: None,
-                object: None,
-                level: PimdirLevel::Probed,
-                summary: None,
-                sort_key: PimdirSortKey::default(),
-                flags: PimdirFlags::default(),
-                status: PimdirStatus::Clean,
-                conflict_revision: None,
-                conflict_object: None,
-                base: None,
-                origin: None,
-            })])
+            .write(vec![
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: object.clone(),
+                        size: 3,
+                    },
+                    body: Some(b"abc".to_vec()),
+                },
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("dav/contacts".into()),
+                    handle: PimdirHandle("card-1.vcf".into()),
+                    link_id: Some(PimdirLinkId("uid:card-1".into())),
+                    object: Some(object.clone()),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Clean,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
+                        revision: Some(String::from("etag-1")),
+                        object: Some(object),
+                    }),
+                    origin: None,
+                }),
+            ])
             .unwrap();
 
+        let mut report = SyncOutput::default();
+        itemize_fetches("dav/contacts", "contacts", &store, "dav", &[], &mut report).unwrap();
         assert!(
-            projection_view(&store, "dav/contacts", "dav")
-                .unwrap()
-                .is_empty(),
-            "the projection drops the residual, which is why it was the wrong read",
+            report.item.patch.is_empty(),
+            "a body held from before is no fetch"
         );
 
-        let mut report = SyncOutput::default();
-        itemize_fetches("dav/contacts", "contacts", &store, "dav", &mut report).unwrap();
-
+        let added = [PimdirSyncEvent::Added(PimdirHandle("card-1.vcf".into()))];
+        itemize_fetches(
+            "dav/contacts",
+            "contacts",
+            &store,
+            "dav",
+            &added,
+            &mut report,
+        )
+        .unwrap();
         assert_eq!(report.item.patch.len(), 1);
         assert!(
-            matches!(&report.item.patch[0].hunk, ItemHunk::Fetch { id, .. } if id == "card-1.vcf"),
-            "named by its handle, the only name it has before its body arrives",
+            matches!(&report.item.patch[0].hunk, ItemHunk::Fetch { id, .. } if id == "uid:card-1"),
+            "named by the identity its body states",
         );
     }
 
@@ -6761,7 +6882,7 @@ mod tests {
             .unwrap();
 
         let mut report = SyncOutput::default();
-        itemize_fetches("dav/contacts", "contacts", &store, "dav", &mut report).unwrap();
+        itemize_fetches("dav/contacts", "contacts", &store, "dav", &[], &mut report).unwrap();
 
         assert_eq!(
             report.item.patch.len(),
@@ -6780,6 +6901,9 @@ mod tests {
         items: Vec<(String, String, Vec<u8>)>,
         /// Every handle a body was fetched for, so a re-download is visible.
         fetched: Vec<String>,
+        /// What the store binds, `handle -> link id`, which names a listed
+        /// member at the same revision without its body, as `PimRemote` does.
+        bound: HashMap<String, String>,
     }
 
     impl PimdirRemote for FullListingRemote {
@@ -6788,22 +6912,31 @@ mod tests {
         fn enumerate(
             &mut self,
             _collection: &PimdirCollectionId,
-            _cursor: Option<PimdirCheckpoint>,
-        ) -> Result<PimdirRemoteSnapshot, Self::Error> {
-            Ok(PimdirRemoteSnapshot {
-                items: self
-                    .items
-                    .iter()
-                    .map(|(handle, _, _)| PimdirRemoteItem {
-                        handle: PimdirHandle(handle.clone()),
-                        flags: PimdirFlags::from_iter([] as [String; 0]),
-                        revision: Some(String::from("etag-1")),
-                    })
-                    .collect(),
-                vanished: Vec::new(),
-                complete: true,
-                checkpoint: PimdirCheckpoint(Vec::new()),
-            })
+            _request: PimdirEnumerate,
+        ) -> Result<PimdirEnumerated, Self::Error> {
+            let mut items = Vec::new();
+            for (handle, uid, body) in self.items.clone() {
+                let meta = match self.bound.get(&handle) {
+                    Some(link) => named(link),
+                    None => {
+                        self.fetched.push(handle.clone());
+                        named(&uid).with_body(PimdirFetchedBody::Inline {
+                            hash: PimdirHash(format!("{:016x}", digest(&body))),
+                            bytes: body,
+                        })
+                    }
+                };
+                items.push(PimdirRemoteItem {
+                    handle: PimdirHandle(handle),
+                    flags: PimdirFlags::from_iter([] as [String; 0]),
+                    revision: Some(String::from("etag-1")),
+                    meta,
+                });
+            }
+            Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::round(
+                items,
+                Some(PimdirCheckpoint(Vec::new())),
+            )))
         }
 
         fn fetch(
@@ -6859,15 +6992,22 @@ mod tests {
 
     /// One collection's spine as `collection_spine` runs it for a lone source.
     ///
-    /// Pull, report the bodies still to fetch, then raise the probed items to
-    /// `Full`, which is where a DAV identity resolves.
+    /// Pull, the listing bringing the bodies of what the store does not bind,
+    /// which is where a DAV identity resolves, then report what came.
     fn spine(
         store: &mut PimdirSourceStore,
         remote: &mut FullListingRemote,
         collection: &str,
     ) -> SyncOutput {
+        remote.bound = load_side(store, collection)
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.base.is_some())
+            .filter_map(|p| Some((p.handle.0, p.link_id?.0)))
+            .collect();
+
         let mut report = SyncOutput::default();
-        run_verb(
+        let pull = run_verb(
             store,
             remote,
             sync_verb(
@@ -6875,25 +7015,20 @@ mod tests {
                 false,
                 PimdirPushRights::all(),
                 PimdirConflictPolicy::Manual,
+                PimdirScope::unbounded(),
+                true,
             ),
         )
         .unwrap();
-        itemize_fetches(collection, "agenda", store, "caldav", &mut report).unwrap();
-
-        let probed: Vec<PimdirHandle> = load_side(store, collection)
-            .unwrap()
-            .into_iter()
-            .filter(|p| p.level == PimdirLevel::Probed)
-            .map(|p| p.handle)
-            .collect();
-        if !probed.is_empty() {
-            run_verb(
-                store,
-                remote,
-                PimdirUpgrade::new(collection.to_string(), probed, PimdirTier::Full),
-            )
-            .unwrap();
-        }
+        itemize_fetches(
+            collection,
+            "agenda",
+            store,
+            "caldav",
+            &pull.events,
+            &mut report,
+        )
+        .unwrap();
         report
     }
 
@@ -6925,6 +7060,7 @@ mod tests {
                 ),
             ],
             fetched: Vec::new(),
+            bound: HashMap::new(),
         };
 
         let first = spine(&mut store, &mut remote, "caldav/agenda");
@@ -7033,8 +7169,8 @@ mod tests {
         fn enumerate(
             &mut self,
             _collection: &PimdirCollectionId,
-            _cursor: Option<PimdirCheckpoint>,
-        ) -> Result<PimdirRemoteSnapshot, Self::Error> {
+            _request: PimdirEnumerate,
+        ) -> Result<PimdirEnumerated, Self::Error> {
             anyhow::bail!("no wire")
         }
 
@@ -7246,6 +7382,264 @@ mod tests {
                 ("imap/Archive".to_string(), 1, "x".to_string()),
                 ("imap/INBOX".to_string(), 1, "0".to_string()),
             ],
+        );
+    }
+
+    /// A mail source answering rounds in scripted pages, newest first, its
+    /// cursor the index of the next page.
+    struct PagedRemote {
+        /// Each page's members, as `(handle, Date header)`.
+        pages: Vec<Vec<(&'static str, Option<&'static str>)>>,
+        /// The page whose request fails once, as a dropped connection would.
+        fail_at: Option<usize>,
+        /// Whether the next resumed request is refused its cursor.
+        reject_cursor: bool,
+        /// Every request, in order.
+        requests: Vec<PimdirEnumerate>,
+    }
+
+    impl PagedRemote {
+        fn new(pages: Vec<Vec<(&'static str, Option<&'static str>)>>) -> Self {
+            Self {
+                pages,
+                fail_at: None,
+                reject_cursor: false,
+                requests: Vec::new(),
+            }
+        }
+
+        fn cursors(&self) -> Vec<Option<String>> {
+            self.requests
+                .iter()
+                .map(|request| {
+                    request
+                        .cursor()
+                        .map(|cursor| String::from_utf8_lossy(&cursor.0).into_owned())
+                })
+                .collect()
+        }
+    }
+
+    impl PimdirRemote for PagedRemote {
+        type Error = anyhow::Error;
+
+        fn enumerate(
+            &mut self,
+            _collection: &PimdirCollectionId,
+            request: PimdirEnumerate,
+        ) -> Result<PimdirEnumerated, Self::Error> {
+            self.requests.push(request.clone());
+            let cursor = match &request.listing {
+                PimdirListing::Delta(checkpoint) => {
+                    return Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::delta(
+                        Vec::new(),
+                        Vec::new(),
+                        checkpoint.clone(),
+                    )));
+                }
+                PimdirListing::Round { cursor, .. } => cursor.clone(),
+            };
+            if cursor.is_some() && mem::take(&mut self.reject_cursor) {
+                return Ok(PimdirEnumerated::CursorRejected);
+            }
+
+            let index: usize = cursor
+                .map(|cursor| String::from_utf8_lossy(&cursor.0).parse().unwrap())
+                .unwrap_or(0);
+            if self.fail_at == Some(index) {
+                self.fail_at = None;
+                anyhow::bail!("connection reset by peer");
+            }
+
+            let items = self.pages[index]
+                .iter()
+                .map(|(handle, date)| {
+                    let mut header = format!("Message-ID: <{handle}@example.org>\r\n");
+                    if let Some(date) = date {
+                        header.push_str(&format!("Date: {date}\r\n"));
+                    }
+                    PimdirRemoteItem {
+                        handle: PimdirHandle((*handle).into()),
+                        flags: PimdirFlags::default(),
+                        revision: None,
+                        meta: io_pimdir::summary::mail::derive_meta(header.as_bytes(), None, None)
+                            .into(),
+                    }
+                })
+                .collect();
+            let next = (index + 1 < self.pages.len())
+                .then(|| PimdirCursor((index + 1).to_string().into_bytes()));
+            let checkpoint = (index == 0).then(|| PimdirCheckpoint(b"modseq-1".to_vec()));
+
+            Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::page(
+                items, next, checkpoint,
+            )))
+        }
+
+        fn fetch(
+            &mut self,
+            _collection: &PimdirCollectionId,
+            _handles: Vec<PimdirHandle>,
+            _tier: PimdirTier,
+        ) -> Result<Vec<PimdirFetchedItem>, Self::Error> {
+            anyhow::bail!("every member arrives named")
+        }
+
+        fn push(
+            &mut self,
+            _collection: &PimdirCollectionId,
+            changes: Vec<PimdirChange>,
+        ) -> Result<Vec<PimdirPushResult>, Self::Error> {
+            anyhow::bail!("nothing is staged, so nothing pushes: {changes:?}")
+        }
+    }
+
+    /// A mailbox holding one message from 2020, synced before any scope.
+    fn mailbox_with_an_old_message(dir: &Path) -> PimdirSourceStore {
+        let old = io_pimdir::summary::mail::derive_meta(
+            b"Message-ID: <old@example.org>\r\nDate: Wed, 01 Jan 2020 10:00:00 +0000\r\n\r\n",
+            None,
+            None,
+        );
+        let mut store = PimdirStore::open(dir).unwrap().for_source("imap");
+        store
+            .ensure_collection("imap/INBOX", "message/rfc822")
+            .unwrap();
+        store
+            .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                collection: PimdirCollectionId("imap/INBOX".into()),
+                handle: PimdirHandle("1".into()),
+                link_id: Some(old.link_id),
+                object: None,
+                level: PimdirLevel::Meta,
+                summary: old.summary,
+                sort_key: old.sort_key,
+                flags: PimdirFlags::default(),
+                status: PimdirStatus::Clean,
+                conflict_revision: None,
+                conflict_object: None,
+                base: Some(PimdirBase {
+                    flags: PimdirFlags::default(),
+                    revision: None,
+                    object: None,
+                }),
+                origin: None,
+            })])
+            .unwrap();
+        store
+    }
+
+    fn scoped_sync(store: &mut PimdirSourceStore, remote: &mut PagedRemote) -> Result<()> {
+        let verb = sync_verb(
+            "imap/INBOX",
+            true,
+            PimdirPushRights::all(),
+            PimdirConflictPolicy::Manual,
+            PimdirScope::since("2026-09-07T00:00:00Z"),
+            false,
+        );
+        run_verb(store, remote, verb).map(|_| ())
+    }
+
+    fn handles_of(store: &PimdirSourceStore) -> BTreeSet<String> {
+        load_side(store, "imap/INBOX")
+            .unwrap()
+            .into_iter()
+            .map(|placement| placement.handle.0)
+            .collect()
+    }
+
+    fn pages() -> Vec<Vec<(&'static str, Option<&'static str>)>> {
+        vec![
+            vec![
+                ("31", Some("Tue, 06 Oct 2026 10:00:00 +0000")),
+                ("30", Some("Tue, 01 Jan 2030 10:00:00 +0000")),
+            ],
+            vec![
+                ("20", Some("Mon, 05 Oct 2026 10:00:00 +0000")),
+                ("19", None),
+            ],
+            vec![("10", Some("Fri, 02 Oct 2026 10:00:00 +0000"))],
+        ]
+    }
+
+    /// A round broken between two pages keeps what landed and resumes from
+    /// its cursor; its last page infers no delete out of scope, and nothing
+    /// pushes a delete nobody staged.
+    #[test]
+    fn an_interrupted_round_resumes_from_its_cursor() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = mailbox_with_an_old_message(dir.path());
+        let mut remote = PagedRemote::new(pages());
+        remote.fail_at = Some(1);
+
+        let err = scoped_sync(&mut store, &mut remote).unwrap_err();
+        assert!(format!("{err:#}").contains("connection reset"), "{err:#}");
+        assert_eq!(
+            handles_of(&store),
+            names(&["1", "30", "31"]),
+            "page one landed"
+        );
+        let coverage = store.list_coverage("imap/INBOX").unwrap();
+        assert_eq!(coverage.len(), 1);
+        assert!(coverage[0].coverage.is_none(), "no round closed yet");
+        assert!(coverage[0].round.is_some(), "the round is left open");
+
+        scoped_sync(&mut store, &mut remote).unwrap();
+        assert_eq!(
+            remote.cursors(),
+            [
+                None,
+                Some(String::from("1")),
+                Some(String::from("1")),
+                Some(String::from("2"))
+            ],
+            "the second run asked for the page the first never got",
+        );
+        assert_eq!(
+            handles_of(&store),
+            names(&["1", "10", "19", "20", "30", "31"]),
+            "the 2020 message no page listed lies out of scope and stays",
+        );
+        let coverage = store.list_coverage("imap/INBOX").unwrap();
+        let closed = coverage[0].coverage.as_ref().expect("the round closed");
+        assert_eq!(closed.scope, PimdirScope::since("2026-09-07T00:00:00Z"));
+        assert!(coverage[0].round.is_none());
+
+        let requests = remote.requests.len();
+        scoped_sync(&mut store, &mut remote).unwrap();
+        assert!(
+            matches!(remote.requests[requests].listing, PimdirListing::Delta(_)),
+            "a covered scope lists the delta from the round's checkpoint",
+        );
+    }
+
+    /// A cursor the source refuses restarts the round from its first page,
+    /// the members already landed matched by handle and never twice.
+    #[test]
+    fn a_refused_cursor_restarts_the_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = mailbox_with_an_old_message(dir.path());
+        let mut remote = PagedRemote::new(pages());
+        remote.fail_at = Some(1);
+        scoped_sync(&mut store, &mut remote).unwrap_err();
+
+        remote.reject_cursor = true;
+        scoped_sync(&mut store, &mut remote).unwrap();
+        assert_eq!(
+            remote.cursors(),
+            [
+                None,
+                Some(String::from("1")),
+                Some(String::from("1")),
+                None,
+                Some(String::from("1")),
+                Some(String::from("2")),
+            ],
+        );
+        assert_eq!(
+            handles_of(&store),
+            names(&["1", "10", "19", "20", "30", "31"])
         );
     }
 }

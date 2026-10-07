@@ -40,6 +40,22 @@ pub struct ImapClient {
     /// command. Every select path records it here, so a cached skip is always
     /// correct.
     selected: Option<String>,
+    /// The UIDs a round still has to list, kept from the search its first
+    /// page made so a later page of this run searches nothing.
+    pub(crate) round: Option<RoundUids>,
+}
+
+/// The UIDs left to list in a round of one mailbox, newest first.
+#[derive(Debug)]
+pub(crate) struct RoundUids {
+    /// The mailbox the round lists.
+    pub mailbox: String,
+    /// The `UIDVALIDITY` the UIDs belong to.
+    pub uid_validity: u32,
+    /// The scope the search narrowed to, as `(since, until)`.
+    pub scope: (Option<String>, Option<String>),
+    /// The UIDs left, highest first.
+    pub left: Vec<u32>,
 }
 
 impl ImapClient {
@@ -60,6 +76,7 @@ impl ImapClient {
             inner,
             capabilities,
             selected: None,
+            round: None,
         };
         if client.supports_qresync() {
             let condstore = CapabilityEnable::CondStore;

@@ -54,6 +54,14 @@ default = true
 # it with targets to migrate AND keep a local copy.
 #retain = true
 
+# The oldest mail a sync lists, on its `Date` header: a duration back from
+# today (`30d`, `12w`, `6mo`, `1y`), a date (`2026-01-01`, midnight UTC) or an
+# RFC 3339 instant. Mail older than that is neither listed nor deleted: what a
+# wider sync stored stays, and widening it later lists only what it lacks.
+# Mail only: refused on an account syncing contacts or calendars. `neverest
+# sync --since <WHEN>` overrides it for one run.
+#item.filter.since = "30d"
+
 # --------------------------------------------------------------------------------
 # Per-source overview
 # --------------------------------------------------------------------------------

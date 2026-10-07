@@ -85,6 +85,19 @@ pub struct SyncOutput {
     /// after `until` picks up the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub throttled: Vec<ThrottledSource>,
+    /// What each source's collections are known to hold once the run ends
+    /// (pimdir SYNC §5): the scope of the last round that closed and when,
+    /// and the round still open, if one is.
+    ///
+    /// A round left open was interrupted (a failure, a throttled provider,
+    /// a stopped run): the run is incomplete (exit 3), and the next one
+    /// resumes it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coverage: Vec<CollectionCoverage>,
+    /// The octets each source received this run: the bodies and the meta
+    /// of its listings, not the protocol around them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloaded: Vec<SourceDownload>,
 }
 
 impl SyncOutput {
@@ -114,6 +127,8 @@ impl SyncOutput {
             rejected,
             unreached,
             throttled,
+            coverage,
+            downloaded,
         } = other;
 
         self.collection.patch.extend(collection.patch);
@@ -128,6 +143,8 @@ impl SyncOutput {
         self.rejected.extend(rejected);
         self.unreached.extend(unreached);
         self.throttled.extend(throttled);
+        self.coverage.extend(coverage);
+        self.downloaded.extend(downloaded);
     }
 
     /// Records a divergence this run parked, unless the run named it already.
@@ -164,6 +181,10 @@ impl SyncOutput {
     pub fn incomplete(&self) -> bool {
         !self.throttled.is_empty()
             || self
+                .coverage
+                .iter()
+                .any(|coverage| coverage.round.is_some())
+            || self
                 .collection
                 .patch
                 .iter()
@@ -178,6 +199,88 @@ impl SyncOutput {
                 .iter()
                 .any(|entry| entry.error.is_some() && !entry.parked)
     }
+}
+
+/// One source's coverage of one collection.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionCoverage {
+    /// The source, as the account names it.
+    pub source: String,
+    /// The collection, as the source names it.
+    pub collection: String,
+    /// The floor of the last closed round's scope, RFC 3339 UTC; absent
+    /// when it had none, or no round ever closed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// Its ceiling, exclusive; absent when it had none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// When that round closed; absent while none ever did, the source
+    /// holding no complete listing of the collection yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<String>,
+    /// The round still open, which the next run resumes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round: Option<OpenRound>,
+}
+
+impl fmt::Display for CollectionCoverage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            source,
+            collection,
+            since,
+            until,
+            at,
+            round,
+        } = self;
+        let span = |since: &Option<String>, until: &Option<String>| match (since, until) {
+            (None, None) => String::from("everything"),
+            (Some(since), None) => format!("since {since}"),
+            (None, Some(until)) => format!("before {until}"),
+            (Some(since), Some(until)) => format!("from {since} to {until}"),
+        };
+
+        write!(f, "{source} {collection}: ")?;
+        match at {
+            Some(at) => write!(f, "{} as of {at}", span(since, until))?,
+            None => write!(f, "never listed whole")?,
+        }
+        if let Some(round) = round {
+            write!(
+                f,
+                ", a round over {} open since {} to resume",
+                span(&round.since, &round.until),
+                round.started_at,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// A round left open: its scope and when it opened.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenRound {
+    /// The floor of the scope it lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since: Option<String>,
+    /// The ceiling of the scope it lists, exclusive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<String>,
+    /// When it opened, RFC 3339 UTC.
+    pub started_at: String,
+}
+
+/// The octets one source received this run.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDownload {
+    /// The source or target, as the account names it.
+    pub source: String,
+    /// The octets of bodies and listed meta.
+    pub bytes: u64,
 }
 
 /// A source that gave up after its provider throttled it.
@@ -590,6 +693,21 @@ impl fmt::Display for SyncOutput {
             writeln!(f, "Item patches ({n}):", n = self.item.patch.len())?;
             for entry in &self.item.patch {
                 writeln!(f, " - {hunk}", hunk = entry.hunk)?;
+            }
+            writeln!(f)?;
+        }
+
+        // NOTE: a collection covered whole is the usual case, and says
+        // nothing worth a line.
+        let bounded: Vec<&CollectionCoverage> = self
+            .coverage
+            .iter()
+            .filter(|c| c.since.is_some() || c.until.is_some() || c.round.is_some())
+            .collect();
+        if !bounded.is_empty() {
+            writeln!(f, "Coverage ({n}):", n = bounded.len())?;
+            for coverage in bounded {
+                writeln!(f, " - {coverage}")?;
             }
             writeln!(f)?;
         }

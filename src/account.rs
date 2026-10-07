@@ -18,7 +18,14 @@
 //! None of these types derive `Debug`: what they hold is exactly what must
 //! not reach a log line.
 
-use std::{collections::HashMap, sync::Arc, time::SystemTime};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::SystemTime,
+};
 
 use anyhow::{Context, Result, bail};
 #[cfg(any(feature = "imap", feature = "smtp"))]
@@ -121,6 +128,21 @@ impl Account {
         throttled.sort();
         throttled
     }
+
+    /// The octets each endpoint that received any received this run, by
+    /// name: the bodies and the meta of its listings, not the wire's own.
+    pub fn downloaded(&self) -> Vec<(String, u64)> {
+        let mut downloaded: Vec<_> = self
+            .endpoints
+            .iter()
+            .filter_map(|(name, account)| {
+                let bytes = account.as_ref().ok()?.downloaded.load(Ordering::Relaxed);
+                (bytes > 0).then(|| (name.clone(), bytes))
+            })
+            .collect();
+        downloaded.sort();
+        downloaded
+    }
 }
 
 /// One endpoint with every secret resolved: what a connection opens from.
@@ -134,6 +156,9 @@ pub struct SourceAccount {
     /// How the endpoint answers its provider's throttling, shared by every
     /// connection opened from it.
     pub throttle: Arc<Throttle>,
+    /// The octets of bodies and meta the run received from the endpoint,
+    /// counted across every connection opened from it.
+    pub downloaded: Arc<AtomicU64>,
 }
 
 impl SourceAccount {
@@ -181,6 +206,7 @@ impl SourceAccount {
             #[cfg(feature = "smtp")]
             smtp,
             throttle: Arc::new(throttle),
+            downloaded: Arc::new(AtomicU64::new(0)),
         })
     }
 }

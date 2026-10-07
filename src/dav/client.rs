@@ -55,7 +55,7 @@ use crate::{
     client::{EnumEntry, Enumeration, WrittenItem},
     item::{collection::Collection, flag::Flag, flag::FlagOp},
     kind::{Kind, LinkId},
-    throttle::Throttle,
+    throttle::{Request, Throttle},
 };
 
 /// How many truncated rounds one enumeration drains before giving up, so a
@@ -172,10 +172,29 @@ impl DavClient {
     /// first. Only an end-of-stream failure retries, never an applied write.
     ///
     /// The source's [`Throttle`] also sends it again while the server
-    /// throttles it (429, 503), which a server answers before applying
-    /// anything.
+    /// throttles it (429, 503). A request creating a resource goes through
+    /// [`op_create`](Self::op_create) instead.
     fn op<T>(
         &mut self,
+        run: impl FnMut(&mut WebdavClientStd) -> Result<T, WebdavClientStdError>,
+    ) -> Result<T, WebdavClientStdError> {
+        self.send(Request::Idempotent, run)
+    }
+
+    /// Runs one WebDAV exchange creating a resource or a collection: sent
+    /// again on a 429 alone, which a server answers before applying
+    /// anything, never on a 503, after which the resource may exist.
+    fn op_create<T>(
+        &mut self,
+        run: impl FnMut(&mut WebdavClientStd) -> Result<T, WebdavClientStdError>,
+    ) -> Result<T, WebdavClientStdError> {
+        self.send(Request::Create, run)
+    }
+
+    /// Runs one WebDAV exchange of `request`, as [`op`](Self::op) describes.
+    fn send<T>(
+        &mut self,
+        request: Request,
         mut run: impl FnMut(&mut WebdavClientStd) -> Result<T, WebdavClientStdError>,
     ) -> Result<T, WebdavClientStdError> {
         let throttle = Arc::clone(&self.throttle);
@@ -189,7 +208,11 @@ impl DavClient {
                 }
                 out => out,
             },
-            |err| is_throttled(err).then_some(None),
+            |err| {
+                throttle_status(err)
+                    .is_some_and(|status| request.retries(status))
+                    .then_some(None)
+            },
             |body| WebdavClientStdError::Send(WebdavSendError::HttpStatus { status: 429, body }),
         )
     }
@@ -324,7 +347,7 @@ impl DavClient {
                     display_name: name,
                     ..Default::default()
                 };
-                self.op(|dav| dav.create_addressbook(&book))
+                self.op_create(|dav| dav.create_addressbook(&book))
             }
             DavKind::Cal => {
                 let calendar = CaldavCalendar {
@@ -332,7 +355,7 @@ impl DavClient {
                     display_name: name,
                     ..Default::default()
                 };
-                self.op(|dav| dav.create_calendar(&calendar))
+                self.op_create(|dav| dav.create_calendar(&calendar))
             }
         }
         .with_context(|| format!("Cannot create the {kind} collection {collection}"))
@@ -441,7 +464,8 @@ impl DavClient {
             // NOTE: a partial snapshot read as complete deletes members left
             // out.
             complete: !delta.truncated,
-            checkpoint: Vec::new(),
+            checkpoint: Some(Vec::new()),
+            ..Default::default()
         })
     }
 
@@ -479,7 +503,8 @@ impl DavClient {
             items,
             vanished,
             complete,
-            checkpoint: token.unwrap_or_default().into_bytes(),
+            checkpoint: Some(token.unwrap_or_default().into_bytes()),
+            ..Default::default()
         })
     }
 
@@ -652,13 +677,13 @@ impl DavClient {
     ) -> Result<WrittenItem, WebdavClientStdError> {
         match self.kind {
             DavKind::Card => self
-                .op(|dav| dav.create_card(collection, id, body.clone()))
+                .op_create(|dav| dav.create_card(collection, id, body.clone()))
                 .map(|created| WrittenItem {
                     id: created.id,
                     revision: created.etag,
                 }),
             DavKind::Cal => self
-                .op(|dav| dav.create_item(collection, id, body.clone()))
+                .op_create(|dav| dav.create_item(collection, id, body.clone()))
                 .map(|created| WrittenItem {
                     id: created.id,
                     revision: created.etag,
@@ -740,6 +765,7 @@ fn entry(change: WebdavSyncChange) -> EnumEntry {
         id: href_id(&change.href),
         flags: BTreeSet::new(),
         revision: change.etag,
+        meta: None,
     }
 }
 
@@ -856,12 +882,13 @@ fn is_connection_closed(err: &WebdavClientStdError) -> bool {
     }
 }
 
-/// Whether the server throttled the exchange: 429, or 503 (RFC 9110
-/// §15.6.4), wherever the status surfaces.
+/// The HTTP status an exchange failed with, wherever it surfaces, which
+/// [`Request::retries`] reads as a throttle or not: 429, or 503 (RFC 9110
+/// §15.6.4) for an idempotent exchange.
 ///
 /// io-webdav keeps no `Retry-After`, so the wait is neverest's back-off.
-fn is_throttled(err: &WebdavClientStdError) -> bool {
-    let status = match err {
+fn throttle_status(err: &WebdavClientStdError) -> Option<u16> {
+    match err {
         WebdavClientStdError::Send(WebdavSendError::HttpStatus { status, .. })
         | WebdavClientStdError::WebdavSyncCollection(WebdavSyncCollectionError::Send(
             WebdavSendError::HttpStatus { status, .. },
@@ -869,10 +896,9 @@ fn is_throttled(err: &WebdavClientStdError) -> bool {
         | WebdavClientStdError::WebdavFollowRedirects(WebdavFollowRedirectsError::HttpStatus {
             status,
             ..
-        }) => *status,
-        _ => return false,
-    };
-    matches!(status, 429 | 503)
+        }) => Some(*status),
+        _ => None,
+    }
 }
 
 /// Whether a write was refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC

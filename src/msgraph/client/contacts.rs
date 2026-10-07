@@ -41,6 +41,10 @@ pub const CONTACTS_FOLDER: &str = "contacts";
 /// being read separately with its stash expanded.
 const DELTA_SELECT: &str = "id,changeKey";
 
+/// The contacts a delta page holds at most (`Prefer: odata.maxpagesize`):
+/// Graph pages ten by default, and a page of ids and change keys is small.
+const CONTACTS_PAGE_SIZE: u32 = 1000;
+
 /// The page size requested when listing contact folders.
 const FOLDER_PAGE_SIZE: u32 = 100;
 
@@ -103,11 +107,11 @@ impl GraphClient {
             if row.removed.is_some() {
                 vanished.push(row.contact.id);
             } else {
-                items.push(EnumEntry {
-                    id: row.contact.id,
-                    flags: Default::default(),
-                    revision: row.contact.change_key,
-                });
+                items.push(EnumEntry::bare(
+                    row.contact.id,
+                    Default::default(),
+                    row.contact.change_key,
+                ));
             }
         }
 
@@ -115,7 +119,8 @@ impl GraphClient {
             items,
             vanished,
             complete: fresh,
-            checkpoint: encode_checkpoint(&delta_link),
+            checkpoint: Some(encode_checkpoint(&delta_link)),
+            ..Default::default()
         })
     }
 
@@ -132,14 +137,22 @@ impl GraphClient {
         let folder = folder(collection).map(str::to_owned);
         let fresh_round = |client: &mut Self| {
             client
-                .op(|graph| graph.contacts_delta(folder.as_deref(), Some(DELTA_SELECT)))
+                .op(|graph| {
+                    graph.contacts_delta_with_page_size(
+                        folder.as_deref(),
+                        Some(DELTA_SELECT),
+                        Some(CONTACTS_PAGE_SIZE),
+                    )
+                })
                 .with_context(|| format!("Start contacts delta of {collection} error"))
         };
 
         let mut fresh = link.is_none();
         let mut page = match link {
             None => fresh_round(self)?,
-            Some(link) => match self.op(|graph| graph.contacts_delta_from_link(&link)) {
+            Some(link) => match self.op(|graph| {
+                graph.contacts_delta_from_link_with_page_size(&link, Some(CONTACTS_PAGE_SIZE))
+            }) {
                 Ok(page) => page,
                 Err(err) if is_expired_link(&err) => {
                     warn!("graph contacts delta link of {collection} expired, restarting");
@@ -171,7 +184,9 @@ impl GraphClient {
                 format!("Contacts delta page of {collection} carries no paging link")
             })?;
             page = self
-                .op(|graph| graph.contacts_delta_from_link(&next))
+                .op(|graph| {
+                    graph.contacts_delta_from_link_with_page_size(&next, Some(CONTACTS_PAGE_SIZE))
+                })
                 .with_context(|| format!("Page contacts delta of {collection} error"))?;
         }
     }
@@ -229,7 +244,7 @@ impl GraphClient {
         let uid = contact.stashed_uid();
 
         let created = self
-            .op(|graph| graph.contact_create(folder(collection), &contact))
+            .create(|graph| graph.contact_create(folder(collection), &contact))
             .with_context(|| format!("Create contact in {collection} error"))?;
         let stored = self.contact(&created.id)?;
 

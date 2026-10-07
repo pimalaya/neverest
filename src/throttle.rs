@@ -167,6 +167,31 @@ impl Throttle {
     }
 }
 
+/// What a request does to the provider, which decides which refusals it is
+/// sent again on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Request {
+    /// A read, a flag set, a move by id, a delete: sending it twice does what
+    /// sending it once does, so a 503 is retried like a 429.
+    Idempotent,
+    /// A create, an upload, a send, an invitation: sent again only when the
+    /// provider refused it unprocessed (429, a Google rate limit), never on a
+    /// 503 or another 5xx, after which it may have landed already and a
+    /// second one would land a second copy.
+    Create,
+}
+
+impl Request {
+    /// Whether an answer of `status` throttles this request: one it is sent
+    /// again on.
+    pub fn retries(self, status: u16) -> bool {
+        match self {
+            Self::Idempotent => matches!(status, 429 | 503),
+            Self::Create => status == 429,
+        }
+    }
+}
+
 /// The wait before retry `retry` (from 0) when the provider states none:
 /// [`FIRST_WAIT`] doubled each time, capped at [`MAX_WAIT`], drawn between
 /// its half and its whole so connections throttled together spread out.
@@ -201,6 +226,19 @@ pub fn retry_after(value: &str) -> Option<Duration> {
 /// error envelope, not its `reason`, so the reason is read from the message
 /// ("Rate Limit Exceeded", "User-rate limit exceeded"). A daily limit is
 /// not a rate limit: waiting seconds does not lift it.
+/// [`google_throttled`] for a request of `request`: a 503 throttles an
+/// idempotent one only.
+pub fn google_throttled_for(
+    request: Request,
+    status: u16,
+    message: &str,
+) -> Option<Option<Duration>> {
+    match (request, status) {
+        (Request::Create, 503) => None,
+        _ => google_throttled(status, message),
+    }
+}
+
 pub fn google_throttled(status: u16, message: &str) -> Option<Option<Duration>> {
     let stated = google_retry_after(message);
     match status {
@@ -412,5 +450,35 @@ mod tests {
             "a date past is no wait"
         );
         assert_eq!(retry_after("soon"), None);
+    }
+
+    /// A create is sent again only on a refusal answered before anything
+    /// was done: a 503 may follow a write that landed.
+    #[test]
+    fn a_create_is_retried_on_a_429_alone() {
+        assert!(Request::Idempotent.retries(429));
+        assert!(Request::Idempotent.retries(503));
+        assert!(!Request::Idempotent.retries(500));
+        assert!(Request::Create.retries(429));
+        assert!(!Request::Create.retries(503));
+        assert!(!Request::Create.retries(502));
+
+        assert_eq!(
+            google_throttled_for(Request::Idempotent, 503, "Backend Error"),
+            Some(None)
+        );
+        assert_eq!(
+            google_throttled_for(Request::Create, 503, "Backend Error"),
+            None
+        );
+        assert_eq!(
+            google_throttled_for(Request::Create, 403, "Rate Limit Exceeded"),
+            Some(None),
+            "a rate limit refuses the request before doing it"
+        );
+        assert_eq!(
+            google_throttled_for(Request::Create, 429, "Too many requests"),
+            Some(None)
+        );
     }
 }

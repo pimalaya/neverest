@@ -47,7 +47,11 @@ use io_gmail::v1::{
     },
     send::{GMAIL_API_BASE, GmailSendError, GmailSendOutput},
 };
-use io_pimdir::summary::mail::{addresses, decode, instant, message_ids};
+use io_pimdir::{
+    collection::PimdirScope,
+    remote::{PimdirEnumerate, PimdirListing},
+    summary::mail::{addresses, decode, instant, message_ids, meta_attachment},
+};
 use log::{debug, trace, warn};
 use pimalaya_stream::{
     proxy::Proxy,
@@ -58,15 +62,16 @@ use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
 use crate::{
-    client::{EnumEntry, Enumeration, WrittenItem},
+    client::{EnumEntry, Enumeration, Held, Listed, WrittenItem},
     item::{
         address::Address,
         collection::Collection,
         flag::{Flag, FlagOp, IanaFlag},
         summary::{ItemSummary, normalize_message_id},
     },
+    kind::mail,
     offline::invitation::Refusal,
-    throttle::{Throttle, google_throttled},
+    throttle::{Request, Throttle, google_throttled_for},
 };
 
 /// Gmail system label marking an unread message; its absence means seen.
@@ -93,6 +98,7 @@ const SUMMARY_HEADERS: &[&str] = &[
     "Cc",
     "Bcc",
     "Date",
+    "Content-Type",
 ];
 
 /// The history records a delta round reads.
@@ -105,6 +111,18 @@ const DELTA_HISTORY: &[GmailHistoryType] = &[
 
 /// The page size of message and history listings, the API maximum.
 const PAGE_SIZE: u32 = 500;
+
+/// The ids one page of a round lists (pimdir SYNC §4): their metadata read
+/// near 40 a second commits a page every two and a half seconds.
+const ROUND_PAGE_SIZE: u32 = 100;
+
+/// The metadata reads a page makes in a row, Google advising batches of 50
+/// at most; io-gmail sends no HTTP batch, so each is its own request, paced.
+const META_CHUNK: usize = 50;
+
+/// How far around a scope the `after:` and `before:` searches reach: Gmail
+/// files a message by its reception, which may differ from its `Date`.
+const SCOPE_MARGIN_DAYS: i64 = 2;
 
 /// The most ids one `batchModify` takes.
 const BATCH_SIZE: usize = 1000;
@@ -150,6 +168,9 @@ pub struct GmailClient {
     alive: bool,
     /// The source's pacing and back-off, shared by its connections.
     throttle: Arc<Throttle>,
+    /// The flag sets of the last label and query a round page read, kept
+    /// for the run so the next page lists them again for nothing.
+    flag_sets: Option<((String, Option<String>), FlagSets)>,
 }
 
 impl GmailClient {
@@ -175,6 +196,7 @@ impl GmailClient {
             labels: HashMap::new(),
             alive: true,
             throttle,
+            flag_sets: None,
         })
     }
 
@@ -201,9 +223,31 @@ impl GmailClient {
     /// keep-alive hint.
     ///
     /// The source's [`Throttle`] paces it and sends it again while Gmail
-    /// throttles it (429, 503, or a 403 rate limit).
+    /// throttles it (429, 503, or a 403 rate limit). A request creating
+    /// something goes through [`create`](Self::create) instead.
     fn op<T>(
         &mut self,
+        units: u32,
+        run: impl FnMut(&mut GmailClientStd) -> Result<GmailSendOutput<T>, GmailClientStdError>,
+    ) -> Result<T, GmailClientStdError> {
+        self.send(Request::Idempotent, units, run)
+    }
+
+    /// Runs one Gmail request that creates something (a label, an imported
+    /// message): sent again on a refusal Gmail answers before doing anything
+    /// (429, a rate limit), never on a 503, after which it may exist.
+    fn create<T>(
+        &mut self,
+        units: u32,
+        run: impl FnMut(&mut GmailClientStd) -> Result<GmailSendOutput<T>, GmailClientStdError>,
+    ) -> Result<T, GmailClientStdError> {
+        self.send(Request::Create, units, run)
+    }
+
+    /// Runs one Gmail request of `request`, as [`op`](Self::op) describes.
+    fn send<T>(
+        &mut self,
+        request: Request,
         units: u32,
         mut run: impl FnMut(&mut GmailClientStd) -> Result<GmailSendOutput<T>, GmailClientStdError>,
     ) -> Result<T, GmailClientStdError> {
@@ -223,7 +267,7 @@ impl GmailClient {
             },
             |err| match err {
                 GmailClientStdError::Send(GmailSendError::Api { status, message }) => {
-                    google_throttled(*status, message)
+                    google_throttled_for(request, *status, message)
                 }
                 _ => None,
             },
@@ -321,7 +365,7 @@ impl GmailClient {
         }
 
         let created = self
-            .op(units::LABEL_CREATE, |client| client.label_create(&label))
+            .create(units::LABEL_CREATE, |client| client.label_create(&label))
             .with_context(|| format!("Create label {} error", label.name))?;
         let name = created.name.clone();
         self.labels.insert(created.name, created.id);
@@ -339,7 +383,7 @@ impl GmailClient {
             ..Default::default()
         };
         let label = self
-            .op(units::LABEL_CREATE, |client| client.label_create(&label))
+            .create(units::LABEL_CREATE, |client| client.label_create(&label))
             .with_context(|| format!("Create label {name} error"))?;
 
         self.labels.insert(label.name, label.id);
@@ -361,78 +405,198 @@ impl GmailClient {
         Ok(())
     }
 
-    /// Enumerates a label, as a delta from the checkpoint's history id when
-    /// it holds one that has not expired, else as a full round.
-    pub fn enumerate(&mut self, collection: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
+    /// Lists one page of a label (pimdir SYNC §4).
+    ///
+    /// A delta reads the label's history since the checkpoint's history id,
+    /// an expired one (HTTP 404) being a rejected checkpoint. A round lists
+    /// the label newest first, [`ROUND_PAGE_SIZE`] ids a page under the
+    /// scope's `after:` (two days below `since`, a superset of the scope on
+    /// `Date`), its cursor the page token; its first page carries the
+    /// profile's history id, read before the listing, so what lands during
+    /// the round is the next delta's.
+    pub fn enumerate(
+        &mut self,
+        collection: &str,
+        request: &PimdirEnumerate,
+        held: Held<'_>,
+    ) -> Result<Listed> {
         let label = self.label_id(collection)?;
 
-        let Some(start) = cursor.and_then(decode_checkpoint) else {
-            return self.full_round(collection, &label);
-        };
-
-        match self.history(&label, &start, DELTA_HISTORY) {
-            Ok((records, checkpoint)) => self.delta_round(collection, &label, &records, checkpoint),
-            Err(err) if is_not_found(&err) => {
-                warn!("gmail history of {collection} expired, restarting a full round");
-                self.full_round(collection, &label)
+        match &request.listing {
+            PimdirListing::Delta(checkpoint) => {
+                let Some(start) = decode_checkpoint(&checkpoint.0) else {
+                    return Ok(Listed::CursorRejected);
+                };
+                match self.history(&label, &start, DELTA_HISTORY) {
+                    Ok((records, next)) => self
+                        .delta_round(collection, &label, &records, next, held)
+                        .map(Listed::Page),
+                    Err(err) if is_not_found(&err) => {
+                        warn!("gmail history of {collection} expired, restarting a round");
+                        Ok(Listed::CursorRejected)
+                    }
+                    Err(err) => Err(anyhow::Error::new(err)
+                        .context(format!("List history of {collection} error"))),
+                }
             }
-            Err(err) => {
-                Err(anyhow::Error::new(err).context(format!("List history of {collection} error")))
+            PimdirListing::Round { cursor, band } => {
+                let token = match cursor {
+                    None => None,
+                    Some(cursor) => match decode_checkpoint(&cursor.0) {
+                        Some(token) => Some(token),
+                        None => return Ok(Listed::CursorRejected),
+                    },
+                };
+                self.round_page(collection, &label, token, *band, &request.scope, held)
             }
         }
     }
 
-    /// Lists every message of a label with its flags.
-    ///
-    /// The checkpoint is the profile's history id, read before the first
-    /// listing, so nothing landing mid-round is missed. The flags come from
-    /// three id-only listings read as sets rather than one get per message.
-    fn full_round(&mut self, collection: &str, label: &str) -> Result<Enumeration> {
-        debug!("begin gmail full round");
-        trace!("collection: {collection}");
+    /// One page of a round over `scope`, from its start or from `token`.
+    fn round_page(
+        &mut self,
+        collection: &str,
+        label: &str,
+        token: Option<String>,
+        band: bool,
+        scope: &PimdirScope,
+        held: Held<'_>,
+    ) -> Result<Listed> {
+        debug!("begin gmail round page");
+        trace!("collection: {collection}, resumed: {}", token.is_some());
 
-        let checkpoint = self
-            .op(units::PROFILE_GET, |client| client.profile_get())
-            .context("Get Gmail profile error")?
-            .history_id
-            .context("Gmail profile carries no history id")?;
+        let checkpoint = match token.is_none() && !band {
+            true => Some(
+                self.op(units::PROFILE_GET, |client| client.profile_get())
+                    .context("Get Gmail profile error")?
+                    .history_id
+                    .context("Gmail profile carries no history id")?
+                    .into_bytes(),
+            ),
+            false => None,
+        };
 
-        let ids = self.list_ids(label, None)?;
-        let unread: BTreeSet<String> = self.list_ids(label, Some(UNREAD))?.into_iter().collect();
-        let starred: BTreeSet<String> = self.list_ids(label, Some(STARRED))?.into_iter().collect();
-        let important: BTreeSet<String> =
-            self.list_ids(label, Some(IMPORTANT))?.into_iter().collect();
+        let query = scope_query(scope);
+        let label_ids = [label.to_owned()];
+        let params = GmailMessagesListParams {
+            q: query.as_deref(),
+            label_ids: &label_ids,
+            max_results: Some(ROUND_PAGE_SIZE),
+            page_token: token.as_deref(),
+            include_spam_trash: label == SPAM || label == TRASH,
+        };
+        let page = match self.op(units::MESSAGES_LIST, |client| client.messages_list(&params)) {
+            Ok(page) => page,
+            Err(err) if token.is_some() && is_bad_request(&err) => {
+                warn!("gmail page token of {collection} refused, restarting the round");
+                return Ok(Listed::CursorRejected);
+            }
+            Err(err) => {
+                return Err(
+                    anyhow::Error::new(err).context(format!("List messages of {collection} error"))
+                );
+            }
+        };
 
-        let items = ids
+        let ids: Vec<String> = page
+            .messages
             .into_iter()
-            .map(|id| EnumEntry {
-                flags: flags(
-                    unread.contains(&id),
-                    starred.contains(&id),
-                    important.contains(&id),
-                ),
-                id,
-                revision: None,
-            })
-            .collect::<Vec<_>>();
+            .map(|message| message.id)
+            .collect();
+        let (bound, unbound): (Vec<String>, Vec<String>) =
+            ids.into_iter().partition(|id| held.holds(id));
 
-        debug!("end of gmail full round");
-        trace!("items: {}", items.len());
+        let mut items = Vec::with_capacity(bound.len() + unbound.len());
+        if !bound.is_empty() {
+            let flags = self.flag_sets(label, query.as_deref())?;
+            items.extend(bound.into_iter().map(|id| {
+                let flags = flags.of(&id);
+                EnumEntry::bare(id, flags, None)
+            }));
+        }
 
-        Ok(Enumeration {
+        let mut bytes = 0;
+        for chunk in unbound.chunks(META_CHUNK) {
+            for id in chunk {
+                match self.metadata(id) {
+                    Ok(message) => {
+                        bytes += serde_json::to_vec(&message).map_or(0, |json| json.len() as u64);
+                        items.push(named_entry(id, &message));
+                    }
+                    // NOTE: gone since the listing: absent from the round,
+                    // as it is from the label.
+                    Err(err) if is_not_found(&err) => continue,
+                    Err(err) => {
+                        return Err(anyhow::Error::new(err)
+                            .context(format!("Get message {id} metadata error")));
+                    }
+                }
+            }
+        }
+
+        debug!("end of gmail round page");
+        trace!(
+            "items: {}, last: {}",
+            items.len(),
+            page.next_page_token.is_none()
+        );
+
+        Ok(Listed::Page(Enumeration {
             items,
             vanished: Vec::new(),
             complete: true,
-            checkpoint: checkpoint.into_bytes(),
+            cursor: page.next_page_token.map(String::into_bytes),
+            checkpoint,
+            bytes,
+        }))
+    }
+
+    /// The flag-like labels of a label's messages under `query`, as three
+    /// id-only listings read once a run rather than one get a message.
+    fn flag_sets(&mut self, label: &str, query: Option<&str>) -> Result<FlagSets> {
+        let key = (label.to_owned(), query.map(String::from));
+        if let Some((cached, sets)) = &self.flag_sets
+            && *cached == key
+        {
+            return Ok(sets.clone());
+        }
+
+        let sets = FlagSets {
+            unread: self
+                .list_ids(label, Some(UNREAD), query)?
+                .into_iter()
+                .collect(),
+            starred: self
+                .list_ids(label, Some(STARRED), query)?
+                .into_iter()
+                .collect(),
+            important: self
+                .list_ids(label, Some(IMPORTANT), query)?
+                .into_iter()
+                .collect(),
+        };
+        self.flag_sets = Some((key, sets.clone()));
+        Ok(sets)
+    }
+
+    /// One message's metadata: its labels and the headers that name it.
+    fn metadata(&mut self, id: &str) -> Result<GmailMessage, GmailClientStdError> {
+        self.op(units::MESSAGE_GET, |client| {
+            client.message_get(id, GmailMessageFormat::Metadata, SUMMARY_HEADERS)
         })
     }
 
     /// Lists the ids of a label's messages, narrowed to the ones also
-    /// carrying `and` when given.
+    /// carrying `and` when given and to `query`.
     ///
     /// Spam and trash are listed only from their own label, as Gmail's own
     /// views do.
-    fn list_ids(&mut self, label: &str, and: Option<&str>) -> Result<Vec<String>> {
+    fn list_ids(
+        &mut self,
+        label: &str,
+        and: Option<&str>,
+        query: Option<&str>,
+    ) -> Result<Vec<String>> {
         let label_ids: Vec<String> = [Some(label), and]
             .into_iter()
             .flatten()
@@ -443,11 +607,11 @@ impl GmailClient {
         let mut token: Option<String> = None;
         loop {
             let params = GmailMessagesListParams {
+                q: query,
                 label_ids: &label_ids,
                 max_results: Some(PAGE_SIZE),
                 page_token: token.as_deref(),
                 include_spam_trash: label == SPAM || label == TRASH,
-                ..Default::default()
             };
             let page = self
                 .op(units::MESSAGES_LIST, |client| client.messages_list(&params))
@@ -502,8 +666,9 @@ impl GmailClient {
     /// Folds a label's history into a delta.
     ///
     /// History records are increments, not state, so every changed message's
-    /// current labels are read (one minimal get each) before it is reported:
-    /// still carrying the label, it is an item with its flags, otherwise or
+    /// current labels are read before it is reported: a minimal get for one
+    /// the store binds, its metadata for one it does not, which names it.
+    /// Still carrying the label, it is an item with its flags; otherwise or
     /// gone, it vanished.
     fn delta_round(
         &mut self,
@@ -511,6 +676,7 @@ impl GmailClient {
         label: &str,
         records: &[GmailHistory],
         checkpoint: String,
+        held: Held<'_>,
     ) -> Result<Enumeration> {
         debug!("begin gmail delta round");
         trace!("collection: {collection}, records: {}", records.len());
@@ -519,15 +685,27 @@ impl GmailClient {
 
         let mut items = Vec::new();
         let mut vanished: Vec<String> = deleted.into_iter().collect();
+        let mut bytes = 0;
         for id in changed {
-            match self.op(units::MESSAGE_GET, |client| {
-                client.message_get(&id, GmailMessageFormat::Minimal, &[])
-            }) {
-                Ok(message) if belongs(&message.label_ids, label) => items.push(EnumEntry {
-                    flags: flags_from_labels(&message.label_ids),
-                    id,
-                    revision: None,
+            let bound = held.holds(&id);
+            let got = match bound {
+                true => self.op(units::MESSAGE_GET, |client| {
+                    client.message_get(&id, GmailMessageFormat::Minimal, &[])
                 }),
+                false => self.metadata(&id),
+            };
+            match got {
+                Ok(message) if belongs(&message.label_ids, label) => match bound {
+                    true => items.push(EnumEntry::bare(
+                        id,
+                        flags_from_labels(&message.label_ids),
+                        None,
+                    )),
+                    false => {
+                        bytes += serde_json::to_vec(&message).map_or(0, |json| json.len() as u64);
+                        items.push(named_entry(&id, &message));
+                    }
+                },
                 Ok(_) => vanished.push(id),
                 Err(err) if is_not_found(&err) => vanished.push(id),
                 Err(err) => {
@@ -539,12 +717,9 @@ impl GmailClient {
         debug!("end of gmail delta round");
         trace!("items: {}, vanished: {}", items.len(), vanished.len());
 
-        Ok(Enumeration {
-            items,
-            vanished,
-            complete: false,
-            checkpoint: checkpoint.into_bytes(),
-        })
+        let mut delta = Enumeration::delta(items, vanished, checkpoint.into_bytes());
+        delta.bytes = bytes;
+        Ok(delta)
     }
 
     /// Fetches the summaries of an id set, one metadata get per message.
@@ -634,7 +809,7 @@ impl GmailClient {
             ..Default::default()
         };
         let answered = self
-            .op(units::MESSAGE_IMPORT, |client| {
+            .create(units::MESSAGE_IMPORT, |client| {
                 let coroutine = GmailMessageImport::new(
                     &client.auth,
                     &client.user_id,
@@ -777,6 +952,70 @@ impl GmailClient {
 /// history id, or a message that does not exist.
 fn is_not_found(err: &GmailClientStdError) -> bool {
     matches!(err, GmailClientStdError::Send(send) if send.status() == Some(404))
+}
+
+/// Whether Gmail refused a request as malformed (HTTP 400), which is how it
+/// answers a page token it no longer takes.
+fn is_bad_request(err: &GmailClientStdError) -> bool {
+    matches!(err, GmailClientStdError::Send(send) if send.status() == Some(400))
+}
+
+/// The flag-like labels of a label's messages, as id sets.
+#[derive(Clone, Debug, Default)]
+struct FlagSets {
+    unread: BTreeSet<String>,
+    starred: BTreeSet<String>,
+    important: BTreeSet<String>,
+}
+
+impl FlagSets {
+    /// The shared flag set of message `id`.
+    fn of(&self, id: &str) -> BTreeSet<Flag> {
+        flags(
+            self.unread.contains(id),
+            self.starred.contains(id),
+            self.important.contains(id),
+        )
+    }
+}
+
+/// A listed message named by its metadata.
+fn named_entry(id: &str, message: &GmailMessage) -> EnumEntry {
+    EnumEntry {
+        id: id.to_owned(),
+        flags: flags_from_labels(&message.label_ids),
+        revision: None,
+        meta: Some(mail::parse_summary(&message_summary(id, message))),
+    }
+}
+
+/// The search narrowing a listing to a scope: `after:` [`SCOPE_MARGIN_DAYS`]
+/// below `since` and `before:` as many above `until`, in epoch seconds,
+/// which Gmail reads as instants rather than its own midnights. A superset
+/// of the messages whose `Date` is in scope, which the local check decides.
+fn scope_query(scope: &PimdirScope) -> Option<String> {
+    let epoch = |instant: &str, shift: i64| {
+        let at = DateTime::parse_from_rfc3339(instant).ok()?.to_utc();
+        let at = at.checked_add_signed(chrono::Duration::days(shift))?;
+        Some(at.timestamp())
+    };
+    let terms: Vec<String> = [
+        scope
+            .since
+            .as_deref()
+            .and_then(|since| epoch(since, -SCOPE_MARGIN_DAYS))
+            .map(|at| format!("after:{at}")),
+        scope
+            .until
+            .as_deref()
+            .and_then(|until| epoch(until, SCOPE_MARGIN_DAYS))
+            .map(|at| format!("before:{at}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
+    (!terms.is_empty()).then(|| terms.join(" "))
 }
 
 /// Whether a label is synced as a collection: every user label, and the
@@ -1002,7 +1241,9 @@ fn message_summary(id: &str, message: &GmailMessage) -> ItemSummary {
             .and_then(instant)
             .and_then(|date| DateTime::parse_from_rfc3339(&date).ok()),
         size: message.size_estimate.unwrap_or(0),
-        has_attachment: None,
+        // NOTE: read without the body (pimdir STORAGE Annex A.1), which the
+        // walk of the parts replaces once the body is in.
+        has_attachment: Some(meta_attachment(header("Content-Type"))),
     }
 }
 
@@ -1203,5 +1444,88 @@ mod tests {
         assert_eq!(decode_checkpoint(b"12345").as_deref(), Some("12345"));
         assert_eq!(decode_checkpoint(&[]), None);
         assert_eq!(decode_checkpoint(&[0xff, 0xfe]), None);
+    }
+
+    /// A listed message is named by its metadata: the `Date` header, never
+    /// Gmail's `internalDate`, the flags of its labels, and the attachment
+    /// mark from the top-level `Content-Type`, both ways.
+    #[test]
+    fn a_listed_message_is_named_by_its_metadata() {
+        let message: GmailMessage = serde_json::from_str(
+            r#"{
+                "id": "18c",
+                "labelIds": ["INBOX", "STARRED"],
+                "internalDate": "1791331200000",
+                "sizeEstimate": 4096,
+                "payload": {"headers": [
+                    {"name": "Message-ID", "value": "<m1@example.org>"},
+                    {"name": "Date", "value": "Wed, 1 Jan 2020 10:00:00 +0000"},
+                    {"name": "Content-Type", "value": "multipart/mixed; boundary=\"x\""}
+                ]}
+            }"#,
+        )
+        .unwrap();
+
+        let entry = named_entry("18c", &message);
+        assert!(entry.flags.contains(&Flag::from_iana(IanaFlag::Seen)));
+        assert!(entry.flags.contains(&Flag::from_iana(IanaFlag::Flagged)));
+        let meta = entry.meta.expect("named in the listing");
+        assert_eq!(meta.link_id.as_str(), "m1@example.org");
+        assert_eq!(
+            meta.sort_key.as_str(),
+            "2020-01-01T10:00:00Z",
+            "the Date header, not the day Gmail received it"
+        );
+        let Some(io_pimdir::summary::PimdirSummary::Mail(summary)) = meta.summary else {
+            panic!("a mail summary");
+        };
+        assert_eq!(summary.attachment, Some(true));
+        assert_eq!(summary.size, Some(4096));
+
+        let plain: GmailMessage = serde_json::from_str(
+            r#"{"id": "18d", "payload": {"headers": [
+                {"name": "Content-Type", "value": "text/plain; charset=utf-8"}
+            ]}}"#,
+        )
+        .unwrap();
+        let meta = named_entry("18d", &plain).meta.unwrap();
+        let Some(io_pimdir::summary::PimdirSummary::Mail(summary)) = meta.summary else {
+            panic!("a mail summary");
+        };
+        assert_eq!(summary.attachment, Some(false));
+        assert_eq!(summary.date, None);
+    }
+
+    /// The search reaches two days around the scope, in epoch seconds Gmail
+    /// reads as instants, its own midnights being Pacific.
+    #[test]
+    fn a_scope_narrows_the_listing_with_a_margin() {
+        assert_eq!(scope_query(&PimdirScope::unbounded()), None);
+        assert_eq!(
+            scope_query(&PimdirScope::since("2026-10-03T00:00:00Z")).as_deref(),
+            Some("after:1790812800"),
+            "2026-10-01T00:00:00Z"
+        );
+        let band = PimdirScope {
+            since: Some(String::from("2026-10-03T00:00:00Z")),
+            until: Some(String::from("2026-10-05T00:00:00Z")),
+        };
+        assert_eq!(
+            scope_query(&band).as_deref(),
+            Some("after:1790812800 before:1791331200")
+        );
+    }
+
+    /// A page token Gmail no longer takes is answered 400.
+    #[test]
+    fn only_a_400_counts_as_a_refused_page_token() {
+        let api = |status| {
+            GmailClientStdError::Send(GmailSendError::Api {
+                status,
+                message: String::from("Invalid pageToken"),
+            })
+        };
+        assert!(is_bad_request(&api(400)));
+        assert!(!is_bad_request(&api(404)));
     }
 }

@@ -159,21 +159,12 @@ impl GraphClient {
         let items: Vec<EnumEntry> = unique(events)?
             .into_iter()
             .filter(|event| !event.id.is_empty() && event.series_master_id.is_none())
-            .map(|event| EnumEntry {
-                id: event.id,
-                flags: Default::default(),
-                revision: event.change_key,
-            })
+            .map(|event| EnumEntry::bare(event.id, Default::default(), event.change_key))
             .collect();
 
         debug!("end of graph events listing");
         trace!("events: {}", items.len());
-        Ok(Enumeration {
-            items,
-            vanished: Vec::new(),
-            complete: true,
-            checkpoint: Vec::new(),
-        })
+        Ok(Enumeration::round(items, Vec::new()))
     }
 
     /// Reads one event with everything the projection reads, its stash
@@ -285,7 +276,7 @@ impl GraphClient {
         let uid = event.stashed_uid();
 
         let created = self
-            .op(|graph| graph.event_create(Some(calendar), &event))
+            .create(|graph| graph.event_create(Some(calendar), &event))
             .with_context(|| format!("Create event in {calendar} error"))?;
         let stored = self.event(&created.id)?;
 
@@ -425,7 +416,7 @@ impl GraphClient {
             .and_then(|base| base.join(&path))
             .context("Cannot build the event action URL")?;
 
-        self.op(|graph| {
+        self.create(|graph| {
             let coroutine =
                 MsgraphSend::<MsgraphNoResponse>::post_json(&graph.auth, url.clone(), body)?;
             graph.run(coroutine)

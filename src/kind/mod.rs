@@ -28,7 +28,7 @@ use anyhow::{Result, bail};
     feature = "gcal"
 ))]
 use io_pimdir::summary::{calendar, contact};
-use io_pimdir::{placement::PimdirLinkId, remote::PimdirTier, summary::PimdirDerivation};
+use io_pimdir::{placement::PimdirLinkId, summary::PimdirDerivation};
 
 use crate::item::summary::ItemSummary;
 
@@ -274,22 +274,6 @@ impl Kind {
         };
 
         (!key.is_empty() && !key.starts_with(fallback)).then_some(key)
-    }
-
-    /// The tier a freshly probed item is raised to so its link id and summary
-    /// resolve: `Meta` where the backend has a cheap server-side summary,
-    /// `Full` where only the body carries the identity.
-    pub fn probe_tier(self) -> PimdirTier {
-        match self {
-            Self::Mail => PimdirTier::Meta,
-            #[cfg(any(
-                feature = "dav",
-                feature = "msgraph",
-                feature = "gpeople",
-                feature = "gcal"
-            ))]
-            Self::Vcard | Self::Ical => PimdirTier::Full,
-        }
     }
 
     /// The derivations from a server-side summary, for a kind with `Meta`.

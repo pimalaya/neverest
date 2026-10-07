@@ -14,7 +14,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     fmt,
     io::{self, Write},
     mem,
@@ -30,22 +30,24 @@ use crossbeam_queue::SegQueue;
 use io_pimdir::{
     change::{PimdirChange, PimdirChangeKind},
     client::blobs::{PimdirBlobWriter, PimdirBlobs},
-    collection::{PimdirCheckpoint, PimdirCollectionId},
+    collection::{PimdirCheckpoint, PimdirCollectionId, PimdirCursor, PimdirScope},
     hash::PimdirHasher,
+    load::PimdirLoaded,
     object::PimdirHash,
-    placement::{PimdirFlags, PimdirHandle, PimdirOrigin},
+    placement::{PimdirFlags, PimdirHandle, PimdirLinkId, PimdirOrigin, PimdirSortKey},
     remote::{
-        PimdirFetchedBody, PimdirFetchedItem, PimdirPushOutcome, PimdirPushResult, PimdirRemote,
-        PimdirRemoteItem, PimdirRemoteSnapshot, PimdirTier,
+        PimdirEnumerate, PimdirEnumerated, PimdirFetchedBody, PimdirFetchedItem, PimdirPushOutcome,
+        PimdirPushResult, PimdirRemote, PimdirRemoteItem, PimdirRemoteMeta, PimdirRemoteSnapshot,
+        PimdirTier,
     },
-    summary::PimdirDerivation,
+    summary::{PimdirDerivation, PimdirSummary},
 };
 use log::warn;
 
 #[cfg(feature = "dav")]
 use crate::dav::client::is_duplicate_uid;
 use crate::{
-    client::{Client, Pool, WrittenItem},
+    client::{Client, EnumEntry, Held, Listed, Pool, WrittenItem},
     item::{
         flag::{Flag, FlagOp},
         summary::ItemSummary,
@@ -99,6 +101,91 @@ pub struct PimRemote<'a> {
     /// Drained into the report by the driver, so a run says what it could not
     /// deliver rather than counting it among the hunks it applied.
     rejected: Vec<RejectedPush>,
+    /// What the store binds of one hub collection, which names a listed
+    /// member the listing read no meta for.
+    bound: Option<(String, Bound)>,
+    /// Whether a member named by its body has the body fetched as its page
+    /// is listed; false on a dry run, which downloads nothing.
+    bodies: bool,
+    /// Whether the connector's checkpoint is bound to its scope, read once
+    /// from [`Client::scope_bound`].
+    scope_bound: bool,
+}
+
+/// What the store binds of a collection for one source.
+#[derive(Default)]
+pub struct Bound {
+    /// The bound handles.
+    handles: HashSet<String>,
+    /// The name of each, by handle.
+    metas: HashMap<String, BoundMeta>,
+    /// The checkpoint the store holds.
+    checkpoint: Option<Vec<u8>>,
+}
+
+impl Bound {
+    /// What a load of the collection binds: every based placement that
+    /// carries its link id.
+    pub fn from_loaded(loaded: PimdirLoaded) -> Self {
+        let metas: HashMap<String, BoundMeta> = loaded
+            .placements
+            .into_iter()
+            .filter_map(|placement| {
+                let base = placement.base?;
+                let link_id = placement.link_id?;
+                let meta = BoundMeta {
+                    revision: base.revision,
+                    link_id,
+                    sort_key: placement.sort_key,
+                };
+                Some((placement.handle.0, meta))
+            })
+            .collect();
+
+        Self {
+            handles: metas.keys().cloned().collect(),
+            metas,
+            checkpoint: loaded.checkpoint.map(|checkpoint| checkpoint.0),
+        }
+    }
+}
+
+/// How the store names one bound member.
+struct BoundMeta {
+    revision: Option<String>,
+    link_id: PimdirLinkId,
+    sort_key: PimdirSortKey,
+}
+
+impl BoundMeta {
+    /// The meta naming the member as the store does, its summary kept.
+    fn meta(&self) -> PimdirRemoteMeta {
+        PimdirRemoteMeta {
+            link_id: self.link_id.clone(),
+            summary: None,
+            sort_key: self.sort_key.clone(),
+            body: None,
+        }
+    }
+}
+
+/// Drops the members of a page whose `Date` lies outside `scope` (pimdir
+/// SYNC §5): a connector narrows its listing by the provider's reception
+/// date to a superset at most, and the `Date` decides, a member with no
+/// usable date being in every scope.
+fn keep_in_scope(items: &mut Vec<PimdirRemoteItem>, scope: &PimdirScope) {
+    if !scope.is_unbounded() {
+        items.retain(|item| scope.contains(listed_date(&item.meta)));
+    }
+}
+
+/// The date a listed member is in scope by: its summary's, else its sort
+/// key, which a mail sort key is (pimdir STORAGE Annex A.1).
+fn listed_date(meta: &PimdirRemoteMeta) -> Option<&str> {
+    match &meta.summary {
+        Some(PimdirSummary::Mail(summary)) => summary.date.as_deref(),
+        _ => Some(meta.sort_key.as_str()).filter(|key| !key.is_empty()),
+    }
 }
 
 /// The handles one side is known to hold, per collection.
@@ -175,6 +262,7 @@ impl<'a> PimRemote<'a> {
     /// Binds a remote to the pool it calls through and the namespace it strips.
     pub fn new(pool: &'a mut Pool, blob: PimdirBlobs, namespace: impl Into<String>) -> Self {
         let kind = resolve_kind(pool);
+        let scope_bound = pool.primary().scope_bound();
         Self {
             kind,
             pool,
@@ -185,6 +273,9 @@ impl<'a> PimRemote<'a> {
             held: HeldHandles::default(),
             refused: Vec::new(),
             rejected: Vec::new(),
+            bound: None,
+            bodies: true,
+            scope_bound,
         }
     }
 
@@ -200,6 +291,7 @@ impl<'a> PimRemote<'a> {
         sizes: HashMap<String, u64>,
     ) -> Self {
         let kind = resolve_kind(pool);
+        let scope_bound = pool.primary().scope_bound();
         Self {
             kind,
             pool,
@@ -210,7 +302,25 @@ impl<'a> PimRemote<'a> {
             held: HeldHandles::default(),
             refused: Vec::new(),
             rejected: Vec::new(),
+            bound: None,
+            bodies: true,
+            scope_bound,
         }
+    }
+
+    /// Names the members of hub collection `collection` the store binds
+    /// the way it binds them, so a listing reads no meta for them.
+    pub fn with_bound(mut self, collection: &str, bound: Bound) -> Self {
+        self.bound = Some((collection.to_owned(), bound));
+        self
+    }
+
+    /// Names a member of a kind named by its body without fetching the
+    /// body, by its handle, when `bodies` is false: a dry run downloads
+    /// nothing, and its replica is thrown away.
+    pub fn with_bodies(mut self, bodies: bool) -> Self {
+        self.bodies = bodies;
+        self
     }
 
     /// [`wire_name`] against this side's namespace.
@@ -310,36 +420,99 @@ impl PimdirRemote for PimRemote<'_> {
     fn enumerate(
         &mut self,
         collection: &PimdirCollectionId,
-        cursor: Option<PimdirCheckpoint>,
-    ) -> Result<PimdirRemoteSnapshot, Self::Error> {
-        let collection = self.wire_name(collection.as_str());
-        let cursor = cursor.as_ref().map(|c| c.0.as_slice());
-        let enumeration = self
+        request: PimdirEnumerate,
+    ) -> Result<PimdirEnumerated, Self::Error> {
+        let hub = collection.as_str();
+        let collection = self.wire_name(hub);
+
+        let empty = Bound::default();
+        let bound = match &self.bound {
+            Some((of, bound)) if of == hub => bound,
+            _ => &empty,
+        };
+        let held = Held {
+            handles: &bound.handles,
+            checkpoint: bound.checkpoint.as_deref(),
+        };
+
+        let listed = self
             .pool
             .primary()
-            .enumerate(collection, cursor)
+            .enumerate(collection, &request, held)
             .with_context(|| format!("Enumerate {collection} error"))?;
-        let items: Vec<PimdirRemoteItem> = enumeration
-            .items
-            .into_iter()
-            .map(|entry| PimdirRemoteItem {
-                handle: PimdirHandle::from(entry.id),
-                flags: to_offline_flags(&entry.flags),
-                revision: entry.revision,
-            })
-            .collect();
-        let vanished: Vec<PimdirHandle> = enumeration
-            .vanished
-            .into_iter()
-            .map(PimdirHandle::from)
-            .collect();
+        let page = match listed {
+            Listed::Page(page) => page,
+            Listed::CursorRejected => return Ok(PimdirEnumerated::CursorRejected),
+        };
+        self.pool.downloaded(page.bytes);
+
+        // NOTE: a member is named by what the listing read, else by what the
+        // store binds it under: a message never renames, and a resource
+        // listed at the revision the store holds states what it stated.
+        let mut items = Vec::with_capacity(page.items.len());
+        let mut unnamed = Vec::new();
+        for mut entry in page.items {
+            let meta = match entry.meta.take() {
+                Some(derivation) => Some(PimdirRemoteMeta::from(derivation)),
+                // NOTE: a dry run names a changed resource by its binding too,
+                // fetching no body: a pull without one, which the plan names.
+                None => bound.metas.get(&entry.id).and_then(|known| {
+                    let same = self.kind == Kind::Mail
+                        || !self.bodies
+                        || (entry.revision.is_some() && entry.revision == known.revision);
+                    same.then(|| known.meta())
+                }),
+            };
+            match meta {
+                Some(meta) => items.push(PimdirRemoteItem {
+                    handle: PimdirHandle::from(entry.id),
+                    flags: to_offline_flags(&entry.flags),
+                    revision: entry.revision,
+                    meta,
+                }),
+                None if self.kind == Kind::Mail => {
+                    warn!(
+                        "{} in {collection} was listed without its meta, skipped",
+                        entry.id
+                    );
+                }
+                None => unnamed.push(entry),
+            }
+        }
+
+        if !unnamed.is_empty() {
+            items.extend(self.name_by_body(collection, unnamed)?);
+        }
+
+        keep_in_scope(&mut items, &request.scope);
+
+        let vanished: Vec<PimdirHandle> =
+            page.vanished.into_iter().map(PimdirHandle::from).collect();
         self.held.remember(collection, &items, &vanished);
-        Ok(PimdirRemoteSnapshot {
-            items,
-            vanished,
-            complete: enumeration.complete,
-            checkpoint: PimdirCheckpoint(enumeration.checkpoint),
-        })
+
+        let snapshot = match page.complete {
+            true => PimdirRemoteSnapshot {
+                vanished,
+                ..PimdirRemoteSnapshot::page(
+                    items,
+                    page.cursor.map(PimdirCursor),
+                    page.checkpoint.map(PimdirCheckpoint),
+                )
+            },
+            false => PimdirRemoteSnapshot {
+                items,
+                vanished,
+                complete: false,
+                last: true,
+                cursor: None,
+                checkpoint: page.checkpoint.map(PimdirCheckpoint),
+            },
+        };
+        Ok(PimdirEnumerated::Page(snapshot))
+    }
+
+    fn scope_bound(&self) -> bool {
+        self.scope_bound
     }
 
     fn fetch(
@@ -480,9 +653,13 @@ impl<R: PimdirRemote<Error = anyhow::Error>> PimdirRemote for CachedFetchRemote<
     fn enumerate(
         &mut self,
         collection: &PimdirCollectionId,
-        cursor: Option<PimdirCheckpoint>,
-    ) -> Result<PimdirRemoteSnapshot, Self::Error> {
-        self.fallback.enumerate(collection, cursor)
+        request: PimdirEnumerate,
+    ) -> Result<PimdirEnumerated, Self::Error> {
+        self.fallback.enumerate(collection, request)
+    }
+
+    fn scope_bound(&self) -> bool {
+        self.fallback.scope_bound()
     }
 
     fn fetch(
@@ -518,6 +695,67 @@ impl<R: PimdirRemote<Error = anyhow::Error>> PimdirRemote for CachedFetchRemote<
 }
 
 impl PimRemote<'_> {
+    /// Names listed members of a kind named by its body (pimdir SYNC §4):
+    /// their bodies fetched for the page, [`BATCH_SIZE`] a request across the
+    /// pool, each carried by its member, the revision the body was read at
+    /// winning over the listed one. A member whose body did not come is left
+    /// out of the page, for the next run.
+    fn name_by_body(
+        &mut self,
+        collection: &str,
+        entries: Vec<EnumEntry>,
+    ) -> Result<Vec<PimdirRemoteItem>> {
+        if !self.bodies {
+            return Ok(entries
+                .into_iter()
+                .map(|entry| PimdirRemoteItem {
+                    meta: PimdirRemoteMeta {
+                        link_id: PimdirLinkId(entry.id.clone()),
+                        summary: None,
+                        sort_key: PimdirSortKey::default(),
+                        body: None,
+                    },
+                    handle: PimdirHandle::from(entry.id),
+                    flags: to_offline_flags(&entry.flags),
+                    revision: entry.revision,
+                })
+                .collect());
+        }
+
+        let handles = entries
+            .iter()
+            .map(|entry| PimdirHandle::from(entry.id.as_str()))
+            .collect();
+        let mut fetched: HashMap<String, PimdirFetchedItem> = self
+            .fetch_full(collection, handles)?
+            .into_iter()
+            .map(|item| (item.handle.0.clone(), item))
+            .collect();
+
+        let mut items = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let Some(item) = fetched.remove(&entry.id) else {
+                warn!(
+                    "{} in {collection} came without its body, skipped",
+                    entry.id
+                );
+                continue;
+            };
+            items.push(PimdirRemoteItem {
+                handle: item.handle,
+                flags: to_offline_flags(&entry.flags),
+                revision: item.revision.or(entry.revision),
+                meta: PimdirRemoteMeta {
+                    link_id: item.link_id,
+                    summary: item.summary,
+                    sort_key: item.sort_key,
+                    body: item.body,
+                },
+            });
+        }
+        Ok(items)
+    }
+
     /// Meta tier: a targeted summary fetch of just the requested handles.
     ///
     /// No bodies and no whole-collection sweep, so the cost scales with the
@@ -567,6 +805,18 @@ impl PimRemote<'_> {
     /// item, so N bodies cost about N/[`BATCH_SIZE`] round trips. Batches are
     /// work-stolen across a bounded pool of connections.
     fn fetch_full(
+        &mut self,
+        collection: &str,
+        handles: Vec<PimdirHandle>,
+    ) -> Result<Vec<PimdirFetchedItem>> {
+        let items = self.fetch_bodies(collection, handles)?;
+        self.pool.downloaded(body_bytes(&items));
+        Ok(items)
+    }
+
+    /// The bodies of [`fetch_full`](Self::fetch_full), largest first when
+    /// the sizes are known, across the pool.
+    fn fetch_bodies(
         &mut self,
         collection: &str,
         mut handles: Vec<PimdirHandle>,
@@ -978,6 +1228,18 @@ impl PimRemote<'_> {
     }
 }
 
+/// The octets of the bodies a fetch brought in.
+pub(crate) fn body_bytes(items: &[PimdirFetchedItem]) -> u64 {
+    items
+        .iter()
+        .map(|item| match &item.body {
+            Some(PimdirFetchedBody::Persisted { size, .. }) => *size as u64,
+            Some(PimdirFetchedBody::Inline { bytes, .. }) => bytes.len() as u64,
+            None => 0,
+        })
+        .sum()
+}
+
 fn accepted(handle: PimdirHandle, assigned: Option<PimdirHandle>) -> PimdirPushResult {
     PimdirPushResult {
         handle,
@@ -1090,6 +1352,12 @@ mod tests {
             handle: PimdirHandle(handle.into()),
             flags: PimdirFlags::default(),
             revision: None,
+            meta: PimdirRemoteMeta {
+                link_id: PimdirLinkId(handle.into()),
+                summary: None,
+                sort_key: PimdirSortKey::default(),
+                body: None,
+            },
         }
     }
 
@@ -1132,5 +1400,95 @@ mod tests {
         held.remember("agenda", &[], &[PimdirHandle("event-1.ics".into())]);
 
         assert!(held.claim("agenda", "event-1.ics"));
+    }
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use io_pimdir::summary::mail;
+
+    use super::*;
+
+    /// A listed message named by a header block carrying `date`.
+    fn dated(handle: &str, date: Option<&str>) -> PimdirRemoteItem {
+        let mut header = format!("Message-ID: <{handle}@example.org>\r\n");
+        if let Some(date) = date {
+            header.push_str(&format!("Date: {date}\r\n"));
+        }
+        header.push_str("\r\n");
+
+        PimdirRemoteItem {
+            handle: PimdirHandle(handle.into()),
+            flags: PimdirFlags::default(),
+            revision: None,
+            meta: PimdirRemoteMeta::from(mail::derive_meta(header.as_bytes(), None, None)),
+        }
+    }
+
+    fn handles(items: &[PimdirRemoteItem]) -> Vec<&str> {
+        items.iter().map(|item| item.handle.as_str()).collect()
+    }
+
+    /// The `Date` decides, whatever narrowed the listing: a message received
+    /// today but dated years ago is out, one dated in the future is in, and
+    /// one with no usable date is in every scope.
+    #[test]
+    fn a_page_keeps_what_its_date_puts_in_scope() {
+        let mut items = vec![
+            dated("old", Some("Wed, 01 Jan 2020 10:00:00 +0000")),
+            dated("edge", Some("Thu, 01 Oct 2026 02:00:00 +0200")),
+            dated("recent", Some("Mon, 05 Oct 2026 10:00:00 +0000")),
+            dated("future", Some("Tue, 01 Jan 2030 10:00:00 +0000")),
+            dated("undated", None),
+            dated("garbled", Some("sometime last week")),
+        ];
+
+        keep_in_scope(&mut items, &PimdirScope::since("2026-10-01T00:00:00Z"));
+
+        assert_eq!(
+            handles(&items),
+            ["edge", "recent", "future", "undated", "garbled"],
+            "02:00 at +02:00 is midnight UTC, the floor itself",
+        );
+    }
+
+    /// A band lists below the coverage only: its ceiling is exclusive.
+    #[test]
+    fn a_band_keeps_what_lies_below_its_ceiling() {
+        let mut items = vec![
+            dated("older", Some("Wed, 01 Jan 2025 10:00:00 +0000")),
+            dated("covered", Some("Thu, 01 Oct 2026 00:00:00 +0000")),
+        ];
+        let band = PimdirScope {
+            since: Some(String::from("2024-01-01T00:00:00Z")),
+            until: Some(String::from("2026-10-01T00:00:00Z")),
+        };
+
+        keep_in_scope(&mut items, &band);
+
+        assert_eq!(handles(&items), ["older"]);
+    }
+
+    /// A member the store binds is named by its binding, whose sort key is
+    /// its date: the scope reads it there.
+    #[test]
+    fn a_bound_member_is_in_scope_by_its_stored_date() {
+        let bound = BoundMeta {
+            revision: None,
+            link_id: PimdirLinkId("old@example.org".into()),
+            sort_key: PimdirSortKey("2020-01-01T10:00:00Z".into()),
+        };
+        let mut items = vec![PimdirRemoteItem {
+            handle: PimdirHandle("7".into()),
+            flags: PimdirFlags::default(),
+            revision: None,
+            meta: bound.meta(),
+        }];
+
+        keep_in_scope(&mut items, &PimdirScope::unbounded());
+        assert_eq!(items.len(), 1, "an unbounded scope keeps everything");
+
+        keep_in_scope(&mut items, &PimdirScope::since("2026-10-01T00:00:00Z"));
+        assert!(items.is_empty());
     }
 }

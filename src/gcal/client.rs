@@ -64,7 +64,7 @@ use crate::{
         flag::{Flag, FlagOp},
     },
     offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp, wall_stamp},
-    throttle::{Throttle, google_throttled},
+    throttle::{Request, Throttle, google_throttled_for},
 };
 
 /// The page size requested from the events listing.
@@ -141,9 +141,29 @@ impl GcalClient {
     /// server closed it, and records the new keep-alive hint.
     ///
     /// The source's [`Throttle`] sends it again while Google throttles it
-    /// (429, 503, or a 403 rate limit).
+    /// (429, 503, or a 403 rate limit). A request creating an event goes
+    /// through [`create`](Self::create) instead.
     fn op<T>(
         &mut self,
+        run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
+    ) -> Result<T, GcalClientStdError> {
+        self.send(Request::Idempotent, run)
+    }
+
+    /// Runs one Calendar request creating an event, which may invite its
+    /// attendees: sent again on a refusal Google answers before doing
+    /// anything (429, a rate limit), never on a 503.
+    fn create<T>(
+        &mut self,
+        run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
+    ) -> Result<T, GcalClientStdError> {
+        self.send(Request::Create, run)
+    }
+
+    /// Runs one Calendar request of `request`, as [`op`](Self::op) describes.
+    fn send<T>(
+        &mut self,
+        request: Request,
         mut run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
     ) -> Result<T, GcalClientStdError> {
         let throttle = Arc::clone(&self.throttle);
@@ -162,7 +182,7 @@ impl GcalClient {
             },
             |err| match err {
                 GcalClientStdError::Send(GcalSendError::Api { status, message }) => {
-                    google_throttled(*status, message)
+                    google_throttled_for(request, *status, message)
                 }
                 _ => None,
             },
@@ -261,11 +281,7 @@ impl GcalClient {
         let items = series
             .into_iter()
             .filter(|(id, _)| !vanished.contains(id))
-            .map(|(id, events)| EnumEntry {
-                id,
-                flags: Default::default(),
-                revision: Some(revision(&events)),
-            })
+            .map(|(id, events)| EnumEntry::bare(id, Default::default(), Some(revision(&events))))
             .collect();
 
         // NOTE: a full listing reports removals by absence; only a resumed
@@ -278,7 +294,8 @@ impl GcalClient {
             items,
             vanished,
             complete,
-            checkpoint: next.into_bytes(),
+            checkpoint: Some(next.into_bytes()),
+            ..Default::default()
         })
     }
 
@@ -431,21 +448,21 @@ impl GcalClient {
                 conference_data_version: CONFERENCE_DATA_VERSION,
                 ..Default::default()
             };
-            self.op(|gcal| gcal.event_insert(calendar, &event, &params))
+            self.create(|gcal| gcal.event_insert(calendar, &event, &params))
                 .with_context(|| format!("Insert scheduled event into {calendar} error"))?
         } else if has_uid {
             let params = GcalEventImportParams {
                 conference_data_version: CONFERENCE_DATA_VERSION,
                 ..Default::default()
             };
-            self.op(|gcal| gcal.event_import(calendar, &event, &params))
+            self.create(|gcal| gcal.event_import(calendar, &event, &params))
                 .with_context(|| format!("Import event into {calendar} error"))?
         } else {
             let params = GcalEventInsertParams {
                 conference_data_version: CONFERENCE_DATA_VERSION,
                 ..Default::default()
             };
-            self.op(|gcal| gcal.event_insert(calendar, &event, &params))
+            self.create(|gcal| gcal.event_insert(calendar, &event, &params))
                 .with_context(|| format!("Insert event into {calendar} error"))?
         };
 

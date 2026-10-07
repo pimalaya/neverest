@@ -82,9 +82,12 @@ where
 
         arg = Some(match serviced {
             Ok(arg) => arg,
-            Err(PimdirYield::WantsEnumerate { collection, cursor }) => PimdirArg::Enumerate(
+            Err(PimdirYield::WantsEnumerate {
+                collection,
+                request,
+            }) => PimdirArg::Enumerate(
                 remote
-                    .enumerate(&collection, cursor)
+                    .enumerate(&collection, request)
                     .map_err(|err| anyhow!("Remote enumerate error: {err:#}"))?,
             ),
             Err(PimdirYield::WantsFetch {

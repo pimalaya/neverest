@@ -123,4 +123,56 @@ mod tests {
             serde_json::json!([{ "source": "gmail", "until": "2026-10-07T10:00:00Z" }])
         );
     }
+
+    /// A round left open was interrupted: what landed stays, and a rerun
+    /// resumes it, so the run is incomplete; a closed one is coverage only.
+    #[test]
+    fn an_open_round_makes_the_run_incomplete() {
+        use crate::sync::report::{CollectionCoverage, OpenRound, SourceDownload};
+
+        let mut report = SyncOutput::default();
+        report.coverage.push(CollectionCoverage {
+            source: String::from("imap"),
+            collection: String::from("INBOX"),
+            since: Some(String::from("2026-09-07T00:00:00Z")),
+            until: None,
+            at: Some(String::from("2026-10-07T10:00:00Z")),
+            round: None,
+        });
+        report.downloaded.push(SourceDownload {
+            source: String::from("imap"),
+            bytes: 2048,
+        });
+        assert_eq!(Exit::from(&report), Exit::Success);
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["coverage"],
+            serde_json::json!([{
+                "source": "imap",
+                "collection": "INBOX",
+                "since": "2026-09-07T00:00:00Z",
+                "at": "2026-10-07T10:00:00Z",
+            }])
+        );
+        assert_eq!(
+            json["downloaded"],
+            serde_json::json!([{ "source": "imap", "bytes": 2048 }])
+        );
+
+        report.coverage[0].round = Some(OpenRound {
+            since: Some(String::from("2025-10-07T00:00:00Z")),
+            until: None,
+            started_at: String::from("2026-10-07T10:05:00Z"),
+        });
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["coverage"][0]["round"],
+            serde_json::json!({
+                "since": "2025-10-07T00:00:00Z",
+                "startedAt": "2026-10-07T10:05:00Z",
+            })
+        );
+    }
 }

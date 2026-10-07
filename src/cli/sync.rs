@@ -11,6 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+use chrono::Utc;
 use clap::{ArgAction, Parser};
 use io_pimdir::client::PimdirStore;
 use log::{debug, info};
@@ -117,6 +118,13 @@ pub struct SyncCommand {
     /// the queued collection creations run; sends and intents wait.
     #[arg(long, conflicts_with = "reset")]
     pub declare_only: bool,
+    /// Sync mail dated since then only, for this run: a duration back from
+    /// today (`30d`, `12w`, `6mo`, `1y`), a date (`2026-01-01`) or an RFC 3339
+    /// instant. Overrides the account's `item.filter.since`; refused on an
+    /// account syncing contacts or calendars. Mail older than it is neither
+    /// listed nor deleted.
+    #[arg(long, value_name = "WHEN")]
+    pub since: Option<String>,
 }
 
 impl SyncCommand {
@@ -164,10 +172,13 @@ impl SyncCommand {
             .unwrap_or(4)
             .max(1);
 
+        let scope = account_config.scope(self.since.as_deref(), &self.source, Utc::now())?;
+
         let report = driver::run(
             &name,
             &account_config,
             cli_filter,
+            &scope,
             self.dry_run,
             connections,
             self.no_purge,

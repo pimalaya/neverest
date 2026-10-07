@@ -53,9 +53,9 @@ io-gmail = { version = "0.4", default-features = false, optional = true }
 io-gpeople = { version = "0.4.2", default-features = false, optional = true }
 io-http = { version = "0.5", default-features = false, optional = true }
 io-imap = { version = "0.7", default-features = false, optional = true }
-io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "d6cb9582e9175fea8ee5b858b4ca9a49991a4a71", default-features = false, optional = true }
+io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "00ef069234d1a97335ea174f918491b703f39238", default-features = false, optional = true }
 io-pim-discovery = { version = "0.8", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "stream"], optional = true }
-io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "ef8eae06a2088d9cf805cbfbc62287abd4d6f1ea", default-features = false, features = ["client"] }
+io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "35a1c3f1c8102be7664f5e89db562d68f2333687", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }
 jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
 io-smtp = { version = "0.5", default-features = false, optional = true }

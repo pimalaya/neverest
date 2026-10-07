@@ -6,7 +6,7 @@
 //!
 //! This module adds the multi-source reads the driver needs on top of that
 //! seam. [`load_side`] reads through one source handle, so it carries that
-//! source's probes, while [`projection_view`] and [`hydration_targets`] read
+//! source's own bindings and pending work, while [`projection_view`] and [`hydration_targets`] read
 //! the whole hub, both sources' bindings included.
 
 use io_pimdir::{
@@ -21,9 +21,8 @@ use crate::offline::source_id;
 
 /// The placements one side's coroutines see for a collection.
 ///
-/// Its hub projection plus this source's probes (freshly enumerated handles
-/// not yet named). The handle must be the side's own store, source fixed at
-/// open.
+/// Its hub projection plus this source's bindings, its base included. The
+/// handle must be the side's own store, source fixed at open.
 pub fn load_side(
     store: &PimdirSourceStore,
     collection: &str,
@@ -39,7 +38,7 @@ pub fn load_side(
 /// The cross-source propagation `source` owes for a collection.
 ///
 /// The hub projection alone (a `Created` copy in, a `Dirty` flag change, a
-/// `Tombstone` delete), without the probes. Drives the itemized report, and
+/// `Tombstone` delete), without the bases. Drives the itemized report, and
 /// reads the whole hub, so any source handle serves it.
 pub fn projection_view(
     store: &PimdirStore,

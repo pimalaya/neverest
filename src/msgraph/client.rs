@@ -75,7 +75,7 @@ use crate::{
 
 /// The `$select` projection of the delta query: the envelope fields the summary
 /// summary and the flag mapping need, so delta pages stay small.
-const DELTA_SELECT: &str = "id,subject,from,toRecipients,receivedDateTime,internetMessageId,isRead,isDraft,flag,parentFolderId";
+const DELTA_SELECT: &str = "id,subject,from,toRecipients,sentDateTime,internetMessageId,isRead,isDraft,flag,parentFolderId";
 
 /// The page size requested when listing mail folders.
 const FOLDER_PAGE_SIZE: u32 = 100;
@@ -966,9 +966,12 @@ fn flags_patch(flags: &[Flag]) -> MsgraphMessage {
     }
 }
 
-/// The author-claimed date of a delta row (Graph emits ISO 8601 date-times).
+/// The author-claimed date of a delta row: `sentDateTime`, Graph's reading
+/// of the `Date` header, which pimdir's mail `date` column holds (STORAGE
+/// Annex A.1). Never `receivedDateTime`, the server's arrival time: absent
+/// or unparseable, the date is `None` (a `NULL` column), as a missing `Date`.
 fn message_date(message: &MsgraphMessage) -> Option<DateTime<FixedOffset>> {
-    let raw = message.received_date_time.as_deref()?;
+    let raw = message.sent_date_time.as_deref()?;
     DateTime::parse_from_rfc3339(raw).ok()
 }
 
@@ -1054,7 +1057,8 @@ mod tests {
                 "subject": "Hello",
                 "from": {"emailAddress": {"name": "Alice", "address": "alice@example.org"}},
                 "toRecipients": [{"emailAddress": {"address": "bob@example.org"}}],
-                "receivedDateTime": "2026-07-06T12:00:00Z",
+                "sentDateTime": "2026-07-06T12:00:00Z",
+                "receivedDateTime": "2026-07-06T12:05:00Z",
                 "internetMessageId": "<m1@example.org>",
                 "isRead": true,
                 "isDraft": false,
@@ -1099,9 +1103,18 @@ mod tests {
             env.date
                 .unwrap()
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "2026-07-06T12:00:00Z"
+            "2026-07-06T12:00:00Z",
+            "the date is sentDateTime, never receivedDateTime"
         );
         assert_eq!(env.size, 0, "Graph exposes no RFC 5322 size");
+    }
+
+    #[test]
+    fn a_row_without_sent_date_has_no_date() {
+        let message: MsgraphMessage =
+            serde_json::from_str(r#"{"id": "x", "receivedDateTime": "2026-07-06T12:05:00Z"}"#)
+                .unwrap();
+        assert_eq!(message_date(&message), None);
     }
 
     #[test]

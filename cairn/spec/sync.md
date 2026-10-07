@@ -182,9 +182,6 @@ The content hash naming an object SHALL come from the store handle (`PimdirStore
 ### Requirement: Every item carries a per-kind sort key
 The sync SHALL write a `sort_key` beside the summary of every item it summarises (pimdir STORAGE §9.3), derived by the same io-pimdir derivation and never parsed back out of the summary by the store. `message/rfc822` SHALL carry the `Date:` header normalised to RFC 3339 in UTC at seconds precision, so byte order is chronological order whatever offset the sender wrote; `text/vcard` SHALL carry the display name (`FN`) casefolded and trimmed. A kind resolving at two tiers SHALL derive the byte-identical key at both, on the same terms as its link id: a key that moved when the body arrived would re-sort the item on hydration. Content carrying nothing to derive from SHALL keep the empty key, which the store reads as unknown.
 
-### Requirement: A probed item is raised to the tier its kind resolves at
-Every freshly probed placement SHALL be raised to the tier its kind resolves its link id and summary at: `Meta` where the backend offers a cheap server-side summary (mail's IMAP `ENVELOPE`), `Full` where only the body carries the identity. Raising a DAV item to `Meta` asks its backend for a summary tier it does not have, which fails the scan of every DAV collection.
-
 ### Requirement: Sources are remote backends only
 A sync source SHALL be a remote backend: IMAP, Microsoft Graph and Gmail for `message/rfc822`, CardDAV, Microsoft Graph and Google People for `text/vcard`, CalDAV, Microsoft Graph and Google Calendar for `text/calendar` (JMAP as its backend lands). Local file backends (m2dir, maildir, vdir) SHALL NOT be sync sources: the pimdir store is the local replica, so a local file store is redundant as a source and belongs on the import/export path, which neverest documents rather than syncing directly.
 
@@ -297,9 +294,7 @@ reading and writing the whole tree
 ### Requirement: The report shows the one-source pull plan
 A one-source sync SHALL report its pull plan, each non-tombstone item whose body it would download into the store, as `Fetch` hunks, in both a dry run (which stops there) and a real run (which then hydrates them). A dry run SHALL fetch no body to produce that report.
 
-The plan SHALL select an item by the absence of a stored object, never by its detail level. The two differ twice over, and both cases are real: a kind that resolves its identity only at `Full` (a DAV one, a `sync-collection` REPORT carrying no `UID`) lands its probe on the level a level-keyed plan reads as complete, and a remote content change drops the stale object while the hub keeps the level the item had reached, so an item about to be re-fetched reads as complete too. Selecting on the object matches the hydration pass the plan is a preview of, so the two cannot disagree.
-
-Raising a fresh probe to the tier its kind resolves at SHALL be skipped in a dry run where that tier is `Full`. A cheaper tier MAY still resolve, so a mail preview keeps naming messages by their `Message-ID`; an item left probed SHALL be named by whatever handle it has. A preview that downloads an entire address book to print a plan is not a preview.
+The plan SHALL select an item by the absence of a stored object, never by its detail level: a remote content change drops the stale object while the hub keeps the level the item had reached, so an item about to be re-fetched reads as complete to a level-keyed plan. A kind whose meta is its body arrives with it, its page fetching the bodies before it lands, so the plan SHALL also name every item the pull added or changed with its body. In a dry run such a member SHALL be named by its handle, its body not fetched: a preview that downloads an entire address book to print a plan is not a preview.
 
 #### Scenario: A first dry run over a DAV account names its items
 - GIVEN an initialized account with a CardDAV source and cards on the server
@@ -312,7 +307,7 @@ Raising a fresh probe to the tier its kind resolves at SHALL be skipped in a dry
 - THEN the report names the card whose body would be re-fetched
 
 ### Requirement: Meta and size fetches are targeted
-The `Meta` fetch (link id + summary) and the largest-first size probe SHALL fetch **only the handles being processed** (a `UID FETCH <handle-set>`), never the whole mailbox: the `Meta` fetch as `(UID FLAGS ENVELOPE RFC822.SIZE)`, the size probe as size-only `(UID RFC822.SIZE)` (no ENVELOPE). So an incremental sync's silent pre-download work scales with the number of changed messages, not the mailbox size: no whole-mailbox ENVELOPE sweep runs to resolve a handful of link ids or to order a download. This mirrors the lean, targeted `enumerate` (QRESYNC delta); a first sync stays inherently heavy (every new message's link id is fetched once), but the redundant second sweep is gone.
+A `Meta` fetch (link id + summary), which only revisits a claim a row does not hold, and the largest-first size probe SHALL fetch **only the handles being processed** (a `UID FETCH <handle-set>`), never the whole mailbox. A listing SHALL read the meta of the members the store does not bind and of no other, so an incremental sync's work scales with the number of changed messages, not the mailbox size.
 
 ### Requirement: Credentials are resolved once per run
 A run SHALL resolve every configured secret once, up front, into a runtime account holding the values themselves, and SHALL open every connection from that account. Nothing below that seam may spawn a process to authenticate: a second connection to a side, whether opened eagerly for the connection budget or lazily for a concurrent fetch, SHALL cost a handshake and no credential read.
@@ -434,7 +429,7 @@ The backend-neutral enumeration seam SHALL carry the incremental-sync cursor as 
 While syncing a mailbox, the spinner SHALL report progress through the slow inner phase, body hydration (and, under relay, the relayed messages), as a percentage appended to the mailbox line (`[2/7] Syncing INBOX 66%`), updated per streamed `Full` body. Fast phases (enumerate, the `Meta` upgrade) stay silent. The progress tick is invoked from the concurrent fetch pool and is safe to call from several threads at once.
 
 ### Requirement: IMAP enumeration is incremental (QRESYNC)
-Enumeration SHALL carry a per-mailbox cursor `(UIDVALIDITY, HIGHESTMODSEQ)` in the `PimdirCheckpoint`. On a QRESYNC-capable server (ENABLEd on connect) with a cursor whose UIDVALIDITY still matches, `enumerate` SHALL issue a QRESYNC `SELECT (QRESYNC (uidvalidity highestmodseq))` and return a **delta** (`complete = false`): only the messages changed since the modseq plus the vanished UIDs, issuing **no FETCH when nothing changed**. Without a usable cursor (first sync, UIDVALIDITY change, malformed checkpoint) or on a non-QRESYNC server it SHALL return a **full** `FETCH 1:* (UID FLAGS)` snapshot (`complete = true`). Enumeration SHALL fetch UID and FLAGS only, never ENVELOPE, since the link id is resolved at the `Meta` tier.
+Enumeration SHALL carry a per-mailbox checkpoint `(UIDVALIDITY, HIGHESTMODSEQ)`. On a QRESYNC-capable server (ENABLEd on connect) with a checkpoint whose UIDVALIDITY still matches, a delta SHALL be a QRESYNC `SELECT (QRESYNC (uidvalidity highestmodseq))`: only the messages changed since the modseq, the meta read for the ones the store does not bind, plus the vanished UIDs, issuing **no FETCH when nothing changed**. Without a usable checkpoint (first sync, UIDVALIDITY change, malformed bytes) or on a non-QRESYNC server it SHALL answer a round, page by page.
 
 ### Requirement: A connection SELECTs a mailbox once per run of commands
 An IMAP connection SHALL cache the mailbox it currently has `SELECT`ed and skip a redundant `SELECT` when the next command targets the same mailbox, so a run of commands on one mailbox, most importantly a batch of body fetches, pays a single `SELECT`, not one per command. Every select path SHALL record the selection so a cached skip is always correct. For a hydrate of N bodies across a W-connection pool this makes `SELECT`s ~W rather than ~N, halving the fetch path's round trips over a high-latency link without changing what is fetched. (Pipelining the body `FETCH`es themselves, mbsync-style, is a further io-imap change, not yet done.)
@@ -550,7 +545,7 @@ The two conflict counts differ and the difference matters: the engine emits noth
 - THEN it exits with the same code, rather than reporting success over a change that stayed in the store
 
 ### Requirement: An incomplete run has its own exit code
-A run that could not do all its work SHALL exit with a code of its own, distinct from success, failure and the conflict code: a source it could not scan, a hunk it could not apply, a send or an intent that failed without parking, or a source that gave up throttled. It SHALL win over the conflict code, the report still counting what waits for a person.
+A run that could not do all its work SHALL exit with a code of its own, distinct from success, failure and the conflict code: a source it could not scan, a hunk it could not apply, a send or an intent that failed without parking, a source that gave up throttled, or a round left open on a collection it synced. It SHALL win over the conflict code, the report still counting what waits for a person.
 
 An unreachable server is the common case. The run stops nothing else over it, so it is no failure, yet a run with nothing to do and a run that could not reach its server both exited 0, and a caller told offline from idle by parsing error strings. A rerun clears this state on its own, which is what sets it apart from the conflict code: that one waits for a person, this one for the network.
 
@@ -588,7 +583,7 @@ An IMAP delete SHALL mark the UID `\Deleted` and expunge it by `UID EXPUNGE` on 
 - **THEN** the deleted one is gone from the server and the one the other client marked is still there
 
 ### Requirement: A throttled provider is waited out, then named
-A request Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV or CardDAV answers with 429 or 503, or Google with a 403 rate limit, SHALL be sent again after the wait the provider states, else after a bounded exponential back-off with jitter. Past the bound, or on a stated wait longer than neverest waits, the source SHALL give up: no connection opened from it sends anything until the wait is over, what the run already wrote stays, the report lists the source under `throttled` with `until` (RFC 3339 UTC), and the run is incomplete (exit 3).
+A request Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV or CardDAV answers with 429, or with 503 for a request that creates nothing, or Google with a 403 rate limit, SHALL be sent again after the wait the provider states, else after a bounded exponential back-off with jitter. Past the bound, or on a stated wait longer than neverest waits, the source SHALL give up: no connection opened from it sends anything until the wait is over, what the run already wrote stays, the report lists the source under `throttled` with `until` (RFC 3339 UTC), and the run is incomplete (exit 3).
 
 #### Scenario: A server answering 503
 - **GIVEN** an account whose CalDAV source answers every request 503
@@ -811,7 +806,7 @@ A run that wrote to a remote SHALL report it. `already in sync` SHALL mean the r
 The per-source permission set SHALL gate item updates (`item.update`, default true) beside the existing collection and item create/delete and flag gates. An update hunk a source's policy forbids SHALL be dropped from the patch and surfaced in the report, so a mutable-content source can be made read-only.
 
 ### Requirement: DAV collections enumerate by sync token and resolve at Full
-A CardDAV or CalDAV source SHALL enumerate through `REPORT sync-collection`, storing the returned sync token verbatim as the collection's opaque checkpoint, and SHALL fall back to a tokenless report (the whole member set, reported complete) when the server rejects the stored token. Because that report returns hrefs and ETags but no `UID`, a DAV placement SHALL resolve directly at the `Full` tier, there being no `Meta` tier for DAV, so a DAV item's link id has exactly one derivation and cannot differ between tiers. Bodies SHALL be fetched in batches through `addressbook-multiget` / `calendar-multiget`.
+A CardDAV or CalDAV source SHALL enumerate through `REPORT sync-collection`, storing the returned sync token verbatim as the collection's opaque checkpoint, and SHALL fall back to a tokenless report (the whole member set, reported complete) when the server rejects the stored token. Because that report returns hrefs and ETags but no `UID`, the bodies of the members it lists SHALL be fetched through `addressbook-multiget` / `calendar-multiget`, in batches, before the page lands, each member named by its body, so a DAV item's link id has exactly one derivation. A member the store holds at the listed ETag SHALL be named by its binding, its body not fetched again.
 
 ### Requirement: A DAV server without `sync-collection` is listed instead
 `sync-collection` is an extension, so a server MAY implement none of it, advertising a `supported-report-set` of `addressbook-multiget` and `addressbook-query` alone. Such a collection SHALL be enumerated through a `PROPFIND` at Depth 1 requesting the ETag, which yields the same member ids and revisions, rather than failing to enumerate at all.
@@ -903,7 +898,7 @@ An empty body stored is worse than a fetch that fails. Its link id is the digest
 ### Requirement: A run reports the bodies it pulls, whatever the tier
 A run SHALL report the bodies it fetches, and SHALL report the same ones whether or not it is a dry run. The report SHALL NOT depend on the tier a kind resolves its identity at.
 
-The pull plan is the placements carrying no body yet, so it SHALL be read before the probe that resolves link ids. A kind with no cheap `Meta` tier resolves its link id from the body, so the probe hydrates it; a plan read afterwards is empty for exactly the items the run is about to pull, and the run calls itself quiescent having downloaded a collection.
+A kind whose meta is its body is fetched while its page is listed, so its pull plan SHALL be read off the pull's events (the items it added or changed holding a body) as well as off the placements carrying no body yet; a plan read off the store alone is empty for exactly the items the run pulled, and the run calls itself quiescent having downloaded a collection.
 
 #### Scenario: A first contacts sync says what it did
 - GIVEN an empty store and an address book holding one card
@@ -1182,3 +1177,39 @@ A Graph mail source SHALL fetch the `Full` tier of an id set through JSON batche
 - **GIVEN** a Graph mail folder holding twenty messages whose bodies the store lacks
 - **WHEN** a sync hydrates them
 - **THEN** one batch request fetches all twenty, stored byte for byte as a direct get would
+
+### Requirement: A mail sync lists within a scope on the `Date`
+An account MAY bound its mail by `item.filter.since`, and a run by `sync --since`, which overrides it: a duration back from today (`30d`, `12w`, `6mo`, `1y`), taken to the start of its UTC day so the runs of one day list one scope, a date at midnight UTC, or an RFC 3339 instant. A mail collection SHALL then sync under the scope from that floor (pimdir SYNC §5): a listed message whose `Date` lies below it SHALL be left out of the page, a message with no usable `Date` SHALL be in every scope, and an explicit removal SHALL apply whatever the date. What a scope leaves out SHALL NOT be deleted, neither in the store nor on the server. A scope SHALL be refused, by the key or flag it came from, when an endpoint the run syncs holds contacts or calendars.
+
+#### Scenario: An old message received today
+- **GIVEN** a mailbox holding, all appended today, a message dated 2020, one dated in the future and one with no `Date`
+- **WHEN** it is synced under `item.filter.since = "30d"`
+- **THEN** the store holds the future and the undated messages and not the one dated 2020
+
+#### Scenario: A narrower scope deletes nothing
+- **GIVEN** that mailbox synced with `--since 2019-01-01`, then under `30d` again
+- **WHEN** the run ends
+- **THEN** the message dated 2020 is still in the store and on the server, and once deleted on the server the next run removes it from the store
+
+### Requirement: A provider narrows a scope with a margin
+A connector MAY narrow a scoped listing by its provider's own filter to a superset of the scope: IMAP `SENTSINCE` a day below the floor (or no `Date` header) and `SENTBEFORE` two days above a ceiling, Graph `$filter=receivedDateTime ge` two days below the floor, Gmail `after:` and `before:` two days around the scope, in epoch seconds. The `Date` SHALL decide what is kept. A connector whose checkpoint is bound to no scope (IMAP, Gmail) SHALL widen a scope by listing only the band its coverage lacks; a Graph delta link made under a `$filter` is bound to it.
+
+### Requirement: A mail round lands page by page, newest first
+A mail round SHALL be answered in pages, newest first, each landing in its own write with its resume cursor: IMAP 500 UIDs by UID descending, its cursor `(UIDVALIDITY, lowest UID listed)`; Graph message delta 1,000 messages a page (`Prefer: odata.maxpagesize`, sent with every link), its cursor the next link; Gmail 100 ids, its cursor the page token. The checkpoint SHALL be the one taken when the round began where the provider gives one (IMAP `HIGHESTMODSEQ` at the select, Gmail's profile `historyId` read before the listing), Graph's delta link on its last page. An interrupted round SHALL resume from its cursor, and a cursor the provider refuses (an expired Graph link, a Gmail page token, a moved `UIDVALIDITY`) SHALL restart it.
+
+#### Scenario: A round killed after its first page
+- **GIVEN** a mailbox of 1,100 messages synced for the first time
+- **WHEN** the run is killed once a page landed, and the account is synced again
+- **THEN** the second run closes the round and the store holds every message once
+
+### Requirement: Every listed member arrives named
+Every member a listing hands the engine SHALL carry its meta (pimdir SYNC §4): IMAP reads `UID FLAGS RFC822.SIZE` and `BODY.PEEK[HEADER.FIELDS]` (`Date`, `From`, `To`, `Cc`, `Bcc`, `Subject`, `Message-ID`, `In-Reply-To`, `Content-Type`) in the listing's own `UID FETCH`, never `BODYSTRUCTURE`, deriving the meta from the header block as the body would derive it; Graph reads its summary `$select`; Gmail its metadata, `Content-Type` among the headers. A member the store already binds, a message being immutable, SHALL be named by its binding rather than read again. A kind whose meta is its body (CardDAV, CalDAV, Google Calendar and People, Graph contacts and events) SHALL have the bodies of a page fetched before it lands, 64 a request, each member carrying its body, unless the store holds it at the listed revision. The attachment mark SHALL be Graph's `hasAttachments`, else a top-level `multipart/mixed`, until the body is read.
+
+### Requirement: The report states each collection's coverage
+The report SHALL list under `coverage`, for every collection a run synced on an endpoint, the scope of that endpoint's last closed round (`since`, `until`) and when it closed (`at`), absent while none ever closed, and the round still open (`round`: `since`, `until`, `startedAt`). A round left open SHALL make the run incomplete.
+
+### Requirement: The report counts what each source downloaded
+The report SHALL list under `downloaded` the octets of bodies and listed meta each source received during the run.
+
+### Requirement: A request that creates is sent again only when unprocessed
+A request creating something (an uploaded or copied message, an event, a contact, a label, an imported message, a send, an invitation reply or cancel, a DAV create) SHALL be sent again on a 429 or a Google rate limit only, which a provider answers before acting, never on a 503 or another 5xx, after which it may have landed. A Graph body batch answered 500, 502 or 504 SHALL be sent again without making the source give up as throttled.

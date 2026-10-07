@@ -16,6 +16,9 @@
 //!      scope as it is, and nothing else moves.
 //!   5. A round of three pages killed after its first page resumes and
 //!      lands every message once.
+//!   6. A round of four pages lands its first bodies before its last page
+//!      lists; killed then, it keeps its pages and bodies, and the next run
+//!      fetches only the rest.
 //!
 //! ```sh
 //! ./tests/stalwart.sh
@@ -204,6 +207,107 @@ fn an_interrupted_round_resumes_and_lands_every_message_once() {
     assert_eq!(stored(&store, &collection).len(), PAGED);
 
     imap(&format!("DELETE {mailbox}"));
+}
+
+/// Four pages of 500 UIDs: a page's bodies land while later pages list.
+const LARGE: usize = 1_600;
+
+/// A page's bodies download as soon as it lands, on the connections the
+/// listing leaves idle, so the first mail is readable while the round still
+/// lists; a run stopped then keeps every page and every body it landed, and
+/// the next fetches only the rest.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
+fn a_page_s_bodies_land_before_its_round_closes() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let store = root.join("store");
+    let config = root.join("config.toml");
+
+    let id = std::process::id();
+    let mailbox = format!("Early{id}");
+    imap(&format!("CREATE {mailbox}"));
+    let date = Utc::now().to_rfc2822();
+    for n in 0..LARGE {
+        append(root, &mailbox, &format!("early-{id}-{n}"), Some(&date));
+    }
+
+    write_config(&config, &store, "early", &mailbox, None);
+    neverest(&["init", "-a", "early"], &config);
+    let collection = format!("imap/{mailbox}");
+
+    let mut first = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &config.to_string_lossy()])
+        .args([
+            "sync",
+            "-a",
+            "early",
+            "-j",
+            "4",
+            "--download-order",
+            "newest",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn neverest");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let open_with_bodies = loop {
+        assert!(
+            first.try_wait().unwrap().is_none(),
+            "the run ended before any body was readable"
+        );
+        if let Some((_, open)) = round_state(&store, &collection)
+            && bodies(&store, &collection) > 0
+        {
+            first.kill().unwrap();
+            break open;
+        }
+        assert!(Instant::now() < deadline, "no body landed in time");
+        thread::sleep(Duration::from_millis(2));
+    };
+    first.wait().unwrap();
+    assert!(
+        open_with_bodies,
+        "a body was readable before the round's last page landed"
+    );
+
+    let (count, open) = round_state(&store, &collection).unwrap();
+    let kept = bodies(&store, &collection);
+    assert!(open, "the stopped round is left open");
+    assert!(
+        count > 0 && count < LARGE,
+        "the pages landed stay ({count})"
+    );
+    assert!(kept > 0 && kept <= count, "the bodies landed stay ({kept})");
+
+    let report = sync(&config, "early", &["-j", "4"]);
+    let fetched = report["item"]["patch"]
+        .as_array()
+        .expect("item patch")
+        .iter()
+        .filter(|entry| entry["hunk"]["kind"] == "fetch")
+        .count();
+    assert_eq!(
+        fetched,
+        LARGE - kept,
+        "only what the first run did not keep"
+    );
+    assert_eq!(round_state(&store, &collection), Some((LARGE, false)));
+    assert_eq!(bodies(&store, &collection), LARGE, "every body is stored");
+
+    imap(&format!("DELETE {mailbox}"));
+}
+
+/// How many messages of `collection` the store holds a body for.
+fn bodies(store: &Path, collection: &str) -> usize {
+    let Ok(reader) = PimdirReader::open(store) else {
+        return 0;
+    };
+    reader
+        .list_items(collection, None, 10_000)
+        .map(|items| items.iter().filter(|item| item.object.is_some()).count())
+        .unwrap_or(0)
 }
 
 fn write_config(config: &Path, store: &Path, account: &str, mailbox: &str, since: Option<&str>) {

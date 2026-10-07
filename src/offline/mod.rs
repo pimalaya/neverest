@@ -16,7 +16,12 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 use io_pimdir::{
-    client::PimdirSourceStore, coroutine::*, hub::PimdirSourceId, remote::PimdirRemote,
+    client::PimdirSourceStore,
+    collection::PimdirCollectionId,
+    coroutine::*,
+    hub::PimdirSourceId,
+    placement::PimdirHandle,
+    remote::{PimdirEnumerated, PimdirListing, PimdirRemote},
 };
 
 pub mod capability;
@@ -47,7 +52,49 @@ pub fn source_id(name: &str) -> PimdirSourceId {
 pub fn run_verb<R, C, T, E>(
     store: &mut PimdirSourceStore,
     remote: &mut R,
+    coroutine: C,
+) -> Result<T>
+where
+    R: PimdirRemote,
+    R::Error: std::fmt::Display,
+    E: std::fmt::Display,
+    C: PimdirCoroutine<Yield = PimdirYield, Return = Result<T, E>>,
+{
+    run_verb_paged(store, remote, coroutine, None)
+}
+
+/// Watches a verb's listing page by page.
+///
+/// Called where the store is at rest: no write of the verb is pending, and
+/// nothing it loaded outlives the next page (the sync coroutine reloads what
+/// a page names), so another verb may write the collection there.
+pub trait Pager {
+    /// The listing is about to ask for a page, or the verb completed.
+    ///
+    /// `landed` names the members of the page enumerated last, whose write
+    /// has committed, and is empty before the first page. `resumed` is true
+    /// once, before the first page of a round an earlier run left open.
+    fn at_rest(
+        &mut self,
+        store: &mut PimdirSourceStore,
+        collection: &PimdirCollectionId,
+        landed: Vec<PimdirHandle>,
+        resumed: bool,
+    );
+
+    /// The listing waits on the remote, the verb holding nothing.
+    fn listing(&mut self);
+
+    /// The remote answered, the verb about to take the page in.
+    fn listed(&mut self);
+}
+
+/// [`run_verb`], telling `pager` each time a page of the listing has landed.
+pub fn run_verb_paged<R, C, T, E>(
+    store: &mut PimdirSourceStore,
+    remote: &mut R,
     mut coroutine: C,
+    mut pager: Option<&mut dyn Pager>,
 ) -> Result<T>
 where
     R: PimdirRemote,
@@ -56,10 +103,19 @@ where
     C: PimdirCoroutine<Yield = PimdirYield, Return = Result<T, E>>,
 {
     let mut arg: Option<PimdirArg> = None;
+    // NOTE: the page enumerated last, landed by the next enumerate or by the
+    // completion: a page is written whole before the coroutine asks again.
+    let mut page: Option<(PimdirCollectionId, Vec<PimdirHandle>)> = None;
+    let mut first = true;
 
     loop {
         let yielded = match coroutine.resume(arg.take()) {
-            PimdirCoroutineState::Complete(Ok(out)) => return Ok(out),
+            PimdirCoroutineState::Complete(Ok(out)) => {
+                if let (Some(pager), Some((collection, landed))) = (pager.as_deref_mut(), page) {
+                    pager.at_rest(store, &collection, landed, false);
+                }
+                return Ok(out);
+            }
             PimdirCoroutineState::Complete(Err(err)) => {
                 return Err(anyhow!("Offline engine error: {err}"));
             }
@@ -85,11 +141,32 @@ where
             Err(PimdirYield::WantsEnumerate {
                 collection,
                 request,
-            }) => PimdirArg::Enumerate(
-                remote
-                    .enumerate(&collection, request)
-                    .map_err(|err| anyhow!("Remote enumerate error: {err:#}"))?,
-            ),
+            }) => {
+                if let Some(pager) = pager.as_deref_mut() {
+                    let resumed = first
+                        && matches!(
+                            request.listing,
+                            PimdirListing::Round {
+                                cursor: Some(_),
+                                ..
+                            }
+                        );
+                    let landed = page.take().map(|(_, landed)| landed).unwrap_or_default();
+                    pager.at_rest(store, &collection, landed, resumed);
+                    pager.listing();
+                }
+                first = false;
+                let listed = remote.enumerate(&collection, request);
+                if let Some(pager) = pager.as_deref_mut() {
+                    pager.listed();
+                }
+                let listed = listed.map_err(|err| anyhow!("Remote enumerate error: {err:#}"))?;
+                if let PimdirEnumerated::Page(snapshot) = &listed {
+                    let handles = snapshot.items.iter().map(|item| item.handle.clone());
+                    page = Some((collection, handles.collect()));
+                }
+                PimdirArg::Enumerate(listed)
+            }
             Err(PimdirYield::WantsFetch {
                 collection,
                 handles,

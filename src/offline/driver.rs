@@ -25,7 +25,7 @@ use std::{
     path::{Path, PathBuf},
     process,
     sync::{
-        Mutex, PoisonError,
+        Condvar, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
@@ -77,7 +77,7 @@ use crate::{
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId, merge::Merged},
     offline::{
-        capability, create,
+        Pager, capability, create,
         invitation::{
             self, Failure as InvitationFailure, Invitation, InvitationIntent, Refusal, Target,
         },
@@ -86,7 +86,7 @@ use crate::{
             BATCH_SIZE, Bound, CachedFetchRemote, PimRemote, RefusedCreate, RejectedPush,
             body_bytes, hydrate_batch, resolve_kind, wire_name,
         },
-        run_verb, source_id,
+        run_verb, run_verb_paged, source_id,
         state::{LookedUpRoles, StoreState},
         storage::{HydrationSide, hydration_targets, load_side, projection_view},
         submit,
@@ -1043,7 +1043,7 @@ fn run_local(
         return Ok(());
     }
 
-    let plans = phase1_spine(
+    let spined = phase1_spine(
         source_name,
         &filtered,
         &mut ctxs,
@@ -1051,6 +1051,7 @@ fn run_local(
         &blobs,
         work_dir,
         dry_run,
+        download_order,
         report,
     )?;
 
@@ -1058,6 +1059,9 @@ fn run_local(
         return Ok(());
     }
 
+    // NOTE: read once phase 1 is over, so a body a landed page's hydration
+    // kept is not downloaded again.
+    let plans = hydrate_plans(&stores[0], source_name, &spined)?;
     phase2_hydrate(
         source_name,
         &plans,
@@ -1115,6 +1119,11 @@ fn open_source_contexts(
 /// Reads run concurrently through WAL, writes serialise on the store's
 /// single-writer lock. Each collection's report is absorbed whole, arms and
 /// all: dropping one leaves the run naming what it touched, never what it left.
+///
+/// A connection with no collection left to spine downloads the bodies of the
+/// pages the others have landed (see [`HydrateFeed`]), so a large collection's
+/// first bodies are readable while its later pages still list. Returns the
+/// collections spined, whose remaining bodies phase 2 downloads.
 #[allow(clippy::too_many_arguments)]
 fn phase1_spine(
     source: &str,
@@ -1124,31 +1133,55 @@ fn phase1_spine(
     blobs: &PimdirBlobs,
     store_dir: &Path,
     dry_run: bool,
+    order: DownloadOrder,
     report: &mut SyncOutput,
-) -> Result<Vec<CollectionPlan>> {
+) -> Result<Vec<String>> {
     let total = filtered.len();
     let queue: SegQueue<String> = SegQueue::new();
     for collection in filtered {
         queue.push(collection.clone());
     }
-    let plans: Mutex<Vec<CollectionPlan>> = Mutex::new(Vec::new());
+    let spined: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let merged: Mutex<SyncOutput> = Mutex::new(SyncOutput::default());
     let scanned = AtomicUsize::new(0);
     let pushing: Mutex<()> = Mutex::new(());
     let s = Spinner::start(format!("Scanning {source} (0/{total})"));
 
+    // NOTE: one connection has none to spare: its bodies wait for phase 2,
+    // which orders them across the whole account.
+    let feeding = !dry_run && ctxs.len() > 1;
+    let feed = HydrateFeed::new(order, total);
+    let gates: HashMap<&str, Mutex<()>> = filtered
+        .iter()
+        .map(|collection| (collection.as_str(), Mutex::new(())))
+        .collect();
+    let applying: Mutex<()> = Mutex::new(());
+    let downloaded = AtomicUsize::new(0);
+    let kind = ctxs
+        .first_mut()
+        .map(|ctx| resolve_kind(&mut ctx.pool))
+        .unwrap_or(Kind::Mail);
+
     let queue_ref = &queue;
-    let plans_ref = &plans;
+    let spined_ref = &spined;
     let merged_ref = &merged;
     let scanned_ref = &scanned;
     let s_ref = &s;
     let pushing_ref = &pushing;
+    let feed_ref = &feed;
+    let gates_ref = &gates;
+    let applying_ref = &applying;
+    let downloaded_ref = &downloaded;
 
     thread::scope(|scope| {
         for (ctx, store) in ctxs.iter_mut().zip(stores.iter_mut()) {
             scope.spawn(move || {
                 while let Some(collection) = queue_ref.pop() {
-                    match collection_spine(
+                    let mut pager = PageFeed::hold(
+                        &gates_ref[collection.as_str()],
+                        feeding.then_some(feed_ref),
+                    );
+                    let spine = collection_spine(
                         &collection,
                         ctx,
                         store,
@@ -1156,9 +1189,12 @@ fn phase1_spine(
                         store_dir,
                         pushing_ref,
                         dry_run,
-                    ) {
-                        Ok((targets, rep)) => {
-                            plans_ref.lock().unwrap().push((collection, targets));
+                        &mut pager,
+                    );
+                    drop(pager);
+                    match spine {
+                        Ok(rep) => {
+                            spined_ref.lock().unwrap().push(collection.clone());
                             merged_ref.lock().unwrap().absorb(rep);
                         }
                         Err(err) => {
@@ -1186,29 +1222,240 @@ fn phase1_spine(
                             );
                         }
                     }
+                    feed_ref.spined();
                     let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
                     s_ref.set_message(format!("Scanning {source} ({n}/{total})"));
+                }
+
+                if !feeding {
+                    return;
+                }
+                while let Some((collection, handles)) = feed_ref.next() {
+                    let fetched = hydrate_batch(
+                        kind,
+                        ctx.pool.primary(),
+                        wire_name(&ctx.namespace, &collection),
+                        &handles,
+                        blobs,
+                        None,
+                    );
+                    // NOTE: left bodiless, so phase 2 downloads it again and
+                    // fails the run if it fails there too.
+                    let items = match fetched {
+                        Ok(items) => items,
+                        Err(err) => {
+                            warn!("{collection} body download error: {err:#}");
+                            continue;
+                        }
+                    };
+                    ctx.pool.downloaded(body_bytes(&items));
+                    downloaded_ref.fetch_add(items.len(), Ordering::Relaxed);
+                    // NOTE: the gate first, the order every applier takes
+                    // them in: the collection's spine may be mid-page.
+                    let _gate = gates_ref[collection.as_str()]
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    let _applying = applying_ref.lock().unwrap_or_else(PoisonError::into_inner);
+                    let fallback =
+                        PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
+                    if let Err(err) = apply_batch(store, fallback, &collection, items) {
+                        warn!("{collection} write error: {err:#}");
+                    }
                 }
             });
         }
     });
 
-    let plans = plans.into_inner().unwrap();
+    let spined = spined.into_inner().unwrap();
     report.absorb(merged.into_inner().unwrap());
-    s.success(format!("Scanned {total} collection(s) on {source}"));
-    Ok(plans)
+    match downloaded.into_inner() {
+        0 => s.success(format!("Scanned {total} collection(s) on {source}")),
+        n => s.success(format!(
+            "Scanned {total} collection(s) on {source}, downloaded {n} item(s)"
+        )),
+    }
+    Ok(spined)
 }
 
-/// Reconciles one collection's spine, without hydration.
+/// The bodies landed pages owe, waiting for an idle connection.
 ///
-/// Returns the not-yet-`Full` bodies to hydrate, each with the size and the
-/// date its local mail summary carries to order the download, plus the report
-/// patches. A dry run stops after itemizing, leaving the targets empty.
+/// The listing of a collection feeds it each time a page lands, and the
+/// connections that have no collection left to spine drain it, so a page's
+/// bodies download while the next pages list. The batches leave it in the
+/// download order across the account, ties in the order they came.
+struct HydrateFeed {
+    order: DownloadOrder,
+    state: Mutex<FeedState>,
+    ready: Condvar,
+}
+
+struct FeedState {
+    /// Each batch beside its first body, the one the order ranks it by.
+    batches: Vec<(HydrateTarget, HydrateBatch)>,
+    /// The collections whose spine has not ended, which may still feed.
+    spining: usize,
+}
+
+impl HydrateFeed {
+    fn new(order: DownloadOrder, spining: usize) -> Self {
+        Self {
+            order,
+            state: Mutex::new(FeedState {
+                batches: Vec::new(),
+                spining,
+            }),
+            ready: Condvar::new(),
+        }
+    }
+
+    /// Queues `collection`'s bodiless targets, in batches of [`BATCH_SIZE`].
+    fn feed(&self, collection: &str, mut targets: Vec<HydrateTarget>) {
+        if targets.is_empty() {
+            return;
+        }
+        targets.sort_by(|a, b| self.order.compare(a, b));
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        for chunk in targets.chunks(BATCH_SIZE) {
+            let handles = chunk.iter().map(|target| target.handle.clone()).collect();
+            state
+                .batches
+                .push((chunk[0].clone(), (collection.to_string(), handles)));
+        }
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    /// One collection's spine ended, whether it succeeded or not.
+    fn spined(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.spining = state.spining.saturating_sub(1);
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    /// The next batch, waiting while a spine may still feed one; `None` once
+    /// every spine ended and the feed is empty.
+    fn next(&self) -> Option<HydrateBatch> {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        loop {
+            let first = state
+                .batches
+                .iter()
+                .enumerate()
+                .min_by(|(_, (a, _)), (_, (b, _))| self.order.compare(a, b))
+                .map(|(index, _)| index);
+            if let Some(index) = first {
+                return Some(state.batches.remove(index).1);
+            }
+            if state.spining == 0 {
+                return None;
+            }
+            state = self
+                .ready
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// The [`Pager`] of a collection's spine in phase 1.
+///
+/// It holds the collection's gate for the whole spine but the listing's
+/// waits on the server, so a body is applied to the collection only where
+/// the sync is at rest, never between a page's load and its write, which
+/// would write back the placement without the body. Each landed page's
+/// bodiless members go to the feed, and the bodiless members of a resumed
+/// round's earlier pages before its first page lists.
+struct PageFeed<'a> {
+    gate: &'a Mutex<()>,
+    held: Option<MutexGuard<'a, ()>>,
+    feed: Option<&'a HydrateFeed>,
+}
+
+impl<'a> PageFeed<'a> {
+    fn hold(gate: &'a Mutex<()>, feed: Option<&'a HydrateFeed>) -> Self {
+        Self {
+            gate,
+            held: Some(gate.lock().unwrap_or_else(PoisonError::into_inner)),
+            feed,
+        }
+    }
+}
+
+impl Pager for PageFeed<'_> {
+    fn at_rest(
+        &mut self,
+        store: &mut PimdirSourceStore,
+        collection: &PimdirCollectionId,
+        landed: Vec<PimdirHandle>,
+        resumed: bool,
+    ) {
+        let Some(feed) = self.feed else {
+            return;
+        };
+        let scope = match (resumed, landed.is_empty()) {
+            (true, _) => PimdirLoadScope::All,
+            (false, true) => return,
+            (false, false) => PimdirLoadScope::Handles(landed),
+        };
+        match store.load(collection, &scope) {
+            Ok(loaded) => feed.feed(collection.as_str(), bodiless(loaded.placements)),
+            // NOTE: what is not fed waits for phase 2.
+            Err(err) => warn!("{} page load error: {err}", collection.as_str()),
+        }
+    }
+
+    fn listing(&mut self) {
+        self.held = None;
+    }
+
+    fn listed(&mut self) {
+        self.held = Some(self.gate.lock().unwrap_or_else(PoisonError::into_inner));
+    }
+}
+
+/// The placements still owed a body, with what orders their download.
+fn bodiless(placements: impl IntoIterator<Item = PimdirPlacement>) -> Vec<HydrateTarget> {
+    placements
+        .into_iter()
+        .filter(|placement| {
+            placement.status != PimdirStatus::Tombstone && placement.object.is_none()
+        })
+        .map(|placement| HydrateTarget {
+            size: summary_size(&placement.summary).unwrap_or(0) as u64,
+            date: summary_date(&placement.summary),
+            handle: placement.handle,
+        })
+        .collect()
+}
+
+/// Each spined collection's bodies still to download, for phase 2.
+fn hydrate_plans(
+    store: &PimdirStore,
+    source: &str,
+    collections: &[String],
+) -> Result<Vec<CollectionPlan>> {
+    collections
+        .iter()
+        .map(|collection| {
+            let view = projection_view(store, collection, source)
+                .with_context(|| format!("Project {source} {collection}"))?;
+            Ok((collection.clone(), bodiless(view)))
+        })
+        .collect()
+}
+
+/// Reconciles one collection's spine, its bodies left to hydration.
+///
+/// Returns the report patches; a dry run stops after itemizing. The listing
+/// tells `pager` each page it lands, which is how the bodies of a page
+/// download while the next pages list.
 ///
 /// Scans run in parallel, but `pushing` lets one collection of the source
 /// push at a time: the two halves of a move derive from the store, and two
 /// overlapping pushes would both read the create as pending, the target
 /// uploading it while the source relocates it (pimdir SYNC §5).
+#[allow(clippy::too_many_arguments)]
 fn collection_spine(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -1217,12 +1464,25 @@ fn collection_spine(
     store_dir: &Path,
     pushing: &Mutex<()>,
     dry_run: bool,
-) -> Result<(Vec<HydrateTarget>, SyncOutput)> {
+    pager: &mut dyn Pager,
+) -> Result<SyncOutput> {
     let mut report = SyncOutput::default();
 
-    let before = flag_snapshot(store, collection, &ctx.name)?;
+    let loaded =
+        load_side(store, collection).with_context(|| format!("Load {} {collection}", &ctx.name))?;
+    let owed: HashSet<String> = loaded
+        .iter()
+        .filter(|placement| {
+            placement.status != PimdirStatus::Tombstone && placement.object.is_none()
+        })
+        .map(|placement| placement.handle.0.clone())
+        .collect();
+    let before: HashMap<String, PimdirFlags> = loaded
+        .into_iter()
+        .map(|placement| (placement.handle.0, placement.flags))
+        .collect();
 
-    let pull = sync_side_rebuilding(collection, ctx, store, blobs, false)?;
+    let pull = sync_side_rebuilding(collection, ctx, store, blobs, false, Some(pager))?;
     let display = display_name(&ctx.namespace, collection);
     // NOTE: before the report reads which conflicts survived, a divergence the
     // merge settles never having been a disagreement.
@@ -1242,11 +1502,12 @@ fn collection_spine(
         store,
         &ctx.name,
         &pull.events,
+        &owed,
         &mut report,
     )?;
     itemize_single(collection, store, ctx, &mut report)?;
     if dry_run {
-        return Ok((Vec::new(), report));
+        return Ok(report);
     }
 
     // NOTE: held across the passes, so a move's halves never push at once:
@@ -1254,7 +1515,7 @@ fn collection_spine(
     // relocated member as a probe, the source's remove no destination left.
     let push = pushing.lock().unwrap_or_else(PoisonError::into_inner);
     for _ in 0..=MAX_EXTRA_PASSES {
-        let pass = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable())?;
+        let pass = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable(), None)?;
         if !moved(&pass) {
             break;
         }
@@ -1263,21 +1524,7 @@ fn collection_spine(
     report_coverage(store, collection, ctx, &mut report);
     itemize_refused(&ctx.name, mem::take(&mut ctx.refused), &mut report);
     itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
-
-    let mut targets: Vec<HydrateTarget> = Vec::new();
-    for placement in projection_view(store, collection, &ctx.name)
-        .with_context(|| format!("Project {} {collection}", &ctx.name))?
-    {
-        if placement.status == PimdirStatus::Tombstone || placement.object.is_some() {
-            continue;
-        }
-        targets.push(HydrateTarget {
-            size: summary_size(&placement.summary).unwrap_or(0) as u64,
-            date: summary_date(&placement.summary),
-            handle: placement.handle,
-        });
-    }
-    Ok((targets, report))
+    Ok(report)
 }
 
 /// One hydrate batch: its collection and the handles fetched together.
@@ -1609,12 +1856,17 @@ fn itemize_single(
 /// with it, its page fetching the bodies before it lands, so the plan read
 /// off the store alone would be empty for exactly what the run pulled: those
 /// are read off the pull's events.
+///
+/// `owed` names what was bodiless before the pull: a body a landed page's
+/// hydration kept since is this run's fetch too, though the pull named no
+/// change for it (a page an earlier run listed).
 fn itemize_fetches(
     collection: &str,
     display: &str,
     store: &PimdirSourceStore,
     source: &str,
     events: &[PimdirSyncEvent],
+    owed: &HashSet<String>,
     report: &mut SyncOutput,
 ) -> Result<()> {
     let pulled: HashSet<&str> = events
@@ -1629,7 +1881,9 @@ fn itemize_fetches(
     let view =
         load_side(store, collection).with_context(|| format!("Load {source} {collection}"))?;
     for placement in view {
-        let arrived = placement.object.is_some() && pulled.contains(placement.handle.as_str());
+        let arrived = placement.object.is_some()
+            && (pulled.contains(placement.handle.as_str())
+                || owed.contains(placement.handle.as_str()));
         if placement.status == PimdirStatus::Tombstone || (placement.object.is_some() && !arrived) {
             continue;
         }
@@ -2554,7 +2808,7 @@ fn reconcile_side(
         Some(flag_snapshot(store, collection, &ctx.name)?)
     };
 
-    let side = sync_side_rebuilding(collection, ctx, store, blobs, push)?;
+    let side = sync_side_rebuilding(collection, ctx, store, blobs, push, None)?;
     resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
 
     let display = display_name(&ctx.namespace, collection);
@@ -2591,10 +2845,11 @@ fn sync_side_rebuilding(
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     push: bool,
+    pager: Option<&mut dyn Pager>,
 ) -> Result<PimdirSyncReport> {
     let pre = stored_epoch(ctx.pool.primary(), store, collection)?;
 
-    let report = sync_side(collection, ctx, store, blobs, push)?;
+    let report = sync_side(collection, ctx, store, blobs, push, pager)?;
 
     if let Some(pre) = pre
         && let Some(post) = stored_epoch(ctx.pool.primary(), store, collection)?
@@ -2688,6 +2943,7 @@ fn sync_side(
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
     push: bool,
+    pager: Option<&mut dyn Pager>,
 ) -> Result<PimdirSyncReport> {
     let bound = store
         .load(
@@ -2707,7 +2963,7 @@ fn sync_side(
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone())
         .with_bound(collection, bound)
         .with_bodies(!ctx.dry_run);
-    let report = run_verb(store, &mut remote, verb);
+    let report = run_verb_paged(store, &mut remote, verb, pager);
     // NOTE: kept whether the pass succeeded or not: a later failure does not
     // unlearn a refusal the run already saw.
     let refused = remote.take_refused();
@@ -6828,7 +7084,16 @@ mod tests {
             .unwrap();
 
         let mut report = SyncOutput::default();
-        itemize_fetches("dav/contacts", "contacts", &store, "dav", &[], &mut report).unwrap();
+        itemize_fetches(
+            "dav/contacts",
+            "contacts",
+            &store,
+            "dav",
+            &[],
+            &HashSet::new(),
+            &mut report,
+        )
+        .unwrap();
         assert!(
             report.item.patch.is_empty(),
             "a body held from before is no fetch"
@@ -6841,6 +7106,7 @@ mod tests {
             &store,
             "dav",
             &added,
+            &HashSet::new(),
             &mut report,
         )
         .unwrap();
@@ -6882,7 +7148,16 @@ mod tests {
             .unwrap();
 
         let mut report = SyncOutput::default();
-        itemize_fetches("dav/contacts", "contacts", &store, "dav", &[], &mut report).unwrap();
+        itemize_fetches(
+            "dav/contacts",
+            "contacts",
+            &store,
+            "dav",
+            &[],
+            &HashSet::new(),
+            &mut report,
+        )
+        .unwrap();
 
         assert_eq!(
             report.item.patch.len(),
@@ -7026,6 +7301,7 @@ mod tests {
             store,
             "caldav",
             &pull.events,
+            &HashSet::new(),
             &mut report,
         )
         .unwrap();
@@ -7641,5 +7917,202 @@ mod tests {
             handles_of(&store),
             names(&["1", "10", "19", "20", "30", "31"])
         );
+    }
+
+    /// A pager that hydrates each landed page where the sync stands at rest,
+    /// as phase 1's idle connections do, recording what it was told.
+    #[derive(Default)]
+    struct HydratingPager {
+        /// Each call, its landed handles sorted, and whether it resumed.
+        told: Vec<(Vec<String>, bool)>,
+        /// Whether a landed page gets its bodies.
+        hydrate: bool,
+        /// Listing waits begun, then ended.
+        listing: usize,
+        listed: usize,
+    }
+
+    impl Pager for HydratingPager {
+        fn at_rest(
+            &mut self,
+            store: &mut PimdirSourceStore,
+            collection: &PimdirCollectionId,
+            landed: Vec<PimdirHandle>,
+            resumed: bool,
+        ) {
+            assert_eq!(self.listing, self.listed, "never told mid-listing");
+            let mut names: Vec<String> = landed.iter().map(|h| h.0.clone()).collect();
+            names.sort();
+            self.told.push((names, resumed));
+            if landed.is_empty() {
+                return;
+            }
+
+            let placements = store
+                .load(collection, &PimdirLoadScope::Handles(landed.clone()))
+                .unwrap()
+                .placements;
+            assert_eq!(placements.len(), landed.len(), "the page has landed");
+            if !self.hydrate {
+                return;
+            }
+            let blobs = store.blobs();
+            let items = placements
+                .into_iter()
+                .map(|placement| {
+                    let body = format!(
+                        "Message-ID: <{}@example.org>\r\n\r\nhi\r\n",
+                        placement.handle.0
+                    );
+                    PimdirFetchedItem {
+                        handle: placement.handle,
+                        link_id: placement.link_id.unwrap(),
+                        summary: None,
+                        sort_key: PimdirSortKey::default(),
+                        body: Some(PimdirFetchedBody::Inline {
+                            hash: blobs.hash(body.as_bytes()),
+                            bytes: body.into_bytes(),
+                        }),
+                        revision: None,
+                    }
+                })
+                .collect();
+            apply_batch(store, NoWire, collection.as_str(), items).unwrap();
+        }
+
+        fn listing(&mut self) {
+            self.listing += 1;
+        }
+
+        fn listed(&mut self) {
+            self.listed += 1;
+        }
+    }
+
+    fn paged_sync(
+        store: &mut PimdirSourceStore,
+        remote: &mut PagedRemote,
+        pager: &mut dyn Pager,
+    ) -> Result<()> {
+        let verb = sync_verb(
+            "imap/INBOX",
+            false,
+            PimdirPushRights::all(),
+            PimdirConflictPolicy::Manual,
+            PimdirScope::since("2026-09-07T00:00:00Z"),
+            false,
+        );
+        run_verb_paged(store, remote, verb, Some(pager)).map(|_| ())
+    }
+
+    fn bodied(store: &PimdirSourceStore) -> BTreeSet<String> {
+        load_side(store, "imap/INBOX")
+            .unwrap()
+            .into_iter()
+            .filter(|placement| placement.object.is_some())
+            .map(|placement| placement.handle.0)
+            .collect()
+    }
+
+    /// Each page is told once written, the last one when the sync completes,
+    /// and a body applied there survives the pages that land after it, the
+    /// last one's whole-collection merge included.
+    #[test]
+    fn a_landed_page_is_told_at_rest_and_its_bodies_stay() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = mailbox_with_an_old_message(dir.path());
+        let mut remote = PagedRemote::new(pages());
+        let mut pager = HydratingPager {
+            hydrate: true,
+            ..Default::default()
+        };
+
+        paged_sync(&mut store, &mut remote, &mut pager).unwrap();
+
+        let owned = |list: &[&str]| list.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            pager.told,
+            [
+                (Vec::new(), false),
+                (owned(&["30", "31"]), false),
+                (owned(&["19", "20"]), false),
+                (owned(&["10"]), false),
+            ],
+        );
+        assert_eq!((pager.listing, pager.listed), (3, 3));
+        assert_eq!(
+            bodied(&store),
+            names(&["10", "19", "20", "30", "31"]),
+            "every page kept the bodies applied at rest",
+        );
+    }
+
+    /// A round resumed is told so before its first page, and its page feed
+    /// then queues the bodies the earlier run's pages still owe, newest first
+    /// across the account, beside each page landed after.
+    #[test]
+    fn a_resumed_round_feeds_what_its_earlier_pages_owe() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = mailbox_with_an_old_message(dir.path());
+        let mut remote = PagedRemote::new(pages());
+        remote.fail_at = Some(1);
+
+        let mut pager = HydratingPager::default();
+        paged_sync(&mut store, &mut remote, &mut pager).unwrap_err();
+        assert_eq!(pager.told.len(), 2, "page one was told before the failure");
+        assert!(bodied(&store).is_empty());
+
+        let mut pager = HydratingPager::default();
+        paged_sync(&mut store, &mut remote, &mut pager).unwrap();
+        assert_eq!(pager.told[0], (Vec::new(), true), "told once, resumed");
+        assert!(pager.told[1..].iter().all(|(_, resumed)| !resumed));
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = mailbox_with_an_old_message(dir.path());
+        let mut remote = PagedRemote::new(pages());
+        remote.fail_at = Some(1);
+        paged_sync(&mut store, &mut remote, &mut HydratingPager::default()).unwrap_err();
+
+        let gate = Mutex::new(());
+        let feed = HydrateFeed::new(DownloadOrder::Newest, 1);
+        let mut pager = PageFeed::hold(&gate, Some(&feed));
+        paged_sync(&mut store, &mut remote, &mut pager).unwrap();
+        drop(pager);
+        feed.spined();
+
+        let mut fed = Vec::new();
+        while let Some((collection, handles)) = feed.next() {
+            assert_eq!(collection, "imap/INBOX");
+            fed.push(handles.into_iter().map(|h| h.0).collect::<Vec<_>>());
+        }
+        assert_eq!(
+            fed,
+            [vec!["30", "31", "1"], vec!["20", "19"], vec!["10"]],
+            "the resumed round's earlier page first, the 2020 mail it owes too",
+        );
+    }
+
+    /// A connection with no collection left waits on the feed until a page
+    /// lands or every spine has ended.
+    #[test]
+    fn the_feed_waits_while_a_spine_may_still_feed() {
+        let feed = HydrateFeed::new(DownloadOrder::Largest, 1);
+        thread::scope(|scope| {
+            let waiter = scope.spawn(|| {
+                let mut got = Vec::new();
+                while let Some((_, handles)) = feed.next() {
+                    got.push(handles.len());
+                }
+                got
+            });
+            thread::sleep(std::time::Duration::from_millis(20));
+            feed.feed(
+                "imap/INBOX",
+                vec![target("a", 1, None), target("b", 9, None)],
+            );
+            thread::sleep(std::time::Duration::from_millis(20));
+            feed.spined();
+            assert_eq!(waiter.join().unwrap(), [2]);
+        });
     }
 }

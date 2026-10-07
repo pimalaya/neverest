@@ -77,6 +77,12 @@ impl ImapClient {
         self.capabilities.contains(&Capability::QResync)
     }
 
+    /// Whether the server takes `UID EXPUNGE`: it advertises UIDPLUS
+    /// (RFC 4315) or IMAP4rev2 (RFC 9051, where the command is built in).
+    pub fn supports_uid_expunge(&self) -> bool {
+        supports_uid_expunge(&self.capabilities)
+    }
+
     /// A QRESYNC `SELECT (QRESYNC (uid_validity highest_mod_seq))`: the server
     /// returns only what changed since `highest_mod_seq` plus vanished UIDs.
     pub fn select_delta(
@@ -109,6 +115,16 @@ impl ImapClient {
     }
 }
 
+/// Whether `capabilities` hold UIDPLUS or IMAP4rev2, both of which carry
+/// `UID EXPUNGE`. imap-types names no IMAP4rev2 variant, so it is read as
+/// the atom, case-insensitively (RFC 9051 §7.2.2).
+fn supports_uid_expunge(capabilities: &[Capability<'_>]) -> bool {
+    capabilities.iter().any(|capability| {
+        *capability == Capability::UidPlus
+            || capability.to_string().eq_ignore_ascii_case("IMAP4rev2")
+    })
+}
+
 impl Deref for ImapClient {
     type Target = Inner;
 
@@ -120,5 +136,25 @@ impl Deref for ImapClient {
 impl DerefMut for ImapClient {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn caps(atoms: &[&'static str]) -> Vec<Capability<'static>> {
+        atoms
+            .iter()
+            .map(|atom| Capability::from(Atom::try_from(*atom).unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn uid_expunge_needs_uidplus_or_imap4rev2() {
+        assert!(supports_uid_expunge(&caps(&["IMAP4rev1", "UIDPLUS"])));
+        assert!(supports_uid_expunge(&caps(&["IMAP4rev2"])));
+        assert!(supports_uid_expunge(&caps(&["imap4rev2"])));
+        assert!(!supports_uid_expunge(&caps(&["IMAP4rev1", "MOVE", "IDLE"])));
     }
 }

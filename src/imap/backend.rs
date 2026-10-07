@@ -392,21 +392,33 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Deletes one message: marks it `\Deleted`, then EXPUNGEs.
+    /// Deletes one message: marks it `\Deleted`, then `UID EXPUNGE`s that
+    /// UID alone (RFC 4315, built into IMAP4rev2).
     ///
-    /// EXPUNGE removes every `\Deleted` message in the mailbox, but the sync
-    /// engine only flags the ones it means to drop, so nothing else is caught.
+    /// A plain `EXPUNGE` would remove every message any client marked
+    /// `\Deleted` in the mailbox, so a server offering neither UIDPLUS nor
+    /// IMAP4rev2 gets no delete at all: the push fails, io-pimdir keeps it,
+    /// and no `\Deleted` flag is left behind, the capability being read
+    /// before anything is stored.
     pub fn delete_message(&mut self, mailbox: &str, id: &str) -> Result<()> {
+        if !self.supports_uid_expunge() {
+            bail!(
+                "The IMAP server offers neither UIDPLUS nor IMAP4rev2, so a single message \
+                 cannot be expunged without expunging every message marked \\Deleted in \
+                 {mailbox}: delete refused"
+            );
+        }
+
         let sequence_set = parse_uids(&[id])?;
 
         self.select_cached(mailbox)?;
         self.store(
-            sequence_set,
+            sequence_set.clone(),
             StoreType::Add,
             vec![ImapFlag::Deleted],
             ImapMessageStoreOptions { uid: true },
         )?;
-        self.expunge()?;
+        self.uid_expunge(sequence_set)?;
 
         Ok(())
     }

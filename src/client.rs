@@ -777,27 +777,44 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
                 &msgraph.token,
                 &msgraph.user_id,
                 msgraph.tls.clone(),
+                account.throttle.clone(),
             )?;
             Ok(Client::Msgraph(Box::new(client)))
         }
         #[cfg(feature = "gpeople")]
         SourceAccountBackend::Gpeople(google) => {
-            let client = GpeopleClient::connect(&google.token, google.tls.clone())?;
+            let client = GpeopleClient::connect(
+                &google.token,
+                google.tls.clone(),
+                account.throttle.clone(),
+            )?;
             Ok(Client::Gpeople(Box::new(client)))
         }
         #[cfg(feature = "gcal")]
         SourceAccountBackend::Gcal(google) => {
-            let client = GcalClient::connect(&google.token, google.tls.clone())?;
+            let client =
+                GcalClient::connect(&google.token, google.tls.clone(), account.throttle.clone())?;
             Ok(Client::Gcal(Box::new(client)))
         }
         #[cfg(feature = "dav")]
         SourceAccountBackend::Dav(dav) => {
-            let client = DavClient::connect(dav.kind, &dav.server, &dav.tls, dav.auth.clone())?;
+            let client = DavClient::connect(
+                dav.kind,
+                &dav.server,
+                &dav.tls,
+                dav.auth.clone(),
+                account.throttle.clone(),
+            )?;
             Ok(Client::Dav(Box::new(client)))
         }
         #[cfg(feature = "gmail")]
         SourceAccountBackend::Gmail(gmail) => {
-            let client = GmailClient::connect(&gmail.token, &gmail.user_id, gmail.tls.clone())?;
+            let client = GmailClient::connect(
+                &gmail.token,
+                &gmail.user_id,
+                gmail.tls.clone(),
+                account.throttle.clone(),
+            )?;
             Ok(Client::Gmail(Box::new(client)))
         }
         #[cfg(not(any(

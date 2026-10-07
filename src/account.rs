@@ -18,7 +18,7 @@
 //! None of these types derive `Debug`: what they hold is exactly what must
 //! not reach a log line.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc, time::SystemTime};
 
 use anyhow::{Context, Result, bail};
 #[cfg(any(feature = "imap", feature = "smtp"))]
@@ -54,6 +54,7 @@ use crate::config::{AccountConfig, SourceBackendConfig, SourceConfig};
 use crate::dav::client::DavKind;
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::GraphKind;
+use crate::throttle::Throttle;
 
 /// An account's endpoints, resolved once for the run.
 ///
@@ -105,6 +106,21 @@ impl Account {
             None => bail!("This account declares no endpoint named {name}"),
         }
     }
+
+    /// The endpoints that gave up after being throttled this run, with
+    /// until when, by name.
+    pub fn throttled(&self) -> Vec<(String, SystemTime)> {
+        let mut throttled: Vec<_> = self
+            .endpoints
+            .iter()
+            .filter_map(|(name, account)| {
+                let until = account.as_ref().ok()?.throttle.gave_up()?;
+                Some((name.clone(), until))
+            })
+            .collect();
+        throttled.sort();
+        throttled
+    }
 }
 
 /// One endpoint with every secret resolved: what a connection opens from.
@@ -115,6 +131,9 @@ pub struct SourceAccount {
     /// The send channel this endpoint declares, if any.
     #[cfg(feature = "smtp")]
     pub smtp: Option<SmtpAccount>,
+    /// How the endpoint answers its provider's throttling, shared by every
+    /// connection opened from it.
+    pub throttle: Arc<Throttle>,
 }
 
 impl SourceAccount {
@@ -144,10 +163,24 @@ impl SourceAccount {
             .transpose()
             .with_context(|| format!("Resolve the send credentials of {name}"))?;
 
+        // NOTE: Gmail meters each user by the second, so it is paced as
+        // well; every other provider is only followed when it refuses.
+        #[cfg(feature = "gmail")]
+        let throttle = match &backend {
+            SourceAccountBackend::Gmail(_) => {
+                Throttle::paced(name, crate::gmail::client::UNITS_PER_SECOND)
+            }
+            #[allow(unreachable_patterns)]
+            _ => Throttle::new(name),
+        };
+        #[cfg(not(feature = "gmail"))]
+        let throttle = Throttle::new(name);
+
         Ok(Self {
             backend,
             #[cfg(feature = "smtp")]
             smtp,
+            throttle: Arc::new(throttle),
         })
     }
 }

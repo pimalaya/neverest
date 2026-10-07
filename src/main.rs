@@ -125,6 +125,7 @@ mod kind;
 mod msgraph;
 mod offline;
 mod sync;
+mod throttle;
 #[cfg(feature = "wizard")]
 mod wizard;
 

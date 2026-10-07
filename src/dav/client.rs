@@ -28,6 +28,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     io::{ErrorKind, Read, Write},
+    sync::Arc,
 };
 
 use anyhow::{Context, Result, bail};
@@ -54,6 +55,7 @@ use crate::{
     client::{EnumEntry, Enumeration, WrittenItem},
     item::{collection::Collection, flag::Flag, flag::FlagOp},
     kind::{Kind, LinkId},
+    throttle::Throttle,
 };
 
 /// How many truncated rounds one enumeration drains before giving up, so a
@@ -123,12 +125,20 @@ pub struct DavClient {
     server: Url,
     tls: Tls,
     auth: WebdavAuth,
+    /// The source's back-off, shared by its connections.
+    throttle: Arc<Throttle>,
 }
 
 impl DavClient {
     /// Opens the session and discovers the home set, so a misconfigured URL or
     /// credential fails here rather than at the first enumeration.
-    pub fn connect(kind: DavKind, server: &Url, tls: &Tls, auth: WebdavAuth) -> Result<Self> {
+    pub fn connect(
+        kind: DavKind,
+        server: &Url,
+        tls: &Tls,
+        auth: WebdavAuth,
+        throttle: Arc<Throttle>,
+    ) -> Result<Self> {
         let inner = WebdavClientStd::connect(server, auth.clone(), connect_options(tls))
             .with_context(|| format!("Cannot connect to the {kind} server"))?;
         let mut client = Self {
@@ -137,6 +147,7 @@ impl DavClient {
             server: server.clone(),
             tls: tls.clone(),
             auth,
+            throttle,
         };
 
         let home = match kind {
@@ -159,18 +170,28 @@ impl DavClient {
     /// io-webdav holds a single stream and reports no keep-alive hint, so an
     /// HTTP/1.0 or `Connection: close` peer breaks every exchange after the
     /// first. Only an end-of-stream failure retries, never an applied write.
+    ///
+    /// The source's [`Throttle`] also sends it again while the server
+    /// throttles it (429, 503), which a server answers before applying
+    /// anything.
     fn op<T>(
         &mut self,
         mut run: impl FnMut(&mut WebdavClientStd) -> Result<T, WebdavClientStdError>,
     ) -> Result<T, WebdavClientStdError> {
-        match run(&mut self.inner) {
-            Err(err) if is_connection_closed(&err) => {
-                debug!("{} connection closed by the server, reopening", self.kind);
-                self.reconnect()?;
-                run(&mut self.inner)
-            }
-            out => out,
-        }
+        let throttle = Arc::clone(&self.throttle);
+        throttle.call(
+            1,
+            || match run(&mut self.inner) {
+                Err(err) if is_connection_closed(&err) => {
+                    debug!("{} connection closed by the server, reopening", self.kind);
+                    self.reconnect()?;
+                    run(&mut self.inner)
+                }
+                out => out,
+            },
+            |err| is_throttled(err).then_some(None),
+            |body| WebdavClientStdError::Send(WebdavSendError::HttpStatus { status: 429, body }),
+        )
     }
 
     /// Reopens the connection, carrying over the discovery already paid for.
@@ -833,6 +854,25 @@ fn is_connection_closed(err: &WebdavClientStdError) -> bool {
         ),
         _ => false,
     }
+}
+
+/// Whether the server throttled the exchange: 429, or 503 (RFC 9110
+/// §15.6.4), wherever the status surfaces.
+///
+/// io-webdav keeps no `Retry-After`, so the wait is neverest's back-off.
+fn is_throttled(err: &WebdavClientStdError) -> bool {
+    let status = match err {
+        WebdavClientStdError::Send(WebdavSendError::HttpStatus { status, .. })
+        | WebdavClientStdError::WebdavSyncCollection(WebdavSyncCollectionError::Send(
+            WebdavSendError::HttpStatus { status, .. },
+        ))
+        | WebdavClientStdError::WebdavFollowRedirects(WebdavFollowRedirectsError::HttpStatus {
+            status,
+            ..
+        }) => *status,
+        _ => return false,
+    };
+    matches!(status, 429 | 503)
 }
 
 /// Whether a write was refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC

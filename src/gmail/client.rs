@@ -24,6 +24,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     io::{Read, Write},
+    sync::Arc,
     thread,
     time::Duration,
 };
@@ -44,7 +45,7 @@ use io_gmail::v1::{
             import::GmailMessageImport, list::GmailMessagesListParams,
         },
     },
-    send::{GMAIL_API_BASE, GmailSendOutput},
+    send::{GMAIL_API_BASE, GmailSendError, GmailSendOutput},
 };
 use io_pimdir::summary::mail::{addresses, decode, instant, message_ids};
 use log::{debug, trace, warn};
@@ -65,6 +66,7 @@ use crate::{
         summary::{ItemSummary, normalize_message_id},
     },
     offline::invitation::Refusal,
+    throttle::{Throttle, google_throttled},
 };
 
 /// Gmail system label marking an unread message; its absence means seen.
@@ -110,6 +112,31 @@ const BATCH_SIZE: usize = 1000;
 /// How many times an import's history is read before giving up on it.
 const IMPORT_ATTEMPTS: u32 = 3;
 
+/// The quota units a second the Gmail source holds itself to, across all its
+/// connections.
+///
+/// Gmail meters each user at 250 units a second, `messages.list` and
+/// `messages.get` costing 5 each: about 50 reads a second, batched or not, a
+/// batch counting each request it carries. 200 is 40 reads a second, a margin
+/// below the quota rather than a run of refusals at it.
+pub const UNITS_PER_SECOND: f64 = 200.0;
+
+/// What each Gmail call costs in quota units, as Google lists them.
+mod units {
+    pub const LABEL_GET: u32 = 1;
+    pub const LABELS_LIST: u32 = 1;
+    pub const LABEL_CREATE: u32 = 5;
+    pub const LABEL_DELETE: u32 = 5;
+    pub const PROFILE_GET: u32 = 1;
+    pub const MESSAGES_LIST: u32 = 5;
+    pub const HISTORY_LIST: u32 = 2;
+    pub const MESSAGE_GET: u32 = 5;
+    pub const MESSAGE_IMPORT: u32 = 25;
+    pub const MESSAGE_DELETE: u32 = 10;
+    pub const MESSAGE_MODIFY: u32 = 5;
+    pub const BATCH_MODIFY: u32 = 50;
+}
+
 /// The live Gmail session of one side.
 pub struct GmailClient {
     inner: GmailClientStd,
@@ -121,12 +148,19 @@ pub struct GmailClient {
     /// Whether the server allowed reusing the stream after the last
     /// exchange; when false the next operation reopens it.
     alive: bool,
+    /// The source's pacing and back-off, shared by its connections.
+    throttle: Arc<Throttle>,
 }
 
 impl GmailClient {
     /// Opens the TLS connection to the Gmail API with a bearer token, scoped
     /// to the `user` mailbox owner (`me` or an address).
-    pub fn connect(token: &SecretString, user: &str, tls: Tls) -> Result<Self> {
+    pub fn connect(
+        token: &SecretString,
+        user: &str,
+        tls: Tls,
+        throttle: Arc<Throttle>,
+    ) -> Result<Self> {
         let options = GmailClientStdConnectOptions {
             tls: tls.clone(),
             proxy: Proxy::None,
@@ -140,6 +174,7 @@ impl GmailClient {
             tls,
             labels: HashMap::new(),
             alive: true,
+            throttle,
         })
     }
 
@@ -161,21 +196,44 @@ impl GmailClient {
         Ok(())
     }
 
-    /// Runs one Gmail operation, reopening the stream first when the server
-    /// closed it, and records the new keep-alive hint.
+    /// Runs one Gmail operation costing `units` of quota, reopening the
+    /// stream first when the server closed it, and records the new
+    /// keep-alive hint.
+    ///
+    /// The source's [`Throttle`] paces it and sends it again while Gmail
+    /// throttles it (429, 503, or a 403 rate limit).
     fn op<T>(
         &mut self,
-        run: impl FnOnce(&mut GmailClientStd) -> Result<GmailSendOutput<T>, GmailClientStdError>,
+        units: u32,
+        mut run: impl FnMut(&mut GmailClientStd) -> Result<GmailSendOutput<T>, GmailClientStdError>,
     ) -> Result<T, GmailClientStdError> {
-        if !self.alive
-            && let Err(err) = self.reconnect()
-        {
-            warn!("cannot reopen the gmail stream: {err:#}");
-        }
+        let throttle = Arc::clone(&self.throttle);
+        throttle.call(
+            units,
+            || {
+                if !self.alive
+                    && let Err(err) = self.reconnect()
+                {
+                    warn!("cannot reopen the gmail stream: {err:#}");
+                }
 
-        let out = run(&mut self.inner)?;
-        self.alive = out.keep_alive;
-        Ok(out.response)
+                let out = run(&mut self.inner)?;
+                self.alive = out.keep_alive;
+                Ok(out.response)
+            },
+            |err| match err {
+                GmailClientStdError::Send(GmailSendError::Api { status, message }) => {
+                    google_throttled(*status, message)
+                }
+                _ => None,
+            },
+            |message| {
+                GmailClientStdError::Send(GmailSendError::Api {
+                    status: 429,
+                    message,
+                })
+            },
+        )
     }
 
     /// Lists the user labels and [`SYSTEM_COLLECTIONS`], counted when
@@ -189,7 +247,7 @@ impl GmailClient {
         for label in labels {
             let (total, unread) = if with_counts {
                 let label = self
-                    .op(|client| client.label_get(&label.id))
+                    .op(units::LABEL_GET, |client| client.label_get(&label.id))
                     .with_context(|| format!("Get label {} error", label.name))?;
                 (label.messages_total, label.messages_unread)
             } else {
@@ -222,7 +280,7 @@ impl GmailClient {
     /// Lists the labels synced as collections, refreshing the name map.
     fn list_labels(&mut self) -> Result<Vec<GmailLabel>> {
         let labels: Vec<GmailLabel> = self
-            .op(|client| client.labels_list())
+            .op(units::LABELS_LIST, |client| client.labels_list())
             .context("List labels error")?
             .labels
             .into_iter()
@@ -263,7 +321,7 @@ impl GmailClient {
         }
 
         let created = self
-            .op(|client| client.label_create(&label))
+            .op(units::LABEL_CREATE, |client| client.label_create(&label))
             .with_context(|| format!("Create label {} error", label.name))?;
         let name = created.name.clone();
         self.labels.insert(created.name, created.id);
@@ -281,7 +339,7 @@ impl GmailClient {
             ..Default::default()
         };
         let label = self
-            .op(|client| client.label_create(&label))
+            .op(units::LABEL_CREATE, |client| client.label_create(&label))
             .with_context(|| format!("Create label {name} error"))?;
 
         self.labels.insert(label.name, label.id);
@@ -296,7 +354,7 @@ impl GmailClient {
         }
 
         let id = self.label_id(name)?;
-        self.op(|client| client.label_delete(&id))
+        self.op(units::LABEL_DELETE, |client| client.label_delete(&id))
             .with_context(|| format!("Delete label {name} error"))?;
 
         self.labels.retain(|_, label| *label != id);
@@ -334,7 +392,7 @@ impl GmailClient {
         trace!("collection: {collection}");
 
         let checkpoint = self
-            .op(|client| client.profile_get())
+            .op(units::PROFILE_GET, |client| client.profile_get())
             .context("Get Gmail profile error")?
             .history_id
             .context("Gmail profile carries no history id")?;
@@ -392,7 +450,7 @@ impl GmailClient {
                 ..Default::default()
             };
             let page = self
-                .op(|client| client.messages_list(&params))
+                .op(units::MESSAGES_LIST, |client| client.messages_list(&params))
                 .with_context(|| format!("List messages of {label_ids:?} error"))?;
 
             ids.extend(page.messages.into_iter().map(|message| message.id));
@@ -425,7 +483,7 @@ impl GmailClient {
                 max_results: Some(PAGE_SIZE),
                 page_token: token.as_deref(),
             };
-            let page = self.op(|client| {
+            let page = self.op(units::HISTORY_LIST, |client| {
                 let coroutine = GmailHistoryList::new(&client.auth, &client.user_id, &params)?;
                 client.run(coroutine)
             })?;
@@ -462,7 +520,9 @@ impl GmailClient {
         let mut items = Vec::new();
         let mut vanished: Vec<String> = deleted.into_iter().collect();
         for id in changed {
-            match self.op(|client| client.message_get(&id, GmailMessageFormat::Minimal, &[])) {
+            match self.op(units::MESSAGE_GET, |client| {
+                client.message_get(&id, GmailMessageFormat::Minimal, &[])
+            }) {
                 Ok(message) if belongs(&message.label_ids, label) => items.push(EnumEntry {
                     flags: flags_from_labels(&message.label_ids),
                     id,
@@ -492,7 +552,9 @@ impl GmailClient {
         let mut summaries = Vec::with_capacity(ids.len());
         for id in ids {
             let message = self
-                .op(|client| client.message_get(id, GmailMessageFormat::Metadata, SUMMARY_HEADERS))
+                .op(units::MESSAGE_GET, |client| {
+                    client.message_get(id, GmailMessageFormat::Metadata, SUMMARY_HEADERS)
+                })
                 .with_context(|| format!("Get message {id} metadata error"))?;
             summaries.push(message_summary(id, &message));
         }
@@ -528,7 +590,9 @@ impl GmailClient {
     /// Fetches the raw RFC 5322 bytes of one message, base64url-decoded.
     fn message_raw(&mut self, id: &str) -> Result<Vec<u8>> {
         let message = self
-            .op(|client| client.message_get(id, GmailMessageFormat::Raw, &[]))
+            .op(units::MESSAGE_GET, |client| {
+                client.message_get(id, GmailMessageFormat::Raw, &[])
+            })
             .with_context(|| format!("Get raw message {id} error"))?;
         let raw = message
             .raw
@@ -557,7 +621,7 @@ impl GmailClient {
             .context("Read message to import error")?;
 
         let start = self
-            .op(|client| client.profile_get())
+            .op(units::PROFILE_GET, |client| client.profile_get())
             .context("Get Gmail profile error")?
             .history_id
             .context("Gmail profile carries no history id")?;
@@ -570,7 +634,7 @@ impl GmailClient {
             ..Default::default()
         };
         let answered = self
-            .op(|client| {
+            .op(units::MESSAGE_IMPORT, |client| {
                 let coroutine = GmailMessageImport::new(
                     &client.auth,
                     &client.user_id,
@@ -585,7 +649,9 @@ impl GmailClient {
             .with_context(|| format!("Import message into {collection} error"))?
             .id;
 
-        match self.op(|client| client.message_get(&answered, GmailMessageFormat::Minimal, &[])) {
+        match self.op(units::MESSAGE_GET, |client| {
+            client.message_get(&answered, GmailMessageFormat::Minimal, &[])
+        }) {
             Ok(_) => {
                 return Ok(WrittenItem {
                     id: answered,
@@ -615,7 +681,7 @@ impl GmailClient {
 
             for id in history_added(&records) {
                 let message = self
-                    .op(|client| {
+                    .op(units::MESSAGE_GET, |client| {
                         client.message_get(&id, GmailMessageFormat::Metadata, &["Message-ID"])
                     })
                     .with_context(|| format!("Get message {id} metadata error"))?;
@@ -645,7 +711,7 @@ impl GmailClient {
         let label = self.label_id(collection)?;
 
         if label == TRASH {
-            self.op(|client| client.message_delete(id))
+            self.op(units::MESSAGE_DELETE, |client| client.message_delete(id))
                 .with_context(|| format!("Delete message {id} error"))?;
         } else {
             self.modify(&[id], &[], &[label])
@@ -683,13 +749,15 @@ impl GmailClient {
     /// `batchModify` by chunks otherwise.
     fn modify(&mut self, ids: &[&str], add: &[String], remove: &[String]) -> Result<()> {
         if let [id] = ids {
-            self.op(|client| client.message_modify(id, add, remove))?;
+            self.op(units::MESSAGE_MODIFY, |client| {
+                client.message_modify(id, add, remove)
+            })?;
             return Ok(());
         }
 
         for chunk in ids.chunks(BATCH_SIZE) {
             let chunk: Vec<String> = chunk.iter().map(|id| id.to_string()).collect();
-            self.op(|client| {
+            self.op(units::BATCH_MODIFY, |client| {
                 let coroutine = GmailMessagesBatchModify::new(
                     &client.auth,
                     &client.user_id,

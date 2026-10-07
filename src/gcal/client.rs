@@ -30,6 +30,7 @@
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
+    sync::Arc,
     time::Duration,
 };
 
@@ -45,7 +46,7 @@ use io_gcal::v3::{
             patch::GcalEventPatchParams, update::GcalEventUpdateParams,
         },
     },
-    send::{GCAL_API_BASE, GcalSendOutput},
+    send::{GCAL_API_BASE, GcalSendError, GcalSendOutput},
 };
 use io_pimdir::summary::calendar;
 use log::{debug, trace, warn};
@@ -63,6 +64,7 @@ use crate::{
         flag::{Flag, FlagOp},
     },
     offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp, wall_stamp},
+    throttle::{Throttle, google_throttled},
 };
 
 /// The page size requested from the events listing.
@@ -92,6 +94,8 @@ pub struct GcalClient {
     /// Whether the server allowed reusing the stream after the last
     /// exchange; when false the next operation reopens it.
     alive: bool,
+    /// The source's back-off, shared by its connections.
+    throttle: Arc<Throttle>,
     /// The account's own address, its primary calendar's id, read once
     /// when a new event first needs it.
     owner: Option<String>,
@@ -99,7 +103,7 @@ pub struct GcalClient {
 
 impl GcalClient {
     /// Opens the TLS connection to the Calendar API with a bearer token.
-    pub fn connect(token: &SecretString, tls: Tls) -> Result<Self> {
+    pub fn connect(token: &SecretString, tls: Tls, throttle: Arc<Throttle>) -> Result<Self> {
         let options = GcalClientStdConnectOptions { tls: tls.clone() };
         let inner = GcalClientStd::connect(token.expose_secret(), options)
             .context("Cannot connect to Google Calendar")?;
@@ -108,6 +112,7 @@ impl GcalClient {
             inner,
             tls,
             alive: true,
+            throttle,
             owner: None,
         })
     }
@@ -134,19 +139,40 @@ impl GcalClient {
 
     /// Runs one Calendar operation, reopening the stream first when the
     /// server closed it, and records the new keep-alive hint.
+    ///
+    /// The source's [`Throttle`] sends it again while Google throttles it
+    /// (429, 503, or a 403 rate limit).
     fn op<T>(
         &mut self,
-        run: impl FnOnce(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
+        mut run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
     ) -> Result<T, GcalClientStdError> {
-        if !self.alive
-            && let Err(err) = self.reconnect()
-        {
-            warn!("cannot reopen the calendar stream: {err:#}");
-        }
+        let throttle = Arc::clone(&self.throttle);
+        throttle.call(
+            1,
+            || {
+                if !self.alive
+                    && let Err(err) = self.reconnect()
+                {
+                    warn!("cannot reopen the calendar stream: {err:#}");
+                }
 
-        let out = run(&mut self.inner)?;
-        self.alive = out.keep_alive;
-        Ok(out.response)
+                let out = run(&mut self.inner)?;
+                self.alive = out.keep_alive;
+                Ok(out.response)
+            },
+            |err| match err {
+                GcalClientStdError::Send(GcalSendError::Api { status, message }) => {
+                    google_throttled(*status, message)
+                }
+                _ => None,
+            },
+            |message| {
+                GcalClientStdError::Send(GcalSendError::Api {
+                    status: 429,
+                    message,
+                })
+            },
+        )
     }
 
     /// Lists the calendars of the user's calendar list, keyed by id and

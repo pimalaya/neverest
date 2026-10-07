@@ -78,6 +78,13 @@ pub struct SyncOutput {
     /// read on an endpoint that opened never lands here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreached: Vec<UnreachedEndpoint>,
+    /// The sources that gave up after their provider throttled them (HTTP
+    /// 429, 503, a Google rate limit) past the waits neverest takes.
+    ///
+    /// What landed before stays; the run is incomplete (exit 3) and a rerun
+    /// after `until` picks up the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub throttled: Vec<ThrottledSource>,
 }
 
 impl SyncOutput {
@@ -106,6 +113,7 @@ impl SyncOutput {
             refused,
             rejected,
             unreached,
+            throttled,
         } = other;
 
         self.collection.patch.extend(collection.patch);
@@ -119,6 +127,7 @@ impl SyncOutput {
         self.refused.extend(refused);
         self.rejected.extend(rejected);
         self.unreached.extend(unreached);
+        self.throttled.extend(throttled);
     }
 
     /// Records a divergence this run parked, unless the run named it already.
@@ -149,13 +158,16 @@ impl SyncOutput {
 
     /// Whether the run left work a rerun picks up: a source it could not
     /// scan, a hunk it could not apply, a send or an intent that failed
-    /// without parking. An unreachable server reads this way, and only
-    /// this way, a run with nothing to do never carrying an error.
+    /// without parking, a source that gave up throttled. An unreachable
+    /// server reads this way, and only this way, a run with nothing to do
+    /// never carrying an error.
     pub fn incomplete(&self) -> bool {
-        self.collection
-            .patch
-            .iter()
-            .any(|entry| entry.error.is_some())
+        !self.throttled.is_empty()
+            || self
+                .collection
+                .patch
+                .iter()
+                .any(|entry| entry.error.is_some())
             || self.item.patch.iter().any(|entry| entry.error.is_some())
             || self
                 .submitted
@@ -166,6 +178,17 @@ impl SyncOutput {
                 .iter()
                 .any(|entry| entry.error.is_some() && !entry.parked)
     }
+}
+
+/// A source that gave up after its provider throttled it.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ThrottledSource {
+    /// The source, as the account names it.
+    pub source: String,
+    /// Until when it waits, RFC 3339 UTC: the `Retry-After` the provider
+    /// stated, or the next back-off wait.
+    pub until: String,
 }
 
 /// An endpoint whose connections the run could not open.

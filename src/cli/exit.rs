@@ -63,7 +63,7 @@ mod tests {
     use super::*;
     use crate::sync::{
         hunk::CollectionHunk,
-        report::{PatchEntry, SubmitEntry},
+        report::{PatchEntry, SubmitEntry, ThrottledSource},
     };
 
     fn unreachable() -> PatchEntry<CollectionHunk> {
@@ -104,5 +104,23 @@ mod tests {
 
         report.submitted[0].parked = false;
         assert_eq!(Exit::from(&report), Exit::Incomplete);
+    }
+
+    /// A source that gave up throttled left work for a rerun, even when
+    /// every collection it scanned reads as done.
+    #[test]
+    fn a_throttled_source_makes_the_run_incomplete() {
+        let mut report = SyncOutput::default();
+        report.throttled.push(ThrottledSource {
+            source: String::from("gmail"),
+            until: String::from("2026-10-07T10:00:00Z"),
+        });
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["throttled"],
+            serde_json::json!([{ "source": "gmail", "until": "2026-10-07T10:00:00Z" }])
+        );
     }
 }

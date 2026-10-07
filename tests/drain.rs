@@ -12,9 +12,11 @@
 
 use std::{
     fs::{self, File},
-    io::Write,
+    io::{Read, Write},
+    net::TcpListener,
     path::PathBuf,
     process::{Command, Output},
+    thread,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -317,5 +319,41 @@ fn an_unreachable_endpoint_is_named_in_the_report() {
             .unwrap()
             .starts_with("Open connection"),
         "{report}"
+    );
+}
+
+/// A server answering every request 503 is waited out a bounded number of
+/// times, then the source gives up: the report names it under `throttled`
+/// with until when, and the run exits 3. About half a minute of back-off.
+#[test]
+fn a_throttling_server_is_named_in_the_report() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\n\
+                  Content-Length: 0\r\n\
+                  Connection: close\r\n\r\n",
+            );
+        }
+    });
+
+    let fixture = Fixture::new(CLOSED, "user", "pass");
+    fixture.offline_store();
+    fixture.point_at(&format!("http://127.0.0.1:{port}/"), "user", "pass");
+
+    let report = fixture.json(&["--json", "sync", "-a", ACCOUNT], 3);
+
+    let throttled = report["throttled"].as_array().expect("throttled sources");
+    assert_eq!(throttled.len(), 1, "{report}");
+    assert_eq!(throttled[0]["source"], "caldav", "{report}");
+    let until = throttled[0]["until"].as_str().unwrap();
+    assert!(
+        until.len() == 20 && until.ends_with('Z'),
+        "RFC 3339 UTC at seconds: {until}"
     );
 }

@@ -16,6 +16,7 @@
 
 use std::{
     io::{Read, Write},
+    sync::Arc,
     time::Duration,
 };
 
@@ -27,7 +28,7 @@ use io_gpeople::v1::{
         connections::list::GpeopleConnectionsListParams,
         vcard::{GPEOPLE_PERSON_STASH_KEY, GPEOPLE_PERSON_VCARD_FIELDS},
     },
-    send::{GPEOPLE_API_BASE, GpeopleSendOutput},
+    send::{GPEOPLE_API_BASE, GpeopleSendError, GpeopleSendOutput},
 };
 use log::{debug, trace, warn};
 use pimalaya_stream::{
@@ -44,6 +45,7 @@ use crate::{
         collection::Collection,
         flag::{Flag, FlagOp},
     },
+    throttle::{Throttle, google_throttled},
 };
 
 /// The one collection a People account syncs: every connection.
@@ -64,11 +66,13 @@ pub struct GpeopleClient {
     /// Whether the server allowed reusing the stream after the last
     /// exchange; when false the next operation reopens it.
     alive: bool,
+    /// The source's back-off, shared by its connections.
+    throttle: Arc<Throttle>,
 }
 
 impl GpeopleClient {
     /// Opens the TLS connection to the People API with a bearer token.
-    pub fn connect(token: &SecretString, tls: Tls) -> Result<Self> {
+    pub fn connect(token: &SecretString, tls: Tls, throttle: Arc<Throttle>) -> Result<Self> {
         let options = GpeopleClientStdConnectOptions {
             tls: tls.clone(),
             proxy: Proxy::None,
@@ -80,6 +84,7 @@ impl GpeopleClient {
             inner,
             tls,
             alive: true,
+            throttle,
         })
     }
 
@@ -103,19 +108,42 @@ impl GpeopleClient {
 
     /// Runs one People operation, reopening the stream first when the
     /// server closed it, and records the new keep-alive hint.
+    ///
+    /// The source's [`Throttle`] sends it again while Google throttles it
+    /// (429, 503, or a 403 rate limit).
     fn op<T>(
         &mut self,
-        run: impl FnOnce(&mut GpeopleClientStd) -> Result<GpeopleSendOutput<T>, GpeopleClientStdError>,
+        mut run: impl FnMut(
+            &mut GpeopleClientStd,
+        ) -> Result<GpeopleSendOutput<T>, GpeopleClientStdError>,
     ) -> Result<T, GpeopleClientStdError> {
-        if !self.alive
-            && let Err(err) = self.reconnect()
-        {
-            warn!("cannot reopen the people stream: {err:#}");
-        }
+        let throttle = Arc::clone(&self.throttle);
+        throttle.call(
+            1,
+            || {
+                if !self.alive
+                    && let Err(err) = self.reconnect()
+                {
+                    warn!("cannot reopen the people stream: {err:#}");
+                }
 
-        let out = run(&mut self.inner)?;
-        self.alive = out.keep_alive;
-        Ok(out.response)
+                let out = run(&mut self.inner)?;
+                self.alive = out.keep_alive;
+                Ok(out.response)
+            },
+            |err| match err {
+                GpeopleClientStdError::Send(GpeopleSendError::Api { status, message }) => {
+                    google_throttled(*status, message)
+                }
+                _ => None,
+            },
+            |message| {
+                GpeopleClientStdError::Send(GpeopleSendError::Api {
+                    status: 429,
+                    message,
+                })
+            },
+        )
     }
 
     /// Lists the one address book a People account has.

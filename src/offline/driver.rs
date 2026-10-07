@@ -95,9 +95,10 @@ use crate::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
             DrainedQueue, IntentEntry, ItemConflict, ParkedQueueAction, PatchEntry, PurgedItems,
-            RefusedDuplicate, RejectedWrite, SyncOutput, UnreachedEndpoint,
+            RefusedDuplicate, RejectedWrite, SyncOutput, ThrottledSource, UnreachedEndpoint,
         },
     },
+    throttle,
 };
 
 /// How many extra sync passes to run after the first.
@@ -499,6 +500,15 @@ pub fn run(
                 Some(err),
             ));
         }
+    }
+
+    // NOTE: once for the run, targets included: a source that gave up shares
+    // its throttle with every connection opened from it.
+    for (source, until) in account.throttled() {
+        report.throttled.push(ThrottledSource {
+            source,
+            until: throttle::rfc3339(until),
+        });
     }
 
     // NOTE: once for the run: the parked rows and the outstanding conflicts

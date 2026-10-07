@@ -31,7 +31,8 @@ mod contacts;
 use std::{
     collections::{BTreeMap, HashMap},
     io::{Read, Write},
-    time::Duration,
+    sync::Arc,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, Result, bail};
@@ -53,7 +54,7 @@ use io_msgraph::v1::{
             delta::{MsgraphMessageDelta, MsgraphMessagesDeltaResponse},
         },
     },
-    send::{MSGRAPH_API_BASE, MsgraphSend, MsgraphSendOutput, user_path},
+    send::{MSGRAPH_API_BASE, MsgraphSend, MsgraphSendError, MsgraphSendOutput, user_path},
 };
 use log::{debug, trace, warn};
 use pimalaya_stream::{
@@ -71,6 +72,7 @@ use crate::{
         flag::{Flag, FlagOp, IanaFlag},
         summary::{ItemSummary, normalize_message_id},
     },
+    throttle::{self, Throttle},
 };
 
 /// The `$select` projection of the delta query: the envelope fields the summary
@@ -131,12 +133,20 @@ pub struct GraphClient {
     /// Whether the server allowed reusing the stream after the last exchange;
     /// when false the next operation reopens it.
     alive: bool,
+    /// The source's back-off, shared by its connections.
+    throttle: Arc<Throttle>,
 }
 
 impl GraphClient {
     /// Opens the TLS connection to the Graph API with the given bearer token,
     /// scoped to the `user` mailbox owner (`me` or a user id), for one kind.
-    pub fn connect(kind: GraphKind, token: &SecretString, user: &str, tls: Tls) -> Result<Self> {
+    pub fn connect(
+        kind: GraphKind,
+        token: &SecretString,
+        user: &str,
+        tls: Tls,
+        throttle: Arc<Throttle>,
+    ) -> Result<Self> {
         let options = MsgraphClientStdConnectOptions {
             tls: tls.clone(),
             proxy: Proxy::None,
@@ -153,6 +163,7 @@ impl GraphClient {
             rows: HashMap::new(),
             drafts: None,
             alive: true,
+            throttle,
         })
     }
 
@@ -176,17 +187,42 @@ impl GraphClient {
 
     /// Runs one Graph operation, reopening the stream first when the server
     /// closed it, and records the new keep-alive hint.
+    ///
+    /// The source's [`Throttle`] sends it again while Graph throttles it
+    /// (429, 503), backing off: io-msgraph keeps no `Retry-After` but in a
+    /// batch's answers.
     fn op<T>(
         &mut self,
-        run: impl FnOnce(&mut MsgraphClientStd) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
+        mut run: impl FnMut(
+            &mut MsgraphClientStd,
+        ) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
     ) -> Result<T, MsgraphClientStdError> {
-        if !self.alive {
-            self.reconnect().map_err(MsgraphClientStdError::Tls)?;
-        }
+        let throttle = Arc::clone(&self.throttle);
+        throttle.call(
+            1,
+            || {
+                if !self.alive {
+                    self.reconnect().map_err(MsgraphClientStdError::Tls)?;
+                }
 
-        let out = run(&mut self.inner)?;
-        self.alive = out.keep_alive;
-        Ok(out.response)
+                let out = run(&mut self.inner)?;
+                self.alive = out.keep_alive;
+                Ok(out.response)
+            },
+            |err| match err {
+                MsgraphClientStdError::Send(send) if matches!(send.status(), Some(429 | 503)) => {
+                    Some(None)
+                }
+                _ => None,
+            },
+            |message| {
+                MsgraphClientStdError::Send(MsgraphSendError::Api {
+                    status: 429,
+                    code: String::from("throttled"),
+                    message,
+                })
+            },
+        )
     }
 
     /// The domain this session syncs.
@@ -395,7 +431,8 @@ impl GraphClient {
     fn folders_from_link(&mut self, link: &str) -> Result<MsgraphMailFoldersListResponse> {
         let url = Url::parse(link).context("Cannot parse the folder paging link")?;
         self.op(|client| {
-            let coroutine = MsgraphSend::<MsgraphMailFoldersListResponse>::get(&client.auth, url);
+            let coroutine =
+                MsgraphSend::<MsgraphMailFoldersListResponse>::get(&client.auth, url.clone());
             client.run(coroutine)
         })
         .context("Follow folder paging link error")
@@ -570,7 +607,9 @@ impl GraphClient {
             let mut pending: Vec<&str> = chunk.to_vec();
 
             for round in 0..=BATCH_RETRY_ROUNDS {
-                if pending.is_empty() {
+                // NOTE: a source that gave up sends nothing until its wait
+                // is over, the bodies left to the next run.
+                if pending.is_empty() || self.throttle.blocked().is_some() {
                     break;
                 }
 
@@ -584,11 +623,14 @@ impl GraphClient {
                 bodies.extend(answered.bodies);
                 pending = answered.retry;
 
+                let wait = answered
+                    .retry_after
+                    .unwrap_or_else(|| Duration::from_secs(1 << round));
+                if !pending.is_empty() && round == BATCH_RETRY_ROUNDS {
+                    self.throttle.give_up(SystemTime::now() + wait);
+                }
                 if !pending.is_empty() && round < BATCH_RETRY_ROUNDS {
-                    let wait = answered
-                        .retry_after
-                        .unwrap_or_else(|| Duration::from_secs(1 << round))
-                        .min(BATCH_RETRY_MAX_WAIT);
+                    let wait = wait.min(BATCH_RETRY_MAX_WAIT);
                     warn!(
                         "graph throttled {} of {} body requests, retrying in {}s",
                         pending.len(),
@@ -836,8 +878,7 @@ fn read_raw_responses<'a>(ids: &[&'a str], responses: MsgraphBatchResponses) -> 
                 .headers
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
-                .and_then(|(_, value)| value.trim().parse::<u64>().ok())
-                .map(Duration::from_secs);
+                .and_then(|(_, value)| throttle::retry_after(value));
             answer.retry_after = answer.retry_after.max(after);
             retry.push(index);
             continue;

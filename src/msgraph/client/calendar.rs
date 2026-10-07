@@ -119,7 +119,7 @@ impl GraphClient {
             page = self
                 .op(|graph| {
                     let coroutine =
-                        MsgraphSend::<MsgraphCalendarsListResponse>::get(&graph.auth, url);
+                        MsgraphSend::<MsgraphCalendarsListResponse>::get(&graph.auth, url.clone());
                     graph.run(coroutine)
                 })
                 .context("Follow calendar paging link error")?;
@@ -426,7 +426,8 @@ impl GraphClient {
             .context("Cannot build the event action URL")?;
 
         self.op(|graph| {
-            let coroutine = MsgraphSend::<MsgraphNoResponse>::post_json(&graph.auth, url, body)?;
+            let coroutine =
+                MsgraphSend::<MsgraphNoResponse>::post_json(&graph.auth, url.clone(), body)?;
             graph.run(coroutine)
         })?;
         Ok(())

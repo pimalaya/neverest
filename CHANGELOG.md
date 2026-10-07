@@ -51,6 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Fixed a widening of the scope deleting the mail of no usable `Date` it did not list: a band round lists by the provider's date filter (IMAP `SENTSINCE`, which skips a garbled `Date`, Gmail's `after:` on the arrival, Graph's `sentDateTime`), which misses such mail, yet its last page inferred it gone. io-pimdir `ff28408` makes a band round infer no delete of an undated member, so the Graph listing no longer relists the bound undated messages on its last band page.
 - Fixed an undated mail a scoped round no longer lists being kept when the round ran in one go but deleted when it was resumed: io-pimdir `f9b13f8` stores an empty mail date as no date, as STORAGE Annex A.1 says, so both paths read it in every scope.
 - Fixed the date of a Microsoft Graph mail: the summary took `receivedDateTime`, the server's arrival time, where pimdir's mail `date` (and its sort key) is the `Date` header, which Graph gives as `sentDateTime`. A message without one has no date rather than its arrival time. A date already stored is corrected when Graph next reports the message.
 - Fixed an IMAP delete expunging more than its message: it marked the UID `\Deleted` then sent a plain `EXPUNGE`, which also removed every message another client had marked `\Deleted` in that mailbox. It now sends `UID EXPUNGE` on that UID (RFC 4315 UIDPLUS, built into IMAP4rev2); a server offering neither gets no delete: the push is rejected, kept in the store, and no `\Deleted` flag is set.

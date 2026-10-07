@@ -7713,8 +7713,9 @@ mod tests {
                         checkpoint.clone(),
                     )));
                 }
-                PimdirListing::Round { cursor, .. } => cursor.clone(),
+                PimdirListing::Round { cursor, band } => (cursor.clone(), *band),
             };
+            let (cursor, band) = cursor;
             if cursor.is_some() && mem::take(&mut self.reject_cursor) {
                 return Ok(PimdirEnumerated::CursorRejected);
             }
@@ -7745,7 +7746,9 @@ mod tests {
                 .collect();
             let next = (index + 1 < self.pages.len())
                 .then(|| PimdirCursor((index + 1).to_string().into_bytes()));
-            let checkpoint = (index == 0).then(|| PimdirCheckpoint(b"modseq-1".to_vec()));
+            // NOTE: a band round carries no checkpoint, the one the store
+            // holds staying the source's.
+            let checkpoint = (index == 0 && !band).then(|| PimdirCheckpoint(b"modseq-1".to_vec()));
 
             Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::page(
                 items, next, checkpoint,
@@ -7917,6 +7920,54 @@ mod tests {
             handles_of(&store),
             names(&["1", "10", "19", "20", "30", "31"])
         );
+    }
+
+    /// A widening on a source whose checkpoint is bound to no scope (IMAP,
+    /// Gmail) lists the band its coverage lacks by a date filter that
+    /// misses mail of no usable date: IMAP's `SENTSINCE` a garbled `Date`,
+    /// Gmail's `after:` a message with no `Date` received outside the band.
+    /// The band round infers no delete of either (io-pimdir `ff28408`).
+    #[test]
+    fn a_band_round_keeps_the_undated_mail_it_does_not_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = mailbox_with_an_old_message(dir.path());
+        let mut remote = PagedRemote::new(vec![
+            vec![
+                ("31", Some("Tue, 06 Oct 2026 10:00:00 +0000")),
+                ("20", Some("Mon, 05 Oct 2026 10:00:00 +0000")),
+            ],
+            vec![("19", None), ("18", Some("sometime last week"))],
+        ]);
+        scoped_sync(&mut store, &mut remote).unwrap();
+        assert_eq!(handles_of(&store), names(&["1", "18", "19", "20", "31"]));
+
+        remote.pages = vec![vec![("5", Some("Mon, 02 Mar 2026 10:00:00 +0000"))]];
+        let requests = remote.requests.len();
+        let verb = sync_verb(
+            "imap/INBOX",
+            true,
+            PimdirPushRights::all(),
+            PimdirConflictPolicy::Manual,
+            PimdirScope::since("2026-01-01T00:00:00Z"),
+            false,
+        );
+        run_verb(&mut store, &mut remote, verb).unwrap();
+
+        assert!(
+            remote.requests[requests..]
+                .iter()
+                .all(|request| matches!(request.listing, PimdirListing::Round { band: true, .. })),
+            "the widening lists its band alone: {:?}",
+            &remote.requests[requests..],
+        );
+        assert_eq!(
+            handles_of(&store),
+            names(&["1", "5", "18", "19", "20", "31"]),
+            "the band brings its message, the undated and garbled ones stay",
+        );
+        let coverage = store.list_coverage("imap/INBOX").unwrap();
+        let closed = coverage[0].coverage.as_ref().expect("the band closed");
+        assert_eq!(closed.scope, PimdirScope::since("2026-01-01T00:00:00Z"));
     }
 
     /// A pager that hydrates each landed page where the sync stands at rest,

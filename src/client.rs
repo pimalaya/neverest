@@ -15,7 +15,7 @@
 //! a DAV href, a Gmail message id). JMAP configs parse but do not open yet.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     io::{Read, Write},
 };
 
@@ -149,10 +149,6 @@ pub struct Held<'a> {
     /// mail source whether a delta link stored before it tagged its links
     /// was made under a `$filter`.
     pub coverage: Option<&'a PimdirScope>,
-    /// The bound messages with no date, by their last-synced flags: in
-    /// every scope, a band round included, which a Graph band listing on
-    /// `sentDateTime` never lists.
-    pub undated: &'a HashMap<String, BTreeSet<Flag>>,
 }
 
 #[cfg_attr(

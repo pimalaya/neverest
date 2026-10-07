@@ -119,8 +119,6 @@ pub struct Bound {
     handles: HashSet<String>,
     /// The name of each, by handle.
     metas: HashMap<String, BoundMeta>,
-    /// The last-synced flags of each bound message with no date.
-    undated: HashMap<String, BTreeSet<Flag>>,
     /// The checkpoint the store holds.
     checkpoint: Option<Vec<u8>>,
     /// The scope of the source's last closed round.
@@ -131,24 +129,12 @@ impl Bound {
     /// What a load of the collection binds: every based placement that
     /// carries its link id.
     pub fn from_loaded(loaded: PimdirLoaded) -> Self {
-        let mut undated = HashMap::new();
         let metas: HashMap<String, BoundMeta> = loaded
             .placements
             .into_iter()
             .filter_map(|placement| {
                 let base = placement.base?;
                 let link_id = placement.link_id?;
-                // NOTE: a message with no date is in every scope, a band
-                // round included, which a provider may not list it in.
-                let undated_mail = match &placement.summary {
-                    Some(PimdirSummary::Mail(mail)) => mail.date.is_none(),
-                    Some(_) => false,
-                    None => true,
-                };
-                if undated_mail {
-                    let flags = to_item_flags(&base.flags).into_iter().collect();
-                    undated.insert(placement.handle.0.clone(), flags);
-                }
                 let meta = BoundMeta {
                     revision: base.revision,
                     link_id,
@@ -161,7 +147,6 @@ impl Bound {
         Self {
             handles: metas.keys().cloned().collect(),
             metas,
-            undated,
             checkpoint: loaded.checkpoint.map(|checkpoint| checkpoint.0),
             coverage: loaded.coverage.map(|coverage| coverage.scope),
         }
@@ -482,7 +467,6 @@ impl PimdirRemote for PimRemote<'_> {
             handles: &bound.handles,
             checkpoint: bound.checkpoint.as_deref(),
             coverage: bound.coverage.as_ref(),
-            undated: &bound.undated,
         };
 
         let listed = self

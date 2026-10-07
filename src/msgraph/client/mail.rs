@@ -213,7 +213,7 @@ pub(super) fn enumerate(
         },
         PimdirListing::Round { cursor: None, band } => {
             if *band || !scope.is_unbounded() {
-                band_page(wire, rows, mailbox, None, *band, scope, held)
+                band_page(wire, rows, mailbox, None, *band, scope)
             } else {
                 summary_page(wire, rows, mailbox, None)
             }
@@ -225,9 +225,7 @@ pub(super) fn enumerate(
             Some(Step::Summary(next)) if scope.is_unbounded() => {
                 summary_page(wire, rows, mailbox, Some(&next))
             }
-            Some(Step::Band(next)) => {
-                band_page(wire, rows, mailbox, Some(&next), *band, scope, held)
-            }
+            Some(Step::Band(next)) => band_page(wire, rows, mailbox, Some(&next), *band, scope),
             Some(Step::Pass) if !band => pass(wire, rows, mailbox, scope, held),
             _ => Ok(Listed::CursorRejected),
         },
@@ -277,8 +275,9 @@ fn summary_page(
 
 /// One page of a band listing: the messages of `scope` by `sentDateTime`,
 /// newest first, each with its summary. Past its last page, a band round
-/// ends; a round over the whole scope goes on with the pass. The last page
-/// of a band round also lists the messages with no date the store binds.
+/// ends; a round over the whole scope goes on with the pass. A message with
+/// no date, which a filter on `sentDateTime` never lists, stays bound: a
+/// band round infers no delete of an undated member (pimdir SYNC §5).
 fn band_page(
     wire: &mut impl MailWire,
     rows: &mut HashMap<String, MsgraphMessage>,
@@ -286,7 +285,6 @@ fn band_page(
     next: Option<&str>,
     band: bool,
     scope: &PimdirScope,
-    held: Held<'_>,
 ) -> Result<Listed> {
     let page = match next {
         None => wire.band_first(mailbox, scope)?,
@@ -306,23 +304,6 @@ fn band_page(
     for message in page.value {
         if in_scope(scope, &message) {
             listing.named(rows, message);
-        }
-    }
-    // NOTE: a message with no date lies in every band, which a filter on
-    // `sentDateTime` never lists: the last page of a band round lists the
-    // ones the store binds as it last synced them, the link reporting
-    // what changed on them since.
-    if band && cursor.is_none() {
-        let listed: HashSet<String> = listing.items.iter().map(|item| item.id.clone()).collect();
-        for (id, flags) in held.undated {
-            if !listed.contains(id) {
-                listing.items.push(EnumEntry {
-                    id: id.clone(),
-                    flags: flags.clone(),
-                    revision: None,
-                    meta: None,
-                });
-            }
         }
     }
     trace!(
@@ -720,18 +701,14 @@ mod tests {
             PimdirEnumerated, PimdirFetchedItem, PimdirPushResult, PimdirRemote, PimdirRemoteItem,
             PimdirRemoteMeta, PimdirTier,
         },
-        summary::PimdirSummary,
         sync::{PimdirSync, PimdirSyncOptions},
     };
 
     use super::*;
-    use crate::{
-        item::flag::Flag,
-        offline::{
-            remote::{keep_in_scope, snapshot},
-            run_verb,
-            storage::load_side,
-        },
+    use crate::offline::{
+        remote::{keep_in_scope, snapshot},
+        run_verb,
+        storage::load_side,
     };
 
     const COLLECTION: &str = "msgraph/INBOX";
@@ -1061,7 +1038,6 @@ mod tests {
         rows: HashMap<String, MsgraphMessage>,
         handles: HashSet<String>,
         names: HashMap<String, (PimdirLinkId, PimdirSortKey)>,
-        undated: HashMap<String, BTreeSet<Flag>>,
         checkpoint: Option<Vec<u8>>,
         coverage: Option<PimdirScope>,
         requests: Vec<PimdirEnumerate>,
@@ -1078,7 +1054,6 @@ mod tests {
                 rows: HashMap::new(),
                 handles: HashSet::new(),
                 names: HashMap::new(),
-                undated: HashMap::new(),
                 checkpoint: None,
                 coverage: None,
                 requests: Vec::new(),
@@ -1111,7 +1086,6 @@ mod tests {
                 handles: &self.handles,
                 checkpoint: self.checkpoint.as_deref(),
                 coverage: self.coverage.as_ref(),
-                undated: &self.undated,
             };
             let page = match enumerate(&mut self.graph, &mut self.rows, "INBOX", &request, held)? {
                 Listed::Page(page) => page,
@@ -1195,21 +1169,6 @@ mod tests {
             .unwrap();
         remote.checkpoint = loaded.checkpoint.map(|checkpoint| checkpoint.0);
         remote.coverage = loaded.coverage.map(|coverage| coverage.scope);
-        remote.undated = loaded
-            .placements
-            .iter()
-            .filter(|placement| {
-                !matches!(
-                    &placement.summary,
-                    Some(PimdirSummary::Mail(mail)) if mail.date.is_some()
-                )
-            })
-            .filter_map(|placement| {
-                let flags = placement.base.as_ref()?.flags.known()?;
-                let flags = flags.iter().map(|flag| Flag::from_raw(flag.clone()));
-                Some((placement.handle.0.clone(), flags.collect()))
-            })
-            .collect();
         remote.names = loaded
             .placements
             .into_iter()
@@ -1544,7 +1503,6 @@ mod tests {
             handles: &handles,
             checkpoint: None,
             coverage: Some(&coverage),
-            undated: &HashMap::new(),
         };
         assert!(matches!(
             enumerate(&mut graph, &mut rows, "INBOX", &request, held).unwrap(),

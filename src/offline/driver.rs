@@ -46,6 +46,7 @@ use io_pimdir::{
     hub::{PimdirBinding, PimdirSourceId},
     intent::{COLLECTION_CREATE, PimdirCollectionCreate},
     load::PimdirLoadScope,
+    mutate::PimdirMutation,
     object::{PimdirHash, PimdirObject},
     placement::{
         PimdirBase, PimdirFlags, PimdirHandle, PimdirLevel, PimdirLinkId, PimdirPlacement,
@@ -3009,6 +3010,13 @@ fn resolve_conflicts(
         return Ok(0);
     }
 
+    // NOTE: the engine records a store-wins divergence as a conflict on a pass
+    // that cannot push, and the pushing pass never revisits it, so the store's
+    // body is restated here for that pass to push over the endpoint.
+    if ctx.authority == Authority::Store {
+        return keep_store_bodies(collection, &ctx.name, store, blobs);
+    }
+
     debug!("merge {} conflicted item(s) in {collection}", parked.len());
 
     let wanted: Vec<PimdirHandle> = parked
@@ -3030,6 +3038,62 @@ fn resolve_conflicts(
     let kind = resolve_kind(&mut ctx.pool);
 
     merge_conflicts(collection, kind, &ctx.name, store, blobs, store_dir)
+}
+
+/// Settles every divergence of a side the store decides on the store's body.
+///
+/// Restating the held body is the decision `conflict resolve --prefer-local`
+/// takes: the conflict clears against the revision the endpoint holds, so the
+/// next pushing pass overwrites it. Nothing is merged, the endpoint's own edit
+/// being what `one-way` discards. The edit is the engine's own rather than an
+/// owner's through the queue, which a one-way account refuses.
+fn keep_store_bodies(
+    collection: &str,
+    source: &str,
+    store: &mut PimdirSourceStore,
+    blobs: &PimdirBlobs,
+) -> Result<usize> {
+    let mut kept = 0usize;
+
+    for placement in conflicted_placements(store, collection, source)? {
+        let handle = placement.handle;
+        let name = handle.0.clone();
+
+        let Some(hash) = placement.object else {
+            debug!("conflicted item {name} in {collection} holds no body to keep");
+            continue;
+        };
+        let Some(body) = blobs
+            .get(&hash)
+            .with_context(|| format!("Read the body of {name} in {collection}"))?
+        else {
+            debug!("the body of the conflicted item {name} in {collection} is not in the store");
+            continue;
+        };
+
+        let object = PimdirObject {
+            hash,
+            size: body.len(),
+        };
+        let edit = PimdirMutation::Edit {
+            handle,
+            object,
+            body,
+            summary: None,
+            sort_key: None,
+        };
+        store
+            .mutate(collection, edit)
+            .map_err(|err| anyhow!("Keep the store's body of {name} in {collection}: {err}"))?;
+
+        kept += 1;
+    }
+
+    if kept > 0 {
+        debug!("kept the store's body over {kept} divergence(s) in {collection}");
+    }
+
+    Ok(kept)
 }
 
 /// The half of [`resolve_conflicts`] that reaches no server.
@@ -5813,6 +5877,39 @@ mod tests {
 
         count_conflicts(&store, CONFLICT_ACCOUNT, &mut report);
         assert_eq!(report.outstanding_conflicts, 0);
+    }
+
+    /// A side the store decides keeps the store's body over its own edit.
+    ///
+    /// The engine parks a store-wins divergence on a pass that cannot push,
+    /// and the pushing pass never revisits a parked one, so the target kept its
+    /// edit and the run asked a person what `one-way` had already answered.
+    #[test]
+    fn a_side_the_store_decides_keeps_the_store_body_against_the_endpoint() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_conflict(
+            dir.path(),
+            &card("+1", "old"),
+            &card("+2", "old"),
+            &card("+3", "old"),
+        );
+        let blobs = store.blobs();
+
+        let kept = keep_store_bodies("contacts", "dav", &mut store, &blobs).unwrap();
+        assert_eq!(kept, 1);
+
+        let placement = load_side(&store, "contacts").unwrap().remove(0);
+        assert_eq!(placement.status, PimdirStatus::Dirty, "a push is owed");
+        assert_eq!(
+            placement.object,
+            Some(blobs.hash(card("+2", "old").as_bytes()))
+        );
+        assert!(placement.conflict_revision.is_none());
+        assert_eq!(
+            placement.base.and_then(|base| base.revision).as_deref(),
+            Some("etag-2"),
+            "the overwrite is conditioned on the revision the endpoint holds",
+        );
     }
 
     /// A conflict the engine marked reaches the report the account prints.

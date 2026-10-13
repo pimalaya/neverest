@@ -984,12 +984,7 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
         }
         #[cfg(feature = "gmail")]
         SourceAccountBackend::Gmail(gmail) => {
-            let client = GmailClient::connect(
-                &gmail.token,
-                &gmail.user_id,
-                gmail.tls.clone(),
-                account.throttle.clone(),
-            )?;
+            let client = GmailClient::connect(gmail, account.throttle.clone())?;
             Ok(Client::Gmail(Box::new(client)))
         }
         #[cfg(not(any(

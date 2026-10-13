@@ -188,13 +188,16 @@ impl SourceAccount {
             .transpose()
             .with_context(|| format!("Resolve the send credentials of {name}"))?;
 
-        // NOTE: Gmail meters each user by the second, so it is paced as
-        // well; every other provider is only followed when it refuses.
+        // NOTE: Gmail meters each user by the second and by the minute, so
+        // it is paced as well; every other provider is only followed when
+        // it refuses.
         #[cfg(feature = "gmail")]
         let throttle = match &backend {
-            SourceAccountBackend::Gmail(_) => {
-                Throttle::paced(name, crate::gmail::client::UNITS_PER_SECOND)
-            }
+            SourceAccountBackend::Gmail(gmail) => Throttle::paced_per_minute(
+                name,
+                crate::gmail::client::UNITS_PER_SECOND,
+                gmail.run.settings.units_per_minute,
+            ),
             #[allow(unreachable_patterns)]
             _ => Throttle::new(name),
         };
@@ -333,11 +336,19 @@ impl SourceAccountBackend {
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
             })),
             #[cfg(feature = "gmail")]
-            SourceBackendConfig::Gmail(config) => Ok(Self::Gmail(GmailAccount {
-                token: resolver.resolve(config.auth.token.clone())?,
-                user_id: config.user_id.clone(),
-                tls: config.tls.clone().into_tls(config.alpn.clone()),
-            })),
+            SourceBackendConfig::Gmail(config) => {
+                let settings = crate::gmail::run::GmailSettings::new(
+                    config.batch_size,
+                    config.batches_in_flight,
+                    config.units_per_minute,
+                )?;
+                Ok(Self::Gmail(GmailAccount {
+                    token: resolver.resolve(config.auth.token.clone())?,
+                    user_id: config.user_id.clone(),
+                    tls: config.tls.clone().into_tls(config.alpn.clone()),
+                    run: Arc::new(crate::gmail::run::GmailRun::new(settings)),
+                }))
+            }
             #[allow(unreachable_patterns)]
             _ => bail!(
                 "This side's backend is not available in this build (rebuild with the matching cargo feature; only the imap, msgraph, dav, gpeople, gcal and gmail backends exist for now)"
@@ -410,6 +421,9 @@ pub struct GmailAccount {
     pub user_id: String,
     /// The TLS handle, ALPN folded in.
     pub tls: Tls,
+    /// What the source's connections share for the run: its batch
+    /// settings and gate, its caches, its history.
+    pub run: Arc<crate::gmail::run::GmailRun>,
 }
 
 /// A resolved SMTP submission channel: the arguments of a session open.

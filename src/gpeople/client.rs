@@ -45,7 +45,7 @@ use crate::{
         collection::Collection,
         flag::{Flag, FlagOp},
     },
-    throttle::{Request, Throttle, google_throttled_for},
+    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle},
 };
 
 /// The one collection a People account syncs: every connection.
@@ -138,6 +138,7 @@ impl GpeopleClient {
         ) -> Result<GpeopleSendOutput<T>, GpeopleClientStdError>,
     ) -> Result<T, GpeopleClientStdError> {
         let throttle = Arc::clone(&self.throttle);
+        let waits = GoogleWaits::new();
         throttle.call(
             1,
             || {
@@ -152,9 +153,16 @@ impl GpeopleClient {
                 Ok(out.response)
             },
             |err| match err {
-                GpeopleClientStdError::Send(GpeopleSendError::Api(err)) => {
-                    google_throttled_for(request, err.status, &err.message)
-                }
+                GpeopleClientStdError::Send(GpeopleSendError::Api(err)) => waits.throttled(
+                    request,
+                    &GoogleAnswer {
+                        status: err.status,
+                        message: &err.message,
+                        reasons: &err.reasons,
+                        detail_reasons: &err.detail_reasons,
+                        google_status: err.google_status.as_deref(),
+                    },
+                ),
                 _ => None,
             },
             |message| {

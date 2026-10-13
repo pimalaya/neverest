@@ -204,6 +204,18 @@ imap.item.delete = false
 #gmail.item.delete = false
 #gmail.pool-size = 4
 
+# Messages are read through Gmail's HTTP batch endpoint, paced below the quota.
+# Reads per batch (1 to 100): Gmail runs them side by side and refuses past its
+# per-user concurrency limit, measured nil at 10, 1.2 % at 25, 19 % at 50.
+#gmail.batch-size = 10
+# Batches in flight across the source's connections. Above 1, refusals grow
+# (two batches of 50 side by side: a third to two thirds refused); each refusal
+# is waited out, so it trades latency for quota and pays only with small batches.
+#gmail.batches-in-flight = 1
+# Quota units spent over any 60 seconds, a read counting 5. 6,000 is the
+# per-user quota a Google project gets; raise it only if yours grants more.
+#gmail.units-per-minute = 6000
+
 # --------------------------------------------------------------------------------
 # Microsoft Graph config (alternative to the blocks above)
 # https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview

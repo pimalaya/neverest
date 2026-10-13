@@ -64,7 +64,7 @@ use crate::{
         flag::{Flag, FlagOp},
     },
     offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp, wall_stamp},
-    throttle::{Request, Throttle, google_throttled_for},
+    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle},
 };
 
 /// The page size requested from the events listing.
@@ -167,6 +167,9 @@ impl GcalClient {
         mut run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
     ) -> Result<T, GcalClientStdError> {
         let throttle = Arc::clone(&self.throttle);
+        // NOTE: io-gcal keeps the status and message alone, so the reason
+        // is read from the message.
+        let waits = GoogleWaits::new();
         throttle.call(
             1,
             || {
@@ -181,9 +184,15 @@ impl GcalClient {
                 Ok(out.response)
             },
             |err| match err {
-                GcalClientStdError::Send(GcalSendError::Api { status, message }) => {
-                    google_throttled_for(request, *status, message)
-                }
+                GcalClientStdError::Send(GcalSendError::Api { status, message }) => waits
+                    .throttled(
+                        request,
+                        &GoogleAnswer {
+                            status: *status,
+                            message,
+                            ..Default::default()
+                        },
+                    ),
                 _ => None,
             },
             |message| {

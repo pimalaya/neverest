@@ -1542,6 +1542,31 @@ source_config! {
         pub alpn: Vec<String>,
         /// How the Gmail session authenticates.
         pub auth: GmailAuthConfig,
+        /// How many message reads one HTTP batch carries, 10 by default,
+        /// from 1 to 100.
+        ///
+        /// Gmail runs the reads of a batch side by side and refuses past
+        /// its per-user concurrency limit: measured on 2026-10-10, batches
+        /// of 10 sent one after another drew no refusal in 2,250 reads, 25
+        /// drew 1.2 % and 50 drew 19 %.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub batch_size: Option<usize>,
+        /// How many batches the source's connections may have in flight at
+        /// once, 1 by default.
+        ///
+        /// Two batches of 50 side by side drew 17 to 33 refusals of 50
+        /// each: more than one in flight trades latency for refusals, each
+        /// waited out, and needs as many connections.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub batches_in_flight: Option<usize>,
+        /// The quota units the source spends over any sixty seconds, 6,000
+        /// by default, a read counting the 5 units Gmail bills it.
+        ///
+        /// 6,000 units a minute a user is the quota Google gives a project
+        /// today. A project granted more may raise it; a refusal past the
+        /// quota is waited out all the same.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub units_per_minute: Option<u32>,
     }
 }
 

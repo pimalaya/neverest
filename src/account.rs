@@ -24,7 +24,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use anyhow::{Context, Result, bail};
@@ -84,6 +84,12 @@ impl Account {
     /// endpoint being kept for [`Account::get`] and counted by the spinner,
     /// so a lost one does not read as clean. The wait is a locked agent.
     pub fn resolve(config: &AccountConfig) -> Result<Self> {
+        Self::resolve_waiting(config, crate::throttle::MAX_WAIT)
+    }
+
+    /// [`Account::resolve`], each source waiting at most `max_wait` at once
+    /// on a throttling provider (`sync --max-wait`).
+    pub fn resolve_waiting(config: &AccountConfig, max_wait: Duration) -> Result<Self> {
         let endpoints = config.endpoints()?;
         let s = Spinner::start("Resolving credentials…");
 
@@ -91,7 +97,7 @@ impl Account {
         let endpoints: HashMap<_, _> = endpoints
             .into_iter()
             .map(|(name, config)| {
-                let resolved = SourceAccount::resolve_with(&name, &config, &mut resolver)
+                let resolved = SourceAccount::resolve_with(&name, &config, &mut resolver, max_wait)
                     .map_err(|err| format!("{err:#}"));
                 (name, resolved)
             })
@@ -168,14 +174,21 @@ impl SourceAccount {
         any(feature = "imap", feature = "msgraph", feature = "dav")
     ))]
     pub fn resolve(name: &str, config: &SourceConfig) -> Result<Self> {
-        Self::resolve_with(name, config, &mut SecretResolver::new())
+        Self::resolve_with(
+            name,
+            config,
+            &mut SecretResolver::new(),
+            crate::throttle::MAX_WAIT,
+        )
     }
 
-    /// Resolves one endpoint, so endpoints naming one command spawn it once.
+    /// Resolves one endpoint, so endpoints naming one command spawn it once,
+    /// its throttle waiting at most `max_wait` at once.
     fn resolve_with(
         name: &str,
         config: &SourceConfig,
         resolver: &mut SecretResolver,
+        max_wait: Duration,
     ) -> Result<Self> {
         let backend = SourceAccountBackend::resolve(&config.backend, resolver)
             .with_context(|| format!("Resolve the credentials of {name}"))?;
@@ -208,7 +221,7 @@ impl SourceAccount {
             backend,
             #[cfg(feature = "smtp")]
             smtp,
-            throttle: Arc::new(throttle),
+            throttle: Arc::new(throttle.waiting(max_wait)),
             downloaded: Arc::new(AtomicU64::new(0)),
         })
     }
@@ -517,5 +530,24 @@ mod tests {
         assert_eq!(fs::read(&path).unwrap(), b"x");
 
         fs::remove_file(&path).unwrap();
+    }
+
+    /// `sync --max-wait` reaches the throttle every connection shares.
+    #[test]
+    fn the_run_s_longest_wait_reaches_each_source() {
+        let config: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://localhost"
+            caldav.server = "https://localhost"
+            caldav.auth.basic.username = "user"
+            caldav.auth.basic.password.raw = "secret"
+            "#,
+        )
+        .unwrap();
+        let wait = std::time::Duration::from_secs(7);
+        let account = Account::resolve_waiting(&config, wait).unwrap();
+        for source in ["imap", "caldav"] {
+            assert_eq!(account.get(source).unwrap().throttle.max_wait(), wait);
+        }
     }
 }

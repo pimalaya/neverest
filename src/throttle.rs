@@ -49,9 +49,10 @@ const MAX_RETRIES: u32 = 5;
 /// none: 1, 2, 4, 8, then 16 seconds, about half a minute in all.
 const FIRST_WAIT: Duration = Duration::from_secs(1);
 
-/// The longest single wait. A provider asking for more (`Retry-After`)
-/// makes the source give up at once, rather than hold the run that long.
-const MAX_WAIT: Duration = Duration::from_secs(120);
+/// The longest single wait by default (`sync --max-wait`). A provider asking
+/// for more (`Retry-After`) makes the source give up at once, rather than
+/// hold the run that long.
+pub const MAX_WAIT: Duration = Duration::from_secs(120);
 
 /// A source's answer to throttling, shared by its connections.
 #[derive(Debug)]
@@ -65,6 +66,8 @@ pub struct Throttle {
     minute: Option<(u32, Mutex<MinuteBudget>)>,
     /// Until when the source gave up, once it did.
     gave_up: Mutex<Option<SystemTime>>,
+    /// The longest single wait, [`MAX_WAIT`] unless the run says otherwise.
+    max_wait: Duration,
 }
 
 impl Throttle {
@@ -75,6 +78,7 @@ impl Throttle {
             pace: None,
             minute: None,
             gave_up: Mutex::new(None),
+            max_wait: MAX_WAIT,
         }
     }
 
@@ -99,7 +103,18 @@ impl Throttle {
     /// Whether a wait is short enough to be slept in the run rather than
     /// make the source give up.
     pub fn waits_in_process(&self, wait: Duration) -> bool {
-        wait <= MAX_WAIT
+        wait <= self.max_wait
+    }
+
+    /// The same source waiting at most `max_wait` at once.
+    pub fn waiting(self, max_wait: Duration) -> Self {
+        Self { max_wait, ..self }
+    }
+
+    /// The longest single wait: a provider asking for more is not waited
+    /// out.
+    pub fn max_wait(&self) -> Duration {
+        self.max_wait
     }
 
     /// Until when the source gave up, if it did this run.
@@ -148,7 +163,7 @@ impl Throttle {
     ///
     /// `throttled` answers `None` for any other error, which is returned at
     /// once, or the wait the provider stated, if any. Past [`MAX_RETRIES`],
-    /// or on a stated wait longer than [`MAX_WAIT`], the source gives up and
+    /// or on a stated wait longer than its longest, the source gives up and
     /// the last error is returned. While it has given up, `blocked` builds
     /// the error returned without sending anything.
     pub fn call<T, E>(
@@ -178,7 +193,7 @@ impl Throttle {
             };
 
             let wait = stated.unwrap_or_else(|| backoff(retry));
-            if retry >= MAX_RETRIES || wait > MAX_WAIT {
+            if retry >= MAX_RETRIES || wait > self.max_wait {
                 let until = SystemTime::now() + wait;
                 warn!(
                     "{} throttled, giving up until {}",
@@ -690,6 +705,42 @@ mod tests {
         );
         assert_eq!(out, Err(999));
         assert_eq!(calls.get(), 1, "nothing sent while blocked");
+    }
+
+    /// `sync --max-wait` sets the longest wait: a stated wait over it gives
+    /// the source up, one under it is waited out.
+    #[test]
+    fn the_longest_wait_is_the_run_s() {
+        let throttle = Throttle::new("msgraph").waiting(Duration::from_secs(5));
+        assert_eq!(throttle.max_wait(), Duration::from_secs(5));
+        let out: Result<(), u16> = throttle.call(
+            1,
+            || Err(429),
+            |_| Some(Some(Duration::from_secs(6))),
+            |_| 0,
+        );
+        assert_eq!(out, Err(429));
+        assert!(throttle.gave_up().is_some(), "six seconds is over five");
+
+        let throttle = Throttle::new("msgraph").waiting(Duration::from_secs(5));
+        let calls = Cell::new(0);
+        let out = throttle.call(
+            1,
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() < 2 { Err(429) } else { Ok(()) }
+            },
+            |_| Some(Some(Duration::from_millis(1))),
+            |_| 0,
+        );
+        assert_eq!(out, Ok(()));
+        assert_eq!(Throttle::new("caldav").max_wait(), MAX_WAIT);
+        let gmail = Throttle::new("gmail").waiting(Duration::from_secs(5));
+        assert!(gmail.waits_in_process(Duration::from_secs(5)));
+        assert!(
+            !gmail.waits_in_process(Duration::from_secs(6)),
+            "a Gmail pause too"
+        );
     }
 
     #[test]

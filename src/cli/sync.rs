@@ -22,7 +22,7 @@ use crate::{
     cli::exit::Exit,
     config::{CollectionFilter, Config},
     offline::{
-        driver::{self, DownloadOrder},
+        driver::{self, Bodies, DownloadOrder, Pacing},
         state::StoreState,
     },
 };
@@ -112,12 +112,29 @@ pub struct SyncCommand {
     /// or `newest` first, so recent mail is readable early on a large account.
     #[arg(long, value_enum, value_name = "ORDER", default_value_t)]
     pub download_order: DownloadOrder,
+    /// List every collection's newest page and download its N newest bodies
+    /// before any collection lists its second page, the rest following
+    /// as usual: every collection is readable early, whatever its size.
+    /// Orders the run, never shortens it. 0 turns it off; the default is
+    /// 50 under `--download-order newest`, 0 under `largest`.
+    #[arg(long, value_name = "N")]
+    pub prime: Option<usize>,
+    /// Which owed bodies the run downloads: `all` of them, or only those of
+    /// the items this run `listed`, leaving the rest for a later run, so a
+    /// new mail is readable at once rather than behind an older backlog.
+    #[arg(long, value_enum, value_name = "WHICH", default_value_t)]
+    pub bodies: Bodies,
+    /// The longest a source waits at once on a provider throttling it, in
+    /// seconds. A provider asking for more makes the source give up for
+    /// the run, which is then incomplete (exit 3).
+    #[arg(long, value_name = "SECONDS", default_value_t = 120)]
+    pub max_wait: u64,
     /// List every collection the sources hold and record its kind, name
     /// and role in the store, whatever the collection filter, syncing no
     /// item. What a client reads to offer the collections it could sync,
     /// and to learn which one is the inbox or the default calendar. Only
     /// the queued collection creations run; sends and intents wait.
-    #[arg(long, conflicts_with = "reset")]
+    #[arg(long, conflicts_with_all = ["reset", "download_order", "prime", "bodies"])]
     pub declare_only: bool,
     /// Perform what frontends queued and nothing else: apply the queue,
     /// then send the queued messages and perform the queued collection
@@ -134,6 +151,9 @@ pub struct SyncCommand {
         "exclude_collection",
         "all_collections",
         "since",
+        "download_order",
+        "prime",
+        "bodies",
     ])]
     pub intents_only: bool,
     /// Sync mail dated since then only, for this run: a duration back from
@@ -202,7 +222,12 @@ impl SyncCommand {
             self.no_purge,
             &self.source,
             self.accept_mode,
-            self.download_order,
+            Pacing::new(
+                self.download_order,
+                self.prime,
+                self.bodies,
+                Duration::from_secs(self.max_wait),
+            ),
             self.declare_only,
             self.intents_only,
         )?;
@@ -312,6 +337,33 @@ fn reset_replica(replica: &std::path::Path, include: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ordering and pacing flags mean nothing to a run that lists nothing,
+    /// so they are refused beside `--intents-only` and `--declare-only`;
+    /// `--max-wait` still bounds the sends an intents run makes.
+    #[test]
+    fn pacing_flags_are_refused_where_nothing_is_listed() {
+        let parse = |args: &[&str]| {
+            SyncCommand::try_parse_from(std::iter::once("sync").chain(args.iter().copied()))
+        };
+        for only in ["--intents-only", "--declare-only"] {
+            for flag in [
+                &["--prime", "5"][..],
+                &["--bodies", "listed"],
+                &["--download-order", "newest"],
+            ] {
+                let mut args = vec![only];
+                args.extend_from_slice(flag);
+                assert!(parse(&args).is_err(), "{args:?} is refused");
+            }
+            assert!(parse(&[only]).is_ok());
+        }
+        assert!(parse(&["--intents-only", "--max-wait", "10"]).is_ok());
+        let sync = parse(&["--prime", "0", "--bodies", "listed", "--max-wait", "30"]).unwrap();
+        assert_eq!(sync.prime, Some(0));
+        assert_eq!(sync.bodies, Bodies::Listed);
+        assert_eq!(sync.max_wait, 30);
+    }
 
     #[test]
     fn a_second_run_waits_out_the_lock_then_gives_up() {

@@ -18,7 +18,7 @@
 
 use std::{
     cmp::Ordering as CmpOrdering,
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fmt, fs,
     io::Write,
     mem,
@@ -53,7 +53,7 @@ use io_pimdir::{
         PimdirSortKey, PimdirStatus,
     },
     rekey::{PimdirRekey, PimdirRekeyReport},
-    remote::{PimdirFetchedItem, PimdirRemote, PimdirTier},
+    remote::{PimdirFetchedItem, PimdirListing, PimdirRemote, PimdirTier},
     summary::PimdirSummary,
     sync::{
         PimdirConflictPolicy, PimdirPushRights, PimdirSync, PimdirSyncEvent, PimdirSyncOptions,
@@ -70,13 +70,13 @@ use crate::{
     account::{Account, SourceAccount},
     client::{Client, Pool, WrittenItem},
     config::{
-        AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceConfig,
-        SourcePermissions,
+        AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceBackendConfig,
+        SourceConfig, SourcePermissions,
     },
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId, merge::Merged},
     offline::{
-        Pager, capability, create,
+        Paged, Pager, Rest, capability, create,
         invitation::{
             self, Failure as InvitationFailure, Invitation, InvitationIntent, Refusal, Target,
         },
@@ -167,15 +167,40 @@ pub fn store_dir(account: &str, config: &AccountConfig) -> Result<PathBuf> {
     }
 }
 
-/// How many connections a side may open.
+/// The connections a Microsoft Graph source opens unless its `pool-size`
+/// says otherwise.
 ///
-/// An HTTP backend keeps one: extra connections only pay extra token
-/// acquisitions, the API being request/response anyway.
+/// Graph serves four requests at once a mailbox, the inner requests of a
+/// `$batch` counting among them, so three leave room for another client of
+/// the mailbox.
+const GRAPH_CONNECTIONS: usize = 3;
+
+/// How many connections a side may open, each one worker of the run.
+///
+/// IMAP takes `connections`, the account's or the run's. Microsoft Graph
+/// takes its `pool-size`, else [`GRAPH_CONNECTIONS`], never more than
+/// `connections`, so `--connections 1` serialises any source. Every other
+/// HTTP backend keeps one.
 fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
-    if config.is_imap() {
-        connections.max(1)
-    } else {
-        1
+    let connections = connections.max(1);
+    match &config.backend {
+        SourceBackendConfig::Imap(_) => connections,
+        SourceBackendConfig::Msgraph(_)
+        | SourceBackendConfig::MsgraphContacts(_)
+        | SourceBackendConfig::MsgraphCalendar(_) => config
+            .pool_size()
+            .unwrap_or(GRAPH_CONNECTIONS)
+            .clamp(1, connections),
+        // NOTE: Gmail stays on one connection. Its batches pass one at a time
+        // across the source (`GmailRun::enter`), and its pace and minute
+        // budget are shared through the throttle, but a listing page or a
+        // lone read on a second connection would run beside a batch, Gmail
+        // binding per-user concurrency, and that was never measured: the
+        // arm to widen once it is.
+        SourceBackendConfig::Gmail(_) => 1,
+        // NOTE: Google Calendar and People meter the account as a whole,
+        // and a DAV server is no faster for being asked twice.
+        _ => 1,
     }
 }
 
@@ -397,7 +422,7 @@ pub fn run(
     no_purge: bool,
     only_sources: &[String],
     accept_mode: bool,
-    download_order: DownloadOrder,
+    pacing: Pacing,
     declare_only: bool,
     intents_only: bool,
 ) -> Result<SyncOutput> {
@@ -457,7 +482,7 @@ pub fn run(
 
     // NOTE: every credential the run needs, read once rather than per
     // connection.
-    let account = Account::resolve(account_config)?;
+    let account = Account::resolve_waiting(account_config, pacing.max_wait)?;
 
     for source_name in &running {
         let source = endpoints[source_name].clone();
@@ -487,7 +512,7 @@ pub fn run(
                 &work_dir,
                 dry_run,
                 connections,
-                download_order,
+                pacing,
                 declare_only,
                 &mut state,
                 &mut report,
@@ -925,6 +950,108 @@ impl DownloadOrder {
     }
 }
 
+/// Which owed bodies a run downloads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+pub enum Bodies {
+    /// Every body the store still lacks, whichever run listed its item.
+    #[default]
+    All,
+    /// Only the bodies of the items this run listed, the others staying
+    /// owed for a later run: an arrival is readable at once, never behind
+    /// the bodies an earlier run left.
+    Listed,
+}
+
+/// How many of each collection's newest bodies `--prime` downloads by
+/// default under `--download-order newest`: what a reader sees of a
+/// mailbox before scrolling, the first chunk the Android client shows.
+pub const DEFAULT_PRIME: usize = 50;
+
+/// How a run orders and paces its work, never how much of it there is:
+/// whatever the pacing, a run that ends has listed every page and
+/// downloaded every body its collections owe ([`Bodies::Listed`] aside).
+#[derive(Clone, Copy, Debug)]
+pub struct Pacing {
+    /// The order bodies download in.
+    pub order: DownloadOrder,
+    /// Under a positive count, every collection first lists its newest page
+    /// and downloads that many of its newest bodies, before any collection
+    /// lists a second page; 0 lists each collection whole in turn.
+    pub prime: usize,
+    /// Which owed bodies the run downloads.
+    pub bodies: Bodies,
+    /// The longest a source waits on a throttling provider before giving
+    /// up for the run.
+    pub max_wait: std::time::Duration,
+}
+
+impl Pacing {
+    /// The pacing of a run, `prime` defaulting by the order: on under
+    /// `newest`, the order a caller picks to show mail early, off under
+    /// `largest`, the fastest whole run, which priming would only slow by
+    /// a store read a collection.
+    pub fn new(
+        order: DownloadOrder,
+        prime: Option<usize>,
+        bodies: Bodies,
+        max_wait: std::time::Duration,
+    ) -> Self {
+        let prime = prime.unwrap_or(match order {
+            DownloadOrder::Newest => DEFAULT_PRIME,
+            DownloadOrder::Largest => 0,
+        });
+        Self {
+            order,
+            prime,
+            bodies,
+            max_wait,
+        }
+    }
+}
+
+impl Default for Pacing {
+    fn default() -> Self {
+        Self::new(
+            DownloadOrder::default(),
+            None,
+            Bodies::default(),
+            throttle::MAX_WAIT,
+        )
+    }
+}
+
+/// Where a collection's role puts it in the run: what a reader opens
+/// first, first. The inbox (or a default calendar or address book), then
+/// sent mail and drafts, every other collection by name, the all-mail
+/// archive that repeats them, then junk, and the trash last.
+fn role_rank(role: Option<&str>) -> u8 {
+    match role {
+        Some("inbox" | "default") => 0,
+        Some("sent") => 1,
+        Some("drafts") => 2,
+        Some("all") => 4,
+        Some("junk") => 5,
+        Some("trash") => 6,
+        _ => 3,
+    }
+}
+
+/// The collection ids `kept`, in the order the run takes them: by role
+/// (see [`role_rank`]), then by name, ASCII case aside, then by id.
+fn run_order(
+    kept: &BTreeSet<String>,
+    names: &BTreeMap<String, String>,
+    roles: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut ordered: Vec<String> = kept.iter().cloned().collect();
+    ordered.sort_by_cached_key(|id| {
+        let role = role_rank(roles.get(id).map(String::as_str));
+        let name = names.get(id).unwrap_or(id).to_ascii_lowercase();
+        (role, name, id.clone())
+    });
+    ordered
+}
+
 /// The local, one-source sync, run as two account-wide phases.
 ///
 /// Spine, then hydrate, each account-wide, so the connection pool
@@ -943,7 +1070,7 @@ fn run_local(
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
-    download_order: DownloadOrder,
+    pacing: Pacing,
     declare_only: bool,
     state: &mut StoreState,
     report: &mut SyncOutput,
@@ -1029,6 +1156,22 @@ fn run_local(
         collection_filter.unwrap_or(source_filter)
     };
     let kept = filter_collections(&collections, &filter);
+
+    let stated = stated_roles(
+        || ctxs[0].pool.primary().lookup_roles(),
+        source_name,
+        &listed,
+        state,
+    );
+    // NOTE: a failed lookup leaves the recorded roles alone, and the run
+    // orders by those the listing states.
+    let roles = stated.clone().unwrap_or_else(|| {
+        listed
+            .iter()
+            .filter_map(|c| Some((c.id.clone(), c.role.clone()?)))
+            .collect()
+    });
+    let kept = run_order(&kept, &collections, &roles);
     let filtered: Vec<String> = kept.iter().map(|id| hub_id(source_name, id)).collect();
 
     for (collection, id) in filtered.iter().zip(&kept) {
@@ -1036,15 +1179,7 @@ fn run_local(
             .ensure_collection(collection, media_type)
             .with_context(|| format!("Declare kind for {collection}"))?;
         declare_name(&stores[0], collection, id, &[&collections]);
-    }
-
-    if let Some(roles) = stated_roles(
-        || ctxs[0].pool.primary().lookup_roles(),
-        source_name,
-        &listed,
-        state,
-    ) {
-        for (collection, id) in filtered.iter().zip(&kept) {
+        if stated.is_some() {
             declare_role(&stores[0], collection, roles.get(id).map(String::as_str));
         }
     }
@@ -1052,6 +1187,13 @@ fn run_local(
     if declare_only {
         return Ok(());
     }
+
+    // NOTE: a dry run lists every page to plan the run, and downloads none.
+    let pacing = Pacing {
+        prime: if dry_run { 0 } else { pacing.prime },
+        ..pacing
+    };
+    let listed_log = (pacing.bodies == Bodies::Listed).then(Listed::default);
 
     let spined = phase1_spine(
         source_name,
@@ -1061,7 +1203,8 @@ fn run_local(
         &blobs,
         work_dir,
         dry_run,
-        download_order,
+        &pacing,
+        listed_log.as_ref(),
         report,
     )?;
 
@@ -1071,11 +1214,11 @@ fn run_local(
 
     // NOTE: read once phase 1 is over, so a body a landed page's hydration
     // kept is not downloaded again.
-    let plans = hydrate_plans(&stores[0], source_name, &spined)?;
+    let plans = hydrate_plans(&stores[0], source_name, &spined, listed_log.as_ref())?;
     phase2_hydrate(
         source_name,
         &plans,
-        download_order,
+        &pacing,
         &mut ctxs,
         &mut stores[0],
         &blobs,
@@ -1307,10 +1450,17 @@ fn open_source_contexts(
 /// single-writer lock. Each collection's report is absorbed whole, arms and
 /// all: dropping one leaves the run naming what it touched, never what it left.
 ///
+/// The collections are taken in the order of `filtered` (see [`run_order`]).
+/// Under `--prime`, every collection first lists up to its newest page and
+/// its newest bodies download right after, before any collection lists a
+/// second page; the collections paused then are listed to their end once
+/// that first pass is over (see [`Work`]).
+///
 /// A connection with no collection left to spine downloads the bodies of the
-/// pages the others have landed (see [`HydrateFeed`]), so a large collection's
-/// first bodies are readable while its later pages still list. Returns the
-/// collections spined, whose remaining bodies phase 2 downloads.
+/// pages the others have landed, so a large collection's first bodies are
+/// readable while its later pages still list. Returns the collections
+/// spined to their end, in the run's order, whose remaining bodies phase 2
+/// downloads.
 #[allow(clippy::too_many_arguments)]
 fn phase1_spine(
     source: &str,
@@ -1320,24 +1470,23 @@ fn phase1_spine(
     blobs: &PimdirBlobs,
     store_dir: &Path,
     dry_run: bool,
-    order: DownloadOrder,
+    pacing: &Pacing,
+    listed: Option<&Listed>,
     report: &mut SyncOutput,
 ) -> Result<Vec<String>> {
     let total = filtered.len();
-    let queue: SegQueue<String> = SegQueue::new();
-    for collection in filtered {
-        queue.push(collection.clone());
-    }
-    let spined: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let prime = pacing.prime;
+    let work = Work::new(pacing.order, total, prime > 0);
+    let spined: Mutex<Vec<usize>> = Mutex::new(Vec::new());
+    let carried: Mutex<HashMap<usize, HashSet<String>>> = Mutex::new(HashMap::new());
     let merged: Mutex<SyncOutput> = Mutex::new(SyncOutput::default());
     let scanned = AtomicUsize::new(0);
     let pushing: Mutex<()> = Mutex::new(());
     let s = Spinner::start(format!("Scanning {source} (0/{total})"));
 
     // NOTE: one connection has none to spare: its bodies wait for phase 2,
-    // which orders them across the whole account.
+    // which orders them across the whole account, but for the primed ones.
     let feeding = !dry_run && ctxs.len() > 1;
-    let feed = HydrateFeed::new(order, total);
     let gates: HashMap<&str, Mutex<()>> = filtered
         .iter()
         .map(|collection| (collection.as_str(), Mutex::new(())))
@@ -1349,13 +1498,13 @@ fn phase1_spine(
         .map(|ctx| resolve_kind(&mut ctx.pool))
         .unwrap_or(Kind::Mail);
 
-    let queue_ref = &queue;
+    let work_ref = &work;
     let spined_ref = &spined;
+    let carried_ref = &carried;
     let merged_ref = &merged;
     let scanned_ref = &scanned;
     let s_ref = &s;
     let pushing_ref = &pushing;
-    let feed_ref = &feed;
     let gates_ref = &gates;
     let applying_ref = &applying;
     let downloaded_ref = &downloaded;
@@ -1363,13 +1512,71 @@ fn phase1_spine(
     thread::scope(|scope| {
         for (ctx, store) in ctxs.iter_mut().zip(stores.iter_mut()) {
             scope.spawn(move || {
-                while let Some(collection) = queue_ref.pop() {
-                    let mut pager = PageFeed::hold(
-                        &gates_ref[collection.as_str()],
-                        feeding.then_some(feed_ref),
-                    );
+                while let Some(job) = work_ref.next() {
+                    let (index, pass) = match job {
+                        Job::Spine { index, pass } => (index, pass),
+                        Job::Hydrate { batch, primed } => {
+                            let (collection, handles) = batch;
+                            let fetched = hydrate_batch(
+                                kind,
+                                ctx.pool.primary(),
+                                wire_name(&ctx.namespace, &collection),
+                                &handles,
+                                blobs,
+                                None,
+                            );
+                            match fetched {
+                                Ok(items) => {
+                                    ctx.pool.downloaded(body_bytes(&items));
+                                    downloaded_ref.fetch_add(items.len(), Ordering::Relaxed);
+                                    // NOTE: the gate first, the order every
+                                    // applier takes them in: the collection's
+                                    // spine may be mid-page.
+                                    let _gate = gates_ref[collection.as_str()]
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner);
+                                    let _applying =
+                                        applying_ref.lock().unwrap_or_else(PoisonError::into_inner);
+                                    let fallback = PimRemote::new(
+                                        &mut ctx.pool,
+                                        blobs.clone(),
+                                        ctx.namespace.clone(),
+                                    );
+                                    if let Err(err) =
+                                        apply_batch(store, fallback, &collection, items)
+                                    {
+                                        warn!("{collection} write error: {err:#}");
+                                    }
+                                }
+                                // NOTE: left bodiless, so phase 2 downloads it
+                                // again and fails the run if it fails there too.
+                                Err(err) => warn!("{collection} body download error: {err:#}"),
+                            }
+                            work_ref.downloaded(primed);
+                            continue;
+                        }
+                    };
+
+                    let collection = &filtered[index];
+                    let owed = carried_ref
+                        .lock()
+                        .unwrap()
+                        .remove(&index)
+                        .unwrap_or_default();
+                    let mut pager = PageFeed {
+                        // NOTE: the first pass queues its bodies once it ends,
+                        // the newest first of all.
+                        feed: (feeding && pass != Pass::First).then_some(work_ref),
+                        rank: index,
+                        // NOTE: what a resumed round owes, the first pass
+                        // queued already.
+                        resumed: pass == Pass::Whole,
+                        pause: pass == Pass::First,
+                        listed,
+                        ..PageFeed::hold(&gates_ref[collection.as_str()])
+                    };
                     let spine = collection_spine(
-                        &collection,
+                        collection,
                         ctx,
                         store,
                         blobs,
@@ -1377,16 +1584,26 @@ fn phase1_spine(
                         pushing_ref,
                         dry_run,
                         &mut pager,
+                        owed,
                     );
                     drop(pager);
-                    match spine {
-                        Ok(rep) => {
-                            spined_ref.lock().unwrap().push(collection.clone());
-                            merged_ref.lock().unwrap().absorb(rep);
+                    let paused = match spine {
+                        Ok(Spined {
+                            report,
+                            paused,
+                            owed,
+                        }) => {
+                            merged_ref.lock().unwrap().absorb(report);
+                            if paused {
+                                carried_ref.lock().unwrap().insert(index, owed);
+                            } else {
+                                spined_ref.lock().unwrap().push(index);
+                            }
+                            paused
                         }
                         Err(err) => {
                             warn!("{collection} scan error: {err:#}");
-                            let display = display_name(&ctx.namespace, &collection).to_string();
+                            let display = display_name(&ctx.namespace, collection).to_string();
                             merged_ref
                                 .lock()
                                 .unwrap()
@@ -1403,57 +1620,28 @@ fn phase1_spine(
                             // which the next run resumes.
                             report_coverage(
                                 store,
-                                &collection,
+                                collection,
                                 ctx,
                                 &mut merged_ref.lock().unwrap(),
                             );
-                        }
-                    }
-                    feed_ref.spined();
-                    let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
-                    s_ref.set_message(format!("Scanning {source} ({n}/{total})"));
-                }
-
-                if !feeding {
-                    return;
-                }
-                while let Some((collection, handles)) = feed_ref.next() {
-                    let fetched = hydrate_batch(
-                        kind,
-                        ctx.pool.primary(),
-                        wire_name(&ctx.namespace, &collection),
-                        &handles,
-                        blobs,
-                        None,
-                    );
-                    // NOTE: left bodiless, so phase 2 downloads it again and
-                    // fails the run if it fails there too.
-                    let items = match fetched {
-                        Ok(items) => items,
-                        Err(err) => {
-                            warn!("{collection} body download error: {err:#}");
-                            continue;
+                            false
                         }
                     };
-                    ctx.pool.downloaded(body_bytes(&items));
-                    downloaded_ref.fetch_add(items.len(), Ordering::Relaxed);
-                    // NOTE: the gate first, the order every applier takes
-                    // them in: the collection's spine may be mid-page.
-                    let _gate = gates_ref[collection.as_str()]
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    let _applying = applying_ref.lock().unwrap_or_else(PoisonError::into_inner);
-                    let fallback =
-                        PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-                    if let Err(err) = apply_batch(store, fallback, &collection, items) {
-                        warn!("{collection} write error: {err:#}");
+                    if pass == Pass::First {
+                        prime_bodies(work_ref, store, collection, index, prime, feeding, listed);
+                    }
+                    work_ref.spined(pass, index, paused);
+                    if !paused {
+                        let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
+                        s_ref.set_message(format!("Scanning {source} ({n}/{total})"));
                     }
                 }
             });
         }
     });
 
-    let spined = spined.into_inner().unwrap();
+    let mut spined = spined.into_inner().unwrap();
+    spined.sort_unstable();
     report.absorb(merged.into_inner().unwrap());
     match downloaded.into_inner() {
         0 => s.success(format!("Scanned {total} collection(s) on {source}")),
@@ -1461,80 +1649,252 @@ fn phase1_spine(
             "Scanned {total} collection(s) on {source}, downloaded {n} item(s)"
         )),
     }
-    Ok(spined)
+    Ok(spined
+        .into_iter()
+        .map(|index| filtered[index].clone())
+        .collect())
 }
 
-/// The bodies landed pages owe, waiting for an idle connection.
+/// Queues the bodies a collection owes once the first pass over it ended:
+/// its `prime` newest ahead of any other, then, connections to spare, the
+/// rest beside the pages' bodies. Whether its round paused or closed, the
+/// store holds what the run listed so far.
+fn prime_bodies(
+    work: &Work,
+    store: &PimdirSourceStore,
+    collection: &str,
+    rank: usize,
+    prime: usize,
+    feeding: bool,
+    listed: Option<&Listed>,
+) {
+    let id = PimdirCollectionId(collection.to_string());
+    let mut owed = match store.load(&id, &PimdirLoadScope::All) {
+        Ok(loaded) => bodiless(loaded.placements),
+        // NOTE: what is not queued waits for phase 2.
+        Err(err) => {
+            warn!("{collection} load error: {err}");
+            return;
+        }
+    };
+    if let Some(listed) = listed {
+        owed = listed.keep(collection, owed);
+    }
+    // NOTE: primed by date whatever the download order, the newest being
+    // what a reader opens first; the order still ranks the batches.
+    owed.sort_by(|a, b| DownloadOrder::Newest.compare(a, b));
+    let rest = owed.split_off(prime.min(owed.len()));
+    work.feed(collection, rank, owed, true);
+    if feeding {
+        work.feed(collection, rank, rest, false);
+    }
+}
+
+/// The handles each collection's listing landed this run, kept under
+/// [`Bodies::Listed`], whose run downloads those bodies alone.
+#[derive(Default)]
+struct Listed(Mutex<HashMap<String, HashSet<String>>>);
+
+impl Listed {
+    fn record(&self, collection: &str, landed: &[PimdirHandle]) {
+        if landed.is_empty() {
+            return;
+        }
+        let mut listed = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        listed
+            .entry(collection.to_string())
+            .or_default()
+            .extend(landed.iter().map(|handle| handle.0.clone()));
+    }
+
+    /// The targets of `collection` this run listed.
+    fn keep(&self, collection: &str, targets: Vec<HydrateTarget>) -> Vec<HydrateTarget> {
+        let listed = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(handles) = listed.get(collection) else {
+            return Vec::new();
+        };
+        targets
+            .into_iter()
+            .filter(|target| handles.contains(&target.handle.0))
+            .collect()
+    }
+}
+
+/// Which pass a phase-1 spine runs in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Pass {
+    /// Priming off: the collection listed to its end.
+    Whole,
+    /// Priming: the collection listed up to its first page, a round left
+    /// open there, a delta to its end.
+    First,
+    /// Priming over: a collection the first pass paused, listed to its end.
+    Fill,
+}
+
+/// What a phase-1 connection does next.
+#[derive(Debug, PartialEq)]
+enum Job {
+    /// Spine the collection at `index` of the run's order.
+    Spine { index: usize, pass: Pass },
+    /// Download a batch, `primed` when it holds a collection's newest.
+    Hydrate { batch: HydrateBatch, primed: bool },
+}
+
+/// What a queued batch is ranked by: its first body, then its collection's
+/// place in the run.
+#[derive(Debug)]
+struct BatchKey {
+    first: HydrateTarget,
+    rank: usize,
+}
+
+/// Phase 1's work, handed to the connections in turn.
 ///
-/// The listing of a collection feeds it each time a page lands, and the
-/// connections that have no collection left to spine drain it, so a page's
-/// bodies download while the next pages list. The batches leave it in the
-/// download order across the account, ties in the order they came.
-struct HydrateFeed {
+/// The collections to spine and the bodies their landed pages owe, waiting
+/// for a free connection. A connection takes, in this order: a batch of
+/// primed bodies; a collection the first pass has not reached; once that
+/// pass and its primed bodies are over, a collection it paused, to fill;
+/// else a batch of other bodies, the first in the download order across
+/// the account, ties going to the collection the run takes first. It
+/// waits while a spine or a primed download under way may queue more.
+///
+/// Only batches are held: every connection fetches one at a time into the
+/// blob store, so the memory in flight is the budget times a batch's
+/// handles, whatever the account holds.
+struct Work {
     order: DownloadOrder,
-    state: Mutex<FeedState>,
+    state: Mutex<WorkState>,
     ready: Condvar,
 }
 
-struct FeedState {
-    /// Each batch beside its first body, the one the order ranks it by.
-    batches: Vec<(HydrateTarget, HydrateBatch)>,
-    /// The collections whose spine has not ended, which may still feed.
+struct WorkState {
+    /// The collections the first pass has not taken, in the run's order.
+    first: VecDeque<usize>,
+    /// The pass they are taken in: [`Pass::First`] under priming, else
+    /// [`Pass::Whole`].
+    pass: Pass,
+    /// The collections the first pass paused, waiting for it to end.
+    fill: BTreeSet<usize>,
+    /// The spines under way.
     spining: usize,
+    /// The spines under way taken from `first`.
+    priming: usize,
+    /// The batches of primed bodies, and how many are downloading.
+    primed: Vec<(BatchKey, HydrateBatch)>,
+    downloading: usize,
+    /// The batches of every other body.
+    batches: Vec<(BatchKey, HydrateBatch)>,
 }
 
-impl HydrateFeed {
-    fn new(order: DownloadOrder, spining: usize) -> Self {
+impl Work {
+    /// The work of `collections` spines, primed or listed whole.
+    fn new(order: DownloadOrder, collections: usize, prime: bool) -> Self {
         Self {
             order,
-            state: Mutex::new(FeedState {
+            state: Mutex::new(WorkState {
+                first: (0..collections).collect(),
+                pass: if prime { Pass::First } else { Pass::Whole },
+                fill: BTreeSet::new(),
+                spining: 0,
+                priming: 0,
+                primed: Vec::new(),
+                downloading: 0,
                 batches: Vec::new(),
-                spining,
             }),
             ready: Condvar::new(),
         }
     }
 
-    /// Queues `collection`'s bodiless targets, in batches of [`BATCH_SIZE`].
-    fn feed(&self, collection: &str, mut targets: Vec<HydrateTarget>) {
+    /// Queues `collection`'s bodiless targets, in batches of [`BATCH_SIZE`]
+    /// sorted in the download order.
+    fn feed(&self, collection: &str, rank: usize, mut targets: Vec<HydrateTarget>, primed: bool) {
         if targets.is_empty() {
             return;
         }
         targets.sort_by(|a, b| self.order.compare(a, b));
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let queue = if primed {
+            &mut state.primed
+        } else {
+            &mut state.batches
+        };
         for chunk in targets.chunks(BATCH_SIZE) {
             let handles = chunk.iter().map(|target| target.handle.clone()).collect();
-            state
-                .batches
-                .push((chunk[0].clone(), (collection.to_string(), handles)));
+            let key = BatchKey {
+                first: chunk[0].clone(),
+                rank,
+            };
+            queue.push((key, (collection.to_string(), handles)));
         }
         drop(state);
         self.ready.notify_all();
     }
 
-    /// One collection's spine ended, whether it succeeded or not.
-    fn spined(&self) {
+    /// A spine ended, whether it succeeded or not, `paused` when the first
+    /// pass left its round open.
+    fn spined(&self, pass: Pass, index: usize, paused: bool) {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.spining = state.spining.saturating_sub(1);
+        if pass != Pass::Fill {
+            state.priming = state.priming.saturating_sub(1);
+        }
+        if paused {
+            state.fill.insert(index);
+        }
         drop(state);
         self.ready.notify_all();
     }
 
-    /// The next batch, waiting while a spine may still feed one; `None` once
-    /// every spine ended and the feed is empty.
-    fn next(&self) -> Option<HydrateBatch> {
+    /// A batch was downloaded, applied or not.
+    fn downloaded(&self, primed: bool) {
+        if !primed {
+            return;
+        }
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.downloading = state.downloading.saturating_sub(1);
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    /// The next job, waiting while one may still come; `None` once every
+    /// spine and primed download has ended and nothing is queued.
+    fn next(&self) -> Option<Job> {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
-            let first = state
-                .batches
-                .iter()
-                .enumerate()
-                .min_by(|(_, (a, _)), (_, (b, _))| self.order.compare(a, b))
-                .map(|(index, _)| index);
-            if let Some(index) = first {
-                return Some(state.batches.remove(index).1);
+            if let Some(batch) = self.take(&mut state.primed) {
+                state.downloading += 1;
+                return Some(Job::Hydrate {
+                    batch,
+                    primed: true,
+                });
             }
-            if state.spining == 0 {
+            if let Some(index) = state.first.pop_front() {
+                state.spining += 1;
+                state.priming += 1;
+                let pass = state.pass;
+                return Some(Job::Spine { index, pass });
+            }
+            // NOTE: the first pass is over once its last spine and its
+            // last primed body are, so no collection lists a second page
+            // before every one has listed its first.
+            if state.priming == 0
+                && state.downloading == 0
+                && let Some(index) = state.fill.pop_first()
+            {
+                state.spining += 1;
+                return Some(Job::Spine {
+                    index,
+                    pass: Pass::Fill,
+                });
+            }
+            if let Some(batch) = self.take(&mut state.batches) {
+                return Some(Job::Hydrate {
+                    batch,
+                    primed: false,
+                });
+            }
+            if state.spining == 0 && state.downloading == 0 {
                 return None;
             }
             state = self
@@ -1542,6 +1902,20 @@ impl HydrateFeed {
                 .wait(state)
                 .unwrap_or_else(PoisonError::into_inner);
         }
+    }
+
+    /// Takes the batch of `queue` that comes first.
+    fn take(&self, queue: &mut Vec<(BatchKey, HydrateBatch)>) -> Option<HydrateBatch> {
+        let first = queue
+            .iter()
+            .enumerate()
+            .min_by(|(_, (a, _)), (_, (b, _))| {
+                self.order
+                    .compare(&a.first, &b.first)
+                    .then(a.rank.cmp(&b.rank))
+            })
+            .map(|(index, _)| index)?;
+        Some(queue.remove(first).1)
     }
 }
 
@@ -1551,20 +1925,31 @@ impl HydrateFeed {
 /// waits on the server, so a body is applied to the collection only where
 /// the sync is at rest, never between a page's load and its write, which
 /// would write back the placement without the body. Each landed page's
-/// bodiless members go to the feed, and the bodiless members of a resumed
-/// round's earlier pages before its first page lists.
+/// bodiless members go to the feed, and, when `resumed`, the bodiless
+/// members of a resumed round's earlier pages before its first page lists.
+/// Under `pause`, the listing stops before the second page of a round.
 struct PageFeed<'a> {
     gate: &'a Mutex<()>,
     held: Option<MutexGuard<'a, ()>>,
-    feed: Option<&'a HydrateFeed>,
+    feed: Option<&'a Work>,
+    /// The collection's place in the run, which breaks the feed's ties.
+    rank: usize,
+    resumed: bool,
+    pause: bool,
+    listed: Option<&'a Listed>,
 }
 
 impl<'a> PageFeed<'a> {
-    fn hold(gate: &'a Mutex<()>, feed: Option<&'a HydrateFeed>) -> Self {
+    /// A pager feeding nothing, its gate held.
+    fn hold(gate: &'a Mutex<()>) -> Self {
         Self {
             gate,
             held: Some(gate.lock().unwrap_or_else(PoisonError::into_inner)),
-            feed,
+            feed: None,
+            rank: 0,
+            resumed: true,
+            pause: false,
+            listed: None,
         }
     }
 }
@@ -1576,20 +1961,44 @@ impl Pager for PageFeed<'_> {
         collection: &PimdirCollectionId,
         landed: Vec<PimdirHandle>,
         resumed: bool,
-    ) {
+        next: Option<&PimdirListing>,
+    ) -> Rest {
+        if let Some(listed) = self.listed {
+            listed.record(collection.as_str(), &landed);
+        }
+        // NOTE: a round asking for a page past its first, whether this run
+        // listed that one or an earlier run did.
+        if self.pause
+            && matches!(
+                next,
+                Some(PimdirListing::Round {
+                    cursor: Some(_),
+                    ..
+                })
+            )
+        {
+            return Rest::Pause;
+        }
         let Some(feed) = self.feed else {
-            return;
+            return Rest::Go;
         };
-        let scope = match (resumed, landed.is_empty()) {
+        let scope = match (resumed && self.resumed, landed.is_empty()) {
             (true, _) => PimdirLoadScope::All,
-            (false, true) => return,
+            (false, true) => return Rest::Go,
             (false, false) => PimdirLoadScope::Handles(landed),
         };
         match store.load(collection, &scope) {
-            Ok(loaded) => feed.feed(collection.as_str(), bodiless(loaded.placements)),
+            Ok(loaded) => {
+                let mut owed = bodiless(loaded.placements);
+                if let Some(listed) = self.listed {
+                    owed = listed.keep(collection.as_str(), owed);
+                }
+                feed.feed(collection.as_str(), self.rank, owed, false);
+            }
             // NOTE: what is not fed waits for phase 2.
             Err(err) => warn!("{} page load error: {err}", collection.as_str()),
         }
+        Rest::Go
     }
 
     fn listing(&mut self) {
@@ -1616,20 +2025,38 @@ fn bodiless(placements: impl IntoIterator<Item = PimdirPlacement>) -> Vec<Hydrat
         .collect()
 }
 
-/// Each spined collection's bodies still to download, for phase 2.
+/// Each spined collection's bodies still to download, for phase 2, only
+/// those the run listed under [`Bodies::Listed`].
 fn hydrate_plans(
     store: &PimdirStore,
     source: &str,
     collections: &[String],
+    listed: Option<&Listed>,
 ) -> Result<Vec<CollectionPlan>> {
     collections
         .iter()
         .map(|collection| {
             let view = projection_view(store, collection, source)
                 .with_context(|| format!("Project {source} {collection}"))?;
-            Ok((collection.clone(), bodiless(view)))
+            let owed = bodiless(view);
+            let owed = match listed {
+                Some(listed) => listed.keep(collection, owed),
+                None => owed,
+            };
+            Ok((collection.clone(), owed))
         })
         .collect()
+}
+
+/// A collection's spine: its report, and whether the pager paused it.
+struct Spined {
+    report: SyncOutput,
+    /// Whether the listing stopped at rest, its round left open.
+    paused: bool,
+    /// When paused, what the itemization of the spine that resumes it
+    /// counts as owed: the bodies owed before this one, and the members it
+    /// pulled, whose bodies may arrive in between.
+    owed: HashSet<String>,
 }
 
 /// Reconciles one collection's spine, its bodies left to hydration.
@@ -1637,6 +2064,11 @@ fn hydrate_plans(
 /// Returns the report patches; a dry run stops after itemizing. The listing
 /// tells `pager` each page it lands, which is how the bodies of a page
 /// download while the next pages list.
+///
+/// A spine the pager pauses reports what its pages pulled and stops there,
+/// its round open: the fetches, the staged work, the pushes and the
+/// coverage wait for the spine that resumes it, which `owed` is handed
+/// from the paused one.
 ///
 /// Scans run in parallel, but `pushing` lets one collection of the source
 /// push at a time: the two halves of a move derive from the store, and two
@@ -1652,24 +2084,27 @@ fn collection_spine(
     pushing: &Mutex<()>,
     dry_run: bool,
     pager: &mut dyn Pager,
-) -> Result<SyncOutput> {
+    owed: HashSet<String>,
+) -> Result<Spined> {
     let mut report = SyncOutput::default();
 
     let loaded =
         load_side(store, collection).with_context(|| format!("Load {} {collection}", &ctx.name))?;
-    let owed: HashSet<String> = loaded
-        .iter()
-        .filter(|placement| {
-            placement.status != PimdirStatus::Tombstone && placement.object.is_none()
-        })
-        .map(|placement| placement.handle.0.clone())
-        .collect();
+    let mut owed = owed;
+    owed.extend(
+        loaded
+            .iter()
+            .filter(|placement| {
+                placement.status != PimdirStatus::Tombstone && placement.object.is_none()
+            })
+            .map(|placement| placement.handle.0.clone()),
+    );
     let before: HashMap<String, PimdirFlags> = loaded
         .into_iter()
         .map(|placement| (placement.handle.0, placement.flags))
         .collect();
 
-    let pull = sync_side_rebuilding(collection, ctx, store, blobs, false, Some(pager))?;
+    let (pull, paused) = sync_side_rebuilding(collection, ctx, store, blobs, false, Some(pager))?;
     let display = display_name(&ctx.namespace, collection);
     // NOTE: before the report reads which conflicts survived, a divergence the
     // merge settles never having been a disagreement.
@@ -1683,6 +2118,19 @@ fn collection_spine(
         &ctx.name,
         &mut report,
     )?;
+    if paused {
+        owed.extend(pull.events.iter().filter_map(|event| match event {
+            PimdirSyncEvent::Added(handle) | PimdirSyncEvent::ContentChanged(handle) => {
+                Some(handle.0.clone())
+            }
+            _ => None,
+        }));
+        return Ok(Spined {
+            report,
+            paused,
+            owed,
+        });
+    }
     itemize_fetches(
         collection,
         display,
@@ -1694,7 +2142,11 @@ fn collection_spine(
     )?;
     itemize_single(collection, store, ctx, &mut report)?;
     if dry_run {
-        return Ok(report);
+        return Ok(Spined {
+            report,
+            paused,
+            owed: HashSet::new(),
+        });
     }
 
     // NOTE: held across the passes, so a move's halves never push at once:
@@ -1702,7 +2154,7 @@ fn collection_spine(
     // relocated member as a probe, the source's remove no destination left.
     let push = pushing.lock().unwrap_or_else(PoisonError::into_inner);
     for _ in 0..=MAX_EXTRA_PASSES {
-        let pass = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable(), None)?;
+        let (pass, _) = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable(), None)?;
         if !moved(&pass) {
             break;
         }
@@ -1711,7 +2163,11 @@ fn collection_spine(
     report_coverage(store, collection, ctx, &mut report);
     itemize_refused(&ctx.name, mem::take(&mut ctx.refused), &mut report);
     itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
-    Ok(report)
+    Ok(Spined {
+        report,
+        paused,
+        owed: HashSet::new(),
+    })
 }
 
 /// One hydrate batch: its collection and the handles fetched together.
@@ -1727,12 +2183,12 @@ type HydrateBatch = (String, Vec<PimdirHandle>);
 fn phase2_hydrate(
     source: &str,
     plans: &[CollectionPlan],
-    order: DownloadOrder,
+    pacing: &Pacing,
     ctxs: &mut [SourceCtx],
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
 ) -> Result<()> {
-    let batches = hydrate_batches(plans, order);
+    let batches = hydrate_batches(plans, pacing.order, pacing.prime);
     let total_bodies: usize = batches.iter().map(|(_, handles)| handles.len()).sum();
     if total_bodies == 0 {
         return Ok(());
@@ -1790,19 +2246,38 @@ fn phase2_hydrate(
 /// Chunks each collection's bodies into batches, queued in `order`.
 ///
 /// The order holds within a collection and, by each batch's first body (its
-/// largest or its newest), across the account.
-fn hydrate_batches(plans: &[CollectionPlan], order: DownloadOrder) -> Vec<HydrateBatch> {
-    let mut batches: Vec<(&HydrateTarget, HydrateBatch)> = Vec::new();
-    for (collection, targets) in plans {
+/// largest or its newest), across the account, ties going to the
+/// collection the run takes first (`plans` comes in the run's order).
+/// Under a positive `prime`, each collection's `prime` newest bodies come
+/// ahead of every other body, so what a first pass could not download is
+/// downloaded first.
+fn hydrate_batches(
+    plans: &[CollectionPlan],
+    order: DownloadOrder,
+    prime: usize,
+) -> Vec<HydrateBatch> {
+    // NOTE: the tier first, 0 for the primed bodies, then the batch's first
+    // body, then the collection's rank.
+    let mut batches: Vec<(u8, &HydrateTarget, usize, HydrateBatch)> = Vec::new();
+    for (rank, (collection, targets)) in plans.iter().enumerate() {
         let mut sorted: Vec<&HydrateTarget> = targets.iter().collect();
-        sorted.sort_by(|a, b| order.compare(a, b));
-        for chunk in sorted.chunks(BATCH_SIZE) {
-            let handles = chunk.iter().map(|target| target.handle.clone()).collect();
-            batches.push((chunk[0], (collection.clone(), handles)));
+        sorted.sort_by(|a, b| DownloadOrder::Newest.compare(a, b));
+        let rest = sorted.split_off(prime.min(sorted.len()));
+        for (tier, mut tiered) in [(0, sorted), (1, rest)] {
+            tiered.sort_by(|a, b| order.compare(a, b));
+            for chunk in tiered.chunks(BATCH_SIZE) {
+                let handles = chunk.iter().map(|target| target.handle.clone()).collect();
+                batches.push((tier, chunk[0], rank, (collection.clone(), handles)));
+            }
         }
     }
-    batches.sort_by(|(a, _), (b, _)| order.compare(a, b));
-    batches.into_iter().map(|(_, batch)| batch).collect()
+    batches.sort_by(|(tier_a, a, rank_a, _), (tier_b, b, rank_b, _)| {
+        tier_a
+            .cmp(tier_b)
+            .then(order.compare(a, b))
+            .then(rank_a.cmp(rank_b))
+    });
+    batches.into_iter().map(|(_, _, _, batch)| batch).collect()
 }
 
 /// Runs `batches` over one worker per connection, applying each as it lands.
@@ -2995,7 +3470,7 @@ fn reconcile_side(
         Some(flag_snapshot(store, collection, &ctx.name)?)
     };
 
-    let side = sync_side_rebuilding(collection, ctx, store, blobs, push, None)?;
+    let (side, _) = sync_side_rebuilding(collection, ctx, store, blobs, push, None)?;
     resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
 
     let display = display_name(&ctx.namespace, collection);
@@ -3026,6 +3501,7 @@ fn moved(report: &PimdirSyncReport) -> bool {
 /// The stored checkpoint's epoch is read before and after; a change means the
 /// server renumbered every handle. The guard is pre/post within one run, so a
 /// crash in between can miss one bump; link ids still converge on the next.
+/// Also answers whether `pager` paused the sync, its round left open.
 fn sync_side_rebuilding(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -3033,10 +3509,10 @@ fn sync_side_rebuilding(
     blobs: &PimdirBlobs,
     push: bool,
     pager: Option<&mut dyn Pager>,
-) -> Result<PimdirSyncReport> {
+) -> Result<(PimdirSyncReport, bool)> {
     let pre = stored_epoch(ctx.pool.primary(), store, collection)?;
 
-    let report = sync_side(collection, ctx, store, blobs, push, pager)?;
+    let synced = sync_side(collection, ctx, store, blobs, push, pager)?;
 
     if let Some(pre) = pre
         && let Some(post) = stored_epoch(ctx.pool.primary(), store, collection)?
@@ -3050,7 +3526,7 @@ fn sync_side_rebuilding(
         );
     }
 
-    Ok(report)
+    Ok(synced)
 }
 
 /// The handle-space epoch of `collection`'s stored checkpoint, if any.
@@ -3123,7 +3599,8 @@ fn sync_verb(
         .scope_bound(scope_bound)
 }
 
-/// Runs one side's `sync` against its server and returns its report.
+/// Runs one side's `sync` against its server and returns its report, and
+/// whether `pager` paused it.
 fn sync_side(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -3131,7 +3608,7 @@ fn sync_side(
     blobs: &PimdirBlobs,
     push: bool,
     pager: Option<&mut dyn Pager>,
-) -> Result<PimdirSyncReport> {
+) -> Result<(PimdirSyncReport, bool)> {
     let bound = store
         .load(
             &PimdirCollectionId(collection.to_string()),
@@ -3158,7 +3635,10 @@ fn sync_side(
     ctx.refused.extend(refused);
     ctx.rejected.extend(rejected);
 
-    report.with_context(|| format!("Sync {} {collection}", &ctx.name))
+    match report.with_context(|| format!("Sync {} {collection}", &ctx.name))? {
+        Paged::Done(report) => Ok((report, false)),
+        Paged::Paused(verb) => Ok((verb.report().clone(), true)),
+    }
 }
 
 /// One side's placements the engine left marked conflicted in `collection`.
@@ -8160,14 +8640,14 @@ mod tests {
         let owned = |list: &[&str]| list.iter().map(|h| h.to_string()).collect::<Vec<_>>();
 
         assert_eq!(
-            queued(hydrate_batches(&plans, DownloadOrder::Largest)),
+            queued(hydrate_batches(&plans, DownloadOrder::Largest, 0)),
             [
                 ("imap/Archive".to_string(), owned(&["a", "b"])),
                 ("imap/INBOX".to_string(), owned(&["e", "c", "d"])),
             ],
         );
         assert_eq!(
-            queued(hydrate_batches(&plans, DownloadOrder::Newest)),
+            queued(hydrate_batches(&plans, DownloadOrder::Newest, 0)),
             [
                 ("imap/INBOX".to_string(), owned(&["c", "e", "d"])),
                 ("imap/Archive".to_string(), owned(&["b", "a"])),
@@ -8194,7 +8674,7 @@ mod tests {
             ),
         ];
 
-        let order: Vec<(String, usize, String)> = hydrate_batches(&plans, DownloadOrder::Newest)
+        let order: Vec<(String, usize, String)> = hydrate_batches(&plans, DownloadOrder::Newest, 0)
             .into_iter()
             .map(|(collection, handles)| (collection, handles.len(), handles[0].0.clone()))
             .collect();
@@ -8537,13 +9017,14 @@ mod tests {
             collection: &PimdirCollectionId,
             landed: Vec<PimdirHandle>,
             resumed: bool,
-        ) {
+            _next: Option<&PimdirListing>,
+        ) -> Rest {
             assert_eq!(self.listing, self.listed, "never told mid-listing");
             let mut names: Vec<String> = landed.iter().map(|h| h.0.clone()).collect();
             names.sort();
             self.told.push((names, resumed));
             if landed.is_empty() {
-                return;
+                return Rest::Go;
             }
 
             let placements = store
@@ -8552,7 +9033,7 @@ mod tests {
                 .placements;
             assert_eq!(placements.len(), landed.len(), "the page has landed");
             if !self.hydrate {
-                return;
+                return Rest::Go;
             }
             let blobs = store.blobs();
             let items = placements
@@ -8576,6 +9057,7 @@ mod tests {
                 })
                 .collect();
             apply_batch(store, NoWire, collection.as_str(), items).unwrap();
+            Rest::Go
         }
 
         fn listing(&mut self) {
@@ -8672,14 +9154,23 @@ mod tests {
         paged_sync(&mut store, &mut remote, &mut HydratingPager::default()).unwrap_err();
 
         let gate = Mutex::new(());
-        let feed = HydrateFeed::new(DownloadOrder::Newest, 1);
-        let mut pager = PageFeed::hold(&gate, Some(&feed));
+        let work = Work::new(DownloadOrder::Newest, 0, false);
+        let mut pager = PageFeed {
+            feed: Some(&work),
+            ..PageFeed::hold(&gate)
+        };
         paged_sync(&mut store, &mut remote, &mut pager).unwrap();
         drop(pager);
-        feed.spined();
 
         let mut fed = Vec::new();
-        while let Some((collection, handles)) = feed.next() {
+        while let Some(job) = work.next() {
+            let Job::Hydrate {
+                batch: (collection, handles),
+                primed: false,
+            } = job
+            else {
+                panic!("only page bodies are queued: {job:?}");
+            };
             assert_eq!(collection, "imap/INBOX");
             fed.push(handles.into_iter().map(|h| h.0).collect::<Vec<_>>());
         }
@@ -8694,23 +9185,689 @@ mod tests {
     /// lands or every spine has ended.
     #[test]
     fn the_feed_waits_while_a_spine_may_still_feed() {
-        let feed = HydrateFeed::new(DownloadOrder::Largest, 1);
+        let work = Work::new(DownloadOrder::Largest, 1, false);
+        assert_eq!(
+            work.next(),
+            Some(Job::Spine {
+                index: 0,
+                pass: Pass::Whole
+            })
+        );
         thread::scope(|scope| {
             let waiter = scope.spawn(|| {
                 let mut got = Vec::new();
-                while let Some((_, handles)) = feed.next() {
-                    got.push(handles.len());
+                while let Some(Job::Hydrate { batch, .. }) = work.next() {
+                    got.push(batch.1.len());
                 }
                 got
             });
             thread::sleep(std::time::Duration::from_millis(20));
-            feed.feed(
+            work.feed(
                 "imap/INBOX",
+                0,
                 vec![target("a", 1, None), target("b", 9, None)],
+                false,
             );
             thread::sleep(std::time::Duration::from_millis(20));
-            feed.spined();
+            work.spined(Pass::Whole, 0, false);
             assert_eq!(waiter.join().unwrap(), [2]);
         });
+    }
+
+    /// Runs a scoped sync of the INBOX under `pager`, answering whether it
+    /// paused.
+    fn paused_sync(
+        store: &mut PimdirSourceStore,
+        remote: &mut PagedRemote,
+        pager: &mut dyn Pager,
+    ) -> bool {
+        let verb = sync_verb(
+            "imap/INBOX",
+            false,
+            PimdirPushRights::all(),
+            PimdirConflictPolicy::Manual,
+            PimdirScope::since("2026-09-07T00:00:00Z"),
+            false,
+        );
+        match run_verb_paged(store, remote, verb, Some(pager)).unwrap() {
+            Paged::Done(_) => false,
+            Paged::Paused(_) => true,
+        }
+    }
+
+    /// A pager pausing a round leaves the store as a run killed after its
+    /// first page does (see `an_interrupted_round_resumes_from_its_cursor`):
+    /// the page landed, the round open at its cursor. A round resumed is
+    /// paused before it asks anything, and the next sync left to page
+    /// resumes from the cursor and closes it; a delta is never paused.
+    #[test]
+    fn a_paused_round_stands_where_a_killed_one_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = mailbox_with_an_old_message(dir.path());
+        let mut remote = PagedRemote::new(pages());
+        let gate = Mutex::new(());
+        let pausing = |gate| PageFeed {
+            pause: true,
+            ..PageFeed::hold(gate)
+        };
+
+        assert!(paused_sync(&mut store, &mut remote, &mut pausing(&gate)));
+        assert_eq!(remote.cursors(), [None], "the first page alone");
+        assert_eq!(handles_of(&store), names(&["1", "30", "31"]));
+        let coverage = store.list_coverage("imap/INBOX").unwrap();
+        assert!(coverage[0].coverage.is_none(), "no round closed yet");
+        assert!(coverage[0].round.is_some(), "the round is left open");
+
+        assert!(paused_sync(&mut store, &mut remote, &mut pausing(&gate)));
+        assert_eq!(remote.cursors(), [None], "a resumed round asks nothing");
+
+        assert!(!paused_sync(
+            &mut store,
+            &mut remote,
+            &mut PageFeed::hold(&gate)
+        ));
+        assert_eq!(
+            remote.cursors(),
+            [None, Some(String::from("1")), Some(String::from("2"))],
+            "the fill resumes from the cursor the first page left",
+        );
+        assert_eq!(
+            handles_of(&store),
+            names(&["1", "10", "19", "20", "30", "31"])
+        );
+        let coverage = store.list_coverage("imap/INBOX").unwrap();
+        assert!(coverage[0].coverage.is_some(), "the round closed");
+        assert!(coverage[0].round.is_none());
+
+        let requests = remote.requests.len();
+        assert!(!paused_sync(&mut store, &mut remote, &mut pausing(&gate)));
+        assert!(
+            matches!(remote.requests[requests].listing, PimdirListing::Delta(_)),
+            "a whole collection runs its delta to the end",
+        );
+    }
+
+    /// Takes the next job, failing on none.
+    fn job(work: &Work) -> Job {
+        work.next().expect("a job")
+    }
+
+    fn spine_job(index: usize, pass: Pass) -> Job {
+        Job::Spine { index, pass }
+    }
+
+    /// Priming lists the first page of every collection, in the run's order,
+    /// each followed by its newest bodies, before any collection lists a
+    /// second page; the fill waits for the last primed body too, other
+    /// bodies downloading meanwhile.
+    #[test]
+    fn every_first_page_and_its_newest_bodies_come_before_any_second_page() {
+        let work = Work::new(DownloadOrder::Newest, 3, true);
+        let primed = |collection: &str, handle: &str| Job::Hydrate {
+            batch: (collection.to_string(), vec![PimdirHandle(handle.into())]),
+            primed: true,
+        };
+
+        assert_eq!(job(&work), spine_job(0, Pass::First));
+        work.feed("INBOX", 0, vec![target("i1", 1, None)], true);
+        work.spined(Pass::First, 0, true);
+        assert_eq!(job(&work), primed("INBOX", "i1"), "its bodies right after");
+        work.downloaded(true);
+
+        assert_eq!(job(&work), spine_job(1, Pass::First));
+        work.spined(Pass::First, 1, false);
+        assert_eq!(job(&work), spine_job(2, Pass::First));
+        work.feed("Trash", 2, vec![target("t1", 1, None)], true);
+        work.feed("Sent", 1, vec![target("s1", 1, None)], false);
+        work.spined(Pass::First, 2, true);
+        assert_eq!(job(&work), primed("Trash", "t1"));
+
+        assert!(
+            matches!(job(&work), Job::Hydrate { primed: false, .. }),
+            "a primed body under way holds the fill back, not the rest",
+        );
+        work.downloaded(false);
+        work.downloaded(true);
+        assert_eq!(job(&work), spine_job(0, Pass::Fill), "the fill, in order");
+        assert_eq!(job(&work), spine_job(2, Pass::Fill));
+        work.spined(Pass::Fill, 0, false);
+        work.spined(Pass::Fill, 2, false);
+        assert_eq!(work.next(), None);
+    }
+
+    /// Several connections take the first pass together, and no fill
+    /// starts while one of its spines is under way.
+    #[test]
+    fn the_fill_waits_for_every_first_page() {
+        let work = Work::new(DownloadOrder::Newest, 2, true);
+        assert_eq!(job(&work), spine_job(0, Pass::First));
+        assert_eq!(job(&work), spine_job(1, Pass::First));
+        work.spined(Pass::First, 0, true);
+        thread::scope(|scope| {
+            let filler = scope.spawn(|| job(&work));
+            thread::sleep(std::time::Duration::from_millis(20));
+            assert!(
+                !filler.is_finished(),
+                "page 2 of one waits for page 1 of all"
+            );
+            work.spined(Pass::First, 1, false);
+            assert_eq!(filler.join().unwrap(), spine_job(0, Pass::Fill));
+        });
+        work.spined(Pass::Fill, 0, false);
+        assert_eq!(work.next(), None);
+    }
+
+    /// Queued bodies leave in the download order, a tie going to the
+    /// collection the run takes first, whichever was queued first.
+    #[test]
+    fn a_tie_between_batches_goes_to_the_collection_taken_first() {
+        let work = Work::new(DownloadOrder::Newest, 0, false);
+        let date = Some("2026-10-04T08:00:00Z");
+        work.feed("Archive", 3, vec![target("a", 1, date)], false);
+        work.feed("INBOX", 0, vec![target("i", 1, date)], false);
+        work.feed(
+            "Sent",
+            1,
+            vec![target("s", 1, Some("2026-10-05T08:00:00Z"))],
+            false,
+        );
+        let mut order = Vec::new();
+        while let Some(Job::Hydrate { batch, .. }) = work.next() {
+            order.push(batch.0);
+        }
+        assert_eq!(order, ["Sent", "INBOX", "Archive"]);
+    }
+
+    /// Phase 2 takes each collection's newest bodies ahead of the rest,
+    /// whatever the download order, then the rest in it.
+    #[test]
+    fn phase_two_downloads_the_newest_of_each_collection_first() {
+        let plans: Vec<CollectionPlan> = vec![
+            (
+                "imap/INBOX".into(),
+                vec![
+                    target("old", 900, Some("2019-05-01T08:00:00Z")),
+                    target("new", 10, Some("2026-10-03T08:00:00Z")),
+                ],
+            ),
+            (
+                "imap/Archive".into(),
+                vec![
+                    target("big", 800, Some("2020-01-01T08:00:00Z")),
+                    target("recent", 5, Some("2026-10-01T08:00:00Z")),
+                ],
+            ),
+        ];
+        let owned = |list: &[&str]| list.iter().map(|h| h.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            queued(hydrate_batches(&plans, DownloadOrder::Largest, 1)),
+            [
+                ("imap/INBOX".to_string(), owned(&["new"])),
+                ("imap/Archive".to_string(), owned(&["recent"])),
+                ("imap/INBOX".to_string(), owned(&["old"])),
+                ("imap/Archive".to_string(), owned(&["big"])),
+            ],
+        );
+    }
+
+    /// The run takes the inbox first and the trash last, every collection
+    /// without a role in between by name.
+    #[test]
+    fn collections_are_taken_by_role_then_by_name() {
+        let ids = [
+            "Trash", "zeta", "INBOX", "Spam", "Archive", "Sent", "Drafts", "All", "beta",
+        ];
+        let kept: BTreeSet<String> = ids.iter().map(|id| id.to_string()).collect();
+        let names: BTreeMap<String, String> = ids
+            .iter()
+            .map(|id| (id.to_string(), id.to_string()))
+            .collect();
+        let roles: BTreeMap<String, String> = [
+            ("INBOX", "inbox"),
+            ("Sent", "sent"),
+            ("Drafts", "drafts"),
+            ("Archive", "archive"),
+            ("All", "all"),
+            ("Spam", "junk"),
+            ("Trash", "trash"),
+        ]
+        .iter()
+        .map(|(id, role)| (id.to_string(), role.to_string()))
+        .collect();
+
+        assert_eq!(
+            run_order(&kept, &names, &roles),
+            [
+                "INBOX", "Sent", "Drafts", "Archive", "beta", "zeta", "All", "Spam", "Trash"
+            ],
+        );
+    }
+
+    /// Under `--bodies listed`, only what a page of this run landed is
+    /// downloaded, the rest staying owed.
+    #[test]
+    fn listed_bodies_are_those_this_run_landed() {
+        let listed = Listed::default();
+        listed.record("imap/INBOX", &[PimdirHandle("2".into())]);
+        let kept = listed.keep(
+            "imap/INBOX",
+            vec![target("1", 1, None), target("2", 1, None)],
+        );
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].handle.0, "2");
+        assert!(
+            listed
+                .keep("imap/Archive", vec![target("2", 1, None)])
+                .is_empty()
+        );
+    }
+
+    fn source_of(toml: &str, name: &str) -> SourceConfig {
+        let config: AccountConfig = toml::from_str(toml).unwrap();
+        config.sources().unwrap()[name].clone()
+    }
+
+    /// IMAP opens the run's connections, Graph three unless its pool size
+    /// says otherwise and never more than the run's, Google and DAV one.
+    #[test]
+    fn each_backend_opens_its_own_connection_budget() {
+        let imap = source_of("imap.server = \"imaps://localhost\"", "imap");
+        assert_eq!(connection_budget(&imap, 4), 4);
+        assert_eq!(connection_budget(&imap, 8), 8);
+
+        let graph = "msgraph.auth.token.raw = \"x\"";
+        let msgraph = source_of(graph, "msgraph");
+        assert_eq!(connection_budget(&msgraph, 4), 3);
+        assert_eq!(connection_budget(&msgraph, 1), 1, "--connections 1");
+        let sized = source_of(&format!("{graph}\nmsgraph.pool-size = 2"), "msgraph");
+        assert_eq!(connection_budget(&sized, 4), 2);
+        let calendar = source_of(
+            "msgraph-calendar.auth.token.raw = \"x\"",
+            "msgraph-calendar",
+        );
+        assert_eq!(connection_budget(&calendar, 4), 3);
+
+        let gmail = source_of("gmail.auth.token.raw = \"x\"", "gmail");
+        assert_eq!(connection_budget(&gmail, 4), 1);
+        let caldav = source_of(
+            "caldav.server = \"https://localhost\"\ncaldav.auth.basic.username = \"u\"\ncaldav.auth.basic.password.raw = \"p\"",
+            "caldav",
+        );
+        assert_eq!(connection_budget(&caldav, 4), 1);
+    }
+
+    /// Priming is on under the order a caller picks to show mail early,
+    /// off under the fastest whole run, and the caller may say otherwise.
+    #[test]
+    fn priming_defaults_by_the_download_order() {
+        let wait = throttle::MAX_WAIT;
+        let pacing = |order, prime| Pacing::new(order, prime, Bodies::All, wait).prime;
+        assert_eq!(pacing(DownloadOrder::Newest, None), DEFAULT_PRIME);
+        assert_eq!(pacing(DownloadOrder::Largest, None), 0);
+        assert_eq!(pacing(DownloadOrder::Newest, Some(0)), 0);
+        assert_eq!(pacing(DownloadOrder::Largest, Some(10)), 10);
+    }
+}
+
+/// Several Microsoft Graph connections of one source against a fake Graph
+/// answering on every connection at once: the run's budget is what runs
+/// side by side, and one throttle stops them all.
+#[cfg(all(test, feature = "msgraph"))]
+mod graph_budget {
+    use std::{
+        collections::VecDeque,
+        io::{self, Read, Write},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+        time::{Duration, Instant, SystemTime},
+    };
+
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use crossbeam_queue::SegQueue;
+    use io_msgraph::v1::client::MsgraphStream;
+    use io_pimdir::{client::PimdirStore, placement::PimdirHandle};
+
+    use super::{connection_budget, hydrate_pool};
+    use crate::{
+        client::Client,
+        config::AccountConfig,
+        kind::Kind,
+        msgraph::client::{GraphClient, SizeHints},
+        offline::remote::hydrate_batch,
+        throttle::Throttle,
+    };
+
+    /// How long the fake serves a request: long enough for the
+    /// connections' requests to overlap.
+    const SERVE: Duration = Duration::from_millis(30);
+
+    /// The fake Graph: every request it served, and how many at once.
+    #[derive(Default)]
+    struct Graph {
+        /// The message whose get is throttled, and the wait stated, in
+        /// seconds, ten minutes by default.
+        hot: Option<String>,
+        retry_after: Option<&'static str>,
+        connections: AtomicUsize,
+        serving: AtomicUsize,
+        most: AtomicUsize,
+        /// Each request: its connection, when it reached the server, and
+        /// the ids it asked.
+        served: Mutex<Vec<(usize, Instant, Vec<String>)>>,
+        /// When the throttled answer left.
+        throttled: Mutex<Option<Instant>>,
+    }
+
+    fn raw(id: &str) -> Vec<u8> {
+        format!("Message-ID: <{id}@example.org>\r\nSubject: {id}\r\n\r\nbody of {id}\r\n")
+            .into_bytes()
+    }
+
+    fn reply(status: u16, body: &[u8], content_type: &str) -> Vec<u8> {
+        let mut out = format!(
+            "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        out.extend_from_slice(body);
+        out
+    }
+
+    impl Graph {
+        /// Answers one request, `line` its request line.
+        fn serve(&self, connection: usize, line: &str, body: &[u8]) -> Vec<u8> {
+            let now = self.serving.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most.fetch_max(now, Ordering::SeqCst);
+            let at = Instant::now();
+            thread::sleep(SERVE);
+
+            let id_of = |url: &str| {
+                url.split("messages/")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let (asked, answer) = if line.starts_with("POST ") && line.contains("$batch") {
+                let batch: serde_json::Value = serde_json::from_slice(body).unwrap();
+                let mut asked = Vec::new();
+                let mut responses = Vec::new();
+                for request in batch["requests"].as_array().unwrap() {
+                    let id = id_of(request["url"].as_str().unwrap());
+                    let rid = request["id"].clone();
+                    if self.hot.as_deref() == Some(id.as_str()) {
+                        *self.throttled.lock().unwrap() = Some(Instant::now());
+                        responses.push(serde_json::json!({
+                            "id": rid,
+                            "status": 429,
+                            "headers": { "retry-after": self.retry_after.unwrap_or("600") },
+                            "body": { "error": { "code": "TooManyRequests", "message": "slow" } },
+                        }));
+                    } else {
+                        responses.push(serde_json::json!({
+                            "id": rid,
+                            "status": 200,
+                            "body": STANDARD.encode(raw(&id)),
+                        }));
+                    }
+                    asked.push(id);
+                }
+                let json = serde_json::json!({ "responses": responses });
+                let json = serde_json::to_vec(&json).unwrap();
+                (asked, reply(200, &json, "application/json"))
+            } else {
+                let id = id_of(line);
+                (vec![id.clone()], reply(200, &raw(&id), "text/plain"))
+            };
+
+            self.served.lock().unwrap().push((connection, at, asked));
+            self.serving.fetch_sub(1, Ordering::SeqCst);
+            answer
+        }
+
+        /// Opens a connection to the fake.
+        fn connect(self: &Arc<Self>) -> anyhow::Result<Box<dyn MsgraphStream>> {
+            let index = self.connections.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(Wire {
+                graph: Arc::clone(self),
+                index,
+                input: Vec::new(),
+                out: VecDeque::new(),
+            }))
+        }
+    }
+
+    /// One connection: what the client wrote, served once it reads.
+    struct Wire {
+        graph: Arc<Graph>,
+        index: usize,
+        input: Vec<u8>,
+        out: VecDeque<u8>,
+    }
+
+    impl Wire {
+        /// Serves every whole request written so far.
+        fn serve(&mut self) {
+            while let Some(end) = self.input.windows(4).position(|w| w == b"\r\n\r\n") {
+                let head = String::from_utf8_lossy(&self.input[..end]).into_owned();
+                let length: usize = head
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse().ok())?
+                    })
+                    .unwrap_or(0);
+                let start = end + 4;
+                if self.input.len() < start + length {
+                    return;
+                }
+                let body: Vec<u8> = self.input[start..start + length].to_vec();
+                self.input.drain(..start + length);
+                let line = head.lines().next().unwrap_or_default().to_owned();
+                let answer = self.graph.serve(self.index, &line, &body);
+                self.out.extend(answer);
+            }
+        }
+    }
+
+    impl Read for Wire {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.out.is_empty() {
+                self.serve();
+            }
+            let n = buf.len().min(self.out.len());
+            for (slot, byte) in buf.iter_mut().zip(self.out.drain(..n)) {
+                *slot = byte;
+            }
+            Ok(n)
+        }
+    }
+
+    impl Write for Wire {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.input.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The budget a Graph mail source takes in a run of four connections,
+    /// its clients over the fake, sharing one throttle and the sizes the
+    /// listing stated for `ids`.
+    fn clients(graph: &Arc<Graph>, ids: &[String]) -> (Vec<Client>, Arc<Throttle>) {
+        clients_waiting(graph, ids, crate::throttle::MAX_WAIT)
+    }
+
+    fn clients_waiting(
+        graph: &Arc<Graph>,
+        ids: &[String],
+        max_wait: Duration,
+    ) -> (Vec<Client>, Arc<Throttle>) {
+        let config: AccountConfig = toml::from_str("msgraph.auth.token.raw = \"x\"").unwrap();
+        let budget = connection_budget(&config.sources().unwrap()["msgraph"], 4);
+        let throttle = Arc::new(Throttle::new("msgraph").waiting(max_wait));
+        let sizes = SizeHints::default();
+        sizes.noted(ids.iter().map(|id| (id.clone(), 1_000)));
+        let clients = (0..budget)
+            .map(|_| {
+                let graph = Arc::clone(graph);
+                let client = GraphClient::over_streams(
+                    move || graph.connect(),
+                    sizes.clone(),
+                    Arc::clone(&throttle),
+                )
+                .unwrap();
+                Client::Msgraph(Box::new(client))
+            })
+            .collect();
+        (clients, throttle)
+    }
+
+    fn ids(count: usize) -> Vec<String> {
+        (0..count).map(|n| format!("m{n:03}")).collect()
+    }
+
+    /// Batches of `size` handles over `ids`.
+    fn batches(ids: &[String], size: usize) -> Vec<(String, Vec<PimdirHandle>)> {
+        ids.chunks(size)
+            .map(|chunk| {
+                let handles = chunk.iter().map(|id| PimdirHandle(id.clone())).collect();
+                (String::from("Inbox"), handles)
+            })
+            .collect()
+    }
+
+    /// A Graph source downloads over its three connections side by side,
+    /// never more, through phase 2's pool, each body asked once.
+    #[test]
+    fn a_graph_source_runs_its_budget_side_by_side_and_no_more() {
+        let graph = Arc::new(Graph::default());
+        let ids = ids(60);
+        let (mut clients, _) = clients(&graph, &ids);
+        assert_eq!(clients.len(), 3, "Graph's default budget");
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
+        let fetched = AtomicUsize::new(0);
+
+        hydrate_pool(
+            &mut clients,
+            &mut (),
+            batches(&ids, 5),
+            |client, collection, handles| {
+                hydrate_batch(Kind::Mail, client, collection, handles, &blobs, None)
+            },
+            |_, _, _, items| {
+                fetched.fetch_add(items.len(), Ordering::Relaxed);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(fetched.into_inner(), 60);
+        assert_eq!(graph.connections.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            graph.most.load(Ordering::SeqCst),
+            3,
+            "three at once, never four"
+        );
+        let served = graph.served.lock().unwrap();
+        let mut asked: Vec<&String> = served.iter().flat_map(|(_, _, ids)| ids).collect();
+        asked.sort();
+        asked.dedup();
+        assert_eq!(asked.len(), 60, "each body asked once");
+        assert_eq!(
+            served.iter().map(|(_, _, ids)| ids.len()).sum::<usize>(),
+            60
+        );
+        for connection in 0..3 {
+            assert!(
+                served.iter().any(|(c, _, _)| *c == connection),
+                "connection {connection} served"
+            );
+        }
+    }
+
+    /// One connection's batch throttled for ten minutes gives the source up,
+    /// and no connection sends anything after: those with batches left
+    /// fail them at once, as phase 1's idle connections go on to the next.
+    #[test]
+    fn a_throttle_on_one_connection_stops_every_connection() {
+        let graph = Arc::new(Graph {
+            hot: Some(String::from("m012")),
+            ..Default::default()
+        });
+        let ids = ids(60);
+        let (mut clients, throttle) = clients(&graph, &ids);
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
+        let queue = SegQueue::new();
+        for batch in batches(&ids, 5) {
+            queue.push(batch);
+        }
+        let failed = AtomicUsize::new(0);
+
+        thread::scope(|scope| {
+            for client in clients.iter_mut() {
+                let (queue, blobs, failed) = (&queue, &blobs, &failed);
+                scope.spawn(move || {
+                    while let Some((collection, handles)) = queue.pop() {
+                        if hydrate_batch(Kind::Mail, client, &collection, &handles, blobs, None)
+                            .is_err()
+                        {
+                            failed.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+        });
+
+        let until = throttle.gave_up().expect("the source gave up");
+        assert!(until > SystemTime::now() + Duration::from_secs(500));
+        let throttled = graph.throttled.lock().unwrap().expect("a throttled answer");
+        let served = graph.served.lock().unwrap();
+        let after: Vec<_> = served.iter().filter(|(_, at, _)| *at > throttled).collect();
+        assert!(
+            after.is_empty(),
+            "nothing sent after the throttle: {after:?}"
+        );
+        assert!(
+            served.len() < 12,
+            "the batches left were not sent: {} of 12",
+            served.len()
+        );
+        assert!(failed.into_inner() > 0, "the batches left failed at once");
+    }
+
+    /// `--max-wait` bounds a batch's own waits: a get Graph asks to wait
+    /// three seconds, in a run waiting at most one, gives the source up
+    /// rather than being sent again.
+    #[test]
+    fn the_run_s_longest_wait_bounds_a_graph_batch() {
+        let graph = Arc::new(Graph {
+            hot: Some(String::from("m001")),
+            retry_after: Some("3"),
+            ..Default::default()
+        });
+        let ids = ids(5);
+        let (mut clients, throttle) = clients_waiting(&graph, &ids, Duration::from_secs(1));
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
+
+        let start = Instant::now();
+        let handles: Vec<PimdirHandle> = ids.iter().map(|id| PimdirHandle(id.clone())).collect();
+        let _ = hydrate_batch(Kind::Mail, &mut clients[0], "Inbox", &handles, &blobs, None);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "no three-second wait"
+        );
+        assert!(throttle.gave_up().is_some(), "the source gave up");
+        assert_eq!(graph.served.lock().unwrap().len(), 1, "never sent again");
     }
 }

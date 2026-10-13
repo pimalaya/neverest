@@ -72,7 +72,9 @@ default = true
 #   - `collection.filter`: which collections this source syncs
 #   - `collection.{create,delete}`, `flag.update`, `item.update`: default true
 #   - `item.{create,delete}`: both required when the block is declared
-#   - `pool-size`: default 8 (IMAP), 4 (JMAP, Gmail, Graph, DAV)
+#   - `pool-size`: read by Microsoft Graph alone for now (default 3, never
+#     above the account's `connections`); IMAP opens `connections`
+#     (default 4), Gmail, Google Calendar, Google People and DAV one
 #
 # `item.update` gates in-place body edits, so it is inert for mail and
 # meaningful for CardDAV and CalDAV.
@@ -243,7 +245,9 @@ imap.item.delete = false
 # whatever the permissions say.
 #msgraph.item.create = true
 #msgraph.item.delete = false
-#msgraph.pool-size = 4
+
+# Graph serves four requests at once a mailbox, a `$batch`'s among them.
+#msgraph.pool-size = 3
 
 # Graph contacts: the same session and fields as `msgraph`, its contact folders
 # exposed as address books, the default Contacts folder as `contacts`. The token

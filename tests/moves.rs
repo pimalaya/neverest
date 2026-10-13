@@ -122,6 +122,121 @@ fn a_move_is_delivered_once() {
     imap(&format!("DELETE {right}"));
 }
 
+/// A move staged through the store lands once whichever of its two
+/// collections a run syncs first, each run naming one alone
+/// (`--include-collection`, as a caller syncing what a watcher reported
+/// does): the source alone, then the target alone, and the other way round.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
+fn a_move_is_delivered_once_by_runs_naming_one_collection() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let store = root.join("store");
+    let config = root.join("config.toml");
+
+    let id = std::process::id();
+    let left = format!("MoveOneLeft{id}");
+    let right = format!("MoveOneRight{id}");
+    let marker = format!("MOVEONEMARKER{id}");
+    imap(&format!("CREATE {left}"));
+    imap(&format!("CREATE {right}"));
+
+    let eml = root.join("msg.eml");
+    fs::write(
+        &eml,
+        format!(
+            "Message-ID: <move-one-{id}@pimalaya.org>\r\n\
+             From: alice@pimalaya.org\r\n\
+             To: bob@pimalaya.org\r\n\
+             Subject: neverest move by halves\r\n\
+             Date: Sat, 03 Oct 2026 10:00:00 +0000\r\n\
+             \r\n\
+             {marker}\r\n",
+        ),
+    )
+    .unwrap();
+    let append = Command::new("curl")
+        .args(["-fsS", "-T"])
+        .arg(&eml)
+        .arg(format!("{SERVER}/{left}"))
+        .args(["--user", CRED])
+        .output()
+        .expect("spawn curl append");
+    assert!(append.status.success(), "seed append failed");
+
+    fs::write(
+        &config,
+        format!(
+            "[accounts.halves]\n\
+             store.root = \"{}\"\n\
+             imap.server = \"{SERVER}\"\n\
+             imap.starttls = false\n\
+             imap.sasl.plain.username = \"test@pimalaya.org\"\n\
+             imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
+             imap.collection.filter.include = [\"{left}\", \"{right}\"]\n",
+            store.display(),
+        ),
+    )
+    .unwrap();
+    neverest(&["init", "-a", "halves"], &config);
+    neverest(&["sync", "-a", "halves"], &config);
+
+    // NOTE: the source first, then the target first, and once more each
+    // way, the message bouncing between the two.
+    let mut from_first = true;
+    let (mut from, mut to) = (left.clone(), right.clone());
+    for bounce in 1..=4 {
+        let source = format!("imap/{from}");
+        let target = format!("imap/{to}");
+
+        let mut producer = PimdirProducer::open(&store, "moves-test").unwrap();
+        let items = producer_items(&store, &source);
+        assert_eq!(items.len(), 1, "bounce {bounce}: {source} holds it once");
+        let action = PimdirAction::Move {
+            seq: items[0],
+            to: PimdirCollectionId(target.clone()),
+        };
+        producer.enqueue(&source, &action, None).unwrap();
+        drop(producer);
+
+        let (first, second) = if from_first {
+            (&from, &to)
+        } else {
+            (&to, &from)
+        };
+        neverest(&["sync", "-a", "halves", "-m", first], &config);
+        neverest(&["sync", "-a", "halves", "-m", second], &config);
+
+        assert_eq!(
+            server_count(&to, &marker),
+            1,
+            "bounce {bounce} ({first} first): {to} holds the message once on the server"
+        );
+        assert_eq!(
+            server_count(&from, &marker),
+            0,
+            "bounce {bounce} ({first} first): {from} is empty"
+        );
+        assert_eq!(
+            producer_items(&store, &target).len(),
+            1,
+            "bounce {bounce} ({first} first): {target} holds the message once in the store"
+        );
+        assert!(
+            producer_items(&store, &source).is_empty(),
+            "bounce {bounce} ({first} first): {source} holds nothing in the store"
+        );
+
+        (from, to) = (to, from);
+        if bounce % 2 == 0 {
+            from_first = !from_first;
+        }
+    }
+
+    imap(&format!("DELETE {left}"));
+    imap(&format!("DELETE {right}"));
+}
+
 /// The live items of `collection`, by seq.
 fn producer_items(store: &Path, collection: &str) -> Vec<i64> {
     let reader = io_pimdir::client::reader::PimdirReader::open(store).unwrap();

@@ -222,6 +222,10 @@ fn recent_mail_downloads_first_on_request() {
             "1",
             "--download-order",
             "newest",
+            // NOTE: the order alone, across the account: priming would take
+            // each folder's newest first, the old folder's among them.
+            "--prime",
+            "0",
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -263,6 +267,360 @@ fn recent_mail_downloads_first_on_request() {
     for folder in &folders {
         imap(&format!("DELETE {folder}"));
     }
+}
+
+/// Messages in each folder of the priming tests: over two IMAP pages.
+const LARGE: usize = 1_100;
+
+/// How many of each folder's newest bodies the priming tests ask for.
+const PRIME: usize = 50;
+
+/// Seeds `folders` with [`LARGE`] small messages each, dated a minute
+/// apart in the order they are appended, so the newest has the highest UID.
+fn seed_large(folders: &[String], tag: &str) {
+    for folder in folders {
+        imap(&format!("CREATE {folder}"));
+        let messages = (0..LARGE).map(|n| {
+            let minute = n % 60;
+            let hour = (n / 60) % 24;
+            let day = 1 + n / (60 * 24);
+            format!(
+                "Message-ID: <{tag}-{folder}-{n:04}@pimalaya.org>\r\n\
+                 From: alice@pimalaya.org\r\n\
+                 To: bob@pimalaya.org\r\n\
+                 Subject: neverest prime {n}\r\n\
+                 Date: {day:02} Oct 2026 {hour:02}:{minute:02}:00 +0000\r\n\
+                 \r\n\
+                 hello {n}\r\n"
+            )
+        });
+        append_all(folder, messages);
+    }
+}
+
+/// Appends `messages` to `folder` over one IMAP session, curl taking one
+/// session a message.
+fn append_all(folder: &str, messages: impl Iterator<Item = String>) {
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpStream,
+    };
+
+    let stream = TcpStream::connect("127.0.0.1:143").expect("connect IMAP");
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut writer = stream;
+    let mut line = String::new();
+    let mut expect = |reader: &mut BufReader<TcpStream>, start: &str| loop {
+        line.clear();
+        reader.read_line(&mut line).expect("read IMAP");
+        assert!(!line.is_empty(), "IMAP closed the connection");
+        if line.split_whitespace().next() == Some(start) {
+            assert!(
+                start == "*" || line.starts_with(&format!("{start} OK")),
+                "IMAP refused: {line}"
+            );
+            return;
+        }
+    };
+    expect(&mut reader, "*");
+    let (user, pass) = CRED.split_once(':').unwrap();
+    write!(writer, "a LOGIN \"{user}\" \"{pass}\"\r\n").unwrap();
+    expect(&mut reader, "a");
+    // NOTE: a hundred messages a command (MULTIAPPEND, RFC 3502), in
+    // non-synchronizing literals (RFC 7888): one command appends its
+    // messages in order, so the UIDs follow the dates, where pipelined
+    // commands may be served out of order.
+    let messages: Vec<String> = messages.collect();
+    for (chunk, messages) in messages.chunks(100).enumerate() {
+        write!(writer, "b{chunk} APPEND {folder}").unwrap();
+        for message in messages {
+            write!(writer, " {{{}+}}\r\n{message}", message.len()).unwrap();
+        }
+        write!(writer, "\r\n").unwrap();
+        expect(&mut reader, &format!("b{chunk}"));
+    }
+    write!(writer, "z LOGOUT\r\n").unwrap();
+}
+
+/// The live items of `folder`, by link id.
+fn items(store: &Path, folder: &str) -> Vec<io_pimdir::client::reader::PimdirItem> {
+    let Ok(reader) = PimdirReader::open(store) else {
+        return Vec::new();
+    };
+    reader
+        .list_items(format!("imap/{folder}"), None, 10_000)
+        .unwrap_or_default()
+}
+
+/// Whether message `n` of `folder` is held with its body.
+fn has_body(items: &[io_pimdir::client::reader::PimdirItem], folder: &str, n: usize) -> bool {
+    let suffix = format!("-{folder}-{n:04}@pimalaya.org");
+    items
+        .iter()
+        .any(|item| item.link_id.0.contains(&suffix) && item.object.is_some())
+}
+
+fn prime_config(root: &Path, account: &str, folders: &[String]) -> std::path::PathBuf {
+    let config = root.join(format!("{account}.toml"));
+    let include: Vec<String> = folders.iter().map(|f| format!("\"{f}\"")).collect();
+    fs::write(
+        &config,
+        format!(
+            "[accounts.{account}]\n\
+             store.root = \"{}\"\n\
+             imap.server = \"{SERVER}\"\n\
+             imap.starttls = false\n\
+             imap.sasl.plain.username = \"test@pimalaya.org\"\n\
+             imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
+             imap.collection.filter.include = [{}]\n",
+            root.join(account).display(),
+            include.join(", "),
+        ),
+    )
+    .unwrap();
+    neverest(&["init", "-a", account], &config);
+    config
+}
+
+/// Priming lists every folder's first page before any second page, each
+/// followed by its newest bodies, over one connection; a run killed then
+/// leaves every folder readable from its newest mail, and the next run
+/// closes every round, each message held once with its body.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
+fn every_folder_is_readable_from_its_newest_mail_early() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let id = std::process::id();
+    let folders: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|n| format!("Prime{id}{n}"))
+        .collect();
+    seed_large(&folders, "prime");
+    let config = prime_config(root, "prime", &folders);
+    let store = root.join("prime");
+
+    let mut run = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &config.to_string_lossy()])
+        .args([
+            "sync",
+            "-a",
+            "prime",
+            "-j",
+            "1",
+            "--download-order",
+            "newest",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn neverest");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let mut first_pages = None;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the first pass did not end in time"
+        );
+        assert!(
+            run.try_wait().unwrap().is_none(),
+            "the run ended before it could be stopped"
+        );
+        let held: Vec<_> = folders.iter().map(|f| items(&store, f)).collect();
+        if first_pages.is_none() && !held[2].is_empty() {
+            first_pages = Some([held[0].len(), held[1].len()]);
+        }
+        let primed = held
+            .iter()
+            .zip(&folders)
+            .all(|(items, folder)| (LARGE - PRIME..LARGE).all(|n| has_body(items, folder, n)));
+        if primed {
+            break;
+        }
+        thread::sleep(Duration::from_millis(2));
+    }
+    run.kill().unwrap();
+    run.wait().unwrap();
+
+    assert_eq!(
+        first_pages,
+        Some([500, 500]),
+        "the last folder's first page landed before any second page"
+    );
+
+    let report = neverest(&["--json", "sync", "-a", "prime"], &config);
+    let report: serde_json::Value = serde_json::from_str(&report).expect("a JSON report");
+    for coverage in report["coverage"].as_array().expect("coverage") {
+        assert!(
+            coverage["round"].is_null(),
+            "every round closed: {coverage}"
+        );
+    }
+    for folder in &folders {
+        let held = items(&store, folder);
+        assert_eq!(held.len(), LARGE, "{folder} holds each message once");
+        assert!(
+            held.iter().all(|item| item.object.is_some()),
+            "{folder} holds every body"
+        );
+    }
+
+    for folder in &folders {
+        imap(&format!("DELETE {folder}"));
+    }
+}
+
+/// A primed run that is not interrupted reports each body it fetched once,
+/// the fetches of a paused folder carried to the spine that fills it, over
+/// several connections as over one; and how soon the first body and every
+/// first page are readable, primed or not (`--nocapture` prints it).
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
+fn a_primed_run_reports_each_fetch_once() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let id = std::process::id();
+    let folders: Vec<String> = ["a", "b", "c"]
+        .iter()
+        .map(|n| format!("Report{id}{n}"))
+        .collect();
+    seed_large(&folders, "report");
+
+    for (connections, prime) in [("1", "0"), ("1", "50"), ("4", "0"), ("4", "50")] {
+        let account = format!("report{connections}x{prime}");
+        let config = prime_config(root, &account, &folders);
+        let store = root.join(&account);
+
+        let start = Instant::now();
+        let run = Command::new(env!("CARGO_BIN_EXE_neverest"))
+            .args(["-c", &config.to_string_lossy()])
+            .args(["--json", "sync", "-a", &account, "-j", connections])
+            .args(["--download-order", "newest", "--prime", prime])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn neverest");
+        let (mut first_body, mut first_pages) = (None, None);
+        while first_body.is_none() || first_pages.is_none() {
+            let held: Vec<_> = folders.iter().map(|f| items(&store, f)).collect();
+            if first_body.is_none() && held.iter().flatten().any(|item| item.object.is_some()) {
+                first_body = Some(start.elapsed());
+            }
+            if first_pages.is_none() && held.iter().all(|items| !items.is_empty()) {
+                first_pages = Some(start.elapsed());
+            }
+            if start.elapsed() > Duration::from_secs(120) {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        let output = run.wait_with_output().expect("wait neverest");
+        let whole = start.elapsed();
+        assert!(output.status.success(), "{account} sync failed");
+        eprintln!(
+            "-j {connections} --prime {prime}: first body {first_body:?}, every first page {first_pages:?}, whole run {whole:?}"
+        );
+
+        let report: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("a JSON report");
+        let fetched: Vec<&str> = report["item"]["patch"]
+            .as_array()
+            .expect("item patch")
+            .iter()
+            .filter(|entry| entry["hunk"]["kind"] == "fetch")
+            .map(|entry| entry["hunk"]["id"].as_str().expect("an id"))
+            .collect();
+        let distinct: std::collections::BTreeSet<&str> = fetched.iter().copied().collect();
+        assert_eq!(
+            fetched.len(),
+            folders.len() * LARGE,
+            "{account}: one fetch a message"
+        );
+        assert_eq!(distinct.len(), fetched.len(), "{account}: none twice");
+        for folder in &folders {
+            let held = items(&store, folder);
+            assert_eq!(held.len(), LARGE, "{account}: {folder} once");
+            assert!(held.iter().all(|item| item.object.is_some()));
+        }
+    }
+
+    for folder in &folders {
+        imap(&format!("DELETE {folder}"));
+    }
+}
+
+/// A run under `--bodies listed` downloads the body of a new mail and
+/// leaves the bodies an interrupted run left owed for a later run.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
+fn a_listed_run_leaves_the_backlog_owed() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let id = std::process::id();
+    let folder = format!("Listed{id}");
+    let line = "x".repeat(76);
+    let large: String = (0..BODY / 78).map(|_| format!("{line}\r\n")).collect();
+    imap(&format!("CREATE {folder}"));
+    let message = |n: usize, body: &str| {
+        format!(
+            "Message-ID: <listed-{id}-{n:04}@pimalaya.org>\r\n\
+             From: alice@pimalaya.org\r\n\
+             To: bob@pimalaya.org\r\n\
+             Subject: neverest listed {n}\r\n\
+             Date: Sun, 04 Oct 2026 10:{n:02}:00 +0000\r\n\
+             \r\n\
+             {body}"
+        )
+    };
+    append_all(&folder, (0..MESSAGES).map(|n| message(n, &large)));
+    let folders = [folder.clone()];
+    let config = prime_config(root, "listed", &folders);
+    let store = root.join("listed");
+
+    let mut first = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &config.to_string_lossy()])
+        .args(["sync", "-a", "listed", "-j", "1"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn neverest");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while items(&store, &folder).len() < MESSAGES {
+        assert!(Instant::now() < deadline, "the page did not land in time");
+        thread::sleep(Duration::from_millis(1));
+    }
+    first.kill().unwrap();
+    first.wait().unwrap();
+    let kept = bodies(&store, &folders);
+    assert!(kept < MESSAGES, "bodies were left owed ({kept})");
+
+    append_all(&folder, std::iter::once(message(MESSAGES, "hello\r\n")));
+    neverest(
+        &["sync", "-a", "listed", "-m", &folder, "--bodies", "listed"],
+        &config,
+    );
+
+    let held = items(&store, &folder);
+    assert_eq!(held.len(), MESSAGES + 1);
+    assert!(has_body_of(&held, id, MESSAGES), "the new mail is readable");
+    assert_eq!(bodies(&store, &folders), kept + 1, "the backlog stays owed");
+
+    neverest(&["sync", "-a", "listed"], &config);
+    assert_eq!(
+        bodies(&store, &folders),
+        MESSAGES + 1,
+        "a full run takes it"
+    );
+
+    imap(&format!("DELETE {folder}"));
+}
+
+/// Whether message `n` of the listed test is held with its body.
+fn has_body_of(items: &[io_pimdir::client::reader::PimdirItem], id: u32, n: usize) -> bool {
+    let suffix = format!("listed-{id}-{n:04}@pimalaya.org");
+    items
+        .iter()
+        .any(|item| item.link_id.0.contains(&suffix) && item.object.is_some())
 }
 
 /// How many messages of `folders` the store holds a body for.

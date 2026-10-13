@@ -60,7 +60,28 @@ where
     E: std::fmt::Display,
     C: PimdirCoroutine<Yield = PimdirYield, Return = Result<T, E>>,
 {
-    run_verb_paged(store, remote, coroutine, None)
+    match run_verb_paged(store, remote, coroutine, None)? {
+        Paged::Done(out) => Ok(out),
+        Paged::Paused(_) => unreachable!("only a pager pauses a verb"),
+    }
+}
+
+/// Whether a verb goes on listing, as its [`Pager`] answers at rest.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Rest {
+    /// The listing asks for its next page.
+    Go,
+    /// The verb stops where it stands, every page it listed committed: the
+    /// store holds what a run killed there would leave, a round left open
+    /// with its cursor, which the next sync of the collection resumes.
+    Pause,
+}
+
+/// How a paged verb ended: completed, or paused by its pager, the
+/// coroutine handed back so its partial report can be read.
+pub enum Paged<T, C> {
+    Done(T),
+    Paused(C),
 }
 
 /// Watches a verb's listing page by page.
@@ -74,13 +95,17 @@ pub trait Pager {
     /// `landed` names the members of the page enumerated last, whose write
     /// has committed, and is empty before the first page. `resumed` is true
     /// once, before the first page of a round an earlier run left open.
+    /// `next` is the listing about to be asked for, `None` once the verb
+    /// completed. Answering [`Rest::Pause`] there stops the verb before it
+    /// asks; on completion the answer is ignored.
     fn at_rest(
         &mut self,
         store: &mut PimdirSourceStore,
         collection: &PimdirCollectionId,
         landed: Vec<PimdirHandle>,
         resumed: bool,
-    );
+        next: Option<&PimdirListing>,
+    ) -> Rest;
 
     /// The listing waits on the remote, the verb holding nothing.
     fn listing(&mut self);
@@ -89,13 +114,14 @@ pub trait Pager {
     fn listed(&mut self);
 }
 
-/// [`run_verb`], telling `pager` each time a page of the listing has landed.
+/// [`run_verb`], telling `pager` each time a page of the listing has landed,
+/// and stopping where it answers [`Rest::Pause`].
 pub fn run_verb_paged<R, C, T, E>(
     store: &mut PimdirSourceStore,
     remote: &mut R,
     mut coroutine: C,
     mut pager: Option<&mut dyn Pager>,
-) -> Result<T>
+) -> Result<Paged<T, C>>
 where
     R: PimdirRemote,
     R::Error: std::fmt::Display,
@@ -112,9 +138,9 @@ where
         let yielded = match coroutine.resume(arg.take()) {
             PimdirCoroutineState::Complete(Ok(out)) => {
                 if let (Some(pager), Some((collection, landed))) = (pager.as_deref_mut(), page) {
-                    pager.at_rest(store, &collection, landed, false);
+                    pager.at_rest(store, &collection, landed, false, None);
                 }
-                return Ok(out);
+                return Ok(Paged::Done(out));
             }
             PimdirCoroutineState::Complete(Err(err)) => {
                 return Err(anyhow!("Offline engine error: {err}"));
@@ -152,7 +178,14 @@ where
                             }
                         );
                     let landed = page.take().map(|(_, landed)| landed).unwrap_or_default();
-                    pager.at_rest(store, &collection, landed, resumed);
+                    // NOTE: the page enumerated last is written whole, its
+                    // pushes settled, before the coroutine asks again, so
+                    // dropping the coroutine here leaves what a kill there
+                    // would: the round open at its cursor.
+                    let next = Some(&request.listing);
+                    if pager.at_rest(store, &collection, landed, resumed, next) == Rest::Pause {
+                        return Ok(Paged::Paused(coroutine));
+                    }
                     pager.listing();
                 }
                 first = false;

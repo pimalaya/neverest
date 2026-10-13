@@ -754,7 +754,8 @@ impl GraphClient {
     /// A request Graph throttles (429, or a common 5xx) is sent again in a
     /// later batch once its own `Retry-After` is over (else after a back-off
     /// doubling from a second), at most [`BATCH_RETRY_ROUNDS`] times; still
-    /// throttled then, or asking to wait more than [`BATCH_RETRY_MAX_WAIT`],
+    /// throttled then, or asking to wait more than the source's longest wait
+    /// (`sync --max-wait`),
     /// it is answered under `retry`, and a throttle (429, 503) gives the
     /// source up until its wait is over, every connection stopping with it.
     /// A 404 is answered under `gone`; any other refusal is left out.
@@ -825,7 +826,7 @@ impl GraphClient {
                 };
                 let wait = stated.unwrap_or_else(|| Duration::from_secs(1 << item.sent.min(6)));
                 item.sent += 1;
-                if item.sent > BATCH_RETRY_ROUNDS || wait > BATCH_RETRY_MAX_WAIT {
+                if item.sent > BATCH_RETRY_ROUNDS || wait > self.throttle.max_wait() {
                     // NOTE: a request Graph failed to serve (500, 502, 504)
                     // is retried the same, but is no throttle: the source
                     // goes on.
@@ -1075,9 +1076,6 @@ pub struct SendMimeFailure {
 /// How many times a throttled body request is sent again in a later batch.
 const BATCH_RETRY_ROUNDS: u32 = 4;
 
-/// The longest wait between two batch rounds, whatever `Retry-After` says.
-const BATCH_RETRY_MAX_WAIT: Duration = Duration::from_secs(120);
-
 /// The gets of a batch, each at the URL `url` builds for its id, each
 /// request id being the index of its id in `ids`.
 fn get_requests(ids: &[&str], url: impl Fn(&str) -> String) -> Vec<MsgraphBatchRequest> {
@@ -1094,6 +1092,35 @@ fn get_requests(ids: &[&str], url: impl Fn(&str) -> String) -> Vec<MsgraphBatchR
 
 /// The raw MIME gets of a batch, each request id being the index of its
 /// message id in `ids`.
+/// A mail session over the connections `connect` opens, for a test of
+/// another module driving several connections of one source.
+#[cfg(test)]
+impl GraphClient {
+    pub(crate) fn over_streams(
+        connect: impl FnMut() -> Result<Box<dyn MsgraphStream>> + Send + 'static,
+        sizes: SizeHints,
+        throttle: Arc<Throttle>,
+    ) -> Result<Self> {
+        let token = SecretString::from("token");
+        Self::over(
+            GraphKind::Mail,
+            &token,
+            "me",
+            Box::new(connect),
+            sizes,
+            throttle,
+        )
+    }
+}
+
+#[cfg(test)]
+impl SizeHints {
+    /// Notes `sizes` as a listing would.
+    pub(crate) fn noted(&self, sizes: impl IntoIterator<Item = (String, u64)>) {
+        self.note(sizes);
+    }
+}
+
 #[cfg(test)]
 fn raw_requests(user: &str, ids: &[&str]) -> Vec<MsgraphBatchRequest> {
     get_requests(ids, |id| format!("/{user}/messages/{id}/$value"))

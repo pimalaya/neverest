@@ -154,10 +154,11 @@ impl Kind {
     /// `Full` tier's derivation, which every kind implements.
     ///
     /// `raw` is the prefix the stream captured, so a size read off it would be
-    /// the prefix's; `size` is the whole body's, known from the stream.
-    pub fn parse_body(self, raw: &[u8], size: u64) -> PimdirDerivation {
+    /// the prefix's; `size` is the whole body's, known from the stream, as is
+    /// a message's attachment mark, `attachment`, which only mail reads.
+    pub fn parse_body(self, raw: &[u8], size: u64, attachment: Option<bool>) -> PimdirDerivation {
         match self {
-            Self::Mail => mail::parse_body(raw, size),
+            Self::Mail => mail::parse_body(raw, size, attachment),
             #[cfg(any(
                 feature = "dav",
                 feature = "msgraph",
@@ -192,7 +193,7 @@ impl Kind {
             );
         }
 
-        let derived = self.parse_body(body, body.len() as u64).link_id;
+        let derived = self.parse_body(body, body.len() as u64, None).link_id;
         let stated = self.split_link_id(&derived).hint;
         let bound = self.split_link_id(link_id).hint;
 

@@ -12,7 +12,7 @@
 use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
 use io_pimdir::summary::{
     PimdirAddress, PimdirDerivation,
-    mail::{self, PimdirMailSummary},
+    mail::{self, PimdirMailSummary, attachments::PimdirAttachmentWalk},
 };
 
 use crate::item::{address::Address, summary::ItemSummary};
@@ -49,16 +49,51 @@ pub fn parse_summary(env: &ItemSummary) -> PimdirDerivation {
 /// headers.
 ///
 /// `raw` is only the header prefix the stream captured, so the octet count is
-/// restated from `size` and no part was walked for an attachment.
-pub fn parse_body(raw: &[u8], size: u64) -> PimdirDerivation {
+/// restated from `size`, and the attachment mark is `attachment`: the one the
+/// walk of the whole stream found (Annex A.1, [`AttachmentMark`]), `None` when
+/// no walk read the body.
+pub fn parse_body(raw: &[u8], size: u64, attachment: Option<bool>) -> PimdirDerivation {
     let mut derivation = mail::derive(raw);
 
     if let Some(io_pimdir::summary::PimdirSummary::Mail(summary)) = &mut derivation.summary {
         summary.size = (size > 0).then_some(size);
-        summary.attachment = None;
+        summary.attachment = attachment;
     }
 
     derivation
+}
+
+/// The attachment mark of a message read as it streams (Annex A.1): io-pimdir's
+/// walk of the parts, the one its writer reads a stored body with for the
+/// stand-ins, fed each chunk as it arrives. It keeps a header block, a line
+/// head and a boundary per open level, never the body, so the mark of a
+/// streamed body is the one [`mail::derive`] reads off the whole message.
+#[derive(Debug, Default)]
+pub struct AttachmentMark(PimdirAttachmentWalk);
+
+impl AttachmentMark {
+    /// A mark at the start of a message.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Reads the next octets of the message, nothing once [`done`](Self::done).
+    pub fn feed(&mut self, chunk: &[u8]) {
+        if !self.0.done() {
+            self.0.feed(chunk);
+        }
+    }
+
+    /// Whether nothing left of the message can change the mark.
+    pub fn done(&self) -> bool {
+        self.0.done()
+    }
+
+    /// Ends the message: whether a part carries
+    /// `Content-Disposition: attachment`.
+    pub fn finish(self) -> bool {
+        !self.0.finish().is_empty()
+    }
 }
 
 /// The `Date:` as Annex A.1 spells it: the UTC instant, RFC 3339 at seconds
@@ -119,7 +154,7 @@ mod tests {
     #[test]
     fn the_body_tier_reports_the_streamed_size_not_the_prefix() {
         let raw = b"Message-ID: <x@y>\r\nSubject: S\r\n\r\n";
-        let derivation = parse_body(raw, 168_320);
+        let derivation = parse_body(raw, 168_320, None);
 
         assert_eq!(derivation.link_id.as_str(), "x@y");
         assert_eq!(mail(&derivation).size, Some(168_320));
@@ -136,7 +171,7 @@ mod tests {
                     To: bob@example.org\r\n\
                     Date: Sat, 1 Aug 2026 12:00:00 +0200\r\n\r\nbody";
 
-        let body = parse_body(raw, 299);
+        let body = parse_body(raw, 299, None);
         let envelope = parse_summary(&summary(None, Some("2026-08-01T12:00:00+02:00")));
 
         assert!(
@@ -159,7 +194,7 @@ mod tests {
                     To: bob@example.org\r\n\
                     Date: Sat, 1 Aug 2026 12:00:00 +0200\r\n\r\nbody";
 
-        let body = parse_body(raw, 299);
+        let body = parse_body(raw, 299, None);
         let envelope = parse_summary(&summary(
             Some("basic-1@example.org"),
             Some("2026-08-01T12:00:00+02:00"),

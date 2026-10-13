@@ -36,9 +36,9 @@ use io_pimdir::{
     object::PimdirHash,
     placement::{PimdirFlags, PimdirHandle, PimdirLinkId, PimdirOrigin, PimdirSortKey},
     remote::{
-        PimdirEnumerate, PimdirEnumerated, PimdirFetchedBody, PimdirFetchedItem, PimdirPushOutcome,
-        PimdirPushResult, PimdirRemote, PimdirRemoteItem, PimdirRemoteMeta, PimdirRemoteSnapshot,
-        PimdirTier,
+        PimdirEnumerate, PimdirEnumerated, PimdirFetchedBody, PimdirFetchedItem, PimdirHead,
+        PimdirHeads, PimdirPushOutcome, PimdirPushResult, PimdirRemote, PimdirRemoteItem,
+        PimdirRemoteMeta, PimdirRemoteSnapshot, PimdirTier,
     },
     summary::{PimdirDerivation, PimdirSummary},
 };
@@ -110,6 +110,8 @@ pub struct PimRemote<'a> {
     /// Whether the connector's checkpoint is bound to its scope, read once
     /// from [`Client::scope_bound`].
     scope_bound: bool,
+    /// The heads the connector lists, read once from [`Client::heads`].
+    heads: PimdirHeads,
 }
 
 /// What the store binds of a collection for one source.
@@ -296,6 +298,7 @@ impl<'a> PimRemote<'a> {
     pub fn new(pool: &'a mut Pool, blob: PimdirBlobs, namespace: impl Into<String>) -> Self {
         let kind = resolve_kind(pool);
         let scope_bound = pool.primary().scope_bound();
+        let heads = pool.primary().heads();
         Self {
             kind,
             pool,
@@ -309,6 +312,7 @@ impl<'a> PimRemote<'a> {
             bound: None,
             bodies: true,
             scope_bound,
+            heads,
         }
     }
 
@@ -325,6 +329,7 @@ impl<'a> PimRemote<'a> {
     ) -> Self {
         let kind = resolve_kind(pool);
         let scope_bound = pool.primary().scope_bound();
+        let heads = pool.primary().heads();
         Self {
             kind,
             pool,
@@ -338,6 +343,7 @@ impl<'a> PimRemote<'a> {
             bound: None,
             bodies: true,
             scope_bound,
+            heads,
         }
     }
 
@@ -477,6 +483,8 @@ impl PimdirRemote for PimRemote<'_> {
         let page = match listed {
             Listed::Page(page) => page,
             Listed::CursorRejected => return Ok(PimdirEnumerated::CursorRejected),
+            Listed::NoHead => return Ok(PimdirEnumerated::NoHead),
+            Listed::HeadRejected => return Ok(PimdirEnumerated::HeadRejected),
         };
         self.pool.downloaded(page.bytes);
 
@@ -524,6 +532,14 @@ impl PimdirRemote for PimRemote<'_> {
             page.vanished.into_iter().map(PimdirHandle::from).collect();
         self.held.remember(collection, &items, &vanished);
 
+        // NOTE: a band head carries no checkpoint and states no removal; a
+        // delta head answers as a delta does (pimdir SYNC §4).
+        if let Some(PimdirHead::Band { .. }) = request.head() {
+            return Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::band_head(
+                items,
+            )));
+        }
+
         Ok(PimdirEnumerated::Page(snapshot(
             page.complete,
             page.cursor,
@@ -535,6 +551,10 @@ impl PimdirRemote for PimRemote<'_> {
 
     fn scope_bound(&self) -> bool {
         self.scope_bound
+    }
+
+    fn heads(&self) -> PimdirHeads {
+        self.heads
     }
 
     fn fetch(
@@ -682,6 +702,10 @@ impl<R: PimdirRemote<Error = anyhow::Error>> PimdirRemote for CachedFetchRemote<
 
     fn scope_bound(&self) -> bool {
         self.fallback.scope_bound()
+    }
+
+    fn heads(&self) -> PimdirHeads {
+        self.fallback.heads()
     }
 
     fn fetch(

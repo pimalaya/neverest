@@ -258,6 +258,8 @@ pub(super) fn enumerate(
     let scope = &request.scope;
 
     match &request.listing {
+        // NOTE: no head yet (pimdir SYNC §4).
+        PimdirListing::Head(_) => Ok(Listed::NoHead),
         PimdirListing::Delta(checkpoint) => match Link::decode(&checkpoint.0, held.coverage) {
             Some(link) => delta(wire, folder, mailbox, &link, scope, held),
             None => {
@@ -1263,6 +1265,8 @@ mod tests {
             {
                 Listed::Page(page) => page,
                 Listed::CursorRejected => return Ok(PimdirEnumerated::CursorRejected),
+                Listed::NoHead => return Ok(PimdirEnumerated::NoHead),
+                Listed::HeadRejected => return Ok(PimdirEnumerated::HeadRejected),
             };
 
             let mut items: Vec<PimdirRemoteItem> = page

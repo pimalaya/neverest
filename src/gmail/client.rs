@@ -503,6 +503,8 @@ impl GmailClient {
         let label = self.label_id(collection)?;
 
         match &request.listing {
+            // NOTE: no head yet (pimdir SYNC §4).
+            PimdirListing::Head(_) => Ok(Listed::NoHead),
             PimdirListing::Delta(checkpoint) => {
                 let Some(start) = decode_checkpoint(&checkpoint.0) else {
                     return Ok(Listed::CursorRejected);
@@ -2071,7 +2073,7 @@ mod tests {
     fn page(listed: Listed) -> Enumeration {
         match listed {
             Listed::Page(page) => page,
-            Listed::CursorRejected => panic!("a page"),
+            Listed::CursorRejected | Listed::NoHead | Listed::HeadRejected => panic!("a page"),
         }
     }
 

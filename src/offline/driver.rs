@@ -9037,6 +9037,7 @@ mod tests {
         ) -> Result<PimdirEnumerated, Self::Error> {
             self.requests.push(request.clone());
             let cursor = match &request.listing {
+                PimdirListing::Head(_) => return Ok(PimdirEnumerated::NoHead),
                 PimdirListing::Delta(checkpoint) => {
                     return Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::delta(
                         Vec::new(),

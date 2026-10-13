@@ -126,6 +126,8 @@ impl ImapClient {
         held: Held<'_>,
     ) -> Result<Listed> {
         match &request.listing {
+            // NOTE: no head yet (pimdir SYNC §4).
+            PimdirListing::Head(_) => Ok(Listed::NoHead),
             PimdirListing::Delta(checkpoint) => {
                 self.delta_page(mailbox, &checkpoint.0, &request.scope, held)
             }

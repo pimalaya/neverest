@@ -20,7 +20,11 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use io_pimdir::{collection::PimdirScope, remote::PimdirEnumerate, summary::PimdirDerivation};
+use io_pimdir::{
+    collection::PimdirScope,
+    remote::{PimdirEnumerate, PimdirHeads},
+    summary::PimdirDerivation,
+};
 
 #[cfg(feature = "dav")]
 use crate::dav::client::DavClient;
@@ -122,6 +126,14 @@ pub enum Listed {
     /// Graph link, a Gmail page token): the engine restarts the round, or
     /// opens one where a delta's checkpoint was refused.
     CursorRejected,
+    /// The connector lists no head of the kind asked for (pimdir SYNC §5):
+    /// the engine resumes the round.
+    NoHead,
+    /// The source refused the head's position: the engine restarts the
+    /// round over the run's scope.
+    // NOTE: answered by the delta heads the backends list next.
+    #[allow(dead_code)]
+    HeadRejected,
 }
 
 /// What the store already binds of a collection, which a mail listing reads
@@ -578,6 +590,12 @@ impl Client {
     /// mail's delta link, made over the whole folder and checked locally,
     /// are not, and widen a scope by listing only the band their coverage
     /// lacks. The kinds that take no scope keep the default.
+    /// The heads the connector lists while a round is open (pimdir SYNC
+    /// §4): none until a backend states its own.
+    pub fn heads(&self) -> PimdirHeads {
+        PimdirHeads::NONE
+    }
+
     pub fn scope_bound(&self) -> bool {
         match self {
             #[cfg(feature = "imap")]

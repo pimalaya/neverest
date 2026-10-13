@@ -38,6 +38,7 @@ use io_pimdir::{
     client::{
         blobs::PimdirBlobs,
         producer::{PimdirActionStatus, PimdirProducer},
+        reader::PimdirReader,
     },
     codec::PimdirAction,
     object::PimdirObject,
@@ -270,6 +271,113 @@ fn check_lists_collections_with_the_roles_the_server_states() {
                     .contains(&collection["role"].as_str().unwrap_or_default())),
         "{checked}"
     );
+}
+
+/// `sync --intents-only` sends the queued message and stops: nothing listed,
+/// nothing fetched, the sent copy in the store at once and on the server
+/// after the next full sync.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143/:2525 and --ignored"]
+fn intents_only_sends_and_the_next_sync_files_the_copy() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let state = root.join("state");
+    let config = root.join("config.toml");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "[accounts.submit]\n\
+             imap.server = \"{IMAP_ROOT}\"\n\
+             imap.starttls = false\n\
+             imap.sasl.plain.username = \"{USER}\"\n\
+             imap.sasl.plain.password.raw = \"{PASS}\"\n\
+             smtp.server = \"{SMTP}\"\n",
+        ),
+    )
+    .unwrap();
+    neverest(&["init", "-a", "submit"], &config, &state);
+    neverest(&["sync", "-a", "submit"], &config, &state);
+
+    let store = state.join("neverest").join("submit");
+    let sent = PimdirReader::open(&store)
+        .expect("open reader")
+        .list_collections()
+        .expect("list collections")
+        .into_iter()
+        .find(|collection| collection.role.as_deref() == Some("sent"))
+        .expect("the server states a Sent folder")
+        .id;
+
+    let marker = marker();
+    let body = message(&marker);
+    let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
+    let hash = producer.hash(&body);
+    let blobs = PimdirBlobs::open(&store, producer.hash_algo());
+    let mut writer = blobs.writer().expect("blob writer");
+    writer.write_all(&body).unwrap();
+    let object = PimdirObject {
+        hash: hash.clone(),
+        size: writer.commit(&hash).expect("commit the body") as usize,
+    };
+    let id = producer
+        .enqueue(
+            &sent,
+            &PimdirAction::Unknown {
+                kind: SUBMIT.into(),
+                payload: format!(
+                    "{{\"v\":1,\"object\":\"{}\",\"from\":\"{USER}\",\"rcpts\":[\"{USER}\"],\
+                     \"subject\":\"{marker}\",\"source\":\"imap\",\"copy\":\"{sent}\"}}",
+                    hash.0,
+                ),
+                object_hash: Some(hash.clone()),
+            },
+            Some(&object),
+        )
+        .expect("enqueue the intent");
+    drop(producer);
+
+    let report = neverest(
+        &["--json", "sync", "-a", "submit", "--intents-only"],
+        &config,
+        &state,
+    );
+    let report: serde_json::Value = serde_json::from_str(&report).expect("one JSON document");
+    let submitted = &report["submitted"][0];
+    assert_eq!(submitted["id"], id, "{report}");
+    assert_eq!(submitted["error"], serde_json::Value::Null, "{report}");
+    assert_eq!(submitted["uncertain"], false, "{report}");
+    assert_eq!(
+        report["collection"]["patch"],
+        serde_json::json!([]),
+        "{report}"
+    );
+    assert_eq!(report["item"]["patch"], serde_json::json!([]), "{report}");
+    assert_eq!(report["drained"][0]["collection"], sent, "{report}");
+
+    wait_for_delivery(&marker).expect("the submitted message reached the server");
+
+    // NOTE: the copy waits in the store until a sync pushes it.
+    let folder = sent.trim_start_matches("imap/").replace(' ', "%20");
+    assert!(
+        !search(&folder, &marker),
+        "the copy is not on the server yet"
+    );
+    neverest(&["sync", "-a", "submit"], &config, &state);
+    assert!(search(&folder, &marker), "the next sync files the copy");
+}
+
+/// Whether the account's `mailbox` (URL-encoded) holds the marker.
+fn search(mailbox: &str, marker: &str) -> bool {
+    let search = Command::new("curl")
+        .args(["-fsS", "--url", &format!("{IMAP_ROOT}/{mailbox}")])
+        .args(["--user", &format!("{USER}:{PASS}")])
+        .args(["-X", &format!("SEARCH TEXT {marker}")])
+        .output()
+        .expect("spawn curl search");
+    String::from_utf8_lossy(&search.stdout)
+        .split_whitespace()
+        .any(|token| token.parse::<u32>().is_ok())
 }
 
 /// Polls the account's mailboxes for the marker until one holds it, and

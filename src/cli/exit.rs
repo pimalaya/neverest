@@ -20,8 +20,9 @@ pub enum Exit {
     Success,
     /// A sync left work a person has to settle.
     ///
-    /// A parked conflict, a duplicate `UID` a side refuses, or a write it
-    /// would not take: all three say a rerun on its own changes nothing.
+    /// A parked conflict, a duplicate `UID` a side refuses, a write it would
+    /// not take, or a send that may have been delivered: all four say a
+    /// rerun on its own changes nothing.
     Conflicted,
     /// A sync left work a rerun picks up: a source it could not reach, or
     /// a hunk, a send or an intent that failed without parking.
@@ -63,7 +64,7 @@ mod tests {
     use super::*;
     use crate::sync::{
         hunk::CollectionHunk,
-        report::{PatchEntry, SubmitEntry, ThrottledSource},
+        report::{PatchEntry, SubmitEntry, ThrottledSource, UnreachedEndpoint},
     };
 
     fn unreachable() -> PatchEntry<CollectionHunk> {
@@ -99,10 +100,53 @@ mod tests {
             subject: None,
             error: Some(String::from("550 rejected")),
             parked: true,
+            uncertain: false,
         });
         assert_eq!(Exit::from(&report), Exit::Success);
 
         report.submitted[0].parked = false;
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
+    }
+
+    /// A send that may have been delivered is parked for a person to
+    /// decide, never resent: the run left something waiting.
+    #[test]
+    fn an_uncertain_send_waits_for_a_person() {
+        let mut report = SyncOutput::default();
+        report.submitted.push(SubmitEntry {
+            id: 7,
+            collection: String::from("imap/Sent"),
+            subject: Some(String::from("hi")),
+            error: Some(String::from("uncertain: Reached unexpected EOF")),
+            parked: true,
+            uncertain: true,
+        });
+        assert_eq!(Exit::from(&report), Exit::Conflicted);
+        assert_eq!(ExitCode::from(Exit::Conflicted), ExitCode::from(2));
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["submitted"],
+            serde_json::json!([{
+                "id": 7,
+                "collection": "imap/Sent",
+                "subject": "hi",
+                "error": "uncertain: Reached unexpected EOF",
+                "parked": true,
+                "uncertain": true,
+            }])
+        );
+    }
+
+    /// A send channel that did not open has no collection to scan, and
+    /// still leaves the run incomplete.
+    #[test]
+    fn an_unreached_send_channel_makes_the_run_incomplete() {
+        let mut report = SyncOutput::default();
+        report.unreached.push(UnreachedEndpoint {
+            endpoint: String::from("imap.smtp"),
+            error: String::from("Cannot connect to the SMTP submission server: refused"),
+        });
         assert_eq!(Exit::from(&report), Exit::Incomplete);
     }
 

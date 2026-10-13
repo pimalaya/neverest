@@ -50,12 +50,13 @@ const LOCK_POLL: Duration = Duration::from_millis(500);
 /// Exit code 0 means the run reconciled everything and left nothing waiting,
 /// 1 that it failed, and 2 that it reconciled its collections and left
 /// something waiting: a parked conflict, a duplicate `UID` the other side
-/// refuses, or a write it would not take. None is a failure: each is one item
+/// refuses, a write it would not take, or a send that may have been delivered
+/// and is never sent again on its own. None is a failure: each is one item
 /// wide and halts nothing, and under a supervisor restarting on failure they
 /// would loop over a state no supervisor can fix. Exit code 3 means the run
 /// could not do all its work and a rerun picks it up: a source it could not
-/// reach (offline), or a hunk, a send or an intent that failed without
-/// parking. It wins over 2.
+/// reach (offline) or an SMTP channel it could not open, or a hunk, a send
+/// or an intent that failed without parking. It wins over 2.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
     /// Print the patch that would be applied, without applying it.
@@ -118,6 +119,23 @@ pub struct SyncCommand {
     /// the queued collection creations run; sends and intents wait.
     #[arg(long, conflicts_with = "reset")]
     pub declare_only: bool,
+    /// Perform what frontends queued and nothing else: apply the queue,
+    /// then send the queued messages and perform the queued collection
+    /// creations, invitation replies and cancellations, listing no
+    /// collection and moving no other item. An endpoint opens only when an
+    /// intent needs it, so a message leaving through an `smtp` channel
+    /// opens that channel alone. What a frontend runs right after queueing
+    /// a send; the copy a send files in Sent is pushed by the next sync.
+    #[arg(long, conflicts_with_all = [
+        "dry_run",
+        "reset",
+        "declare_only",
+        "include_collection",
+        "exclude_collection",
+        "all_collections",
+        "since",
+    ])]
+    pub intents_only: bool,
     /// Sync mail dated since then only, for this run: a duration back from
     /// today (`30d`, `12w`, `6mo`, `1y`), a date (`2026-01-01`) or an RFC 3339
     /// instant. Overrides the account's `item.filter.since`; refused on an
@@ -186,6 +204,7 @@ impl SyncCommand {
             self.accept_mode,
             self.download_order,
             self.declare_only,
+            self.intents_only,
         )?;
 
         // NOTE: read before printing, which consumes the report.

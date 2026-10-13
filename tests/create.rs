@@ -169,6 +169,58 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
         .output();
 }
 
+/// `sync --intents-only` opens the source the intent needs and creates the
+/// folder, listing nothing: the folder is in the store only once a sync
+/// lists it.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
+fn a_queued_folder_is_created_by_a_run_performing_intents_alone() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let state = tmp.path().join("state");
+    let config = tmp.path().join("config.toml");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "[accounts.create]\n\
+             imap.server = \"{IMAP_ROOT}\"\n\
+             imap.starttls = false\n\
+             imap.sasl.plain.username = \"{USER}\"\n\
+             imap.sasl.plain.password.raw = \"{PASS}\"\n",
+        ),
+    )
+    .unwrap();
+    neverest(&["init", "-a", "create"], &config, &state);
+    sync(&config, &state, "INBOX");
+
+    let folder = unique("Intents");
+    let store = state.join("neverest").join("create");
+    let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
+    producer
+        .enqueue_collection_create("imap/INBOX", &folder, None, None)
+        .expect("queue the folder");
+
+    let report = neverest(
+        &["sync", "-a", "create", "--intents-only", "--json"],
+        &config,
+        &state,
+    );
+    assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
+    let parsed: Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(
+        parsed["collection"]["patch"],
+        serde_json::json!([]),
+        "{report}"
+    );
+    assert!(listed(&config, &state).contains(&folder));
+
+    let _ = Command::new("curl")
+        .args(["-sS", "-o", "/dev/null", "-u", &format!("{USER}:{PASS}")])
+        .args(["-X", &format!("DELETE \"{folder}\"")])
+        .arg(format!("{IMAP_ROOT}/"))
+        .output();
+}
+
 /// Syncs the account narrowed to one collection, and returns the JSON
 /// report.
 fn sync(config: &Path, state: &Path, collection: &str) -> String {

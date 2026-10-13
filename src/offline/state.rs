@@ -143,8 +143,13 @@ impl StoreState {
     ///
     /// Whoever materializes pimdir.db owes the sidecar: a store created without
     /// this stamp reads as the unnamespaced ancestor, so it is refused on the
-    /// next run and again after the `--reset` the refusal asks for.
+    /// next run and again after the `--reset` the refusal asks for. A send
+    /// an earlier store had in flight is cleared too: its queue id names
+    /// nothing in the new store, or another intent.
     pub fn stamp(dir: &Path, mode: Option<&AccountMode>) -> Result<()> {
+        crate::offline::submit::InFlight::new(dir)
+            .end()
+            .with_context(|| format!("Clear the in-flight send of {}", dir.display()))?;
         Self {
             layout: LAYOUT,
             mode: mode.map(ModeStamp::from),
@@ -323,5 +328,18 @@ mod tests {
 
         let state = StoreState::load(dir.path()).unwrap();
         state.check_mode(&mode(2, 0, false, false)).unwrap();
+    }
+
+    /// A recreated store starts with nothing in flight: the queue id an
+    /// earlier store left marked would name another intent of the new one.
+    #[test]
+    fn a_stamp_clears_the_send_an_earlier_store_had_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let mark = crate::offline::submit::InFlight::new(dir.path());
+        mark.begin(1).unwrap();
+
+        StoreState::stamp(dir.path(), None).unwrap();
+
+        assert_eq!(mark.left(), None);
     }
 }

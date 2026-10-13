@@ -66,8 +66,6 @@ use pimalaya_cli::spinner::Spinner;
 
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::GraphKind;
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
-use crate::sync::report::SubmitEntry;
 use crate::{
     account::{Account, SourceAccount},
     client::{Client, Pool, WrittenItem},
@@ -97,7 +95,7 @@ use crate::{
         report::{
             CollectionCoverage, DrainedQueue, IntentEntry, ItemConflict, OpenRound,
             ParkedQueueAction, PatchEntry, PurgedItems, RefusedDuplicate, RejectedWrite,
-            SourceDownload, SyncOutput, ThrottledSource, UnreachedEndpoint,
+            SourceDownload, SubmitEntry, SyncOutput, ThrottledSource, UnreachedEndpoint,
         },
     },
     throttle,
@@ -383,6 +381,11 @@ impl SourceCtx {
 /// Under `declare_only`, each source lists every collection it holds and the
 /// store records its kind, name and role, the filter aside, and no item
 /// moves: what a client reads to offer the collections it could sync.
+///
+/// Under `intents_only`, the run drains the queue and performs what
+/// frontends queued (collection creations, sends, calendar intents), opening
+/// an endpoint only for an intent that needs it, then stops: it lists no
+/// collection, pushes no other write and fetches nothing.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     account_name: impl Into<String>,
@@ -396,6 +399,7 @@ pub fn run(
     accept_mode: bool,
     download_order: DownloadOrder,
     declare_only: bool,
+    intents_only: bool,
 ) -> Result<SyncOutput> {
     let account_name = account_name.into();
     let endpoints = account_config.endpoints()?;
@@ -406,6 +410,9 @@ pub fn run(
         bail!(
             "Declaring collections without syncing reads a local store only (an account with no target)"
         );
+    }
+    if intents_only && (declare_only || dry_run) {
+        bail!("Performing the queued intents alone neither declares nor plans");
     }
 
     let real_dir = store_dir(&account_name, account_config)?;
@@ -455,7 +462,19 @@ pub fn run(
     for source_name in &running {
         let source = endpoints[source_name].clone();
 
-        let outcome = if mode.is_local() {
+        let outcome = if intents_only {
+            run_intents(
+                &account_name,
+                account_config,
+                &account,
+                &mode,
+                &endpoints,
+                source_name,
+                scope,
+                &work_dir,
+                &mut report,
+            )
+        } else if mode.is_local() {
             run_local(
                 &account_name,
                 account_config,
@@ -494,20 +513,7 @@ pub fn run(
         // NOTE: sources share nothing but the store file, so one broken remote
         // is no reason to leave the others unsynced.
         if let Err(err) = outcome {
-            warn!("source {source_name} sync error: {err:#}");
-            if let Some(unreached) = err.downcast_ref::<Unreached>() {
-                report.unreached.push(UnreachedEndpoint {
-                    endpoint: unreached.endpoint.clone(),
-                    error: format!("{err:#}"),
-                });
-            }
-            report.collection.patch.push(PatchEntry::new(
-                CollectionHunk::Scan {
-                    side: source_name.clone(),
-                    collection: String::from("*"),
-                },
-                Some(err),
-            ));
+            note_source_failure(source_name, err, &mut report);
         }
     }
 
@@ -545,12 +551,13 @@ pub fn run(
             warn!("cannot declare what the sources hold after the run: {err:#}");
         }
 
-        let sweeper = running
-            .first()
-            .expect("a validated account has at least one source");
-        let mut store = open_store(&work_dir, sweeper, &account_name)?;
-
-        if !no_purge {
+        // NOTE: a run performing the queued intents alone purges nothing,
+        // being one a frontend waits on.
+        if !no_purge && !intents_only {
+            let sweeper = running
+                .first()
+                .expect("a validated account has at least one source");
+            let mut store = open_store(&work_dir, sweeper, &account_name)?;
             sweep_retained(account_config, &mut store, &mut report);
         }
 
@@ -754,9 +761,10 @@ fn run_pair(
         drain_submits(
             account_config,
             account,
-            &mut [&mut left, &mut right],
+            &mut [SendSide::open(&mut left), SendSide::open(&mut right)],
             &mut left_store,
             &blobs,
+            work_dir,
             report,
         );
         drain_invitations(&mut [&mut left, &mut right], &mut left_store, report);
@@ -990,9 +998,10 @@ fn run_local(
             drain_submits(
                 account_config,
                 account,
-                &mut [&mut *first],
+                &mut [SendSide::open(&mut *first)],
                 &mut stores[0],
                 &blobs,
+                work_dir,
                 report,
             );
             drain_invitations(&mut [first], &mut stores[0], report);
@@ -1071,6 +1080,183 @@ fn run_local(
         &mut stores[0],
         &blobs,
     )
+}
+
+/// Performs what frontends queued for one source and, in a paired account,
+/// its targets, syncing nothing: the collection creations, the sends and
+/// the calendar intents, as a full run does before it lists anything.
+///
+/// An endpoint is opened only when one of these needs its session: an
+/// intent it performs on its server, or a send through its native channel
+/// (Graph). A send through an `smtp` table opens that channel alone, so a
+/// message leaves while the source's own server is down. An endpoint that
+/// does not open is reported unreached and the others still perform theirs.
+#[allow(clippy::too_many_arguments)]
+fn run_intents(
+    account_name: &str,
+    account_config: &AccountConfig,
+    account: &Account,
+    mode: &AccountMode,
+    endpoints: &HashMap<String, SourceConfig>,
+    source_name: &str,
+    scope: &PimdirScope,
+    work_dir: &Path,
+    report: &mut SyncOutput,
+) -> Result<()> {
+    // NOTE: a target binds its source's namespace, as in a paired sync.
+    let names: Vec<&str> = std::iter::once(source_name)
+        .chain(mode.targets.iter().map(String::as_str))
+        .collect();
+    let mut store = open_store(work_dir, source_name, account_name)?;
+    let blobs = store.blobs();
+    let wanted = wanted_sides(&store, account_config, &names, source_name);
+
+    let mut opened: Vec<SourceCtx> = Vec::new();
+    for &name in names.iter().filter(|name| wanted.contains(**name)) {
+        let authority = match (mode.one_way, name == source_name) {
+            (false, _) => Authority::Shared,
+            (true, true) => Authority::Endpoint,
+            (true, false) => Authority::Store,
+        };
+        let ctxs = account.get(name).and_then(|side| {
+            open_source_contexts(
+                name,
+                source_name,
+                &endpoints[name],
+                side,
+                authority,
+                1,
+                scope,
+                false,
+            )
+        });
+        match ctxs {
+            Ok(ctxs) => opened.extend(ctxs),
+            Err(err) => note_source_failure(name, err, report),
+        }
+    }
+
+    drain_collection_creates(
+        &mut opened.iter_mut().collect::<Vec<_>>(),
+        &mut store,
+        report,
+    );
+
+    // NOTE: `opened` keeps the order of `names`, so one walk pairs them.
+    let mut open = opened.iter_mut().peekable();
+    let mut sides: Vec<SendSide<'_>> = Vec::with_capacity(names.len());
+    for &name in &names {
+        match open.next_if(|ctx| ctx.name == name) {
+            Some(ctx) => sides.push(SendSide::open(ctx)),
+            None => sides.push(SendSide::unopened(name)),
+        }
+    }
+    drain_submits(
+        account_config,
+        account,
+        &mut sides,
+        &mut store,
+        &blobs,
+        work_dir,
+        report,
+    );
+    drop(sides);
+
+    drain_invitations(
+        &mut opened.iter_mut().collect::<Vec<_>>(),
+        &mut store,
+        report,
+    );
+    Ok(())
+}
+
+/// The endpoints among `names` whose session a queued intent needs, the
+/// drains picking their performer as they do.
+///
+/// A collection creation or a calendar intent needs the endpoint it names,
+/// or, naming none (a producer predating pimdir STORAGE §15.6), the first
+/// endpoint of its namespace; an unnamed calendar intent may need any of
+/// them, the one binding its item being known only once they are open. A
+/// send needs the sending endpoint only when it sends natively.
+fn wanted_sides(
+    store: &PimdirStore,
+    account_config: &AccountConfig,
+    names: &[&str],
+    namespace: &str,
+) -> BTreeSet<String> {
+    let prefix = format!("{namespace}/");
+    let mut wanted = BTreeSet::new();
+    let mut want = |named: Option<String>, collection: &str, any: bool| match named {
+        Some(name) if names.contains(&name.as_str()) => {
+            wanted.insert(name);
+        }
+        Some(_) => {}
+        None if collection.starts_with(&prefix) && any => {
+            wanted.extend(names.iter().map(|name| name.to_string()));
+        }
+        None if collection.starts_with(&prefix) => {
+            wanted.insert(names[0].to_owned());
+        }
+        None => {}
+    };
+
+    match create::pending(store) {
+        Ok(intents) => {
+            for intent in intents {
+                want(intent.source(), &intent.collection, false);
+            }
+        }
+        Err(err) => warn!("cannot read the queued collection intents: {err:#}"),
+    }
+    match invitation::pending(store) {
+        Ok(intents) => {
+            for intent in intents {
+                want(intent.source(), &intent.collection, true);
+            }
+        }
+        Err(err) => warn!("cannot read the queued calendar intents: {err:#}"),
+    }
+
+    let sides: Vec<SendSide<'_>> = names.iter().map(|name| SendSide::unopened(name)).collect();
+    let sender = sending_source(account_config, &sides);
+    let native = sender.as_ref().is_some_and(|sender| {
+        account_config.sources().is_ok_and(|sources| {
+            sources
+                .get(sender)
+                .is_some_and(|source| source.smtp.is_none() && source.sends_natively())
+        })
+    });
+    if let Some(sender) = sender.filter(|_| native) {
+        let queued = submit::pending(store).is_ok_and(|intents| {
+            intents
+                .iter()
+                .any(|intent| intent.source().is_none_or(|source| source == sender))
+        });
+        if queued {
+            wanted.insert(sender);
+        }
+    }
+
+    wanted
+}
+
+/// Records an endpoint the run could not sync or open: a failed `*` scan,
+/// and the endpoint unreached when the failure says so.
+fn note_source_failure(source_name: &str, err: anyhow::Error, report: &mut SyncOutput) {
+    warn!("source {source_name} sync error: {err:#}");
+    if let Some(unreached) = err.downcast_ref::<Unreached>() {
+        report.unreached.push(UnreachedEndpoint {
+            endpoint: unreached.endpoint.clone(),
+            error: format!("{err:#}"),
+        });
+    }
+    report.collection.patch.push(PatchEntry::new(
+        CollectionHunk::Scan {
+            side: source_name.to_owned(),
+            collection: String::from("*"),
+        },
+        Some(err),
+    ));
 }
 
 /// Opens `count` single-connection [`SourceCtx`]s with overlapping handshakes.
@@ -3939,18 +4125,53 @@ fn warn_conflicts(report: &SyncOutput) -> usize {
     report.conflicts.len()
 }
 
+/// One endpoint a run may send through: its name, and its open session when
+/// the run opened one.
+///
+/// A run performing intents alone opens an endpoint only for an intent that
+/// needs its session, so an SMTP channel sends with its source unopened.
+struct SendSide<'a> {
+    name: &'a str,
+    #[cfg_attr(not(feature = "msgraph"), allow(dead_code))]
+    client: Option<&'a mut Client>,
+}
+
+impl<'a> SendSide<'a> {
+    /// A side whose session the run opened.
+    fn open(ctx: &'a mut SourceCtx) -> Self {
+        Self {
+            name: &ctx.name,
+            client: Some(ctx.pool.primary()),
+        }
+    }
+
+    /// A side the run did not open.
+    fn unopened(name: &'a str) -> Self {
+        Self { name, client: None }
+    }
+}
+
 /// Performs the queue's `submit` intents, which the store's drain leaves alone.
 ///
 /// A sent intent is acknowledged with a receipt, releasing its body's pin, so a
-/// producer reads it applied rather than withdrawn; a permanent failure
-/// parks the row with its error, a transient one leaves it pending. With no
-/// channel they stay pending, never parked, another build being able to send.
+/// producer reads it applied rather than withdrawn; a permanent failure parks
+/// the row with its error, an uncertain one parks it under
+/// [`submit::UNCERTAIN`], never to be sent again, and a transient one leaves
+/// it pending. With no channel they stay pending, never parked, another build
+/// being able to send.
+///
+/// Each attempt is counted, and the intent marked in flight
+/// ([`submit::InFlight`]), before its first byte leaves: a producer reading
+/// the row mid-send sees the attempt, and a run killed mid-send leaves the
+/// mark, so the next one parks that intent as uncertain instead of sending
+/// it again. The mark is cleared once the outcome is in the store.
 fn drain_submits(
     account_config: &AccountConfig,
     account: &Account,
-    sides: &mut [&mut SourceCtx],
+    sides: &mut [SendSide<'_>],
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobs,
+    dir: &Path,
     report: &mut SyncOutput,
 ) {
     let intents = match submit::pending(store) {
@@ -3959,6 +4180,10 @@ fn drain_submits(
             warn!("cannot read the queued submit intents: {err:#}");
             return;
         }
+    };
+    let in_flight = submit::InFlight::new(dir);
+    let Some(intents) = park_interrupted(store, &in_flight, intents, report) else {
+        return;
     };
     // NOTE: an intent naming another source is that source's to send, on its
     // own run (pimdir STORAGE §15.6); one naming none predates the field.
@@ -3988,16 +4213,88 @@ fn drain_submits(
 
     #[cfg(any(feature = "smtp", feature = "msgraph"))]
     {
-        let Some(mut channel) = open_send_channel(account_config, account, sides, intents.len())
-        else {
-            return;
+        let entry =
+            |intent: &submit::SubmitIntent, error: Option<String>, parked, uncertain| SubmitEntry {
+                id: intent.id,
+                collection: intent.collection.clone(),
+                subject: intent.subject(),
+                error,
+                parked,
+                uncertain,
+            };
+
+        let mut channel = match open_send_channel(account_config, account, sides, intents.len()) {
+            Ok(channel) => channel,
+            Err(Unopened::Pending) => return,
+            Err(Unopened::Unreached(unreached)) => {
+                report.unreached.push(unreached);
+                return;
+            }
+            Err(Unopened::Refused(error)) => {
+                // NOTE: nothing was attempted, so no attempt is counted:
+                // the producer reads the rows as never tried.
+                for intent in &intents {
+                    report
+                        .submitted
+                        .push(entry(intent, Some(error.clone()), false, false));
+                }
+                return;
+            }
         };
 
         let mut sent = 0;
         let mut copies = 0;
+        // NOTE: why the run stops attempting, once it must: an outcome it
+        // could not record keeps its mark, which the next intent's would
+        // overwrite.
+        let mut halted: Option<String> = None;
         for intent in &intents {
-            let subject = intent.subject();
-            let entry = match submit::send_one(&mut channel, blobs, intent) {
+            if let Some(why) = halted.as_deref().or(channel.lost()) {
+                let error = format!("Not attempted, {why}");
+                report
+                    .submitted
+                    .push(entry(intent, Some(error), false, false));
+                continue;
+            }
+
+            let outgoing = match submit::prepare(blobs, intent) {
+                Ok(outgoing) => outgoing,
+                Err(failure) => {
+                    let reason = failure.reason();
+                    warn!("submit intent #{} failed: {reason}", intent.id);
+                    let parked = failure.parks();
+                    if let Err(err) = store.fail_action(intent.id, parked.then_some(&*reason)) {
+                        warn!("cannot record submit intent #{} failure: {err}", intent.id);
+                    }
+                    report
+                        .submitted
+                        .push(entry(intent, Some(reason), parked, false));
+                    continue;
+                }
+            };
+
+            // NOTE: counted and marked before the first byte leaves; a row
+            // whose attempt cannot be recorded is not sent.
+            let marked = store
+                .fail_action(intent.id, None)
+                .map_err(|err| format!("cannot record the attempt: {err}"))
+                .and_then(|()| {
+                    in_flight
+                        .begin(intent.id)
+                        .map_err(|err| format!("cannot mark it in flight: {err}"))
+                });
+            if let Err(why) = marked {
+                warn!("submit intent #{} not sent, {why}", intent.id);
+                report.submitted.push(entry(
+                    intent,
+                    Some(format!("Not attempted, {why}")),
+                    false,
+                    false,
+                ));
+                continue;
+            }
+
+            let (recorded, outcome) = match submit::deliver(&mut channel, outgoing) {
                 Ok(()) => {
                     let copy = intent.copy().filter(|_| !files_copy);
                     // NOTE: both leave the intent's receipt with no seq: the
@@ -4016,44 +4313,61 @@ fn drain_submits(
                         None => store.acknowledge_action(intent.id, None),
                     };
                     copies += usize::from(copy.is_some());
-                    match acknowledged {
-                        Ok(true) => {}
-                        Ok(false) => warn!(
-                            "submit intent #{} vanished from the queue before its acknowledgement",
-                            intent.id
-                        ),
-                        Err(err) => warn!(
-                            "submit intent #{} was sent but could not be acknowledged, it will be resent: {err}",
-                            intent.id
-                        ),
-                    }
                     sent += 1;
-                    SubmitEntry {
-                        id: intent.id,
-                        collection: intent.collection.clone(),
-                        subject,
-                        error: None,
-                        parked: false,
-                    }
+                    let recorded = match acknowledged {
+                        Ok(true) => true,
+                        Ok(false) => {
+                            warn!(
+                                "submit intent #{} vanished from the queue before its acknowledgement",
+                                intent.id
+                            );
+                            true
+                        }
+                        Err(err) => {
+                            warn!(
+                                "submit intent #{} was sent but could not be acknowledged, the next run parks it as uncertain: {err}",
+                                intent.id
+                            );
+                            false
+                        }
+                    };
+                    (recorded, entry(intent, None, false, false))
                 }
                 Err(failure) => {
-                    let error = format!("{:#}", failure.error());
-                    let parked = failure.parks();
-                    warn!("submit intent #{} failed: {error}", intent.id);
-                    let outcome = parked.then_some(error.as_str());
-                    if let Err(err) = store.fail_action(intent.id, outcome) {
-                        warn!("cannot record submit intent #{} failure: {err}", intent.id);
-                    }
-                    SubmitEntry {
-                        id: intent.id,
-                        collection: intent.collection.clone(),
-                        subject,
-                        error: Some(error),
-                        parked,
-                    }
+                    let reason = failure.reason();
+                    let (parked, uncertain) = (failure.parks(), failure.uncertain());
+                    warn!("submit intent #{} failed: {reason}", intent.id);
+                    // NOTE: the attempt is counted already, so a transient
+                    // failure records nothing more.
+                    let recorded = !parked
+                        || match store.fail_action(intent.id, Some(&reason)) {
+                            Ok(()) => true,
+                            Err(err) => {
+                                warn!("cannot park submit intent #{}: {err}", intent.id);
+                                // NOTE: a refused message may be sent again
+                                // and refused again; an uncertain one must
+                                // not be, which the mark sees to.
+                                !uncertain
+                            }
+                        };
+                    (recorded, entry(intent, Some(reason), parked, uncertain))
                 }
             };
-            report.submitted.push(entry);
+            report.submitted.push(outcome);
+
+            if recorded {
+                if let Err(err) = in_flight.end() {
+                    warn!(
+                        "cannot clear the in-flight mark of submit intent #{}: {err}",
+                        intent.id
+                    );
+                    halted = Some(format!("the in-flight mark could not be cleared: {err}"));
+                }
+            } else {
+                halted = Some(String::from(
+                    "an earlier message's outcome could not be recorded",
+                ));
+            }
         }
 
         channel.close();
@@ -4081,6 +4395,58 @@ fn drain_submits(
             intents.len()
         );
     }
+}
+
+/// Parks the intent an earlier run left in flight as uncertain, and returns
+/// the others, still to send.
+///
+/// That run was stopped between counting the attempt and recording its
+/// outcome: the message may have left, so it is never sent again on its
+/// own. `None` when the intent could not be parked, the run then sending
+/// nothing, so the mark stays for the next.
+fn park_interrupted(
+    store: &mut PimdirSourceStore,
+    in_flight: &submit::InFlight,
+    mut intents: Vec<submit::SubmitIntent>,
+    report: &mut SyncOutput,
+) -> Option<Vec<submit::SubmitIntent>> {
+    let Some(left) = in_flight.left() else {
+        // NOTE: a mark is renamed into place whole, so one that does not
+        // read names nothing.
+        if let Err(err) = in_flight.end() {
+            warn!("cannot clear an unreadable in-flight mark: {err}");
+        }
+        return Some(intents);
+    };
+
+    // NOTE: an intent no longer pending was acknowledged or parked before
+    // the run stopped, its outcome recorded.
+    if let Some(index) = intents.iter().position(|intent| intent.id == left) {
+        let intent = intents.remove(index);
+        let error = submit::uncertain_reason("a run stopped while handing it over");
+        warn!("submit intent #{} parked: {error}", intent.id);
+        if let Err(err) = store.fail_action(intent.id, Some(&error)) {
+            warn!(
+                "cannot park submit intent #{}, nothing is sent this run: {err}",
+                intent.id
+            );
+            return None;
+        }
+        report.submitted.push(SubmitEntry {
+            id: intent.id,
+            collection: intent.collection.clone(),
+            subject: intent.subject(),
+            error: Some(error),
+            parked: true,
+            uncertain: true,
+        });
+    }
+
+    if let Err(err) = in_flight.end() {
+        warn!("cannot clear the in-flight mark, nothing is sent this run: {err}");
+        return None;
+    }
+    Some(intents)
 }
 
 /// Performs the queued collection-create intents (pimdir STORAGE Annex
@@ -4453,35 +4819,55 @@ fn sweep_retained(
 
 /// The source whose channel a run over `sides` sends through, found as
 /// [`open_send_channel`] picks it.
-fn sending_source(account_config: &AccountConfig, sides: &[&mut SourceCtx]) -> Option<String> {
+fn sending_source(account_config: &AccountConfig, sides: &[SendSide<'_>]) -> Option<String> {
     let configured = account_config.sources().ok()?;
     sides
         .iter()
-        .find(|ctx| {
+        .find(|side| {
             configured
-                .get(&ctx.name)
+                .get(side.name)
                 .is_some_and(|source| source.smtp.is_some() || source.sends_natively())
         })
-        .map(|ctx| ctx.name.clone())
+        .map(|side| side.name.to_owned())
+}
+
+/// Why a run has no send channel for its intents.
+#[cfg(any(feature = "smtp", feature = "msgraph"))]
+enum Unopened {
+    /// None this build or this account offers: the intents stay pending,
+    /// unreported, another build or run being able to send them.
+    Pending,
+    /// The SMTP server could not be reached: named under `unreached`, the
+    /// intents pending and unattempted.
+    #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
+    Unreached(UnreachedEndpoint),
+    /// The SMTP server refused the credentials: each intent fails with this
+    /// error, pending and unattempted.
+    #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
+    Refused(String),
 }
 
 /// Resolves the account's send channel: an `smtp` table, else a native send.
 ///
 /// At most one source may declare an `smtp` table, the account refusing more at
-/// load, so there is no tiebreak here. `None` warns and leaves them pending.
+/// load, so there is no tiebreak here. A channel the run cannot have warns and
+/// leaves the intents pending.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 #[cfg_attr(not(feature = "smtp"), allow(unused_variables))]
 fn open_send_channel<'a>(
     account_config: &AccountConfig,
     account: &Account,
-    sides: &'a mut [&mut SourceCtx],
+    sides: &'a mut [SendSide<'_>],
     queued: usize,
-) -> Option<submit::SendChannel<'a>> {
-    let configured = account_config.sources().ok()?;
-    let pick = sides.iter().enumerate().find_map(|(index, ctx)| {
-        let source = configured.get(&ctx.name)?;
+) -> Result<submit::SendChannel<'a>, Unopened> {
+    let configured = account_config.sources().map_err(|err| {
+        warn!("cannot read the account's sources, {queued} intent(s) stay pending: {err:#}");
+        Unopened::Pending
+    })?;
+    let pick = sides.iter().enumerate().find_map(|(index, side)| {
+        let source = configured.get(side.name)?;
         match &source.smtp {
-            Some(_) => Some(SendChannelPick::Smtp(ctx.name.clone())),
+            Some(_) => Some(SendChannelPick::Smtp(side.name.to_owned())),
             None if source.sends_natively() => Some(SendChannelPick::Native(index)),
             None => None,
         }
@@ -4490,16 +4876,25 @@ fn open_send_channel<'a>(
     match pick {
         #[cfg(feature = "smtp")]
         Some(SendChannelPick::Smtp(name)) => {
-            let opened = account.get(&name).and_then(|source| {
-                let smtp = source.smtp.expect("the pick found a configured channel");
-                submit::connect_smtp(&smtp)
-            });
-
-            match opened {
-                Ok(client) => Some(submit::SendChannel::Smtp(client)),
+            let source = account.get(&name).map_err(|err| {
+                warn!("cannot resolve the smtp channel, {queued} intent(s) stay pending: {err:#}");
+                Unopened::Pending
+            })?;
+            let smtp = source.smtp.expect("the pick found a configured channel");
+            match submit::connect_smtp(&smtp) {
+                Ok(client) => Ok(submit::SendChannel::smtp(client)),
                 Err(err) => {
-                    warn!("cannot open the smtp channel, {queued} intent(s) stay pending: {err:#}");
-                    None
+                    let error = format!("{err:#}");
+                    warn!("cannot open the smtp channel, {queued} intent(s) stay pending: {error}");
+                    match submit::open_failure(&err) {
+                        submit::OpenFailure::Unreached => {
+                            Err(Unopened::Unreached(UnreachedEndpoint {
+                                endpoint: format!("{name}.smtp"),
+                                error,
+                            }))
+                        }
+                        submit::OpenFailure::Refused => Err(Unopened::Refused(error)),
+                    }
                 }
             }
         }
@@ -4508,17 +4903,17 @@ fn open_send_channel<'a>(
             warn!(
                 "the source's `smtp` table needs the `smtp` cargo feature, {queued} intent(s) stay pending"
             );
-            None
+            Err(Unopened::Pending)
         }
         #[cfg(feature = "msgraph")]
-        Some(SendChannelPick::Native(index)) => match sides[index].pool.primary() {
-            Client::Msgraph(client) if client.kind() == GraphKind::Mail => {
-                Some(submit::SendChannel::Graph(client.as_mut()))
+        Some(SendChannelPick::Native(index)) => match sides[index].client.as_deref_mut() {
+            Some(Client::Msgraph(client)) if client.kind() == GraphKind::Mail => {
+                Ok(submit::SendChannel::graph(client.as_mut()))
             }
             #[allow(unreachable_patterns)]
             _ => {
                 warn!("no send channel available, {queued} intent(s) stay pending");
-                None
+                Err(Unopened::Pending)
             }
         },
         #[cfg(not(feature = "msgraph"))]
@@ -4526,11 +4921,11 @@ fn open_send_channel<'a>(
             warn!(
                 "the side sends through Microsoft Graph, which needs the `msgraph` cargo feature, {queued} intent(s) stay pending"
             );
-            None
+            Err(Unopened::Pending)
         }
         None => {
             warn!("no send channel available, {queued} intent(s) stay pending");
-            None
+            Err(Unopened::Pending)
         }
     }
 }
@@ -7101,6 +7496,61 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("no source named nope"), "got {err}");
+    }
+
+    /// Stages one `submit` in the store at `dir`, anchored on `collection`.
+    fn queue_submit(dir: &Path, collection: &str) {
+        PimdirProducer::open(dir, "test-frontend")
+            .unwrap()
+            .enqueue(
+                collection,
+                &PimdirAction::Unknown {
+                    kind: submit::SUBMIT.into(),
+                    payload: r#"{"v":1,"from":"a@x.org","rcpts":["b@y.org"]}"#.into(),
+                    object_hash: None,
+                },
+                None,
+            )
+            .unwrap();
+    }
+
+    /// A run performing intents alone opens an endpoint for a send only
+    /// when the endpoint sends it natively: an `smtp` table opens alone.
+    #[test]
+    fn a_send_needs_its_source_opened_only_when_it_sends_natively() {
+        let smtp: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            smtp.server = "smtps://smtp.example.org:465"
+            "#,
+        )
+        .unwrap();
+        let graph: AccountConfig = toml::from_str(
+            r#"
+            msgraph.auth.token.raw = "tok"
+            "#,
+        )
+        .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+        store
+            .ensure_collection("imap/Sent", "message/rfc822")
+            .unwrap();
+        queue_submit(dir.path(), "imap/Sent");
+        assert!(wanted_sides(&store, &smtp, &["imap"], "imap").is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = PimdirStore::open(dir.path()).unwrap().for_source("msgraph");
+        store
+            .ensure_collection("msgraph/Sent Items", "message/rfc822")
+            .unwrap();
+        assert!(wanted_sides(&store, &graph, &["msgraph"], "msgraph").is_empty());
+        queue_submit(dir.path(), "msgraph/Sent Items");
+        assert_eq!(
+            wanted_sides(&store, &graph, &["msgraph"], "msgraph"),
+            BTreeSet::from([String::from("msgraph")])
+        );
     }
 
     /// The authority is the whole of `one-way`.

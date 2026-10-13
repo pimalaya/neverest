@@ -14,6 +14,10 @@
 //! read is sent again once on a new connection (RFC 9112 section 9.3.1). A
 //! read that timed out may be a server still at work, and is never sent
 //! again; nor is a request that creates, sends or moves.
+//!
+//! The record also says whether a request went whole ([`Exchange::written`]):
+//! a `sendMail` failing past that point with no status may have been
+//! delivered, one failing before it was not.
 
 use std::{
     io::{self, ErrorKind, Read, Write},
@@ -41,6 +45,10 @@ pub(super) type Connect = Box<dyn FnMut() -> anyhow::Result<Box<dyn MsgraphStrea
 pub(super) struct Exchange {
     /// The first octets the exchange wrote: its request line's method.
     head: Vec<u8>,
+    /// Whether the request went whole: the exchange asked for its answer,
+    /// the stream flushed. From then on the server may have acted on it,
+    /// whatever comes back or fails to.
+    written: bool,
     /// Whether any octet of an answer came.
     heard: bool,
     /// Whether a read met the end of the stream.
@@ -51,6 +59,13 @@ impl Exchange {
     /// Whether the request in flight is a `GET`, which reads only.
     pub(super) fn reads(&self) -> bool {
         self.head.starts_with(b"GET ")
+    }
+
+    /// Whether the request was written whole and flushed before the
+    /// exchange read: a failure past it, with no status read, cannot tell
+    /// a request the server never acted on from one it did.
+    pub(super) fn written(&self) -> bool {
+        self.written
     }
 
     /// Whether any octet of an answer came.
@@ -80,8 +95,21 @@ impl<S> Watched<S> {
     }
 }
 
-impl<S: Read> Read for Watched<S> {
+impl<S: Read + Write> Read for Watched<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // NOTE: the first read of an exchange follows its whole request;
+        // flushed first, so a TLS layer holding the tail fails here, the
+        // request not written whole.
+        let written = self
+            .exchange
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .written;
+        if !written {
+            self.inner.flush()?;
+            let mut exchange = self.exchange.lock().unwrap_or_else(|err| err.into_inner());
+            exchange.written = !exchange.head.is_empty();
+        }
         let read = self.inner.read(buf)?;
         let mut exchange = self.exchange.lock().unwrap_or_else(|err| err.into_inner());
         match read {

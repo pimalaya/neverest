@@ -76,6 +76,11 @@ pub struct SyncOutput {
     /// Each also reads as a failed `*` scan in the collection patch, the run
     /// exiting 3; this names it for a program. A collection that failed to
     /// read on an endpoint that opened never lands here.
+    ///
+    /// A source's SMTP channel is named `<source>.smtp`, and only when the
+    /// server could not be reached: one refusing the credentials fails each
+    /// queued `submit` under `submitted` instead, not parked. It has no `*`
+    /// scan, but still makes the run exit 3.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreached: Vec<UnreachedEndpoint>,
     /// The sources that gave up after their provider throttled them (HTTP
@@ -167,19 +172,25 @@ impl SyncOutput {
     /// Whether the run left work no rerun clears, which the exit code answers.
     ///
     /// A divergence waiting for a decision, a duplicate `UID` the other side
-    /// will not take and a write a remote refused are one class: re-reported
-    /// every run until a person acts, and none of them a failure of the run.
+    /// will not take, a write a remote refused and a send that may have been
+    /// delivered are one class: waiting until a person acts, and none of
+    /// them a failure of the run.
     pub fn left_waiting(&self) -> bool {
-        self.outstanding_conflicts > 0 || !self.refused.is_empty() || !self.rejected.is_empty()
+        self.outstanding_conflicts > 0
+            || !self.refused.is_empty()
+            || !self.rejected.is_empty()
+            || self.submitted.iter().any(|entry| entry.uncertain)
     }
 
     /// Whether the run left work a rerun picks up: a source it could not
     /// scan, a hunk it could not apply, a send or an intent that failed
     /// without parking, a source that gave up throttled. An unreachable
     /// server reads this way, and only this way, a run with nothing to do
-    /// never carrying an error.
+    /// never carrying an error. A send channel that did not open is named
+    /// in `unreached` alone, having no collection to scan.
     pub fn incomplete(&self) -> bool {
         !self.throttled.is_empty()
+            || !self.unreached.is_empty()
             || self
                 .coverage
                 .iter()
@@ -298,7 +309,8 @@ pub struct ThrottledSource {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct UnreachedEndpoint {
-    /// The source or target, as the account names it.
+    /// The source or target, as the account names it, or `<source>.smtp`
+    /// for a source's SMTP channel.
     pub endpoint: String,
     /// Why, the whole error chain.
     pub error: String,
@@ -458,7 +470,9 @@ impl fmt::Display for ParkedQueueAction {
 /// One submit intent attempted this run.
 ///
 /// Acknowledged when `error` is `None`, its queue row dropped and the body's
-/// pin released; parked when the failure is permanent, pending otherwise.
+/// pin released; parked when the failure is permanent or uncertain, pending
+/// otherwise. A parked uncertain one carries an `error` beginning
+/// `uncertain: `, as its parked row does.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitEntry {
@@ -472,6 +486,12 @@ pub struct SubmitEntry {
     pub error: Option<String>,
     /// Whether the failure parked the row rather than leaving it pending.
     pub parked: bool,
+    /// Whether the message may have been delivered despite the failure:
+    /// handed over whole with no verdict back, or answered by a gateway
+    /// error, or left mid-send by a run that stopped. Such a row is parked
+    /// and never sent again on its own. False on success and on a failure
+    /// that certainly delivered nothing.
+    pub uncertain: bool,
 }
 
 impl fmt::Display for SubmitEntry {
@@ -479,6 +499,12 @@ impl fmt::Display for SubmitEntry {
         let subject = self.subject.as_deref().unwrap_or("<no subject>");
         match (&self.error, self.parked) {
             (None, _) => write!(f, "submitted {subject}"),
+            (Some(err), true) if self.uncertain => {
+                write!(
+                    f,
+                    "{subject} may have been sent, parked and never sent again: {err}"
+                )
+            }
             (Some(err), true) => write!(f, "{subject} parked, never retried: {err}"),
             (Some(err), false) => write!(f, "{subject} not submitted, retried next run: {err}"),
         }

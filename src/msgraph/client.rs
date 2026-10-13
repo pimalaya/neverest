@@ -303,6 +303,9 @@ impl GraphClient {
             &mut MsgraphClientStd,
         ) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
     ) -> Result<T, MsgraphClientStdError> {
+        // NOTE: cleared before a reopen too, so a reopen that fails leaves
+        // no earlier attempt's record behind.
+        wire::begin(&self.exchange);
         if self.alive && self.reused && self.used.elapsed() > wire::IDLE {
             debug!(
                 "graph stream idle for {}s, not reused",
@@ -1032,13 +1035,41 @@ impl GraphClient {
 
     /// Sends raw MIME through sendMail, which files the message in Sent itself.
     ///
-    /// The client error comes back unwrapped, so the caller can read the HTTP
-    /// status off it. sendMail derives the recipients from the MIME headers
-    /// (Bcc included), so envelope recipients beyond the headers are lost.
-    pub fn send_mime(&mut self, raw: &[u8]) -> Result<(), MsgraphClientStdError> {
-        self.create(|client| client.mail_send_mime(raw))?;
-        Ok(())
+    /// A `POST` that creates: never sent again on a dead connection
+    /// ([`exchange`](Self::exchange)), sent again only on a 429, which Graph
+    /// answers before doing anything ([`create`](Self::create)). The client
+    /// error comes back unwrapped, so the caller can read the HTTP status off
+    /// it, with whether the request had gone whole and no answer was read
+    /// whole ([`Exchange::written`]): an answer cut short counts as none.
+    /// sendMail derives the recipients from the MIME headers (Bcc included),
+    /// so envelope recipients beyond the headers are lost.
+    pub fn send_mime(&mut self, raw: &[u8]) -> Result<(), SendMimeFailure> {
+        let error = match self.create(|client| client.mail_send_mime(raw)) {
+            Ok(_) => return Ok(()),
+            Err(error) => error,
+        };
+        // NOTE: the record is the last attempt's, cleared before a reopen
+        // that failed. A status or a redirect is a verdict; an answer that
+        // did not parse may be a 2xx, so it is none.
+        let verdict = matches!(
+            &error,
+            MsgraphClientStdError::Send(
+                MsgraphSendError::Api { .. } | MsgraphSendError::UnexpectedRedirect
+            )
+        );
+        let unanswered = !verdict && wire::read(&self.exchange, Exchange::written);
+        Err(SendMimeFailure { error, unanswered })
     }
+}
+
+/// A `sendMail` that failed.
+#[derive(Debug)]
+pub struct SendMimeFailure {
+    /// The client error, its status read off it.
+    pub error: MsgraphClientStdError,
+    /// Whether the request had been written whole and no answer read whole:
+    /// the message may have been taken.
+    pub unanswered: bool,
 }
 
 /// How many times a throttled body request is sent again in a later batch.
@@ -2441,5 +2472,68 @@ mod tests {
         assert!(requests[0].contains("%24expand="), "{}", requests[0]);
         assert!(!requests[1].contains("%24expand="), "{}", requests[1]);
         assert!(!requests[2].contains("%24expand="), "{}", requests[2]);
+    }
+
+    const SEND_MAIL: &str = "POST /v1.0/me/sendMail";
+
+    fn accepted() -> Step {
+        Step::Reply(b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\n\r\n".to_vec())
+    }
+
+    fn send_mail(client: &mut GraphClient) -> Result<(), SendMimeFailure> {
+        client.send_mime(b"Subject: hi\r\n\r\nhi")
+    }
+
+    /// A send answered, whatever the status, carries its verdict.
+    #[test]
+    fn a_send_answered_is_settled_whatever_the_status() {
+        let (mut client, _) = session(vec![vec![accepted()]]);
+        send_mail(&mut client).unwrap();
+
+        let (mut client, server) = session(vec![vec![Step::error(503, "ServiceUnavailable")]]);
+        let failure = send_mail(&mut client).unwrap_err();
+        let MsgraphClientStdError::Send(err) = &failure.error else {
+            panic!("a 503 is an API error: {failure:?}");
+        };
+        assert_eq!(err.status(), Some(503));
+        assert!(!failure.unanswered, "a status answers the request");
+        assert_eq!(lines(&server), [vec![SEND_MAIL]], "a 503 is not sent again");
+    }
+
+    /// A send written whole on a connection that then ends, with no answer
+    /// or with one cut short, may have been taken: never sent again, and
+    /// told unanswered.
+    #[test]
+    fn a_send_written_whole_and_not_answered_whole_is_unanswered() {
+        let cut = Step::Reply(b"HTTP/1.1 202 Acc".to_vec());
+        for (dead, after) in [
+            (Step::Close, vec![]),
+            (Step::Reset, vec![]),
+            (Step::Timeout, vec![]),
+            (cut, vec![Step::Close]),
+        ] {
+            let mut script = vec![inbox(), dead];
+            script.extend(after);
+            let (mut client, server) = session(vec![script, vec![accepted()]]);
+
+            get_inbox(&mut client).unwrap();
+            let failure = send_mail(&mut client).unwrap_err();
+            assert!(failure.unanswered, "{failure:?}");
+            assert_eq!(
+                lines(&server),
+                [vec![GET_INBOX, SEND_MAIL]],
+                "a send is never sent again on a new connection"
+            );
+        }
+    }
+
+    /// A send whose request could not be written went nowhere.
+    #[test]
+    fn a_send_not_written_whole_is_answered_as_never_sent() {
+        let (mut client, _) = session(vec![vec![inbox(), Step::Broken], vec![accepted()]]);
+
+        get_inbox(&mut client).unwrap();
+        let failure = send_mail(&mut client).unwrap_err();
+        assert!(!failure.unanswered, "{failure:?}");
     }
 }

@@ -584,11 +584,15 @@ impl Client {
     }
 
     /// The heads the connector lists while a round is open (pimdir SYNC
-    /// §4): Gmail lists delta heads from its history; the others none yet.
+    /// §4): Gmail lists delta heads from its history; Graph mail band
+    /// heads by `receivedDateTime`, its delta link arriving with a round's
+    /// last page only; the others none yet.
     pub fn heads(&self) -> PimdirHeads {
         match self {
             #[cfg(feature = "gmail")]
             Client::Gmail(_) => PimdirHeads::DELTA,
+            #[cfg(feature = "msgraph")]
+            Client::Msgraph(c) if c.kind() == GraphKind::Mail => PimdirHeads::BAND,
             #[allow(unreachable_patterns)]
             _ => PimdirHeads::NONE,
         }

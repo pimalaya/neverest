@@ -142,6 +142,9 @@ pub struct GraphClient {
     /// Whether a whole-folder delta asks for the size `$expand`, until
     /// Graph refuses it once.
     delta_expands: bool,
+    /// Whether a listing by arrival (a band head) asks for the size
+    /// `$expand`, until Graph refuses it once.
+    received_expands: bool,
     /// The id of the well-known Drafts folder, resolved on the first append.
     drafts: Option<String>,
     /// Whether the stream may carry the next exchange: the last one read a
@@ -213,6 +216,7 @@ impl GraphClient {
             kept: HashMap::new(),
             sizes,
             delta_expands: true,
+            received_expands: true,
             drafts: None,
             alive: true,
             reused: false,
@@ -1145,6 +1149,36 @@ impl GraphClient {
             throttle,
         )
     }
+
+    /// A mail session over a scripted server, one script a connection,
+    /// knowing `folders` (name, id) already, for a test of another module
+    /// driving a Graph mail source request by request.
+    pub(crate) fn scripted(
+        scripts: Vec<Vec<scripted::Step>>,
+        folders: &[(&str, &str)],
+    ) -> (Self, scripted::Server) {
+        let server = scripted::Server::new(scripts);
+        let mut client = Self::over(
+            GraphKind::Mail,
+            &SecretString::from("token"),
+            "me",
+            server.connect(),
+            SizeHints::default(),
+            Arc::new(Throttle::new("msgraph")),
+        )
+        .unwrap();
+        for (name, id) in folders {
+            client.folders.insert((*name).to_owned(), (*id).to_owned());
+        }
+        (client, server)
+    }
+}
+
+/// The scripted Graph server a test of another module drives a session
+/// over ([`GraphClient::scripted`]).
+#[cfg(test)]
+pub(crate) mod scripted {
+    pub(crate) use super::wire::fake::{Server, Step};
 }
 
 #[cfg(test)]
@@ -2640,6 +2674,49 @@ mod tests {
 
         let requests = server.requests().remove(0);
         assert_eq!(requests.len(), 3);
+        assert!(requests[0].contains("%24expand="), "{}", requests[0]);
+        assert!(!requests[1].contains("%24expand="), "{}", requests[1]);
+        assert!(!requests[2].contains("%24expand="), "{}", requests[2]);
+    }
+
+    /// A band head lists the folder by arrival, newest first, from the
+    /// instant asked, with the summary and the size `$expand`; refused, it
+    /// asks again without the `$expand`, and the session no longer asks
+    /// for it.
+    #[test]
+    fn a_head_refusing_the_size_expand_is_asked_without_it() {
+        let page = || Step::ok(serde_json::json!({ "value": [] }));
+        let (mut client, server) =
+            session(vec![vec![Step::error(400, "BadRequest"), page(), page()]]);
+        client
+            .folders
+            .insert(String::from("Inbox"), String::from("id-inbox"));
+
+        use mail::MailWire;
+        client
+            .received_first("Inbox", "2026-10-11T10:00:00Z")
+            .unwrap();
+        client
+            .received_first("Inbox", "2026-10-11T10:00:00Z")
+            .unwrap();
+
+        let requests = server.requests().remove(0);
+        assert_eq!(requests.len(), 3);
+        for request in &requests {
+            assert!(
+                request.starts_with("GET /v1.0/me/mailFolders/id-inbox/messages?"),
+                "{request}"
+            );
+            assert!(
+                request.contains("%24filter=receivedDateTime+ge+2026-10-11T10%3A00%3A00Z"),
+                "{request}"
+            );
+            assert!(
+                request.contains("%24orderby=receivedDateTime+desc"),
+                "{request}"
+            );
+            assert!(request.contains("%24top=512"), "{request}");
+        }
         assert!(requests[0].contains("%24expand="), "{}", requests[0]);
         assert!(!requests[1].contains("%24expand="), "{}", requests[1]);
         assert!(!requests[2].contains("%24expand="), "{}", requests[2]);

@@ -23,6 +23,16 @@
 //!   not bind is named by its summary, read in JSON batches when the link
 //!   carries ids only.
 //!
+//! While a round is open, a run resuming it first lists the round's band
+//! head (pimdir SYNC §4, §5): every message of the folder Graph received
+//! from two days before the round began, newest first, by a plain
+//! `/messages` listing filtered and ordered on `receivedDateTime`, so what
+//! arrives during a long round shows at once. The round's last page lists
+//! again what that head would list then: a whole-folder round's last delta
+//! page and a band round's last band page by the same listing, read after
+//! them; under a scope, the pass, which lists every member of the scope
+//! still in the folder.
+//!
 //! The link is the same whatever scope a later run asks for: a narrower one
 //! keeps it, a wider one lists its band and keeps it. A link made by a
 //! whole-folder round carries summaries, one made under a scope ids only;
@@ -33,7 +43,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
-use chrono::{DateTime, SecondsFormat};
+use chrono::{DateTime, NaiveDateTime, SecondsFormat, TimeDelta};
 use io_msgraph::v1::{
     client::{MsgraphClientStd, MsgraphClientStdError},
     rest::batch::MSGRAPH_BATCH_MAX_REQUESTS,
@@ -46,7 +56,7 @@ use io_msgraph::v1::{
 };
 use io_pimdir::{
     collection::PimdirScope,
-    remote::{PimdirEnumerate, PimdirListing},
+    remote::{PimdirEnumerate, PimdirHead, PimdirListing},
 };
 use log::{debug, trace, warn};
 use url::Url;
@@ -73,6 +83,14 @@ pub(super) const IDS_SELECT: &str = "id,sentDateTime,isRead,isDraft,flag";
 /// under three seconds (measured on a test tenant, 2026-10-07).
 pub(super) const PAGE_SIZE: u32 = 1000;
 
+/// The messages a page of a listing by arrival holds at most (`$top`): a
+/// head lists the few days a round takes, which a page or two holds.
+pub(super) const HEAD_PAGE_SIZE: u32 = 512;
+
+/// The margin a band head takes below the instant the round opened (pimdir
+/// SYNC §4), for the skew between the store's clock and Graph's.
+const HEAD_MARGIN_DAYS: i64 = 2;
+
 /// What a mail listing asks of Graph: the seam [`GraphClient`] serves and
 /// the tests fake.
 pub(super) trait MailWire {
@@ -84,8 +102,13 @@ pub(super) trait MailWire {
         band: &PimdirScope,
     ) -> Result<MsgraphMessagesListResponse>;
 
-    /// The page a band listing's next link answers, `None` when Graph no
-    /// longer serves it.
+    /// The first page of the messages of `mailbox` Graph received from
+    /// `from` on, newest first, each with its summary: a band head, and
+    /// what a round's last page lists again of it.
+    fn received_first(&mut self, mailbox: &str, from: &str) -> Result<MsgraphMessagesListResponse>;
+
+    /// The page a band listing's or a listing by arrival's next link
+    /// answers, `None` when Graph no longer serves it.
     fn band_next(&mut self, link: &str) -> Result<Option<MsgraphMessagesListResponse>>;
 
     /// The first page of a fresh delta of `mailbox` over the whole folder,
@@ -200,6 +223,12 @@ pub(super) struct Folder {
     /// a round that goes on with a pass keeps them, and the pass drops
     /// them: ids and three bits, never summaries.
     banded: HashMap<String, Marks>,
+    /// The instant the open round's band head listed from this run (the
+    /// round's start less the margin), which the round's last page lists
+    /// from again (pimdir SYNC §4). The engine lists the head first in
+    /// every run resuming a round, so a run reaching the last page of a
+    /// round it resumed holds it; one that opened the round listed no head.
+    head: Option<String>,
     /// The size Graph stated for each message the last page named, for
     /// the session to plan its body batches by.
     pub(super) sizes: Vec<(String, u64)>,
@@ -258,8 +287,12 @@ pub(super) fn enumerate(
     let scope = &request.scope;
 
     match &request.listing {
-        // NOTE: no head yet (pimdir SYNC §4).
-        PimdirListing::Head(_) => Ok(Listed::NoHead),
+        // NOTE: Graph's delta link arrives with a round's last page only,
+        // so there is none to list a delta head from (pimdir SYNC §4).
+        PimdirListing::Head(PimdirHead::Delta(_)) => Ok(Listed::NoHead),
+        PimdirListing::Head(PimdirHead::Band { since }) => {
+            head(wire, folder, mailbox, since, scope, held)
+        }
         PimdirListing::Delta(checkpoint) => match Link::decode(&checkpoint.0, held.coverage) {
             Some(link) => delta(wire, folder, mailbox, &link, scope, held),
             None => {
@@ -268,10 +301,12 @@ pub(super) fn enumerate(
             }
         },
         PimdirListing::Round { cursor: None, band } => {
+            // NOTE: a round opened afresh has had no head yet.
+            folder.head = None;
             if *band || !scope.is_unbounded() {
-                band_page(wire, folder, mailbox, None, *band, scope)
+                band_page(wire, folder, mailbox, None, *band, scope, held)
             } else {
-                summary_page(wire, folder, mailbox, None)
+                summary_page(wire, folder, mailbox, None, held)
             }
         }
         PimdirListing::Round {
@@ -279,9 +314,11 @@ pub(super) fn enumerate(
             band,
         } => match Step::decode(&cursor.0, scope) {
             Some(Step::Summary(next)) if scope.is_unbounded() => {
-                summary_page(wire, folder, mailbox, Some(&next))
+                summary_page(wire, folder, mailbox, Some(&next), held)
             }
-            Some(Step::Band(next)) => band_page(wire, folder, mailbox, Some(&next), *band, scope),
+            Some(Step::Band(next)) => {
+                band_page(wire, folder, mailbox, Some(&next), *band, scope, held)
+            }
             Some(Step::Pass) if !band => pass(wire, folder, mailbox, scope, held),
             _ => Ok(Listed::CursorRejected),
         },
@@ -289,12 +326,14 @@ pub(super) fn enumerate(
 }
 
 /// One page of a whole-folder round: the delta with summaries, from its
-/// start or its next link; the last page carries the delta link.
+/// start or its next link; the last page carries the delta link, and lists
+/// again what the round's band head would list, read after the link.
 fn summary_page(
     wire: &mut impl MailWire,
     folder: &mut Folder,
     mailbox: &str,
     next: Option<&str>,
+    held: Held<'_>,
 ) -> Result<Listed> {
     let page = match next {
         None => wire.delta_first(mailbox, SUMMARY_SELECT)?,
@@ -325,14 +364,19 @@ fn summary_page(
         "graph delta page of {mailbox}: {} rows",
         listing.items.len()
     );
+    if checkpoint.is_some() {
+        let scope = PimdirScope::unbounded();
+        relist_head(wire, folder, mailbox, &scope, held, &mut listing)?;
+    }
 
     Ok(Listed::Page(listing.page(true, cursor, checkpoint)))
 }
 
 /// One page of a band listing: the messages of `scope` by `sentDateTime`,
 /// newest first, each with its summary. Past its last page, a band round
-/// ends; a round over the whole scope goes on with the pass, which needs
-/// the marks of what the band listed. A message with no date, which a
+/// ends, its last page listing again what the round's band head would list
+/// in the band; a round over the whole scope goes on with the pass, which
+/// needs the marks of what the band listed. A message with no date, which a
 /// filter on `sentDateTime` never lists, stays bound: a band round infers
 /// no delete of an undated member (pimdir SYNC §5).
 fn band_page(
@@ -342,6 +386,7 @@ fn band_page(
     next: Option<&str>,
     band: bool,
     scope: &PimdirScope,
+    held: Held<'_>,
 ) -> Result<Listed> {
     let page = match next {
         None => wire.band_first(mailbox, scope)?,
@@ -356,6 +401,7 @@ fn band_page(
         (None, true) => None,
         (None, false) => Some(Step::Pass),
     };
+    let last = cursor.is_none();
 
     let mut listing = Listing::default();
     for message in page.value {
@@ -372,12 +418,138 @@ fn band_page(
         "graph band page of {mailbox}: {} messages",
         listing.items.len()
     );
+    if last {
+        relist_head(wire, folder, mailbox, scope, held, &mut listing)?;
+    }
 
     Ok(Listed::Page(listing.page(
         true,
         cursor.map(|step| step.encode()),
         None,
     )))
+}
+
+/// The open round's band head (pimdir SYNC §4): every message of `scope`
+/// Graph received from two days before `since`, the instant the round
+/// opened, each a member the store binds by its flags, any other by its
+/// summary. It carries no checkpoint and no removal, and the round's last
+/// page lists from the same instant again.
+///
+/// A `since` that reads as no instant lists no head: the round resumes as
+/// it would without, and its last page owes nothing.
+fn head(
+    wire: &mut impl MailWire,
+    folder: &mut Folder,
+    mailbox: &str,
+    since: &str,
+    scope: &PimdirScope,
+    held: Held<'_>,
+) -> Result<Listed> {
+    let Some(from) = received_floor(since) else {
+        warn!("round of {mailbox} opened at {since:?}, which reads as no instant: no head");
+        return Ok(Listed::NoHead);
+    };
+    debug!("list the head of the graph folder {mailbox}, received from {from}");
+
+    let mut listing = Listing::default();
+    received(
+        wire,
+        folder,
+        mailbox,
+        &from,
+        scope,
+        held,
+        &mut listing,
+        HashSet::new(),
+    )?;
+    folder.head = Some(from);
+    trace!("graph head of {mailbox}: {} messages", listing.items.len());
+
+    Ok(Listed::Page(listing.page(false, None, None)))
+}
+
+/// What a round's last page owes a band head of the round (pimdir SYNC
+/// §4): every member of `scope` that head would list now, added to
+/// `listing` unless the page lists or removes it already, read after the
+/// page's own rows. Nothing when no head was listed this run.
+fn relist_head(
+    wire: &mut impl MailWire,
+    folder: &mut Folder,
+    mailbox: &str,
+    scope: &PimdirScope,
+    held: Held<'_>,
+    listing: &mut Listing,
+) -> Result<()> {
+    let Some(from) = folder.head.take() else {
+        return Ok(());
+    };
+    debug!("list the head of the graph folder {mailbox} again, received from {from}");
+
+    let listed = listing
+        .items
+        .iter()
+        .map(|entry| entry.id.clone())
+        .chain(listing.vanished.iter().cloned())
+        .collect();
+    received(wire, folder, mailbox, &from, scope, held, listing, listed)
+}
+
+/// Lists into `listing` the messages of `scope` Graph received from `from`
+/// on, following the next links, each page read down as it comes, an id in
+/// `listed` once: a member the store binds by its flags, any other by its
+/// summary, which names it.
+#[allow(clippy::too_many_arguments)]
+fn received(
+    wire: &mut impl MailWire,
+    folder: &mut Folder,
+    mailbox: &str,
+    from: &str,
+    scope: &PimdirScope,
+    held: Held<'_>,
+    listing: &mut Listing,
+    mut listed: HashSet<String>,
+) -> Result<()> {
+    let mut page = wire.received_first(mailbox, from)?;
+    loop {
+        for message in page.value {
+            if message.id.is_empty()
+                || !in_scope(scope, &message)
+                || !listed.insert(message.id.clone())
+            {
+                continue;
+            }
+            if held.holds(&message.id) {
+                listing.bare(&message.id, Marks::of(&message));
+            } else {
+                listing.named(folder, message);
+            }
+        }
+        let Some(next) = page.next_link else {
+            return Ok(());
+        };
+        page = wire
+            .band_next(&next)?
+            .with_context(|| format!("Listing of {mailbox} by arrival expired"))?;
+    }
+}
+
+/// The instant a band head lists from: `since`, as the store stamped it
+/// (RFC 3339, `strftime('%Y-%m-%dT%H:%M:%fZ')`, or SQLite's plain
+/// `YYYY-MM-DD HH:MM:SS`, in UTC when it states no offset), less the
+/// margin, in UTC to the second as Graph's `$filter` reads it.
+fn received_floor(since: &str) -> Option<String> {
+    let since = since.trim();
+    let at = DateTime::parse_from_rfc3339(since)
+        .map(|at| at.to_utc())
+        .ok()
+        .or_else(|| {
+            ["%Y-%m-%dT%H:%M:%S%.f", "%Y-%m-%d %H:%M:%S%.f"]
+                .into_iter()
+                .find_map(|format| NaiveDateTime::parse_from_str(since, format).ok())
+                .map(|at| at.and_utc())
+        })?;
+    let from = at.checked_sub_signed(TimeDelta::days(HEAD_MARGIN_DAYS))?;
+    Some(from.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 /// What the pass keeps of the last row of a message: ids, dates and flags
@@ -398,6 +570,12 @@ enum Seen {
 /// batches when nothing names it, and not again when the band listed it
 /// this run with the marks it still has; a member the store binds or the
 /// band listed that the pass does not list is gone.
+///
+/// A member a band head named that the store did not bind when the run
+/// began is not held: the pass reads its summary, as it does any member
+/// the band did not list this run, so the round's last page lists it again
+/// as it owes (pimdir SYNC §4). Only a member a band page listed this run,
+/// with the marks it still has, is left out: that page stamped it.
 ///
 /// The pass runs within one request of the engine: resumed, it starts
 /// again, since what it did not list is what went. Its rows are read down
@@ -460,6 +638,7 @@ fn pass(
     gone.sort_unstable();
 
     folder.banded.clear();
+    folder.head = None;
     listing.read_metas(wire, folder, &unread, scope)?;
     for id in gone {
         listing.vanish(folder, id);
@@ -754,6 +933,36 @@ impl MailWire for GraphClient {
             .with_context(|| format!("List {mailbox} by date error"))
     }
 
+    /// Graph orders by `receivedDateTime` only when the `$filter` names it
+    /// first, which it does. The size `$expand`, refused once (400), is
+    /// asked no more by the session, the sizes then read before the bodies.
+    fn received_first(&mut self, mailbox: &str, from: &str) -> Result<MsgraphMessagesListResponse> {
+        let folder = self.folder_id(mailbox)?;
+        let filter = format!("receivedDateTime ge {from}");
+        let params = |expand: bool| MsgraphMessagesListParams {
+            top: Some(HEAD_PAGE_SIZE),
+            select: Some(SUMMARY_SELECT),
+            filter: Some(filter.as_str()),
+            orderby: Some("receivedDateTime desc"),
+            expand: expand.then_some(SIZE_EXPAND),
+            ..Default::default()
+        };
+
+        let expands = self.received_expands;
+        let first = self.op(|client| client.messages_list(Some(&folder), &params(expands)));
+        let first = match first {
+            Err(MsgraphClientStdError::Send(err)) if expands && err.status() == Some(400) => {
+                warn!(
+                    "graph refused the size $expand on the arrivals of {mailbox} ({err}), asking without it"
+                );
+                self.received_expands = false;
+                self.op(|client| client.messages_list(Some(&folder), &params(false)))
+            }
+            first => first,
+        };
+        first.with_context(|| format!("List {mailbox} by arrival error"))
+    }
+
     fn band_next(&mut self, link: &str) -> Result<Option<MsgraphMessagesListResponse>> {
         let url = Url::parse(link).context("Cannot parse the listing's next link")?;
         let page = self.op(|client: &mut MsgraphClientStd| {
@@ -872,8 +1081,8 @@ mod tests {
         load::PimdirLoadScope,
         placement::{PimdirHandle, PimdirLinkId, PimdirSortKey},
         remote::{
-            PimdirEnumerated, PimdirFetchedItem, PimdirPushResult, PimdirRemote, PimdirRemoteItem,
-            PimdirRemoteMeta, PimdirTier,
+            PimdirEnumerated, PimdirFetchedItem, PimdirHeads, PimdirPushResult, PimdirRemote,
+            PimdirRemoteItem, PimdirRemoteMeta, PimdirRemoteSnapshot, PimdirTier,
         },
         sync::{PimdirSync, PimdirSyncOptions},
     };
@@ -961,9 +1170,16 @@ mod tests {
     #[derive(Clone)]
     struct Message {
         sent: Option<String>,
+        /// When Graph received it, UTC to the second: long ago for the
+        /// folder a test starts with, now for an arrival.
+        received: String,
         read: bool,
         flagged: bool,
     }
+
+    /// When the folder a test starts with was received: before any round
+    /// a test opens, so no head lists it.
+    const LONG_AGO: &str = "2001-01-01T00:00:00Z";
 
     /// What the fake answered, by kind of request.
     #[derive(Clone, Debug, Default, PartialEq)]
@@ -982,6 +1198,10 @@ mod tests {
         delta_rows: usize,
         /// Summaries read.
         metas: usize,
+        /// Listings by arrival started, with the instant they list from.
+        received: Vec<String>,
+        /// Messages a listing by arrival listed.
+        received_rows: usize,
     }
 
     /// A Graph mail folder in memory: band listings by `sentDateTime`,
@@ -1010,10 +1230,21 @@ mod tests {
         }
 
         fn add(&mut self, id: &str, sent: Option<&str>) {
+            self.received(id, sent, LONG_AGO);
+        }
+
+        /// A message Graph receives now, as a round goes on.
+        fn arrive(&mut self, id: &str, sent: &str) {
+            let now = chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+            self.received(id, Some(sent), &now);
+        }
+
+        fn received(&mut self, id: &str, sent: Option<&str>, received: &str) {
             self.messages.insert(
                 id.to_owned(),
                 Message {
                     sent: sent.map(String::from),
+                    received: received.to_owned(),
                     read: false,
                     flagged: false,
                 },
@@ -1037,6 +1268,7 @@ mod tests {
             let mut row = serde_json::json!({
                 "id": id,
                 "sentDateTime": message.sent,
+                "receivedDateTime": message.received,
                 "isRead": message.read,
                 "isDraft": false,
                 "flag": { "flagStatus": if message.flagged { "flagged" } else { "notFlagged" } },
@@ -1089,6 +1321,28 @@ mod tests {
             MsgraphMessagesListResponse { value, next_link }
         }
 
+        /// A page of the messages received from `from` on, newest first,
+        /// from `offset`, as Graph's `$filter` and `$orderby` on
+        /// `receivedDateTime` answer them.
+        fn received_page(&mut self, from: &str, offset: usize) -> MsgraphMessagesListResponse {
+            let mut ids: Vec<(&String, &String)> = self
+                .messages
+                .iter()
+                .filter(|(_, message)| message.received.as_str() >= from)
+                .map(|(id, message)| (&message.received, id))
+                .collect();
+            ids.sort();
+            let ids: Vec<String> = ids.into_iter().rev().map(|(_, id)| id.clone()).collect();
+            let end = (offset + self.page).min(ids.len());
+            let value: Vec<MsgraphMessage> = ids[offset..end]
+                .iter()
+                .map(|id| self.row(id, true))
+                .collect();
+            self.counts.received_rows += value.len();
+            let next_link = (end < ids.len()).then(|| format!("received|{from}|{end}"));
+            MsgraphMessagesListResponse { value, next_link }
+        }
+
         /// A page of `ids` from `offset`, with the link to the next one or,
         /// last, the delta link at the current version.
         fn delta_page(
@@ -1137,8 +1391,20 @@ mod tests {
             Ok(self.band_page(band.clone(), 0))
         }
 
+        fn received_first(
+            &mut self,
+            _mailbox: &str,
+            from: &str,
+        ) -> Result<MsgraphMessagesListResponse> {
+            self.counts.received.push(from.to_owned());
+            Ok(self.received_page(from, 0))
+        }
+
         fn band_next(&mut self, link: &str) -> Result<Option<MsgraphMessagesListResponse>> {
             let parts: Vec<&str> = link.split('|').collect();
+            if parts[0] == "received" {
+                return Ok(Some(self.received_page(parts[1], parts[2].parse()?)));
+            }
             let bound = |text: &str| (!text.is_empty()).then(|| text.to_owned());
             let band = PimdirScope {
                 since: bound(parts[1]),
@@ -1219,6 +1485,8 @@ mod tests {
         /// Run between two enumerations, once, before the one numbered by
         /// its key.
         between: Option<(usize, Change)>,
+        /// The heads the remote states, none unless a test lists them.
+        heads: PimdirHeads,
     }
 
     impl Remote {
@@ -1233,6 +1501,7 @@ mod tests {
                 requests: Vec::new(),
                 fail_at: None,
                 between: None,
+                heads: PimdirHeads::NONE,
             }
         }
     }
@@ -1296,6 +1565,11 @@ mod tests {
             keep_in_scope(&mut items, &request.scope);
             let vanished = page.vanished.into_iter().map(PimdirHandle).collect();
 
+            if let Some(PimdirHead::Band { .. }) = request.head() {
+                return Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::band_head(
+                    items,
+                )));
+            }
             Ok(PimdirEnumerated::Page(snapshot(
                 page.complete,
                 page.cursor,
@@ -1324,6 +1598,10 @@ mod tests {
 
         fn scope_bound(&self) -> bool {
             false
+        }
+
+        fn heads(&self) -> PimdirHeads {
+            self.heads
         }
     }
 
@@ -1362,7 +1640,8 @@ mod tests {
         };
         let verb = PimdirSync::new(COLLECTION, opts)
             .beside_other_sources(true)
-            .scope_bound(false);
+            .scope_bound(false)
+            .heads(remote.heads);
         run_verb(store, remote, verb).map(|_| ())
     }
 
@@ -1716,6 +1995,261 @@ mod tests {
         assert!(remote.folder.banded.is_empty(), "dropped with the pass");
         let coverage = store.list_coverage(COLLECTION).unwrap();
         assert!(coverage[0].round.is_none(), "the round closed");
+    }
+
+    // --- heads ------------------------------------------------------------
+
+    /// When the open round of the folder opened, as the store stamped it.
+    fn started_at(store: &PimdirSourceStore) -> String {
+        store.list_coverage(COLLECTION).unwrap()[0]
+            .round
+            .as_ref()
+            .expect("a round is open")
+            .started_at
+            .clone()
+    }
+
+    fn round_open(store: &PimdirSourceStore) -> bool {
+        store.list_coverage(COLLECTION).unwrap()[0].round.is_some()
+    }
+
+    fn band_head(since: &str) -> PimdirListing {
+        PimdirListing::Head(PimdirHead::Band {
+            since: since.to_owned(),
+        })
+    }
+
+    /// A band head lists from two days before the instant the store
+    /// stamped, however the store wrote it; one that reads as no instant
+    /// lists none, and Graph lists no delta head.
+    #[test]
+    fn a_band_head_lists_from_two_days_before_the_round_opened() {
+        for since in [
+            "2026-10-13T10:00:00.000Z",
+            "2026-10-13T10:00:00Z",
+            "2026-10-13T12:00:00+02:00",
+            "2026-10-13 10:00:00",
+            "2026-10-13 10:00:00.250",
+            "2026-10-13T10:00:00.250",
+        ] {
+            assert_eq!(
+                received_floor(since).as_deref(),
+                Some("2026-10-11T10:00:00Z"),
+                "{since}"
+            );
+        }
+        assert_eq!(received_floor("soon"), None);
+
+        let mut graph = folder();
+        let mut folder = Folder::default();
+        let handles = HashSet::new();
+        let held = || Held {
+            handles: &handles,
+            checkpoint: None,
+            coverage: None,
+        };
+        for listing in [
+            band_head("soon"),
+            PimdirListing::Head(PimdirHead::Delta(io_pimdir::collection::PimdirCheckpoint(
+                b"summary delta|summary|0".to_vec(),
+            ))),
+        ] {
+            let request = PimdirEnumerate {
+                listing,
+                scope: PimdirScope::unbounded(),
+            };
+            assert!(matches!(
+                enumerate(&mut graph, &mut folder, "INBOX", &request, held()).unwrap(),
+                Listed::NoHead
+            ));
+        }
+        assert_eq!(graph.counts, Counts::default(), "nothing is asked of Graph");
+        assert_eq!(folder.head, None);
+    }
+
+    /// A whole-folder round resumed lists its head first, from two days
+    /// before it opened: what arrived since lands at once, before the
+    /// round's next page. The round's later pages never list it (an
+    /// arrival sorting before their position, as a delta round's initial
+    /// listing would not), so its last page lists the head again after the
+    /// delta link: what is still there is kept when the round closes, a
+    /// member a head named and that went before the last page is found
+    /// absent.
+    #[test]
+    fn a_whole_folder_round_lists_its_head_and_its_last_page_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut remote = Remote::new(folder());
+        remote.heads = PimdirHeads::BAND;
+
+        remote.fail_at = Some(2);
+        sync(&mut store, &mut remote, PimdirScope::unbounded()).unwrap_err();
+        assert_eq!(stored(&store).len(), 6, "two pages of three landed");
+        assert!(
+            remote.graph.counts.received.is_empty(),
+            "a run opening the round lists no head"
+        );
+        let since = started_at(&store);
+
+        // NOTE: `0-…` sorts before the round's position, so no later page
+        // of the round lists it; `zz-…` after it, and goes before the
+        // round's pages reach it.
+        remote.graph.arrive("0-fresh", "2026-10-12T08:00:00Z");
+        remote.graph.arrive("zz-brief", "2026-10-12T09:00:00Z");
+        let first = remote.requests.len();
+        remote.fail_at = Some(first + 2);
+        sync(&mut store, &mut remote, PimdirScope::unbounded()).unwrap_err();
+
+        assert_eq!(remote.requests[first].listing, band_head(&since));
+        assert!(remote.requests[first + 1].cursor().is_some());
+        assert_eq!(
+            remote.graph.counts.received,
+            [received_floor(&since).unwrap()],
+            "the head lists from two days before the round opened",
+        );
+        let landed = stored(&store);
+        assert!(landed.contains("0-fresh"), "the arrival shows at once");
+        assert!(landed.contains("zz-brief"));
+        assert!(round_open(&store));
+
+        remote.graph.delete("zz-brief");
+        remote.graph.arrive("0-late", "2026-10-12T10:00:00Z");
+        let first = remote.requests.len();
+        sync(&mut store, &mut remote, PimdirScope::unbounded()).unwrap();
+
+        assert_eq!(remote.requests[first].listing, band_head(&since));
+        let mut expected = months(&["2026-03", "2026-06", "2026-07", "2026-09"]);
+        expected.insert("0-fresh".into());
+        expected.insert("0-late".into());
+        assert_eq!(
+            stored(&store),
+            expected,
+            "the last page keeps what a head named, the one gone is absent"
+        );
+        assert_eq!(
+            remote.graph.counts.received.len(),
+            3,
+            "the head of each run resuming the round, and the last page's",
+        );
+        assert!(!round_open(&store), "the round closed");
+        assert!(checkpoint(&store).unwrap().starts_with(b"summary "));
+        assert_eq!(remote.folder.head, None, "the last page owes nothing more");
+
+        let requests = remote.requests.len();
+        sync(&mut store, &mut remote, PimdirScope::unbounded()).unwrap();
+        assert!(matches!(
+            remote.requests[requests].listing,
+            PimdirListing::Delta(_)
+        ));
+        assert_eq!(stored(&store), expected, "the next delta keeps them");
+    }
+
+    /// Under a scope, the head lands an arrival before the band's next
+    /// page; the band never lists it (it sorts above the band's position),
+    /// and the pass closing the round does: a member the store bound when
+    /// the run began by its flags, one the head named this run by a
+    /// summary read, the band not having listed it. A member a head named
+    /// that went before the pass is found absent.
+    #[test]
+    fn a_scoped_round_lists_its_head_and_its_pass_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut remote = Remote::new(folder());
+        remote.heads = PimdirHeads::BAND;
+        let scope = since("2026-07-01");
+
+        remote.fail_at = Some(2);
+        sync(&mut store, &mut remote, scope.clone()).unwrap_err();
+        let since = started_at(&store);
+
+        // NOTE: the band lists newest first: `fresh` sorts above its
+        // position, `brief` below it, and goes before the band reaches it.
+        remote.graph.arrive("fresh", "2026-10-12T08:00:00Z");
+        remote.graph.arrive("brief", "2026-07-01T05:00:00Z");
+        let first = remote.requests.len();
+        remote.fail_at = Some(first + 2);
+        sync(&mut store, &mut remote, scope.clone()).unwrap_err();
+
+        assert_eq!(remote.requests[first].listing, band_head(&since));
+        let landed = stored(&store);
+        assert!(landed.contains("fresh") && landed.contains("brief"));
+
+        remote.graph.delete("brief");
+        remote.graph.arrive("late", "2026-10-12T10:00:00Z");
+        let metas = remote.graph.counts.metas;
+        let first = remote.requests.len();
+        sync(&mut store, &mut remote, scope.clone()).unwrap();
+
+        assert_eq!(remote.requests[first].listing, band_head(&since));
+        assert_eq!(
+            remote.graph.counts.received.len(),
+            2,
+            "a head a run; the pass lists the whole scope already"
+        );
+        assert_eq!(
+            remote.graph.counts.metas - metas,
+            2,
+            "the undated message and the arrival the head named this run"
+        );
+        let mut expected = months(&["2026-07", "2026-09"]);
+        expected.insert("fresh".into());
+        expected.insert("late".into());
+        assert_eq!(stored(&store), expected);
+        assert!(!round_open(&store), "the round closed");
+        assert_eq!(remote.folder.head, None);
+    }
+
+    /// A round widening the scope lists the band the coverage lacks; its
+    /// head lists by arrival over the run's scope, and its last band page
+    /// lists again what that head lists in the band: an arrival dated in
+    /// the band above the band's position, which no band page lists, is
+    /// kept when the round closes, one gone before it is found absent.
+    #[test]
+    fn a_band_round_lists_its_head_and_its_last_page_keeps_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut remote = Remote::new(folder());
+        remote.heads = PimdirHeads::BAND;
+        sync(&mut store, &mut remote, since("2026-09-01")).unwrap();
+        let link = checkpoint(&store).unwrap();
+
+        let first = remote.requests.len();
+        remote.fail_at = Some(first + 2);
+        sync(&mut store, &mut remote, since("2026-06-01")).unwrap_err();
+        assert!(matches!(
+            remote.requests[first].listing,
+            PimdirListing::Round { band: true, .. }
+        ));
+        let since_round = started_at(&store);
+
+        // NOTE: the band lists July then June, newest first: `old` sorts
+        // above its position, `gone` below it.
+        remote.graph.arrive("old", "2026-07-09T12:00:00Z");
+        remote.graph.arrive("gone", "2026-06-01T05:00:00Z");
+        let first = remote.requests.len();
+        remote.fail_at = Some(first + 2);
+        sync(&mut store, &mut remote, since("2026-06-01")).unwrap_err();
+        assert_eq!(remote.requests[first].listing, band_head(&since_round));
+        assert_eq!(
+            remote.requests[first].scope,
+            since("2026-06-01"),
+            "the run's scope"
+        );
+        let landed = stored(&store);
+        assert!(landed.contains("old") && landed.contains("gone"));
+
+        remote.graph.delete("gone");
+        let first = remote.requests.len();
+        sync(&mut store, &mut remote, since("2026-06-01")).unwrap();
+
+        assert_eq!(remote.requests[first].listing, band_head(&since_round));
+        let mut expected = months(&["2026-06", "2026-07", "2026-09"]);
+        expected.insert("old".into());
+        assert_eq!(stored(&store), expected);
+        assert_eq!(remote.graph.counts.received.len(), 3);
+        assert!(!round_open(&store), "the round closed");
+        assert_eq!(checkpoint(&store), Some(link), "the band keeps the link");
+        assert_eq!(coverage(&store), Some(since("2026-06-01")));
     }
 
     /// What a pass or a delta keeps of a message while it follows the

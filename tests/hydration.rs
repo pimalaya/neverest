@@ -615,6 +615,128 @@ fn a_listed_run_leaves_the_backlog_owed() {
     imap(&format!("DELETE {folder}"));
 }
 
+/// Messages expunged between the listing and the download of their
+/// bodies leave the run complete, their members kept as listed; the next
+/// run's listing takes them away and asks for nothing.
+///
+/// Over one connection, phase 2 downloads the largest bodies first, a
+/// batch of 64 at a time: the tail of small messages sits in the second
+/// batch, expunged while the first downloads.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
+fn a_body_gone_mid_run_is_owed_nothing() {
+    const HEADS: usize = 70;
+    const TAILS: usize = 3;
+
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let id = std::process::id();
+    let folder = format!("Gone{id}");
+    let line = "x".repeat(76);
+    let large: String = (0..BODY / 78).map(|_| format!("{line}\r\n")).collect();
+    imap(&format!("CREATE {folder}"));
+    let message = |n: usize, body: &str| {
+        format!(
+            "Message-ID: <gone-{id}-{n:04}@pimalaya.org>\r\n\
+             From: alice@pimalaya.org\r\n\
+             To: bob@pimalaya.org\r\n\
+             Subject: neverest gone {n}\r\n\
+             Date: Sun, 04 Oct 2026 10:{:02}:00 +0000\r\n\
+             \r\n\
+             {body}",
+            n % 60,
+        )
+    };
+    // NOTE: twenty a command, under the server's request size.
+    let messages: Vec<String> = (0..HEADS)
+        .map(|n| message(n, &large))
+        .chain((HEADS..HEADS + TAILS).map(|n| message(n, "small\r\n")))
+        .collect();
+    for chunk in messages.chunks(20) {
+        append_all(&folder, chunk.iter().cloned());
+    }
+    let folders = [folder.clone()];
+    let config = prime_config(root, "gone", &folders);
+    let store = root.join("gone");
+
+    let mut run = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &config.to_string_lossy()])
+        .args(["sync", "-a", "gone", "-j", "1"])
+        .stdout(Stdio::null())
+        .stderr(fs::File::create(root.join("stderr")).unwrap())
+        .spawn()
+        .expect("spawn neverest");
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while items(&store, &folder).len() < HEADS + TAILS {
+        assert!(
+            Instant::now() < deadline,
+            "the listing did not land in time"
+        );
+        assert!(run.try_wait().unwrap().is_none(), "the run ended early");
+        thread::sleep(Duration::from_millis(1));
+    }
+    // NOTE: the UIDs follow the appends, the tail last.
+    let tail = format!("{}:{}", HEADS + 1, HEADS + TAILS);
+    imap_in(&folder, &format!("UID STORE {tail} +FLAGS (\\Deleted)"));
+    imap_in(&folder, "EXPUNGE");
+    let status = run.wait().unwrap();
+    assert!(
+        status.success(),
+        "a body gone fails no run:\n{}",
+        fs::read_to_string(root.join("stderr")).unwrap_or_default()
+    );
+
+    let held = items(&store, &folder);
+    assert_eq!(held.len(), HEADS + TAILS, "the gone members stay as listed");
+    assert!(
+        (0..HEADS).all(|n| has_body_of_tag(&held, "gone", id, n)),
+        "every other body is stored"
+    );
+    assert!(
+        (HEADS..HEADS + TAILS).all(|n| !has_body_of_tag(&held, "gone", id, n)),
+        "the tail was expunged before its batch (raise HEADS if the run outran the expunge)"
+    );
+
+    let report = neverest(&["--json", "sync", "-a", "gone"], &config);
+    let report: serde_json::Value = serde_json::from_str(&report).expect("a JSON report");
+    let fetched = report["item"]["patch"]
+        .as_array()
+        .expect("item patch")
+        .iter()
+        .filter(|entry| entry["hunk"]["kind"] == "fetch")
+        .count();
+    assert_eq!(fetched, 0, "nothing asked again: {report}");
+    let held = items(&store, &folder);
+    assert_eq!(held.len(), HEADS, "the listing took the gone members away");
+    assert!(held.iter().all(|item| item.object.is_some()));
+
+    imap(&format!("DELETE {folder}"));
+}
+
+/// Runs one IMAP command in `folder`, failing the test if it fails.
+fn imap_in(folder: &str, command: &str) {
+    let output = Command::new("curl")
+        .args(["-fsS", "--user", CRED])
+        .arg(format!("{SERVER}/{folder}"))
+        .args(["-X", command])
+        .output()
+        .expect("spawn curl");
+    assert!(output.status.success(), "IMAP `{command}` failed");
+}
+
+/// Whether message `n` of a test tagged `tag` is held with its body.
+fn has_body_of_tag(
+    items: &[io_pimdir::client::reader::PimdirItem],
+    tag: &str,
+    id: u32,
+    n: usize,
+) -> bool {
+    let suffix = format!("{tag}-{id}-{n:04}@pimalaya.org");
+    items
+        .iter()
+        .any(|item| item.link_id.0.contains(&suffix) && item.object.is_some())
+}
+
 /// Whether message `n` of the listed test is held with its body.
 fn has_body_of(items: &[io_pimdir::client::reader::PimdirItem], id: u32, n: usize) -> bool {
     let suffix = format!("listed-{id}-{n:04}@pimalaya.org");

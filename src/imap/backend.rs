@@ -43,7 +43,7 @@ use log::debug;
 use rfc2047_decoder::{Decoder, RecoverStrategy};
 
 use crate::{
-    client::{EnumEntry, Enumeration, Held, Listed},
+    client::{EnumEntry, Enumeration, Gone, Held, Listed},
     imap::client::{ImapClient, RoundUids},
     item::{
         address::Address,
@@ -462,7 +462,10 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Streams a UID set's bodies in one batched `UID FETCH … (BODY.PEEK[])`.
+    /// Streams a UID set's bodies in one batched `UID FETCH … (BODY.PEEK[])`,
+    /// and answers the UIDs the server answered nothing for: a `UID FETCH`
+    /// ignores a UID the mailbox no longer holds (RFC 9051 §6.4.9), so a
+    /// command that completes leaves out exactly the messages gone.
     ///
     /// One SELECT and one FETCH for the whole set, and no body lands in memory
     /// whole. Named apart from the inner `fetch_bodies_stream` reached through
@@ -473,26 +476,38 @@ impl ImapClient {
         ids: &[&str],
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let sequence_set = parse_uids(ids)?;
         self.select_cached(mailbox)?;
+        let mut answered = BTreeSet::new();
         self.fetch_bodies_stream(
             sequence_set,
             true,
             |uid| open(&uid.to_string()),
-            |uid, sink| done(&uid.to_string(), None, sink),
+            |uid, sink| {
+                answered.insert(uid);
+                done(&uid.to_string(), None, sink)
+            },
         )
         .with_context(|| format!("Batched body fetch {mailbox} error"))?;
-        Ok(())
+        Ok(ids
+            .iter()
+            .filter(|id| id.parse::<u32>().is_ok_and(|uid| !answered.contains(&uid)))
+            .map(|id| id.to_string())
+            .collect())
     }
 
     /// Streams one message's raw RFC 5322 bytes into `sink` without flipping
-    /// `\Seen` (BODY.PEEK[]).
+    /// `\Seen` (BODY.PEEK[]); a UID answered with nothing is [`Gone`].
     pub fn get_message_stream(&mut self, mailbox: &str, id: &str, sink: impl Write) -> Result<()> {
         let uid: NonZeroU32 = id.parse().map_err(|_| anyhow!("Invalid IMAP UID {id}"))?;
 
         self.select_cached(mailbox)?;
-        self.fetch_body_stream(uid, true, sink)?;
+        let mut sink = Counted { sink, octets: 0 };
+        self.fetch_body_stream(uid, true, &mut sink)?;
+        if sink.octets == 0 {
+            return Err(anyhow::Error::new(Gone(format!("UID {id} in {mailbox}"))));
+        }
         Ok(())
     }
 
@@ -1063,6 +1078,24 @@ fn parse_mailbox(name: &str) -> Result<ImapMailbox<'static>> {
     String::from(name)
         .try_into()
         .map_err(|_| anyhow!("Invalid IMAP mailbox {name}"))
+}
+
+/// A sink counting the octets written through it.
+struct Counted<W> {
+    sink: W,
+    octets: u64,
+}
+
+impl<W: Write> Write for Counted<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.sink.write(buf)?;
+        self.octets += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.sink.flush()
+    }
 }
 
 /// Parses stringified UIDs into an IMAP [`SequenceSet`].

@@ -234,22 +234,32 @@ impl GraphClient {
     }
 
     /// Streams the iCalendar objects of an id set, each committed with its
-    /// master's `changeKey`.
+    /// master's `changeKey`; answers the events Graph answered 404, gone
+    /// since they were listed.
     pub(super) fn fetch_events<S: Write>(
         &mut self,
         ids: &[&str],
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
+        let mut gone = Vec::new();
         for id in ids {
-            let (ical, revision) = self.calendar_item(id)?;
+            let (ical, revision) = match self.calendar_item(id) {
+                Ok(item) => item,
+                Err(err) if chain_not_found(&err) => {
+                    debug!("event {id} gone before it was read");
+                    gone.push(id.to_string());
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             let mut sink = open(id).with_context(|| format!("Open body sink for {id} error"))?;
             sink.write_all(ical.as_bytes())
                 .with_context(|| format!("Store event {id} error"))?;
             done(id, revision.as_deref(), sink)
                 .with_context(|| format!("Commit event {id} error"))?;
         }
-        Ok(())
+        Ok(gone)
     }
 
     /// Streams one item's iCalendar object into `sink`, returning its

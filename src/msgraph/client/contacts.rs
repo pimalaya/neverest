@@ -198,22 +198,32 @@ impl GraphClient {
     }
 
     /// Streams the vCards of an id set, one read per contact, each committed
-    /// with the `changeKey` it was projected from.
+    /// with the `changeKey` it was projected from; answers the contacts
+    /// Graph answered 404, gone since they were listed.
     pub(super) fn fetch_contacts<S: Write>(
         &mut self,
         ids: &[&str],
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
+        let mut gone = Vec::new();
         for id in ids {
-            let contact = self.contact(id)?;
+            let contact = match self.contact(id) {
+                Ok(contact) => contact,
+                Err(err) if chain_not_found(&err) => {
+                    debug!("contact {id} gone before it was read");
+                    gone.push(id.to_string());
+                    continue;
+                }
+                Err(err) => return Err(err),
+            };
             let mut sink = open(id).with_context(|| format!("Open body sink for {id} error"))?;
             sink.write_all(contact.to_vcard().as_bytes())
                 .with_context(|| format!("Store contact {id} error"))?;
             done(id, contact.change_key.as_deref(), sink)
                 .with_context(|| format!("Commit contact {id} error"))?;
         }
-        Ok(())
+        Ok(gone)
     }
 
     /// Streams one contact's vCard into `sink`, returning its `changeKey`.

@@ -77,7 +77,7 @@ use url::Url;
 
 use self::wire::{Connect, Exchange, Shared, Watched};
 use crate::{
-    client::{Held, Listed, WrittenItem},
+    client::{Gone, Held, Listed, StoredSize, WrittenItem},
     item::{
         collection::Collection,
         flag::{Flag, FlagOp, IanaFlag},
@@ -422,33 +422,41 @@ impl GraphClient {
     }
 
     /// Streams the bodies of an id set into a sink `open`ed and `done` per
-    /// item, `done` receiving the revision on contacts.
+    /// item, `done` receiving the revision on contacts, and answers the ids
+    /// Graph answered 404, gone since they were listed. `sizes` is what the
+    /// store records of each message.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         collection: &str,
         ids: &[&str],
+        sizes: StoredSize<'_>,
         open: impl FnMut(&str) -> std::io::Result<S>,
         done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         match self.kind {
-            GraphKind::Mail => self.fetch_messages(collection, ids, open, done),
+            GraphKind::Mail => self.fetch_messages(collection, ids, sizes, open, done),
             GraphKind::Contacts => self.fetch_contacts(ids, open, done),
             GraphKind::Calendar => self.fetch_events(ids, open, done),
         }
     }
 
-    /// Streams one item into `sink`, returning its revision on contacts.
+    /// Streams one item into `sink`, returning its revision on contacts;
+    /// one Graph answers 404 fails with [`Gone`].
     pub fn get_item_stream(
         &mut self,
         collection: &str,
         id: &str,
         sink: impl Write,
     ) -> Result<Option<String>> {
-        match self.kind {
+        let read = match self.kind {
             GraphKind::Mail => self.get_message_stream(collection, id, sink).map(|()| None),
             GraphKind::Contacts => self.get_contact_stream(id, sink),
             GraphKind::Calendar => self.get_event_stream(id, sink),
-        }
+        };
+        read.map_err(|err| match chain_not_found(&err) {
+            true => err.context(Gone(id.to_owned())),
+            false => err,
+        })
     }
 
     /// Creates an item; a message lands in Drafts only, with `flags`.
@@ -639,34 +647,45 @@ impl GraphClient {
     /// is decoded, in requests planned by the size Graph states for each
     /// ([`plan`]): JSON batches of up to [`MSGRAPH_BATCH_MAX_REQUESTS`] raw
     /// MIME gets and [`BATCH_BYTES`] stated, a message past [`ALONE_BYTES`]
-    /// or of no stated size read alone. Sizes the listings of the run did
-    /// not state are asked for first, twenty ids a batch, when more than one
-    /// message lacks one.
+    /// or of no stated size read alone. A size neither the listings of the
+    /// run nor the store (`stored`) state is asked for first, twenty ids a
+    /// batch, when more than one message lacks one.
     ///
-    /// A body still missing after [`batch_get`](Self::batch_get)'s retries,
-    /// refused for another reason, or failing alone, is left out: the
-    /// caller fetches every handle the fetch did not answer one by one,
-    /// which surfaces its error.
+    /// Answers the messages Graph answered 404, gone since they were
+    /// listed. A body still missing after [`batch_get`](Self::batch_get)'s
+    /// retries, refused for another reason, or failing alone, is left out:
+    /// the caller fetches every handle the fetch did not answer one by
+    /// one, which surfaces its error.
     fn fetch_messages<S: Write>(
         &mut self,
         _mailbox: &str,
         ids: &[&str],
+        stored: StoredSize<'_>,
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let user = user_path(&self.inner.user_id);
 
+        // NOTE: the session's own size first, which also takes it out of
+        // the shared hints, then the store's, a resumed hydration's.
         let mut sizes: HashMap<&str, u64> = ids
             .iter()
-            .filter_map(|id| Some((*id, self.sizes.take(id)?)))
+            .filter_map(|id| {
+                let size = self
+                    .sizes
+                    .take(id)
+                    .or_else(|| stored(id).filter(|size| *size > 0))?;
+                Some((*id, size))
+            })
             .collect();
         let unstated: Vec<&str> = ids
             .iter()
             .copied()
             .filter(|id| !sizes.contains_key(id))
             .collect();
+        let mut gone: Vec<String> = Vec::new();
         if unstated.len() > 1 {
-            sizes.extend(self.stated_sizes(&unstated));
+            sizes.extend(self.stated_sizes(&unstated, &mut gone));
         }
 
         let mut commit = |id: &str, raw: &[u8]| -> Result<()> {
@@ -676,10 +695,19 @@ impl GraphClient {
             done(id, None, sink).with_context(|| format!("Commit body {id} error"))
         };
 
-        for fetch in plan(ids, |id| sizes.get(id).copied()) {
+        let asked: Vec<&str> = ids
+            .iter()
+            .copied()
+            .filter(|id| !gone.iter().any(|gone| gone == id))
+            .collect();
+        for fetch in plan(&asked, |id| sizes.get(id).copied()) {
             match fetch {
                 Fetch::Alone(id) => match self.message_raw(id) {
                     Ok(raw) => commit(id, &raw)?,
+                    Err(err) if chain_not_found(&err) => {
+                        debug!("message {id} gone before its body was read");
+                        gone.push(id.to_owned());
+                    }
                     Err(err) => debug!("body of {id} not read alone, left out: {err:#}"),
                 },
                 Fetch::Batch(batch) => {
@@ -703,17 +731,22 @@ impl GraphClient {
                         batch.len(),
                         answer.held,
                     );
+                    gone.extend(answer.gone.iter().map(|id| id.to_string()));
                 }
             }
         }
 
-        Ok(())
+        Ok(gone)
     }
 
     /// The size Graph states for each of `ids`, read twenty a batch with
     /// the id alone; a message stating none, or a batch that failed, is
-    /// left out (read alone).
-    fn stated_sizes<'a>(&mut self, ids: &[&'a str]) -> HashMap<&'a str, u64> {
+    /// left out (read alone), and one Graph answers 404 is added to `gone`.
+    fn stated_sizes<'a>(
+        &mut self,
+        ids: &[&'a str],
+        gone: &mut Vec<String>,
+    ) -> HashMap<&'a str, u64> {
         let user = user_path(&self.inner.user_id);
         let mut sizes = HashMap::with_capacity(ids.len());
 
@@ -735,11 +768,12 @@ impl GraphClient {
                     Ok(())
                 },
             );
-            if let Err(err) = asked {
-                debug!(
+            match asked {
+                Ok(answer) => gone.extend(answer.gone.iter().map(|id| id.to_string())),
+                Err(err) => debug!(
                     "sizes of {} messages not read, each read alone: {err:#}",
                     chunk.len()
-                );
+                ),
             }
         }
 
@@ -2003,6 +2037,7 @@ mod tests {
             .fetch_messages(
                 "Inbox",
                 &["m0"],
+                &|_| None,
                 |_| Ok(Vec::new()),
                 |id, _, sink: Vec<u8>| {
                     bodies.push((id.to_owned(), sink));
@@ -2257,6 +2292,7 @@ mod tests {
             .fetch_messages(
                 "Inbox",
                 &["m0", "big", "m1", "m2"],
+                &|_| None,
                 |_| Ok(Vec::new()),
                 |id, _, sink: Vec<u8>| {
                     bodies.push((id.to_owned(), sink));
@@ -2312,6 +2348,7 @@ mod tests {
             .fetch_messages(
                 "Inbox",
                 &["m0", "m1", "m2", "m3"],
+                &|_| None,
                 |_| Ok(Vec::new()),
                 |id, _, _: Vec<u8>| {
                     fetched.push(id.to_owned());
@@ -2337,6 +2374,113 @@ mod tests {
             ),
             "{written}"
         );
+    }
+
+    /// The sizes the store records plan the batches of a resumed
+    /// hydration: no size is asked first.
+    #[test]
+    fn the_sizes_the_store_records_spare_the_size_batch() {
+        let body = |id: &str| format!("Subject: {id}\r\n\r\n{id}").into_bytes();
+        let bodies = serde_json::json!({ "responses": [
+            { "id": "0", "status": 200, "body": STANDARD.encode(body("m0")) },
+            { "id": "1", "status": 200, "body": STANDARD.encode(body("m1")) },
+        ]});
+        let (mut client, server) = session(vec![vec![Step::ok(bodies)]]);
+
+        let stored = |id: &str| Some(if id == "m0" { 100 } else { 200 });
+        let mut fetched = Vec::new();
+        let gone = client
+            .fetch_messages(
+                "Inbox",
+                &["m0", "m1"],
+                &stored,
+                |_| Ok(Vec::new()),
+                |id, _, _: Vec<u8>| {
+                    fetched.push(id.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(fetched, ["m0", "m1"]);
+        assert!(gone.is_empty());
+        assert_eq!(lines(&server)[0], ["POST /v1.0/$batch"], "the bodies alone");
+    }
+
+    /// A message Graph answers 404, asked its size, in a batch or alone,
+    /// is answered gone, and the fetch goes on.
+    #[test]
+    fn a_message_gone_is_answered_gone() {
+        let body = |id: &str| format!("Subject: {id}\r\n\r\n{id}").into_bytes();
+        let missing = || serde_json::json!({ "error": { "code": "ErrorItemNotFound" } });
+        let sizes = serde_json::json!({ "responses": [
+            { "id": "0", "status": 404, "body": missing() },
+            { "id": "1", "status": 200, "body": size_row("m3", 100) },
+        ]});
+        let bodies = serde_json::json!({ "responses": [
+            { "id": "0", "status": 200, "body": STANDARD.encode(body("m3")) },
+            { "id": "1", "status": 404, "body": missing() },
+            { "id": "2", "status": 200, "body": STANDARD.encode(body("m2")) },
+        ]});
+        let (mut client, server) = session(vec![vec![
+            Step::ok(sizes),
+            Step::error(404, "ErrorItemNotFound"),
+            Step::ok(bodies),
+        ]]);
+
+        // NOTE: m0 and m3 state no size, so theirs are asked first; m0 is
+        // gone there, m1 in the body batch, m4 read alone (past 1 MiB).
+        let stored = |id: &str| match id {
+            "m1" | "m2" => Some(100),
+            "m4" => Some(2 * 1024 * 1024),
+            _ => None,
+        };
+        let mut fetched = Vec::new();
+        let gone = client
+            .fetch_messages(
+                "Inbox",
+                &["m0", "m3", "m1", "m2", "m4"],
+                &stored,
+                |_| Ok(Vec::new()),
+                |id, _, _: Vec<u8>| {
+                    fetched.push(id.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let mut gone = gone;
+        gone.sort();
+        assert_eq!(gone, ["m0", "m1", "m4"]);
+        assert_eq!(fetched, ["m3", "m2"]);
+        let mut asked = lines(&server)[0].clone();
+        asked.sort();
+        assert_eq!(
+            asked,
+            [
+                "GET /v1.0/me/messages/m4/$value",
+                "POST /v1.0/$batch",
+                "POST /v1.0/$batch",
+            ]
+        );
+    }
+
+    /// A message read alone and answered 404 is [`Gone`]; another refusal
+    /// is not.
+    #[test]
+    fn a_message_read_alone_and_gone_is_gone() {
+        let (mut client, _server) = session(vec![vec![
+            Step::error(404, "ErrorItemNotFound"),
+            Step::error(403, "ErrorAccessDenied"),
+        ]]);
+        let err = client
+            .get_item_stream("Inbox", "m1", Vec::new())
+            .unwrap_err();
+        assert!(Gone::is(&err), "{err:#}");
+        let err = client
+            .get_item_stream("Inbox", "m1", Vec::new())
+            .unwrap_err();
+        assert!(!Gone::is(&err), "{err:#}");
     }
 
     /// Each throttled get of a batch waits its own `Retry-After`: one asking

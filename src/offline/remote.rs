@@ -42,12 +42,12 @@ use io_pimdir::{
     },
     summary::{PimdirDerivation, PimdirSummary},
 };
-use log::warn;
+use log::{debug, warn};
 
 #[cfg(feature = "dav")]
 use crate::dav::client::is_duplicate_uid;
 use crate::{
-    client::{Client, EnumEntry, Held, Listed, Pool, WrittenItem},
+    client::{Client, EnumEntry, Gone, Held, Listed, Pool, StoredSize, WrittenItem},
     item::{
         flag::{Flag, FlagOp},
         summary::ItemSummary,
@@ -837,7 +837,8 @@ impl PimRemote<'_> {
     }
 
     /// The bodies of [`fetch_full`](Self::fetch_full), largest first when
-    /// the sizes are known, across the pool.
+    /// the sizes are known, across the pool. A body gone from the server
+    /// is left out, which the upgrade asking for it leaves owed.
     fn fetch_bodies(
         &mut self,
         collection: &str,
@@ -861,16 +862,20 @@ impl PimRemote<'_> {
 
         if target <= 1 {
             let blob = self.blob.clone();
+            let sizes = &self.sizes;
+            let sized = |id: &str| sizes.get(id).copied();
             let mut items = Vec::with_capacity(total);
             for batch in &batches {
-                items.extend(hydrate_batch(
+                let hydrated = hydrate_batch(
                     self.kind,
                     self.pool.primary(),
                     collection,
                     batch,
+                    &sized,
                     &blob,
                     self.on_body,
-                )?);
+                )?;
+                items.extend(hydrated.items);
             }
             return Ok(items);
         }
@@ -899,6 +904,8 @@ impl PimRemote<'_> {
 
         let kind = self.kind;
         let blob = self.blob.clone();
+        let sizes = &self.sizes;
+        let sized = |id: &str| sizes.get(id).copied();
         let clients = self.pool.workers(target)?;
 
         let queue_ref = &queue;
@@ -906,6 +913,7 @@ impl PimRemote<'_> {
         let failure_ref = &failure;
         let stop_ref = &stop;
         let blob_ref = &blob;
+        let sized_ref = &sized;
         let on_body = self.on_body;
 
         thread::scope(|scope| {
@@ -915,8 +923,13 @@ impl PimRemote<'_> {
                         let Some(batch) = queue_ref.pop() else {
                             break;
                         };
-                        match hydrate_batch(kind, client, collection, &batch, blob_ref, on_body) {
-                            Ok(mut items) => results_ref.lock().unwrap().append(&mut items),
+                        let hydrated = hydrate_batch(
+                            kind, client, collection, &batch, sized_ref, blob_ref, on_body,
+                        );
+                        match hydrated {
+                            Ok(mut hydrated) => {
+                                results_ref.lock().unwrap().append(&mut hydrated.items)
+                            }
                             Err(err) => {
                                 *failure_ref.lock().unwrap() = Some(err);
                                 stop_ref.store(true, Ordering::Relaxed);
@@ -938,7 +951,8 @@ impl PimRemote<'_> {
 /// Streams one body into the blob store and reports the object by reference.
 ///
 /// The link id and summary come from the streamed header prefix. Free of
-/// `PimRemote` so a pool worker can call it on its own connection.
+/// `PimRemote` so a pool worker can call it on its own connection. A body
+/// the server no longer holds fails with [`Gone`].
 fn fetch_one_full(
     kind: Kind,
     client: &mut Client,
@@ -980,25 +994,98 @@ fn fetch_one_full(
     })
 }
 
+/// What one batch of bodies came to.
+pub(crate) struct Hydrated {
+    /// The bodies, each streamed into the blob store.
+    pub items: Vec<PimdirFetchedItem>,
+    /// The handles the server answered gone ([`Gone`]), owed nothing more.
+    pub gone: Vec<PimdirHandle>,
+}
+
+/// The body the store already holds under `hash`, reported for `handle`
+/// as a fetch of the same bytes would be, read from the blob's header
+/// alone; `None` when the blob is not there (collected meanwhile).
+///
+/// What serves a member of a second collection with the body a source
+/// whose handles are account-wide (Gmail) already delivered for the
+/// first: the identity, summary and sort key derive from the header as
+/// they did then, and nothing goes over the network.
+pub(crate) fn stored_item(
+    kind: Kind,
+    blobs: &PimdirBlobs,
+    handle: PimdirHandle,
+    hash: PimdirHash,
+) -> Result<Option<PimdirFetchedItem>> {
+    let Some(mut file) = blobs
+        .reader(&hash)
+        .with_context(|| format!("Open stored body {}", hash.0))?
+    else {
+        return Ok(None);
+    };
+    let size = file
+        .metadata()
+        .with_context(|| format!("Stat stored body {}", hash.0))?
+        .len() as usize;
+    if size == 0 {
+        return Ok(None);
+    }
+
+    let mut header = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while header.len() < HEADER_CAP {
+        let n = io::Read::read(&mut file, &mut chunk)
+            .with_context(|| format!("Read stored body {}", hash.0))?;
+        if n == 0 {
+            break;
+        }
+        let from = header.len().saturating_sub(3);
+        header.extend_from_slice(&chunk[..n]);
+        if let Some(end) = header_boundary(&header[from..]) {
+            header.truncate(from + end);
+            break;
+        }
+    }
+    header.truncate(HEADER_CAP);
+
+    let PimdirDerivation {
+        link_id,
+        summary,
+        sort_key,
+    } = kind.parse_body(&header, size as u64);
+    Ok(Some(PimdirFetchedItem {
+        handle,
+        link_id,
+        summary,
+        sort_key,
+        body: Some(PimdirFetchedBody::Persisted { hash, size }),
+        revision: None,
+    }))
+}
+
 /// Fetches a batch of bodies in one command, each streamed into its own blob.
 ///
 /// The handle the server echoes keys each body back, so out-of-order responses
 /// still route. A batch error, or a batch answering for fewer members than it
 /// was asked, falls back to per-item fetches, idempotent by content address.
+/// A handle the server answers gone, in the batch or alone, is answered under
+/// [`Hydrated::gone`] and never fails the batch. `sizes` is what the store
+/// records of each body.
 pub(crate) fn hydrate_batch(
     kind: Kind,
     client: &mut Client,
     collection: &str,
     handles: &[PimdirHandle],
+    sizes: StoredSize<'_>,
     blob: &PimdirBlobs,
     on_body: Option<&(dyn Fn() + Sync)>,
-) -> Result<Vec<PimdirFetchedItem>> {
+) -> Result<Hydrated> {
     let ids: Vec<&str> = handles.iter().map(|h| h.as_str()).collect();
     let mut items: Vec<PimdirFetchedItem> = Vec::with_capacity(handles.len());
 
     let batched = client.fetch_bodies(
         collection,
         &ids,
+        sizes,
         |_id| {
             blob.writer()
                 .map(|writer| HydrateSink::new(writer, blob.hasher()))
@@ -1025,60 +1112,60 @@ pub(crate) fn hydrate_batch(
         },
     );
 
-    match batched {
-        Ok(()) => {
+    let (alone, mut gone): (Vec<PimdirHandle>, Vec<PimdirHandle>) = match batched {
+        Ok(gone) => {
             // NOTE: a short batch is not a batch that succeeded: the engine
             // would record nothing for the rest and ask again every run. A
             // CardDAV server was seen answering each card's ETag with a 404
             // body.
-            let fetched: BTreeSet<String> = items
+            let gone: Vec<PimdirHandle> = gone.into_iter().map(PimdirHandle::from).collect();
+            let answered: BTreeSet<&str> = items
                 .iter()
-                .map(|item| item.handle.as_str().to_owned())
+                .map(|item| item.handle.as_str())
+                .chain(gone.iter().map(PimdirHandle::as_str))
                 .collect();
             let missing: Vec<PimdirHandle> = handles
                 .iter()
-                .filter(|handle| !fetched.contains(handle.as_str()))
+                .filter(|handle| !answered.contains(handle.as_str()))
                 .cloned()
                 .collect();
-
             if !missing.is_empty() {
                 warn!(
                     "batched fetch {collection} returned {} of {} bodies; \
                      fetching the rest one by one",
-                    items.len(),
+                    items.len() + gone.len(),
                     handles.len(),
                 );
-
-                let blob = blob.clone();
-                for handle in missing {
-                    items.push(fetch_one_full(kind, client, collection, handle, &blob)?);
-                    if let Some(cb) = on_body {
-                        cb();
-                    }
-                }
             }
-
-            Ok(items)
+            (missing, gone)
         }
         Err(err) => {
             warn!("batched fetch {collection} failed ({err:#}); falling back to per-item");
             items.clear();
-            let blob = blob.clone();
-            for handle in handles {
-                items.push(fetch_one_full(
-                    kind,
-                    client,
-                    collection,
-                    handle.clone(),
-                    &blob,
-                )?);
+            (handles.to_vec(), Vec::new())
+        }
+    };
+
+    for handle in alone {
+        match fetch_one_full(kind, client, collection, handle.clone(), blob) {
+            Ok(item) => {
+                items.push(item);
                 if let Some(cb) = on_body {
                     cb();
                 }
             }
-            Ok(items)
+            Err(err) if Gone::is(&err) => gone.push(handle),
+            Err(err) => return Err(err),
         }
     }
+
+    if !gone.is_empty() {
+        debug!(
+            "{} bodies of {collection} gone from the server since they were listed",
+            gone.len()
+        );
+    }
+    Ok(Hydrated { items, gone })
 }
 
 impl PimRemote<'_> {

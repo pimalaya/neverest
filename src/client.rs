@@ -222,6 +222,35 @@ pub struct WrittenItem {
     pub revision: Option<String>,
 }
 
+/// An item a read found gone from the server: deleted, or moved out of
+/// its collection, since it was listed.
+///
+/// A body fetch answering it is owed nothing more: the store keeps the
+/// member until the next listing of its collection takes it away (pimdir
+/// SYNC §5), and nothing asks for its body again in the run.
+#[derive(Debug)]
+pub struct Gone(pub String);
+
+impl Gone {
+    /// Whether `err` says the item it read is gone, wherever in the chain.
+    pub fn is(err: &anyhow::Error) -> bool {
+        err.downcast_ref::<Gone>().is_some()
+    }
+}
+
+impl std::fmt::Display for Gone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} is gone from the server", self.0)
+    }
+}
+
+impl std::error::Error for Gone {}
+
+/// The size the store records for a body about to be fetched, `None`
+/// when it records none: what a backend reading by size (Gmail, Graph)
+/// plans its batches with, rather than asking the server first.
+pub type StoredSize<'a> = &'a (dyn Fn(&str) -> Option<u64> + Sync);
+
 /// A live sync client: exactly one compiled-in backend per side.
 pub enum Client {
     #[cfg(feature = "imap")]
@@ -562,6 +591,20 @@ impl Client {
         }
     }
 
+    /// Whether one handle names one item across every collection of the
+    /// source, the item placed in each collection holding it: a Gmail
+    /// message id, the same under each of its labels. Its body is then
+    /// read once, whichever collection asks. An IMAP UID, a DAV href or a
+    /// Graph id names an item of one collection.
+    pub fn global_handles(&self) -> bool {
+        match self {
+            #[cfg(feature = "gmail")]
+            Client::Gmail(_) => true,
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
     /// Fetches the summaries of an id set, for `Meta`-tier link id and
     /// summary resolution, rather than listing the whole collection.
     pub fn fetch_summaries(&mut self, collection: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
@@ -596,27 +639,42 @@ impl Client {
     ///
     /// No body lands in memory whole on the IMAP path. `done` also
     /// receives the revision the body corresponds to when the backend
-    /// reports one (a DAV multiget), `None` on immutable content.
+    /// reports one (a DAV multiget), `None` on immutable content. Answers
+    /// the ids the server said are gone ([`Gone`]); an id neither
+    /// delivered nor gone went unanswered, which the caller reads alone.
+    /// `sizes` is what the store records of each, which Gmail and Graph
+    /// plan their batches by.
+    #[cfg_attr(
+        not(any(feature = "msgraph", feature = "gmail")),
+        allow(unused_variables)
+    )]
     pub fn fetch_bodies<S: Write>(
         &mut self,
         collection: &str,
         ids: &[&str],
+        sizes: StoredSize<'_>,
         open: impl FnMut(&str) -> std::io::Result<S>,
         done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         match self {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c.fetch_bodies(collection, ids, open, done),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.fetch_bodies(collection, ids, open, done),
+            Client::Msgraph(c) => c.fetch_bodies(collection, ids, sizes, open, done),
             #[cfg(feature = "dav")]
-            Client::Dav(c) => c.fetch_bodies(collection, ids, open, done),
+            Client::Dav(c) => c
+                .fetch_bodies(collection, ids, open, done)
+                .map(|()| Vec::new()),
             #[cfg(feature = "gpeople")]
-            Client::Gpeople(c) => c.fetch_bodies(collection, ids, open, done),
+            Client::Gpeople(c) => c
+                .fetch_bodies(collection, ids, open, done)
+                .map(|()| Vec::new()),
             #[cfg(feature = "gcal")]
-            Client::Gcal(c) => c.fetch_bodies(collection, ids, open, done),
+            Client::Gcal(c) => c
+                .fetch_bodies(collection, ids, open, done)
+                .map(|()| Vec::new()),
             #[cfg(feature = "gmail")]
-            Client::Gmail(c) => c.fetch_bodies(ids, open, done),
+            Client::Gmail(c) => c.fetch_bodies(ids, sizes, open, done),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
@@ -633,7 +691,8 @@ impl Client {
     /// corresponds to when the backend reports one.
     ///
     /// The bytes are RFC 5322 for mail and a vCard or iCalendar object for
-    /// the DAV kinds. On the IMAP path they never land in memory whole.
+    /// the DAV kinds. On the IMAP path they never land in memory whole. An
+    /// item IMAP, Gmail or Graph no longer holds fails with [`Gone`].
     pub fn get_item_stream(
         &mut self,
         collection: &str,
@@ -1024,6 +1083,16 @@ impl Pool {
             clients: vec![primary],
             max: max.max(1),
         })
+    }
+
+    /// A pool of one connection already open, for the tests.
+    #[cfg(all(test, feature = "gmail"))]
+    pub fn of(account: SourceAccount, client: Client) -> Self {
+        Self {
+            account,
+            clients: vec![client],
+            max: 1,
+        }
     }
 
     /// The connection budget, the account's `connections` (default 4).

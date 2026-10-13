@@ -75,7 +75,7 @@ use super::{
 };
 use crate::{
     account::GmailAccount,
-    client::{EnumEntry, Enumeration, Held, Listed, WrittenItem},
+    client::{EnumEntry, Enumeration, Gone, Held, Listed, StoredSize, WrittenItem},
     item::{
         address::Address,
         collection::Collection,
@@ -867,23 +867,30 @@ impl GmailClient {
     }
 
     /// Streams the bodies of an id set, by batches of raw reads, each body
-    /// written to its sink as its batch lands.
+    /// written to its sink as its batch lands, and answers the ids gone
+    /// since they were listed.
     ///
     /// A batch holds about [`batch::RAW_BATCH_BYTES`] by the sizes the run
-    /// read with the metadata, a message past [`batch::ALONE_BYTES`] being
-    /// read alone; the sizes it did not read come from a minimal read first.
-    /// A message gone since it was listed is left out.
+    /// read with the metadata, else those the store records (`stored`), a
+    /// message past [`batch::ALONE_BYTES`] being read alone; a size neither
+    /// knows comes from a minimal read first.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         ids: &[&str],
+        stored: StoredSize<'_>,
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         let run = Arc::clone(&self.run);
         let mut sizes: HashMap<String, u64> = HashMap::with_capacity(ids.len());
         let mut unknown = Vec::new();
         for id in ids {
-            match run.take_size(id) {
+            // NOTE: the run's own read first, which also drops it from the
+            // run's cache, then the store's, a resumed hydration's.
+            match run
+                .take_size(id)
+                .or_else(|| stored(id).filter(|size| *size > 0))
+            {
                 Some(size) => {
                     sizes.insert(id.to_string(), size);
                 }
@@ -891,15 +898,13 @@ impl GmailClient {
             }
         }
 
-        let mut gone = HashSet::new();
+        let mut gone = Vec::new();
         self.read_messages(ReadAs::Minimal, &unknown, &|_| 0, |id, message| {
             match message {
                 Some(message) => {
                     sizes.insert(id, message.size_estimate.unwrap_or(0));
                 }
-                None => {
-                    gone.insert(id);
-                }
+                None => gone.push(id),
             }
             Ok(())
         })
@@ -907,13 +912,14 @@ impl GmailClient {
 
         let ids: Vec<String> = ids
             .iter()
-            .filter(|id| !gone.contains(**id))
+            .filter(|id| !gone.iter().any(|gone| gone == **id))
             .map(|id| id.to_string())
             .collect();
         let size = |id: &str| sizes.get(id).copied().unwrap_or(0);
         self.read_messages(ReadAs::Raw, &ids, &size, |id, message| {
             let Some(message) = message else {
                 debug!("message {id} gone before its body was read");
+                gone.push(id);
                 return Ok(());
             };
             let raw = raw_body(&id, message)?;
@@ -924,10 +930,12 @@ impl GmailClient {
             done(&id, None, sink).with_context(|| format!("Commit body {id} error"))?;
             Ok(())
         })
-        .context("Read message bodies error")
+        .context("Read message bodies error")?;
+        Ok(gone)
     }
 
-    /// Streams one message's raw RFC 5322 bytes into `sink`.
+    /// Streams one message's raw RFC 5322 bytes into `sink`; a message
+    /// gone fails with [`Gone`].
     pub fn get_item_stream(&mut self, id: &str, mut sink: impl Write) -> Result<Option<String>> {
         let raw = self.message_raw(id)?;
         sink.write_all(&raw)
@@ -937,11 +945,17 @@ impl GmailClient {
 
     /// Fetches the raw RFC 5322 bytes of one message, base64url-decoded.
     fn message_raw(&mut self, id: &str) -> Result<Vec<u8>> {
-        let message = self
-            .op(units::MESSAGE_GET, |client| {
-                client.message_get(id, GmailMessageFormat::Raw, &[])
-            })
-            .with_context(|| format!("Get raw message {id} error"))?;
+        let message = match self.op(units::MESSAGE_GET, |client| {
+            client.message_get(id, GmailMessageFormat::Raw, &[])
+        }) {
+            Ok(message) => message,
+            Err(err) if is_not_found(&err) => {
+                return Err(anyhow::Error::new(err).context(Gone(id.to_owned())));
+            }
+            Err(err) => {
+                return Err(anyhow::Error::new(err).context(format!("Get raw message {id} error")));
+            }
+        };
         raw_body(id, message)
     }
 
@@ -1609,10 +1623,133 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<String> {
     (!id.is_empty()).then(|| id.to_owned())
 }
 
+/// A Gmail client over scripted sessions, for the tests here and the
+/// driver's.
+#[cfg(test)]
+pub(crate) mod scripted {
+    use std::io::{self, Read, Write};
+
+    use super::*;
+
+    /// A scripted Gmail session: each answer served whole to the read that
+    /// follows a request, each request's first line recorded.
+    #[derive(Clone, Default)]
+    pub(crate) struct Wire {
+        answers: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+        requests: Arc<std::sync::Mutex<Vec<String>>>,
+        current: Vec<u8>,
+        at: usize,
+    }
+
+    impl Wire {
+        pub(crate) fn answer(&self, answer: Vec<u8>) {
+            self.answers.lock().unwrap().push_back(answer);
+        }
+
+        pub(crate) fn requests(&self) -> Vec<String> {
+            self.requests.lock().unwrap().clone()
+        }
+
+        pub(crate) fn left(&self) -> usize {
+            self.answers.lock().unwrap().len()
+        }
+    }
+
+    impl Read for Wire {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.at == self.current.len() {
+                self.current = self.answers.lock().unwrap().pop_front().unwrap_or_default();
+                self.at = 0;
+            }
+            let n = buf.len().min(self.current.len() - self.at);
+            buf[..n].copy_from_slice(&self.current[self.at..self.at + n]);
+            self.at += n;
+            Ok(n)
+        }
+    }
+
+    impl Write for Wire {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let text = String::from_utf8_lossy(buf);
+            let line = text.lines().next().unwrap_or_default();
+            if ["GET ", "POST ", "DELETE ", "PUT ", "PATCH "]
+                .iter()
+                .any(|method| line.starts_with(method))
+            {
+                self.requests.lock().unwrap().push(line.to_owned());
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    pub(crate) fn json(status: &str, body: &str) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    pub(crate) fn ok(body: serde_json::Value) -> Vec<u8> {
+        json("200 OK", &body.to_string())
+    }
+
+    /// A batch answer, its parts tagged by the index of their read.
+    pub(crate) fn batch_answer(parts: &[(usize, &str, serde_json::Value)]) -> Vec<u8> {
+        let mut body = String::new();
+        for (n, status, json) in parts {
+            body.push_str("--b\r\nContent-Type: application/http\r\n");
+            body.push_str(&format!("Content-ID: <response-{n}>\r\n\r\n"));
+            body.push_str(&format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\r\n{json}\r\n"
+            ));
+        }
+        body.push_str("--b--\r\n");
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: multipart/mixed; boundary=b\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    /// A client over two scripted wires, the API's and the batch
+    /// endpoint's, knowing the labels `INBOX` and `Work` (`Label_1`).
+    pub(crate) fn scripted() -> (GmailClient, Wire, Wire) {
+        let (api, batch) = (Wire::default(), Wire::default());
+        let options = || GmailClientStdConnectOptions {
+            tls: Tls::default(),
+            proxy: Proxy::None,
+            user_id: String::from("me"),
+        };
+        let client = GmailClient {
+            inner: GmailClientStd::new(api.clone(), "token", options()),
+            batch: Some(GmailClientStd::new(batch.clone(), "token", options())),
+            token: SecretString::from(String::from("token")),
+            tls: Tls::default(),
+            labels: HashMap::from([
+                (String::from("INBOX"), String::from("INBOX")),
+                (String::from("Work"), String::from("Label_1")),
+                (String::from("TRASH"), String::from("TRASH")),
+            ]),
+            alive: true,
+            batch_alive: true,
+            throttle: Arc::new(Throttle::new("gmail")),
+            run: Arc::new(GmailRun::new(Default::default())),
+            flag_sets: None,
+        };
+        (client, api, batch)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use io_gmail::v1::send::{GmailApiError, GmailSendError};
 
+    use super::scripted::*;
     use super::*;
 
     #[test]
@@ -1884,91 +2021,6 @@ mod tests {
         assert!(!is_bad_request(&api(404)));
     }
 
-    /// A scripted Gmail session: each answer served whole to the read that
-    /// follows a request, each request's first line recorded.
-    #[derive(Clone, Default)]
-    struct Wire {
-        answers: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
-        requests: Arc<std::sync::Mutex<Vec<String>>>,
-        current: Vec<u8>,
-        at: usize,
-    }
-
-    impl Wire {
-        fn answer(&self, answer: Vec<u8>) {
-            self.answers.lock().unwrap().push_back(answer);
-        }
-
-        fn requests(&self) -> Vec<String> {
-            self.requests.lock().unwrap().clone()
-        }
-
-        fn left(&self) -> usize {
-            self.answers.lock().unwrap().len()
-        }
-    }
-
-    impl Read for Wire {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if self.at == self.current.len() {
-                self.current = self.answers.lock().unwrap().pop_front().unwrap_or_default();
-                self.at = 0;
-            }
-            let n = buf.len().min(self.current.len() - self.at);
-            buf[..n].copy_from_slice(&self.current[self.at..self.at + n]);
-            self.at += n;
-            Ok(n)
-        }
-    }
-
-    impl Write for Wire {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let text = String::from_utf8_lossy(buf);
-            let line = text.lines().next().unwrap_or_default();
-            if ["GET ", "POST ", "DELETE ", "PUT ", "PATCH "]
-                .iter()
-                .any(|method| line.starts_with(method))
-            {
-                self.requests.lock().unwrap().push(line.to_owned());
-            }
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    fn json(status: &str, body: &str) -> Vec<u8> {
-        format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-        .into_bytes()
-    }
-
-    fn ok(body: serde_json::Value) -> Vec<u8> {
-        json("200 OK", &body.to_string())
-    }
-
-    /// A batch answer, its parts tagged by the index of their read.
-    fn batch_answer(parts: &[(usize, &str, serde_json::Value)]) -> Vec<u8> {
-        let mut body = String::new();
-        for (n, status, json) in parts {
-            body.push_str("--b\r\nContent-Type: application/http\r\n");
-            body.push_str(&format!("Content-ID: <response-{n}>\r\n\r\n"));
-            body.push_str(&format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n\r\n{json}\r\n"
-            ));
-        }
-        body.push_str("--b--\r\n");
-        format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: multipart/mixed; boundary=b\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-        .into_bytes()
-    }
-
     fn metadata(id: &str, labels: &[&str]) -> serde_json::Value {
         serde_json::json!({
             "id": id,
@@ -1987,34 +2039,6 @@ mod tests {
             .map(|id| serde_json::json!({ "id": id }))
             .collect();
         ok(serde_json::json!({ "messages": messages }))
-    }
-
-    /// A client over two scripted wires, the API's and the batch
-    /// endpoint's, knowing the labels `INBOX` and `Work` (`Label_1`).
-    fn scripted() -> (GmailClient, Wire, Wire) {
-        let (api, batch) = (Wire::default(), Wire::default());
-        let options = || GmailClientStdConnectOptions {
-            tls: Tls::default(),
-            proxy: Proxy::None,
-            user_id: String::from("me"),
-        };
-        let client = GmailClient {
-            inner: GmailClientStd::new(api.clone(), "token", options()),
-            batch: Some(GmailClientStd::new(batch.clone(), "token", options())),
-            token: SecretString::from(String::from("token")),
-            tls: Tls::default(),
-            labels: HashMap::from([
-                (String::from("INBOX"), String::from("INBOX")),
-                (String::from("Work"), String::from("Label_1")),
-                (String::from("TRASH"), String::from("TRASH")),
-            ]),
-            alive: true,
-            batch_alive: true,
-            throttle: Arc::new(Throttle::new("gmail")),
-            run: Arc::new(GmailRun::new(Default::default())),
-            flag_sets: None,
-        };
-        (client, api, batch)
     }
 
     fn round() -> PimdirEnumerate {
@@ -2187,9 +2211,10 @@ mod tests {
         ]));
 
         let mut bodies = BTreeMap::new();
-        client
+        let gone = client
             .fetch_bodies(
                 &["m1", "m4", "m5"],
+                &|_| None,
                 |_| Ok(Vec::new()),
                 |id, _, sink| {
                     bodies.insert(id.to_owned(), String::from_utf8(sink).unwrap());
@@ -2200,8 +2225,102 @@ mod tests {
 
         assert_eq!(batch.requests().len(), 2, "the sizes, then the bodies");
         assert_eq!(bodies.len(), 2, "m5 is gone");
+        assert_eq!(gone, ["m5"], "and answered gone");
         assert!(bodies["m4"].ends_with("Body of m4\r\n"));
         assert_eq!(batch.left(), 0);
+    }
+
+    fn raw(id: &str) -> serde_json::Value {
+        let source = format!("Message-ID: <{id}@example.org>\r\n\r\nBody of {id}\r\n");
+        serde_json::json!({ "id": id, "raw": encode_raw(source.as_bytes()) })
+    }
+
+    /// A resumed hydration plans its batches by the sizes the store
+    /// records: no minimal read asks for them first.
+    #[test]
+    fn the_sizes_the_store_records_spare_a_minimal_read() {
+        let (mut client, api, batch) = scripted();
+        batch.answer(batch_answer(&[
+            (0, "200 OK", raw("m1")),
+            (1, "200 OK", raw("m2")),
+        ]));
+
+        let stored = |id: &str| match id {
+            "m1" => Some(100),
+            "m2" => Some(200),
+            _ => None,
+        };
+        let mut bodies = Vec::new();
+        let gone = client
+            .fetch_bodies(
+                &["m1", "m2"],
+                &stored,
+                |_| Ok(Vec::new()),
+                |id, _, _| {
+                    bodies.push(id.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(bodies, ["m1", "m2"]);
+        assert!(gone.is_empty());
+        let requests = batch.requests();
+        assert_eq!(requests.len(), 1, "the bodies alone: {requests:?}");
+        assert_eq!(api.left() + batch.left(), 0);
+    }
+
+    /// A size the store records past what a batch holds reads that
+    /// message alone, without asking Gmail its size.
+    #[test]
+    fn a_large_size_the_store_records_reads_its_message_alone() {
+        let (mut client, api, batch) = scripted();
+        api.answer(ok(raw("big")));
+        batch.answer(batch_answer(&[(0, "200 OK", raw("small"))]));
+
+        let stored = |id: &str| match id {
+            "big" => Some(batch::ALONE_BYTES + 1),
+            _ => Some(10),
+        };
+        let mut bodies = Vec::new();
+        client
+            .fetch_bodies(
+                &["big", "small"],
+                &stored,
+                |_| Ok(Vec::new()),
+                |id, _, _| {
+                    bodies.push(id.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(bodies, ["big", "small"]);
+        let alone = api.requests();
+        assert_eq!(alone.len(), 1, "{alone:?}");
+        assert!(alone[0].contains("/messages/big"), "{alone:?}");
+        assert!(alone[0].contains("format=RAW"), "{alone:?}");
+        assert_eq!(batch.requests().len(), 1, "the small one by a batch");
+        assert_eq!(api.left() + batch.left(), 0);
+    }
+
+    /// A message read alone and answered 404 is gone, not an error.
+    #[test]
+    fn a_message_gone_alone_is_gone() {
+        let (mut client, api, _) = scripted();
+        api.answer(json(
+            "404 Not Found",
+            r#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}"#,
+        ));
+        let err = client.get_item_stream("m9", Vec::new()).unwrap_err();
+        assert!(Gone::is(&err), "{err:#}");
+
+        api.answer(json(
+            "403 Forbidden",
+            r#"{"error":{"code":403,"message":"Insufficient Permission"}}"#,
+        ));
+        let err = client.get_item_stream("m9", Vec::new()).unwrap_err();
+        assert!(!Gone::is(&err), "another refusal is no gone: {err:#}");
     }
 
     /// A write on a message gone already has nothing left to do.

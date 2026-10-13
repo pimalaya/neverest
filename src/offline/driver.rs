@@ -83,7 +83,7 @@ use crate::{
         pipe,
         remote::{
             BATCH_SIZE, Bound, CachedFetchRemote, PimRemote, RefusedCreate, RejectedPush,
-            body_bytes, hydrate_batch, resolve_kind, wire_name,
+            body_bytes, hydrate_batch, resolve_kind, stored_item, wire_name,
         },
         run_verb, run_verb_paged, source_id,
         state::{LookedUpRoles, StoreState},
@@ -1194,6 +1194,8 @@ fn run_local(
         ..pacing
     };
     let listed_log = (pacing.bodies == Bodies::Listed).then(Listed::default);
+    let shared = ctxs[0].pool.primary().global_handles();
+    let gone = GoneBodies::default();
 
     let spined = phase1_spine(
         source_name,
@@ -1205,6 +1207,8 @@ fn run_local(
         dry_run,
         &pacing,
         listed_log.as_ref(),
+        shared,
+        &gone,
         report,
     )?;
 
@@ -1213,15 +1217,17 @@ fn run_local(
     }
 
     // NOTE: read once phase 1 is over, so a body a landed page's hydration
-    // kept is not downloaded again.
-    let plans = hydrate_plans(&stores[0], source_name, &spined, listed_log.as_ref())?;
+    // kept is not downloaded again, nor one it found gone.
+    let plans = hydrate_plans(&stores[0], source_name, &spined, listed_log.as_ref(), &gone)?;
     phase2_hydrate(
         source_name,
-        &plans,
+        plans,
         &pacing,
         &mut ctxs,
-        &mut stores[0],
+        &mut stores,
         &blobs,
+        shared.then_some(&filtered[..]),
+        &gone,
     )
 }
 
@@ -1472,6 +1478,8 @@ fn phase1_spine(
     dry_run: bool,
     pacing: &Pacing,
     listed: Option<&Listed>,
+    shared: bool,
+    gone: &GoneBodies,
     report: &mut SyncOutput,
 ) -> Result<Vec<String>> {
     let total = filtered.len();
@@ -1497,6 +1505,15 @@ fn phase1_spine(
         .first_mut()
         .map(|ctx| resolve_kind(&mut ctx.pool))
         .unwrap_or(Kind::Mail);
+    let landing = Landing {
+        kind,
+        blobs,
+        gates: Some(&gates),
+        applying: &applying,
+        shared: shared.then_some(filtered),
+        gone,
+        on_body: None,
+    };
 
     let work_ref = &work;
     let spined_ref = &spined;
@@ -1506,7 +1523,7 @@ fn phase1_spine(
     let s_ref = &s;
     let pushing_ref = &pushing;
     let gates_ref = &gates;
-    let applying_ref = &applying;
+    let landing_ref = &landing;
     let downloaded_ref = &downloaded;
 
     thread::scope(|scope| {
@@ -1516,41 +1533,15 @@ fn phase1_spine(
                     let (index, pass) = match job {
                         Job::Spine { index, pass } => (index, pass),
                         Job::Hydrate { batch, primed } => {
-                            let (collection, handles) = batch;
-                            let fetched = hydrate_batch(
-                                kind,
-                                ctx.pool.primary(),
-                                wire_name(&ctx.namespace, &collection),
-                                &handles,
-                                blobs,
-                                None,
-                            );
-                            match fetched {
-                                Ok(items) => {
-                                    ctx.pool.downloaded(body_bytes(&items));
-                                    downloaded_ref.fetch_add(items.len(), Ordering::Relaxed);
-                                    // NOTE: the gate first, the order every
-                                    // applier takes them in: the collection's
-                                    // spine may be mid-page.
-                                    let _gate = gates_ref[collection.as_str()]
-                                        .lock()
-                                        .unwrap_or_else(PoisonError::into_inner);
-                                    let _applying =
-                                        applying_ref.lock().unwrap_or_else(PoisonError::into_inner);
-                                    let fallback = PimRemote::new(
-                                        &mut ctx.pool,
-                                        blobs.clone(),
-                                        ctx.namespace.clone(),
-                                    );
-                                    if let Err(err) =
-                                        apply_batch(store, fallback, &collection, items)
-                                    {
-                                        warn!("{collection} write error: {err:#}");
-                                    }
+                            match landing_ref.land(ctx, store, &batch) {
+                                Ok(fetched) => {
+                                    downloaded_ref.fetch_add(fetched, Ordering::Relaxed);
                                 }
                                 // NOTE: left bodiless, so phase 2 downloads it
                                 // again and fails the run if it fails there too.
-                                Err(err) => warn!("{collection} body download error: {err:#}"),
+                                Err(err) => {
+                                    warn!("{} body download error: {err:#}", batch.collection)
+                                }
                             }
                             work_ref.downloaded(primed);
                             continue;
@@ -1820,12 +1811,11 @@ impl Work {
             &mut state.batches
         };
         for chunk in targets.chunks(BATCH_SIZE) {
-            let handles = chunk.iter().map(|target| target.handle.clone()).collect();
             let key = BatchKey {
                 first: chunk[0].clone(),
                 rank,
             };
-            queue.push((key, (collection.to_string(), handles)));
+            queue.push((key, HydrateBatch::new(collection, chunk)));
         }
         drop(state);
         self.ready.notify_all();
@@ -2026,19 +2016,20 @@ fn bodiless(placements: impl IntoIterator<Item = PimdirPlacement>) -> Vec<Hydrat
 }
 
 /// Each spined collection's bodies still to download, for phase 2, only
-/// those the run listed under [`Bodies::Listed`].
+/// those the run listed under [`Bodies::Listed`], none the run found gone.
 fn hydrate_plans(
     store: &PimdirStore,
     source: &str,
     collections: &[String],
     listed: Option<&Listed>,
+    gone: &GoneBodies,
 ) -> Result<Vec<CollectionPlan>> {
     collections
         .iter()
         .map(|collection| {
             let view = projection_view(store, collection, source)
                 .with_context(|| format!("Project {source} {collection}"))?;
-            let owed = bodiless(view);
+            let owed = gone.keep(collection, bodiless(view));
             let owed = match listed {
                 Some(listed) => listed.keep(collection, owed),
                 None => owed,
@@ -2170,26 +2161,312 @@ fn collection_spine(
     })
 }
 
-/// One hydrate batch: its collection and the handles fetched together.
-type HydrateBatch = (String, Vec<PimdirHandle>);
+/// One hydrate batch: the collection it is read from, and the bodies
+/// fetched together, each with the size the store records (0 when it
+/// records none), which a backend reading by size plans its reads with.
+#[derive(Debug, PartialEq)]
+struct HydrateBatch {
+    collection: String,
+    bodies: Vec<(PimdirHandle, u64)>,
+}
+
+impl HydrateBatch {
+    /// The batch of `targets`, read from `collection`.
+    fn new<'t>(collection: &str, targets: impl IntoIterator<Item = &'t HydrateTarget>) -> Self {
+        Self {
+            collection: collection.to_string(),
+            bodies: targets
+                .into_iter()
+                .map(|target| (target.handle.clone(), target.size))
+                .collect(),
+        }
+    }
+}
+
+/// The bodies the servers answered gone this run, by collection.
+///
+/// They are owed nothing more: no later batch of the run asks for them
+/// again, phase 2 included. The store keeps each member as it is until
+/// the next listing of its collection takes it away (pimdir SYNC §5), so
+/// a member gone is never fetched in a loop, and never dropped on the
+/// word of a body read alone.
+#[derive(Default)]
+struct GoneBodies(Mutex<HashMap<String, HashSet<String>>>);
+
+impl GoneBodies {
+    fn record<'h>(&self, collection: &str, handles: impl IntoIterator<Item = &'h PimdirHandle>) {
+        let mut gone = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let gone = gone.entry(collection.to_string()).or_default();
+        gone.extend(handles.into_iter().map(|handle| handle.0.clone()));
+    }
+
+    fn holds(&self, collection: &str, handle: &PimdirHandle) -> bool {
+        let gone = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        gone.get(collection)
+            .is_some_and(|gone| gone.contains(&handle.0))
+    }
+
+    /// `targets` but the ones gone from `collection`.
+    fn keep(&self, collection: &str, targets: Vec<HydrateTarget>) -> Vec<HydrateTarget> {
+        let gone = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(gone) = gone.get(collection) else {
+            return targets;
+        };
+        targets
+            .into_iter()
+            .filter(|target| !gone.contains(&target.handle.0))
+            .collect()
+    }
+}
+
+/// What the connections landing downloaded bodies share in a phase.
+struct Landing<'a> {
+    kind: Kind,
+    blobs: &'a PimdirBlobs,
+    /// Each collection's gate, which its spine holds but while it waits on
+    /// the server (phase 1); none once every spine is over (phase 2).
+    gates: Option<&'a HashMap<&'a str, Mutex<()>>>,
+    /// Serialises the writes of the connections' store handles.
+    applying: &'a Mutex<()>,
+    /// The source's collections, when one handle names one item across
+    /// them ([`Client::global_handles`]): Gmail's labels.
+    shared: Option<&'a [String]>,
+    gone: &'a GoneBodies,
+    /// Called for each body of a batch once it is settled: downloaded,
+    /// served from the store, gone, or owed nowhere any more.
+    on_body: Option<&'a (dyn Fn() + Sync)>,
+}
+
+impl Landing<'_> {
+    /// Downloads `batch` on `ctx`'s connection and raises each body to
+    /// `Full` in every collection owing it, answering how many bodies came
+    /// over the network.
+    ///
+    /// On a source whose handles are account-wide, every collection of
+    /// the source is read for the batch's handles first: a handle one of
+    /// them holds a body for is served from that body, the others are
+    /// downloaded once, and each body lands in every collection holding
+    /// its handle without one. A body the server answers gone is recorded
+    /// for each collection owing it ([`GoneBodies`]) and asked for no more
+    /// in the run. Only a failed download is an error; a write that fails
+    /// is warned about, its bodies left for the next run.
+    fn land(
+        &self,
+        ctx: &mut SourceCtx,
+        store: &mut PimdirSourceStore,
+        batch: &HydrateBatch,
+    ) -> Result<usize> {
+        let collection = batch.collection.as_str();
+        let asked: Vec<PimdirHandle> = batch
+            .bodies
+            .iter()
+            .map(|(handle, _)| handle)
+            .filter(|handle| !self.gone.holds(collection, handle))
+            .cloned()
+            .collect();
+        let placed = match self.shared {
+            Some(collections) => Placed::read(store, collections, &asked).unwrap_or_else(|err| {
+                warn!("cannot read where the bodies of {collection} are owed ({err:#}), landing them there alone");
+                Placed::alone(collection, &asked)
+            }),
+            None => Placed::alone(collection, &asked),
+        };
+
+        let fetch = placed.to_fetch(&asked);
+        let sizes: HashMap<&str, u64> = batch
+            .bodies
+            .iter()
+            .filter(|(_, size)| *size > 0)
+            .map(|(handle, size)| (handle.as_str(), *size))
+            .collect();
+        let sized = |id: &str| sizes.get(id).copied();
+        let (mut items, gone) = match fetch.is_empty() {
+            true => (Vec::new(), Vec::new()),
+            false => {
+                let hydrated = hydrate_batch(
+                    self.kind,
+                    ctx.pool.primary(),
+                    wire_name(&ctx.namespace, collection),
+                    &fetch,
+                    &sized,
+                    self.blobs,
+                    self.on_body,
+                )?;
+                ctx.pool.downloaded(body_bytes(&hydrated.items));
+                (hydrated.items, hydrated.gone)
+            }
+        };
+        let fetched = items.len();
+
+        for (handle, hash) in placed.stored {
+            match stored_item(self.kind, self.blobs, handle.clone(), hash) {
+                Ok(Some(item)) => items.push(item),
+                // NOTE: left owed, for the next batch or run to download.
+                Ok(None) => debug!("the stored body of {} is gone", handle.as_str()),
+                Err(err) => warn!("cannot serve {} from the store: {err:#}", handle.as_str()),
+            }
+        }
+        if let Some(on_body) = self.on_body {
+            (fetched..batch.bodies.len()).for_each(|_| on_body());
+        }
+
+        if !gone.is_empty() {
+            let gone: HashSet<&str> = gone.iter().map(PimdirHandle::as_str).collect();
+            for (place, handles) in &placed.owed {
+                self.gone.record(
+                    place,
+                    handles
+                        .iter()
+                        .filter(|handle| gone.contains(handle.as_str())),
+                );
+            }
+            info!(
+                "{} bodies of {} gone from the server since they were listed, left to the next listing",
+                gone.len(),
+                display_name(&ctx.namespace, collection),
+            );
+        }
+
+        let items: HashMap<String, PimdirFetchedItem> = items
+            .into_iter()
+            .map(|item| (item.handle.0.clone(), item))
+            .collect();
+        for (place, handles) in placed.owed {
+            let landed: Vec<PimdirFetchedItem> = handles
+                .iter()
+                .filter_map(|handle| items.get(&handle.0).cloned())
+                .collect();
+            if landed.is_empty() {
+                continue;
+            }
+            // NOTE: the gate first, the order every applier takes them in:
+            // the collection's spine may be mid-page. One collection at a
+            // time, so no applier ever holds two gates.
+            let _gate = self
+                .gates
+                .and_then(|gates| gates.get(place.as_str()))
+                .map(|gate| gate.lock().unwrap_or_else(PoisonError::into_inner));
+            let _applying = self.applying.lock().unwrap_or_else(PoisonError::into_inner);
+            let fallback = PimRemote::new(&mut ctx.pool, self.blobs.clone(), ctx.namespace.clone());
+            if let Err(err) = apply_batch(store, fallback, &place, landed) {
+                warn!("{place} write error: {err:#}");
+            }
+        }
+
+        Ok(fetched)
+    }
+}
+
+/// Where the bodies of a batch are owed.
+struct Placed {
+    /// Each collection holding some of the handles without a body, with
+    /// those handles, in the run's order.
+    owed: Vec<(String, Vec<PimdirHandle>)>,
+    /// The body a collection already holds for a handle another owes.
+    stored: Vec<(PimdirHandle, PimdirHash)>,
+}
+
+impl Placed {
+    /// The handles owed by their own collection alone.
+    fn alone(collection: &str, handles: &[PimdirHandle]) -> Self {
+        Self {
+            owed: vec![(collection.to_string(), handles.to_vec())],
+            stored: Vec::new(),
+        }
+    }
+
+    /// Where `handles` are owed across `collections`, on a source whose
+    /// handles are account-wide.
+    fn read(
+        store: &PimdirSourceStore,
+        collections: &[String],
+        handles: &[PimdirHandle],
+    ) -> Result<Self> {
+        let mut owed = Vec::new();
+        let mut owing: HashSet<String> = HashSet::new();
+        let mut held: HashMap<String, PimdirHash> = HashMap::new();
+        if handles.is_empty() {
+            return Ok(Self {
+                owed,
+                stored: Vec::new(),
+            });
+        }
+        for collection in collections {
+            let id = PimdirCollectionId(collection.clone());
+            let loaded = store
+                .load(&id, &PimdirLoadScope::Handles(handles.to_vec()))
+                .with_context(|| format!("Load {collection}"))?;
+            let mut its = Vec::new();
+            for placement in loaded.placements {
+                if placement.status == PimdirStatus::Tombstone {
+                    continue;
+                }
+                match placement.object {
+                    Some(hash) => {
+                        held.entry(placement.handle.0).or_insert(hash);
+                    }
+                    None => {
+                        owing.insert(placement.handle.0.clone());
+                        its.push(placement.handle);
+                    }
+                }
+            }
+            if !its.is_empty() {
+                owed.push((collection.clone(), its));
+            }
+        }
+        let stored = handles
+            .iter()
+            .filter(|handle| owing.contains(&handle.0))
+            .filter_map(|handle| Some((handle.clone(), held.remove(&handle.0)?)))
+            .collect();
+        Ok(Self { owed, stored })
+    }
+
+    /// The handles of `asked` to download: owed somewhere, and held in
+    /// no collection already, in the order asked.
+    fn to_fetch(&self, asked: &[PimdirHandle]) -> Vec<PimdirHandle> {
+        let owed: HashSet<&str> = self
+            .owed
+            .iter()
+            .flat_map(|(_, handles)| handles.iter().map(PimdirHandle::as_str))
+            .collect();
+        let stored: HashSet<&str> = self
+            .stored
+            .iter()
+            .map(|(handle, _)| handle.as_str())
+            .collect();
+        asked
+            .iter()
+            .filter(|handle| owed.contains(handle.as_str()) && !stored.contains(handle.as_str()))
+            .cloned()
+            .collect()
+    }
+}
 
 /// Phase 2, hydrating every body through one global work-stealing pool.
 ///
 /// A batched fetch stays within one selected collection, so bodies are chunked
 /// per collection and the batches queued in the chosen order across the
-/// account. A worker steals the next, idling at no collection edge.
+/// account. A worker steals the next, idling at no collection edge, each
+/// on its own connection and store handle, the writes serialised.
 /// Each batch is raised to `Full` as soon as it is fetched, so its bodies are
-/// readable at once and an interrupted run keeps them.
+/// readable at once and an interrupted run keeps them. On a source whose
+/// handles are account-wide (`shared`), a body is downloaded once for
+/// every collection holding it ([`Landing::land`]).
+#[allow(clippy::too_many_arguments)]
 fn phase2_hydrate(
     source: &str,
-    plans: &[CollectionPlan],
+    plans: Vec<CollectionPlan>,
     pacing: &Pacing,
     ctxs: &mut [SourceCtx],
-    store: &mut PimdirSourceStore,
+    stores: &mut [PimdirSourceStore],
     blobs: &PimdirBlobs,
+    shared: Option<&[String]>,
+    gone: &GoneBodies,
 ) -> Result<()> {
-    let batches = hydrate_batches(plans, pacing.order, pacing.prime);
-    let total_bodies: usize = batches.iter().map(|(_, handles)| handles.len()).sum();
+    let batches = hydrate_batches(plans, pacing.order, pacing.prime, shared.is_some());
+    let total_bodies: usize = batches.iter().map(|batch| batch.bodies.len()).sum();
     if total_bodies == 0 {
         return Ok(());
     }
@@ -2199,12 +2476,8 @@ fn phase2_hydrate(
         .map(|ctx| resolve_kind(&mut ctx.pool))
         .unwrap_or(Kind::Mail);
 
-    let namespace = ctxs
-        .first()
-        .map(|ctx| ctx.namespace.clone())
-        .unwrap_or_default();
-
     let done = AtomicUsize::new(0);
+    let fetched = AtomicUsize::new(0);
     let s = Spinner::start(format!("Downloading {source} 0% (0/{total_bodies})"));
     let on_body = || {
         let n = done.fetch_add(1, Ordering::Relaxed) + 1;
@@ -2213,32 +2486,28 @@ fn phase2_hydrate(
             "Downloading {source} {percent}% ({n}/{total_bodies})"
         ));
     };
+    let applying = Mutex::new(());
+    let landing = Landing {
+        kind,
+        blobs,
+        gates: None,
+        applying: &applying,
+        shared,
+        gone,
+        on_body: Some(&on_body),
+    };
 
-    hydrate_pool(
-        ctxs,
-        store,
-        batches,
-        |ctx, collection, handles| {
-            let items = hydrate_batch(
-                kind,
-                ctx.pool.primary(),
-                wire_name(&namespace, collection),
-                handles,
-                blobs,
-                Some(&on_body),
-            )?;
-            ctx.pool.downloaded(body_bytes(&items));
-            Ok(items)
-        },
-        |ctx, store, collection, items| {
-            let fallback = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-            apply_batch(store, fallback, collection, items)
-        },
-    )?;
+    let mut workers: Vec<(&mut SourceCtx, &mut PimdirSourceStore)> =
+        ctxs.iter_mut().zip(stores.iter_mut()).collect();
+    hydrate_pool(&mut workers, batches, |(ctx, store), batch| {
+        let n = landing.land(ctx, store, &batch)?;
+        fetched.fetch_add(n, Ordering::Relaxed);
+        Ok(())
+    })?;
 
     s.success(format!(
         "Downloaded {} item(s) from {source}",
-        done.load(Ordering::Relaxed)
+        fetched.load(Ordering::Relaxed)
     ));
     Ok(())
 }
@@ -2250,28 +2519,54 @@ fn phase2_hydrate(
 /// collection the run takes first (`plans` comes in the run's order).
 /// Under a positive `prime`, each collection's `prime` newest bodies come
 /// ahead of every other body, so what a first pass could not download is
-/// downloaded first.
+/// downloaded first. Under `shared`, a handle names one item across the
+/// collections (Gmail): it is planned once, under the first collection
+/// listing it, primed when any of them primes it.
 fn hydrate_batches(
-    plans: &[CollectionPlan],
+    plans: Vec<CollectionPlan>,
     order: DownloadOrder,
     prime: usize,
+    shared: bool,
 ) -> Vec<HydrateBatch> {
-    // NOTE: the tier first, 0 for the primed bodies, then the batch's first
-    // body, then the collection's rank.
-    let mut batches: Vec<(u8, &HydrateTarget, usize, HydrateBatch)> = Vec::new();
-    for (rank, (collection, targets)) in plans.iter().enumerate() {
-        let mut sorted: Vec<&HydrateTarget> = targets.iter().collect();
-        sorted.sort_by(|a, b| DownloadOrder::Newest.compare(a, b));
-        let rest = sorted.split_off(prime.min(sorted.len()));
-        for (tier, mut tiered) in [(0, sorted), (1, rest)] {
-            tiered.sort_by(|a, b| order.compare(a, b));
-            for chunk in tiered.chunks(BATCH_SIZE) {
-                let handles = chunk.iter().map(|target| target.handle.clone()).collect();
-                batches.push((tier, chunk[0], rank, (collection.clone(), handles)));
+    let mut names = Vec::with_capacity(plans.len());
+    // NOTE: each body's tier, 0 for a collection's primed ones, and its
+    // collection's rank.
+    let mut tiered: Vec<(u8, usize, HydrateTarget)> = Vec::new();
+    let mut planned: HashMap<String, usize> = HashMap::new();
+    for (rank, (collection, mut targets)) in plans.into_iter().enumerate() {
+        names.push(collection);
+        targets.sort_by(|a, b| DownloadOrder::Newest.compare(a, b));
+        for (at, target) in targets.into_iter().enumerate() {
+            let tier = u8::from(at >= prime);
+            if shared {
+                if let Some(&first) = planned.get(&target.handle.0) {
+                    let held = &mut tiered[first].0;
+                    *held = (*held).min(tier);
+                    continue;
+                }
+                planned.insert(target.handle.0.clone(), tiered.len());
             }
+            tiered.push((tier, rank, target));
         }
     }
-    batches.sort_by(|(tier_a, a, rank_a, _), (tier_b, b, rank_b, _)| {
+    drop(planned);
+
+    // NOTE: stable, so ties keep a collection's newest-first order.
+    tiered.sort_by(|(tier_a, rank_a, a), (tier_b, rank_b, b)| {
+        rank_a
+            .cmp(rank_b)
+            .then(tier_a.cmp(tier_b))
+            .then(order.compare(a, b))
+    });
+    let mut batches: Vec<(u8, usize, HydrateTarget, HydrateBatch)> = Vec::new();
+    for group in tiered.chunk_by(|a, b| (a.0, a.1) == (b.0, b.1)) {
+        let (tier, rank) = (group[0].0, group[0].1);
+        for chunk in group.chunks(BATCH_SIZE) {
+            let batch = HydrateBatch::new(&names[rank], chunk.iter().map(|(_, _, t)| t));
+            batches.push((tier, rank, chunk[0].2.clone(), batch));
+        }
+    }
+    batches.sort_by(|(tier_a, rank_a, a, _), (tier_b, rank_b, b, _)| {
         tier_a
             .cmp(tier_b)
             .then(order.compare(a, b))
@@ -2280,57 +2575,42 @@ fn hydrate_batches(
     batches.into_iter().map(|(_, _, _, batch)| batch).collect()
 }
 
-/// Runs `batches` over one worker per connection, applying each as it lands.
+/// Runs `batches` over one worker per connection, each landing its batch
+/// before taking the next.
 ///
-/// Fetches overlap across the workers; applies serialise on the one store,
-/// two collections possibly holding the same body. A fetch error stops the
-/// pool and fails the run, every batch applied before it staying in the
-/// store. An apply error is warned about, its batch left for the next run.
-fn hydrate_pool<W, S>(
+/// Fetches overlap across the workers; `land` serialises its writes. A
+/// landing error (its download failed) stops the pool and fails the run,
+/// every batch landed before it staying in the store; a write that fails
+/// is warned about by `land`, its batch left for the next run.
+fn hydrate_pool<W: Send>(
     workers: &mut [W],
-    store: &mut S,
     batches: Vec<HydrateBatch>,
-    fetch: impl Fn(&mut W, &str, &[PimdirHandle]) -> Result<Vec<PimdirFetchedItem>> + Sync,
-    apply: impl Fn(&mut W, &mut S, &str, Vec<PimdirFetchedItem>) -> Result<()> + Sync,
-) -> Result<()>
-where
-    W: Send,
-    S: Send,
-{
+    land: impl Fn(&mut W, HydrateBatch) -> Result<()> + Sync,
+) -> Result<()> {
     let queue: SegQueue<HydrateBatch> = SegQueue::new();
     for batch in batches {
         queue.push(batch);
     }
 
-    let store: Mutex<&mut S> = Mutex::new(store);
     let failure: Mutex<Option<anyhow::Error>> = Mutex::new(None);
     let stop = AtomicBool::new(false);
 
     let queue_ref = &queue;
-    let store_ref = &store;
     let failure_ref = &failure;
     let stop_ref = &stop;
-    let fetch_ref = &fetch;
-    let apply_ref = &apply;
+    let land_ref = &land;
 
     thread::scope(|scope| {
         for worker in workers.iter_mut() {
             scope.spawn(move || {
                 while !stop_ref.load(Ordering::Relaxed) {
-                    let Some((collection, handles)) = queue_ref.pop() else {
+                    let Some(batch) = queue_ref.pop() else {
                         break;
                     };
-                    let items = match fetch_ref(worker, &collection, &handles) {
-                        Ok(items) => items,
-                        Err(err) => {
-                            *failure_ref.lock().unwrap() = Some(err);
-                            stop_ref.store(true, Ordering::Relaxed);
-                            break;
-                        }
-                    };
-                    let mut store = store_ref.lock().unwrap_or_else(PoisonError::into_inner);
-                    if let Err(err) = apply_ref(worker, &mut store, &collection, items) {
-                        warn!("{collection} write error: {err:#}");
+                    if let Err(err) = land_ref(worker, batch) {
+                        *failure_ref.lock().unwrap() = Some(err);
+                        stop_ref.store(true, Ordering::Relaxed);
+                        break;
                     }
                 }
             });
@@ -8536,10 +8816,6 @@ mod tests {
                 .unwrap();
         }
 
-        let batch = |collection: &str, handles: &[&str]| {
-            let handles = handles.iter().map(|h| PimdirHandle((*h).into())).collect();
-            (collection.to_string(), handles)
-        };
         let batches = vec![
             batch("imap/Archive", &["1", "2"]),
             batch("imap/INBOX", &["1", "2", "3"]),
@@ -8548,39 +8824,39 @@ mod tests {
         ];
 
         let fetched = AtomicUsize::new(0);
-        let mut workers = [()];
-        let outcome = hydrate_pool(
-            &mut workers,
-            &mut store,
-            batches,
-            |_, collection, handles| {
-                if fetched.fetch_add(1, Ordering::Relaxed) == 2 {
-                    anyhow::bail!("connection lost");
-                }
-                Ok(handles
-                    .iter()
-                    .map(|handle| {
-                        let body = format!(
-                            "Message-ID: <{}@example.org>\r\nSubject: {collection}\r\n\r\nhi\r\n",
-                            handle.0
-                        );
-                        let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
-                        PimdirFetchedItem {
-                            handle: handle.clone(),
-                            link_id: PimdirLinkId(format!("mid:{}@example.org", handle.0)),
-                            summary: None,
-                            sort_key: PimdirSortKey::default(),
-                            body: Some(PimdirFetchedBody::Inline {
-                                hash: blobs.hash(body.as_bytes()),
-                                bytes: body.into_bytes(),
-                            }),
-                            revision: None,
-                        }
-                    })
-                    .collect())
-            },
-            |_, store, collection, items| apply_batch(store, NoWire, collection, items),
-        );
+        let mut workers = [&mut store];
+        let outcome = hydrate_pool(&mut workers, batches, |store, batch| {
+            if fetched.fetch_add(1, Ordering::Relaxed) == 2 {
+                anyhow::bail!("connection lost");
+            }
+            let collection = &batch.collection;
+            let items = batch
+                .bodies
+                .iter()
+                .map(|(handle, _)| {
+                    let body = format!(
+                        "Message-ID: <{}@example.org>\r\nSubject: {collection}\r\n\r\nhi\r\n",
+                        handle.0
+                    );
+                    let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
+                    PimdirFetchedItem {
+                        handle: handle.clone(),
+                        link_id: PimdirLinkId(format!("mid:{}@example.org", handle.0)),
+                        summary: None,
+                        sort_key: PimdirSortKey::default(),
+                        body: Some(PimdirFetchedBody::Inline {
+                            hash: blobs.hash(body.as_bytes()),
+                            bytes: body.into_bytes(),
+                        }),
+                        revision: None,
+                    }
+                })
+                .collect();
+            if let Err(err) = apply_batch(store, NoWire, collection, items) {
+                warn!("{collection} write error: {err:#}");
+            }
+            Ok(())
+        });
 
         assert_eq!(
             outcome.unwrap_err().to_string(),
@@ -8611,8 +8887,22 @@ mod tests {
     fn queued(batches: Vec<HydrateBatch>) -> Vec<(String, Vec<String>)> {
         batches
             .into_iter()
-            .map(|(collection, handles)| (collection, handles.into_iter().map(|h| h.0).collect()))
+            .map(|batch| {
+                let handles = batch.bodies.into_iter().map(|(h, _)| h.0).collect();
+                (batch.collection, handles)
+            })
             .collect()
+    }
+
+    /// A batch of `handles` read from `collection`, of no known size.
+    fn batch(collection: &str, handles: &[&str]) -> HydrateBatch {
+        HydrateBatch {
+            collection: collection.to_string(),
+            bodies: handles
+                .iter()
+                .map(|handle| (PimdirHandle((*handle).into()), 0))
+                .collect(),
+        }
     }
 
     /// The download order is the caller's: largest first by default, the
@@ -8640,14 +8930,24 @@ mod tests {
         let owned = |list: &[&str]| list.iter().map(|h| h.to_string()).collect::<Vec<_>>();
 
         assert_eq!(
-            queued(hydrate_batches(&plans, DownloadOrder::Largest, 0)),
+            queued(hydrate_batches(
+                plans.clone(),
+                DownloadOrder::Largest,
+                0,
+                false
+            )),
             [
                 ("imap/Archive".to_string(), owned(&["a", "b"])),
                 ("imap/INBOX".to_string(), owned(&["e", "c", "d"])),
             ],
         );
         assert_eq!(
-            queued(hydrate_batches(&plans, DownloadOrder::Newest, 0)),
+            queued(hydrate_batches(
+                plans.clone(),
+                DownloadOrder::Newest,
+                0,
+                false
+            )),
             [
                 ("imap/INBOX".to_string(), owned(&["c", "e", "d"])),
                 ("imap/Archive".to_string(), owned(&["b", "a"])),
@@ -8674,10 +8974,14 @@ mod tests {
             ),
         ];
 
-        let order: Vec<(String, usize, String)> = hydrate_batches(&plans, DownloadOrder::Newest, 0)
-            .into_iter()
-            .map(|(collection, handles)| (collection, handles.len(), handles[0].0.clone()))
-            .collect();
+        let order: Vec<(String, usize, String)> =
+            hydrate_batches(plans.clone(), DownloadOrder::Newest, 0, false)
+                .into_iter()
+                .map(|batch| {
+                    let first = batch.bodies[0].0.0.clone();
+                    (batch.collection, batch.bodies.len(), first)
+                })
+                .collect();
         assert_eq!(
             order,
             [
@@ -9165,14 +9469,20 @@ mod tests {
         let mut fed = Vec::new();
         while let Some(job) = work.next() {
             let Job::Hydrate {
-                batch: (collection, handles),
+                batch,
                 primed: false,
             } = job
             else {
                 panic!("only page bodies are queued: {job:?}");
             };
-            assert_eq!(collection, "imap/INBOX");
-            fed.push(handles.into_iter().map(|h| h.0).collect::<Vec<_>>());
+            assert_eq!(batch.collection, "imap/INBOX");
+            fed.push(
+                batch
+                    .bodies
+                    .into_iter()
+                    .map(|(h, _)| h.0)
+                    .collect::<Vec<_>>(),
+            );
         }
         assert_eq!(
             fed,
@@ -9197,7 +9507,7 @@ mod tests {
             let waiter = scope.spawn(|| {
                 let mut got = Vec::new();
                 while let Some(Job::Hydrate { batch, .. }) = work.next() {
-                    got.push(batch.1.len());
+                    got.push(batch.bodies.len());
                 }
                 got
             });
@@ -9304,7 +9614,10 @@ mod tests {
     fn every_first_page_and_its_newest_bodies_come_before_any_second_page() {
         let work = Work::new(DownloadOrder::Newest, 3, true);
         let primed = |collection: &str, handle: &str| Job::Hydrate {
-            batch: (collection.to_string(), vec![PimdirHandle(handle.into())]),
+            batch: HydrateBatch {
+                collection: collection.to_string(),
+                bodies: vec![(PimdirHandle(handle.into()), 1)],
+            },
             primed: true,
         };
 
@@ -9373,7 +9686,7 @@ mod tests {
         );
         let mut order = Vec::new();
         while let Some(Job::Hydrate { batch, .. }) = work.next() {
-            order.push(batch.0);
+            order.push(batch.collection);
         }
         assert_eq!(order, ["Sent", "INBOX", "Archive"]);
     }
@@ -9400,7 +9713,12 @@ mod tests {
         ];
         let owned = |list: &[&str]| list.iter().map(|h| h.to_string()).collect::<Vec<_>>();
         assert_eq!(
-            queued(hydrate_batches(&plans, DownloadOrder::Largest, 1)),
+            queued(hydrate_batches(
+                plans.clone(),
+                DownloadOrder::Largest,
+                1,
+                false
+            )),
             [
                 ("imap/INBOX".to_string(), owned(&["new"])),
                 ("imap/Archive".to_string(), owned(&["recent"])),
@@ -9530,7 +9848,7 @@ mod graph_budget {
     use io_msgraph::v1::client::MsgraphStream;
     use io_pimdir::{client::PimdirStore, placement::PimdirHandle};
 
-    use super::{connection_budget, hydrate_pool};
+    use super::{HydrateBatch, connection_budget, hydrate_pool};
     use crate::{
         client::Client,
         config::AccountConfig,
@@ -9735,12 +10053,27 @@ mod graph_budget {
     }
 
     /// Batches of `size` handles over `ids`.
-    fn batches(ids: &[String], size: usize) -> Vec<(String, Vec<PimdirHandle>)> {
+    fn batches(ids: &[String], size: usize) -> Vec<HydrateBatch> {
         ids.chunks(size)
             .map(|chunk| {
-                let handles = chunk.iter().map(|id| PimdirHandle(id.clone())).collect();
-                (String::from("Inbox"), handles)
+                let bodies = chunk
+                    .iter()
+                    .map(|id| (PimdirHandle(id.clone()), 0))
+                    .collect();
+                HydrateBatch {
+                    collection: String::from("Inbox"),
+                    bodies,
+                }
             })
+            .collect()
+    }
+
+    /// The handles of `batch`.
+    fn handles_of_batch(batch: &HydrateBatch) -> Vec<PimdirHandle> {
+        batch
+            .bodies
+            .iter()
+            .map(|(handle, _)| handle.clone())
             .collect()
     }
 
@@ -9756,18 +10089,20 @@ mod graph_budget {
         let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
         let fetched = AtomicUsize::new(0);
 
-        hydrate_pool(
-            &mut clients,
-            &mut (),
-            batches(&ids, 5),
-            |client, collection, handles| {
-                hydrate_batch(Kind::Mail, client, collection, handles, &blobs, None)
-            },
-            |_, _, _, items| {
-                fetched.fetch_add(items.len(), Ordering::Relaxed);
-                Ok(())
-            },
-        )
+        hydrate_pool(&mut clients, batches(&ids, 5), |client, batch| {
+            let handles = handles_of_batch(&batch);
+            let hydrated = hydrate_batch(
+                Kind::Mail,
+                client,
+                &batch.collection,
+                &handles,
+                &|_| None,
+                &blobs,
+                None,
+            )?;
+            fetched.fetch_add(hydrated.items.len(), Ordering::Relaxed);
+            Ok(())
+        })
         .unwrap();
 
         assert_eq!(fetched.into_inner(), 60);
@@ -9817,9 +10152,19 @@ mod graph_budget {
             for client in clients.iter_mut() {
                 let (queue, blobs, failed) = (&queue, &blobs, &failed);
                 scope.spawn(move || {
-                    while let Some((collection, handles)) = queue.pop() {
-                        if hydrate_batch(Kind::Mail, client, &collection, &handles, blobs, None)
-                            .is_err()
+                    while let Some(batch) = queue.pop() {
+                        let handles = handles_of_batch(&batch);
+                        let collection = &batch.collection;
+                        if hydrate_batch(
+                            Kind::Mail,
+                            client,
+                            collection,
+                            &handles,
+                            &|_| None,
+                            blobs,
+                            None,
+                        )
+                        .is_err()
                         {
                             failed.fetch_add(1, Ordering::Relaxed);
                         }
@@ -9862,12 +10207,249 @@ mod graph_budget {
 
         let start = Instant::now();
         let handles: Vec<PimdirHandle> = ids.iter().map(|id| PimdirHandle(id.clone())).collect();
-        let _ = hydrate_batch(Kind::Mail, &mut clients[0], "Inbox", &handles, &blobs, None);
+        let _ = hydrate_batch(
+            Kind::Mail,
+            &mut clients[0],
+            "Inbox",
+            &handles,
+            &|_| None,
+            &blobs,
+            None,
+        );
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "no three-second wait"
         );
         assert!(throttle.gave_up().is_some(), "the source gave up");
         assert_eq!(graph.served.lock().unwrap().len(), 1, "never sent again");
+    }
+}
+
+/// Hydration of a Gmail source, whose message ids name a message across
+/// its labels, over scripted sessions: a message under two labels is
+/// downloaded once, a body gone is owed nothing more for the run, and the
+/// sizes the store records plan the reads.
+#[cfg(all(test, feature = "gmail"))]
+mod gmail_bodies {
+    use std::{
+        path::Path,
+        sync::{Arc, atomic::AtomicU64},
+    };
+
+    use io_gmail::v1::rest::messages::encode_raw;
+    use io_pimdir::{
+        change::PimdirWriteOp,
+        client::PimdirSourceStore,
+        collection::{PimdirCollectionId, PimdirScope},
+        object::PimdirHash,
+        placement::{
+            PimdirBase, PimdirFlags, PimdirHandle, PimdirLevel, PimdirLinkId, PimdirPlacement,
+            PimdirSortKey, PimdirStatus,
+        },
+        summary::{PimdirSummary, mail::PimdirMailSummary},
+    };
+    use pimalaya_stream::tls::Tls;
+    use secrecy::SecretString;
+
+    use super::{
+        Authority, GoneBodies, Pacing, SourceCtx, hydrate_plans, open_store, phase2_hydrate,
+        projection_view,
+    };
+    use crate::{
+        account::{GmailAccount, SourceAccount, SourceAccountBackend},
+        client::{Client, Pool},
+        config::AccountConfig,
+        gmail::{
+            client::scripted::{Wire, batch_answer, scripted},
+            run::GmailRun,
+        },
+        throttle::Throttle,
+    };
+
+    const INBOX: &str = "gmail/INBOX";
+    const WORK: &str = "gmail/Work";
+
+    /// A message listed under `collection`, its body owed, of `size`
+    /// octets by its summary.
+    fn owed(collection: &str, handle: &str, size: u64) -> PimdirWriteOp {
+        PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+            collection: PimdirCollectionId(collection.into()),
+            handle: PimdirHandle(handle.into()),
+            link_id: Some(PimdirLinkId(format!("{handle}@example.org"))),
+            object: None,
+            level: PimdirLevel::Meta,
+            summary: Some(PimdirSummary::Mail(PimdirMailSummary {
+                size: Some(size),
+                ..Default::default()
+            })),
+            sort_key: PimdirSortKey::default(),
+            flags: PimdirFlags::default(),
+            status: PimdirStatus::Clean,
+            conflict_revision: None,
+            conflict_object: None,
+            base: Some(PimdirBase {
+                flags: PimdirFlags::default(),
+                revision: None,
+                object: None,
+            }),
+            origin: None,
+        })
+    }
+
+    fn raw(id: &str) -> serde_json::Value {
+        let source = format!("Message-ID: <{id}@example.org>\r\n\r\nBody of {id}\r\n");
+        serde_json::json!({ "id": id, "raw": encode_raw(source.as_bytes()) })
+    }
+
+    fn gone() -> serde_json::Value {
+        serde_json::json!({ "error": { "code": 404, "message": "Requested entity was not found." } })
+    }
+
+    /// The store of a Gmail account syncing `INBOX` and `Work`, holding
+    /// `placements`.
+    fn store_holding(dir: &Path, placements: Vec<PimdirWriteOp>) -> PimdirSourceStore {
+        let mut store = open_store(dir, "gmail", "gmail").unwrap();
+        for collection in [INBOX, WORK] {
+            store
+                .ensure_collection(collection, "message/rfc822")
+                .unwrap();
+        }
+        store.write(placements).unwrap();
+        store
+    }
+
+    /// One connection to a scripted Gmail, its API and batch sessions.
+    fn connection() -> (SourceCtx, Wire, Wire) {
+        let (client, api, batch) = scripted();
+        let config: AccountConfig = toml::from_str("gmail.auth.token.raw = \"x\"").unwrap();
+        let perms = config.sources().unwrap()["gmail"].permissions();
+        let account = SourceAccount {
+            backend: SourceAccountBackend::Gmail(GmailAccount {
+                token: SecretString::from(String::from("token")),
+                user_id: String::from("me"),
+                tls: Tls::default(),
+                run: Arc::new(GmailRun::new(Default::default())),
+            }),
+            #[cfg(feature = "smtp")]
+            smtp: None,
+            throttle: Arc::new(Throttle::new("gmail")),
+            downloaded: Arc::new(AtomicU64::new(0)),
+        };
+        let ctx = SourceCtx {
+            name: String::from("gmail"),
+            namespace: String::from("gmail"),
+            pool: Pool::of(account, Client::Gmail(Box::new(client))),
+            perms,
+            authority: Authority::Shared,
+            refused: Vec::new(),
+            rejected: Vec::new(),
+            scope: PimdirScope::unbounded(),
+            dry_run: false,
+        };
+        (ctx, api, batch)
+    }
+
+    /// Phase 2 over `collections`, the run's gone bodies `gone`.
+    fn hydrate(
+        store: &mut PimdirSourceStore,
+        ctx: &mut SourceCtx,
+        collections: &[String],
+        gone: &GoneBodies,
+    ) {
+        let plans = hydrate_plans(store, "gmail", collections, None, gone).unwrap();
+        let blobs = store.blobs();
+        phase2_hydrate(
+            "gmail",
+            plans,
+            &Pacing::default(),
+            std::slice::from_mut(ctx),
+            std::slice::from_mut(store),
+            &blobs,
+            Some(collections),
+            gone,
+        )
+        .unwrap();
+    }
+
+    /// Each placement of `collection` and the body it holds.
+    fn bodies(store: &PimdirSourceStore, collection: &str) -> Vec<(String, Option<PimdirHash>)> {
+        let mut bodies: Vec<_> = projection_view(store, collection, "gmail")
+            .unwrap()
+            .into_iter()
+            .map(|placement| (placement.handle.0, placement.object))
+            .collect();
+        bodies.sort();
+        bodies
+    }
+
+    /// A message under two labels is downloaded once and lands under both;
+    /// one gone since it was listed leaves the run complete, is asked once,
+    /// and no later batch of the run asks for it again. The sizes come from
+    /// the store: no minimal read asks for them.
+    #[test]
+    fn a_message_under_two_labels_downloads_once_and_one_gone_is_owed_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_holding(
+            dir.path(),
+            vec![
+                owed(INBOX, "m1", 40),
+                owed(INBOX, "m2", 40),
+                owed(WORK, "m1", 40),
+                owed(WORK, "m3", 40),
+            ],
+        );
+        let (mut ctx, api, batch) = connection();
+        batch.answer(batch_answer(&[
+            (0, "200 OK", raw("m1")),
+            (1, "200 OK", raw("m2")),
+        ]));
+        batch.answer(batch_answer(&[(0, "404 Not Found", gone())]));
+
+        let collections = vec![INBOX.to_string(), WORK.to_string()];
+        let run = GoneBodies::default();
+        hydrate(&mut store, &mut ctx, &collections, &run);
+
+        let requests = batch.requests();
+        assert_eq!(requests.len(), 2, "m1 and m2, then m3: {requests:?}");
+        assert!(api.requests().is_empty(), "nothing read alone");
+        let inbox = bodies(&store, INBOX);
+        let work = bodies(&store, WORK);
+        assert!(inbox.iter().all(|(_, body)| body.is_some()), "{inbox:?}");
+        assert_eq!(work[0].0, "m1");
+        assert_eq!(work[0].1, inbox[0].1, "one body for both labels");
+        assert_eq!(work[1], (String::from("m3"), None), "m3 stays as listed");
+
+        // NOTE: a second pass of the run plans nothing: m3 is owed nothing
+        // more, and the wire, answering no more, would fail any request.
+        hydrate(&mut store, &mut ctx, &collections, &run);
+        assert_eq!(batch.requests().len(), 2, "nothing asked again");
+        assert_eq!(batch.left(), 0);
+    }
+
+    /// A message a label holds a body for, listed under another label
+    /// later, takes that body with no download.
+    #[test]
+    fn a_body_held_under_one_label_serves_another_without_a_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_holding(dir.path(), vec![owed(INBOX, "m1", 40)]);
+        let (mut ctx, _, batch) = connection();
+        batch.answer(batch_answer(&[(0, "200 OK", raw("m1"))]));
+        hydrate(
+            &mut store,
+            &mut ctx,
+            &[INBOX.to_string()],
+            &GoneBodies::default(),
+        );
+        assert_eq!(batch.requests().len(), 1);
+
+        store.write(vec![owed(WORK, "m1", 40)]).unwrap();
+        let collections = vec![INBOX.to_string(), WORK.to_string()];
+        hydrate(&mut store, &mut ctx, &collections, &GoneBodies::default());
+
+        assert_eq!(batch.requests().len(), 1, "no second download");
+        let inbox = bodies(&store, INBOX);
+        let work = bodies(&store, WORK);
+        assert!(work[0].1.is_some(), "{work:?}");
+        assert_eq!(work[0].1, inbox[0].1);
     }
 }

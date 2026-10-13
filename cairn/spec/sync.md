@@ -444,8 +444,8 @@ The one-source (retain) sync SHALL run as two phases across the whole account, n
 
 - **Phase 1, spine (parallel over mailboxes).** A work-stealing pool of workers,
 each on its own connection *and* its own store handle, reconciles each mailbox's spine (pull + meta + itemize + push), the mailboxes taken in the run's order (see "Collections are taken by role"), in one pass or, primed, in two (see "Every collection's newest mail comes first on request"). The network overlaps across mailboxes; store writes serialise on the store's single-writer lock (the seam sanctions process-level serialization), and every collection is pre-created serially first so no worker races lazy creation. A worker with no mailbox left downloads the bodies of the pages the others have landed (see "A landed page's bodies download while the next pages list"), the spine of a mailbox holding it at rest for each apply.
-- **Phase 2, hydrate and apply (one global pool).** Once phase 1 has ended, the bodies still owed (`handle`, size and date from the local mail summary) are chunked into
-per-mailbox batches queued in the download order the caller chose (largest first by default, see below), each mailbox's primed bodies first when the run primes, and work-stolen across the connections through **one** queue: a worker finishing one mailbox's last batch immediately steals the next mailbox's (`select_cached` re-SELECTs across the boundary), so no connection idles at a mailbox edge. Bodies stream into the blob store. The worker that fetched a batch SHALL raise its items to `Full` before taking the next one, over a cache-backed remote serving that batch alone (a miss falls back to a real fetch on the worker's connection). The applies SHALL be serialised on one store handle, the same body possibly belonging to two mailboxes.
+- **Phase 2, hydrate and apply (one global pool).** Once phase 1 has ended, the bodies still owed (`handle`, size and date from the local mail summary), but those the run found gone (see "A body gone from the server is owed nothing more"), are chunked into
+per-mailbox batches queued in the download order the caller chose (largest first by default, see below), each mailbox's primed bodies first when the run primes, a handle of a source with account-wide handles planned once (see "A message under several labels is downloaded once"), and work-stolen across the connections through **one** queue: a worker finishing one mailbox's last batch immediately steals the next mailbox's (`select_cached` re-SELECTs across the boundary), so no connection idles at a mailbox edge. Each batch carries the sizes the store records, which the backend plans its reads with. Bodies stream into the blob store. The worker that fetched a batch SHALL raise its items to `Full` before taking the next one, through its own store handle, over a cache-backed remote serving that batch alone (a miss falls back to a real fetch on the worker's connection). The writes of the workers SHALL be serialised, the same body possibly belonging to two mailboxes.
 
 A body SHALL be readable from the store as soon as its batch is applied, not once the account has downloaded. A run that stops during either phase SHALL keep every batch it applied, so the next run's pull plan holds only what is still without a body; nothing is held in memory beyond the batches in flight, one a connection. In phase 2 a fetch error SHALL stop the pool and fail the run; a batch that fails to apply SHALL be warned about and left for the next run.
 
@@ -623,7 +623,7 @@ A request Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV or Card
 The Gmail source SHALL hold itself to 200 quota units a second across all its connections, and to `gmail.units-per-minute` units over any sixty seconds (6,000 by default), each call, and each batch for all its reads, taking its cost before it is sent, a read costing the 5 units Gmail bills.
 
 ### Requirement: Gmail reads in paced batches
-A `gmail` source SHALL read message metadata, sizes and raw bodies through Gmail's HTTP batch endpoint, `gmail.batch-size` reads a batch (10 by default, 1 to 100) and at most `gmail.batches-in-flight` batches at once across the source's connections (1 by default), each batch paced by the units of all its reads. A read refused inside a batch for concurrency, rate or a missing answer SHALL be sent again at the head of the next batch after one to two seconds, one refused a per-minute quota likewise after two to five seconds and then the next minute; a read answered 404 SHALL be a message gone, never an error; a daily quota, or a read refused six times, SHALL give the source up. A raw batch SHALL hold about 8 MiB of messages by their size estimates, a message over 5 MiB being read alone, and each body SHALL be stored as its batch lands.
+A `gmail` source SHALL read message metadata, sizes and raw bodies through Gmail's HTTP batch endpoint, `gmail.batch-size` reads a batch (10 by default, 1 to 100) and at most `gmail.batches-in-flight` batches at once across the source's connections (1 by default), each batch paced by the units of all its reads. A read refused inside a batch for concurrency, rate or a missing answer SHALL be sent again at the head of the next batch after one to two seconds, one refused a per-minute quota likewise after two to five seconds and then the next minute; a read answered 404 SHALL be a message gone, never an error, and a body read so SHALL be answered gone to the driver; a daily quota, or a read refused six times, SHALL give the source up. A raw batch SHALL hold about 8 MiB of messages by their sizes, a message over 5 MiB being read alone, and each body SHALL be stored as its batch lands. The sizes SHALL be the run's own reads, else the ones the store records for the bodies it owes, a minimal read asking Gmail only for the sizes neither knows.
 
 A run SHALL read a message once: a message carrying several synced labels SHALL be named, under the second label listing it, from the metadata the first read, its flags from that label's own flag listings. The run SHALL read the mailbox history once, with no label, and project it on each label.
 
@@ -636,6 +636,11 @@ A run SHALL read a message once: a message carrying several synced labels SHALL 
 - **GIVEN** a message filed under `INBOX` and a user label
 - **WHEN** both are listed in one run
 - **THEN** its metadata is read once
+
+#### Scenario: A resumed hydration
+- **GIVEN** bodies an interrupted run left owed, their sizes in the store
+- **WHEN** a run downloads them
+- **THEN** raw batches read them with no minimal read first
 
 ### Requirement: Entering a conflict is said once
 A run SHALL warn once for each placement that entered conflict during it, and SHALL say nothing about one an earlier run already parked. Neverest SHALL raise no desktop notification of its own, and SHALL NOT link a notification daemon.
@@ -920,7 +925,7 @@ A run that failed to scan a collection SHALL NOT report itself in sync. "In sync
 An error crossing an engine boundary SHALL be rendered with its full chain, not with its outermost context alone. A backend keeps a server's status and response body so a caller can read them, and a wrapper that renders only the top drops exactly the part naming what the server said.
 
 ### Requirement: A body fetch answers for every handle it was asked about
-A batched body fetch SHALL be treated as complete only when it answers for every handle it carried. A batch answering for fewer SHALL fall back to a per-item fetch for the remainder, exactly as a batch that errors already does, and SHALL report the shortfall.
+A batched body fetch SHALL be treated as complete only when it answers for every handle it carried, a handle the server answered gone being answered (see "A body gone from the server is owed nothing more"). A batch answering for fewer SHALL fall back to a per-item fetch for the remainder, exactly as a batch that errors already does, and SHALL report the shortfall; a per-item fetch the server answers gone SHALL be answered gone, never fail the batch.
 
 A backend that answers for a subset is not a backend that failed, so nothing surfaces as an error; but the engine cannot tell an unanswered handle from an unasked one, so an unanswered handle is recorded nowhere and re-requested on every later run. That is a run that fetches a whole collection, stores nothing and reports itself in sync.
 
@@ -930,7 +935,7 @@ A backend that answers for a subset is not a backend that failed, so nothing sur
 - THEN the other 62 are fetched one by one and the shortfall is reported
 
 ### Requirement: An empty body is refused, never stored
-A body of zero bytes SHALL fail the fetch, naming the item and its collection. No kind neverest syncs has an empty body: a message carries headers and a card carries at least its `BEGIN` and `END` lines.
+A body of zero bytes SHALL fail the fetch, naming the item and its collection. No kind neverest syncs has an empty body: a message carries headers and a card carries at least its `BEGIN` and `END` lines. An IMAP UID a lone fetch answers with no message at all is no empty body: the message is gone.
 
 An empty body stored is worse than a fetch that fails. Its link id is the digest of nothing, so every empty body a server returns resolves to the same identity; the second one collides with the first, the duplicate-link-id floor freezes it, and the collection stays frozen for every later run.
 
@@ -1240,7 +1245,7 @@ Before the first byte of a message leaves, the run SHALL count the attempt in th
 - **THEN** the row reads pending with one attempt, and the next run parks it under `uncertain: ` without sending it
 
 ### Requirement: Graph mail bodies are fetched in JSON batches
-A Graph mail source SHALL fetch the `Full` tier of an id set through JSON batches (`POST /$batch`) of raw MIME gets (`/messages/{id}/$value`), each body answered base64-encoded, matched to its message by request id whatever order Graph answers in, and written to the blob store as soon as it is decoded, before the next is read. A batch SHALL hold at most 20 gets and 4 MiB of the sizes Graph states for them (the MAPI message size, `$expand=singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')`, which the band listing, the summaries read by id and the whole-folder delta ask for, the delta asking without it once Graph refused it); a message stated over 1 MiB, or stating no size, SHALL be read alone by a plain get. When more than one message of a fetch states no size to the session, their sizes SHALL be read first, 20 a batch, by id alone. A get Graph throttles (429 or a common 5xx), alone or with its whole batch, SHALL be sent again in a later batch once its own `Retry-After` is over (seconds or an HTTP date), else after a back-off doubling from a second, at most four times; one still throttled, or stating a wait over `sync --max-wait` (two minutes by default), SHALL be left unanswered, a throttle (429, 503) giving the source up until its wait is over. A get refused otherwise SHALL be left unanswered, so the per-item fallback fetches it and surfaces its error.
+A Graph mail source SHALL fetch the `Full` tier of an id set through JSON batches (`POST /$batch`) of raw MIME gets (`/messages/{id}/$value`), each body answered base64-encoded, matched to its message by request id whatever order Graph answers in, and written to the blob store as soon as it is decoded, before the next is read. A batch SHALL hold at most 20 gets and 4 MiB of the sizes stated for them (the MAPI message size, `$expand=singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')`, which the band listing, the summaries read by id and the whole-folder delta ask for, the delta asking without it once Graph refused it, else the size the store records for the body it owes); a message stated over 1 MiB, or stating no size, SHALL be read alone by a plain get. When more than one message of a fetch states no size to the session nor to the store, their sizes SHALL be read first, 20 a batch, by id alone. A get Graph throttles (429 or a common 5xx), alone or with its whole batch, SHALL be sent again in a later batch once its own `Retry-After` is over (seconds or an HTTP date), else after a back-off doubling from a second, at most four times; one still throttled, or stating a wait over `sync --max-wait` (two minutes by default), SHALL be left unanswered, a throttle (429, 503) giving the source up until its wait is over. A get answered 404, for the size or the body, alone or in a batch, SHALL be answered gone. A get refused otherwise SHALL be left unanswered, so the per-item fallback fetches it and surfaces its error.
 
 #### Scenario: Twenty bodies, one round trip
 - **GIVEN** a Graph mail folder holding twenty messages of 50 KiB each whose bodies the store lacks
@@ -1360,3 +1365,29 @@ The one-source sync SHALL take its collections in the order of the roles the run
 - **GIVEN** an Inbox an interrupted first sync left owing thousands of bodies, and a new mail
 - **WHEN** `sync --include-collection INBOX --bodies listed` runs
 - **THEN** the new mail's body is downloaded and the backlog is not
+
+### Requirement: A body gone from the server is owed nothing more
+A body read the server answers gone SHALL NOT fail the run: a Gmail or Graph read answered 404 (in a batch, a size read, or alone), and an IMAP UID a completed `UID FETCH` answers nothing for (RFC 9051 §6.4.9), or a lone fetch of it that streams nothing. The run SHALL record the body gone for each collection owing it and SHALL NOT ask for it again: no later batch of phase 1 and none of phase 2. The store SHALL keep the member as it was listed, a body read being no listing (pimdir SYNC §5), so the next run's listing takes it away before that run plans its body. DAV, Google Calendar and Google People bodies are not covered.
+
+#### Scenario: Expunged while the run downloads
+- **GIVEN** an IMAP folder whose three smallest messages are expunged after a `-j 1` run listed them, while it downloads the largest bodies
+- **WHEN** the run reaches their batch
+- **THEN** the run completes, the three members stay without a body, and the next run's listing removes them, fetching nothing
+
+#### Scenario: A Gmail body gone
+- **GIVEN** a Gmail message deleted after it was listed
+- **WHEN** its raw read answers 404
+- **THEN** the run completes and no later batch of the run asks for it
+
+### Requirement: A message under several labels is downloaded once
+On a source whose handle names one item across its collections (a Gmail message id, the same under each label), a run SHALL download each body once: phase 2 SHALL plan a handle once, under the first collection in the run's order listing it, among the primed bodies when any collection primes it; a batch SHALL read where its handles are owed across the source's collections, serve a handle some collection already holds a body for from that body with no download, download the rest once, and raise each body to `Full` in every collection holding its handle without one, one collection at a time and only where its sync is at rest. The store holds one object per hash, which every placement references.
+
+#### Scenario: `INBOX` and a user label
+- **GIVEN** a Gmail message under `INBOX` and `Work`, its body owed in both
+- **WHEN** the run downloads bodies
+- **THEN** one raw read fetches it, and both placements hold the same body
+
+#### Scenario: A label added later
+- **GIVEN** a message whose body the store holds under `INBOX`, listed under `Work` by a later run
+- **WHEN** that run downloads bodies
+- **THEN** `Work` holds the same body and nothing is downloaded

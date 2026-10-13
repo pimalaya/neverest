@@ -28,7 +28,7 @@ use io_gpeople::v1::{
         connections::list::GpeopleConnectionsListParams,
         vcard::{GPEOPLE_PERSON_STASH_KEY, GPEOPLE_PERSON_VCARD_FIELDS},
     },
-    send::{GPEOPLE_API_BASE, GpeopleSendError, GpeopleSendOutput},
+    send::{GPEOPLE_API_BASE, GpeopleApiError, GpeopleSendError, GpeopleSendOutput},
 };
 use log::{debug, trace, warn};
 use pimalaya_stream::{
@@ -152,16 +152,17 @@ impl GpeopleClient {
                 Ok(out.response)
             },
             |err| match err {
-                GpeopleClientStdError::Send(GpeopleSendError::Api { status, message }) => {
-                    google_throttled_for(request, *status, message)
+                GpeopleClientStdError::Send(GpeopleSendError::Api(err)) => {
+                    google_throttled_for(request, err.status, &err.message)
                 }
                 _ => None,
             },
             |message| {
-                GpeopleClientStdError::Send(GpeopleSendError::Api {
+                GpeopleClientStdError::Send(GpeopleSendError::Api(GpeopleApiError {
                     status: 429,
                     message,
-                })
+                    ..Default::default()
+                }))
             },
         )
     }

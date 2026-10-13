@@ -45,7 +45,7 @@ use io_gmail::v1::{
             import::GmailMessageImport, list::GmailMessagesListParams,
         },
     },
-    send::{GMAIL_API_BASE, GmailSendError, GmailSendOutput},
+    send::{GMAIL_API_BASE, GmailApiError, GmailSendError, GmailSendOutput},
 };
 use io_pimdir::{
     collection::PimdirScope,
@@ -266,16 +266,17 @@ impl GmailClient {
                 Ok(out.response)
             },
             |err| match err {
-                GmailClientStdError::Send(GmailSendError::Api { status, message }) => {
-                    google_throttled_for(request, *status, message)
+                GmailClientStdError::Send(GmailSendError::Api(err)) => {
+                    google_throttled_for(request, err.status, &err.message)
                 }
                 _ => None,
             },
             |message| {
-                GmailClientStdError::Send(GmailSendError::Api {
+                GmailClientStdError::Send(GmailSendError::Api(GmailApiError {
                     status: 429,
                     message,
-                })
+                    ..Default::default()
+                }))
             },
         )
     }
@@ -1256,7 +1257,7 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use io_gmail::v1::send::GmailSendError;
+    use io_gmail::v1::send::{GmailApiError, GmailSendError};
 
     use super::*;
 
@@ -1423,16 +1424,18 @@ mod tests {
 
     #[test]
     fn only_a_404_counts_as_not_found() {
-        let expired = GmailClientStdError::Send(GmailSendError::Api {
+        let expired = GmailClientStdError::Send(GmailSendError::Api(GmailApiError {
             status: 404,
             message: "Requested entity was not found.".into(),
-        });
+            ..Default::default()
+        }));
         assert!(is_not_found(&expired));
 
-        let denied = GmailClientStdError::Send(GmailSendError::Api {
+        let denied = GmailClientStdError::Send(GmailSendError::Api(GmailApiError {
             status: 403,
             message: "no".into(),
-        });
+            ..Default::default()
+        }));
         assert!(!is_not_found(&denied));
         assert!(!is_not_found(&GmailClientStdError::Io(
             std::io::Error::other("reset")
@@ -1520,10 +1523,11 @@ mod tests {
     #[test]
     fn only_a_400_counts_as_a_refused_page_token() {
         let api = |status| {
-            GmailClientStdError::Send(GmailSendError::Api {
+            GmailClientStdError::Send(GmailSendError::Api(GmailApiError {
                 status,
                 message: String::from("Invalid pageToken"),
-            })
+                ..Default::default()
+            }))
         };
         assert!(is_bad_request(&api(400)));
         assert!(!is_bad_request(&api(404)));

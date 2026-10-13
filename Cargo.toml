@@ -47,18 +47,18 @@ clap = { version = "4.4", features = ["derive", "env", "wrap_help"] }
 crossbeam-queue = "0.3"
 crossterm = { version = "0.29", default-features = false, features = ["serde"] }
 dirs = "7"
-ical-rs = { version = "0.5.3", optional = true }
-io-gcal = { git = "https://github.com/pimalaya/io-gcal", rev = "1268ef625d70fbebfc0bf6d876aa2330ad469461", default-features = false, optional = true }
-io-gmail = { version = "0.4", default-features = false, optional = true }
-io-gpeople = { version = "0.4.2", default-features = false, optional = true }
+ical-rs = { version = "0.6", optional = true }
+io-gcal = { version = "0.2", default-features = false, optional = true }
+io-gmail = { version = "0.5", default-features = false, optional = true }
+io-gpeople = { version = "0.5", default-features = false, optional = true }
 io-http = { version = "0.5", default-features = false, optional = true }
 io-imap = { version = "0.7", default-features = false, optional = true }
-io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "00ef069234d1a97335ea174f918491b703f39238", default-features = false, optional = true }
+io-msgraph = { version = "0.6", default-features = false, optional = true }
 io-pim-discovery = { version = "0.8", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "stream"], optional = true }
-io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "be03184246e1ad7e45bd657de5076d99a1b34922", default-features = false, features = ["client"] }
+io-pimdir = { version = "0.8", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }
 jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
-io-smtp = { version = "0.5", default-features = false, optional = true }
+io-smtp = { version = "0.6", default-features = false, optional = true }
 io-webdav = { version = "0.5", default-features = false, optional = true }
 log = "0.4"
 mail-parser = { version = "0.11", features = ["serde"] }
@@ -79,3 +79,12 @@ vcard-rs = { version = "0.5", optional = true }
 
 [dev-dependencies]
 io-oauth = { version = "0.3", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
+
+# NOTE: unreleased fixes, pushed revisions to be replaced by released versions.
+[patch.crates-io]
+ical-rs = { git = "https://github.com/pimalaya/ical", rev = "caa14225152a7aff6d8c86cef1f95e800dd77d20" }
+io-http = { git = "https://github.com/pimalaya/io-http", rev = "e1815307771c1ec65a86b77256d46c33241d3038" }
+io-imap = { git = "https://github.com/pimalaya/io-imap", rev = "b1ab38ea9f24578b46dda56aa009600571b6b9ef" }
+io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "2ae26370aefa671c16316dbad98107634436bce6" }
+io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "189db408bdbeee33c1c535709c5f40f3464c7ecb" }
+io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "62fad898d1ecb3ebb25c37826a79eb72fcd54d7f" }

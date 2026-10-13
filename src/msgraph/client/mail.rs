@@ -628,6 +628,7 @@ impl MailWire for GraphClient {
         let params = MsgraphMessagesDeltaParams {
             select: Some(select),
             filter: None,
+            expand: None,
             max_page_size: Some(PAGE_SIZE),
         };
         self.op(|client| client.messages_delta_with_params(Some(&folder), &params))

@@ -35,6 +35,8 @@ pub fn parse_summary(env: &ItemSummary) -> PimdirDerivation {
         date: env.date.map(utc),
         size: (env.size > 0).then_some(env.size),
         attachment: env.has_attachment,
+        // NOTE: read with the body alone, never off an envelope.
+        invitation: None,
         from,
         to: env.to.iter().map(address).collect(),
         cc: env.cc.iter().map(address).collect(),

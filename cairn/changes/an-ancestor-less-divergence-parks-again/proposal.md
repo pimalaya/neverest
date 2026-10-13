@@ -1,7 +1,7 @@
 ---
 cairn: change
 id: an-ancestor-less-divergence-parks-again
-status: active
+status: landed
 created: 2026-10-11
 ---
 

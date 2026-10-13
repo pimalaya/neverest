@@ -1,7 +1,7 @@
 ---
 cairn: change
 id: a-preferred-local-reaches-the-target
-status: active
+status: landed
 created: 2026-10-02
 ---
 

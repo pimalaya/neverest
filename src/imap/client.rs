@@ -71,7 +71,13 @@ impl ImapClient {
                 ..Default::default()
             },
         };
-        let (inner, capabilities) = Inner::connect(server, opts)?;
+        let (inner, mut capabilities) = Inner::connect(server, opts)?;
+        // NOTE: a debug build can be told to read the server as one without
+        // QRESYNC, which the integration tests take to list band heads
+        // against a server offering it; a release build never reads it.
+        if cfg!(debug_assertions) && std::env::var_os("NEVEREST_IMAP_NO_QRESYNC").is_some() {
+            capabilities.retain(|capability| *capability != Capability::QResync);
+        }
         let mut client = Self {
             inner,
             capabilities,

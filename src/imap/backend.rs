@@ -36,7 +36,7 @@ use io_imap::{
 };
 use io_pimdir::{
     collection::PimdirScope,
-    remote::{PimdirEnumerate, PimdirListing},
+    remote::{PimdirEnumerate, PimdirHead, PimdirListing},
     summary::{PimdirDerivation, mail},
 };
 use log::debug;
@@ -116,9 +116,14 @@ impl ImapClient {
     /// QRESYNC `SELECT`; a server without QRESYNC, or a checkpoint whose
     /// `UIDVALIDITY` moved, answers the first page of a round instead. A
     /// round lists the scope newest first, [`PAGE_SIZE`] UIDs a page, its
-    /// cursor the lowest UID listed; its first page carries the checkpoint
-    /// taken at the `SELECT`, so what moves during the round is the next
-    /// delta's.
+    /// cursor the lowest UID listed and the highest UID the round found
+    /// when it opened; its first page carries the checkpoint taken at the
+    /// `SELECT`, so what moves during the round is its heads' or the next
+    /// delta's, and its last page lists again what arrived since it opened.
+    ///
+    /// A head lists what changed while the round is open: a delta head the
+    /// QRESYNC delta from a checkpoint, a band head what `SEARCH SINCE`
+    /// dates from the round's opening less two days.
     pub fn enumerate(
         &mut self,
         mailbox: &str,
@@ -126,17 +131,21 @@ impl ImapClient {
         held: Held<'_>,
     ) -> Result<Listed> {
         match &request.listing {
-            // NOTE: no head yet (pimdir SYNC §4).
-            PimdirListing::Head(_) => Ok(Listed::NoHead),
+            PimdirListing::Head(PimdirHead::Delta(checkpoint)) => {
+                self.delta_head(mailbox, &checkpoint.0, &held)
+            }
+            PimdirListing::Head(PimdirHead::Band { since }) => {
+                self.band_head(mailbox, since, &held)
+            }
             PimdirListing::Delta(checkpoint) => {
-                self.delta_page(mailbox, &checkpoint.0, &request.scope, held)
+                self.delta_page(mailbox, &checkpoint.0, &request.scope, &held)
             }
             PimdirListing::Round { cursor, band } => self.round_page(
                 mailbox,
                 cursor.as_ref().map(|cursor| cursor.0.as_slice()),
                 *band,
                 &request.scope,
-                held,
+                &held,
             ),
         }
     }
@@ -148,25 +157,59 @@ impl ImapClient {
         mailbox: &str,
         checkpoint: &[u8],
         scope: &PimdirScope,
-        held: Held<'_>,
+        held: &Held<'_>,
     ) -> Result<Listed> {
-        let Some((cv, cmodseq)) = decode_checkpoint(checkpoint) else {
+        let Some(position) = qresync_position(checkpoint, self.supports_qresync()) else {
             return self.round_page(mailbox, None, false, scope, held);
         };
-        let Some(cv_nz) = NonZeroU32::new(cv).filter(|_| cmodseq > 0 && self.supports_qresync())
-        else {
-            return self.round_page(mailbox, None, false, scope, held);
-        };
-
-        let mbox = parse_mailbox(mailbox)?;
-        let data = self.select_delta(mbox, cv_nz, cmodseq)?;
-        self.mark_selected(mailbox);
-        let uid_validity = data.uid_validity.map(|v| v.get()).unwrap_or(cv);
-        if uid_validity != cv {
-            debug!("UIDVALIDITY of {mailbox} moved, listing it in a round");
-            return self.round_page(mailbox, None, false, scope, held);
+        match self.qresync_delta(mailbox, position, held)? {
+            Some(page) => Ok(Listed::Page(page)),
+            None => {
+                debug!("UIDVALIDITY of {mailbox} moved, listing it in a round");
+                self.round_page(mailbox, None, false, scope, held)
+            }
         }
-        let highest_mod_seq = data.highest_mod_seq.unwrap_or(cmodseq);
+    }
+
+    /// The delta head of an open round: what changed since `checkpoint`,
+    /// answered as a delta and never as a round (pimdir SYNC §4).
+    ///
+    /// A server without QRESYNC, or a checkpoint with no modseq to list
+    /// from, lists none. A checkpoint whose `UIDVALIDITY` moved is refused:
+    /// the round restarts and takes the new one from its first page, and
+    /// the stored checkpoint moving to it when that round closes rebuilds
+    /// the collection, as a delta meeting a moved `UIDVALIDITY` does.
+    fn delta_head(&mut self, mailbox: &str, checkpoint: &[u8], held: &Held<'_>) -> Result<Listed> {
+        let Some(position) = qresync_position(checkpoint, self.supports_qresync()) else {
+            return Ok(Listed::NoHead);
+        };
+        match self.qresync_delta(mailbox, position, held)? {
+            Some(page) => Ok(Listed::Page(page)),
+            None => {
+                debug!("UIDVALIDITY of {mailbox} moved under the round, refusing its head");
+                Ok(Listed::HeadRejected)
+            }
+        }
+    }
+
+    /// The QRESYNC delta from `(UIDVALIDITY, modseq)`: the messages changed
+    /// since, the meta read for the ones the store does not bind, the UIDs
+    /// vanished, and the checkpoint the server holds now. `None` when the
+    /// `UIDVALIDITY` moved, its UIDs naming other messages.
+    fn qresync_delta(
+        &mut self,
+        mailbox: &str,
+        (validity, modseq): (NonZeroU32, u64),
+        held: &Held<'_>,
+    ) -> Result<Option<Enumeration>> {
+        let mbox = parse_mailbox(mailbox)?;
+        let data = self.select_delta(mbox, validity, modseq)?;
+        self.mark_selected(mailbox);
+        let uid_validity = data.uid_validity.map(|v| v.get()).unwrap_or(validity.get());
+        if uid_validity != validity.get() {
+            return Ok(None);
+        }
+        let highest_mod_seq = data.highest_mod_seq.unwrap_or(modseq);
 
         let changed: Vec<Spine> = data
             .changed
@@ -179,11 +222,12 @@ impl ImapClient {
             .map(|uid| uid.get().to_string())
             .collect();
 
-        // NOTE: the handles still name what the store binds, the
-        // `UIDVALIDITY` being the checkpoint's.
+        // NOTE: a head's checkpoint may be newer than the store's, whose
+        // handles then name what an older `UIDVALIDITY` numbered.
+        let trusted = trusts(held, uid_validity);
         let unheld: Vec<u32> = changed
             .iter()
-            .filter(|row| !held.holds(&row.uid.to_string()))
+            .filter(|row| !(trusted && held.holds(&row.uid.to_string())))
             .map(|row| row.uid)
             .collect();
         let (metas, bytes) = self.fetch_metas(&unheld)?;
@@ -195,7 +239,44 @@ impl ImapClient {
             encode_checkpoint(uid_validity, highest_mod_seq),
         );
         page.bytes = bytes;
-        Ok(Listed::Page(page))
+        Ok(Some(page))
+    }
+
+    /// The band head of an open round: every message the server dates
+    /// from `since` less two days by its arrival (`UID SEARCH SINCE`, its
+    /// `INTERNALDATE`), read now as a round's page reads it (pimdir SYNC
+    /// §4). It states no removal and carries no checkpoint; a message moved
+    /// in keeps its arrival and waits for the round's last page. An instant
+    /// it cannot read lists none.
+    fn band_head(&mut self, mailbox: &str, since: &str, held: &Held<'_>) -> Result<Listed> {
+        let Some(day) = imap_day(since, -2) else {
+            debug!("no band head of {mailbox} from {since}, not an RFC 3339 instant");
+            return Ok(Listed::NoHead);
+        };
+
+        let mbox = parse_mailbox(mailbox)?;
+        let select = self.select(mbox, ImapMailboxSelectOptions::default())?;
+        self.mark_selected(mailbox);
+        let uid_validity = select.uid_validity.map(|v| v.get()).unwrap_or(0);
+
+        let uids: Vec<u32> = if select.exists.unwrap_or(0) == 0 {
+            Vec::new()
+        } else {
+            self.search(
+                Vec1::from(SearchKey::Since(day)),
+                ImapMessageSearchOptions { uid: true },
+            )?
+            .into_iter()
+            .map(NonZeroU32::get)
+            .collect()
+        };
+
+        let (items, bytes) = self.list_uids(&uids, uid_validity, held)?;
+        Ok(Listed::Page(Enumeration {
+            items,
+            bytes,
+            ..Default::default()
+        }))
     }
 
     /// One page of a round over `scope`, from its start or from `cursor`.
@@ -205,7 +286,7 @@ impl ImapClient {
         cursor: Option<&[u8]>,
         band: bool,
         scope: &PimdirScope,
-        held: Held<'_>,
+        held: &Held<'_>,
     ) -> Result<Listed> {
         let cursor = match cursor {
             None => None,
@@ -220,16 +301,17 @@ impl ImapClient {
         self.mark_selected(mailbox);
         let uid_validity = select.uid_validity.map(|v| v.get()).unwrap_or(0);
         let highest_mod_seq = select.highest_mod_seq.unwrap_or(0);
+        let exists = select.exists.unwrap_or(0);
 
-        if let Some((validity, _)) = cursor
-            && validity != uid_validity
+        if let Some(cursor) = cursor
+            && cursor.uid_validity != uid_validity
         {
             debug!("UIDVALIDITY of {mailbox} moved under the round, restarting it");
             return Ok(Listed::CursorRejected);
         }
 
         let key = (scope.since.clone(), scope.until.clone());
-        let below = cursor.map(|(_, lowest)| lowest);
+        let below = cursor.map(|cursor| cursor.lowest);
         let cached = self.round.take().filter(|round| {
             round.mailbox == mailbox
                 && round.uid_validity == uid_validity
@@ -242,15 +324,24 @@ impl ImapClient {
                 .into_iter()
                 .filter(|uid| below.is_none_or(|below| *uid < below))
                 .collect(),
-            None => self.search_round(scope, below, select.exists.unwrap_or(0))?,
+            None => self.search_round(scope, None, below, exists)?,
+        };
+        // NOTE: the highest UID the round found when it opened bounds what
+        // arrived since, UIDs only ever growing under one `UIDVALIDITY`.
+        let top = match cursor {
+            Some(cursor) => cursor.top,
+            None => left.first().copied().unwrap_or(0),
         };
 
         let rest = left.split_off(left.len().min(PAGE_SIZE));
-        let page_uids = left;
-        let next = rest
-            .first()
-            .and(page_uids.last())
-            .map(|lowest| encode_cursor(uid_validity, *lowest));
+        let mut page_uids = left;
+        let next = rest.first().and(page_uids.last()).map(|lowest| {
+            encode_cursor(RoundCursor {
+                uid_validity,
+                lowest: *lowest,
+                top,
+            })
+        });
         if !rest.is_empty() {
             self.round = Some(RoundUids {
                 mailbox: mailbox.to_owned(),
@@ -260,23 +351,17 @@ impl ImapClient {
             });
         }
 
-        // NOTE: a handle names what the store binds only under the
-        // `UIDVALIDITY` its checkpoint was made under.
-        let trusted = held
-            .checkpoint
-            .and_then(checkpoint_uid_validity)
-            .is_some_and(|validity| validity == uid_validity);
-        let (heldset, unheld): (Vec<u32>, Vec<u32>) = page_uids
-            .iter()
-            .partition(|uid| trusted && held.holds(&uid.to_string()));
+        // NOTE: a band head stamps nothing, so the last page of a round
+        // lists again every message that arrived since the round opened,
+        // read after this page's `SELECT` (pimdir SYNC §4); a round of one
+        // page found them already.
+        if next.is_none() && cursor.is_some() {
+            page_uids.extend(self.search_round(scope, Some(top), None, exists)?);
+            page_uids.sort_unstable_by(|a, b| b.cmp(a));
+            page_uids.dedup();
+        }
 
-        let mut rows = self.fetch_spines(&heldset)?;
-        let (metas, bytes) = self.fetch_metas(&unheld)?;
-        rows.extend(metas.iter().map(|(uid, meta)| Spine {
-            uid: *uid,
-            flags: meta.flags.clone(),
-        }));
-        let items = entries(rows, metas);
+        let (items, bytes) = self.list_uids(&page_uids, uid_validity, held)?;
 
         let first = cursor.is_none();
         Ok(Listed::Page(Enumeration {
@@ -289,13 +374,39 @@ impl ImapClient {
         }))
     }
 
+    /// What a UID set names, read now: the flags of the messages the store
+    /// binds under this `UIDVALIDITY`, the meta of the others, and the
+    /// header octets read. A UID the mailbox no longer holds is answered
+    /// nothing and left out (RFC 9051 §6.4.9), so a page never lists a
+    /// message a head stated removed.
+    fn list_uids(
+        &mut self,
+        uids: &[u32],
+        uid_validity: u32,
+        held: &Held<'_>,
+    ) -> Result<(Vec<EnumEntry>, u64)> {
+        let trusted = trusts(held, uid_validity);
+        let (heldset, unheld): (Vec<u32>, Vec<u32>) = uids
+            .iter()
+            .partition(|uid| trusted && held.holds(&uid.to_string()));
+
+        let mut rows = self.fetch_spines(&heldset)?;
+        let (metas, bytes) = self.fetch_metas(&unheld)?;
+        rows.extend(metas.iter().map(|(uid, meta)| Spine {
+            uid: *uid,
+            flags: meta.flags.clone(),
+        }));
+        Ok((entries(rows, metas), bytes))
+    }
+
     /// The UIDs of a round, highest first: every message, or the ones
     /// `SENTSINCE` and `SENTBEFORE` keep with a day's margin around the
     /// scope (the server compares dates, not instants, in its own zone) and
-    /// the ones with no `Date`, below `below` when a round resumes.
+    /// the ones with no `Date`, above `above` and below `below` when given.
     fn search_round(
         &mut self,
         scope: &PimdirScope,
+        above: Option<u32>,
         below: Option<u32>,
         exists: u32,
     ) -> Result<Vec<u32>> {
@@ -312,6 +423,18 @@ impl ImapClient {
                 .as_str()
                 .try_into()
                 .map_err(|_| anyhow!("Invalid IMAP UID range below {below}"))?;
+            criteria.push(SearchKey::Uid(range));
+        }
+        if let Some(above) = above.filter(|above| *above > 0) {
+            let Some(from) = above.checked_add(1) else {
+                return Ok(Vec::new());
+            };
+            // NOTE: `n:*` matches the highest UID even below `n` (RFC 9051
+            // §9), which the filter below drops.
+            let range: SequenceSet = format!("{from}:*")
+                .as_str()
+                .try_into()
+                .map_err(|_| anyhow!("Invalid IMAP UID range above {above}"))?;
             criteria.push(SearchKey::Uid(range));
         }
         // NOTE: a message with no `Date` is in every scope, and `SENTSINCE`
@@ -342,6 +465,7 @@ impl ImapClient {
             .search(criteria, ImapMessageSearchOptions { uid: true })?
             .into_iter()
             .map(NonZeroU32::get)
+            .filter(|uid| above.is_none_or(|above| *uid > above))
             .collect();
         uids.sort_unstable_by(|a, b| b.cmp(a));
         uids.dedup();
@@ -893,23 +1017,59 @@ fn imap_day(instant: &str, shift: i64) -> Option<ImapDate> {
     ImapDate::try_from(day).ok()
 }
 
-/// Encodes a round's resume cursor `(UIDVALIDITY, lowest UID listed)`:
-/// little-endian, 4 bytes each.
-fn encode_cursor(uid_validity: u32, lowest: u32) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(8);
-    bytes.extend_from_slice(&uid_validity.to_le_bytes());
-    bytes.extend_from_slice(&lowest.to_le_bytes());
+/// Where a round stands: the `UIDVALIDITY` it lists under, the lowest UID
+/// it listed, and the highest UID it found when it opened, above which
+/// every UID arrived since.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RoundCursor {
+    uid_validity: u32,
+    lowest: u32,
+    top: u32,
+}
+
+/// Encodes a round's resume cursor: little-endian, 4 bytes each of the
+/// `UIDVALIDITY`, the lowest UID listed and the highest UID found.
+fn encode_cursor(cursor: RoundCursor) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(12);
+    bytes.extend_from_slice(&cursor.uid_validity.to_le_bytes());
+    bytes.extend_from_slice(&cursor.lowest.to_le_bytes());
+    bytes.extend_from_slice(&cursor.top.to_le_bytes());
     bytes
 }
 
 /// Decodes a round's resume cursor; `None` for bytes that are not one.
-fn decode_cursor(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.len() != 8 {
-        return None;
+///
+/// A cursor written before it carried the highest UID found reads it as 0:
+/// the round's last page then lists its whole scope again, which keeps
+/// whatever arrived since, at the price of one pass over the flags.
+fn decode_cursor(bytes: &[u8]) -> Option<RoundCursor> {
+    let word = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
+    match bytes.len() {
+        8 | 12 => Some(RoundCursor {
+            uid_validity: word(0)?,
+            lowest: word(4)?,
+            top: if bytes.len() == 12 { word(8)? } else { 0 },
+        }),
+        _ => None,
     }
-    let uid_validity = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
-    let lowest = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
-    Some((uid_validity, lowest))
+}
+
+/// The `(UIDVALIDITY, modseq)` a QRESYNC `SELECT` lists from: `None` for a
+/// server without QRESYNC, bytes that are no checkpoint, or a checkpoint
+/// with no `UIDVALIDITY` or no modseq (a mailbox without `CONDSTORE`).
+fn qresync_position(checkpoint: &[u8], qresync: bool) -> Option<(NonZeroU32, u64)> {
+    let (validity, modseq) = decode_checkpoint(checkpoint)?;
+    let validity = NonZeroU32::new(validity)?;
+    (qresync && modseq > 0).then_some((validity, modseq))
+}
+
+/// Whether the store's handles name what `uid_validity` numbers: a handle
+/// names what the store binds only under the `UIDVALIDITY` its checkpoint
+/// was made under.
+fn trusts(held: &Held<'_>, uid_validity: u32) -> bool {
+    held.checkpoint
+        .and_then(checkpoint_uid_validity)
+        .is_some_and(|validity| validity == uid_validity)
 }
 
 /// Folds one FETCH row into a shared [`ItemSummary`].
@@ -1284,18 +1444,75 @@ mod tests {
         assert!(meta_from(row).is_none());
     }
 
-    /// The resume cursor carries the `UIDVALIDITY` and the lowest UID
-    /// listed, and anything else is no cursor at all.
+    /// The resume cursor carries the `UIDVALIDITY`, the lowest UID listed
+    /// and the highest UID the round found; one written before the last
+    /// reads it as 0, and anything else is no cursor at all.
     #[test]
     fn a_round_cursor_round_trips_and_rejects_garbage() {
-        let cursor = encode_cursor(1_774_329_954, 501);
-        assert_eq!(decode_cursor(&cursor), Some((1_774_329_954, 501)));
-        assert_eq!(decode_cursor(&[]), None);
+        let cursor = RoundCursor {
+            uid_validity: 1_774_329_954,
+            lowest: 501,
+            top: 1_100,
+        };
+        assert_eq!(decode_cursor(&encode_cursor(cursor)), Some(cursor));
+
+        let mut legacy = Vec::new();
+        legacy.extend_from_slice(&1_774_329_954u32.to_le_bytes());
+        legacy.extend_from_slice(&501u32.to_le_bytes());
         assert_eq!(
-            decode_cursor(&encode_checkpoint(1, 2)),
-            None,
-            "a checkpoint is no cursor"
+            decode_cursor(&legacy),
+            Some(RoundCursor { top: 0, ..cursor }),
+            "a cursor from before lists the whole scope again on its last page"
         );
+
+        assert_eq!(decode_cursor(&[]), None);
+        assert_eq!(decode_cursor(&[0; 5]), None);
+        assert_eq!(decode_cursor(&[0; 16]), None);
+    }
+
+    /// A delta lists from a checkpoint only where QRESYNC can: the server
+    /// offers it, and the checkpoint names a `UIDVALIDITY` and a modseq.
+    #[test]
+    fn a_qresync_position_needs_the_server_and_a_modseq() {
+        let checkpoint = encode_checkpoint(7, 42);
+        assert_eq!(
+            qresync_position(&checkpoint, true),
+            Some((NonZeroU32::new(7).unwrap(), 42))
+        );
+        assert_eq!(qresync_position(&checkpoint, false), None, "no QRESYNC");
+        assert_eq!(
+            qresync_position(&encode_checkpoint(7, 0), true),
+            None,
+            "a mailbox without CONDSTORE"
+        );
+        assert_eq!(qresync_position(&encode_checkpoint(0, 42), true), None);
+        assert_eq!(qresync_position(&[1, 2, 3], true), None);
+    }
+
+    /// The store's handles are trusted only under the `UIDVALIDITY` its
+    /// checkpoint names: a round or a head under a newer one reads every
+    /// message's meta anew.
+    #[test]
+    fn handles_are_trusted_under_the_store_s_uidvalidity_only() {
+        let handles = std::collections::HashSet::from(["3".to_owned()]);
+        let checkpoint = encode_checkpoint(7, 42);
+        let held = |checkpoint| Held {
+            handles: &handles,
+            checkpoint,
+            coverage: None,
+        };
+
+        assert!(trusts(&held(Some(&checkpoint)), 7));
+        assert!(!trusts(&held(Some(&checkpoint)), 8));
+        assert!(!trusts(&held(None), 7), "a first round binds nothing yet");
+    }
+
+    /// A band head reaches two days below the round's opening, by the
+    /// server's own days.
+    #[test]
+    fn a_band_head_reaches_two_days_below_the_round_s_opening() {
+        let day = imap_day("2026-10-13T09:30:00Z", -2).unwrap();
+        assert_eq!(day.as_ref().to_string(), "2026-10-11");
     }
 
     /// `SENTSINCE` and `SENTBEFORE` compare dates in the server's own zone,

@@ -586,13 +586,20 @@ impl Client {
     /// The heads the connector lists while a round is open (pimdir SYNC
     /// §4): Gmail lists delta heads from its history; Graph mail band
     /// heads by `receivedDateTime`, its delta link arriving with a round's
-    /// last page only; the others none yet.
+    /// last page only. IMAP lists a delta head from a checkpoint where the server
+    /// offers QRESYNC, read from the capabilities it stated when this
+    /// connection opened, and a band head (`SEARCH SINCE`) everywhere;
+    /// CONDSTORE alone states no removal, so it lists no delta head.
     pub fn heads(&self) -> PimdirHeads {
         match self {
             #[cfg(feature = "gmail")]
             Client::Gmail(_) => PimdirHeads::DELTA,
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) if c.kind() == GraphKind::Mail => PimdirHeads::BAND,
+            #[cfg(feature = "imap")]
+            Client::Imap(c) if c.supports_qresync() => PimdirHeads::BOTH,
+            #[cfg(feature = "imap")]
+            Client::Imap(_) => PimdirHeads::BAND,
             #[allow(unreachable_patterns)]
             _ => PimdirHeads::NONE,
         }

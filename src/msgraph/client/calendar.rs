@@ -42,7 +42,7 @@ use log::{debug, trace, warn};
 use serde_json::json;
 use url::Url;
 
-use super::GraphClient;
+use super::{GraphClient, chain_not_found};
 use crate::{
     client::{EnumEntry, Enumeration, WrittenItem},
     item::collection::Collection,
@@ -425,8 +425,18 @@ impl GraphClient {
     }
 
     /// Deletes an event, the whole series for a master, conditionally on
-    /// `if_match`.
+    /// `if_match`; one gone from the server already counts as deleted.
     pub(super) fn delete_event(&mut self, id: &str, if_match: Option<&str>) -> Result<()> {
+        match self.delete_event_once(id, if_match) {
+            Err(err) if chain_not_found(&err) => {
+                debug!("event {id} gone from the server already, its delete counts as done");
+                Ok(())
+            }
+            deleted => deleted,
+        }
+    }
+
+    fn delete_event_once(&mut self, id: &str, if_match: Option<&str>) -> Result<()> {
         if if_match.is_some() {
             let current = self.event(id)?;
             check_revision(id, &current, if_match)?;

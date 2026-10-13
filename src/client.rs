@@ -951,6 +951,7 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
                 &msgraph.token,
                 &msgraph.user_id,
                 msgraph.tls.clone(),
+                msgraph.sizes.clone(),
                 account.throttle.clone(),
             )?;
             Ok(Client::Msgraph(Box::new(client)))

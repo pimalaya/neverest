@@ -27,7 +27,7 @@ use io_msgraph::v1::rest::users::{
 };
 use log::{debug, trace, warn};
 
-use super::{GraphClient, decode_checkpoint, encode_checkpoint, is_expired_link};
+use super::{GraphClient, chain_not_found, decode_checkpoint, encode_checkpoint, is_expired_link};
 use crate::{
     client::{EnumEntry, Enumeration, WrittenItem},
     item::collection::Collection,
@@ -287,8 +287,19 @@ impl GraphClient {
         Ok(updated.change_key)
     }
 
-    /// Deletes a contact, conditionally on `if_match`.
+    /// Deletes a contact, conditionally on `if_match`; one gone from the
+    /// server already counts as deleted.
     pub(super) fn delete_contact(&mut self, id: &str, if_match: Option<&str>) -> Result<()> {
+        match self.delete_contact_once(id, if_match) {
+            Err(err) if chain_not_found(&err) => {
+                debug!("contact {id} gone from the server already, its delete counts as done");
+                Ok(())
+            }
+            deleted => deleted,
+        }
+    }
+
+    fn delete_contact_once(&mut self, id: &str, if_match: Option<&str>) -> Result<()> {
         if if_match.is_some() {
             let current = self.contact(id)?;
             check_revision(id, &current, if_match)?;

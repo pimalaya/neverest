@@ -30,15 +30,15 @@
 //! under a `$filter` when the coverage is bounded, and is refused, which
 //! opens a round.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, SecondsFormat};
 use io_msgraph::v1::{
-    client::MsgraphClientStd,
+    client::{MsgraphClientStd, MsgraphClientStdError},
     rest::batch::MSGRAPH_BATCH_MAX_REQUESTS,
     rest::users::messages::{
-        MsgraphMessage,
+        MsgraphFlagStatus, MsgraphMessage,
         delta::{MsgraphMessagesDeltaParams, MsgraphMessagesDeltaResponse},
         list::{MsgraphMessagesListParams, MsgraphMessagesListResponse},
     },
@@ -51,9 +51,10 @@ use io_pimdir::{
 use log::{debug, trace, warn};
 use url::Url;
 
-use super::{GraphClient, is_expired_link, message_date, message_envelope, message_flags};
+use super::{GraphClient, SIZE_EXPAND, batch_url, is_expired_link, message_date, message_envelope};
 use crate::{
     client::{EnumEntry, Enumeration, Held, Listed},
+    item::flag::{Flag, IanaFlag},
     kind::mail::parse_summary,
 };
 
@@ -190,13 +191,66 @@ impl Step {
     }
 }
 
+/// What a run keeps of one folder between the pages of its listing.
+#[derive(Debug, Default)]
+pub(super) struct Folder {
+    /// The marks of each message a band round this run listed, so the pass
+    /// closing the round lists again only those whose marks moved since,
+    /// the round having listed the others already (pimdir SYNC §4). Only
+    /// a round that goes on with a pass keeps them, and the pass drops
+    /// them: ids and three bits, never summaries.
+    banded: HashMap<String, Marks>,
+    /// The size Graph stated for each message the last page named, for
+    /// the session to plan its body batches by.
+    pub(super) sizes: Vec<(String, u64)>,
+}
+
+/// The flags a Graph message maps to, in three bits: what a member the
+/// store binds is listed by.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct Marks(u8);
+
+impl Marks {
+    const SEEN: u8 = 1;
+    const FLAGGED: u8 = 2;
+    const DRAFT: u8 = 4;
+
+    /// The marks of a delta row or a summary.
+    pub(super) fn of(message: &MsgraphMessage) -> Self {
+        let mut marks = 0;
+        if message.is_read == Some(true) {
+            marks |= Self::SEEN;
+        }
+        let status = message.flag.as_ref().and_then(|flag| flag.flag_status);
+        if status == Some(MsgraphFlagStatus::Flagged) {
+            marks |= Self::FLAGGED;
+        }
+        if message.is_draft == Some(true) {
+            marks |= Self::DRAFT;
+        }
+        Self(marks)
+    }
+
+    /// The shared flag set. `\Answered` and `\Deleted` have no Graph
+    /// equivalent and are never produced.
+    pub(super) fn flags(self) -> BTreeSet<Flag> {
+        [
+            (Self::SEEN, IanaFlag::Seen),
+            (Self::FLAGGED, IanaFlag::Flagged),
+            (Self::DRAFT, IanaFlag::Draft),
+        ]
+        .into_iter()
+        .filter(|(bit, _)| self.0 & bit != 0)
+        .map(|(_, flag)| Flag::from_iana(flag))
+        .collect()
+    }
+}
+
 /// Lists one page of the mail folder `mailbox` (pimdir SYNC §4), as the
-/// module describes. `rows` caches the summary of every message the run
-/// listed in it, which serves the `Meta` tier and names a member a later
-/// page lists bare.
+/// module describes. `folder` is what the run keeps of it between pages.
 pub(super) fn enumerate(
     wire: &mut impl MailWire,
-    rows: &mut HashMap<String, MsgraphMessage>,
+    folder: &mut Folder,
     mailbox: &str,
     request: &PimdirEnumerate,
     held: Held<'_>,
@@ -205,7 +259,7 @@ pub(super) fn enumerate(
 
     match &request.listing {
         PimdirListing::Delta(checkpoint) => match Link::decode(&checkpoint.0, held.coverage) {
-            Some(link) => delta(wire, rows, mailbox, &link, scope, held),
+            Some(link) => delta(wire, folder, mailbox, &link, scope, held),
             None => {
                 warn!("graph delta link of {mailbox} reads as none, opening a round");
                 Ok(Listed::CursorRejected)
@@ -213,9 +267,9 @@ pub(super) fn enumerate(
         },
         PimdirListing::Round { cursor: None, band } => {
             if *band || !scope.is_unbounded() {
-                band_page(wire, rows, mailbox, None, *band, scope)
+                band_page(wire, folder, mailbox, None, *band, scope)
             } else {
-                summary_page(wire, rows, mailbox, None)
+                summary_page(wire, folder, mailbox, None)
             }
         }
         PimdirListing::Round {
@@ -223,10 +277,10 @@ pub(super) fn enumerate(
             band,
         } => match Step::decode(&cursor.0, scope) {
             Some(Step::Summary(next)) if scope.is_unbounded() => {
-                summary_page(wire, rows, mailbox, Some(&next))
+                summary_page(wire, folder, mailbox, Some(&next))
             }
-            Some(Step::Band(next)) => band_page(wire, rows, mailbox, Some(&next), *band, scope),
-            Some(Step::Pass) if !band => pass(wire, rows, mailbox, scope, held),
+            Some(Step::Band(next)) => band_page(wire, folder, mailbox, Some(&next), *band, scope),
+            Some(Step::Pass) if !band => pass(wire, folder, mailbox, scope, held),
             _ => Ok(Listed::CursorRejected),
         },
     }
@@ -236,7 +290,7 @@ pub(super) fn enumerate(
 /// start or its next link; the last page carries the delta link.
 fn summary_page(
     wire: &mut impl MailWire,
-    rows: &mut HashMap<String, MsgraphMessage>,
+    folder: &mut Folder,
     mailbox: &str,
     next: Option<&str>,
 ) -> Result<Listed> {
@@ -261,8 +315,8 @@ fn summary_page(
             .map(|row| (row.message, row.removed.is_some())),
     ) {
         match row {
-            (message, true) => listing.vanish(rows, message.id),
-            (message, false) => listing.named(rows, message),
+            (message, true) => listing.vanish(folder, message.id),
+            (message, false) => listing.named(folder, message),
         }
     }
     trace!(
@@ -275,12 +329,13 @@ fn summary_page(
 
 /// One page of a band listing: the messages of `scope` by `sentDateTime`,
 /// newest first, each with its summary. Past its last page, a band round
-/// ends; a round over the whole scope goes on with the pass. A message with
-/// no date, which a filter on `sentDateTime` never lists, stays bound: a
-/// band round infers no delete of an undated member (pimdir SYNC §5).
+/// ends; a round over the whole scope goes on with the pass, which needs
+/// the marks of what the band listed. A message with no date, which a
+/// filter on `sentDateTime` never lists, stays bound: a band round infers
+/// no delete of an undated member (pimdir SYNC §5).
 fn band_page(
     wire: &mut impl MailWire,
-    rows: &mut HashMap<String, MsgraphMessage>,
+    folder: &mut Folder,
     mailbox: &str,
     next: Option<&str>,
     band: bool,
@@ -303,7 +358,12 @@ fn band_page(
     let mut listing = Listing::default();
     for message in page.value {
         if in_scope(scope, &message) {
-            listing.named(rows, message);
+            if !band {
+                folder
+                    .banded
+                    .insert(message.id.clone(), Marks::of(&message));
+            }
+            listing.named(folder, message);
         }
     }
     trace!(
@@ -318,64 +378,89 @@ fn band_page(
     )))
 }
 
+/// What the pass keeps of the last row of a message: ids, dates and flags
+/// read down to what the round's last page needs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Seen {
+    /// Removed from the folder.
+    Removed,
+    /// Present, out of the scope.
+    Out,
+    /// Present in the scope, with its marks.
+    In(Marks),
+}
+
 /// The round's last page under a scope: one pass of a fresh delta over the
 /// whole folder with ids, dates and flags, whose delta link becomes the
-/// checkpoint. Every member in scope is listed, by its binding, by the
-/// summary the band read, else by one read in batches; a member the store
-/// binds or the band listed that the pass does not list is gone.
+/// checkpoint. A member in scope is listed by its binding, by one read in
+/// batches when nothing names it, and not again when the band listed it
+/// this run with the marks it still has; a member the store binds or the
+/// band listed that the pass does not list is gone.
 ///
 /// The pass runs within one request of the engine: resumed, it starts
-/// again, since what it did not list is what went.
+/// again, since what it did not list is what went. Its rows are read down
+/// to an id and a [`Seen`] as each page comes, so a folder of any size
+/// costs that much a message, never its rows.
 fn pass(
     wire: &mut impl MailWire,
-    rows: &mut HashMap<String, MsgraphMessage>,
+    folder: &mut Folder,
     mailbox: &str,
     scope: &PimdirScope,
     held: Held<'_>,
 ) -> Result<Listed> {
     debug!("pass over the graph folder {mailbox} for its delta link");
 
-    let (listed, delta) =
-        follow(wire, mailbox, None)?.with_context(|| format!("Delta pass of {mailbox} expired"))?;
+    let Followed {
+        rows: listed,
+        link: delta,
+        bytes,
+    } = follow(wire, mailbox, None, |message, removed| match removed {
+        true => Seen::Removed,
+        false if in_scope(scope, &message) => Seen::In(Marks::of(&message)),
+        false => Seen::Out,
+    })?
+    .with_context(|| format!("Delta pass of {mailbox} expired"))?;
 
-    let mut listing = Listing::default();
+    let mut listing = Listing {
+        bytes,
+        ..Default::default()
+    };
     let mut present = HashSet::new();
     let mut unread = Vec::new();
-    for (message, removed) in latest(listed) {
-        if removed {
-            listing.vanish(rows, message.id);
-            continue;
-        }
-        present.insert(message.id.clone());
-        if !in_scope(scope, &message) {
-            continue;
-        }
-        if held.holds(&message.id) {
-            listing.bare(&message);
-        } else if let Some(known) = rows.get_mut(&message.id) {
-            known.is_read = message.is_read;
-            known.is_draft = message.is_draft;
-            known.flag = message.flag.clone();
-            let known = known.clone();
-            listing.named(rows, known);
-        } else {
-            unread.push(message.id);
+    for (id, seen) in &listed {
+        let marks = match seen {
+            Seen::Removed => continue,
+            Seen::Out => {
+                present.insert(id.as_str());
+                continue;
+            }
+            Seen::In(marks) => *marks,
+        };
+        present.insert(id.as_str());
+        if held.holds(id) {
+            listing.bare(id, marks);
+        } else if folder.banded.get(id) != Some(&marks) {
+            unread.push(id.clone());
         }
     }
 
-    listing.read_metas(wire, rows, &unread, scope)?;
-
-    let gone: Vec<String> = held
+    // NOTE: what the pass removes and what it no longer lists are both
+    // gone, each stated once.
+    let mut gone: Vec<String> = held
         .handles
         .iter()
-        .chain(rows.keys())
-        .filter(|id| !present.contains(*id))
+        .chain(folder.banded.keys())
+        .filter(|id| !present.contains(id.as_str()))
         .cloned()
         .collect::<HashSet<_>>()
         .into_iter()
         .collect();
+    gone.sort_unstable();
+
+    folder.banded.clear();
+    listing.read_metas(wire, folder, &unread, scope)?;
     for id in gone {
-        listing.vanish(rows, id);
+        listing.vanish(folder, id);
     }
 
     Ok(Listed::Page(listing.page(
@@ -385,42 +470,73 @@ fn pass(
     )))
 }
 
+/// What a delta keeps of the last row of a message: no more than the page
+/// it lands needs.
+#[derive(Debug)]
+enum Change {
+    /// Removed from the folder, whatever the scope.
+    Removed,
+    /// Changed out of the scope: dropped.
+    Out,
+    /// A member the store binds, listed by its marks.
+    Bound(Marks),
+    /// A member the store does not bind, named by its row's summary.
+    Named(Box<MsgraphMessage>),
+    /// A member the store does not bind, whose summary is to read.
+    Unread,
+}
+
 /// What changed since `link`: removals vanish whatever the scope, changes
 /// outside it are dropped, a change of a member the store binds is listed
 /// by its flags, and a member it does not bind is named by its summary,
 /// the row's own or one read in batches.
 fn delta(
     wire: &mut impl MailWire,
-    rows: &mut HashMap<String, MsgraphMessage>,
+    folder: &mut Folder,
     mailbox: &str,
     link: &Link,
     scope: &PimdirScope,
     held: Held<'_>,
 ) -> Result<Listed> {
-    let Some((listed, next)) = follow(wire, mailbox, Some(link.as_str()))? else {
+    let followed = follow(wire, mailbox, Some(link.as_str()), |message, removed| {
+        if removed {
+            Change::Removed
+        } else if !in_scope(scope, &message) {
+            Change::Out
+        } else if held.holds(&message.id) {
+            Change::Bound(Marks::of(&message))
+        } else if let Link::Summary(_) = link {
+            Change::Named(Box::new(message))
+        } else {
+            Change::Unread
+        }
+    })?;
+    let Some(Followed {
+        rows: listed,
+        link: next,
+        bytes,
+    }) = followed
+    else {
         warn!("graph delta link of {mailbox} expired, opening a round");
         return Ok(Listed::CursorRejected);
     };
 
-    let mut listing = Listing::default();
+    let mut listing = Listing {
+        bytes,
+        ..Default::default()
+    };
     let mut unread = Vec::new();
-    for (message, removed) in latest(listed) {
-        if removed {
-            listing.vanish(rows, message.id);
-            continue;
-        }
-        if !in_scope(scope, &message) {
-            trace!("change of {} out of scope, dropped", message.id);
-            continue;
-        }
-        match link {
-            Link::Summary(_) => listing.named(rows, message),
-            Link::Ids(_) if held.holds(&message.id) => listing.bare(&message),
-            Link::Ids(_) => unread.push(message.id),
+    for (id, change) in listed {
+        match change {
+            Change::Removed => listing.vanish(folder, id),
+            Change::Out => trace!("change of {id} out of scope, dropped"),
+            Change::Bound(marks) => listing.bare(&id, marks),
+            Change::Named(message) => listing.named(folder, *message),
+            Change::Unread => unread.push(id),
         }
     }
 
-    listing.read_metas(wire, rows, &unread, scope)?;
+    listing.read_metas(wire, folder, &unread, scope)?;
 
     Ok(Listed::Page(listing.page(
         false,
@@ -430,13 +546,18 @@ fn delta(
 }
 
 /// Follows a delta from `link`, or from a fresh pass with ids only, to its
-/// delta link: every row, flagged when removed, and the delta link. `None`
-/// when Graph answers that the link expired.
-fn follow(
+/// delta link: the last row of each message read down by `keep` as its
+/// page comes, in the order of those last rows, the delta link, and the
+/// octets of the rows. `None` when Graph answers that the link expired.
+///
+/// No page is held past its own reading: a folder of any size costs an id
+/// and what `keep` makes of its row a message.
+fn follow<T>(
     wire: &mut impl MailWire,
     mailbox: &str,
     link: Option<&str>,
-) -> Result<Option<(Vec<Row>, String)>> {
+    mut keep: impl FnMut(MsgraphMessage, bool) -> T,
+) -> Result<Option<Followed<T>>> {
     let mut page = match link {
         None => wire.delta_first(mailbox, IDS_SELECT)?,
         Some(link) => match wire.delta_next(link)? {
@@ -445,15 +566,28 @@ fn follow(
         },
     };
 
-    let mut rows = Vec::new();
+    let mut kept: HashMap<String, (usize, T)> = HashMap::new();
+    let mut order = 0;
+    let mut bytes = 0;
     loop {
-        rows.extend(
-            page.value
-                .into_iter()
-                .map(|row| (row.message, row.removed.is_some())),
-        );
+        for row in page.value {
+            if row.message.id.is_empty() {
+                continue;
+            }
+            bytes += serde_json::to_vec(&row).map_or(0, |json| json.len() as u64);
+            let id = row.message.id.clone();
+            kept.insert(id, (order, keep(row.message, row.removed.is_some())));
+            order += 1;
+        }
         if let Some(delta) = page.delta_link {
-            return Ok(Some((rows, delta)));
+            let mut listed: Vec<(String, (usize, T))> = kept.into_iter().collect();
+            listed.sort_unstable_by_key(|(_, (order, _))| *order);
+            let listed = listed.into_iter().map(|(id, (_, kept))| (id, kept));
+            return Ok(Some(Followed {
+                rows: listed.collect(),
+                link: delta,
+                bytes,
+            }));
         }
         let next = page
             .next_link
@@ -463,6 +597,15 @@ fn follow(
             None => return Ok(None),
         };
     }
+}
+
+/// What [`follow`] read of a delta: the last row of each message as its
+/// caller keeps it, in the order of those rows, the delta link, and the
+/// octets the rows took.
+struct Followed<T> {
+    rows: Vec<(String, T)>,
+    link: String,
+    bytes: u64,
 }
 
 /// A delta row: the message, and whether it was removed.
@@ -517,33 +660,34 @@ struct Listing {
 }
 
 impl Listing {
-    /// Lists `message` named by its summary, which the cache keeps.
-    fn named(&mut self, rows: &mut HashMap<String, MsgraphMessage>, message: MsgraphMessage) {
+    /// Lists `message` named by its summary, noting the size Graph states.
+    fn named(&mut self, folder: &mut Folder, message: MsgraphMessage) {
         self.bytes += serde_json::to_vec(&message).map_or(0, |json| json.len() as u64);
         let summary = message_envelope(&message.id, &message);
+        if summary.size > 0 {
+            folder.sizes.push((message.id.clone(), summary.size));
+        }
         self.items.push(EnumEntry {
-            id: message.id.clone(),
-            flags: message_flags(&message),
+            id: message.id,
+            flags: summary.flags.clone(),
             revision: None,
             meta: Some(parse_summary(&summary)),
         });
-        rows.insert(message.id.clone(), message);
     }
 
     /// Lists a member the store binds by its flags, the store naming it.
-    fn bare(&mut self, message: &MsgraphMessage) {
-        self.bytes += serde_json::to_vec(message).map_or(0, |json| json.len() as u64);
+    fn bare(&mut self, id: &str, marks: Marks) {
         self.items.push(EnumEntry {
-            id: message.id.clone(),
-            flags: message_flags(message),
+            id: id.to_owned(),
+            flags: marks.flags(),
             revision: None,
             meta: None,
         });
     }
 
     /// States `id` removed.
-    fn vanish(&mut self, rows: &mut HashMap<String, MsgraphMessage>, id: String) {
-        rows.remove(&id);
+    fn vanish(&mut self, folder: &mut Folder, id: String) {
+        folder.banded.remove(&id);
         self.vanished.push(id);
     }
 
@@ -553,7 +697,7 @@ impl Listing {
     fn read_metas(
         &mut self,
         wire: &mut impl MailWire,
-        rows: &mut HashMap<String, MsgraphMessage>,
+        folder: &mut Folder,
         ids: &[String],
         scope: &PimdirScope,
     ) -> Result<()> {
@@ -565,7 +709,7 @@ impl Listing {
         let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
         for message in wire.metas(&ids)? {
             if in_scope(scope, &message) {
-                self.named(rows, message);
+                self.named(folder, message);
             }
         }
         Ok(())
@@ -601,6 +745,7 @@ impl MailWire for GraphClient {
             select: Some(SUMMARY_SELECT),
             filter: filter.as_deref(),
             orderby: Some("sentDateTime desc"),
+            expand: Some(SIZE_EXPAND),
             ..Default::default()
         };
         self.op(|client| client.messages_list(Some(&folder), &params))
@@ -623,16 +768,32 @@ impl MailWire for GraphClient {
         }
     }
 
+    /// A whole-folder delta asks for the size `$expand` too, which Graph
+    /// documents for message delta; refused once (400), the session asks
+    /// without it from then on, the sizes then read before the bodies.
     fn delta_first(&mut self, mailbox: &str, select: &str) -> Result<MsgraphMessagesDeltaResponse> {
         let folder = self.folder_id(mailbox)?;
-        let params = MsgraphMessagesDeltaParams {
+        let expands = select == SUMMARY_SELECT && self.delta_expands;
+        let params = |expand: bool| MsgraphMessagesDeltaParams {
             select: Some(select),
             filter: None,
-            expand: None,
+            expand: expand.then_some(SIZE_EXPAND),
             max_page_size: Some(PAGE_SIZE),
         };
-        self.op(|client| client.messages_delta_with_params(Some(&folder), &params))
-            .with_context(|| format!("Start delta of {mailbox} error"))
+
+        let first =
+            self.op(|client| client.messages_delta_with_params(Some(&folder), &params(expands)));
+        let first = match first {
+            Err(MsgraphClientStdError::Send(err)) if expands && err.status() == Some(400) => {
+                warn!(
+                    "graph refused the size $expand on the delta of {mailbox} ({err}), asking without it"
+                );
+                self.delta_expands = false;
+                self.op(|client| client.messages_delta_with_params(Some(&folder), &params(false)))
+            }
+            first => first,
+        };
+        first.with_context(|| format!("Start delta of {mailbox} error"))
     }
 
     fn delta_next(&mut self, link: &str) -> Result<Option<MsgraphMessagesDeltaResponse>> {
@@ -650,10 +811,16 @@ impl MailWire for GraphClient {
         let mut metas = Vec::with_capacity(ids.len());
 
         for chunk in ids.chunks(MSGRAPH_BATCH_MAX_REQUESTS) {
+            let mut read = HashMap::new();
             let answer = self
                 .batch_get(
                     chunk,
-                    |id| format!("/{user}/messages/{id}?$select={SUMMARY_SELECT}"),
+                    |id| {
+                        batch_url(
+                            &format!("{user}/messages/{id}"),
+                            &[("$select", SUMMARY_SELECT), ("$expand", SIZE_EXPAND)],
+                        )
+                    },
                     |id, body| {
                         let message = body
                             .and_then(|body| serde_json::from_value::<MsgraphMessage>(body).ok());
@@ -662,19 +829,23 @@ impl MailWire for GraphClient {
                         }
                         message
                     },
+                    |id, message| {
+                        read.insert(id, message);
+                        Ok(())
+                    },
                 )
                 .context("Send summary batch error")?;
 
             let missing = chunk
                 .iter()
-                .filter(|id| !answer.bodies.contains_key(*id) && !answer.gone.contains(id))
+                .filter(|id| !read.contains_key(*id) && !answer.gone.contains(id))
                 .count();
             if missing > 0 {
                 bail!("Graph did not answer the summary of {missing} changed messages");
             }
 
             for id in chunk {
-                if let Some(mut message) = answer.bodies.get(id).cloned() {
+                if let Some(mut message) = read.remove(id) {
                     if message.id.is_empty() {
                         message.id = (*id).to_owned();
                     }
@@ -1036,7 +1207,7 @@ mod tests {
     /// enumeration numbered `fail_at`, as a dropped connection would.
     struct Remote {
         graph: FakeGraph,
-        rows: HashMap<String, MsgraphMessage>,
+        folder: Folder,
         handles: HashSet<String>,
         names: HashMap<String, (PimdirLinkId, PimdirSortKey)>,
         checkpoint: Option<Vec<u8>>,
@@ -1052,7 +1223,7 @@ mod tests {
         fn new(graph: FakeGraph) -> Self {
             Self {
                 graph,
-                rows: HashMap::new(),
+                folder: Folder::default(),
                 handles: HashSet::new(),
                 names: HashMap::new(),
                 checkpoint: None,
@@ -1088,7 +1259,8 @@ mod tests {
                 checkpoint: self.checkpoint.as_deref(),
                 coverage: self.coverage.as_ref(),
             };
-            let page = match enumerate(&mut self.graph, &mut self.rows, "INBOX", &request, held)? {
+            let page = match enumerate(&mut self.graph, &mut self.folder, "INBOX", &request, held)?
+            {
                 Listed::Page(page) => page,
                 Listed::CursorRejected => return Ok(PimdirEnumerated::CursorRejected),
             };
@@ -1491,7 +1663,7 @@ mod tests {
     #[test]
     fn a_filtered_link_of_before_opens_a_round() {
         let mut graph = folder();
-        let mut rows = HashMap::new();
+        let mut folder = Folder::default();
         let handles = HashSet::new();
         let coverage = since("2026-09-01");
         let request = PimdirEnumerate {
@@ -1506,9 +1678,51 @@ mod tests {
             coverage: Some(&coverage),
         };
         assert!(matches!(
-            enumerate(&mut graph, &mut rows, "INBOX", &request, held).unwrap(),
+            enumerate(&mut graph, &mut folder, "INBOX", &request, held).unwrap(),
             Listed::CursorRejected
         ));
         assert_eq!(graph.counts, Counts::default(), "nothing is asked of Graph");
+    }
+
+    /// The pass lists again only what the band listed this run whose
+    /// marks moved since, by reading its summary; the rest the band
+    /// listed stays listed by the round, and nothing it keeps of the band
+    /// outlives the pass.
+    #[test]
+    fn the_pass_relists_only_what_moved_since_the_band() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut remote = Remote::new(folder());
+        // NOTE: the band of September is four pages of three: the pass is
+        // the fifth request.
+        remote.between = Some((
+            4,
+            Box::new(|graph: &mut FakeGraph| graph.flag("2026-09-05")),
+        ));
+
+        sync(&mut store, &mut remote, since("2026-09-01")).unwrap();
+
+        assert_eq!(stored(&store), months(&["2026-09"]));
+        assert!(flags_of(&store, "2026-09-05").contains("\\Flagged"));
+        assert!(!flags_of(&store, "2026-09-04").contains("\\Flagged"));
+        assert_eq!(
+            remote.graph.counts.metas, 2,
+            "the undated message and the one flagged since the band"
+        );
+        assert!(remote.folder.banded.is_empty(), "dropped with the pass");
+        let coverage = store.list_coverage(COLLECTION).unwrap();
+        assert!(coverage[0].round.is_none(), "the round closed");
+    }
+
+    /// What a pass or a delta keeps of a message while it follows the
+    /// folder is its id and a few octets, never its row.
+    #[test]
+    fn a_followed_row_is_kept_as_a_few_octets() {
+        assert!(std::mem::size_of::<Seen>() <= 2);
+        assert!(std::mem::size_of::<Change>() <= 16);
+        assert!(
+            std::mem::size_of::<MsgraphMessage>()
+                > 8 * std::mem::size_of::<(String, (usize, Seen))>()
+        );
     }
 }

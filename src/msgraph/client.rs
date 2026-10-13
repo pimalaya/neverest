@@ -1,8 +1,15 @@
 //! # Microsoft Graph client
 //!
 //! [`GraphClient`] wraps the std blocking io-msgraph client behind the same
-//! adapter surface as the IMAP backend, with the folder name map, the delta row
-//! cache serving the `Meta` tier and stream reopens.
+//! adapter surface as the IMAP backend, with the folder name map and the
+//! connection it watches and reopens ([`wire`]): never reused past a minute
+//! idle or after an exchange it did not read whole, a read sent again once
+//! when a reused connection was found dead before answering.
+//!
+//! Bodies come in JSON batches bounded in octets by the sizes the listings
+//! state ([`SizeHints`]), each committed as soon as it is decoded. A flag
+//! set, a move or a delete on an item gone from the server counts as done;
+//! a copy of it stays an error.
 //!
 //! `enumerate` lists mail as [`mail`] describes: a folder-wide message delta
 //! link as the engine's opaque checkpoint (HTTP 410 means an expired link and
@@ -29,12 +36,13 @@
 mod calendar;
 mod contacts;
 mod mail;
+mod wire;
 
 use std::{
     collections::{BTreeMap, HashMap},
     io::{Read, Write},
-    sync::Arc,
-    time::{Duration, SystemTime},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime},
 };
 
 use anyhow::{Context, Result, bail};
@@ -44,7 +52,9 @@ use base64::{
 };
 use chrono::{DateTime, FixedOffset};
 use io_msgraph::v1::{
-    client::{MsgraphClientStd, MsgraphClientStdConnectOptions, MsgraphClientStdError},
+    client::{
+        MsgraphClientStd, MsgraphClientStdConnectOptions, MsgraphClientStdError, MsgraphStream,
+    },
     rest::batch::{MSGRAPH_BATCH_MAX_REQUESTS, MsgraphBatchRequest, MsgraphBatchResponses},
     rest::users::{
         mail_folders::{
@@ -65,6 +75,7 @@ use pimalaya_stream::{
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
+use self::wire::{Connect, Exchange, Shared, Watched};
 use crate::{
     client::{Held, Listed, WrittenItem},
     item::{
@@ -116,19 +127,32 @@ pub struct GraphClient {
     /// The domain this session syncs.
     kind: GraphKind,
     inner: MsgraphClientStd,
-    /// The TLS configuration, kept for stream reopens.
-    tls: Tls,
+    /// Opens a new connection to the Graph API, for reopens.
+    connect: Connect,
+    /// What the exchange in flight did on the stream ([`wire`]).
+    exchange: Shared,
     /// Folder display name (or `Parent/Child` path) to folder id, refreshed
     /// from the folder listing when a name misses.
     folders: HashMap<String, String>,
-    /// The delta rows of the last enumerations, keyed by collection then
-    /// handle, serving the `Meta` tier without re-fetching.
-    rows: HashMap<String, HashMap<String, MsgraphMessage>>,
+    /// What the run keeps of each mail folder between its pages.
+    kept: HashMap<String, mail::Folder>,
+    /// The sizes the listings stated, shared by the source's connections,
+    /// which plan the body batches by.
+    sizes: SizeHints,
+    /// Whether a whole-folder delta asks for the size `$expand`, until
+    /// Graph refuses it once.
+    delta_expands: bool,
     /// The id of the well-known Drafts folder, resolved on the first append.
     drafts: Option<String>,
-    /// Whether the server allowed reusing the stream after the last exchange;
-    /// when false the next operation reopens it.
+    /// Whether the stream may carry the next exchange: the last one read a
+    /// whole answer and the server kept the connection. When false the next
+    /// operation reopens it.
     alive: bool,
+    /// Whether the stream carried an exchange already, so the server may
+    /// have closed it while it idled.
+    reused: bool,
+    /// When the stream last carried an exchange.
+    used: Instant,
     /// The source's back-off, shared by its connections.
     throttle: Arc<Throttle>,
 }
@@ -136,53 +160,81 @@ pub struct GraphClient {
 impl GraphClient {
     /// Opens the TLS connection to the Graph API with the given bearer token,
     /// scoped to the `user` mailbox owner (`me` or a user id), for one kind.
+    /// `sizes` is shared by every connection of the source.
     pub fn connect(
         kind: GraphKind,
         token: &SecretString,
         user: &str,
         tls: Tls,
+        sizes: SizeHints,
         throttle: Arc<Throttle>,
     ) -> Result<Self> {
+        let connect: Connect = Box::new(move || {
+            let url =
+                Url::parse(MSGRAPH_API_BASE).context("Cannot parse the Graph API base URL")?;
+            let host = url.host_str().context("Graph API base URL has no host")?;
+            let opts = TlsConnectOptions {
+                tls: tls.clone(),
+                proxy: Proxy::None,
+                ..Default::default()
+            };
+            let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
+            stream.set_read_timeout(Some(wire::READ_TIMEOUT))?;
+            Ok(Box::new(stream) as Box<dyn MsgraphStream>)
+        });
+
+        Self::over(kind, token, user, connect, sizes, throttle)
+            .context("Cannot connect to Microsoft Graph")
+    }
+
+    /// A session over the connections `connect` opens, the first one at once.
+    fn over(
+        kind: GraphKind,
+        token: &SecretString,
+        user: &str,
+        mut connect: Connect,
+        sizes: SizeHints,
+        throttle: Arc<Throttle>,
+    ) -> Result<Self> {
+        let exchange = Shared::default();
+        let stream = Watched::new(connect()?, Arc::clone(&exchange));
         let options = MsgraphClientStdConnectOptions {
-            tls: tls.clone(),
-            proxy: Proxy::None,
             user_id: user.to_owned(),
+            ..Default::default()
         };
-        let inner = MsgraphClientStd::connect(token.expose_secret(), options)
-            .context("Cannot connect to Microsoft Graph")?;
+        let inner = MsgraphClientStd::new(stream, token.expose_secret(), options);
 
         Ok(Self {
             kind,
             inner,
-            tls,
+            connect,
+            exchange,
             folders: HashMap::new(),
-            rows: HashMap::new(),
+            kept: HashMap::new(),
+            sizes,
+            delta_expands: true,
             drafts: None,
             alive: true,
+            reused: false,
+            used: Instant::now(),
             throttle,
         })
     }
 
     /// Reopens the stream to the Graph API endpoint, keeping the credential.
-    fn reconnect(&mut self) -> Result<()> {
+    fn reconnect(&mut self) -> Result<(), MsgraphClientStdError> {
         debug!("reopening the graph stream");
 
-        let url = Url::parse(MSGRAPH_API_BASE).context("Cannot parse the Graph API base URL")?;
-        let host = url.host_str().context("Graph API base URL has no host")?;
-        let opts = TlsConnectOptions {
-            tls: self.tls.clone(),
-            ..Default::default()
-        };
-        let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-
-        self.inner.set_stream(stream);
+        let stream = (self.connect)().map_err(MsgraphClientStdError::Tls)?;
+        self.inner
+            .set_stream(Watched::new(stream, Arc::clone(&self.exchange)));
         self.alive = true;
+        self.reused = false;
         Ok(())
     }
 
-    /// Runs one Graph operation, reopening the stream first when the server
-    /// closed it, and records the new keep-alive hint.
+    /// Runs one Graph operation on a connection fit for it
+    /// ([`exchange`](Self::exchange)).
     ///
     /// The source's [`Throttle`] sends it again while Graph throttles it
     /// (429, 503), backing off: io-msgraph keeps no `Retry-After` but in a
@@ -192,7 +244,7 @@ impl GraphClient {
         &mut self,
         run: impl FnMut(&mut MsgraphClientStd) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
     ) -> Result<T, MsgraphClientStdError> {
-        self.send(Request::Idempotent, run)
+        self.send(Request::Idempotent, false, run)
     }
 
     /// Runs one Graph request that creates or sends something: sent again on
@@ -202,13 +254,16 @@ impl GraphClient {
         &mut self,
         run: impl FnMut(&mut MsgraphClientStd) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
     ) -> Result<T, MsgraphClientStdError> {
-        self.send(Request::Create, run)
+        self.send(Request::Create, false, run)
     }
 
     /// Runs one Graph request of `request`, as [`op`](Self::op) describes.
+    /// `reads` vouches that a request other than a `GET` reads only (a
+    /// `$batch` of gets), so it may be sent again on a dead connection.
     fn send<T>(
         &mut self,
         request: Request,
+        reads: bool,
         mut run: impl FnMut(
             &mut MsgraphClientStd,
         ) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
@@ -216,15 +271,7 @@ impl GraphClient {
         let throttle = Arc::clone(&self.throttle);
         throttle.call(
             1,
-            || {
-                if !self.alive {
-                    self.reconnect().map_err(MsgraphClientStdError::Tls)?;
-                }
-
-                let out = run(&mut self.inner)?;
-                self.alive = out.keep_alive;
-                Ok(out.response)
-            },
+            || self.exchange(reads, &mut run),
             |err| match err {
                 MsgraphClientStdError::Send(send)
                     if send.status().is_some_and(|status| request.retries(status)) =>
@@ -241,6 +288,78 @@ impl GraphClient {
                 })
             },
         )
+    }
+
+    /// Runs one exchange on a connection fit for it ([`wire`]): one the last
+    /// exchange left unfit (a failure short of a whole answer, a connection
+    /// the server ended or asked to close), or that idled past
+    /// [`wire::IDLE`], is reopened first. A request that only reads, met
+    /// by a reused connection already dead, is sent again once on a new
+    /// one; never one that timed out, nor one that writes.
+    fn exchange<T>(
+        &mut self,
+        reads: bool,
+        run: &mut impl FnMut(
+            &mut MsgraphClientStd,
+        ) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
+    ) -> Result<T, MsgraphClientStdError> {
+        if self.alive && self.reused && self.used.elapsed() > wire::IDLE {
+            debug!(
+                "graph stream idle for {}s, not reused",
+                self.used.elapsed().as_secs()
+            );
+            self.alive = false;
+        }
+        if !self.alive {
+            self.reconnect()?;
+        }
+
+        let reused = self.reused;
+        let err = match self.attempt(run) {
+            Ok(out) => return Ok(out),
+            Err(err) => err,
+        };
+
+        let (reading, died) = wire::read(&self.exchange, |exchange| {
+            (reads || exchange.reads(), wire::died(&err, exchange))
+        });
+        if !(reused && reading && died) {
+            if wire::timed_out(&err) {
+                debug!("graph answer timed out, the request is not sent again");
+            }
+            return Err(err);
+        }
+
+        debug!("graph connection closed while it idled ({err}), sending again on a new one");
+        self.reconnect()?;
+        self.attempt(run)
+    }
+
+    /// Runs `run` once on the current stream and settles what it left of
+    /// the connection: fit for the next exchange only after a whole answer
+    /// on a stream the server neither ended nor asked to close.
+    fn attempt<T>(
+        &mut self,
+        run: &mut impl FnMut(
+            &mut MsgraphClientStd,
+        ) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
+    ) -> Result<T, MsgraphClientStdError> {
+        wire::begin(&self.exchange);
+        self.reused = true;
+        let out = run(&mut self.inner);
+        self.used = Instant::now();
+
+        let ended = wire::read(&self.exchange, Exchange::ended);
+        match out {
+            Ok(out) => {
+                self.alive = out.keep_alive && !ended;
+                Ok(out.response)
+            }
+            Err(err) => {
+                self.alive = wire::answered(&err) && !ended;
+                Err(err)
+            }
+        }
     }
 
     /// The domain this session syncs.
@@ -271,11 +390,12 @@ impl GraphClient {
             .map(|checkpoint| checkpoint.0.as_slice());
         match self.kind {
             GraphKind::Mail => {
-                // NOTE: the row cache is taken out for the listing, which
-                // borrows the session as its wire.
-                let mut rows = self.rows.remove(collection).unwrap_or_default();
-                let listed = mail::enumerate(self, &mut rows, collection, request, held);
-                self.rows.insert(collection.to_owned(), rows);
+                // NOTE: what the run keeps of the folder is taken out for
+                // the listing, which borrows the session as its wire.
+                let mut folder = self.kept.remove(collection).unwrap_or_default();
+                let listed = mail::enumerate(self, &mut folder, collection, request, held);
+                self.sizes.note(folder.sizes.drain(..));
+                self.kept.insert(collection.to_owned(), folder);
                 listed
             }
             GraphKind::Contacts => self
@@ -485,38 +605,45 @@ impl GraphClient {
         lookup_folder(&self.folders, name).with_context(|| format!("Unknown Graph folder {name}"))
     }
 
-    /// The delta row of a handle: the enumeration cache when it holds it, else
-    /// a targeted single-message get.
-    fn row(&mut self, mailbox: &str, id: &str) -> Result<MsgraphMessage> {
-        match self.rows.get(mailbox).and_then(|cache| cache.get(id)) {
-            Some(message) => Ok(message.clone()),
-            None => self
-                .op(|client| client.message_get(id))
-                .with_context(|| format!("Get message {id} error")),
-        }
-    }
-
-    /// Fetches envelopes for a message-id set, served from the cached delta
-    /// rows (one message get per handle missing the cache).
-    ///
-    /// Graph exposes no RFC 5322 octet size, so `size` stays 0 and is filled
-    /// from the blob length at the `Full` tier.
-    fn fetch_envelopes(&mut self, mailbox: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
+    /// Fetches envelopes for a message-id set, one summary get a message,
+    /// its size expanded. The `Meta` tier is an upgrade a frontend asks for
+    /// now and then, every listed member arriving named.
+    fn fetch_envelopes(&mut self, _mailbox: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
+        let user = user_path(&self.inner.user_id);
         let mut envelopes = Vec::with_capacity(ids.len());
         for id in ids {
-            let message = self.row(mailbox, id)?;
+            let url = Url::parse(MSGRAPH_API_BASE)
+                .and_then(|base| base.join(&format!("{user}/messages/{id}")))
+                .map(|mut url| {
+                    url.query_pairs_mut()
+                        .append_pair("$select", mail::SUMMARY_SELECT)
+                        .append_pair("$expand", SIZE_EXPAND);
+                    url
+                })
+                .with_context(|| format!("Cannot build the URL of message {id}"))?;
+            let message = self
+                .op(|client| {
+                    let coroutine = MsgraphSend::<MsgraphMessage>::get(&client.auth, url.clone());
+                    client.run(coroutine)
+                })
+                .with_context(|| format!("Get message {id} error"))?;
             envelopes.push(message_envelope(id, &message));
         }
         Ok(envelopes)
     }
 
-    /// Streams the bodies of a message-id set through JSON batches: up to
-    /// [`MSGRAPH_BATCH_MAX_REQUESTS`] raw MIME gets per HTTP call, each body
-    /// answered base64-encoded, committed in request order.
+    /// Streams the bodies of a message-id set, each committed as soon as it
+    /// is decoded, in requests planned by the size Graph states for each
+    /// ([`plan`]): JSON batches of up to [`MSGRAPH_BATCH_MAX_REQUESTS`] raw
+    /// MIME gets and [`BATCH_BYTES`] stated, a message past [`ALONE_BYTES`]
+    /// or of no stated size read alone. Sizes the listings of the run did
+    /// not state are asked for first, twenty ids a batch, when more than one
+    /// message lacks one.
     ///
     /// A body still missing after [`batch_get`](Self::batch_get)'s retries,
-    /// or refused for another reason, is left out: the caller fetches every
-    /// handle a batch did not answer one by one, which surfaces its error.
+    /// refused for another reason, or failing alone, is left out: the
+    /// caller fetches every handle the fetch did not answer one by one,
+    /// which surfaces its error.
     fn fetch_messages<S: Write>(
         &mut self,
         _mailbox: &str,
@@ -526,82 +653,138 @@ impl GraphClient {
     ) -> Result<()> {
         let user = user_path(&self.inner.user_id);
 
-        for chunk in ids.chunks(MSGRAPH_BATCH_MAX_REQUESTS) {
-            let mut answer = self
-                .batch_get(
-                    chunk,
-                    |id| format!("/{user}/messages/{id}/$value"),
-                    raw_body,
-                )
-                .context("Send raw message batch error")?;
+        let mut sizes: HashMap<&str, u64> = ids
+            .iter()
+            .filter_map(|id| Some((*id, self.sizes.take(id)?)))
+            .collect();
+        let unstated: Vec<&str> = ids
+            .iter()
+            .copied()
+            .filter(|id| !sizes.contains_key(id))
+            .collect();
+        if unstated.len() > 1 {
+            sizes.extend(self.stated_sizes(&unstated));
+        }
 
-            for id in chunk {
-                let Some(raw) = answer.bodies.remove(id) else {
-                    continue;
-                };
-                let mut sink =
-                    open(id).with_context(|| format!("Open body sink for {id} error"))?;
-                sink.write_all(&raw)
-                    .with_context(|| format!("Store body {id} error"))?;
-                done(id, None, sink).with_context(|| format!("Commit body {id} error"))?;
+        let mut commit = |id: &str, raw: &[u8]| -> Result<()> {
+            let mut sink = open(id).with_context(|| format!("Open body sink for {id} error"))?;
+            sink.write_all(raw)
+                .with_context(|| format!("Store body {id} error"))?;
+            done(id, None, sink).with_context(|| format!("Commit body {id} error"))
+        };
+
+        for fetch in plan(ids, |id| sizes.get(id).copied()) {
+            match fetch {
+                Fetch::Alone(id) => match self.message_raw(id) {
+                    Ok(raw) => commit(id, &raw)?,
+                    Err(err) => debug!("body of {id} not read alone, left out: {err:#}"),
+                },
+                Fetch::Batch(batch) => {
+                    let stated: u64 = batch.iter().filter_map(|id| sizes.get(id)).sum();
+                    let mut decoded = 0;
+                    let mut largest = 0;
+                    let answer = self
+                        .batch_get(
+                            &batch,
+                            |id| format!("/{user}/messages/{id}/$value"),
+                            raw_body,
+                            |id, raw: Vec<u8>| {
+                                decoded += raw.len();
+                                largest = largest.max(raw.len());
+                                commit(id, &raw)
+                            },
+                        )
+                        .context("Send raw message batch error")?;
+                    debug!(
+                        "graph body batch of {}: {stated} octets stated, {} base64 octets held at most, {decoded} decoded, largest {largest}",
+                        batch.len(),
+                        answer.held,
+                    );
+                }
             }
         }
 
         Ok(())
     }
 
+    /// The size Graph states for each of `ids`, read twenty a batch with
+    /// the id alone; a message stating none, or a batch that failed, is
+    /// left out (read alone).
+    fn stated_sizes<'a>(&mut self, ids: &[&'a str]) -> HashMap<&'a str, u64> {
+        let user = user_path(&self.inner.user_id);
+        let mut sizes = HashMap::with_capacity(ids.len());
+
+        for chunk in ids.chunks(MSGRAPH_BATCH_MAX_REQUESTS) {
+            let asked = self.batch_get(
+                chunk,
+                |id| {
+                    batch_url(
+                        &format!("{user}/messages/{id}"),
+                        &[("$select", "id"), ("$expand", SIZE_EXPAND)],
+                    )
+                },
+                |_, body| {
+                    let message = serde_json::from_value::<MsgraphMessage>(body?).ok()?;
+                    message_size(&message)
+                },
+                |id, size| {
+                    sizes.insert(id, size);
+                    Ok(())
+                },
+            );
+            if let Err(err) = asked {
+                debug!(
+                    "sizes of {} messages not read, each read alone: {err:#}",
+                    chunk.len()
+                );
+            }
+        }
+
+        sizes
+    }
+
     /// Sends the gets of `ids` (at most [`MSGRAPH_BATCH_MAX_REQUESTS`]) in
     /// one JSON batch, each at the URL `url` builds for its id, its body
-    /// read by `decode`.
+    /// read by `decode` and handed to `deliver` before the next is read, so
+    /// a batch holds no more than its answer and one decoded body.
     ///
-    /// A request Graph throttles (429, or a common 5xx) is sent again in the
-    /// next batch after the longest `Retry-After` it stated, at most
-    /// [`BATCH_RETRY_ROUNDS`] times; still throttled then, it is answered
-    /// under `retry`, and a throttle (429, 503) gives the source up. A 404 is
-    /// answered under `gone`; any other refusal is left out.
+    /// A request Graph throttles (429, or a common 5xx) is sent again in a
+    /// later batch once its own `Retry-After` is over (else after a back-off
+    /// doubling from a second), at most [`BATCH_RETRY_ROUNDS`] times; still
+    /// throttled then, or asking to wait more than [`BATCH_RETRY_MAX_WAIT`],
+    /// it is answered under `retry`, and a throttle (429, 503) gives the
+    /// source up until its wait is over, every connection stopping with it.
+    /// A 404 is answered under `gone`; any other refusal is left out.
     fn batch_get<'a, T>(
         &mut self,
         ids: &[&'a str],
         url: impl Fn(&str) -> String,
         decode: impl Fn(&str, Option<serde_json::Value>) -> Option<T>,
-    ) -> Result<BatchAnswer<'a, T>, MsgraphClientStdError> {
+        mut deliver: impl FnMut(&'a str, T) -> Result<()>,
+    ) -> Result<BatchAnswer<'a>> {
         let mut out = BatchAnswer::default();
-        let mut pending: Vec<&str> = ids.to_vec();
+        let start = Instant::now();
+        let mut pending: Vec<Pending<'a>> = ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| Pending {
+                index,
+                id,
+                due: start,
+                sent: 0,
+            })
+            .collect();
 
-        for round in 0..=BATCH_RETRY_ROUNDS {
+        while !pending.is_empty() {
             // NOTE: a source that gave up sends nothing until its wait is
             // over, what is left going to the next run.
-            if pending.is_empty() || self.throttle.blocked().is_some() {
+            if self.throttle.blocked().is_some() {
                 break;
             }
 
-            let requests = get_requests(&pending, &url);
-            let answered = match self.op(|client| client.batch(&requests)) {
-                Ok(responses) => read_responses(&pending, responses, &decode),
-                Err(err) if is_throttled(&err) => {
-                    let throttled = matches!(
-                        &err,
-                        MsgraphClientStdError::Send(send) if matches!(send.status(), Some(429 | 503))
-                    );
-                    BatchAnswer::retry_all(&pending, throttled)
-                }
-                Err(err) => return Err(err),
-            };
-
-            out.bodies.extend(answered.bodies);
-            out.gone.extend(answered.gone);
-            pending = answered.retry;
-
-            let wait = answered
-                .retry_after
-                .unwrap_or_else(|| Duration::from_secs(1 << round));
-            // NOTE: a request Graph failed to serve (500, 502, 504) is
-            // retried the same, but is no throttle: the source goes on.
-            if !pending.is_empty() && round == BATCH_RETRY_ROUNDS && answered.throttled {
-                self.throttle.give_up(SystemTime::now() + wait);
-            }
-            if !pending.is_empty() && round < BATCH_RETRY_ROUNDS {
-                let wait = wait.min(BATCH_RETRY_MAX_WAIT);
+            let first = pending.iter().map(|p| p.due).min().unwrap_or(start);
+            let wait = first.saturating_duration_since(Instant::now());
+            if !wait.is_zero() {
                 warn!(
                     "graph throttled {} of {} batched requests, retrying in {}s",
                     pending.len(),
@@ -610,9 +793,52 @@ impl GraphClient {
                 );
                 std::thread::sleep(wait);
             }
+
+            let now = Instant::now();
+            let (due, later): (Vec<_>, Vec<_>) = pending.into_iter().partition(|p| p.due <= now);
+            pending = later;
+            let asked: Vec<&'a str> = due.iter().map(|p| p.id).collect();
+
+            let requests = get_requests(&asked, &url);
+            let answered = match self
+                .send(Request::Idempotent, true, |client| client.batch(&requests))
+            {
+                Ok(responses) => read_responses(&asked, responses, &decode, &mut deliver)?,
+                Err(err) if is_throttled(&err) => {
+                    let throttled = matches!(
+                        &err,
+                        MsgraphClientStdError::Send(send) if matches!(send.status(), Some(429 | 503))
+                    );
+                    Answered::retry_all(&asked, throttled)
+                }
+                Err(err) => return Err(err.into()),
+            };
+
+            out.held = out.held.max(answered.held);
+            out.gone.extend(answered.gone);
+            for (id, stated, throttled) in answered.retry {
+                let Some(mut item) = due.iter().find(|p| p.id == id).cloned() else {
+                    continue;
+                };
+                let wait = stated.unwrap_or_else(|| Duration::from_secs(1 << item.sent.min(6)));
+                item.sent += 1;
+                if item.sent > BATCH_RETRY_ROUNDS || wait > BATCH_RETRY_MAX_WAIT {
+                    // NOTE: a request Graph failed to serve (500, 502, 504)
+                    // is retried the same, but is no throttle: the source
+                    // goes on.
+                    if throttled {
+                        self.throttle.give_up(SystemTime::now() + wait);
+                    }
+                    out.retry.push((item.index, id));
+                    continue;
+                }
+                item.due = Instant::now() + wait;
+                pending.push(item);
+            }
         }
 
-        out.retry = pending;
+        out.retry.extend(pending.iter().map(|p| (p.index, p.id)));
+        out.retry.sort_unstable();
         Ok(out)
     }
 
@@ -648,8 +874,14 @@ impl GraphClient {
 
         let patch = flags_patch(flags);
         for id in ids {
-            self.op(|client| client.message_update(id, &patch))
-                .with_context(|| format!("Update flags of {id} error"))?;
+            match self.op(|client| client.message_update(id, &patch)) {
+                Err(err) if is_not_found(&err) => {
+                    debug!("message {id} gone from the server, its flags count as set");
+                }
+                updated => {
+                    updated.with_context(|| format!("Update flags of {id} error"))?;
+                }
+            }
         }
         Ok(())
     }
@@ -714,6 +946,10 @@ impl GraphClient {
     /// logged: the target's next enumeration lists the message under it, and
     /// the fetch naming it lands the move's pending create there (pimdir
     /// SYNC §5, §6), as after an IMAP `MOVE`.
+    ///
+    /// A message gone from the server counts as moved: a 404 is told from a
+    /// destination Graph no longer knows by reading the message, the
+    /// destination being resolved from the folder listing first.
     pub fn move_messages(&mut self, to: &str, ids: &[&str]) -> Result<()> {
         if self.kind != GraphKind::Mail {
             bail!(
@@ -724,12 +960,36 @@ impl GraphClient {
 
         let folder = self.folder_id(to)?;
         for id in ids {
-            let moved = self
-                .op(|client| client.message_move(id, &folder))
-                .with_context(|| format!("Move message {id} to {to} error"))?;
-            debug!("moved message {id} to {to}, now {}", moved.id);
+            match self.op(|client| client.message_move(id, &folder)) {
+                Ok(moved) => debug!("moved message {id} to {to}, now {}", moved.id),
+                Err(err) if is_not_found(&err) && self.message_gone(id)? => {
+                    debug!("message {id} gone from the server, its move counts as done");
+                }
+                Err(err) => {
+                    return Err(err).with_context(|| format!("Move message {id} to {to} error"));
+                }
+            }
         }
         Ok(())
+    }
+
+    /// Whether Graph answers that message `id` is gone (404), read by its
+    /// id alone.
+    fn message_gone(&mut self, id: &str) -> Result<bool> {
+        let user = user_path(&self.inner.user_id);
+        let mut url = Url::parse(MSGRAPH_API_BASE)
+            .and_then(|base| base.join(&format!("{user}/messages/{id}")))
+            .with_context(|| format!("Cannot build the URL of message {id}"))?;
+        url.query_pairs_mut().append_pair("$select", "id");
+
+        match self.op(|client| {
+            let coroutine = MsgraphSend::<MsgraphMessage>::get(&client.auth, url.clone());
+            client.run(coroutine)
+        }) {
+            Ok(_) => Ok(false),
+            Err(err) if is_not_found(&err) => Ok(true),
+            Err(err) => Err(err).with_context(|| format!("Get message {id} error")),
+        }
     }
 
     /// Copies a message into the folder `to`, returning the copy's id.
@@ -756,11 +1016,18 @@ impl GraphClient {
         })
     }
 
-    /// Deletes one message by id.
+    /// Deletes one message by id; one gone from the server already counts
+    /// as deleted.
     fn delete_message(&mut self, id: &str) -> Result<()> {
-        self.op(|client| client.message_delete(id))
-            .with_context(|| format!("Delete message {id} error"))?;
-        Ok(())
+        match self.op(|client| client.message_delete(id)) {
+            Err(err) if is_not_found(&err) => {
+                debug!("message {id} gone from the server already, its delete counts as done");
+                Ok(())
+            }
+            deleted => deleted
+                .map(|_| ())
+                .with_context(|| format!("Delete message {id} error")),
+        }
     }
 
     /// Sends raw MIME through sendMail, which files the message in Sent itself.
@@ -801,61 +1068,198 @@ fn raw_requests(user: &str, ids: &[&str]) -> Vec<MsgraphBatchRequest> {
     get_requests(ids, |id| format!("/{user}/messages/{id}/$value"))
 }
 
-/// What a batch of gets answered.
-#[derive(Debug, PartialEq)]
-struct BatchAnswer<'a, T = Vec<u8>> {
-    /// The decoded bodies, by id.
-    bodies: HashMap<&'a str, T>,
-    /// The ids Graph throttled, to send again, in request order.
-    retry: Vec<&'a str>,
-    /// The ids Graph answered 404, gone since they were listed.
-    gone: Vec<&'a str>,
-    /// The longest `Retry-After` the throttled responses stated.
-    retry_after: Option<Duration>,
-    /// Whether Graph throttled any of `retry` (429, 503), rather than
-    /// failing it (500, 502, 504): only a throttle gives the source up.
-    throttled: bool,
-}
+/// The most octets of stated message size one batch of bodies asks for:
+/// its answer, base64 and JSON, about a third more, is held whole while it
+/// is read, then each body decoded in turn.
+const BATCH_BYTES: u64 = 4 * 1024 * 1024;
 
-impl<T> Default for BatchAnswer<'_, T> {
-    fn default() -> Self {
-        Self {
-            bodies: HashMap::new(),
-            retry: Vec::new(),
-            gone: Vec::new(),
-            retry_after: None,
-            throttled: false,
+/// A message stated larger than this is read alone, by a plain get.
+const ALONE_BYTES: u64 = 1024 * 1024;
+
+/// The most sizes a source keeps between its listing and its bodies:
+/// beyond, a message is planned as one of no stated size.
+const MAX_SIZE_HINTS: usize = 100_000;
+
+/// The `$expand` asking Graph for the MAPI message size
+/// (`PidTagMessageSize`, `Integer 0x0E08`), the size Exchange states for a
+/// message as IMAP's `RFC822.SIZE` does (io-msgraph `fa73f04`).
+pub(super) const SIZE_EXPAND: &str =
+    "singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')";
+
+/// The sizes a source's listings stated, by message id, until its bodies
+/// are planned: shared by every connection opened from the source, since
+/// the connection listing a folder is rarely the one downloading it.
+#[derive(Clone, Debug, Default)]
+pub struct SizeHints(Arc<Mutex<HashMap<String, u64>>>);
+
+impl SizeHints {
+    /// Notes `sizes`, up to [`MAX_SIZE_HINTS`] in all.
+    fn note(&self, sizes: impl IntoIterator<Item = (String, u64)>) {
+        let mut hints = self.0.lock().unwrap_or_else(|err| err.into_inner());
+        for (id, size) in sizes {
+            if hints.len() >= MAX_SIZE_HINTS && !hints.contains_key(&id) {
+                break;
+            }
+            hints.insert(id, size);
         }
+    }
+
+    /// Takes the size noted for `id`.
+    fn take(&self, id: &str) -> Option<u64> {
+        let mut hints = self.0.lock().unwrap_or_else(|err| err.into_inner());
+        hints.remove(id)
     }
 }
 
-impl<'a, T> BatchAnswer<'a, T> {
+/// The MAPI size a message states, when [`SIZE_EXPAND`] asked for it.
+fn message_size(message: &MsgraphMessage) -> Option<u64> {
+    message
+        .single_value_extended_properties
+        .iter()
+        .find(|property| property.id.eq_ignore_ascii_case("Integer 0xe08"))
+        .or_else(|| message.single_value_extended_properties.first())
+        .and_then(|property| property.value.trim().parse().ok())
+}
+
+/// One request of a body fetch.
+#[derive(Debug, Eq, PartialEq)]
+enum Fetch<'a> {
+    /// A JSON batch of raw gets.
+    Batch(Vec<&'a str>),
+    /// One raw get.
+    Alone(&'a str),
+}
+
+/// Plans the bodies of `ids` by the size `size` states for each, in their
+/// order: batches of at most [`MSGRAPH_BATCH_MAX_REQUESTS`] gets and
+/// [`BATCH_BYTES`] stated, a message past [`ALONE_BYTES`] or of no stated
+/// size read alone where it comes.
+fn plan<'a>(ids: &[&'a str], size: impl Fn(&str) -> Option<u64>) -> Vec<Fetch<'a>> {
+    let mut plan = Vec::new();
+    let mut batch: Vec<&str> = Vec::new();
+    let mut bytes = 0;
+
+    for id in ids {
+        let Some(size) = size(id).filter(|size| *size <= ALONE_BYTES) else {
+            plan.push(Fetch::Alone(id));
+            continue;
+        };
+        if batch.len() == MSGRAPH_BATCH_MAX_REQUESTS || bytes + size > BATCH_BYTES {
+            plan.push(Fetch::Batch(std::mem::take(&mut batch)));
+            bytes = 0;
+        }
+        batch.push(id);
+        bytes += size;
+    }
+    if !batch.is_empty() {
+        plan.push(Fetch::Batch(batch));
+    }
+
+    plan
+}
+
+/// The address of a get inside a JSON batch: `path` under the API version,
+/// with `query` percent-encoded.
+fn batch_url(path: &str, query: &[(&str, &str)]) -> String {
+    let base = Url::parse(MSGRAPH_API_BASE).expect("the Graph API base URL parses");
+    let Ok(mut url) = base.join(path) else {
+        return format!("/{path}");
+    };
+    url.query_pairs_mut().extend_pairs(query);
+    let path = url.path().strip_prefix(base.path()).unwrap_or(url.path());
+    match url.query() {
+        Some(query) => format!("/{path}?{query}"),
+        None => format!("/{path}"),
+    }
+}
+
+/// A get of a batch still to answer.
+#[derive(Clone, Debug)]
+struct Pending<'a> {
+    /// Its place among the ids asked.
+    index: usize,
+    id: &'a str,
+    /// When it may be sent: its `Retry-After` over.
+    due: Instant,
+    /// How many times Graph throttled it.
+    sent: u32,
+}
+
+/// What [`GraphClient::batch_get`] answered beyond what it delivered.
+#[derive(Debug, Default)]
+struct BatchAnswer<'a> {
+    /// The ids still throttled, by their place among the ids asked.
+    retry: Vec<(usize, &'a str)>,
+    /// The ids Graph answered 404, gone since they were listed.
+    gone: Vec<&'a str>,
+    /// The most base64 and JSON octets one answer held while it was read.
+    held: usize,
+}
+
+/// What one batch answered beyond what it delivered.
+#[derive(Debug, Default, PartialEq)]
+struct Answered<'a> {
+    /// The ids Graph throttled, to send again, in request order, each with
+    /// the `Retry-After` it stated and whether it was a throttle (429,
+    /// 503) rather than a failure (500, 502, 504): only a throttle gives
+    /// the source up.
+    retry: Vec<(&'a str, Option<Duration>, bool)>,
+    /// The ids Graph answered 404, gone since they were listed.
+    gone: Vec<&'a str>,
+    /// The body octets the answer held (base64 text, JSON).
+    held: usize,
+}
+
+impl<'a> Answered<'a> {
     /// A batch throttled as a whole: every request to send again.
     fn retry_all(ids: &[&'a str], throttled: bool) -> Self {
         Self {
-            retry: ids.to_vec(),
-            throttled,
+            retry: ids.iter().map(|id| (*id, None, throttled)).collect(),
             ..Default::default()
         }
     }
 }
 
-/// Reads the responses of a batch of raw gets sent for `ids`.
+/// Reads the responses of a batch of raw gets sent for `ids`, collecting
+/// the bodies.
 #[cfg(test)]
-fn read_raw_responses<'a>(ids: &[&'a str], responses: MsgraphBatchResponses) -> BatchAnswer<'a> {
-    read_responses(ids, responses, raw_body)
+fn read_raw_responses<'a>(
+    ids: &[&'a str],
+    responses: MsgraphBatchResponses,
+) -> (HashMap<&'a str, Vec<u8>>, Answered<'a>) {
+    let mut bodies = HashMap::new();
+    let answered = read_responses(ids, responses, raw_body, &mut |id, body| {
+        bodies.insert(id, body);
+        Ok(())
+    })
+    .unwrap();
+    (bodies, answered)
 }
 
 /// Reads the responses of a batch of gets sent for `ids`, matched by
-/// request id (Graph answers in any order). A 2xx body is read by
-/// `decode`; a throttled request is kept to retry, a 404 named gone; any
-/// other answer, or a body `decode` refuses, is left out.
+/// request id (Graph answers in any order), one at a time: a 2xx body is
+/// read by `decode` and handed to `deliver`, its JSON dropped before the
+/// next is read; a throttled request is kept to retry with its own
+/// `Retry-After`, a 404 named gone; any other answer, or a body `decode`
+/// refuses, is left out.
 fn read_responses<'a, T>(
     ids: &[&'a str],
     responses: MsgraphBatchResponses,
     decode: impl Fn(&str, Option<serde_json::Value>) -> Option<T>,
-) -> BatchAnswer<'a, T> {
-    let mut answer = BatchAnswer::default();
+    deliver: &mut impl FnMut(&'a str, T) -> Result<()>,
+) -> Result<Answered<'a>> {
+    let mut answer = Answered {
+        held: responses
+            .responses
+            .iter()
+            .filter_map(|response| response.body.as_ref())
+            .map(|body| match body {
+                serde_json::Value::String(text) => text.len(),
+                other => other.to_string().len(),
+            })
+            .sum(),
+        ..Default::default()
+    };
     let mut retry = Vec::new();
 
     for response in responses.responses {
@@ -874,9 +1278,7 @@ fn read_responses<'a, T>(
                 .iter()
                 .find(|(name, _)| name.eq_ignore_ascii_case("retry-after"))
                 .and_then(|(_, value)| throttle::retry_after(value));
-            answer.retry_after = answer.retry_after.max(after);
-            answer.throttled |= matches!(response.status, 429 | 503);
-            retry.push(index);
+            retry.push((index, after, matches!(response.status, 429 | 503)));
             continue;
         }
 
@@ -891,14 +1293,17 @@ fn read_responses<'a, T>(
         }
 
         if let Some(body) = decode(id, response.body) {
-            answer.bodies.insert(id, body);
+            deliver(id, body)?;
         }
     }
 
-    retry.sort_unstable();
-    retry.dedup();
-    answer.retry = retry.into_iter().map(|index| ids[index]).collect();
-    answer
+    retry.sort_unstable_by_key(|(index, _, _)| *index);
+    retry.dedup_by_key(|(index, _, _)| *index);
+    answer.retry = retry
+        .into_iter()
+        .map(|(index, after, throttled)| (ids[index], after, throttled))
+        .collect();
+    Ok(answer)
 }
 
 /// The raw MIME of a batch body: base64 text, as Graph answers a body
@@ -927,6 +1332,21 @@ fn decode_batch_body(encoded: &str) -> Option<Vec<u8>> {
 /// Whether a client error is Graph throttling the whole batch call.
 fn is_throttled(err: &MsgraphClientStdError) -> bool {
     matches!(err, MsgraphClientStdError::Send(send) if send.is_retryable())
+}
+
+/// Whether a client error is Graph answering that what the request names
+/// does not exist (404).
+fn is_not_found(err: &MsgraphClientStdError) -> bool {
+    matches!(err, MsgraphClientStdError::Send(send) if send.status() == Some(404))
+}
+
+/// Whether an error chain carries a Graph 404 (see [`is_not_found`]).
+fn chain_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<MsgraphClientStdError>()
+            .is_some_and(is_not_found)
+    })
 }
 
 /// Whether a client error is an expired delta link (HTTP 410), the signal to
@@ -982,18 +1402,7 @@ fn lookup_folder(folders: &HashMap<String, String>, name: &str) -> Option<String
 /// Maps a delta row to the shared flag set. `\Answered` and `\Deleted` have no
 /// Graph delta equivalent and are never produced.
 fn message_flags(message: &MsgraphMessage) -> std::collections::BTreeSet<Flag> {
-    let mut flags = std::collections::BTreeSet::new();
-    if message.is_read == Some(true) {
-        flags.insert(Flag::from_iana(IanaFlag::Seen));
-    }
-    let status = message.flag.as_ref().and_then(|flag| flag.flag_status);
-    if status == Some(MsgraphFlagStatus::Flagged) {
-        flags.insert(Flag::from_iana(IanaFlag::Flagged));
-    }
-    if message.is_draft == Some(true) {
-        flags.insert(Flag::from_iana(IanaFlag::Draft));
-    }
-    flags
+    mail::Marks::of(message).flags()
 }
 
 /// The `message_update` patch replacing a message's flags. Every other field
@@ -1045,7 +1454,9 @@ fn message_envelope(id: &str, message: &MsgraphMessage) -> ItemSummary {
         cc: message.cc_recipients.iter().map(address).collect(),
         bcc: Vec::new(),
         date: message_date(message),
-        size: 0,
+        // NOTE: the MAPI size, when the read expanded it; else 0, filled
+        // from the blob length at the `Full` tier.
+        size: message_size(message).unwrap_or(0),
         // NOTE: Graph states the mark itself (pimdir STORAGE Annex A.1),
         // which the walk of the parts replaces once the body is in.
         has_attachment: message.has_attachments,
@@ -1322,14 +1733,20 @@ mod tests {
         }))
         .unwrap();
 
-        let answer = read_raw_responses(&ids, responses);
+        let (bodies, answer) = read_raw_responses(&ids, responses);
 
-        assert_eq!(answer.bodies.len(), 2, "a refused get is left out");
-        assert_eq!(answer.bodies["m0"], raw0);
-        assert_eq!(answer.bodies["m2"], raw2);
-        assert_eq!(answer.retry, ["m3", "m4"], "in request order");
+        assert_eq!(bodies.len(), 2, "a refused get is left out");
+        assert_eq!(bodies["m0"], raw0);
+        assert_eq!(bodies["m2"], raw2);
+        assert_eq!(
+            answer.retry,
+            [
+                ("m3", Some(Duration::from_secs(3)), true),
+                ("m4", Some(Duration::from_secs(7)), true)
+            ],
+            "in request order, each with its own Retry-After"
+        );
         assert_eq!(answer.gone, ["m1"], "a 404 is gone since it was listed");
-        assert_eq!(answer.retry_after, Some(Duration::from_secs(7)));
     }
 
     #[test]
@@ -1343,9 +1760,9 @@ mod tests {
         }))
         .unwrap();
 
-        let answer = read_raw_responses(&ids, responses);
+        let (bodies, answer) = read_raw_responses(&ids, responses);
 
-        assert!(answer.bodies.is_empty());
+        assert!(bodies.is_empty());
         assert!(answer.retry.is_empty());
     }
 
@@ -1365,8 +1782,8 @@ mod tests {
         assert!(is_throttled(&throttled));
         assert!(!is_throttled(&refused));
         assert_eq!(
-            BatchAnswer::<Vec<u8>>::retry_all(&["m0", "m1"], true).retry,
-            ["m0", "m1"]
+            Answered::retry_all(&["m0", "m1"], true).retry,
+            [("m0", None, true), ("m1", None, true)]
         );
     }
 
@@ -1396,9 +1813,8 @@ mod tests {
             ]
         }))
         .unwrap();
-        let answer = read_raw_responses(&["m0", "m1"], responses);
-        assert_eq!(answer.retry, ["m0", "m1"]);
-        assert!(!answer.throttled);
+        let (_, answer) = read_raw_responses(&["m0", "m1"], responses);
+        assert_eq!(answer.retry, [("m0", None, false), ("m1", None, false)]);
 
         let responses: MsgraphBatchResponses = serde_json::from_value(serde_json::json!({
             "responses": [
@@ -1407,6 +1823,623 @@ mod tests {
             ]
         }))
         .unwrap();
-        assert!(read_raw_responses(&["m0", "m1"], responses).throttled);
+        let (_, answer) = read_raw_responses(&["m0", "m1"], responses);
+        assert_eq!(answer.retry, [("m0", None, false), ("m1", None, true)]);
+    }
+
+    // --- the connection ---------------------------------------------------
+
+    use super::wire::fake::{Server, Step};
+
+    /// A session of `kind` over a scripted server, one script a connection.
+    fn session_of(kind: GraphKind, scripts: Vec<Vec<Step>>) -> (GraphClient, Server) {
+        let server = Server::new(scripts);
+        let client = GraphClient::over(
+            kind,
+            &SecretString::from("token"),
+            "me",
+            server.connect(),
+            SizeHints::default(),
+            Arc::new(Throttle::new("msgraph")),
+        )
+        .unwrap();
+        (client, server)
+    }
+
+    fn session(scripts: Vec<Vec<Step>>) -> (GraphClient, Server) {
+        session_of(GraphKind::Mail, scripts)
+    }
+
+    fn inbox() -> Step {
+        Step::ok(serde_json::json!({ "id": "id-inbox", "displayName": "Inbox" }))
+    }
+
+    fn get_inbox(client: &mut GraphClient) -> Result<MsgraphMailFolder, MsgraphClientStdError> {
+        client.op(|client| client.mail_folder_get("inbox"))
+    }
+
+    /// The request lines of every connection, methods and paths only.
+    fn lines(server: &Server) -> Vec<Vec<String>> {
+        server
+            .requests()
+            .into_iter()
+            .map(|requests| {
+                requests
+                    .into_iter()
+                    .map(|line| line.split('?').next().unwrap_or_default().to_owned())
+                    .collect()
+            })
+            .collect()
+    }
+
+    const GET_INBOX: &str = "GET /v1.0/me/mailFolders/inbox";
+
+    /// Graph closed the connection while it idled: a `GET` meeting its end
+    /// of stream, or a reset, before any byte of an answer goes again once,
+    /// on a new connection.
+    #[test]
+    fn a_get_on_a_connection_closed_while_it_idled_is_sent_again_once() {
+        for dead in [Step::Close, Step::Reset] {
+            let (mut client, server) = session(vec![vec![inbox(), dead], vec![inbox()]]);
+
+            get_inbox(&mut client).unwrap();
+            assert_eq!(get_inbox(&mut client).unwrap().id, "id-inbox");
+            assert_eq!(
+                lines(&server),
+                [vec![GET_INBOX, GET_INBOX], vec![GET_INBOX]],
+                "sent again on a second connection"
+            );
+        }
+    }
+
+    /// Sent again once only: a second dead connection fails the request.
+    #[test]
+    fn a_get_is_sent_again_once_only() {
+        let (mut client, server) = session(vec![
+            vec![inbox(), Step::Close],
+            vec![Step::Close],
+            vec![inbox()],
+        ]);
+
+        get_inbox(&mut client).unwrap();
+        assert!(get_inbox(&mut client).is_err());
+        assert_eq!(lines(&server).len(), 2);
+
+        // NOTE: the failed connection is not reused.
+        get_inbox(&mut client).unwrap();
+        assert_eq!(lines(&server).len(), 3);
+    }
+
+    /// A request that writes (a move is a `POST`) is never sent again, even
+    /// on a connection that died before answering: it may have landed.
+    #[test]
+    fn a_post_on_a_dead_connection_is_not_sent_again() {
+        let (mut client, server) = session(vec![vec![inbox(), Step::Close], vec![inbox()]]);
+        client
+            .folders
+            .insert(String::from("Archive"), String::from("id-archive"));
+
+        get_inbox(&mut client).unwrap();
+        let err = client.move_messages("Archive", &["m1"]).unwrap_err();
+        assert!(format!("{err:#}").contains("Move message m1"), "{err:#}");
+        assert_eq!(lines(&server)[0][1], "POST /v1.0/me/messages/m1/move");
+        assert_eq!(lines(&server).len(), 1, "no second connection");
+
+        get_inbox(&mut client).unwrap();
+        assert_eq!(lines(&server)[1], [GET_INBOX], "the next request reopens");
+    }
+
+    /// A JSON batch of gets reads only, so it goes again like a `GET`.
+    #[test]
+    fn a_batch_of_gets_on_a_dead_connection_is_sent_again() {
+        let answer = serde_json::json!({ "responses": [
+            { "id": "0", "status": 200, "body": STANDARD.encode(b"Subject: a\r\n\r\nA") },
+        ]});
+        let (mut client, server) =
+            session(vec![vec![inbox(), Step::Reset], vec![Step::ok(answer)]]);
+
+        get_inbox(&mut client).unwrap();
+        client.sizes.note([(String::from("m0"), 15)]);
+        let mut bodies = Vec::new();
+        client
+            .fetch_messages(
+                "Inbox",
+                &["m0"],
+                |_| Ok(Vec::new()),
+                |id, _, sink: Vec<u8>| {
+                    bodies.push((id.to_owned(), sink));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            bodies,
+            [(String::from("m0"), b"Subject: a\r\n\r\nA".to_vec())]
+        );
+        assert_eq!(lines(&server)[1], ["POST /v1.0/$batch"]);
+    }
+
+    /// A read that timed out may be a server still at work on the request:
+    /// it is not sent again, and the connection, whose answer may still
+    /// come, is not reused.
+    #[test]
+    fn a_timed_out_read_is_not_sent_again_and_its_connection_is_dropped() {
+        let (mut client, server) =
+            session(vec![vec![inbox(), Step::Timeout, inbox()], vec![inbox()]]);
+
+        get_inbox(&mut client).unwrap();
+        let err = get_inbox(&mut client).unwrap_err();
+        assert!(wire::timed_out(&err), "{err}");
+        assert_eq!(lines(&server).len(), 1, "not sent again");
+
+        get_inbox(&mut client).unwrap();
+        assert_eq!(
+            lines(&server),
+            [vec![GET_INBOX, GET_INBOX], vec![GET_INBOX]],
+            "the late answer is never read as the next request's"
+        );
+    }
+
+    /// The first request of a connection that ends gets the server's
+    /// answer: a fresh connection is not one that idled.
+    #[test]
+    fn a_fresh_connection_that_ends_is_not_tried_again() {
+        let (mut client, server) = session(vec![vec![Step::Close], vec![inbox()]]);
+
+        assert!(get_inbox(&mut client).is_err());
+        assert_eq!(lines(&server).len(), 1);
+    }
+
+    /// A connection idle past a minute is dropped before the next request,
+    /// below the two minutes after which Graph closes it.
+    #[test]
+    fn an_idle_connection_is_not_reused() {
+        let (mut client, server) = session(vec![vec![inbox(), inbox()], vec![inbox()]]);
+
+        get_inbox(&mut client).unwrap();
+        client.used = Instant::now()
+            .checked_sub(wire::IDLE + Duration::from_secs(1))
+            .unwrap();
+        get_inbox(&mut client).unwrap();
+
+        assert_eq!(lines(&server), [vec![GET_INBOX], vec![GET_INBOX]]);
+    }
+
+    /// A refusal is a whole answer, which keeps the connection; an answer
+    /// read to the end of the stream, or one closing the connection,
+    /// does not.
+    #[test]
+    fn a_connection_is_reused_only_after_a_whole_answer() {
+        let (mut client, server) = session(vec![
+            vec![
+                Step::error(404, "ErrorItemNotFound"),
+                inbox(),
+                Step::Reply(b"HTTP/1.1 200 OK\r\n\r\n{\"id\":\"x\"}".to_vec()),
+            ],
+            vec![Step::Reply(
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 10\r\n\r\n{\"id\":\"x\"}"
+                    .to_vec(),
+            )],
+            vec![inbox()],
+        ]);
+
+        assert!(get_inbox(&mut client).is_err());
+        get_inbox(&mut client).unwrap();
+        get_inbox(&mut client).unwrap();
+        get_inbox(&mut client).unwrap();
+        get_inbox(&mut client).unwrap();
+
+        assert_eq!(
+            lines(&server).iter().map(Vec::len).collect::<Vec<_>>(),
+            [3, 1, 1]
+        );
+    }
+
+    // --- a write on an item gone converges --------------------------------
+
+    /// A flag set, a move or a delete on a message gone from the server
+    /// counts as done; a copy of it stays an error.
+    #[test]
+    fn a_write_on_a_message_gone_counts_as_done_but_a_copy() {
+        let gone = || Step::error(404, "ErrorItemNotFound");
+        let (mut client, server) = session(vec![vec![gone(), gone(), gone(), gone(), gone()]]);
+        client
+            .folders
+            .insert(String::from("Archive"), String::from("id-archive"));
+
+        client
+            .store_flags(&["m1"], &[Flag::from_iana(IanaFlag::Seen)], FlagOp::Set)
+            .unwrap();
+        client.move_messages("Archive", &["m2"]).unwrap();
+        client.delete_item("m3", None).unwrap();
+        let Err(err) = client.copy_message("Archive", "m4") else {
+            panic!("a copy of a message gone is an error");
+        };
+        assert!(format!("{err:#}").contains("404"), "{err:#}");
+
+        assert_eq!(
+            lines(&server)[0],
+            [
+                "PATCH /v1.0/me/messages/m1",
+                "POST /v1.0/me/messages/m2/move",
+                "GET /v1.0/me/messages/m2",
+                "DELETE /v1.0/me/messages/m3",
+                "POST /v1.0/me/messages/m4/copy",
+            ]
+        );
+    }
+
+    /// A move answered 404 while the message is still there names a
+    /// destination Graph no longer knows: an error.
+    #[test]
+    fn a_move_to_a_folder_gone_stays_an_error() {
+        let (mut client, _) = session(vec![vec![
+            Step::error(404, "ErrorItemNotFound"),
+            Step::ok(serde_json::json!({ "id": "m1" })),
+        ]]);
+        client
+            .folders
+            .insert(String::from("Archive"), String::from("id-archive"));
+
+        let err = client.move_messages("Archive", &["m1"]).unwrap_err();
+        assert!(format!("{err:#}").contains("Move message m1"), "{err:#}");
+    }
+
+    /// A contact or an event gone from the server is deleted already,
+    /// whether the delete or the read checking its revision meets the 404.
+    #[test]
+    fn a_contact_or_an_event_gone_counts_as_deleted() {
+        for kind in [GraphKind::Contacts, GraphKind::Calendar] {
+            let gone = || Step::error(404, "ErrorItemNotFound");
+            let (mut client, server) = session_of(kind, vec![vec![gone(), gone()]]);
+
+            client.delete_item("c1", None).unwrap();
+            client.delete_item("c2", Some("ck-1")).unwrap();
+            assert_eq!(lines(&server)[0].len(), 2);
+            assert!(lines(&server)[0][0].starts_with("DELETE "));
+            assert!(lines(&server)[0][1].starts_with("GET "));
+        }
+    }
+
+    // --- bodies by batches bounded in bytes -------------------------------
+
+    /// Batches hold at most twenty gets and 4 MiB stated, in the order
+    /// asked; a message over 1 MiB, or of no stated size, is read alone.
+    #[test]
+    fn bodies_are_planned_by_their_stated_sizes() {
+        let kib = 1024;
+        let sizes: HashMap<&str, u64> = [
+            ("a", 900 * kib),
+            ("b", 900 * kib),
+            ("c", 900 * kib),
+            ("d", 900 * kib),
+            ("e", 900 * kib),
+            ("big", 2 * 1024 * kib),
+            ("f", 10 * kib),
+        ]
+        .into_iter()
+        .collect();
+        let ids = ["a", "b", "c", "d", "big", "e", "unknown", "f"];
+
+        let planned = plan(&ids, |id| sizes.get(id).copied());
+        assert_eq!(
+            planned,
+            [
+                Fetch::Alone("big"),
+                Fetch::Batch(vec!["a", "b", "c", "d"]),
+                Fetch::Alone("unknown"),
+                Fetch::Batch(vec!["e", "f"]),
+            ]
+        );
+
+        let small: Vec<String> = (0..45).map(|n| format!("m{n}")).collect();
+        let small: Vec<&str> = small.iter().map(String::as_str).collect();
+        let planned = plan(&small, |_| Some(kib));
+        let lens: Vec<usize> = planned
+            .iter()
+            .map(|fetch| match fetch {
+                Fetch::Batch(batch) => batch.len(),
+                Fetch::Alone(_) => 0,
+            })
+            .collect();
+        assert_eq!(lens, [20, 20, 5]);
+
+        for fetch in plan(&ids, |id| sizes.get(id).copied()) {
+            if let Fetch::Batch(batch) = fetch {
+                let stated: u64 = batch.iter().map(|id| sizes[id]).sum();
+                assert!(
+                    stated <= BATCH_BYTES,
+                    "a batch holds {stated} stated octets"
+                );
+            }
+        }
+    }
+
+    fn raw_reply(raw: &[u8]) -> Step {
+        let mut reply = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+            raw.len()
+        )
+        .into_bytes();
+        reply.extend_from_slice(raw);
+        Step::Reply(reply)
+    }
+
+    fn size_row(id: &str, size: u64) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "singleValueExtendedProperties": [{ "id": "Integer 0xe08", "value": size.to_string() }],
+        })
+    }
+
+    /// The sizes the listing stated plan the batches; a lone message of no
+    /// stated size is read alone, without asking its size, as one past a
+    /// mebibyte, where it comes; every body is committed byte for byte.
+    #[test]
+    fn bodies_follow_the_sizes_the_listing_stated() {
+        let body = |id: &str| format!("Subject: {id}\r\n\r\nbody of {id}").into_bytes();
+        let answer = serde_json::json!({ "responses": [
+            { "id": "1", "status": 200, "body": STANDARD.encode(body("m1")) },
+            { "id": "0", "status": 200, "body": STANDARD.encode(body("m0")) },
+        ]});
+        let (mut client, server) = session(vec![vec![
+            raw_reply(&body("big")),
+            raw_reply(&body("m2")),
+            Step::ok(answer),
+        ]]);
+        client.sizes.note([
+            (String::from("m0"), 2_000),
+            (String::from("big"), 5_000_000),
+            (String::from("m1"), 3_000),
+        ]);
+
+        let mut bodies = Vec::new();
+        client
+            .fetch_messages(
+                "Inbox",
+                &["m0", "big", "m1", "m2"],
+                |_| Ok(Vec::new()),
+                |id, _, sink: Vec<u8>| {
+                    bodies.push((id.to_owned(), sink));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            bodies,
+            [
+                (String::from("big"), body("big")),
+                (String::from("m2"), body("m2")),
+                (String::from("m1"), body("m1")),
+                (String::from("m0"), body("m0")),
+            ]
+        );
+        assert_eq!(
+            lines(&server)[0],
+            [
+                "GET /v1.0/me/messages/big/$value",
+                "GET /v1.0/me/messages/m2/$value",
+                "POST /v1.0/$batch",
+            ]
+        );
+        assert!(client.sizes.take("m0").is_none(), "a size serves once");
+    }
+
+    /// Messages of no stated size are asked theirs first, twenty a batch,
+    /// with the MAPI size expanded; one Graph states none for is read alone.
+    #[test]
+    fn sizes_unstated_are_asked_before_the_bodies() {
+        let body = |id: &str| format!("Subject: {id}\r\n\r\n{id}").into_bytes();
+        let sizes = serde_json::json!({ "responses": [
+            { "id": "0", "status": 200, "body": size_row("m0", 100) },
+            { "id": "1", "status": 200, "body": size_row("m1", 3_000_000) },
+            { "id": "2", "status": 200, "body": { "id": "m2" } },
+            { "id": "3", "status": 200, "body": size_row("m3", 200) },
+        ]});
+        let bodies = serde_json::json!({ "responses": [
+            { "id": "0", "status": 200, "body": STANDARD.encode(body("m0")) },
+            { "id": "1", "status": 200, "body": STANDARD.encode(body("m3")) },
+        ]});
+        let (mut client, server) = session(vec![vec![
+            Step::ok(sizes),
+            raw_reply(&body("m1")),
+            raw_reply(&body("m2")),
+            Step::ok(bodies),
+        ]]);
+
+        let mut fetched = Vec::new();
+        client
+            .fetch_messages(
+                "Inbox",
+                &["m0", "m1", "m2", "m3"],
+                |_| Ok(Vec::new()),
+                |id, _, _: Vec<u8>| {
+                    fetched.push(id.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(fetched, ["m1", "m2", "m0", "m3"]);
+        assert_eq!(
+            lines(&server)[0],
+            [
+                "POST /v1.0/$batch",
+                "GET /v1.0/me/messages/m1/$value",
+                "GET /v1.0/me/messages/m2/$value",
+                "POST /v1.0/$batch",
+            ]
+        );
+        let written = server.written(0);
+        assert!(
+            written.contains(
+                "/me/messages/m0?%24select=id&%24expand=singleValueExtendedProperties%28%24filter%3Did+eq+%27Integer+0x0E08%27%29"
+            ),
+            "{written}"
+        );
+    }
+
+    /// Each throttled get of a batch waits its own `Retry-After`: one asking
+    /// for no wait goes in the next batch at once, one asking for a second
+    /// in the batch after, alone.
+    #[test]
+    fn a_throttled_get_waits_its_own_retry_after() {
+        let first = serde_json::json!({ "responses": [
+            { "id": "0", "status": 200, "body": STANDARD.encode(b"Subject: 0\r\n\r\n0") },
+            { "id": "1", "status": 429, "headers": { "Retry-After": "0" } },
+            { "id": "2", "status": 503, "headers": { "Retry-After": "1" } },
+        ]});
+        let one = |text: &[u8]| {
+            Step::ok(serde_json::json!({ "responses": [
+                { "id": "0", "status": 200, "body": STANDARD.encode(text) },
+            ]}))
+        };
+        let (mut client, server) = session(vec![vec![
+            Step::ok(first),
+            one(b"Subject: 1\r\n\r\n1"),
+            one(b"Subject: 2\r\n\r\n2"),
+        ]]);
+
+        let start = Instant::now();
+        let mut delivered = Vec::new();
+        let answer = client
+            .batch_get(
+                &["m0", "m1", "m2"],
+                |id| format!("/me/messages/{id}/$value"),
+                raw_body,
+                |id, _| {
+                    delivered.push((id, start.elapsed()));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        let ids: Vec<&str> = delivered.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, ["m0", "m1", "m2"]);
+        assert!(
+            delivered[1].1 < Duration::from_millis(900),
+            "m1 did not wait for m2"
+        );
+        assert!(
+            delivered[2].1 >= Duration::from_secs(1),
+            "m2 waited its own second"
+        );
+        assert!(answer.retry.is_empty());
+        assert!(client.throttle.gave_up().is_none());
+
+        let written = server.written(0);
+        let batches: Vec<&str> = written.split("POST /v1.0/$batch").skip(1).collect();
+        assert_eq!(batches.len(), 3);
+        assert!(batches[1].contains("/me/messages/m1/$value"));
+        assert!(!batches[1].contains("/me/messages/m2/$value"));
+        assert!(batches[2].contains("/me/messages/m2/$value"));
+    }
+
+    /// A get asking to wait longer than neverest does is not sent again:
+    /// the source gives up until the wait is over, and every get left goes
+    /// to the next run.
+    #[test]
+    fn a_throttled_get_asking_too_long_a_wait_gives_the_source_up() {
+        let first = serde_json::json!({ "responses": [
+            { "id": "0", "status": 200, "body": STANDARD.encode(b"Subject: 0\r\n\r\n0") },
+            { "id": "1", "status": 429, "headers": { "Retry-After": "0" } },
+            { "id": "2", "status": 429, "headers": { "Retry-After": "3600" } },
+        ]});
+        let (mut client, server) = session(vec![vec![Step::ok(first)]]);
+
+        let mut delivered = Vec::new();
+        let answer = client
+            .batch_get(
+                &["m0", "m1", "m2"],
+                |id| format!("/me/messages/{id}/$value"),
+                raw_body,
+                |id, _| {
+                    delivered.push(id);
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(delivered, ["m0"]);
+        assert_eq!(answer.retry, [(1, "m1"), (2, "m2")]);
+        let until = client.throttle.gave_up().expect("the source gave up");
+        assert!(until > SystemTime::now() + Duration::from_secs(3000));
+        assert_eq!(lines(&server)[0].len(), 1, "nothing sent past the give-up");
+    }
+
+    /// The octets an answer held while it was read are measured: its base64
+    /// bodies, before any is decoded.
+    #[test]
+    fn a_batch_answer_measures_what_it_held() {
+        let raw = vec![b'x'; 3_000];
+        let encoded = STANDARD.encode(&raw);
+        let responses: MsgraphBatchResponses = serde_json::from_value(serde_json::json!({
+            "responses": [
+                { "id": "0", "status": 200, "body": encoded },
+                { "id": "1", "status": 200, "body": encoded },
+            ]
+        }))
+        .unwrap();
+
+        let (bodies, answer) = read_raw_responses(&["m0", "m1"], responses);
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(answer.held, 2 * encoded.len());
+    }
+
+    /// A summary read by id expands the MAPI size, which the envelope
+    /// carries.
+    #[test]
+    fn the_envelope_carries_the_expanded_size() {
+        let message: MsgraphMessage = serde_json::from_value(size_row("m1", 48_213)).unwrap();
+        assert_eq!(message_envelope("m1", &message).size, 48_213);
+        assert_eq!(message_envelope("m1", &fixture_row()).size, 0);
+
+        assert_eq!(
+            batch_url(
+                "me/messages/AAMk-1=",
+                &[("$select", "id"), ("$expand", SIZE_EXPAND)]
+            ),
+            "/me/messages/AAMk-1=?%24select=id&%24expand=singleValueExtendedProperties%28%24filter%3Did+eq+%27Integer+0x0E08%27%29"
+        );
+    }
+
+    /// A request whose write meets a connection the server closed (a broken
+    /// pipe) never reached it: a `GET` goes again on a new connection.
+    #[test]
+    fn a_get_whose_write_breaks_on_a_closed_connection_is_sent_again() {
+        let (mut client, server) = session(vec![vec![inbox(), Step::Broken], vec![inbox()]]);
+
+        get_inbox(&mut client).unwrap();
+        get_inbox(&mut client).unwrap();
+        assert_eq!(lines(&server), [vec![GET_INBOX], vec![GET_INBOX]]);
+    }
+
+    /// A whole-folder delta asks for the size `$expand`; refused, it asks
+    /// again without it, and the session no longer asks for it.
+    #[test]
+    fn a_delta_refusing_the_size_expand_is_asked_without_it() {
+        let page = || {
+            Step::ok(serde_json::json!({
+                "value": [],
+                "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/mailFolders/id-inbox/messages/delta?$deltatoken=a",
+            }))
+        };
+        let (mut client, server) =
+            session(vec![vec![Step::error(400, "BadRequest"), page(), page()]]);
+        client
+            .folders
+            .insert(String::from("Inbox"), String::from("id-inbox"));
+
+        use mail::MailWire;
+        client.delta_first("Inbox", mail::SUMMARY_SELECT).unwrap();
+        client.delta_first("Inbox", mail::SUMMARY_SELECT).unwrap();
+
+        let requests = server.requests().remove(0);
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].contains("%24expand="), "{}", requests[0]);
+        assert!(!requests[1].contains("%24expand="), "{}", requests[1]);
+        assert!(!requests[2].contains("%24expand="), "{}", requests[2]);
     }
 }

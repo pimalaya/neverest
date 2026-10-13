@@ -60,7 +60,7 @@ use crate::config::{AccountConfig, SourceBackendConfig, SourceConfig};
 #[cfg(feature = "dav")]
 use crate::dav::client::DavKind;
 #[cfg(feature = "msgraph")]
-use crate::msgraph::client::GraphKind;
+use crate::msgraph::client::{GraphKind, SizeHints};
 use crate::throttle::Throttle;
 
 /// An account's endpoints, resolved once for the run.
@@ -304,6 +304,7 @@ impl SourceAccountBackend {
                 token: resolver.resolve(config.auth.token.clone())?,
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
+                sizes: SizeHints::default(),
             })),
             #[cfg(feature = "msgraph")]
             SourceBackendConfig::MsgraphContacts(config) => Ok(Self::Msgraph(MsgraphAccount {
@@ -311,6 +312,7 @@ impl SourceAccountBackend {
                 token: resolver.resolve(config.auth.token.clone())?,
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
+                sizes: SizeHints::default(),
             })),
             #[cfg(feature = "msgraph")]
             SourceBackendConfig::MsgraphCalendar(config) => Ok(Self::Msgraph(MsgraphAccount {
@@ -318,6 +320,7 @@ impl SourceAccountBackend {
                 token: resolver.resolve(config.auth.token.clone())?,
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
+                sizes: SizeHints::default(),
             })),
             #[cfg(feature = "gpeople")]
             SourceBackendConfig::Gpeople(config) => Ok(Self::Gpeople(GoogleAccount {
@@ -383,6 +386,8 @@ pub struct MsgraphAccount {
     pub user_id: String,
     /// The TLS handle, ALPN folded in.
     pub tls: Tls,
+    /// The message sizes its listings stated, shared by its connections.
+    pub sizes: SizeHints,
 }
 
 /// A resolved Google endpoint, People or Calendar.

@@ -94,7 +94,8 @@ pub trait Pager {
     ///
     /// `landed` names the members of the page enumerated last, whose write
     /// has committed, and is empty before the first page. `resumed` is true
-    /// once, before the first page of a round an earlier run left open.
+    /// once, before the head or the first page of a round an earlier run
+    /// left open.
     /// `next` is the listing about to be asked for, `None` once the verb
     /// completed. Answering [`Rest::Pause`] there stops the verb before it
     /// asks; on completion the answer is ignored.
@@ -169,13 +170,15 @@ where
                 request,
             }) => {
                 if let Some(pager) = pager.as_deref_mut() {
+                    // NOTE: a run resuming an open round lists its head
+                    // first, which only an open round has (pimdir SYNC §5).
                     let resumed = first
                         && matches!(
                             request.listing,
                             PimdirListing::Round {
                                 cursor: Some(_),
                                 ..
-                            }
+                            } | PimdirListing::Head(_)
                         );
                     let landed = page.take().map(|(_, landed)| landed).unwrap_or_default();
                     // NOTE: the page enumerated last is written whole, its

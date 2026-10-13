@@ -15,7 +15,10 @@
 //! checkpoint: a full round lists the label's ids (plus three id-only listings
 //! for the flags), a delta round projects on the label the mailbox history,
 //! read once a run, and an expired history id (HTTP 404) restarts a full
-//! round.
+//! round. While a round is open, a run resuming it lists its delta head
+//! first (pimdir SYNC §4): the same projection from the round's history id,
+//! so what arrives during a long round shows before it closes; the label's
+//! later pages read what the head touched anew.
 //!
 //! Messages are read through Gmail's HTTP batch endpoint, a batch of a few
 //! reads at a time across the source ([`super::batch`]), paced by the units
@@ -56,8 +59,8 @@ use io_gmail::v1::{
     send::{GMAIL_API_BASE, GmailApiError, GmailSendError, GmailSendOutput},
 };
 use io_pimdir::{
-    collection::PimdirScope,
-    remote::{PimdirEnumerate, PimdirListing},
+    collection::{PimdirCheckpoint, PimdirScope},
+    remote::{PimdirEnumerate, PimdirHead, PimdirListing},
     summary::mail::{addresses, decode, instant, message_ids, meta_attachment},
 };
 use log::{debug, trace, warn};
@@ -187,9 +190,10 @@ pub struct GmailClient {
     throttle: Arc<Throttle>,
     /// What the source's connections share for the run.
     run: Arc<GmailRun>,
-    /// The flag sets of the last label and query a round page read, kept
-    /// for the run so the next page lists them again for nothing.
-    flag_sets: Option<((String, Option<String>), FlagSets)>,
+    /// The flag sets of the last label and query a round page read, and
+    /// when, kept for the run so the next page lists them again for
+    /// nothing.
+    flag_sets: Option<((String, Option<String>), Instant, FlagSets)>,
 }
 
 impl GmailClient {
@@ -493,7 +497,9 @@ impl GmailClient {
     /// below `since`, a superset of the scope on `Date`), its cursor the
     /// page token; its first page carries the profile's history id, read
     /// before the listing, so what lands during the round is the next
-    /// delta's.
+    /// delta's, or the head's of a run resuming it. A delta head is the
+    /// delta from the round's history id, an expired one rejecting the
+    /// head; Gmail dates no label change, so it lists no band head.
     pub fn enumerate(
         &mut self,
         collection: &str,
@@ -503,8 +509,10 @@ impl GmailClient {
         let label = self.label_id(collection)?;
 
         match &request.listing {
-            // NOTE: no head yet (pimdir SYNC §4).
-            PimdirListing::Head(_) => Ok(Listed::NoHead),
+            PimdirListing::Head(PimdirHead::Delta(checkpoint)) => {
+                self.delta_head(collection, &label, checkpoint, held)
+            }
+            PimdirListing::Head(PimdirHead::Band { .. }) => Ok(Listed::NoHead),
             PimdirListing::Delta(checkpoint) => {
                 let Some(start) = decode_checkpoint(&checkpoint.0) else {
                     return Ok(Listed::CursorRejected);
@@ -534,12 +542,55 @@ impl GmailClient {
         }
     }
 
+    /// The head of an open round (pimdir SYNC §4): the label's changes
+    /// since `checkpoint`, answered as a delta, with the history id Gmail
+    /// holds now. What it touched is recorded for the run, so the label's
+    /// later pages read it anew rather than as it stood before the head.
+    fn delta_head(
+        &mut self,
+        collection: &str,
+        label: &str,
+        checkpoint: &PimdirCheckpoint,
+        held: Held<'_>,
+    ) -> Result<Listed> {
+        let at = Instant::now();
+        let Some(start) = decode_checkpoint(&checkpoint.0) else {
+            warn!("gmail head of {collection} asked from no history id, restarting the round");
+            return Ok(Listed::HeadRejected);
+        };
+        let changes = match self.changes(label, &start, &held) {
+            Ok(changes) => changes,
+            Err(err) if is_not_found(&err) => {
+                warn!("gmail history of {collection} expired, restarting the round");
+                return Ok(Listed::HeadRejected);
+            }
+            Err(err) => {
+                return Err(
+                    anyhow::Error::new(err).context(format!("List the head of {collection} error"))
+                );
+            }
+        };
+
+        let touched: Vec<String> = changes
+            .changed
+            .iter()
+            .chain(&changes.deleted)
+            .cloned()
+            .collect();
+        let head = self.delta_round(collection, label, changes, held)?;
+        self.run.headed(label, at, touched);
+        Ok(Listed::Page(head))
+    }
+
     /// One page of a round over `scope`, from its start or from `token`.
     ///
     /// The members the store binds are named by their binding and flagged
     /// from the label's flag listings; the others by their metadata, read in
     /// batches, or kept from another label's listing this run, then flagged
-    /// as the bound ones are.
+    /// as the bound ones are. A message read here that no longer carries
+    /// the label is left out; one a head of the label touched this run is
+    /// read again unless the run read it since the head, its labels then
+    /// deciding its membership and flags.
     fn round_page(
         &mut self,
         collection: &str,
@@ -586,15 +637,33 @@ impl GmailClient {
         };
 
         let run = Arc::clone(&self.run);
+        // NOTE: a message a head of this label touched is read no earlier
+        // than the head, so the page never lists it as it stood before a
+        // removal the head stated, whatever Gmail's page token lists (pimdir
+        // SYNC §4).
+        let head = run.head(label);
+        let since = head.as_ref().map(|head| head.at);
+        let touched = |id: &str| head.as_ref().is_some_and(|head| head.touched.contains(id));
         let mut bound = Vec::new();
         let mut kept = Vec::new();
+        let mut fresh = Vec::new();
+        let mut labels_only = Vec::new();
         let mut unread = Vec::new();
         for message in page.messages {
             let id = message.id;
-            if held.holds(&id) {
-                bound.push(id);
-            } else if let Some(message) = run.seen(&id, true, None) {
-                kept.push((id, message));
+            let holds = held.holds(&id);
+            if !touched(&id) {
+                if holds {
+                    bound.push(id);
+                } else if let Some(message) = run.seen(&id, true, None) {
+                    kept.push((id, message));
+                } else {
+                    unread.push(id);
+                }
+            } else if let Some(message) = run.seen(&id, !holds, since) {
+                fresh.push((id, holds, message));
+            } else if holds {
+                labels_only.push(id);
             } else {
                 unread.push(id);
             }
@@ -605,7 +674,7 @@ impl GmailClient {
         // its headers, but its flags may have moved since: they are read
         // from this label's listings, as a bound one's are.
         if !bound.is_empty() || !kept.is_empty() {
-            let flags = self.flag_sets(label, query.as_deref())?;
+            let flags = self.flag_sets(label, query.as_deref(), since)?;
             items.extend(bound.into_iter().map(|id| {
                 let flags = flags.of(&id);
                 EnumEntry::bare(id, flags, None)
@@ -617,21 +686,39 @@ impl GmailClient {
             }));
         }
 
+        // NOTE: a message read since the listing that no longer carries the
+        // label left it meanwhile, and one gone (404) is gone: both are left
+        // out, absent from the round as they are from the label. A round
+        // page states no removal.
+        let mut left = Vec::new();
+        for (id, holds, message) in fresh {
+            settle(label, id, holds, &message, &mut items, &mut left);
+        }
         let shared = self.collection_ids();
         let mut bytes = 0;
-        let at = Instant::now();
-        self.read_messages(ReadAs::Metadata, &unread, &|_| 0, |id, message| {
-            // NOTE: gone since the listing: absent from the round, as it is
-            // from the label.
-            let Some(message) = message else {
-                return Ok(());
-            };
-            bytes += serde_json::to_vec(&message).map_or(0, |json| json.len() as u64);
-            keep(&run, &shared, &id, &message, true, at);
-            items.push(named_entry(&id, &message));
-            Ok(())
-        })
-        .with_context(|| format!("Read the metadata of {collection} error"))?;
+        for (read, ids) in [(ReadAs::Minimal, labels_only), (ReadAs::Metadata, unread)] {
+            let at = Instant::now();
+            let holds = read == ReadAs::Minimal;
+            self.read_messages(read, &ids, &|_| 0, |id, message| {
+                let Some(message) = message else {
+                    return Ok(());
+                };
+                if !holds {
+                    bytes += serde_json::to_vec(&message).map_or(0, |json| json.len() as u64);
+                }
+                keep(&run, &shared, &id, &message, !holds, at);
+                settle(label, id, holds, &message, &mut items, &mut left);
+                Ok(())
+            })
+            .with_context(|| format!("Read the metadata of {collection} error"))?;
+        }
+        if !left.is_empty() {
+            debug!(
+                "{} member(s) of {collection} left the label since it was listed",
+                left.len()
+            );
+            trace!("left: {left:?}");
+        }
 
         debug!("end of gmail round page");
         trace!(
@@ -651,15 +738,23 @@ impl GmailClient {
     }
 
     /// The flag-like labels of a label's messages under `query`, as three
-    /// id-only listings read once a run rather than one get a message.
-    fn flag_sets(&mut self, label: &str, query: Option<&str>) -> Result<FlagSets> {
+    /// id-only listings read once a run rather than one get a message, and
+    /// again when read before `since`, the label's head.
+    fn flag_sets(
+        &mut self,
+        label: &str,
+        query: Option<&str>,
+        since: Option<Instant>,
+    ) -> Result<FlagSets> {
         let key = (label.to_owned(), query.map(String::from));
-        if let Some((cached, sets)) = &self.flag_sets
+        if let Some((cached, at, sets)) = &self.flag_sets
             && *cached == key
+            && since.is_none_or(|since| *at >= since)
         {
             return Ok(sets.clone());
         }
 
+        let at = Instant::now();
         let sets = FlagSets {
             unread: self
                 .list_ids(label, Some(UNREAD), query)?
@@ -674,7 +769,7 @@ impl GmailClient {
                 .into_iter()
                 .collect(),
         };
-        self.flag_sets = Some((key, sets.clone()));
+        self.flag_sets = Some((key, at, sets.clone()));
         Ok(sets)
     }
 
@@ -2182,6 +2277,222 @@ mod tests {
         ));
         let listed = client.enumerate("INBOX", &delta("1"), held(&none)).unwrap();
         assert!(matches!(listed, Listed::CursorRejected));
+    }
+
+    fn head(from: &str) -> PimdirEnumerate {
+        PimdirEnumerate {
+            listing: PimdirListing::Head(PimdirHead::Delta(PimdirCheckpoint(
+                from.as_bytes().to_vec(),
+            ))),
+            scope: PimdirScope::unbounded(),
+        }
+    }
+
+    fn resumed(token: &str) -> PimdirEnumerate {
+        PimdirEnumerate {
+            listing: PimdirListing::Round {
+                cursor: Some(io_pimdir::collection::PimdirCursor(
+                    token.as_bytes().to_vec(),
+                )),
+                band: false,
+            },
+            scope: PimdirScope::unbounded(),
+        }
+    }
+
+    fn ids(page: &Enumeration) -> Vec<&str> {
+        let mut ids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
+        ids.sort();
+        ids
+    }
+
+    /// A delta head lists what changed in the label since the round's
+    /// history id, as a delta does: an arrival named by its metadata, a
+    /// deletion stated at once, and the history id Gmail holds now.
+    #[test]
+    fn a_head_lists_the_label_since_the_round_began() {
+        let (mut client, api, batch) = scripted();
+        let m1 = HashSet::from([String::from("m1")]);
+
+        api.answer(ok(serde_json::json!({
+            "history": [
+                { "id": "110", "messagesAdded": [{
+                    "message": { "id": "m9", "labelIds": ["INBOX", "UNREAD"] }
+                }]},
+                { "id": "111", "messagesDeleted": [{
+                    "message": { "id": "m1", "labelIds": ["INBOX"] }
+                }]},
+                { "id": "112", "messagesAdded": [{
+                    "message": { "id": "m8", "labelIds": ["Label_1"] }
+                }]},
+            ],
+            "historyId": "120"
+        })));
+        batch.answer(batch_answer(&[(
+            0,
+            "200 OK",
+            metadata("m9", &["INBOX", "UNREAD"]),
+        )]));
+        let head = page(client.enumerate("INBOX", &head("100"), held(&m1)).unwrap());
+
+        assert_eq!(ids(&head), ["m9"], "m8 is not the inbox's");
+        assert!(head.items[0].meta.is_some(), "named by its metadata");
+        assert_eq!(head.vanished, ["m1"]);
+        assert_eq!(head.checkpoint.as_deref(), Some(&b"120"[..]));
+        assert!(!head.complete, "a head is no round page");
+        assert!(head.cursor.is_none(), "and moves no cursor");
+        let history = api.requests();
+        assert!(history[0].contains("/history"), "{history:?}");
+        assert!(history[0].contains("startHistoryId=100"), "{history:?}");
+        assert_eq!(api.left() + batch.left(), 0);
+    }
+
+    /// A head from a history id Gmail no longer holds is rejected, so the
+    /// round restarts; Gmail lists no band head.
+    #[test]
+    fn an_expired_history_rejects_the_head() {
+        let (mut client, api, _) = scripted();
+        let none = HashSet::new();
+        api.answer(json(
+            "404 Not Found",
+            r#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}"#,
+        ));
+        let listed = client.enumerate("INBOX", &head("1"), held(&none)).unwrap();
+        assert!(matches!(listed, Listed::HeadRejected), "{listed:?}");
+
+        let listed = client.enumerate("INBOX", &head(""), held(&none)).unwrap();
+        assert!(matches!(listed, Listed::HeadRejected), "no history id");
+
+        let band = PimdirEnumerate {
+            listing: PimdirListing::Head(PimdirHead::Band {
+                since: String::from("2026-10-13T00:00:00Z"),
+            }),
+            scope: PimdirScope::unbounded(),
+        };
+        let listed = client.enumerate("INBOX", &band, held(&none)).unwrap();
+        assert!(matches!(listed, Listed::NoHead), "{listed:?}");
+        assert_eq!(api.requests().len(), 1, "only the expired history asked");
+    }
+
+    /// A page after a head never lists a member as it stood before the
+    /// head: what the head touched is read again unless read since, its
+    /// labels deciding, and a member read without the label is left out.
+    #[test]
+    fn a_page_after_a_head_reads_what_it_touched_anew() {
+        let (mut client, api, batch) = scripted();
+        let held_ids = HashSet::from([String::from("m1"), String::from("m2")]);
+
+        // NOTE: read under Work earlier in the run, before the head.
+        let m3 = serde_json::from_value(metadata("m3", &["INBOX", "Label_1"])).unwrap();
+        client.run.keep(&m3, true, Instant::now());
+
+        api.answer(ok(serde_json::json!({
+            "history": [
+                { "id": "110", "labelsAdded": [{
+                    "message": { "id": "m1", "labelIds": ["INBOX", "STARRED"] },
+                    "labelIds": ["STARRED"]
+                }]},
+                { "id": "111", "labelsAdded": [{
+                    "message": { "id": "m3", "labelIds": ["INBOX", "Label_1"] },
+                    "labelIds": ["INBOX"]
+                }]},
+            ],
+            "historyId": "120"
+        })));
+        batch.answer(batch_answer(&[(
+            0,
+            "200 OK",
+            serde_json::json!({ "id": "m1", "labelIds": ["INBOX", "STARRED"] }),
+        )]));
+        batch.answer(batch_answer(&[(
+            0,
+            "200 OK",
+            metadata("m3", &["INBOX", "Label_1"]),
+        )]));
+        let head = page(
+            client
+                .enumerate("INBOX", &head("100"), held(&held_ids))
+                .unwrap(),
+        );
+        assert_eq!(ids(&head), ["m1", "m3"]);
+        assert_eq!(
+            batch.requests().len(),
+            2,
+            "m3 read again: the run's read predates the history"
+        );
+
+        // NOTE: since the head, m1 and m4 left the inbox, and the page token
+        // lists them still.
+        api.answer(ok(serde_json::json!({
+            "messages": [{ "id": "m1" }, { "id": "m2" }, { "id": "m3" }, { "id": "m4" }]
+        })));
+        api.answer(listed(&[]));
+        api.answer(listed(&[]));
+        api.answer(listed(&[]));
+        batch.answer(batch_answer(&[(
+            0,
+            "200 OK",
+            serde_json::json!({ "id": "m1", "labelIds": ["STARRED"] }),
+        )]));
+        batch.answer(batch_answer(&[(0, "200 OK", metadata("m4", &["Label_1"]))]));
+        let page = page(
+            client
+                .enumerate("INBOX", &resumed("t2"), held(&held_ids))
+                .unwrap(),
+        );
+
+        assert_eq!(
+            ids(&page),
+            ["m2", "m3"],
+            "m1 and m4 left out, m3 as the head read it"
+        );
+        assert!(page.vanished.is_empty(), "a round page states no removal");
+        let reads = batch.requests();
+        assert_eq!(reads.len(), 4, "m1's labels and m4's metadata: {reads:?}");
+        assert_eq!(api.left() + batch.left(), 0);
+    }
+
+    /// The flag sets a page read before the label's head are read again
+    /// by the next page.
+    #[test]
+    fn flag_sets_read_before_a_head_are_read_again() {
+        let (mut client, api, _) = scripted();
+        let m1 = HashSet::from([String::from("m1")]);
+
+        api.answer(listed(&["m1"]));
+        api.answer(listed(&["m1"]));
+        api.answer(listed(&[]));
+        api.answer(listed(&[]));
+        let first = page(
+            client
+                .enumerate("INBOX", &resumed("t1"), held(&m1))
+                .unwrap(),
+        );
+        assert!(
+            !first.items[0]
+                .flags
+                .contains(&Flag::from_iana(IanaFlag::Seen))
+        );
+
+        api.answer(ok(serde_json::json!({ "history": [], "historyId": "120" })));
+        client.enumerate("INBOX", &head("100"), held(&m1)).unwrap();
+
+        api.answer(listed(&["m1"]));
+        api.answer(listed(&[]));
+        api.answer(listed(&[]));
+        api.answer(listed(&[]));
+        let second = page(
+            client
+                .enumerate("INBOX", &resumed("t2"), held(&m1))
+                .unwrap(),
+        );
+        assert!(
+            second.items[0]
+                .flags
+                .contains(&Flag::from_iana(IanaFlag::Seen)),
+            "read since the head"
+        );
+        assert_eq!(api.left(), 0);
     }
 
     /// Bodies come by raw batches, sized by the run's reads, a size it did

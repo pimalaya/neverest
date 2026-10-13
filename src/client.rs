@@ -130,9 +130,7 @@ pub enum Listed {
     /// the engine resumes the round.
     NoHead,
     /// The source refused the head's position: the engine restarts the
-    /// round over the run's scope.
-    // NOTE: answered by the delta heads the backends list next.
-    #[allow(dead_code)]
+    /// round over the run's scope (an expired Gmail history id).
     HeadRejected,
 }
 
@@ -585,17 +583,22 @@ impl Client {
         }
     }
 
+    /// The heads the connector lists while a round is open (pimdir SYNC
+    /// §4): Gmail lists delta heads from its history; the others none yet.
+    pub fn heads(&self) -> PimdirHeads {
+        match self {
+            #[cfg(feature = "gmail")]
+            Client::Gmail(_) => PimdirHeads::DELTA,
+            #[allow(unreachable_patterns)]
+            _ => PimdirHeads::NONE,
+        }
+    }
+
     /// Whether this backend's checkpoint is bound to the scope it was made
     /// under (pimdir SYNC §4): IMAP's modseq, Gmail's history and Graph
     /// mail's delta link, made over the whole folder and checked locally,
     /// are not, and widen a scope by listing only the band their coverage
     /// lacks. The kinds that take no scope keep the default.
-    /// The heads the connector lists while a round is open (pimdir SYNC
-    /// §4): none until a backend states its own.
-    pub fn heads(&self) -> PimdirHeads {
-        PimdirHeads::NONE
-    }
-
     pub fn scope_bound(&self) -> bool {
         match self {
             #[cfg(feature = "imap")]

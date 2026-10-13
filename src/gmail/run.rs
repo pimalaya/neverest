@@ -10,9 +10,13 @@
 //! they list it, and the history is read once for the mailbox, then
 //! projected on each label. Every cache is bounded, the oldest entries
 //! leaving first, a miss costing one read more, never a wrong answer.
+//!
+//! A head listed on a label (pimdir SYNC §4) is recorded with what it
+//! touched, so the label's later pages read those messages anew rather
+//! than as they stood before it.
 
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     sync::{Condvar, Mutex, MutexGuard, PoisonError},
     time::Instant,
 };
@@ -121,6 +125,19 @@ pub struct GmailRun {
     sizes: Mutex<Bounded<u64>>,
     /// The mailbox history read this run, projected on each label.
     history: Mutex<Option<History>>,
+    /// The heads listed this run, by label id.
+    heads: Mutex<HashMap<String, Headed>>,
+}
+
+/// What the heads listed on one label this run touched, which the label's
+/// later pages read anew (pimdir SYNC §4).
+#[derive(Clone, Debug)]
+pub struct Headed {
+    /// When the latest head began: a read before it is no evidence of
+    /// what a head stated.
+    pub at: Instant,
+    /// The messages the heads read again or stated deleted.
+    pub touched: HashSet<String>,
 }
 
 impl GmailRun {
@@ -132,7 +149,27 @@ impl GmailRun {
             metas: Mutex::new(Bounded::new(METAS_CAP)),
             sizes: Mutex::new(Bounded::new(SIZES_CAP)),
             history: Mutex::new(None),
+            heads: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Records a head listed on `label`, begun at `at`, which touched
+    /// `touched`: the label's later pages read them again, no earlier than
+    /// the latest head.
+    pub fn headed(&self, label: &str, at: Instant, touched: impl IntoIterator<Item = String>) {
+        let mut heads = lock(&self.heads);
+        let headed = heads.entry(label.to_owned()).or_insert_with(|| Headed {
+            at,
+            touched: HashSet::new(),
+        });
+        headed.at = headed.at.max(at);
+        headed.touched.extend(touched);
+    }
+
+    /// What the heads listed on `label` this run touched, `None` before
+    /// any.
+    pub fn head(&self, label: &str) -> Option<Headed> {
+        lock(&self.heads).get(label).cloned()
     }
 
     /// Waits for room among the batches in flight and takes it until the

@@ -52,7 +52,7 @@ use crate::{
         flag::{Flag, FlagOp},
         summary::ItemSummary,
     },
-    kind::{Kind, LinkId, mail::AttachmentMark},
+    kind::{Kind, LinkId},
 };
 
 /// No DAV backend, so nothing can be refused with `no-uid-conflict`.
@@ -974,7 +974,7 @@ impl PimRemote<'_> {
 
 /// Streams one body into the blob store and reports the object by reference.
 ///
-/// The link id and summary come from the scanned stream. Free of
+/// The link id and summary come from the streamed header prefix. Free of
 /// `PimRemote` so a pool worker can call it on its own connection. A body
 /// the server no longer holds fails with [`Gone`].
 fn fetch_one_full(
@@ -985,7 +985,7 @@ fn fetch_one_full(
     blob: &PimdirBlobs,
 ) -> Result<PimdirFetchedItem> {
     let writer = blob.writer().context("Open blob writer error")?;
-    let mut sink = HydrateSink::new(writer, blob.hasher(), kind);
+    let mut sink = HydrateSink::new(writer, blob.hasher());
     let revision = client
         .get_item_stream(collection, handle.as_str(), &mut sink)
         .with_context(|| format!("Stream item {} in {collection} error", handle.as_str()))?;
@@ -1028,13 +1028,14 @@ pub(crate) struct Hydrated {
 
 /// The body the store already holds under `hash`, reported for `handle`
 /// as a fetch of the same bytes would be, read from the blob's header
-/// and, for a message, its parts; `None` when the blob is not there
-/// (collected meanwhile).
+/// alone; `None` when the blob is not there (collected meanwhile).
 ///
 /// What serves a member of a second collection with the body a source
 /// whose handles are account-wide (Gmail) already delivered for the
-/// first: the identity, summary and sort key derive from the body as
-/// they did then, and nothing goes over the network.
+/// first: the identity, summary and sort key derive from the header as
+/// they did then, and nothing goes over the network. A message's mark
+/// and invitation are the store's to state: the write gives the new row
+/// those of the row already holding the body (Annex A.1).
 pub(crate) fn stored_item(
     kind: Kind,
     blobs: &PimdirBlobs,
@@ -1055,10 +1056,8 @@ pub(crate) fn stored_item(
         return Ok(None);
     }
 
-    // NOTE: read as far as the scan needs: the header block, and a message's
-    // parts while one may still carry the attachment mark.
-    let mut scan = BodyScan::new(kind);
-    let mut chunk = vec![0u8; 64 * 1024];
+    let mut scan = HeaderScan::default();
+    let mut chunk = [0u8; 8192];
     while !scan.done() {
         let n = io::Read::read(&mut file, &mut chunk)
             .with_context(|| format!("Read stored body {}", hash.0))?;
@@ -1109,7 +1108,7 @@ pub(crate) fn hydrate_batch(
         sizes,
         |_id| {
             blob.writer()
-                .map(|writer| HydrateSink::new(writer, blob.hasher(), kind))
+                .map(|writer| HydrateSink::new(writer, blob.hasher()))
         },
         |id, revision, sink: HydrateSink| {
             let (hash, size, scan) = sink.finish().map_err(io::Error::other)?;
@@ -1391,83 +1390,70 @@ fn rejected_bare(handle: PimdirHandle) -> PimdirPushResult {
 /// Cap on captured header bytes, bounding memory if no boundary is found.
 const HEADER_CAP: usize = 256 * 1024;
 
-/// What a body tells as it streams by, read without holding it: its header
-/// prefix, which names it, and for a message its attachment mark, which
-/// only the walk of every part gives (Annex A.1).
-struct BodyScan {
+/// The header prefix of a body, captured as it streams by without holding
+/// the body: what names it and summarises it. A message's mark and
+/// invitation, which only the walk of every part gives, are left to the
+/// store's write, which walks each body entering it once (Annex A.1).
+#[derive(Default)]
+struct HeaderScan {
     header: Vec<u8>,
-    header_done: bool,
-    /// `None` for a kind other than mail.
-    mark: Option<AttachmentMark>,
+    done: bool,
 }
 
-impl BodyScan {
-    /// A scan at the start of a body of `kind`.
-    fn new(kind: Kind) -> Self {
-        Self {
-            header: Vec::new(),
-            header_done: false,
-            mark: (kind == Kind::Mail).then(AttachmentMark::new),
-        }
-    }
-
-    /// Reads the next octets of the body.
+impl HeaderScan {
+    /// Reads the next octets of the body, nothing once [`done`](Self::done).
     fn feed(&mut self, buf: &[u8]) {
-        if !self.header_done {
-            let from = self.header.len().saturating_sub(3);
-            self.header.extend_from_slice(buf);
-            if let Some(end) = header_boundary(&self.header[from..]) {
-                self.header.truncate(from + end);
-                self.header_done = true;
-            } else if self.header.len() >= HEADER_CAP {
-                self.header.truncate(HEADER_CAP);
-                self.header_done = true;
-            }
+        if self.done {
+            return;
         }
-        if let Some(mark) = &mut self.mark {
-            mark.feed(buf);
+        let from = self.header.len().saturating_sub(3);
+        self.header.extend_from_slice(buf);
+        if let Some(end) = header_boundary(&self.header[from..]) {
+            self.header.truncate(from + end);
+            self.done = true;
+        } else if self.header.len() >= HEADER_CAP {
+            self.header.truncate(HEADER_CAP);
+            self.done = true;
         }
     }
 
-    /// Whether nothing left of the body changes what the scan derives.
+    /// Whether the header block is read, or the cap reached.
     fn done(&self) -> bool {
-        self.header_done && self.mark.as_ref().is_none_or(AttachmentMark::done)
+        self.done
     }
 
     /// The link id, summary and sort key of the body of `size` octets read.
     fn derive(self, kind: Kind, size: usize) -> PimdirDerivation {
-        let attachment = self.mark.map(AttachmentMark::finish);
-        kind.parse_body(&self.header, size as u64, attachment)
+        kind.parse_body(&self.header, size as u64)
     }
 }
 
 /// A [`Write`] sink for a streaming `Full` fetch.
 ///
 /// It tees each chunk into the blob store, folds it into the content hash, and
-/// scans it ([`BodyScan`]) so the link id and summary derive without a second
-/// pass. The whole body never sits in memory.
+/// captures the header prefix ([`HeaderScan`]) so the link id and summary
+/// derive without a second pass. The whole body never sits in memory.
 struct HydrateSink {
     writer: PimdirBlobWriter,
     hasher: PimdirHasher,
-    scan: BodyScan,
+    scan: HeaderScan,
 }
 
 impl HydrateSink {
-    /// Builds the sink over a blob writer and the store's own hasher, for a
-    /// body of `kind`.
+    /// Builds the sink over a blob writer and the store's own hasher.
     ///
     /// A body is then named by the algorithm the store records (pimdir SPEC §5)
     /// and dedups against what any other consumer of that store wrote.
-    fn new(writer: PimdirBlobWriter, hasher: PimdirHasher, kind: Kind) -> Self {
+    fn new(writer: PimdirBlobWriter, hasher: PimdirHasher) -> Self {
         Self {
             writer,
             hasher,
-            scan: BodyScan::new(kind),
+            scan: HeaderScan::default(),
         }
     }
 
     /// Commits the blob under its hash, returning `(hash, size, scan)`.
-    fn finish(self) -> Result<(PimdirHash, usize, BodyScan)> {
+    fn finish(self) -> Result<(PimdirHash, usize, HeaderScan)> {
         let hash = self.hasher.finish();
         let size = self.writer.commit(&hash)? as usize;
         Ok((hash, size, self.scan))
@@ -1663,7 +1649,7 @@ mod scope_tests {
 }
 
 #[cfg(test)]
-mod mark_tests {
+mod scan_tests {
     use io_pimdir::{
         hash::PimdirHashAlgo,
         summary::{PimdirSummary, mail},
@@ -1671,13 +1657,12 @@ mod mark_tests {
 
     use super::*;
 
-    /// Messages whose attachment mark the walk of the parts decides, the
-    /// header block alone often deciding wrong (Annex A.1).
-    const MESSAGES: &[(&str, &str, bool)] = &[
+    /// Messages whose header block names them, the body after it read by
+    /// the store's write alone.
+    const MESSAGES: &[(&str, &str)] = &[
         (
             "single part",
             "Message-ID: <plain@example.org>\r\nContent-Type: text/plain\r\n\r\nhello\r\n",
-            false,
         ),
         (
             "two attachments",
@@ -1687,119 +1672,72 @@ mod mark_tests {
              --b1\r\nContent-Type: application/pdf; name=\"a.pdf\"\r\n\
              Content-Disposition: attachment; filename=\"a.pdf\"\r\n\
              Content-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n\
-             --b1\r\nContent-Type: text/csv\r\n\
-             Content-Disposition: attachment; filename=\"b.csv\"\r\n\r\na,b\r\n1,2\r\n\
-             --b1--\r\nepilogue\r\n",
-            true,
+             --b1--\r\n",
         ),
         (
-            "an inline image only",
-            "Message-ID: <inline@example.org>\r\n\
-             Content-Type: multipart/mixed; boundary=b2\r\n\r\n\
-             --b2\r\nContent-Type: text/html\r\n\r\n<img src=\"cid:i\">\r\n\
-             --b2\r\nContent-Type: image/png\r\nContent-Disposition: inline\r\n\
-             Content-ID: <i>\r\n\r\niVBORw0KGgo=\r\n--b2--\r\n",
-            false,
-        ),
-        (
-            "an attachment in a nested multipart",
-            "Message-ID: <nested@example.org>\r\n\
-             Content-Type: multipart/signed; boundary=outer; protocol=\"application/pgp-signature\"\r\n\r\n\
-             --outer\r\nContent-Type: multipart/mixed; boundary=inner\r\n\r\n\
-             --inner\r\nContent-Type: multipart/alternative; boundary=alt\r\n\r\n\
-             --alt\r\nContent-Type: text/plain\r\n\r\nhi\r\n--alt\r\n\
-             Content-Type: text/html\r\n\r\n<p>hi</p>\r\n--alt--\r\n\
-             --inner\r\nContent-Type: text/plain\r\n\
-             Content-Disposition: attachment; filename=notes.txt\r\n\r\nnotes\r\n\
-             --inner--\r\n\
-             --outer\r\nContent-Type: application/pgp-signature\r\n\r\nsig\r\n--outer--\r\n",
-            true,
-        ),
-        (
-            "a message disposed as an attachment",
-            "Message-ID: <whole@example.org>\r\nContent-Type: application/zip\r\n\
-             Content-Disposition: attachment; filename=all.zip\r\n\r\nUEsDBA==\r\n",
-            true,
-        ),
-        (
-            "an attachment no delimiter ends",
-            "Message-ID: <cut@example.org>\nContent-Type: multipart/mixed; boundary=c\n\n\
-             --c\nContent-Type: text/plain\n\nhi\n\
-             --c\nContent-Type: text/plain\nContent-Disposition: attachment\n\ncut short\n",
-            false,
+            "bare line feeds and no Message-ID",
+            "Subject: Stand-up notes\nFrom: alice@example.org\n\
+             Date: Sat, 1 Aug 2026 12:00:00 +0200\n\nbody\n",
         ),
     ];
 
-    /// Streams `body` through a sink `chunk` octets a write, as a connector
-    /// writes a fetched body, and derives it.
-    fn streamed(blobs: &PimdirBlobs, body: &[u8], chunk: usize) -> PimdirDerivation {
-        let mut sink = HydrateSink::new(blobs.writer().unwrap(), blobs.hasher(), Kind::Mail);
-        for part in body.chunks(chunk) {
-            sink.write_all(part).unwrap();
-        }
-        let (_, size, scan) = sink.finish().unwrap();
-        assert_eq!(size, body.len());
-        scan.derive(Kind::Mail, size)
-    }
-
-    fn mark(derivation: &PimdirDerivation) -> Option<bool> {
+    fn summary(derivation: &PimdirDerivation) -> &mail::PimdirMailSummary {
         match &derivation.summary {
-            Some(PimdirSummary::Mail(summary)) => summary.attachment,
+            Some(PimdirSummary::Mail(summary)) => summary,
             other => panic!("expected a mail summary, got {other:?}"),
         }
     }
 
-    /// The mark of a streamed body is the one the whole message gives,
-    /// however the stream is cut, where it was left unknown.
+    /// A streamed body is named as the whole message is, however the stream
+    /// is cut, sized as the stream was, and leaves the mark to the store.
     #[test]
-    fn a_streamed_body_carries_the_mark_of_its_parts() {
+    fn a_streamed_body_is_named_by_its_header_block() {
         let dir = tempfile::tempdir().unwrap();
         let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
 
-        for (label, body, expected) in MESSAGES {
+        for (label, body) in MESSAGES {
             let whole = mail::derive(body.as_bytes());
-            assert_eq!(mark(&whole), Some(*expected), "{label}: the whole message");
             for chunk in [1, 7, 64, body.len()] {
-                let derivation = streamed(&blobs, body.as_bytes(), chunk);
-                assert_eq!(mark(&derivation), Some(*expected), "{label}, by {chunk}");
+                let mut sink = HydrateSink::new(blobs.writer().unwrap(), blobs.hasher());
+                for part in body.as_bytes().chunks(chunk) {
+                    sink.write_all(part).unwrap();
+                }
+                let (_, size, scan) = sink.finish().unwrap();
+                assert_eq!(size, body.len(), "{label}, by {chunk}");
+                let derivation = scan.derive(Kind::Mail, size);
                 assert_eq!(derivation.link_id, whole.link_id, "{label}, by {chunk}");
+                assert_eq!(derivation.sort_key, whole.sort_key, "{label}, by {chunk}");
+                let streamed = summary(&derivation);
+                assert_eq!(streamed.size, Some(body.len() as u64), "{label}");
+                assert_eq!(streamed.attachment, None, "{label}: the store's to state");
             }
         }
     }
 
-    /// A body served from the store to a second label reads the same mark.
+    /// A body served from the store to a second label is named alike.
     #[test]
-    fn a_stored_body_carries_the_mark_of_its_parts() {
+    fn a_stored_body_is_named_by_its_header_block() {
         let dir = tempfile::tempdir().unwrap();
         let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
 
-        for (label, body, expected) in MESSAGES {
-            let mut sink = HydrateSink::new(blobs.writer().unwrap(), blobs.hasher(), Kind::Mail);
+        for (label, body) in MESSAGES {
+            let mut sink = HydrateSink::new(blobs.writer().unwrap(), blobs.hasher());
             sink.write_all(body.as_bytes()).unwrap();
             let (hash, _, _) = sink.finish().unwrap();
 
             let item = stored_item(Kind::Mail, &blobs, PimdirHandle("7".into()), hash)
                 .unwrap()
                 .expect("the body is stored");
+            assert_eq!(
+                item.link_id,
+                mail::derive(body.as_bytes()).link_id,
+                "{label}"
+            );
             let Some(PimdirSummary::Mail(summary)) = &item.summary else {
                 panic!("{label}: expected a mail summary");
             };
-            assert_eq!(summary.attachment, Some(*expected), "{label}");
             assert_eq!(summary.size, Some(body.len() as u64), "{label}");
+            assert_eq!(summary.attachment, None, "{label}: the store's to state");
         }
-    }
-
-    /// Another kind is named by its body and carries no mark.
-    #[cfg(any(
-        feature = "dav",
-        feature = "gcal",
-        feature = "gpeople",
-        feature = "msgraph"
-    ))]
-    #[test]
-    fn a_card_is_not_walked_for_parts() {
-        let mut scan = BodyScan::new(Kind::Vcard);
-        scan.feed(b"BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u1\r\nFN:A\r\nEND:VCARD\r\n");
-        assert!(scan.mark.is_none());
     }
 }

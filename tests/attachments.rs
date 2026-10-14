@@ -344,9 +344,9 @@ fn a_synced_body_stands_for_its_attachments() {
             before,
             "{account}: a body filed again stands for nothing new",
         );
-        // NOTE: the copy's row keeps the mark its listing read: io-pimdir
-        // links a body the account holds without fetching it, the summary
-        // left at `Meta` (upgrade.rs, `LookingUp`).
+        // NOTE: the copy's row takes the mark of the row holding its body:
+        // io-pimdir links a body the account holds without fetching it and
+        // states the held row's size, mark and invitation (Annex A.1).
         assert_eq!(
             held(&store, &copies),
             (4, 4),

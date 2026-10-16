@@ -115,6 +115,9 @@ impl GmailSettings {
 pub struct GmailRun {
     /// The batch settings.
     pub settings: GmailSettings,
+    /// The reads the next batch carries, adapted across the run's
+    /// connections ([`super::batch::BatchSize`]).
+    pub batch_size: Mutex<super::batch::BatchSize>,
     /// The batches in flight now.
     in_flight: Mutex<usize>,
     /// Signalled when a batch lands.
@@ -144,6 +147,7 @@ impl GmailRun {
     pub fn new(settings: GmailSettings) -> Self {
         Self {
             settings,
+            batch_size: Mutex::new(super::batch::BatchSize::new(settings.batch_size)),
             in_flight: Mutex::new(0),
             landed: Condvar::new(),
             metas: Mutex::new(Bounded::new(METAS_CAP)),

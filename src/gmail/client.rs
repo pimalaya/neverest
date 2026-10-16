@@ -352,9 +352,9 @@ impl GmailClient {
         if ids.is_empty() {
             return Ok(());
         }
-        let batch_size = self.run.settings.batch_size;
+        let run = Arc::clone(&self.run);
         let mut batcher = LiveBatcher { client: self };
-        batch::read_all(&mut batcher, read, ids, batch_size, sizes, each)
+        batch::read_all(&mut batcher, read, ids, &run.batch_size, sizes, each)
     }
 
     /// The label ids synced as collections: a message carrying two of them
@@ -2546,6 +2546,78 @@ mod tests {
     fn raw(id: &str) -> serde_json::Value {
         let source = format!("Message-ID: <{id}@example.org>\r\n\r\nBody of {id}\r\n");
         serde_json::json!({ "id": id, "raw": encode_raw(source.as_bytes()) })
+    }
+
+    /// The batch size lives on the run: a concurrency refusal a read meets
+    /// cuts it there, and the next read of the source starts from it.
+    #[test]
+    fn a_refusal_cuts_the_size_the_run_shares() {
+        let (mut client, _, batch) = scripted();
+        client.run.keep_size("m1", 100);
+        client.run.keep_size("m2", 100);
+        let concurrency = serde_json::json!({ "error": {
+            "code": 429,
+            "message": "Too many concurrent requests for user",
+            "errors": [{ "domain": "global", "reason": "rateLimitExceeded" }],
+            "status": "RESOURCE_EXHAUSTED",
+        }});
+        batch.answer(batch_answer(&[
+            (0, "200 OK", raw("m1")),
+            (1, "429 Too Many Requests", concurrency),
+        ]));
+        batch.answer(batch_answer(&[(0, "200 OK", raw("m2"))]));
+        for id in ["m3", "m4", "m5"] {
+            client.run.keep_size(id, 100);
+        }
+        batch.answer(batch_answer(&[
+            (0, "200 OK", raw("m3")),
+            (1, "200 OK", raw("m4")),
+        ]));
+        batch.answer(batch_answer(&[(0, "200 OK", raw("m5"))]));
+
+        let mut bodies = Vec::new();
+        client
+            .fetch_bodies(
+                &["m1", "m2"],
+                &|_| None,
+                |_| Ok(Vec::new()),
+                |id, _, _| {
+                    bodies.push(id.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(
+            batch.requests().len(),
+            2,
+            "the refused body read again alone"
+        );
+        assert_eq!(
+            client.run.batch_size.lock().unwrap().current(),
+            2,
+            "cut to one by the refused batch of two, doubled by the full batch of one"
+        );
+
+        client
+            .fetch_bodies(
+                &["m3", "m4", "m5"],
+                &|_| None,
+                |_| Ok(Vec::new()),
+                |id, _, _| {
+                    bodies.push(id.to_owned());
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(bodies.len(), 5);
+        // Started at the 2 the run holds: a full batch of two doubles it to 4,
+        // and m5 alone, not a full batch, leaves it there. A read starting at
+        // the ceiling would send all three, miss m5's answer and end at 2.
+        assert_eq!(batch.requests().len(), 4);
+        assert_eq!(client.run.batch_size.lock().unwrap().current(), 4);
+        assert_eq!(batch.left(), 0);
     }
 
     /// A resumed hydration plans its batches by the sizes the store

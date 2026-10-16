@@ -1542,8 +1542,11 @@ source_config! {
         pub alpn: Vec<String>,
         /// How the Gmail session authenticates.
         pub auth: GmailAuthConfig,
-        /// How many message reads one HTTP batch carries, 10 by default,
-        /// from 1 to 100.
+        /// The most message reads one HTTP batch carries, 10 by default,
+        /// from 1 to 100: a batch with a read Gmail refuses for concurrency
+        /// or rate, fails transiently or leaves unanswered halves the next,
+        /// down to one read, and each full batch answered whole doubles it
+        /// back up to this ceiling.
         ///
         /// Gmail runs the reads of a batch side by side and refuses past
         /// its per-user concurrency limit: measured on 2026-10-10, batches

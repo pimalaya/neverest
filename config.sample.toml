@@ -207,8 +207,12 @@ imap.item.delete = false
 #gmail.pool-size = 4
 
 # Messages are read through Gmail's HTTP batch endpoint, paced below the quota.
-# Reads per batch (1 to 100): Gmail runs them side by side and refuses past its
-# per-user concurrency limit, measured nil at 10, 1.2 % at 25, 19 % at 50.
+# Most reads per batch (1 to 100): Gmail runs them side by side and refuses past
+# its per-user concurrency limit, measured nil at 10, 1.2 % at 25, 19 % at 50. A
+# batch with a read refused for concurrency or rate, failed transiently or left
+# unanswered halves the next, down to one read; each full batch answered whole
+# doubles it back up to this ceiling, so another API client on the mailbox costs
+# throughput rather than repeated refusals.
 #gmail.batch-size = 10
 # Batches in flight across the source's connections. Above 1, refusals grow
 # (two batches of 50 side by side: a third to two thirds refused); each refusal

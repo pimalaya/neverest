@@ -7,11 +7,18 @@
 //! refused read back at the head of the next batch after a short pause, and
 //! gives the source up on a daily quota.
 //!
+//! The batches adapt their size after lieer's: a batch with a read refused
+//! for concurrency or rate, failed transiently or left unanswered cuts the
+//! size to half the reads it carried, down to one read, and a full batch
+//! answered with no refusal doubles it back, up to `gmail.batch-size`
+//! ([`BatchSize`]).
+//!
 //! The sender is the [`Batcher`] trait, so the reads can be counted and
 //! refused without a network.
 
 use std::{
     collections::{HashMap, VecDeque},
+    sync::{Mutex, PoisonError},
     time::{Duration, SystemTime},
 };
 
@@ -151,10 +158,70 @@ pub trait Batcher {
 /// The size of a message, for a raw read.
 pub type Sizes<'a> = &'a dyn Fn(&str) -> u64;
 
+/// How many reads the next batch carries, adapted after lieer's Gmail
+/// batches (gauteh/lieer `remote.py`, `get_messages`).
+///
+/// It starts at the configured ceiling. A batch with a read answered
+/// [`Inner::Busy`] (a concurrency or rate refusal, a transient failure or a
+/// missing answer) cuts it to half the reads that batch carried, down to
+/// one read; a full batch answered with no refusal at all doubles it, up to
+/// the ceiling. Unlike lieer, a per-minute quota refusal leaves it alone:
+/// the pacing charges that quota by the read, so a smaller batch would only
+/// slow the run, and the minute's waits answer it.
+///
+/// The size is shared by a source's connections for the run. A batch
+/// adapts from the size it was sent at, not the size in force when it
+/// lands: batches built before a refusal and answered after it cut the size to
+/// half their own at most, rather than halving it again each, and only a
+/// batch sent at the size in force grows it, so a late landing does not
+/// undo a fresh halving.
+#[derive(Debug, Eq, PartialEq)]
+pub struct BatchSize {
+    ceiling: usize,
+    current: usize,
+}
+
+impl BatchSize {
+    /// A size starting at `ceiling`, at least one read.
+    pub fn new(ceiling: usize) -> Self {
+        let ceiling = ceiling.max(1);
+        Self {
+            ceiling,
+            current: ceiling,
+        }
+    }
+
+    /// The reads the next batch carries.
+    pub fn current(&self) -> usize {
+        self.current
+    }
+
+    /// Cuts the size to half of `sent`, the reads a refused batch carried,
+    /// at least one read; a size already smaller stays.
+    fn refused(&mut self, sent: usize) {
+        self.current = self.current.min((sent / 2).max(1));
+    }
+
+    /// Doubles the size after a full batch of `sent` reads answered with no
+    /// refusal, when it was sent at the size in force; a batch sent before
+    /// a change, or cut short by its bytes, proves nothing about it.
+    fn landed(&mut self, sent: usize) {
+        if sent == self.current {
+            self.current = (self.current * 2).min(self.ceiling);
+        }
+    }
+}
+
+/// Locks the shared size, a poisoned lock keeping its value.
+fn size_lock(size: &Mutex<BatchSize>) -> std::sync::MutexGuard<'_, BatchSize> {
+    size.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 /// Reads every message of `ids` as `read`, handing each to `each` once,
-/// `None` for one gone: batches of at most `batch_size` sent one after
-/// another; for a raw read, a batch holds about [`RAW_BATCH_BYTES`] by the
-/// sizes `sizes` names, and a message past [`ALONE_BYTES`] is read alone.
+/// `None` for one gone: batches of at most `batch_size`'s current size
+/// ([`BatchSize`]) sent one after another; for a raw read, a batch holds
+/// about [`RAW_BATCH_BYTES`] by the sizes `sizes` names, and a message past
+/// [`ALONE_BYTES`] is read alone.
 ///
 /// A read refused for concurrency or rate is put back at the head of the
 /// next batch, sent after a second or two; one refused a per-minute quota
@@ -166,7 +233,7 @@ pub fn read_all<B: Batcher>(
     batcher: &mut B,
     read: Read,
     ids: &[String],
-    batch_size: usize,
+    batch_size: &Mutex<BatchSize>,
     sizes: Sizes<'_>,
     mut each: impl FnMut(String, Option<GmailMessage>) -> Result<()>,
 ) -> Result<()> {
@@ -174,7 +241,6 @@ pub fn read_all<B: Batcher>(
         Read::Raw => sizes(id),
         _ => 0,
     };
-    let batch_size = batch_size.max(1);
     let mut queue: VecDeque<String> = ids.iter().cloned().collect();
     let mut tries: HashMap<String, u32> = HashMap::new();
     let waits = GoogleWaits::new();
@@ -194,11 +260,12 @@ pub fn read_all<B: Batcher>(
             continue;
         }
 
+        let limit = size_lock(batch_size).current();
         let mut batch = Vec::new();
         let mut bytes = 0;
         while let Some(id) = queue.front() {
             let next = size(id);
-            if batch.len() == batch_size
+            if batch.len() == limit
                 || next > ALONE_BYTES
                 || (!batch.is_empty() && bytes + next > RAW_BATCH_BYTES)
             {
@@ -208,6 +275,7 @@ pub fn read_all<B: Batcher>(
             batch.extend(queue.pop_front());
         }
 
+        let sent = batch.len();
         let mut answers: HashMap<String, Result<GmailMessage, GmailBatchResponseError>> = batcher
             .batch(&batch, read)?
             .into_iter()
@@ -216,6 +284,7 @@ pub fn read_all<B: Batcher>(
 
         let mut again = Vec::new();
         let mut minute = false;
+        let mut busy = false;
         for id in batch {
             let answer = answers
                 .remove(&id)
@@ -224,6 +293,7 @@ pub fn read_all<B: Batcher>(
                 Inner::Read(message) => each(id, Some(*message))?,
                 Inner::Gone => each(id, None)?,
                 Inner::Busy => {
+                    busy = true;
                     pause = pause.max(burst_pause());
                     again.push(id);
                 }
@@ -252,6 +322,19 @@ pub fn read_all<B: Batcher>(
             pause = pause.max(wait);
         } else {
             waits.reset();
+        }
+
+        {
+            let mut adaptive = size_lock(batch_size);
+            let was = adaptive.current();
+            if busy {
+                adaptive.refused(sent);
+            } else if !minute && sent == limit {
+                adaptive.landed(limit);
+            }
+            if adaptive.current() != was {
+                debug!("gmail batch: size {was} -> {}", adaptive.current());
+            }
         }
 
         if again.is_empty() {
@@ -495,6 +578,9 @@ mod tests {
         pub singles: Vec<String>,
         pub paused: Vec<Duration>,
         pub gave_up: Option<SystemTime>,
+        /// Run as each batch is sent, standing for another connection of
+        /// the source acting on the shared size meanwhile.
+        pub meanwhile: Option<Box<dyn FnMut()>>,
     }
 
     impl FakeBatcher {
@@ -526,6 +612,9 @@ mod tests {
                 ids.len()
             );
             assert!(self.gave_up.is_none(), "nothing sent once given up");
+            if let Some(meanwhile) = self.meanwhile.as_mut() {
+                meanwhile();
+            }
             self.batches.push((read, ids.to_vec()));
             let mut parts: Vec<(&str, &str, String)> = Vec::new();
             for id in ids {
@@ -572,13 +661,25 @@ mod tests {
         0
     }
 
+    /// A batch size starting at `ceiling`, as a run holds it.
+    fn sized(ceiling: usize) -> Mutex<BatchSize> {
+        Mutex::new(BatchSize::new(ceiling))
+    }
+
     /// Reads `ids` as metadata, each answer kept as `(id, read)`.
     fn read_metadata(batcher: &mut FakeBatcher, ids: &[String]) -> Result<Vec<(String, bool)>> {
         let mut read = Vec::new();
-        read_all(batcher, Read::Metadata, ids, 10, &no_size, |id, message| {
-            read.push((id, message.is_some()));
-            Ok(())
-        })?;
+        read_all(
+            batcher,
+            Read::Metadata,
+            ids,
+            &sized(10),
+            &no_size,
+            |id, message| {
+                read.push((id, message.is_some()));
+                Ok(())
+            },
+        )?;
         Ok(read)
     }
 
@@ -594,7 +695,11 @@ mod tests {
         let read = read_metadata(&mut batcher, &ids).unwrap();
 
         let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
-        assert_eq!(sizes, [10, 10, 10, 10, 6], "the refused one rides again");
+        assert_eq!(
+            sizes,
+            [10, 5, 10, 10, 10, 1],
+            "the refused one rides again, in a batch halved by the refusal, the next doubled back"
+        );
         assert_eq!(
             batcher.batches[1].1[0], "m007",
             "at the head of the next batch"
@@ -626,7 +731,7 @@ mod tests {
             &mut batcher,
             Read::Minimal,
             &ids(60),
-            25,
+            &sized(25),
             &no_size,
             |_, _| Ok(()),
         )
@@ -741,7 +846,7 @@ mod tests {
             &mut batcher,
             Read::Raw,
             &ids(6),
-            10,
+            &sized(10),
             &size,
             |id, message| {
                 let raw = message.and_then(|message| message.raw).unwrap();
@@ -765,5 +870,276 @@ mod tests {
         );
         assert_eq!(batcher.singles, ["m002"]);
         assert_eq!(fetched.len(), 6);
+    }
+
+    #[test]
+    fn a_batch_size_starts_at_its_ceiling_halves_to_one_and_doubles_back() {
+        let mut size = BatchSize::new(10);
+        assert_eq!(size.current(), 10);
+        let halved: Vec<usize> = (0..5)
+            .map(|_| {
+                size.refused(size.current());
+                size.current()
+            })
+            .collect();
+        assert_eq!(halved, [5, 2, 1, 1, 1], "never below one read");
+        let doubled: Vec<usize> = (0..5)
+            .map(|_| {
+                size.landed(size.current());
+                size.current()
+            })
+            .collect();
+        assert_eq!(doubled, [2, 4, 8, 10, 10], "never above the ceiling");
+        assert_eq!(BatchSize::new(0).current(), 1);
+
+        size.refused(10);
+        assert_eq!(size.current(), 5);
+        size.refused(2);
+        size.refused(10);
+        assert_eq!(
+            size.current(),
+            1,
+            "a late refusal of a larger batch never raises it"
+        );
+    }
+
+    /// Several connections share the size: batches built at 10 before one
+    /// is refused, then answered after it, must neither halve it again each
+    /// nor grow it back.
+    #[test]
+    fn a_batch_adapts_from_the_size_it_was_sent_at() {
+        let mut size = BatchSize::new(10);
+        size.refused(10);
+        size.refused(10);
+        assert_eq!(
+            size.current(),
+            5,
+            "two refusals of batches sent at 10 cut to 5, not 2"
+        );
+        size.landed(10);
+        assert_eq!(
+            size.current(),
+            5,
+            "a batch sent at 10 before the cut proves nothing"
+        );
+        size.refused(5);
+        assert_eq!(size.current(), 2);
+        size.landed(2);
+        assert_eq!(size.current(), 4, "one sent at the size in force grows it");
+    }
+
+    #[test]
+    fn concurrency_refusals_shrink_the_batches_until_one_lands() {
+        let mut batcher = FakeBatcher {
+            refusals: [("m000".to_string(), vec![Answer::Concurrency; 3])].into(),
+            ..FakeBatcher::new()
+        };
+        read_metadata(&mut batcher, &ids(20)).unwrap();
+        let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
+        assert_eq!(
+            sizes,
+            [10, 5, 2, 1, 2, 3],
+            "halved by each refused batch, doubled back by each one answered whole"
+        );
+        assert!(batcher.batches.iter().all(|(_, ids)| !ids.is_empty()));
+    }
+
+    #[test]
+    fn a_minute_refusal_leaves_the_batch_size_alone() {
+        // m000 halves the size to 5, then m010's minute refusal must keep it
+        // there rather than double it back.
+        let mut batcher = FakeBatcher {
+            refusals: [
+                ("m000".to_string(), vec![Answer::Concurrency]),
+                ("m010".to_string(), vec![Answer::Minute]),
+            ]
+            .into(),
+            ..FakeBatcher::new()
+        };
+        read_metadata(&mut batcher, &ids(25)).unwrap();
+        let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
+        assert_eq!(
+            sizes,
+            [10, 5, 5, 7],
+            "halved by the concurrency refusal, left at 5 by the minute one, doubled by the next full batch"
+        );
+    }
+
+    #[test]
+    fn two_refusals_in_one_batch_halve_it_once() {
+        let mut batcher = FakeBatcher {
+            refusals: [
+                ("m001".to_string(), vec![Answer::Concurrency]),
+                ("m002".to_string(), vec![Answer::Concurrency]),
+            ]
+            .into(),
+            ..FakeBatcher::new()
+        };
+        read_metadata(&mut batcher, &ids(20)).unwrap();
+        let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
+        assert_eq!(
+            sizes[..2],
+            [10, 5],
+            "one cut a batch, however many reads it refused"
+        );
+    }
+
+    #[test]
+    fn a_batch_with_both_refusals_halves() {
+        let mut batcher = FakeBatcher {
+            refusals: [
+                ("m002".to_string(), vec![Answer::Concurrency]),
+                ("m003".to_string(), vec![Answer::Minute]),
+            ]
+            .into(),
+            ..FakeBatcher::new()
+        };
+        read_metadata(&mut batcher, &ids(20)).unwrap();
+        let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
+        assert_eq!(
+            sizes[..2],
+            [10, 5],
+            "the concurrency refusal halves despite the minute one"
+        );
+    }
+
+    #[test]
+    fn a_batch_cut_short_by_its_bytes_does_not_grow_the_size() {
+        const MB: u64 = 1024 * 1024;
+        let size = sized(10);
+        size.lock().unwrap().refused(10);
+        let mut batcher = FakeBatcher::new();
+        let big = |_: &str| 3 * MB;
+        read_all(&mut batcher, Read::Raw, &ids(4), &size, &big, |_, _| Ok(())).unwrap();
+        let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
+        assert_eq!(sizes, [2, 2], "8 MiB holds two 3 MiB bodies");
+        assert_eq!(
+            size.lock().unwrap().current(),
+            5,
+            "two reads of five prove nothing"
+        );
+    }
+
+    #[test]
+    fn the_size_a_read_ends_at_carries_to_the_next_read_of_the_run() {
+        let size = sized(10);
+        let mut batcher = FakeBatcher {
+            refusals: [("m000".to_string(), vec![Answer::Concurrency; 3])].into(),
+            ..FakeBatcher::new()
+        };
+        read_all(
+            &mut batcher,
+            Read::Metadata,
+            &ids(20),
+            &size,
+            &no_size,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        assert_eq!(
+            size.lock().unwrap().current(),
+            4,
+            "10, 5, 2, 1, then 2 and 4; the last batch of 3 was not full"
+        );
+
+        let mut batcher = FakeBatcher::new();
+        read_all(
+            &mut batcher,
+            Read::Metadata,
+            &ids(12),
+            &size,
+            &no_size,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
+        assert_eq!(
+            sizes,
+            [4, 8],
+            "starts where the run left it, then doubles back"
+        );
+        assert_eq!(size.lock().unwrap().current(), 10);
+    }
+
+    /// Another connection's refusal cuts the shared size to 5 while this
+    /// read's batch of 10 is in flight; this batch, refused too, cuts it to
+    /// half of its own 10 at most, so the next carries 5, not 2.
+    #[test]
+    fn a_batch_refused_after_another_cut_does_not_halve_again() {
+        let size = std::sync::Arc::new(sized(10));
+        let other = std::sync::Arc::clone(&size);
+        let mut first = true;
+        let mut batcher = FakeBatcher {
+            refusals: [("m000".to_string(), vec![Answer::Concurrency])].into(),
+            meanwhile: Some(Box::new(move || {
+                if std::mem::take(&mut first) {
+                    other.lock().unwrap().refused(10);
+                }
+            })),
+            ..FakeBatcher::new()
+        };
+        read_all(
+            &mut batcher,
+            Read::Metadata,
+            &ids(20),
+            &size,
+            &no_size,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
+        assert_eq!(sizes[..2], [10, 5]);
+    }
+
+    /// Another connection's refusal cuts the shared size to 5 while this
+    /// read's batch of 10 is in flight; this batch then lands whole, but it
+    /// was sent at 10, so it leaves the size at 5.
+    #[test]
+    fn a_batch_landing_after_another_cut_does_not_grow_the_size() {
+        let size = std::sync::Arc::new(sized(10));
+        let other = std::sync::Arc::clone(&size);
+        let mut first = true;
+        let mut batcher = FakeBatcher {
+            meanwhile: Some(Box::new(move || {
+                if std::mem::take(&mut first) {
+                    other.lock().unwrap().refused(10);
+                }
+            })),
+            ..FakeBatcher::new()
+        };
+        read_all(
+            &mut batcher,
+            Read::Metadata,
+            &ids(20),
+            &size,
+            &no_size,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
+        assert_eq!(sizes[..2], [10, 5], "the late landing did not undo the cut");
+    }
+
+    /// A raw batch cut short by its bytes and refused halves from the reads
+    /// it carried, so the next is smaller than the refused one.
+    #[test]
+    fn a_refused_batch_cut_short_by_its_bytes_halves_from_what_it_carried() {
+        const MB: u64 = 1024 * 1024;
+        let mut batcher = FakeBatcher {
+            refusals: [("m000".to_string(), vec![Answer::Concurrency])].into(),
+            ..FakeBatcher::new()
+        };
+        let sizes_of = |_: &str| 2 * MB;
+        read_all(
+            &mut batcher,
+            Read::Raw,
+            &ids(8),
+            &sized(10),
+            &sizes_of,
+            |_, _| Ok(()),
+        )
+        .unwrap();
+        let sizes: Vec<usize> = batcher.batches.iter().map(|(_, ids)| ids.len()).collect();
+        assert_eq!(sizes[..2], [4, 2], "four 2 MiB bodies refused, then two");
     }
 }

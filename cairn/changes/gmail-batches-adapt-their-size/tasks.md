@@ -11,4 +11,4 @@ change: gmail-batches-adapt-their-size
 - [x] `gmail.batch-size` documented as the ceiling, in the config docs and config.sample.toml.
 - [x] `cargo test`, clippy, fmt.
 - [x] Spec folded, log written, CHANGELOG.
-- [ ] Live: a first sync of a busy account, counting the batch sizes it settles on.
+- [x] Live: a first sync of a busy account, counting the batch sizes it settles on (2026-10-19, see the log).

@@ -1139,6 +1139,11 @@ impl Pool {
             .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// The media type the primary connection syncs ([`Client::media_type`]).
+    pub fn media_type(&self) -> &'static str {
+        self.clients[0].media_type()
+    }
+
     /// The always-present primary connection, for sequential operations.
     pub fn primary(&mut self) -> &mut Client {
         &mut self.clients[0]

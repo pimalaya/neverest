@@ -645,8 +645,9 @@ impl DavClient {
         Ok(())
     }
 
-    /// Rejected: DAV has no flags, and the enumeration reports every member as
-    /// known-empty, so the engine never derives a flag change to push.
+    /// Rejected: DAV has no flags. The enumeration reports every member as
+    /// known-empty, and a flag kept in the store only is never pushed, the
+    /// flag right being withheld for a kind other than mail.
     pub fn store_flags(&mut self, _ids: &[&str], _flags: &[Flag], _op: FlagOp) -> Result<()> {
         bail!("{} has no flags (store not supported)", self.kind)
     }

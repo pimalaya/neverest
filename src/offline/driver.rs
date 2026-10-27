@@ -388,12 +388,22 @@ impl SourceCtx {
     /// one. The engine keeps a forbidden kind pending while the others still
     /// propagate, which is what makes a side read-only for some operations.
     fn push_rights(&self) -> PimdirPushRights {
-        PimdirPushRights {
-            flags: self.perms.flag.update,
-            content: self.perms.item.update,
-            add: self.perms.item.create,
-            remove: self.perms.item.delete,
-        }
+        push_rights(&self.perms, self.pool.media_type())
+    }
+}
+
+/// A side's permissions as io-pimdir's push rights for the kind it syncs.
+///
+/// Only mail carries flags on the wire: a flag on a card or a calendar item
+/// is the store's alone (a `pimdir tag`, kept in the store only), so the
+/// right is withheld and the engine keeps it local rather than pushing a
+/// change the backend rejects on every run.
+fn push_rights(perms: &SourcePermissions, media_type: &str) -> PimdirPushRights {
+    PimdirPushRights {
+        flags: perms.flag.update && media_type == "message/rfc822",
+        content: perms.item.update,
+        add: perms.item.create,
+        remove: perms.item.delete,
     }
 }
 
@@ -7873,6 +7883,50 @@ mod tests {
             placements[0].status,
             PimdirStatus::Tombstone,
             "the removal is still a removal, not undone into a clean row",
+        );
+    }
+
+    /// A flag on a card or a calendar item is the store's alone (a `pimdir
+    /// tag`): it is never pushed, so the backend rejects nothing and warns
+    /// nothing on every run, and the flag stays. Mail keeps the right.
+    #[test]
+    fn a_store_only_flag_on_a_card_stays_local() {
+        let perms = SourcePermissions {
+            collection: Default::default(),
+            flag: Default::default(),
+            item: Default::default(),
+        };
+        assert!(push_rights(&perms, "message/rfc822").flags);
+        assert!(!push_rights(&perms, "text/calendar").flags);
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_with_local_delete(dir.path());
+        let contacts = PimdirCollectionId("contacts".into());
+        let mut placement = store
+            .load(&contacts, &PimdirLoadScope::All)
+            .unwrap()
+            .placements
+            .remove(0);
+        placement.status = PimdirStatus::Dirty;
+        placement.flags = PimdirFlags::from_iter(["$pinned"]);
+        store
+            .write(vec![PimdirWriteOp::UpsertPlacement(placement)])
+            .unwrap();
+        let mut remote = MutableRemote::at("card1", "v1");
+
+        for _ in 0..2 {
+            sync_with(&mut store, &mut remote, push_rights(&perms, "text/vcard"));
+        }
+
+        assert!(remote.pushed.is_empty(), "no flag change pushed");
+        let placements = store
+            .load(&contacts, &PimdirLoadScope::All)
+            .unwrap()
+            .placements;
+        assert_eq!(
+            placements[0].flags,
+            PimdirFlags::from_iter(["$pinned"]),
+            "the flag kept in the store"
         );
     }
 

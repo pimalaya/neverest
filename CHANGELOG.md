@@ -74,6 +74,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 - Changed a `submit` naming its sending source to be sent by that source alone.
 - Changed Google Calendar updates and deletes to notify the attendees (`sendUpdates`): an update when the event leaves them to the server (`SCHEDULE-AGENT`), a delete when the event has attendees.
 - Changed a new Google Calendar event the account organises, scheduled on the server, to be inserted with its UID and invite its attendees, rather than imported, which notified nobody.
+- Changed piped `--json` output to print one value per line, each schema of `json-schema` to carry an `$id` naming the contract version (`v0.3`), and added `neverest-error`, the schema of the JSON failure object (pimalaya-cli `55b6693`).
 
 ### Fixed
 

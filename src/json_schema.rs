@@ -2,7 +2,8 @@
 //!
 //! Maps a CLI-invocation key, the command path joined with hyphens and
 //! prefixed `neverest-`, to the JSON Schema of that command's `--json`
-//! payload. [`JsonSchemaCommand`] writes one file per entry.
+//! payload. [`JsonSchemaCommand`] writes one file per entry. The
+//! `neverest-error` key describes the failure object instead.
 //!
 //! Every entry is unconditional: the backends are feature-gated but the
 //! output shapes are not, so a build with no backend describes the same
@@ -12,15 +13,16 @@
 
 use std::collections::BTreeMap;
 
+use pimalaya_cli::{clap::commands::JsonSchemaRegistry, error::ErrorReport};
 use schemars::schema_for;
-use serde_json::Value;
 
-/// Builds the command-to-schema map consumed by `json-schema <DIR>`.
+/// Builds the command-to-schema registry consumed by `json-schema <DIR>`.
 ///
 /// Each value describes the type the command hands to the printer. The
 /// commands confirming rather than reporting are absent: they print a
-/// message and have no payload to describe.
-pub fn schemas() -> BTreeMap<String, Value> {
+/// message and have no payload to describe. `neverest-error` describes the
+/// failure object every command prints instead.
+pub fn registry() -> JsonSchemaRegistry {
     let mut schemas = BTreeMap::new();
 
     macro_rules! insert {
@@ -51,26 +53,42 @@ pub fn schemas() -> BTreeMap<String, Value> {
         crate::conflict::report::ConflictResolveOutput
     );
 
-    schemas
+    insert!("neverest-error", ErrorReport);
+
+    JsonSchemaRegistry {
+        bin: "neverest",
+        version: env!("CARGO_PKG_VERSION"),
+        schemas,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use clap::{Command, CommandFactory};
 
-    use super::schemas;
+    use super::registry;
     use crate::cli::main::Cli;
 
     /// A key naming no command is a schema nobody can ask for, which is what
-    /// renaming a subcommand and forgetting the registry leaves behind.
+    /// renaming a subcommand and forgetting the registry leaves behind. The
+    /// failure object belongs to every command, so its key names none.
     #[test]
     fn every_registered_key_names_a_command() {
         let mut paths = Vec::new();
         collect(&Cli::command(), String::new(), &mut paths);
 
-        for cmd in schemas().keys() {
+        for cmd in registry().schemas.keys() {
+            if cmd == "neverest-error" {
+                continue;
+            }
+
             assert!(paths.contains(cmd), "{cmd} names no command");
         }
+    }
+
+    #[test]
+    fn every_payload_is_an_object() {
+        assert_eq!(registry().non_object_roots(), Vec::<&str>::new());
     }
 
     /// Walks the parser, naming each subcommand by its full path joined with

@@ -102,7 +102,7 @@ impl Command {
             Self::Configure(cmd) => cmd.execute(printer, config_paths),
             Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
             Self::Completion(cmd) => cmd.execute(printer, Cli::command()),
-            Self::JsonSchema(cmd) => cmd.execute(printer, json_schema::schemas()),
+            Self::JsonSchema(cmd) => cmd.execute(printer, json_schema::registry()),
         };
 
         done.map(|()| Exit::Success)

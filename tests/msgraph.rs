@@ -43,14 +43,17 @@ const LISTED: Duration = Duration::from_secs(60);
 
 /// The messages of the folder `folder` (an id or a well-known name)
 /// whose `Message-ID` is `<tag@pimalaya.org>`, as `message` writes it.
-fn messages(client: &mut MsgraphClientStd, folder: &str, tag: &str) -> Vec<MsgraphMessage> {
+///
+/// NOTE: each listing connects anew: Graph drops a connection left idle
+/// while a sync runs, and the next request then breaks its pipe.
+fn messages(token: &str, folder: &str, tag: &str) -> Vec<MsgraphMessage> {
     let filter = format!("internetMessageId eq '<{tag}@pimalaya.org>'");
     let params = MsgraphMessagesListParams {
         filter: Some(&filter),
         select: Some("id,isRead,isDraft,internetMessageId"),
         ..Default::default()
     };
-    client
+    connect(token)
         .messages_list(Some(folder), &params)
         .expect("list the folder")
         .response
@@ -59,10 +62,10 @@ fn messages(client: &mut MsgraphClientStd, folder: &str, tag: &str) -> Vec<Msgra
 
 /// Waits until the folder `folder` lists `count` messages tagged `tag`,
 /// Graph's listing trailing its writes by a moment.
-fn wait_count(client: &mut MsgraphClientStd, folder: &str, tag: &str, count: usize, what: &str) {
+fn wait_count(token: &str, folder: &str, tag: &str, count: usize, what: &str) {
     let deadline = Instant::now() + LISTED;
     loop {
-        let listed = messages(client, folder, tag).len();
+        let listed = messages(token, folder, tag).len();
         if listed == count {
             return;
         }
@@ -77,7 +80,7 @@ fn wait_count(client: &mut MsgraphClientStd, folder: &str, tag: &str, count: usi
 fn delete_tagged(token: &str, folders: &[&str], tag: &str) {
     let mut client = connect(token);
     for folder in folders {
-        for message in messages(&mut client, folder, tag) {
+        for message in messages(token, folder, tag) {
             if let Err(err) = client.message_delete(&message.id) {
                 eprintln!("WARNING: leftover message {tag} in {folder}: {err:?}");
             }
@@ -229,7 +232,7 @@ fn a_graph_scope_widens_by_its_band() {
 
             let oldest = format!("{folder}-2024");
             let mut client = connect(&token);
-            let id = messages(&mut client, &folder_id, &oldest)
+            let id = messages(&token, &folder_id, &oldest)
                 .pop()
                 .expect("the oldest message")
                 .id;
@@ -305,8 +308,8 @@ fn a_graph_move_is_delivered_once() {
                 a.sync_keys(&keys, &[0]);
 
                 let what = format!("bounce {bounce}");
-                wait_count(&mut client, to.1, &folder, 1, &what);
-                wait_count(&mut client, from.1, &folder, 0, &what);
+                wait_count(&token, to.1, &folder, 1, &what);
+                wait_count(&token, from.1, &folder, 0, &what);
 
                 // NOTE: a second run proves the store bound the server's
                 // copy: a create still pending would push again.
@@ -319,15 +322,15 @@ fn a_graph_move_is_delivered_once() {
                     "{what}: {} is empty",
                     from.0
                 );
-                wait_count(&mut client, to.1, &folder, 1, &what);
+                wait_count(&token, to.1, &folder, 1, &what);
 
                 (from, to) = (to, from);
             }
 
             a.move_to(from.0, seq, trash);
             a.sync_keys(&keys, &[0]);
-            wait_count(&mut client, "deleteditems", &folder, 1, "trash");
-            wait_count(&mut client, from.1, &folder, 0, "trash");
+            wait_count(&token, "deleteditems", &folder, 1, "trash");
+            wait_count(&token, from.1, &folder, 0, "trash");
             a.sync_keys(&keys, &[0]);
             let trashed = a.items(trash, &folder);
             assert_eq!(trashed.len(), 1, "Deleted Items holds it once");
@@ -383,8 +386,8 @@ fn a_graph_add_lands_in_drafts_only() {
                 &["\\Draft", "\\Seen"],
             );
             a.sync_keys(&["Drafts"], &[0]);
-            wait_count(&mut client, "drafts", &draft, 1, "the add");
-            let created = &messages(&mut client, "drafts", &draft)[0];
+            wait_count(&token, "drafts", &draft, 1, "the add");
+            let created = &messages(&token, "drafts", &draft)[0];
             assert_eq!(created.is_draft, Some(true), "Graph files it as a draft");
             assert_eq!(
                 created.is_read,
@@ -397,7 +400,7 @@ fn a_graph_add_lands_in_drafts_only() {
             let held = a.items("Drafts", &draft);
             assert_eq!(held.len(), 1, "a second run pushes nothing more");
             assert_eq!(held[0].seq, seq);
-            wait_count(&mut client, "drafts", &draft, 1, "the second run");
+            wait_count(&token, "drafts", &draft, 1, "the second run");
 
             let b = Replica::open("msgraph", &extra, &token);
             b.sync_keys(&["Drafts"], &[0]);
@@ -409,7 +412,7 @@ fn a_graph_add_lands_in_drafts_only() {
             a.add(&draft, &message(&elsewhere, &msgraph_user()), &[]);
             a.sync_keys(&[&draft], &[2]);
             assert!(
-                messages(&mut client, &folder_id, &elsewhere).is_empty(),
+                messages(&token, &folder_id, &elsewhere).is_empty(),
                 "nothing is filed outside Drafts"
             );
             assert!(

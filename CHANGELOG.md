@@ -84,6 +84,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Fixed a request that creates nothing failing the run on a 502 or a 504 (Google People answered a listing `502` "Error 502 (Server Error)!!1"): a gateway error is now waited out like a 503, on every source, a create still never sent again on a 5xx.
 - Fixed a CalDAV or CardDAV delete of a member already gone (404, 410) being rejected and retried every run: it is accepted, pushes being at least once and a create delivered by a move taking the member it supersedes along before that member's delete.
 - Fixed a flag kept in the store only on a card or a calendar item (`pimdir tag`) being pushed to its source on every run, rejected there and warned about each time: a source syncing a kind other than mail is given no flag push right, so the flag stays local.
 - Fixed a message filed again from a body the account holds (an IMAP COPY or MOVE, a second Gmail label, a body an upgrade links from the store) keeping the size and attachment mark its listing read, and a downloaded message reading no invitation: io-pimdir `ca4c589` states, as the write lands, a linked body's size and the mark and invitation of a row holding it, and walks an entering body once for its stand-ins, mark and invitation.

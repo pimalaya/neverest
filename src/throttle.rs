@@ -220,7 +220,8 @@ impl Throttle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Request {
     /// A read, a flag set, a move by id, a delete: sending it twice does what
-    /// sending it once does, so a 503 is retried like a 429.
+    /// sending it once does, so a 503, or a 502 or 504 from a gateway on the
+    /// way, is retried like a 429.
     Idempotent,
     /// A create, an upload, a send, an invitation: sent again only when the
     /// provider refused it unprocessed (429, a Google rate limit), never on a
@@ -234,7 +235,7 @@ impl Request {
     /// again on.
     pub fn retries(self, status: u16) -> bool {
         match self {
-            Self::Idempotent => matches!(status, 429 | 503),
+            Self::Idempotent => matches!(status, 429 | 502 | 503 | 504),
             Self::Create => status == 429,
         }
     }
@@ -270,7 +271,8 @@ pub fn retry_after(value: &str) -> Option<Duration> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GoogleRefusal {
     /// A per-user concurrency limit (`Too many concurrent requests for
-    /// user`), a per-second rate, a 503: gone within a second or two.
+    /// user`), a per-second rate, a 502, 503 or 504: gone within a second or
+    /// two.
     Burst,
     /// A per-minute quota (`Quota exceeded for quota metric 'Total Query
     /// Cost' and limit 'Units per minute per user'`): a bucket refilling by
@@ -321,7 +323,7 @@ impl GoogleAnswer<'_> {
 /// How a Google answer throttles: `None` for any other answer, which is no
 /// reason to wait.
 ///
-/// A 429, a 503, or a 403 or 429 naming a rate limit by reason
+/// A 429, a 502, 503 or 504, or a 403 or 429 naming a rate limit by reason
 /// (`rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded`,
 /// `RATE_LIMIT_EXCEEDED`) or by message, is a [`GoogleRefusal::Burst`],
 /// unless it names a per-minute quota ([`GoogleRefusal::Minute`]) or a
@@ -352,7 +354,7 @@ pub fn google_refusal(answer: &GoogleAnswer<'_>) -> Option<GoogleRefusal> {
             Some(GoogleRefusal::Daily)
         }
         429 | 403 if names_minute_quota(&text) => Some(GoogleRefusal::Minute),
-        429 | 503 => Some(GoogleRefusal::Burst),
+        429 | 502 | 503 | 504 => Some(GoogleRefusal::Burst),
         403 if rate => Some(GoogleRefusal::Burst),
         _ => None,
     }
@@ -400,14 +402,14 @@ impl GoogleWaits {
     }
 
     /// Whether an answer of `request` throttles it, and the wait before it
-    /// is sent again, as [`Throttle::call`] takes it: a 503 throttles an
-    /// idempotent request only, a create maybe having landed.
+    /// is sent again, as [`Throttle::call`] takes it: a 502, 503 or 504
+    /// throttles an idempotent request only, a create maybe having landed.
     pub fn throttled(
         &self,
         request: Request,
         answer: &GoogleAnswer<'_>,
     ) -> Option<Option<Duration>> {
-        if request == Request::Create && answer.status == 503 {
+        if request == Request::Create && (502..=504).contains(&answer.status) {
             return None;
         }
         let refusal = google_refusal(answer)?;
@@ -779,6 +781,9 @@ mod tests {
             Some(Burst)
         );
         assert_eq!(text(503, "Backend Error"), Some(Burst));
+        assert_eq!(text(502, "Error 502 (Server Error)!!1"), Some(Burst));
+        assert_eq!(text(504, "Gateway Timeout"), Some(Burst));
+        assert_eq!(text(500, "Internal error"), None);
         assert_eq!(text(403, "Rate Limit Exceeded"), Some(Burst));
         assert_eq!(text(403, "User Rate Limit Exceeded"), Some(Burst));
         assert_eq!(
@@ -1050,5 +1055,30 @@ mod tests {
             "a rate limit refuses the request before doing it"
         );
         assert!(throttled(Request::Create, 429, "Too many requests"));
+    }
+
+    /// A gateway error is the way to the server failing, not the request: a
+    /// read is sent again on a 502 or a 504 as on a 503 (Google People
+    /// answered a listing 502 on 2026-10-29), a create never.
+    #[test]
+    fn a_gateway_error_is_waited_out_on_a_read() {
+        for status in [502, 504] {
+            assert!(Request::Idempotent.retries(status), "{status}");
+            assert!(!Request::Create.retries(status), "{status}");
+            let waits = GoogleWaits::new();
+            let answer = GoogleAnswer {
+                status,
+                message: "Error 502 (Server Error)!!1",
+                ..Default::default()
+            };
+            assert!(
+                waits.throttled(Request::Idempotent, &answer).is_some(),
+                "{status}"
+            );
+            assert!(
+                waits.throttled(Request::Create, &answer).is_none(),
+                "{status}"
+            );
+        }
     }
 }

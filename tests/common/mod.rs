@@ -72,6 +72,46 @@ const TOKEN_VAR: &str = "NEVEREST_LIVE_TOKEN";
 /// How long a change may take to show on the other replica.
 const SETTLE: Duration = Duration::from_secs(90);
 
+/// How many times one run a provider throttled is waited out and run again.
+const THROTTLED_RUNS: u32 = 3;
+
+/// The longest wait for a throttled source: Google's per-minute quotas lift
+/// within a minute or two, a longer stated wait is a quota no test outlasts.
+const THROTTLED_WAIT: Duration = Duration::from_secs(150);
+
+/// The wait until the last source a run's `--json` report names as
+/// `throttled` may send again, a second more, `None` when it names none or
+/// one that waits longer than [`THROTTLED_WAIT`].
+fn throttled_wait(report: &str) -> Option<Duration> {
+    fn untils<'a>(value: &'a serde_json::Value, found: &mut Vec<&'a str>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if let Some(serde_json::Value::Array(sources)) = map.get("throttled") {
+                    found.extend(sources.iter().filter_map(|s| s.get("until")?.as_str()));
+                }
+                map.values().for_each(|v| untils(v, found));
+            }
+            serde_json::Value::Array(items) => items.iter().for_each(|v| untils(v, found)),
+            _ => {}
+        }
+    }
+
+    let report: serde_json::Value = serde_json::from_str(report).ok()?;
+    let mut found = Vec::new();
+    untils(&report, &mut found);
+
+    let until = found
+        .iter()
+        .filter_map(|until| chrono::DateTime::parse_from_rfc3339(until).ok())
+        .max()?;
+    let wait = (until.with_timezone(&chrono::Utc) - chrono::Utc::now())
+        .to_std()
+        .unwrap_or_default()
+        + Duration::from_secs(1);
+
+    (wait <= THROTTLED_WAIT).then_some(wait)
+}
+
 /// A name no earlier run used, for every resource a run creates.
 pub fn tag() -> String {
     let millis = SystemTime::now()
@@ -151,25 +191,60 @@ impl Replica {
 
     /// Runs neverest on the account, which must end on one of `codes`.
     fn run(&self, args: &[&str], codes: &[i32]) -> (i32, String) {
-        let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
-            .arg("-c")
-            .arg(self.dir.path().join("config.toml"))
-            .args(args)
-            .env("XDG_STATE_HOME", self.dir.path())
-            .env(TOKEN_VAR, &self.token)
-            .output()
-            .expect("spawn neverest");
+        let (code, stdout, _) = self.run_waiting(args, codes);
+        (code, stdout)
+    }
 
-        let code = output.status.code().unwrap_or(-1);
-        assert!(
-            codes.contains(&code),
-            "`neverest {}` ended on {code}:\n--- stdout ---\n{}\n--- stderr ---\n{}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr),
-        );
+    /// Runs neverest as [`run`](Self::run) does, waiting out a provider
+    /// that throttled it, and answers how long it waited.
+    ///
+    /// A run a provider throttled past what it waits itself ends incomplete
+    /// (3), naming the source and when it may send again, and a rerun picks
+    /// it up, as a supervisor's would: the test waits until then and runs
+    /// it again, [`THROTTLED_RUNS`] times at most, rather than failing on
+    /// Google's per-minute quotas. Any other incomplete run fails.
+    fn run_waiting(&self, args: &[&str], codes: &[i32]) -> (i32, String, Duration) {
+        let mut waited = Duration::ZERO;
+        let mut reruns = 0;
 
-        (code, String::from_utf8_lossy(&output.stdout).into_owned())
+        loop {
+            let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
+                .arg("-c")
+                .arg(self.dir.path().join("config.toml"))
+                .args(args)
+                .env("XDG_STATE_HOME", self.dir.path())
+                .env(TOKEN_VAR, &self.token)
+                .output()
+                .expect("spawn neverest");
+
+            let code = output.status.code().unwrap_or(-1);
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+            if code == 3
+                && !codes.contains(&3)
+                && reruns < THROTTLED_RUNS
+                && let Some(wait) = throttled_wait(&stdout)
+            {
+                eprintln!(
+                    "`neverest {}` throttled, running it again in {}s",
+                    args.join(" "),
+                    wait.as_secs()
+                );
+                thread::sleep(wait);
+                waited += wait;
+                reruns += 1;
+                continue;
+            }
+
+            assert!(
+                codes.contains(&code),
+                "`neverest {}` ended on {code}:\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr),
+            );
+
+            return (code, stdout, waited);
+        }
     }
 
     /// Syncs until a run ends settled and `check` holds on the store.
@@ -177,11 +252,14 @@ impl Replica {
     /// A provider acknowledges a write before every read reflects it, and
     /// may touch an item on its own (Exchange bumps an event's change key
     /// after creating it), which parks a push until the next run merges it.
+    /// A wait out of a throttled run moves the deadline as far.
     pub fn sync_until(&self, key: &str, what: &str, mut check: impl FnMut(&Self) -> bool) {
-        let deadline = Instant::now() + SETTLE;
+        let mut deadline = Instant::now() + SETTLE;
 
         loop {
-            let (code, _) = self.run(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[0, 2]);
+            let (code, _, waited) =
+                self.run_waiting(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[0, 2]);
+            deadline += waited;
             if code == 0 && check(self) {
                 return;
             }

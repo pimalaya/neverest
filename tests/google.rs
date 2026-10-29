@@ -31,8 +31,9 @@ use io_gmail::v1::{
 };
 #[cfg(feature = "gpeople")]
 use io_gpeople::v1::{
-    client::{GpeopleClientStd, GpeopleClientStdConnectOptions},
+    client::{GpeopleClientStd, GpeopleClientStdConnectOptions, GpeopleClientStdError},
     rest::people::{GpeoplePersonField, GpeopleReadSourceType},
+    send::GpeopleSendError,
 };
 #[cfg(feature = "gpeople")]
 use pimalaya_stream::{proxy::Proxy, tls::Tls};
@@ -166,17 +167,18 @@ fn google_contacts_sync_both_ways() {
                 },
             )
             .expect("connect to People");
-            let found = client
-                .contacts_search(
+            let found = patiently(|| {
+                client.contacts_search(
                     "neverest-live",
                     &[GpeoplePersonField::Names],
                     None,
                     &[GpeopleReadSourceType::ReadSourceTypeContact],
                 )
-                .expect("search the run's cards")
-                .response;
+            })
+            .expect("search the run's cards")
+            .response;
             for person in found.results.into_iter().filter_map(|r| r.person) {
-                if let Err(err) = client.contact_delete(&person.resource_name) {
+                if let Err(err) = patiently(|| client.contact_delete(&person.resource_name)) {
                     eprintln!("WARNING: leftover card {}: {err:?}", person.resource_name);
                 }
             }
@@ -496,4 +498,26 @@ fn a_google_invitation_is_answered() {
                 .is_some_and(|item| a.body(&item).contains("PARTSTAT=TENTATIVE"))
         });
     });
+}
+
+/// Sends a People request the cleanup makes on its own, outside neverest's
+/// throttle, again after a 429: Google's per-minute quota on contact reads,
+/// which the run's syncs may have spent, lifts within the next minute.
+#[cfg(feature = "gpeople")]
+fn patiently<T>(
+    mut send: impl FnMut() -> Result<T, GpeopleClientStdError>,
+) -> Result<T, GpeopleClientStdError> {
+    let mut tries = 0;
+    loop {
+        match send() {
+            Err(GpeopleClientStdError::Send(GpeopleSendError::Api(err)))
+                if err.status == 429 && tries < 3 =>
+            {
+                tries += 1;
+                eprintln!("People throttled the cleanup, sending it again in 61s");
+                std::thread::sleep(std::time::Duration::from_secs(61));
+            }
+            result => return result,
+        }
+    }
 }

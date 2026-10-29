@@ -141,8 +141,8 @@ impl GcalClient {
     /// server closed it, and records the new keep-alive hint.
     ///
     /// The source's [`Throttle`] sends it again while Google throttles it
-    /// (429, 503, or a 403 rate limit). A request creating an event goes
-    /// through [`create`](Self::create) instead.
+    /// (429, a 502 to 504, or a 403 rate limit). A request creating an event
+    /// goes through [`create`](Self::create) instead.
     fn op<T>(
         &mut self,
         run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
@@ -152,7 +152,7 @@ impl GcalClient {
 
     /// Runs one Calendar request creating an event, which may invite its
     /// attendees: sent again on a refusal Google answers before doing
-    /// anything (429, a rate limit), never on a 503.
+    /// anything (429, a rate limit), never on a 5xx.
     fn create<T>(
         &mut self,
         run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,

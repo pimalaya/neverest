@@ -110,8 +110,8 @@ impl GpeopleClient {
     /// server closed it, and records the new keep-alive hint.
     ///
     /// The source's [`Throttle`] sends it again while Google throttles it
-    /// (429, 503, or a 403 rate limit). A request creating a contact goes
-    /// through [`create`](Self::create) instead.
+    /// (429, a 502 to 504, or a 403 rate limit). A request creating a contact
+    /// goes through [`create`](Self::create) instead.
     fn op<T>(
         &mut self,
         run: impl FnMut(&mut GpeopleClientStd) -> Result<GpeopleSendOutput<T>, GpeopleClientStdError>,

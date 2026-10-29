@@ -262,9 +262,9 @@ impl GmailClient {
     /// keep-alive hint.
     ///
     /// The source's [`Throttle`] paces it and sends it again while Gmail
-    /// throttles it (429, 503, or a 403 rate limit), by the reason Google
-    /// gives ([`GoogleWaits`]). A request creating something goes through
-    /// [`create`](Self::create) instead.
+    /// throttles it (429, a 502 to 504, or a 403 rate limit), by the reason
+    /// Google gives ([`GoogleWaits`]). A request creating something goes
+    /// through [`create`](Self::create) instead.
     fn op<T>(
         &mut self,
         units: u32,
@@ -275,7 +275,7 @@ impl GmailClient {
 
     /// Runs one Gmail request that creates something (a label, an imported
     /// message): sent again on a refusal Gmail answers before doing anything
-    /// (429, a rate limit), never on a 503, after which it may exist.
+    /// (429, a rate limit), never on a 5xx, after which it may exist.
     fn create<T>(
         &mut self,
         units: u32,

@@ -257,14 +257,14 @@ impl Replica {
         let mut deadline = Instant::now() + SETTLE;
 
         loop {
-            let (code, _, waited) =
+            let (code, report, waited) =
                 self.run_waiting(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[0, 2]);
             deadline += waited;
             if code == 0 && check(self) {
                 return;
             }
             if Instant::now() > deadline {
-                panic!("timed out waiting until {what}");
+                panic!("timed out waiting until {what}; the last run ended on {code}:\n{report}");
             }
             thread::sleep(Duration::from_secs(3));
         }

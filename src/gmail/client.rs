@@ -388,6 +388,7 @@ impl GmailClient {
                 total,
                 unread,
                 role,
+                takes_tasks: None,
             });
         }
 

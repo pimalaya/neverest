@@ -139,6 +139,7 @@ impl Fixture {
                     link_id: Some(PimdirLinkId(uid.into())),
                     flags: PimdirFlags::default(),
                     object: Some(hash.clone()),
+                    supersedes: None,
                 },
                 Some(&PimdirObject {
                     hash,

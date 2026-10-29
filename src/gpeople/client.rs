@@ -183,6 +183,7 @@ impl GpeopleClient {
             total: None,
             unread: None,
             role: Some(String::from("default")),
+            takes_tasks: None,
         }])
     }
 

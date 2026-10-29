@@ -11,7 +11,7 @@
 //! it is this crate's bookkeeping, not part of the pimdir format.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -81,6 +81,12 @@ pub struct StoreState {
     /// by source.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub looked_up_roles: BTreeMap<String, LookedUpRoles>,
+    /// The calendars a source's last listing stated take no tasks (their
+    /// `supported-calendar-component-set` leaving VTODO out), as hub ids,
+    /// by source: declared `x-vtodo` `none` there (pimdir STORAGE §15.6)
+    /// by every declaration, the one before the drain opening no endpoint.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub taskless: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// One source's looked-up roles, with the collection set they were
@@ -155,6 +161,7 @@ impl StoreState {
             mode: mode.map(ModeStamp::from),
             mode_accepted: false,
             looked_up_roles: BTreeMap::new(),
+            taskless: BTreeMap::new(),
         }
         .save(dir)
     }

@@ -109,6 +109,7 @@ impl GraphClient {
                     total: None,
                     unread: None,
                     role: is_default.then(|| String::from("default")),
+                    takes_tasks: None,
                 });
             }
 

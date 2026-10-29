@@ -1202,6 +1202,7 @@ mod tests {
                 total: None,
                 unread: None,
                 role: None,
+                takes_tasks: None,
             })
             .collect()
     }

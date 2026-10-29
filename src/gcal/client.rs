@@ -249,6 +249,7 @@ impl GcalClient {
                     total: None,
                     unread: None,
                     role: is_primary.then(|| String::from("default")),
+                    takes_tasks: None,
                 });
             }
 

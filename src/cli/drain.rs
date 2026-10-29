@@ -8,7 +8,7 @@ use std::{fmt, path::PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use io_pimdir::client::producer::PimdirActionStatus;
-use log::info;
+use log::{info, warn};
 use pimalaya_cli::printer::Printer;
 use pimalaya_config::toml::TomlConfig;
 use schemars::JsonSchema;
@@ -17,7 +17,7 @@ use serde::Serialize;
 use crate::{
     cli::{exit::Exit, sync::try_store_lock},
     config::Config,
-    offline::driver,
+    offline::{driver, state::StoreState},
     sync::report::SyncOutput,
 };
 
@@ -71,9 +71,16 @@ impl DrainCommand {
             .first()
             .expect("a validated account has at least one source");
 
-        // NOTE: as a sync does before its drain, from the configuration
-        // alone (pimdir STORAGE §15.6).
-        driver::declare(&dir, &name, &account_config, &mode)?;
+        // NOTE: as a sync does before its drain, from the configuration and
+        // the calendars the last listing stated take no tasks (pimdir
+        // STORAGE §15.6). A sidecar that does not read declares none of
+        // those, as a store never listed does, rather than refusing a drain
+        // that never needed it.
+        let state = StoreState::load(&dir).unwrap_or_else(|err| {
+            warn!("cannot read the sidecar of account {name}: {err:#}");
+            StoreState::default()
+        });
+        driver::declare(&dir, &name, &account_config, &mode, &state)?;
 
         let mut store = driver::open_store(&dir, first, &name)?;
         let queued = store

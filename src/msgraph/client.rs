@@ -514,6 +514,7 @@ impl GraphClient {
                 total: None,
                 unread: None,
                 role: None,
+                takes_tasks: None,
             })
             .collect())
     }

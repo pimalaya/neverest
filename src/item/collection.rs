@@ -33,4 +33,11 @@ pub struct Collection {
     /// listing states it; `None` otherwise, never guessed from a name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    /// Whether the server states the collection takes tasks (VTODO): a
+    /// CalDAV calendar's `supported-calendar-component-set` (RFC 4791
+    /// §5.2.3) naming `VTODO` or leaving it out. `None` where the listing
+    /// states no set, which takes any component, and for every other
+    /// backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub takes_tasks: Option<bool>,
 }

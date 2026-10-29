@@ -843,6 +843,7 @@ fn mailbox_from(row: ListRow) -> Collection {
         total: None,
         unread: None,
         role,
+        takes_tasks: None,
     }
 }
 

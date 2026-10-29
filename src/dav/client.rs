@@ -242,17 +242,22 @@ impl DavClient {
     /// makes.
     pub fn list_collections(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         let kind = self.kind;
-        let collections: BTreeMap<String, Option<String>> = match kind {
+        // NOTE: by id, the display name and whether the server states the
+        // collection takes tasks.
+        let collections: BTreeMap<String, (Option<String>, Option<bool>)> = match kind {
             DavKind::Card => self.op(WebdavClientStd::list_addressbooks).map(|books| {
                 books
                     .into_iter()
-                    .map(|book| (book.id, book.display_name))
+                    .map(|book| (book.id, (book.display_name, None)))
                     .collect()
             }),
             DavKind::Cal => self.op(WebdavClientStd::list_calendars).map(|calendars| {
                 calendars
                     .into_iter()
-                    .map(|calendar| (calendar.id, calendar.display_name))
+                    .map(|calendar| {
+                        let tasks = takes_tasks(&calendar.components);
+                        (calendar.id, (calendar.display_name, tasks))
+                    })
                     .collect()
             }),
         }
@@ -263,7 +268,7 @@ impl DavClient {
         // is called, and servers routinely make the segment a UUID.
         Ok(collections
             .into_iter()
-            .map(|(id, display)| Collection {
+            .map(|(id, (display, takes_tasks))| Collection {
                 name: display
                     .filter(|name| !name.trim().is_empty())
                     .unwrap_or_else(|| id.clone()),
@@ -271,6 +276,7 @@ impl DavClient {
                 total: None,
                 unread: None,
                 role: None,
+                takes_tasks,
             })
             .collect())
     }
@@ -915,6 +921,19 @@ pub fn is_duplicate_uid(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether a calendar takes tasks by its `supported-calendar-component-set`
+/// (RFC 4791 §5.2.3): `None` for no set stated, which takes any component,
+/// else whether the set names `VTODO`.
+fn takes_tasks(components: &BTreeSet<String>) -> Option<bool> {
+    if components.is_empty() {
+        return None;
+    }
+    let vtodo = components
+        .iter()
+        .any(|component| component.eq_ignore_ascii_case("VTODO"));
+    Some(vtodo)
+}
+
 /// Whether the server advertises `sync-collection` for a collection.
 ///
 /// A collection nobody listed counts as supporting it: a server that does not
@@ -1101,5 +1120,23 @@ mod tests {
             has_sync_collection(None),
             "a collection nobody listed is enumerated by the report, whose refusal names itself",
         );
+    }
+
+    /// A component set leaving VTODO out is an events-only calendar; no set
+    /// at all takes any component (RFC 4791 §5.2.3).
+    #[test]
+    fn a_calendar_takes_tasks_as_its_component_set_says() {
+        let set = |components: &[&str]| {
+            components
+                .iter()
+                .map(|component| String::from(*component))
+                .collect::<BTreeSet<String>>()
+        };
+
+        assert_eq!(takes_tasks(&set(&["VEVENT"])), Some(false));
+        assert_eq!(takes_tasks(&set(&["VEVENT", "VJOURNAL"])), Some(false));
+        assert_eq!(takes_tasks(&set(&["VEVENT", "VTODO"])), Some(true));
+        assert_eq!(takes_tasks(&set(&["vtodo"])), Some(true));
+        assert_eq!(takes_tasks(&set(&[])), None);
     }
 }

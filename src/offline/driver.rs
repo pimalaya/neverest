@@ -475,7 +475,7 @@ pub fn run(
     // NOTE: before any credential is read, a declaration coming from the
     // configuration alone (pimdir STORAGE §15.6).
     if !dry_run {
-        declare(&work_dir, &account_name, account_config, &mode)?;
+        declare(&work_dir, &account_name, account_config, &mode, &state)?;
     }
 
     // NOTE: once, before any credential is read or any endpoint opened, so a
@@ -582,7 +582,7 @@ pub fn run(
 
         // NOTE: again, so a calendar met for the first time this run takes
         // the intents its source performs there (pimdir STORAGE §15.6).
-        if let Err(err) = declare(&work_dir, &account_name, account_config, &mode) {
+        if let Err(err) = declare(&work_dir, &account_name, account_config, &mode, &state) {
             warn!("cannot declare what the sources hold after the run: {err:#}");
         }
 
@@ -604,12 +604,15 @@ pub fn run(
 }
 
 /// Declares what every source of the account can do (pimdir STORAGE §15.6),
-/// replacing what an earlier run or configuration declared.
+/// replacing what an earlier run or configuration declared: what its
+/// backend and rights allow, and `x-vtodo` `none` on the calendars its last
+/// listing stated take no tasks, which `state` keeps.
 pub(crate) fn declare(
     dir: &Path,
     account: &str,
     config: &AccountConfig,
     mode: &AccountMode,
+    state: &StoreState,
 ) -> Result<()> {
     let sources = config.sources()?;
     let first = mode
@@ -637,7 +640,10 @@ pub(crate) fn declare(
                 held.push(collection.id.clone());
             }
         }
-        let capabilities = capability::declaration(source, mode.one_way, &held);
+        let mut capabilities = capability::declaration(source, mode.one_way, &held);
+        if let Some(taskless) = state.taskless.get(name) {
+            capabilities.extend(capability::vtodo(&held, taskless));
+        }
         store
             .declare(name, &capabilities)
             .with_context(|| format!("Declare the capabilities of source {name}"))?;
@@ -1159,6 +1165,10 @@ fn run_local(
         "Listed {} collection(s) on {source_name}",
         collections.len()
     ));
+
+    // NOTE: kept for every later declaration, the one before the next run's
+    // drain included, which lists nothing (pimdir STORAGE §15.6).
+    record_taskless(state, source_name, &listed);
 
     let filter = if declare_only {
         CollectionFilter::All
@@ -4583,6 +4593,22 @@ fn stated_roles(
     Some(roles)
 }
 
+/// Records the collections of `listed` whose server states they take no
+/// tasks, by hub id, in place of what the source's previous listing stated.
+fn record_taskless(state: &mut StoreState, source: &str, listed: &[Collection]) {
+    let taskless: BTreeSet<String> = listed
+        .iter()
+        .filter(|collection| collection.takes_tasks == Some(false))
+        .map(|collection| hub_id(source, &collection.id))
+        .collect();
+
+    if taskless.is_empty() {
+        state.taskless.remove(source);
+    } else {
+        state.taskless.insert(source.to_owned(), taskless);
+    }
+}
+
 /// Records the role a source states for a collection, or clears one it no
 /// longer states. Only from the source, never from a name; nothing keys on
 /// it, so a failure costs a role and never a sync, and is logged.
@@ -5078,6 +5104,7 @@ fn drain_submits(
                                 link_id: None,
                                 flags: PimdirFlags::from_iter(["\\Seen"]),
                                 object: intent.object.clone(),
+                                supersedes: None,
                             };
                             store.replace_action(intent.id, "neverest", collection, &action)
                         }
@@ -5945,6 +5972,7 @@ mod tests {
                 total: None,
                 unread: None,
                 role: role.map(String::from),
+                takes_tasks: None,
             })
             .collect()
     }
@@ -6148,6 +6176,7 @@ mod tests {
                         link_id: Some(PimdirLinkId(link.into())),
                         flags: PimdirFlags::default(),
                         object: None,
+                        supersedes: None,
                     },
                     None,
                 )
@@ -6233,6 +6262,7 @@ mod tests {
                     link_id: Some(PimdirLinkId("mid:q1@x".into())),
                     flags: PimdirFlags::from_iter(["\\Seen"]),
                     object: Some(hash),
+                    supersedes: None,
                 },
                 Some(&object),
             )
@@ -6702,6 +6732,128 @@ mod tests {
         };
         assert_eq!(collection, "gcal/primary");
         assert_eq!(seq, None);
+    }
+
+    const TODO: &str = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t1\r\n\
+                        DTSTAMP:20261028T090000Z\r\nSUMMARY:Call Ann\r\n\
+                        END:VTODO\r\nEND:VCALENDAR\r\n";
+
+    /// A calendar of account `live` the `caldav` source syncs, holding one
+    /// event it binds.
+    fn bound_calendar(store: &mut PimdirSourceStore, collection: &str) {
+        store
+            .ensure_collection(collection, "text/calendar")
+            .unwrap();
+        store
+            .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                collection: PimdirCollectionId(collection.into()),
+                handle: PimdirHandle("e0.ics".into()),
+                link_id: Some(PimdirLinkId(format!("{collection}-e0"))),
+                object: None,
+                level: PimdirLevel::Meta,
+                summary: None,
+                sort_key: PimdirSortKey::default(),
+                flags: PimdirFlags::default(),
+                status: PimdirStatus::Clean,
+                conflict_revision: None,
+                conflict_object: None,
+                base: Some(PimdirBase {
+                    flags: PimdirFlags::default(),
+                    revision: None,
+                    object: None,
+                }),
+                origin: None,
+            })])
+            .unwrap();
+    }
+
+    /// Queues the add of a new task into `collection`, as a frontend does.
+    fn queue_task(dir: &Path, collection: &str) -> Result<i64, PimdirError> {
+        let mut producer = PimdirProducer::open(dir, "test-frontend").unwrap();
+        let blobs = producer.blobs();
+        let hash = blobs.hash(TODO.as_bytes());
+        let mut writer = blobs.writer().unwrap();
+        writer.write_all(TODO.as_bytes()).unwrap();
+        let object = PimdirObject {
+            hash: hash.clone(),
+            size: writer.commit(&hash).unwrap() as usize,
+        };
+        let action = PimdirAction::Add {
+            link_id: None,
+            flags: PimdirFlags::default(),
+            object: Some(hash),
+            supersedes: None,
+        };
+        producer.enqueue(collection, &action, Some(&object))
+    }
+
+    /// A calendar whose server keeps it from tasks refuses one at the gate,
+    /// before it is queued and pushed (pimdir STORAGE §15.6), from what the
+    /// listing stated and the sidecar kept for the next declaration.
+    #[test]
+    fn an_events_only_calendar_refuses_a_task_before_it_is_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account("live")
+            .for_source("caldav");
+        bound_calendar(&mut store, "caldav/events");
+        bound_calendar(&mut store, "caldav/work");
+        bound_calendar(&mut store, "caldav/any");
+        drop(store);
+
+        let config: AccountConfig = toml::from_str(
+            "caldav.server = \"https://dav.example.org/\"\n\
+             caldav.auth.basic.username = \"user\"\n\
+             caldav.auth.basic.password.raw = \"pw\"",
+        )
+        .unwrap();
+        let mode = config.mode().unwrap();
+        let listed = |tasks: [Option<bool>; 3]| -> Vec<Collection> {
+            ["events", "work", "any"]
+                .into_iter()
+                .zip(tasks)
+                .map(|(id, takes_tasks)| Collection {
+                    id: id.into(),
+                    name: id.into(),
+                    total: None,
+                    unread: None,
+                    role: None,
+                    takes_tasks,
+                })
+                .collect()
+        };
+
+        let mut state = StoreState::default();
+        record_taskless(
+            &mut state,
+            "caldav",
+            &listed([Some(false), Some(true), None]),
+        );
+        state.save(dir.path()).unwrap();
+        let state = StoreState::load(dir.path()).unwrap();
+        declare(dir.path(), "live", &config, &mode, &state).unwrap();
+
+        let Err(PimdirError::Unsupported(refusal)) = queue_task(dir.path(), "caldav/events") else {
+            panic!("a task into an events-only calendar is refused at the gate");
+        };
+        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(refusal.source, "caldav");
+        queue_task(dir.path(), "caldav/work").unwrap();
+        queue_task(dir.path(), "caldav/any").unwrap();
+
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert!(!reader.accepts_vtodo("caldav/events").unwrap());
+        assert!(reader.accepts_vtodo("caldav/work").unwrap());
+        assert!(reader.accepts_vtodo("caldav/any").unwrap());
+        drop(reader);
+
+        // NOTE: a later listing replaces what the earlier one stated.
+        let mut state = state;
+        record_taskless(&mut state, "caldav", &listed([None, Some(true), None]));
+        assert!(state.taskless.is_empty());
+        declare(dir.path(), "live", &config, &mode, &state).unwrap();
+        queue_task(dir.path(), "caldav/events").unwrap();
     }
 
     #[test]
@@ -7447,6 +7599,7 @@ mod tests {
                     link_id: Some(PimdirLinkId("uid:new".into())),
                     flags: PimdirFlags::default(),
                     object: Some(hash),
+                    supersedes: None,
                 },
                 Some(&object),
             )

@@ -65,6 +65,7 @@ impl GraphClient {
             total: None,
             unread: None,
             role: Some(String::from("default")),
+            takes_tasks: None,
         }];
 
         let top = self
@@ -337,6 +338,7 @@ fn push_folder(collections: &mut Vec<Collection>, folder: &MsgraphContactFolder)
         total: None,
         unread: None,
         role: None,
+        takes_tasks: None,
     });
 }
 

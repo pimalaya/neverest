@@ -240,6 +240,7 @@ impl Replica {
             link_id: None,
             flags: known(flags),
             object: Some(hash),
+            supersedes: None,
         };
         self.enqueue(key, action, Some(object));
     }

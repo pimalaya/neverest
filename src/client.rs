@@ -225,6 +225,7 @@ impl EnumEntry {
 }
 
 /// What a backend assigned to an item it just wrote.
+#[derive(Debug)]
 pub struct WrittenItem {
     /// The server-assigned handle (an IMAP UID, a DAV href).
     pub id: String,
@@ -879,6 +880,27 @@ impl Client {
         match self {
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) if c.kind() == GraphKind::Mail => c.copy_message(to, id).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// Moves one item from `from` into `to` server side keeping its id,
+    /// gated on `if_match`, returning where it went, or `None` for a backend
+    /// or a server that cannot move it, the caller then uploading the body.
+    ///
+    /// CalDAV moves (WebDAV `MOVE`); every other backend answers `None`, so
+    /// a create superseding a member is an upload there (pimdir SYNC §4).
+    #[allow(unused_variables)]
+    pub fn move_item(
+        &mut self,
+        from: &str,
+        to: &str,
+        id: &str,
+        if_match: Option<&str>,
+    ) -> Result<Option<WrittenItem>> {
+        match self {
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => c.move_item(from, to, id, if_match),
             _ => Ok(None),
         }
     }

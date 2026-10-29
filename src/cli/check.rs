@@ -4,7 +4,11 @@
 //! collections, and opens the send channel a source declares, surfacing
 //! credential, network or config errors before a real sync.
 
-use std::{fmt, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    path::PathBuf,
+};
 
 use anyhow::{Result, bail};
 use clap::Parser;
@@ -14,7 +18,13 @@ use pimalaya_config::toml::TomlConfig;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::{account::Account, client, config::Config, offline::capability};
+use crate::{
+    account::Account,
+    client,
+    config::{AccountMode, Config, SourceConfig},
+    item::collection::Collection,
+    offline::capability,
+};
 
 /// Probes every configured source before a real sync.
 ///
@@ -56,17 +66,11 @@ impl CheckCommand {
         let account = Account::resolve(&account_config)?;
 
         let mut sources = Vec::new();
+        let endpoints = account_config.endpoints()?;
 
-        for (endpoint, endpoint_config) in account_config.endpoints()? {
-            // NOTE: a target is written to, never declared, as in a sync.
-            let capabilities = match account_mode.sources.contains(&endpoint) {
-                true => capability::supports(&endpoint_config, account_mode.one_way)
-                    .into_iter()
-                    .map(CheckedCapability::from)
-                    .collect(),
-                false => Vec::new(),
-            };
-            sources.push(check_source(&endpoint, &account, capabilities)?);
+        for (endpoint, endpoint_config) in &endpoints {
+            let capabilities = declared(endpoint, endpoint_config, &account_mode, &endpoints);
+            sources.push(check_source(endpoint, &account, capabilities)?);
         }
 
         printer.out(CheckOutput {
@@ -75,6 +79,38 @@ impl CheckCommand {
             sources,
         })
     }
+}
+
+/// What a sync declares `endpoint` can do, from the configuration alone:
+/// every Annex B capability of its kind and the source-wide `x-vtodo` row,
+/// its provider's or a target's (pimdir STORAGE §15.6). A target is written
+/// to, never declared, as in a sync.
+fn declared(
+    endpoint: &str,
+    config: &SourceConfig,
+    mode: &AccountMode,
+    endpoints: &HashMap<String, SourceConfig>,
+) -> Vec<CheckedCapability> {
+    if !mode.sources.iter().any(|source| source == endpoint) {
+        return Vec::new();
+    }
+    let targets: Vec<(&str, &SourceConfig)> = mode
+        .targets
+        .iter()
+        .filter_map(|name| Some((name.as_str(), endpoints.get(name)?)))
+        .collect();
+    let mut capabilities: Vec<CheckedCapability> = capability::supports(config, mode.one_way)
+        .into_iter()
+        .map(CheckedCapability::from)
+        .collect();
+    if let Some(wide) = capability::vtodo_wide(config, &targets) {
+        capabilities.push(CheckedCapability {
+            name: wide.name,
+            support: wide.support.as_str().to_owned(),
+            detail: wide.detail,
+        });
+    }
+    capabilities
 }
 
 /// Opens the source and lists its collections with the role each states on
@@ -93,12 +129,7 @@ fn check_source(
     let collections: Vec<CheckedCollection> = client
         .list_collections(false)?
         .into_iter()
-        .map(|collection| CheckedCollection {
-            role: roles.remove(&collection.id),
-            default: default.as_ref() == Some(&collection.id),
-            id: collection.id,
-            name: collection.name,
-        })
+        .map(|collection| checked(collection, &mut roles, default.as_ref()))
         .collect();
     s.success(format!(
         "Checked source {label} ({} collections)",
@@ -128,6 +159,22 @@ fn check_source(
         capabilities,
         smtp,
     })
+}
+
+/// One listed collection as a check reports it, with the role and the
+/// default mark the server states, taken out of `roles`.
+fn checked(
+    collection: Collection,
+    roles: &mut BTreeMap<String, String>,
+    default: Option<&String>,
+) -> CheckedCollection {
+    CheckedCollection {
+        role: roles.remove(&collection.id),
+        default: default == Some(&collection.id),
+        takes_tasks: collection.takes_tasks,
+        id: collection.id,
+        name: collection.name,
+    }
 }
 
 /// What `neverest check` reports: the account's declared mode, and every
@@ -217,6 +264,15 @@ pub struct CheckedCollection {
     /// most once per source, and left out when false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default: bool,
+    /// Whether the calendar takes tasks, as a CalDAV server states it by
+    /// its `supported-calendar-component-set` (RFC 4791 §5.2.3): `false`
+    /// when the set leaves VTODO out, which a sync declares as `x-vtodo`
+    /// `none` on the source's calendar of that id, a target's included.
+    /// Left out where no set is stated, which takes any component, and on
+    /// every other backend: Google and Graph, whose calendars take no task,
+    /// say so by a source-wide capability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub takes_tasks: Option<bool>,
 }
 
 /// One capability a source declares.
@@ -239,5 +295,84 @@ impl From<capability::SupportRow> for CheckedCapability {
             support: support.as_str().to_owned(),
             detail: detail.map(str::to_owned),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::AccountConfig;
+
+    use super::*;
+
+    /// What a check reports each endpoint of `toml`'s account declares, by
+    /// endpoint.
+    fn declared_by(toml: &str) -> BTreeMap<String, Vec<CheckedCapability>> {
+        let account: AccountConfig = toml::from_str(toml).unwrap();
+        let mode = account.mode().unwrap();
+        let endpoints = account.endpoints().unwrap();
+        endpoints
+            .iter()
+            .map(|(name, config)| (name.clone(), declared(name, config, &mode, &endpoints)))
+            .collect()
+    }
+
+    fn vtodo(capabilities: &[CheckedCapability]) -> Option<&CheckedCapability> {
+        capabilities.iter().find(|row| row.name == "x-vtodo")
+    }
+
+    /// The source-wide `x-vtodo` row a sync declares is reported with the
+    /// Annex B ones: a Google or Graph calendar source, and a source copied
+    /// to a Google target, take no task; a target lists nothing.
+    #[test]
+    fn a_check_reports_the_calendars_that_take_no_tasks() {
+        let declared = declared_by("gcal.auth.token.raw = \"token\"");
+        let row = vtodo(&declared["gcal"]).expect("a Google source takes no task");
+        assert_eq!(row.support, "none");
+        assert!(row.detail.as_deref().unwrap().contains("Google Tasks"));
+
+        let declared = declared_by("msgraph-calendar.auth.token.raw = \"token\"");
+        let row = vtodo(&declared["msgraph-calendar"]).expect("a Graph source takes no task");
+        assert!(row.detail.as_deref().unwrap().contains("Microsoft To Do"));
+
+        let caldav = "caldav.server = \"https://dav.example.org/\"\n\
+                      caldav.auth.basic.username = \"user\"\n\
+                      caldav.auth.basic.password.raw = \"pw\"\n";
+        assert!(vtodo(&declared_by(caldav)["caldav"]).is_none());
+
+        let declared = declared_by(&format!(
+            "{caldav}one-way = true\ntargets.google.gcal.auth.token.raw = \"token\""
+        ));
+        let row = vtodo(&declared["caldav"]).expect("a source copied to Google takes no task");
+        assert_eq!(row.support, "none");
+        assert!(row.detail.as_deref().unwrap().contains("target google"));
+        assert!(declared["google"].is_empty());
+    }
+
+    /// A CalDAV calendar's component set is reported on the collection, a
+    /// listing stating none leaving the key out.
+    #[test]
+    fn a_check_names_what_each_calendar_takes() {
+        let listed = |id: &str, takes_tasks| Collection {
+            id: id.into(),
+            name: id.into(),
+            total: None,
+            unread: None,
+            role: None,
+            takes_tasks,
+        };
+        let json = |collection| {
+            let checked = checked(collection, &mut BTreeMap::new(), None);
+            serde_json::to_value(checked).unwrap()
+        };
+
+        assert_eq!(
+            json(listed("events", Some(false)))["takesTasks"],
+            serde_json::Value::Bool(false)
+        );
+        assert_eq!(
+            json(listed("work", Some(true)))["takesTasks"],
+            serde_json::Value::Bool(true)
+        );
+        assert!(json(listed("any", None)).get("takesTasks").is_none());
     }
 }

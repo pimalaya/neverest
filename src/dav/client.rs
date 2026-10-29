@@ -10,7 +10,9 @@
 //! where the ETag and `If-Match` plumbing built for mail is finally exercised.
 //!
 //! Three shapes differ from the mail backends: collections are keyed by their
-//! path segment, a display name being optional, mutable and free to collide;
+//! path segment under the home set, else by their path, starting with a slash
+//! (io-webdav's id), a display name being optional, mutable and free to
+//! collide;
 //! items resolve at `Full` only, a `sync-collection` REPORT carrying hrefs and
 //! ETags but never a `UID`; flags are known-empty rather than unknown.
 //!
@@ -38,7 +40,7 @@ use io_webdav::{
     coroutine::{WebdavCoroutine, WebdavCoroutineState, WebdavYield},
     rfc4791::calendar::{CALDAV, CaldavCalendar},
     rfc4918::{
-        WebdavAuth, WebdavProperty, follow_redirects::WebdavFollowRedirectsError,
+        WebdavAuth, WebdavProperty, collection_id, follow_redirects::WebdavFollowRedirectsError,
         propfind::WebdavPropfind, resolve_href, send::WebdavSendError,
     },
     rfc6352::addressbook::CarddavAddressbook,
@@ -167,9 +169,11 @@ impl DavClient {
 
     /// Runs one WebDAV exchange, reopening a connection the server had closed.
     ///
-    /// io-webdav holds a single stream and reports no keep-alive hint, so an
-    /// HTTP/1.0 or `Connection: close` peer breaks every exchange after the
-    /// first. Only an end-of-stream failure retries, never an applied write.
+    /// io-webdav holds a single stream, so an HTTP/1.0 or `Connection: close`
+    /// peer breaks the exchange after an answer; a client from `connect`
+    /// resends it once on a fresh connection itself, and this reopens one
+    /// should that fail too. Only an end-of-stream failure retries, never an
+    /// applied write.
     ///
     /// The source's [`Throttle`] also sends it again while the server
     /// throttles it (429, 503). A request creating a resource goes through
@@ -263,9 +267,10 @@ impl DavClient {
         }
         .with_context(|| format!("Cannot list the {kind} collections"))?;
 
-        // NOTE: the path segment is the key, a display name being free to
-        // collide, to change and to be absent; it is still what the collection
-        // is called, and servers routinely make the segment a UUID.
+        // NOTE: the id is the key (the path segment, or the path of one
+        // outside the home set), a display name being free to collide, to
+        // change and to be absent; it is still what the collection is called,
+        // and servers routinely make the segment a UUID.
         Ok(collections
             .into_iter()
             .map(|(id, (display, takes_tasks))| Collection {
@@ -313,7 +318,10 @@ impl DavClient {
         else {
             return Ok(None);
         };
-        Ok(collection_key(calendar.path()))
+        let Some(home) = &self.inner.calendar_home_set else {
+            return Ok(None);
+        };
+        Ok(collection_key(home.path(), calendar.path()))
     }
 
     /// The href a `Depth: 0` PROPFIND of `path` states for `prop`.
@@ -620,23 +628,40 @@ impl DavClient {
     }
 
     /// Deletes a resource, conditionally on the last-synced ETag.
+    ///
+    /// A resource already gone (404, 410) is deleted: pushes are at least
+    /// once, and a create delivered by a move took the member it superseded
+    /// along before that member's delete is pushed (pimdir SYNC §4).
     pub fn delete_item(
         &mut self,
         collection: &str,
         id: &str,
         if_match: Option<&str>,
     ) -> Result<()> {
-        self.delete(collection, id, if_match)
-            .with_context(|| format!("Cannot delete {id} from {collection}"))
+        match self.delete(collection, id, if_match) {
+            Err(err) if is_gone(&err) => {
+                debug!("{id} is already gone from {collection}: {err}");
+                Ok(())
+            }
+            deleted => deleted.with_context(|| format!("Cannot delete {id} from {collection}")),
+        }
     }
 
     /// Moves resources between collections.
     ///
-    /// DAV has no server-side move here, so each is re-created at the target
-    /// and deleted from the source; the delete only runs once the create was
-    /// accepted, so a failure leaves the resource where it was.
+    /// Each goes by a server-side `MOVE` (see [`move_item`](Self::move_item)),
+    /// which keeps its `UID` in one place: Fastmail, holding one `UID` per
+    /// account, refuses a create at the target while the source holds it.
+    /// Where the server has no `MOVE`, and for CardDAV, which io-webdav moves
+    /// nothing of, the resource is re-created at the target and deleted from
+    /// the source; the delete only runs once the create was accepted, so a
+    /// failure leaves the resource where it was.
     pub fn move_items(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
         for id in ids {
+            if self.move_item(from, to, id, None)?.is_some() {
+                continue;
+            }
+
             let (data, etag) = self
                 .read(from, id)
                 .with_context(|| format!("Cannot read {id} for a move"))?;
@@ -649,6 +674,43 @@ impl DavClient {
         }
 
         Ok(())
+    }
+
+    /// Moves one resource into `to` server side, keeping its id (WebDAV
+    /// `MOVE`, RFC 4918 §9.9, `Overwrite: F`), gated on `if_match`.
+    ///
+    /// Answers the moved resource and the ETag the server gave it, if any, or
+    /// `None` when this server cannot move it: CardDAV, which io-webdav moves
+    /// nothing of, and a server answering the `MOVE` 405, 501 or 404, the last
+    /// being Google's answer for a member it holds (pimdir SYNC §4). Any
+    /// other refusal is an error, a duplicate `UID` among them
+    /// ([`is_duplicate_uid`]).
+    pub fn move_item(
+        &mut self,
+        from: &str,
+        to: &str,
+        id: &str,
+        if_match: Option<&str>,
+    ) -> Result<Option<WrittenItem>> {
+        if self.kind == DavKind::Card {
+            return Ok(None);
+        }
+
+        // NOTE: a create at the target, which a 503 may have applied.
+        match self.op_create(|dav| dav.move_item(from, id, to, if_match)) {
+            Ok(moved) => Ok(Some(WrittenItem {
+                id: moved.id,
+                revision: moved.etag,
+            })),
+            Err(err) if is_unsupported_move(&err) => {
+                debug!("{} server cannot move {id} from {from}: {err}", self.kind);
+                Ok(None)
+            }
+            Err(err) => {
+                Err(anyhow::Error::new(err)
+                    .context(format!("Cannot move {id} from {from} into {to}")))
+            }
+        }
     }
 
     /// Rejected: DAV has no flags. The enumeration reports every member as
@@ -725,14 +787,13 @@ const SCHEDULE_DEFAULT_CALENDAR_URL: WebdavProperty = WebdavProperty {
     local: "schedule-default-calendar-URL",
 };
 
-/// The key a listing gives the collection at `path`: its last non-empty
-/// segment, as io-webdav keys a calendar.
-fn collection_key(path: &str) -> Option<String> {
-    path.trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_owned)
+/// The key a listing gives the collection at `path` under the home set
+/// path `home`, as io-webdav keys a calendar: its last segment directly
+/// under the home set, else its path, starting with a slash (Google lists
+/// every calendar as `/caldav/v2/<calendar>/events/`).
+fn collection_key(home: &str, path: &str) -> Option<String> {
+    let key = collection_id(home, path);
+    (!key.trim_matches('/').is_empty()).then_some(key)
 }
 
 /// Runs a coroutine io-webdav's client has no method for over its stream.
@@ -908,6 +969,28 @@ fn throttle_status(err: &WebdavClientStdError) -> Option<u16> {
     }
 }
 
+/// The status a plain request failed with, as io-webdav surfaces a non-2xx
+/// answer to anything but a report.
+fn http_status(err: &WebdavClientStdError) -> Option<u16> {
+    match err {
+        WebdavClientStdError::Send(WebdavSendError::HttpStatus { status, .. }) => Some(*status),
+        _ => None,
+    }
+}
+
+/// Whether a `MOVE` was answered as one the server cannot do (pimdir SYNC
+/// §4): not allowed there (405), not implemented (501), or the member not
+/// found (404), Google's answer for a member it holds. A duplicate `UID` is
+/// another variant, never one of these.
+fn is_unsupported_move(err: &WebdavClientStdError) -> bool {
+    matches!(http_status(err), Some(405 | 501 | 404))
+}
+
+/// Whether a request found its resource gone (404, 410).
+fn is_gone(err: &WebdavClientStdError) -> bool {
+    matches!(http_status(err), Some(404 | 410))
+}
+
 /// Whether a write was refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC
 /// 6352 §6.3.2), the collection already holding that `UID`.
 ///
@@ -956,17 +1039,179 @@ fn is_invalid_sync_token(err: &WebdavClientStdError) -> bool {
 }
 
 #[cfg(test)]
+impl DavClient {
+    /// A session of `kind` over a scripted server answering `replies` in
+    /// order, its home set `home` already discovered, for a test of this
+    /// module or another driving a DAV source request by request.
+    pub(crate) fn scripted(
+        kind: DavKind,
+        home: &str,
+        replies: Vec<String>,
+    ) -> (Self, scripted::Wire) {
+        let base = Url::parse("https://dav.example.org/").unwrap();
+        let wire = scripted::Wire::new(replies);
+        let auth = WebdavAuth::None;
+        let mut inner = WebdavClientStd::new(wire.stream(), auth.clone(), base.clone());
+        let home = Some(base.join(home).unwrap());
+        match kind {
+            DavKind::Card => inner.addressbook_home_set = home,
+            DavKind::Cal => inner.calendar_home_set = home,
+        }
+        let client = Self {
+            kind,
+            inner,
+            // NOTE: a port nothing listens on, should a test run its script
+            // dry and the session reconnect.
+            server: Url::parse("http://127.0.0.1:1/").unwrap(),
+            tls: Tls::default(),
+            auth,
+            throttle: Arc::new(Throttle::new("dav")),
+        };
+        (client, wire)
+    }
+}
+
+/// A scripted DAV server: one connection answering its requests from a
+/// script, in order, and recording each request written to it.
+#[cfg(test)]
+pub(crate) mod scripted {
+    use std::{
+        collections::VecDeque,
+        io::{self, Read, Write},
+        sync::{Arc, Mutex},
+    };
+
+    /// An answer of `status`, carrying `headers` and no body.
+    pub(crate) fn reply(status: &str, headers: &[(&str, &str)]) -> String {
+        answer(status, headers, "")
+    }
+
+    /// An answer of `status`, carrying `headers` and `body`.
+    pub(crate) fn answer(status: &str, headers: &[(&str, &str)], body: &str) -> String {
+        let headers: String = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
+        format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+    }
+
+    #[derive(Default)]
+    struct State {
+        replies: VecDeque<Vec<u8>>,
+        out: VecDeque<u8>,
+        writing: Vec<u8>,
+        requests: Vec<String>,
+    }
+
+    /// The server's side of the connection.
+    #[derive(Clone, Default)]
+    pub(crate) struct Wire(Arc<Mutex<State>>);
+
+    impl Wire {
+        pub(crate) fn new(replies: Vec<String>) -> Self {
+            let wire = Self::default();
+            let mut state = wire.0.lock().unwrap();
+            state.replies = replies.into_iter().map(String::into_bytes).collect();
+            drop(state);
+            wire
+        }
+
+        pub(crate) fn stream(&self) -> Stream {
+            Stream(self.clone())
+        }
+
+        /// Every request written so far, head and body, in order.
+        pub(crate) fn requests(&self) -> Vec<String> {
+            let mut state = self.0.lock().unwrap();
+            flush(&mut state);
+            state.requests.clone()
+        }
+
+        /// The request line of each request, in order.
+        pub(crate) fn lines(&self) -> Vec<String> {
+            self.requests()
+                .iter()
+                .map(|request| request.lines().next().unwrap_or_default().to_owned())
+                .collect()
+        }
+    }
+
+    /// Closes the request being written once its answer is read.
+    fn flush(state: &mut State) {
+        if !state.writing.is_empty() {
+            let request = String::from_utf8_lossy(&state.writing).into_owned();
+            state.requests.push(request);
+            state.writing.clear();
+        }
+    }
+
+    pub(crate) struct Stream(Wire);
+
+    impl Read for Stream {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let mut state = (self.0).0.lock().unwrap();
+            flush(&mut state);
+            if state.out.is_empty() {
+                // NOTE: a script run dry ends the stream, as a server
+                // closing the connection.
+                let Some(reply) = state.replies.pop_front() else {
+                    return Ok(0);
+                };
+                state.out.extend(reply);
+            }
+            let n = buf.len().min(state.out.len());
+            for (slot, byte) in buf.iter_mut().zip(state.out.drain(..n)) {
+                *slot = byte;
+            }
+            Ok(n)
+        }
+    }
+
+    impl Write for Stream {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut state = (self.0).0.lock().unwrap();
+            state.writing.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn a_default_calendar_url_is_keyed_as_a_listing_keys_it() {
+        let home = "/dav/cal/test%40pimalaya.org/";
         assert_eq!(
-            collection_key("/dav/cal/test%40pimalaya.org/default/").as_deref(),
+            collection_key(home, "/dav/cal/test%40pimalaya.org/default/").as_deref(),
             Some("default")
         );
-        assert_eq!(collection_key("/cal/work").as_deref(), Some("work"));
-        assert_eq!(collection_key("/"), None);
+        assert_eq!(collection_key("/cal", "/cal/work").as_deref(), Some("work"));
+        assert_eq!(collection_key("/cal/", "/"), None);
+    }
+
+    /// A calendar outside the home set is keyed by its path, as io-webdav
+    /// lists it: Google names every calendar `events` under its own path, so
+    /// a last segment would make the default calendar any of them.
+    #[test]
+    fn a_default_calendar_outside_the_home_set_is_keyed_by_its_path() {
+        let home = "/caldav/v2/alice%40g/";
+        assert_eq!(
+            collection_key(home, "/caldav/v2/x%40g/events/").as_deref(),
+            Some("/caldav/v2/x%40g/events")
+        );
+        assert_eq!(
+            collection_key(home, "/caldav/v2/alice@g/events/").as_deref(),
+            Some("events")
+        );
     }
 
     #[test]
@@ -1138,5 +1383,162 @@ mod tests {
         assert_eq!(takes_tasks(&set(&["VEVENT", "VTODO"])), Some(true));
         assert_eq!(takes_tasks(&set(&["vtodo"])), Some(true));
         assert_eq!(takes_tasks(&set(&[])), None);
+    }
+
+    use scripted::{answer, reply};
+
+    /// A calendar session over `replies`, its home set `/dav/cal/`.
+    fn calendars(replies: Vec<String>) -> (DavClient, scripted::Wire) {
+        DavClient::scripted(DavKind::Cal, "/dav/cal/", replies)
+    }
+
+    /// Whether `request` carries the header line `line`, names compared
+    /// without case.
+    fn carries(request: &str, line: &str) -> bool {
+        let line = line.to_ascii_lowercase();
+        request
+            .lines()
+            .any(|header| header.to_ascii_lowercase() == line)
+    }
+
+    /// A move is one server-side `MOVE`, keeping the id, refusing to
+    /// overwrite and gated on the source's ETag.
+    #[test]
+    fn an_item_moves_by_one_server_side_move() {
+        let (mut dav, wire) = calendars(vec![reply("201 Created", &[("ETag", "\"m1\"")])]);
+
+        let moved = dav
+            .move_item("tasks", "work", "t1.ics", Some("\"e1\""))
+            .unwrap()
+            .expect("a CalDAV server moves");
+
+        assert_eq!(moved.id, "t1.ics");
+        assert_eq!(moved.revision.as_deref(), Some("m1"));
+        let requests = wire.requests();
+        assert_eq!(wire.lines(), ["MOVE /dav/cal/tasks/t1.ics HTTP/1.1"]);
+        let request = &requests[0];
+        assert!(
+            carries(
+                request,
+                "destination: https://dav.example.org/dav/cal/work/t1.ics"
+            ),
+            "{request}"
+        );
+        assert!(carries(request, "overwrite: F"), "{request}");
+        assert!(carries(request, "if-match: \"e1\""), "{request}");
+    }
+
+    /// A server answering the `MOVE` as one it cannot do has the item
+    /// uploaded instead; any other refusal is the caller's to report.
+    #[test]
+    fn a_move_the_server_cannot_do_is_answered_none() {
+        for status in [
+            "405 Method Not Allowed",
+            "501 Not Implemented",
+            "404 Not Found",
+        ] {
+            let (mut dav, _) = calendars(vec![reply(status, &[])]);
+            let moved = dav.move_item("tasks", "work", "t1.ics", None).unwrap();
+            assert!(moved.is_none(), "{status}");
+        }
+
+        let (mut dav, _) = calendars(vec![reply("412 Precondition Failed", &[])]);
+        let err = dav.move_item("tasks", "work", "t1.ics", None).unwrap_err();
+        assert!(!is_duplicate_uid(&err), "{err:#}");
+
+        let refusal = "<d:error xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">\
+                       <c:no-uid-conflict/></d:error>";
+        let (mut dav, _) = calendars(vec![answer(
+            "403 Forbidden",
+            &[("Content-Type", "application/xml")],
+            refusal,
+        )]);
+        let err = dav.move_item("tasks", "work", "t1.ics", None).unwrap_err();
+        assert!(is_duplicate_uid(&err), "{err:#}");
+    }
+
+    /// io-webdav moves no card: CardDAV answers none without a request.
+    #[test]
+    fn a_card_is_never_moved_server_side() {
+        let (mut dav, wire) = DavClient::scripted(DavKind::Card, "/dav/card/", Vec::new());
+        let moved = dav.move_item("a", "b", "c1.vcf", None).unwrap();
+        assert!(moved.is_none());
+        assert!(wire.requests().is_empty());
+    }
+
+    /// A relocation is a `MOVE`, never a create then a delete, which a
+    /// server keeping one `UID` per account (Fastmail) refuses.
+    #[test]
+    fn a_relocation_moves_rather_than_recreates() {
+        let (mut dav, wire) = calendars(vec![reply("201 Created", &[])]);
+
+        dav.move_items("tasks", "work", &["t1.ics"]).unwrap();
+
+        assert_eq!(wire.lines(), ["MOVE /dav/cal/tasks/t1.ics HTTP/1.1"]);
+    }
+
+    /// A server with no `MOVE` (Google answers 404) has the item re-created
+    /// at the target, then deleted from the source on its ETag.
+    #[test]
+    fn a_relocation_recreates_where_the_server_cannot_move() {
+        let body = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+        let (mut dav, wire) = calendars(vec![
+            reply("404 Not Found", &[]),
+            answer("200 OK", &[("ETag", "\"e1\"")], body),
+            reply("201 Created", &[("ETag", "\"n1\"")]),
+            reply("204 No Content", &[]),
+        ]);
+
+        dav.move_items("tasks", "work", &["t1.ics"]).unwrap();
+
+        assert_eq!(
+            wire.lines(),
+            [
+                "MOVE /dav/cal/tasks/t1.ics HTTP/1.1",
+                "GET /dav/cal/tasks/t1.ics HTTP/1.1",
+                "PUT /dav/cal/work/t1.ics HTTP/1.1",
+                "DELETE /dav/cal/tasks/t1.ics HTTP/1.1",
+            ]
+        );
+    }
+
+    /// A delete finding its member gone is done: a create delivered by a
+    /// move took it along (pimdir SYNC §4).
+    #[test]
+    fn a_delete_of_a_member_already_gone_is_done() {
+        for status in ["404 Not Found", "410 Gone"] {
+            let (mut dav, _) = calendars(vec![reply(status, &[])]);
+            dav.delete_item("tasks", "t1.ics", Some("\"e1\"")).unwrap();
+        }
+
+        let (mut dav, _) = calendars(vec![reply("412 Precondition Failed", &[])]);
+        assert!(dav.delete_item("tasks", "t1.ics", Some("\"e1\"")).is_err());
+    }
+
+    /// A calendar outside the home set is addressed by its path, the id
+    /// io-webdav lists it under.
+    #[test]
+    fn a_calendar_outside_the_home_set_is_addressed_by_its_path() {
+        let (mut dav, wire) = DavClient::scripted(
+            DavKind::Cal,
+            "/caldav/v2/alice%40g/",
+            vec![reply("201 Created", &[])],
+        );
+
+        dav.move_items("/caldav/v2/x%40g/events", "events", &["t1.ics"])
+            .unwrap();
+
+        let request = &wire.requests()[0];
+        assert_eq!(
+            wire.lines(),
+            ["MOVE /caldav/v2/x%40g/events/t1.ics HTTP/1.1"]
+        );
+        assert!(
+            carries(
+                request,
+                "destination: https://dav.example.org/caldav/v2/alice%40g/events/t1.ics"
+            ),
+            "{request}"
+        );
     }
 }

@@ -3,8 +3,10 @@
 //! What each source declares it can do (pimdir STORAGE §15.6), derived
 //! from its backend and its configured rights alone, so a declaration
 //! needs no network. JMAP sources stay undeclared, which gates nothing.
-//! The one fact a server states, a calendar taking no tasks (`x-vtodo`),
-//! comes from the source's last listing, kept in the sidecar.
+//! A calendar taking no tasks (`x-vtodo`) is the provider's when it keeps
+//! tasks apart (Google, Graph), from the configuration too, and otherwise a
+//! fact a CalDAV server states, which comes from the source's last listing,
+//! kept in the sidecar.
 
 use std::collections::BTreeSet;
 
@@ -28,8 +30,14 @@ type Backend = fn(&str, bool) -> Support;
 /// One capability a source supports: its name, how well, and why.
 pub type SupportRow = (&'static str, PimdirSupport, Option<&'static str>);
 
-/// Why a calendar is declared to take no tasks.
-const NO_VTODO: &str = "the server's supported-calendar-component-set leaves VTODO out";
+/// Why a CalDAV calendar is declared to take no tasks.
+const NO_VTODO: &str = "the calendar's supported-calendar-component-set leaves VTODO out";
+
+/// Why a Google calendar takes no tasks.
+const GCAL_NO_VTODO: &str = "Google Calendar holds events: tasks live in Google Tasks";
+
+/// Why a Graph calendar takes no tasks.
+const GRAPH_NO_VTODO: &str = "Graph calendars hold events: tasks live in Microsoft To Do";
 
 /// Why a source-wide row refuses an intent its source performs on the
 /// collections it holds.
@@ -87,8 +95,8 @@ pub fn declaration(
 
 /// The `x-vtodo` rows of one source (pimdir STORAGE §15.6): `none` on each
 /// of `collections`, the store collections it syncs, that its last listing
-/// stated take no tasks (`taskless`). Nothing elsewhere: a collection with
-/// no row refuses no task.
+/// or the last listing of a target paired with it stated take no tasks
+/// (`taskless`). Nothing elsewhere: a collection with no row refuses no task.
 pub fn vtodo(collections: &[String], taskless: &BTreeSet<String>) -> Vec<PimdirCapability> {
     collections
         .iter()
@@ -100,6 +108,49 @@ pub fn vtodo(collections: &[String], taskless: &BTreeSet<String>) -> Vec<PimdirC
             detail: Some(NO_VTODO.to_string()),
         })
         .collect()
+}
+
+/// Why a source's provider keeps tasks out of its calendars, `None` for
+/// one whose calendars may take them: Google Calendar and Graph store
+/// events alone, their tasks living behind another API.
+fn keeps_tasks_apart(source: &SourceConfig) -> Option<&'static str> {
+    match source.backend {
+        SourceBackendConfig::Gcal(_) => Some(GCAL_NO_VTODO),
+        SourceBackendConfig::MsgraphCalendar(_) => Some(GRAPH_NO_VTODO),
+        _ => None,
+    }
+}
+
+/// The source-wide `x-vtodo` row of one source (pimdir STORAGE §15.6),
+/// from the configuration alone: `none` where its provider keeps tasks
+/// apart, or the provider of one of `targets`, by name, which every calendar
+/// of the source is copied to. `None` elsewhere, and for a source syncing
+/// no calendar (an undeclared JMAP one among them).
+pub fn vtodo_wide(
+    source: &SourceConfig,
+    targets: &[(&str, &SourceConfig)],
+) -> Option<PimdirCapability> {
+    let calendars = matches!(
+        source.backend,
+        SourceBackendConfig::Caldav(_)
+            | SourceBackendConfig::Gcal(_)
+            | SourceBackendConfig::MsgraphCalendar(_)
+    );
+    if !calendars {
+        return None;
+    }
+    let detail = match keeps_tasks_apart(source) {
+        Some(why) => why.to_string(),
+        None => targets.iter().find_map(|(name, target)| {
+            keeps_tasks_apart(target).map(|why| format!("copied to target {name}: {why}"))
+        })?,
+    };
+    Some(PimdirCapability {
+        collection: None,
+        name: X_VTODO.to_string(),
+        support: PimdirSupport::None,
+        detail: Some(detail),
+    })
 }
 
 /// What one source can do, a row per capability of its kind, from its
@@ -592,6 +643,38 @@ mod tests {
             Some("collection.create is disabled")
         );
     }
+    /// Google and Graph keep tasks apart, so their calendars, and those a
+    /// source copies to them, take none; CalDAV says so per calendar, and a
+    /// source of another kind gets no row.
+    #[test]
+    fn a_provider_keeping_tasks_apart_declares_none_source_wide() {
+        let gcal_row = vtodo_wide(&gcal(), &[]).unwrap();
+        assert_eq!(gcal_row.name, X_VTODO);
+        assert_eq!(gcal_row.collection, None);
+        assert_eq!(gcal_row.support, PimdirSupport::None);
+        assert_eq!(gcal_row.detail.as_deref(), Some(GCAL_NO_VTODO));
+        let graph_row = vtodo_wide(&msgraph_calendar(), &[]).unwrap();
+        assert_eq!(graph_row.detail.as_deref(), Some(GRAPH_NO_VTODO));
+
+        assert_eq!(vtodo_wide(&caldav(), &[]), None);
+        let target = gcal();
+        let copied = vtodo_wide(&caldav(), &[("google", &target)]).unwrap();
+        assert_eq!(
+            copied.detail.as_deref(),
+            Some(
+                "copied to target google: Google Calendar holds events: tasks live in Google Tasks"
+            )
+        );
+
+        let imap = source(
+            "imap.server = \"imap://imap.example.org\"\n\
+             imap.sasl.plain.username = \"user\"\n\
+             imap.sasl.plain.password.raw = \"pw\"",
+            "imap",
+        );
+        assert_eq!(vtodo_wide(&imap, &[("google", &target)]), None);
+    }
+
     #[test]
     fn a_source_with_no_calendar_yet_declares_its_intents_nowhere() {
         let declaration = declaration(&gcal(), false, &[]);

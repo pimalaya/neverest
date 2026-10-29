@@ -87,7 +87,7 @@ use crate::{
         },
         run_verb, run_verb_paged, source_id,
         state::{LookedUpRoles, StoreState},
-        storage::{HydrationSide, hydration_targets, load_side, projection_view},
+        storage::{HydrationSide, hydration_targets, load_side, projection_view, register_syncing},
         submit,
     },
     sync::{
@@ -541,6 +541,7 @@ pub fn run(
                 &work_dir,
                 dry_run,
                 connections,
+                &mut state,
                 &mut report,
             )
         };
@@ -605,8 +606,9 @@ pub fn run(
 
 /// Declares what every source of the account can do (pimdir STORAGE §15.6),
 /// replacing what an earlier run or configuration declared: what its
-/// backend and rights allow, and `x-vtodo` `none` on the calendars its last
-/// listing stated take no tasks, which `state` keeps.
+/// backend and rights allow, and `x-vtodo` `none` source-wide where its
+/// provider or a target's keeps tasks apart, else on the calendars its last
+/// listings stated take no tasks, which `state` keeps.
 pub(crate) fn declare(
     dir: &Path,
     account: &str,
@@ -615,6 +617,12 @@ pub(crate) fn declare(
     state: &StoreState,
 ) -> Result<()> {
     let sources = config.sources()?;
+    let endpoints = config.endpoints()?;
+    let targets: Vec<(&str, &SourceConfig)> = mode
+        .targets
+        .iter()
+        .filter_map(|name| Some((name.as_str(), endpoints.get(name)?)))
+        .collect();
     let first = mode
         .sources
         .first()
@@ -641,8 +649,16 @@ pub(crate) fn declare(
             }
         }
         let mut capabilities = capability::declaration(source, mode.one_way, &held);
-        if let Some(taskless) = state.taskless.get(name) {
-            capabilities.extend(capability::vtodo(&held, taskless));
+        // NOTE: a source-wide `none` already covers every calendar, and an
+        // undeclared source gets no row, which would refuse all it lacks.
+        match capability::vtodo_wide(source, &targets) {
+            Some(wide) => capabilities.push(wide),
+            None if capabilities.is_empty() => {}
+            None => {
+                if let Some(taskless) = state.taskless.get(name) {
+                    capabilities.extend(capability::vtodo(&held, taskless));
+                }
+            }
         }
         store
             .declare(name, &capabilities)
@@ -695,9 +711,11 @@ fn run_targets(
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
+    state: &mut StoreState,
     report: &mut SyncOutput,
 ) -> Result<()> {
     let relay = mode.streams(endpoints);
+    let mut taskless = PairTaskless::new(state, source_name);
 
     for target_name in &mode.targets {
         run_pair(
@@ -716,11 +734,62 @@ fn run_targets(
             work_dir,
             dry_run,
             connections,
+            state,
+            &mut taskless,
             report,
         )?;
     }
 
+    // NOTE: every target listed, so what they and the source stated
+    // replaces the record, a calendar no longer stated dropping out.
+    record_taskless(state, source_name, &taskless.listed);
     Ok(())
+}
+
+/// What the pairs of one source stated of tasks this run, as hub ids of
+/// its namespace: the record before the run, kept while a target is still
+/// to list, and what the listings of the pairs read.
+struct PairTaskless {
+    previous: BTreeSet<String>,
+    listed: BTreeSet<String>,
+}
+
+impl PairTaskless {
+    fn new(state: &StoreState, source: &str) -> Self {
+        Self {
+            previous: state.taskless.get(source).cloned().unwrap_or_default(),
+            listed: BTreeSet::new(),
+        }
+    }
+}
+
+/// Records what one pair's listings state of tasks under the source, the
+/// source as syncing each hub collection of `common` ([`register_syncing`]),
+/// and declares the account again, before any item of the pair moves
+/// (pimdir STORAGE §15.6): a task in a hub calendar crosses to the target,
+/// so a calendar either endpoint keeps from tasks takes none. A target
+/// stays undeclared and unregistered. Until every target has listed, the
+/// record only grows, so a run stopping early drops nothing a target it
+/// did not reach stated. A dry run registers and declares nothing.
+fn record_pair_listing(
+    declaring: &Declaring<'_>,
+    state: &mut StoreState,
+    namespace: &str,
+    taskless: &mut PairTaskless,
+    listings: [&[Collection]; 2],
+    common: &[String],
+    dry_run: bool,
+) {
+    for listed in listings {
+        taskless.listed.extend(taskless_ids(namespace, listed));
+    }
+    let known = taskless.previous.union(&taskless.listed).cloned().collect();
+    record_taskless(state, namespace, &known);
+
+    if !dry_run {
+        declaring.register(namespace, common);
+        declaring.again(state);
+    }
 }
 
 /// One source against one target, propagation falling out of the shared hub.
@@ -741,6 +810,8 @@ fn run_pair(
     work_dir: &Path,
     dry_run: bool,
     connections: usize,
+    state: &mut StoreState,
+    taskless: &mut PairTaskless,
     report: &mut SyncOutput,
 ) -> Result<()> {
     let left_filter = left_config.collection().filter.clone();
@@ -812,8 +883,18 @@ fn run_pair(
     }
 
     let s = Spinner::start("Listing collections…");
-    let left_collections = list_collections(left.pool.primary())?;
-    let right_collections = list_collections(right.pool.primary())?;
+    let left_listed = left
+        .pool
+        .primary()
+        .list_collections(false)
+        .context("List collections error")?;
+    let right_listed = right
+        .pool
+        .primary()
+        .list_collections(false)
+        .context("List collections error")?;
+    let left_collections = names_by_id(&left_listed);
+    let right_collections = names_by_id(&right_listed);
     s.success(format!(
         "Listed collections ({} on {left_name}, {} on {right_name})",
         left_collections.len(),
@@ -875,15 +956,43 @@ fn run_pair(
     }
     let common: BTreeSet<String> = present_left.intersection(&present_right).cloned().collect();
 
-    let total = common.len();
-    for (index, name) in common.iter().enumerate() {
-        let collection = &hub_id(namespace, name);
+    // NOTE: every collection in the store and named first, so the source's
+    // registration and the declaration that follow the listing hold it.
+    let mut syncing = Vec::with_capacity(common.len());
+    for name in &common {
+        let collection = hub_id(namespace, name);
+        // NOTE: its sync declares the kind again and reports a failure.
+        let known = left_store.ensure_collection(&collection, media_type);
         declare_name(
             &left_store,
-            collection,
+            &collection,
             name,
             &[&left_collections, &right_collections],
         );
+        match known {
+            Ok(_) => syncing.push(collection),
+            Err(err) => warn!("cannot declare the kind of {collection}: {err}"),
+        }
+    }
+    let declaring = Declaring {
+        dir: work_dir,
+        account: account_name,
+        config: account_config,
+        mode,
+    };
+    record_pair_listing(
+        &declaring,
+        state,
+        namespace,
+        taskless,
+        [&left_listed, &right_listed],
+        &syncing,
+        dry_run,
+    );
+
+    let total = common.len();
+    for (index, name) in common.iter().enumerate() {
+        let collection = &hub_id(namespace, name);
         let label = format!("[{}/{total}] Syncing {name}", index + 1);
         let s = Spinner::start(label.clone());
         let progress = CollectionProgress {
@@ -1166,10 +1275,6 @@ fn run_local(
         collections.len()
     ));
 
-    // NOTE: kept for every later declaration, the one before the next run's
-    // drain included, which lists nothing (pimdir STORAGE §15.6).
-    record_taskless(state, source_name, &listed);
-
     let filter = if declare_only {
         CollectionFilter::All
     } else {
@@ -1194,15 +1299,27 @@ fn run_local(
     let kept = run_order(&kept, &collections, &roles);
     let filtered: Vec<String> = kept.iter().map(|id| hub_id(source_name, id)).collect();
 
-    for (collection, id) in filtered.iter().zip(&kept) {
-        stores[0]
-            .ensure_collection(collection, media_type)
-            .with_context(|| format!("Declare kind for {collection}"))?;
-        declare_name(&stores[0], collection, id, &[&collections]);
-        if stated.is_some() {
-            declare_role(&stores[0], collection, roles.get(id).map(String::as_str));
-        }
-    }
+    let listing = Listing {
+        listed: &listed,
+        names: &collections,
+        kept: &kept,
+        roles: stated.as_ref(),
+    };
+    let declaring = Declaring {
+        dir: work_dir,
+        account: account_name,
+        config: account_config,
+        mode,
+    };
+    record_listing(
+        &stores[0],
+        &declaring,
+        state,
+        source_name,
+        media_type,
+        &listing,
+        dry_run,
+    )?;
 
     if declare_only {
         return Ok(());
@@ -1249,6 +1366,86 @@ fn run_local(
         shared.then_some(&filtered[..]),
         &gone,
     )
+}
+
+/// What a declaration reads: the store, the account and its mode.
+struct Declaring<'a> {
+    dir: &'a Path,
+    account: &'a str,
+    config: &'a AccountConfig,
+    mode: &'a AccountMode,
+}
+
+impl Declaring<'_> {
+    /// Declares the account's sources again (see [`declare`]) from `state`,
+    /// a failure logged: the declaration before the drain still stands.
+    fn again(&self, state: &StoreState) {
+        if let Err(err) = declare(self.dir, self.account, self.config, self.mode, state) {
+            warn!("cannot declare what the sources hold after a listing: {err:#}");
+        }
+    }
+
+    /// Records `source` as syncing `collections` from their listing on
+    /// ([`register_syncing`]), so the declaration that follows holds there
+    /// before their first checkpoint, a failure logged: the first item sync
+    /// still records it.
+    fn register(&self, source: &str, collections: &[String]) {
+        match register_syncing(self.dir, source, collections) {
+            Ok(0) => {}
+            Ok(n) => debug!("{source} registered as syncing {n} new collection(s)"),
+            Err(err) => warn!("cannot record {source} as syncing what it listed: {err:#}"),
+        }
+    }
+}
+
+/// What one source's listing answered, as a run keeps it.
+struct Listing<'a> {
+    /// Every collection listed.
+    listed: &'a [Collection],
+    /// Their names, by id.
+    names: &'a BTreeMap<String, String>,
+    /// The ids the run keeps, in run order.
+    kept: &'a [String],
+    /// The roles the source states, by id, `None` when a lookup failed.
+    roles: Option<&'a BTreeMap<String, String>>,
+}
+
+/// Records what a local listing discovered before any item of it moves:
+/// the kind, name and role of each collection kept, the calendars the
+/// server states take no tasks, kept for every later declaration (the one
+/// before the next run's drain included, which lists nothing), the source
+/// as syncing each collection kept ([`register_syncing`]), then the
+/// declaration again, so a calendar met for the first time is gated from
+/// the listing on rather than from its first item sync or the end of the
+/// run (pimdir STORAGE §15.6). A dry run registers and declares nothing.
+fn record_listing(
+    store: &PimdirSourceStore,
+    declaring: &Declaring<'_>,
+    state: &mut StoreState,
+    source: &str,
+    media_type: &str,
+    listing: &Listing<'_>,
+    dry_run: bool,
+) -> Result<()> {
+    record_taskless(state, source, &taskless_ids(source, listing.listed));
+
+    for id in listing.kept {
+        let collection = &hub_id(source, id);
+        store
+            .ensure_collection(collection, media_type)
+            .with_context(|| format!("Declare kind for {collection}"))?;
+        declare_name(store, collection, id, &[listing.names]);
+        if let Some(roles) = listing.roles {
+            declare_role(store, collection, roles.get(id).map(String::as_str));
+        }
+    }
+
+    if !dry_run {
+        let kept: Vec<String> = listing.kept.iter().map(|id| hub_id(source, id)).collect();
+        declaring.register(source, &kept);
+        declaring.again(state);
+    }
+    Ok(())
 }
 
 /// Performs what frontends queued for one source and, in a paired account,
@@ -4514,13 +4711,11 @@ fn source_ctx<'a>(
 /// The two coincide on IMAP and Graph and part ways on DAV, where a segment is
 /// routinely a UUID and the name is a `DAV:displayname`. Every hub id and wire
 /// call is built from the key; nothing reads the value back.
-fn list_collections(client: &mut Client) -> Result<BTreeMap<String, String>> {
-    Ok(client
-        .list_collections(false)
-        .context("List collections error")?
-        .into_iter()
-        .map(|collection| (collection.id, collection.name))
-        .collect())
+fn names_by_id(listed: &[Collection]) -> BTreeMap<String, String> {
+    listed
+        .iter()
+        .map(|collection| (collection.id.clone(), collection.name.clone()))
+        .collect()
 }
 
 /// Records what a collection is called, the id staying what addresses it.
@@ -4593,19 +4788,23 @@ fn stated_roles(
     Some(roles)
 }
 
-/// Records the collections of `listed` whose server states they take no
-/// tasks, by hub id, in place of what the source's previous listing stated.
-fn record_taskless(state: &mut StoreState, source: &str, listed: &[Collection]) {
-    let taskless: BTreeSet<String> = listed
+/// The hub ids, in `namespace`, of the collections of `listed` whose server
+/// states they take no tasks.
+fn taskless_ids(namespace: &str, listed: &[Collection]) -> BTreeSet<String> {
+    listed
         .iter()
         .filter(|collection| collection.takes_tasks == Some(false))
-        .map(|collection| hub_id(source, &collection.id))
-        .collect();
+        .map(|collection| hub_id(namespace, &collection.id))
+        .collect()
+}
 
+/// Records `taskless`, hub ids, as the calendars the source's listings
+/// stated take no tasks, in place of what its previous listings stated.
+fn record_taskless(state: &mut StoreState, source: &str, taskless: &BTreeSet<String>) {
     if taskless.is_empty() {
         state.taskless.remove(source);
     } else {
-        state.taskless.insert(source.to_owned(), taskless);
+        state.taskless.insert(source.to_owned(), taskless.clone());
     }
 }
 
@@ -6825,11 +7024,8 @@ mod tests {
         };
 
         let mut state = StoreState::default();
-        record_taskless(
-            &mut state,
-            "caldav",
-            &listed([Some(false), Some(true), None]),
-        );
+        let stated = taskless_ids("caldav", &listed([Some(false), Some(true), None]));
+        record_taskless(&mut state, "caldav", &stated);
         state.save(dir.path()).unwrap();
         let state = StoreState::load(dir.path()).unwrap();
         declare(dir.path(), "live", &config, &mode, &state).unwrap();
@@ -6850,10 +7046,398 @@ mod tests {
 
         // NOTE: a later listing replaces what the earlier one stated.
         let mut state = state;
-        record_taskless(&mut state, "caldav", &listed([None, Some(true), None]));
+        let stated = taskless_ids("caldav", &listed([None, Some(true), None]));
+        record_taskless(&mut state, "caldav", &stated);
         assert!(state.taskless.is_empty());
         declare(dir.path(), "live", &config, &mode, &state).unwrap();
         queue_task(dir.path(), "caldav/events").unwrap();
+    }
+
+    const CALDAV: &str = "caldav.server = \"https://dav.example.org/\"\n\
+                          caldav.auth.basic.username = \"user\"\n\
+                          caldav.auth.basic.password.raw = \"pw\"\n";
+
+    /// A calendar as a listing answers it, stating whether it takes tasks.
+    fn calendar(id: &str, takes_tasks: Option<bool>) -> Collection {
+        Collection {
+            id: id.into(),
+            name: id.into(),
+            total: None,
+            unread: None,
+            role: None,
+            takes_tasks,
+        }
+    }
+
+    /// The calendars `source` of account `live` syncs, each holding one
+    /// event it binds, as its first item sync leaves them.
+    fn synced(dir: &Path, source: &str, collections: &[&str]) {
+        let mut store = PimdirStore::open(dir)
+            .unwrap()
+            .for_account("live")
+            .for_source(source);
+        for collection in collections {
+            bound_calendar(&mut store, collection);
+        }
+    }
+
+    /// The refusal of a task queued into `collection`, which must be one.
+    fn refused_task(dir: &Path, collection: &str) -> io_pimdir::capability::PimdirRefusal {
+        match queue_task(dir, collection) {
+            Err(PimdirError::Unsupported(refusal)) => refusal,
+            other => panic!("a task into {collection} is refused at the gate: {other:?}"),
+        }
+    }
+
+    /// Google Calendar and Graph keep tasks apart: their calendars refuse a
+    /// task at the gate from the configuration alone, no listing needed.
+    #[test]
+    fn a_google_or_graph_calendar_refuses_a_task_before_it_is_queued() {
+        let sources = [
+            (
+                "gcal.auth.token.raw = \"token\"",
+                "gcal",
+                "gcal/primary",
+                "Google Tasks",
+            ),
+            (
+                "msgraph-calendar.auth.token.raw = \"token\"",
+                "msgraph-calendar",
+                "msgraph-calendar/AAMk",
+                "Microsoft To Do",
+            ),
+        ];
+        for (toml, source, collection, tasks) in sources {
+            let dir = tempfile::tempdir().unwrap();
+            synced(dir.path(), source, &[collection]);
+            let config: AccountConfig = toml::from_str(toml).unwrap();
+            let mode = config.mode().unwrap();
+            declare(dir.path(), "live", &config, &mode, &StoreState::default()).unwrap();
+
+            let refusal = refused_task(dir.path(), collection);
+            assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+            assert_eq!(refusal.source, source);
+            assert!(refusal.detail.unwrap().contains(tasks));
+            let reader = PimdirReader::open(dir.path()).unwrap();
+            assert!(!reader.accepts_vtodo(collection).unwrap());
+        }
+    }
+
+    /// A task in a hub calendar crosses to the target, so a calendar the
+    /// target's server keeps from tasks refuses one, under the source's
+    /// declaration: the target stays undeclared.
+    #[test]
+    fn a_target_s_events_only_calendar_refuses_a_task_before_it_is_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        synced(dir.path(), "caldav", &["caldav/events", "caldav/work"]);
+        synced(dir.path(), "dav", &["caldav/events", "caldav/work"]);
+        let config: AccountConfig = toml::from_str(&format!(
+            "{CALDAV}targets.dav.caldav.server = \"https://other.example.org/\"\n\
+             targets.dav.caldav.auth.basic.username = \"user\"\n\
+             targets.dav.caldav.auth.basic.password.raw = \"pw\""
+        ))
+        .unwrap();
+        let mode = config.mode().unwrap();
+        let declaring = Declaring {
+            dir: dir.path(),
+            account: "live",
+            config: &config,
+            mode: &mode,
+        };
+
+        let mut state = StoreState::default();
+        let earlier = BTreeSet::from([String::from("caldav/gone")]);
+        state.taskless.insert("caldav".into(), earlier);
+        let mut taskless = PairTaskless::new(&state, "caldav");
+        let source = [calendar("events", None), calendar("work", Some(true))];
+        let target = [calendar("events", Some(false)), calendar("work", None)];
+        record_pair_listing(
+            &declaring,
+            &mut state,
+            "caldav",
+            &mut taskless,
+            [&source, &target],
+            &[],
+            false,
+        );
+
+        let refusal = refused_task(dir.path(), "caldav/events");
+        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(refusal.source, "caldav");
+        queue_task(dir.path(), "caldav/work").unwrap();
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert!(!reader.accepts_vtodo("caldav/events").unwrap());
+        let syncing = reader.capabilities("caldav/events").unwrap();
+        let target = syncing.iter().find(|source| source.source == "dav");
+        assert!(
+            target.unwrap().declared.is_none(),
+            "a target stays undeclared"
+        );
+
+        // NOTE: until every target listed, the record keeps what the
+        // earlier run stated.
+        let known = BTreeSet::from([String::from("caldav/events"), "caldav/gone".into()]);
+        assert_eq!(state.taskless["caldav"], known);
+    }
+
+    /// A Google target keeps every calendar of the source it copies from
+    /// tasks, from the configuration alone.
+    #[test]
+    fn a_google_target_keeps_the_source_s_calendars_from_tasks() {
+        let dir = tempfile::tempdir().unwrap();
+        synced(dir.path(), "caldav", &["caldav/events"]);
+        let config: AccountConfig = toml::from_str(&format!(
+            "{CALDAV}targets.google.gcal.auth.token.raw = \"token\""
+        ))
+        .unwrap();
+        let mode = config.mode().unwrap();
+        declare(dir.path(), "live", &config, &mode, &StoreState::default()).unwrap();
+
+        let refusal = refused_task(dir.path(), "caldav/events");
+        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(refusal.source, "caldav");
+        assert!(refusal.detail.unwrap().contains("target google"));
+    }
+
+    /// A calendar a listing meets for the first time is gated from its
+    /// first item sync on, before the run's last declaration.
+    #[test]
+    fn a_calendar_met_mid_run_is_gated_from_its_first_item_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let config: AccountConfig = toml::from_str(CALDAV).unwrap();
+        let mode = config.mode().unwrap();
+        let declaring = Declaring {
+            dir: dir.path(),
+            account: "live",
+            config: &config,
+            mode: &mode,
+        };
+        // NOTE: the declaration before the drain, from a sidecar that never
+        // met the calendar.
+        let mut state = StoreState::default();
+        declare(dir.path(), "live", &config, &mode, &state).unwrap();
+
+        let store = open_store(dir.path(), "caldav", "live").unwrap();
+        let listed = [
+            calendar("events", Some(false)),
+            calendar("work", Some(true)),
+        ];
+        let names = names_by_id(&listed);
+        let kept = [String::from("events"), String::from("work")];
+        let listing = Listing {
+            listed: &listed,
+            names: &names,
+            kept: &kept,
+            roles: None,
+        };
+        record_listing(
+            &store,
+            &declaring,
+            &mut state,
+            "caldav",
+            "text/calendar",
+            &listing,
+            false,
+        )
+        .unwrap();
+        drop(store);
+        synced(dir.path(), "caldav", &["caldav/events", "caldav/work"]);
+
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert!(!reader.accepts_vtodo("caldav/events").unwrap());
+        assert!(reader.accepts_vtodo("caldav/work").unwrap());
+        drop(reader);
+        let refusal = refused_task(dir.path(), "caldav/events");
+        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+    }
+
+    /// A Google calendar outside the home set, as io-webdav lists it: by
+    /// its path.
+    const GOOGLE_EVENTS: &str = "/caldav/v2/x%40g/events";
+
+    /// Records a local listing of `listed`, every collection kept, as
+    /// `run_local` does.
+    fn record_local(dir: &Path, state: &mut StoreState, listed: &[Collection]) {
+        let config: AccountConfig = toml::from_str(CALDAV).unwrap();
+        let mode = config.mode().unwrap();
+        let declaring = Declaring {
+            dir,
+            account: "live",
+            config: &config,
+            mode: &mode,
+        };
+        let store = open_store(dir, "caldav", "live").unwrap();
+        let names = names_by_id(listed);
+        let kept: Vec<String> = listed.iter().map(|c| c.id.clone()).collect();
+        let listing = Listing {
+            listed,
+            names: &names,
+            kept: &kept,
+            roles: None,
+        };
+        record_listing(
+            &store,
+            &declaring,
+            state,
+            "caldav",
+            "text/calendar",
+            &listing,
+            false,
+        )
+        .unwrap();
+    }
+
+    /// A calendar listed and not synced yet refuses a task right after the
+    /// listing: the source is recorded as syncing it, with no checkpoint,
+    /// so its declaration holds there (pimdir STORAGE §15.6). A calendar
+    /// outside the home set is one whose id is its path.
+    #[test]
+    fn a_listed_calendar_refuses_a_task_before_its_first_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = StoreState::default();
+        let listed = [
+            calendar(GOOGLE_EVENTS, Some(false)),
+            calendar("work", Some(true)),
+        ];
+
+        record_local(dir.path(), &mut state, &listed);
+
+        let collection = format!("caldav/{GOOGLE_EVENTS}");
+        let refusal = refused_task(dir.path(), &collection);
+        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(refusal.source, "caldav");
+        queue_task(dir.path(), "caldav/work").unwrap();
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert!(!reader.accepts_vtodo(&collection).unwrap());
+        assert_eq!(reader.collection_sources(&collection).unwrap(), ["caldav"]);
+        assert_eq!(state.taskless["caldav"], BTreeSet::from([collection]));
+    }
+
+    /// A listing records a source syncing a collection it holds no state
+    /// in, and leaves the checkpoint and coverage of one it does alone.
+    #[test]
+    fn a_listing_keeps_the_checkpoint_a_source_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open_store(dir.path(), "caldav", "live").unwrap();
+        store
+            .ensure_collection("caldav/work", "text/calendar")
+            .unwrap();
+        store
+            .write(vec![PimdirWriteOp::SetCheckpoint {
+                collection: PimdirCollectionId("caldav/work".into()),
+                checkpoint: PimdirCheckpoint(b"token-1".to_vec()),
+            }])
+            .unwrap();
+        drop(store);
+
+        let mut state = StoreState::default();
+        let listed = [
+            calendar("work", Some(true)),
+            calendar("events", Some(false)),
+        ];
+        record_local(dir.path(), &mut state, &listed);
+        record_local(dir.path(), &mut state, &listed);
+
+        let store = open_store(dir.path(), "caldav", "live").unwrap();
+        let load = |collection: &str| {
+            store
+                .load(
+                    &PimdirCollectionId(collection.into()),
+                    &PimdirLoadScope::All,
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            load("caldav/work").checkpoint,
+            Some(PimdirCheckpoint(b"token-1".to_vec())),
+            "a checkpoint is never overwritten",
+        );
+        let events = load("caldav/events");
+        assert_eq!(events.checkpoint, None, "no state, a first round");
+        assert!(events.coverage.is_none() && events.round.is_none());
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert_eq!(
+            reader.collection_sources("caldav/events").unwrap(),
+            ["caldav"]
+        );
+    }
+
+    /// A pair records its source as syncing the collections it is about to
+    /// sync, so a target's events-only calendar refuses a task from the
+    /// listing on; the target stays unrecorded and undeclared.
+    #[test]
+    fn a_pair_s_listed_calendar_refuses_a_task_before_its_first_sync() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = open_store(dir.path(), "caldav", "live").unwrap();
+        for collection in ["caldav/events", "caldav/work"] {
+            store
+                .ensure_collection(collection, "text/calendar")
+                .unwrap();
+        }
+        drop(store);
+        let config: AccountConfig = toml::from_str(&format!(
+            "{CALDAV}targets.dav.caldav.server = \"https://other.example.org/\"\n\
+             targets.dav.caldav.auth.basic.username = \"user\"\n\
+             targets.dav.caldav.auth.basic.password.raw = \"pw\""
+        ))
+        .unwrap();
+        let mode = config.mode().unwrap();
+        let declaring = Declaring {
+            dir: dir.path(),
+            account: "live",
+            config: &config,
+            mode: &mode,
+        };
+
+        let mut state = StoreState::default();
+        let mut taskless = PairTaskless::new(&state, "caldav");
+        let source = [calendar("events", None), calendar("work", None)];
+        let target = [calendar("events", Some(false)), calendar("work", None)];
+        let common = [String::from("caldav/events"), String::from("caldav/work")];
+        record_pair_listing(
+            &declaring,
+            &mut state,
+            "caldav",
+            &mut taskless,
+            [&source, &target],
+            &common,
+            false,
+        );
+
+        let refusal = refused_task(dir.path(), "caldav/events");
+        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(refusal.source, "caldav");
+        queue_task(dir.path(), "caldav/work").unwrap();
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert_eq!(
+            reader.collection_sources("caldav/events").unwrap(),
+            ["caldav"]
+        );
+    }
+
+    /// A configured filter names a calendar outside the home set by the id
+    /// it is listed under, its path.
+    #[test]
+    fn a_filter_names_a_calendar_by_its_path() {
+        let collections = BTreeMap::from([
+            (String::from(GOOGLE_EVENTS), String::from("Team")),
+            (String::from("events"), String::from("Primary")),
+        ]);
+
+        let include = CollectionFilter::Include(vec![GOOGLE_EVENTS.into()]);
+        assert_eq!(
+            filter_collections(&collections, &include),
+            BTreeSet::from([String::from(GOOGLE_EVENTS)])
+        );
+        let exclude = CollectionFilter::Exclude(vec![GOOGLE_EVENTS.into()]);
+        assert_eq!(
+            filter_collections(&collections, &exclude),
+            BTreeSet::from([String::from("events")])
+        );
+        assert_eq!(
+            wire_name("caldav", &hub_id("caldav", GOOGLE_EVENTS)),
+            GOOGLE_EVENTS
+        );
     }
 
     #[test]

@@ -34,7 +34,9 @@ use io_pimdir::{
     hash::PimdirHasher,
     load::PimdirLoaded,
     object::PimdirHash,
-    placement::{PimdirFlags, PimdirHandle, PimdirLinkId, PimdirOrigin, PimdirSortKey},
+    placement::{
+        PimdirFlags, PimdirHandle, PimdirLinkId, PimdirOrigin, PimdirSortKey, PimdirSuperseded,
+    },
     remote::{
         PimdirEnumerate, PimdirEnumerated, PimdirFetchedBody, PimdirFetchedItem, PimdirHead,
         PimdirHeads, PimdirPushOutcome, PimdirPushResult, PimdirRemote, PimdirRemoteItem,
@@ -637,17 +639,25 @@ impl PimdirRemote for PimRemote<'_> {
                     link_id,
                     flags,
                     origin,
+                    supersedes,
                     object,
                 } => {
                     let link = link_id
                         .as_ref()
                         .map(|link| self.kind.split_link_id(link))
                         .unwrap_or_default();
-                    match origin {
-                        Some(origin) => {
+                    let moved = match (&supersedes, &object) {
+                        (Some(superseded), Some(object)) => {
+                            self.supersede(&collection, &handle, superseded, object, link)
+                        }
+                        _ => None,
+                    };
+                    match (moved, origin) {
+                        (Some(moved), _) => moved,
+                        (None, Some(origin)) => {
                             self.copy(&collection, handle, &flags, &origin, object, link)
                         }
-                        None => self.append(&collection, handle, &flags, object, link),
+                        (None, None) => self.append(&collection, handle, &flags, object, link),
                     }
                 }
                 PimdirChangeKind::Update {
@@ -1238,19 +1248,126 @@ impl PimRemote<'_> {
                     return self.reject(collection, handle, "append", format!("{err:#}"));
                 }
 
-                let uid = link.hint.unwrap_or(handle.as_str());
-                warn!("append to {collection} refused: it already holds UID {uid}");
-                self.refused.push(RefusedCreate {
-                    collection: collection.to_string(),
-                    uid: uid.to_string(),
-                    handle: handle.0.clone(),
-                });
-
-                return rejected_bare(handle);
+                return self.refuse_uid(collection, handle, "append", link);
             }
         };
 
         self.assign(collection, handle, "append", written)
+    }
+
+    /// Records a create refused because `collection` already holds its
+    /// `UID`, answering the engine's rejection.
+    fn refuse_uid(
+        &mut self,
+        collection: &str,
+        handle: PimdirHandle,
+        action: &'static str,
+        link: LinkId<'_>,
+    ) -> PimdirPushResult {
+        let uid = link.hint.unwrap_or(handle.as_str());
+        warn!("{action} to {collection} refused: it already holds UID {uid}");
+        self.refused.push(RefusedCreate {
+            collection: collection.to_string(),
+            uid: uid.to_string(),
+            handle: handle.0.clone(),
+        });
+
+        rejected_bare(handle)
+    }
+
+    /// Delivers a create superseding a member of its own identity by moving
+    /// that member into `collection`, then writing `object` over it (pimdir
+    /// SYNC §3, §4), so the `UID` never lives twice on the server: Fastmail,
+    /// keeping one per account, refuses an upload while the source holds it.
+    ///
+    /// The move is gated on the member's last-synced revision, and the write
+    /// on the ETag the move answered, unconditional when it answered none.
+    /// Accepted under the moved member's handle and the revision the write
+    /// left. `None` when the backend or its server cannot move it (CardDAV,
+    /// Google's 404, a 405 or 501): the caller uploads the body as for any
+    /// create. A refused move rejects the create as a refused upload does,
+    /// a duplicate `UID` with its own report entry.
+    fn supersede(
+        &mut self,
+        collection: &str,
+        handle: &PimdirHandle,
+        superseded: &PimdirSuperseded,
+        object: &PimdirHash,
+        link: LinkId<'_>,
+    ) -> Option<PimdirPushResult> {
+        // NOTE: the body is opened first, so one missing moves nothing.
+        let (reader, len) = match self.body(object) {
+            Ok(body) => body,
+            Err(reason) => return Some(self.reject(collection, handle.clone(), "move", reason)),
+        };
+
+        let from = wire_name(&self.namespace, superseded.collection.as_str()).to_string();
+        let moved = self.pool.primary().move_item(
+            &from,
+            collection,
+            superseded.handle.as_str(),
+            superseded.if_match.as_deref(),
+        );
+        let moved = match moved {
+            Ok(Some(moved)) => moved,
+            Ok(None) => {
+                debug!(
+                    "{} cannot move from {from} into {collection}, uploading it",
+                    superseded.handle.as_str()
+                );
+                return None;
+            }
+            Err(err) if is_duplicate_uid(&err) => {
+                return Some(self.refuse_uid(collection, handle.clone(), "move", link));
+            }
+            Err(err) => {
+                return Some(self.reject(collection, handle.clone(), "move", format!("{err:#}")));
+            }
+        };
+
+        // NOTE: a write failing after the move leaves the member in the
+        // target under its old body, and the create pending: the target's
+        // next listing names it, which lands the create (pimdir SYNC §6).
+        let written = self.pool.primary().update_item_stream(
+            collection,
+            &moved.id,
+            reader,
+            len,
+            moved.revision.as_deref(),
+        );
+        let result = match written {
+            Ok(revision) => self.assign(
+                collection,
+                handle.clone(),
+                "move",
+                WrittenItem {
+                    id: moved.id,
+                    revision,
+                },
+            ),
+            Err(err) => {
+                let reason = format!("moved as {}, its body not written: {err:#}", moved.id);
+                self.reject(collection, handle.clone(), "move", reason)
+            }
+        };
+        Some(result)
+    }
+
+    /// Opens a stored body for an upload, with its length, or says why it
+    /// cannot be.
+    fn body(&self, object: &PimdirHash) -> Result<(std::fs::File, usize), String> {
+        let reader = match self.blob.reader(object) {
+            Ok(Some(file)) => file,
+            Ok(None) => {
+                return Err(format!(
+                    "its body {} is missing from the blob tree",
+                    object.as_str()
+                ));
+            }
+            Err(err) => return Err(format!("{err:#}")),
+        };
+        let len = reader.metadata().map_err(|err| format!("{err:#}"))?.len() as usize;
+        Ok((reader, len))
     }
 
     /// Creates a member by server-side copy from `origin` (pimdir SYNC §4)
@@ -1739,5 +1856,274 @@ mod scan_tests {
             assert_eq!(summary.size, Some(body.len() as u64), "{label}");
             assert_eq!(summary.attachment, None, "{label}: the store's to state");
         }
+    }
+}
+
+#[cfg(all(test, feature = "dav"))]
+mod push_tests {
+    use std::sync::{Arc, atomic::AtomicU64};
+
+    use io_pimdir::client::PimdirStore;
+    use pimalaya_stream::tls::Tls;
+    use url::Url;
+
+    use super::*;
+    use crate::{
+        account::{DavAccount, SourceAccount, SourceAccountBackend},
+        dav::client::{
+            DavClient, DavKind,
+            scripted::{Wire, answer, reply},
+        },
+        throttle::Throttle,
+    };
+
+    const TODO: &str = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t1\r\n\
+                        SUMMARY:Call Ann\r\nCATEGORIES:work\r\n\
+                        END:VTODO\r\nEND:VCALENDAR\r\n";
+
+    /// A Google calendar's id, outside the home set: its path.
+    const TARGET: &str = "/caldav/v2/team%40g/events";
+
+    /// The pool of a CalDAV source answering `replies`, its home set
+    /// `/caldav/v2/alice%40g/`.
+    fn caldav(replies: Vec<String>) -> (Pool, Wire) {
+        let (client, wire) = DavClient::scripted(DavKind::Cal, "/caldav/v2/alice%40g/", replies);
+        let account = SourceAccount {
+            backend: SourceAccountBackend::Dav(DavAccount {
+                kind: DavKind::Cal,
+                server: Url::parse("https://dav.example.org/").unwrap(),
+                tls: Tls::default(),
+                auth: io_webdav::rfc4918::WebdavAuth::None,
+            }),
+            #[cfg(feature = "smtp")]
+            smtp: None,
+            throttle: Arc::new(Throttle::new("caldav")),
+            downloaded: Arc::new(AtomicU64::new(0)),
+        };
+        (Pool::of(account, Client::Dav(Box::new(client))), wire)
+    }
+
+    /// The blobs of a store holding the task's body, and its hash.
+    fn stored(dir: &std::path::Path) -> (PimdirBlobs, PimdirHash) {
+        let blobs = PimdirStore::open(dir).unwrap().for_source("caldav").blobs();
+        let hash = blobs.hash(TODO.as_bytes());
+        let mut writer = blobs.writer().unwrap();
+        writer.write_all(TODO.as_bytes()).unwrap();
+        writer.commit(&hash).unwrap();
+        (blobs, hash)
+    }
+
+    /// The create of the task into [`TARGET`], superseding member `t1.ics`
+    /// of `caldav/tasks` synced at ETag `e1`.
+    fn superseding(object: PimdirHash) -> PimdirChange {
+        let collection = PimdirCollectionId(format!("caldav/{TARGET}"));
+        PimdirChange::new(
+            &collection,
+            PimdirChangeKind::Add {
+                handle: PimdirHandle("pending-1".into()),
+                link_id: Some(PimdirLinkId("t1".into())),
+                flags: PimdirFlags::default(),
+                origin: None,
+                supersedes: Some(PimdirSuperseded {
+                    collection: PimdirCollectionId("caldav/tasks".into()),
+                    handle: PimdirHandle("t1.ics".into()),
+                    if_match: Some("e1".into()),
+                }),
+                object: Some(object),
+            },
+        )
+    }
+
+    /// Pushes `change` into [`TARGET`] through a remote over `pool`.
+    fn push(
+        pool: &mut Pool,
+        blobs: PimdirBlobs,
+        change: PimdirChange,
+    ) -> (PimdirPushResult, Vec<RefusedCreate>, Vec<RejectedPush>) {
+        let mut remote = PimRemote::new(pool, blobs, "caldav");
+        let collection = PimdirCollectionId(format!("caldav/{TARGET}"));
+        let mut results = remote.push(&collection, vec![change]).unwrap();
+        (
+            results.remove(0),
+            remote.take_refused(),
+            remote.take_rejected(),
+        )
+    }
+
+    /// Whether `request` carries the header line `line`, names compared
+    /// without case.
+    fn carries(request: &str, line: &str) -> bool {
+        let line = line.to_ascii_lowercase();
+        request
+            .lines()
+            .any(|header| header.to_ascii_lowercase() == line)
+    }
+
+    /// A task filed into another calendar keeping its `UID` is moved there,
+    /// then its body written over the moved member: the server never holds
+    /// the `UID` twice, which Fastmail refuses (pimdir SYNC §4).
+    #[test]
+    fn a_superseding_create_is_delivered_by_a_move_then_a_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (blobs, hash) = stored(dir.path());
+        let (mut pool, wire) = caldav(vec![
+            reply("201 Created", &[("ETag", "\"m1\"")]),
+            reply("204 No Content", &[("ETag", "\"w1\"")]),
+        ]);
+
+        let (result, refused, rejected) = push(&mut pool, blobs, superseding(hash));
+
+        assert_eq!(
+            wire.lines(),
+            [
+                "MOVE /caldav/v2/alice%40g/tasks/t1.ics HTTP/1.1",
+                &format!("PUT {TARGET}/t1.ics HTTP/1.1"),
+            ]
+        );
+        let requests = wire.requests();
+        assert!(carries(&requests[0], "if-match: \"e1\""), "{}", requests[0]);
+        assert!(
+            carries(
+                &requests[0],
+                &format!("destination: https://dav.example.org{TARGET}/t1.ics")
+            ),
+            "{}",
+            requests[0]
+        );
+        assert!(carries(&requests[1], "if-match: \"m1\""), "{}", requests[1]);
+        assert!(requests[1].ends_with(TODO), "the stored body is written");
+        assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+        assert_eq!(result.handle.as_str(), "pending-1");
+        assert_eq!(
+            result.assigned.as_ref().map(PimdirHandle::as_str),
+            Some("t1.ics")
+        );
+        assert_eq!(result.revision.as_deref(), Some("w1"));
+        assert!(refused.is_empty() && rejected.is_empty());
+    }
+
+    /// A move answered with no ETag has the body written unconditionally.
+    #[test]
+    fn a_move_answering_no_etag_is_written_over_unconditionally() {
+        let dir = tempfile::tempdir().unwrap();
+        let (blobs, hash) = stored(dir.path());
+        let (mut pool, wire) = caldav(vec![
+            reply("201 Created", &[]),
+            reply("204 No Content", &[("ETag", "\"w1\"")]),
+        ]);
+
+        let (result, _, _) = push(&mut pool, blobs, superseding(hash));
+
+        let requests = wire.requests();
+        assert!(requests[1].starts_with("PUT "), "{}", requests[1]);
+        assert!(
+            !requests[1].to_ascii_lowercase().contains("\r\nif-match:"),
+            "{}",
+            requests[1]
+        );
+        assert!(
+            !requests[1]
+                .to_ascii_lowercase()
+                .contains("\r\nif-none-match:"),
+            "a write over the moved member, not a create: {}",
+            requests[1]
+        );
+        assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+        assert_eq!(result.revision.as_deref(), Some("w1"));
+    }
+
+    /// A server with no `MOVE` (Google answers 404) has the create
+    /// uploaded instead, as without a superseded member.
+    #[test]
+    fn a_server_without_move_has_the_create_uploaded() {
+        for status in [
+            "404 Not Found",
+            "405 Method Not Allowed",
+            "501 Not Implemented",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let (blobs, hash) = stored(dir.path());
+            let (mut pool, wire) = caldav(vec![
+                reply(status, &[]),
+                reply("201 Created", &[("ETag", "\"n1\"")]),
+            ]);
+
+            let (result, _, rejected) = push(&mut pool, blobs, superseding(hash));
+
+            assert_eq!(
+                wire.lines(),
+                [
+                    "MOVE /caldav/v2/alice%40g/tasks/t1.ics HTTP/1.1",
+                    &format!("PUT {TARGET}/t1.ics HTTP/1.1"),
+                ],
+                "{status}"
+            );
+            assert!(carries(&wire.requests()[1], "if-none-match: *"));
+            assert_eq!(result.outcome, PimdirPushOutcome::Accepted, "{status}");
+            assert_eq!(result.revision.as_deref(), Some("n1"));
+            assert!(rejected.is_empty(), "{status}");
+        }
+    }
+
+    /// A move refused for the identity rejects the create as a refused
+    /// upload does: a duplicate `UID` named as one, a moved source member
+    /// (412) as a rejected move. Nothing is uploaded after either.
+    #[test]
+    fn a_move_refused_for_its_identity_rejects_the_create() {
+        let refusal = "<d:error xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">\
+                       <c:no-uid-conflict/></d:error>";
+        let dir = tempfile::tempdir().unwrap();
+        let (blobs, hash) = stored(dir.path());
+        let (mut pool, wire) = caldav(vec![answer(
+            "403 Forbidden",
+            &[("Content-Type", "application/xml")],
+            refusal,
+        )]);
+
+        let (result, refused, rejected) = push(&mut pool, blobs, superseding(hash));
+
+        assert_eq!(wire.lines().len(), 1);
+        assert_eq!(result.outcome, PimdirPushOutcome::Rejected);
+        assert_eq!(refused.len(), 1);
+        assert_eq!(refused[0].uid, "t1");
+        assert_eq!(refused[0].collection, TARGET);
+        assert!(rejected.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let (blobs, hash) = stored(dir.path());
+        let (mut pool, wire) = caldav(vec![reply("412 Precondition Failed", &[])]);
+
+        let (result, refused, rejected) = push(&mut pool, blobs, superseding(hash));
+
+        assert_eq!(wire.lines().len(), 1);
+        assert_eq!(result.outcome, PimdirPushOutcome::Rejected);
+        assert!(refused.is_empty());
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0].action, "move");
+    }
+
+    /// The superseded member's delete comes after the move took it along:
+    /// a 404 is the delete done (pimdir SYNC §4).
+    #[test]
+    fn a_remove_of_a_member_already_gone_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let (blobs, _) = stored(dir.path());
+        let (mut pool, _) = caldav(vec![reply("404 Not Found", &[])]);
+        let collection = PimdirCollectionId("caldav/tasks".into());
+        let change = PimdirChange::new(
+            &collection,
+            PimdirChangeKind::Remove {
+                handle: PimdirHandle("t1.ics".into()),
+                to: None,
+                link_id: None,
+                if_match: Some("e1".into()),
+            },
+        );
+
+        let mut remote = PimRemote::new(&mut pool, blobs, "caldav");
+        let results = remote.push(&collection, vec![change]).unwrap();
+
+        assert_eq!(results[0].outcome, PimdirPushOutcome::Accepted);
+        assert!(remote.take_rejected().is_empty());
     }
 }

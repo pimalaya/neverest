@@ -7,15 +7,21 @@
 //! This module adds the multi-source reads the driver needs on top of that
 //! seam. [`load_side`] reads through one source handle, so it carries that
 //! source's own bindings and pending work, while [`projection_view`] and [`hydration_targets`] read
-//! the whole hub, both sources' bindings included.
+//! the whole hub, both sources' bindings included. [`register_syncing`]
+//! records a source as syncing a collection before its first checkpoint.
 
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use io_pimdir::{
     client::{PimdirError, PimdirSourceStore, PimdirStore},
     collection::PimdirCollectionId,
     hub::PimdirSourceId,
     load::PimdirLoadScope,
     placement::{PimdirHandle, PimdirPlacement},
+    sql,
 };
+use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, named_params};
 
 use crate::offline::source_id;
 
@@ -140,6 +146,54 @@ pub fn hydration_targets(
     }
 
     Ok(out)
+}
+
+/// Records `source` as syncing each of `collections` it holds no state in
+/// yet, with no checkpoint, answering how many it recorded.
+///
+/// The store counts a source as syncing a collection from its `sources` row
+/// or a binding there (pimdir STORAGE §15.6, `load_capabilities`), so what
+/// the source declares for a calendar listed but not synced yet, `x-vtodo`
+/// among it, holds from the listing on rather than from its first
+/// checkpoint. A row with no checkpoint reads as no sync state at all. A row
+/// already there is left alone, its checkpoint the next delta's base: the
+/// canonical `load_checkpoint` reads it before `upsert_checkpoint` writes
+/// one, in one transaction, as Android's calendar does.
+///
+/// io-pimdir has no owner write for it, so this holds a connection of its
+/// own, which pimdir's canonical statements are vendored for. Each
+/// collection must be in the store already.
+pub fn register_syncing(dir: &Path, source: &str, collections: &[String]) -> Result<usize> {
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mut conn = Connection::open_with_flags(dir.join("pimdir.db"), flags)
+        .context("Open the store to record the sources syncing it")?;
+    conn.execute_batch("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 30000;")?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+    let mut registered = 0;
+    for collection in collections {
+        let key = named_params! { ":collection": collection, ":source": source };
+        let held = tx
+            .query_row(sql::LOAD_CHECKPOINT, key, |_| Ok(()))
+            .optional()?
+            .is_some();
+        if held {
+            continue;
+        }
+        tx.execute(
+            sql::UPSERT_CHECKPOINT,
+            named_params! {
+                ":collection": collection,
+                ":source": source,
+                ":checkpoint": None::<Vec<u8>>,
+            },
+        )
+        .with_context(|| format!("Record {source} as syncing {collection}"))?;
+        registered += 1;
+    }
+
+    tx.commit()?;
+    Ok(registered)
 }
 
 #[cfg(test)]

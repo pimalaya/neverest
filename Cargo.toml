@@ -67,6 +67,7 @@ pimalaya-cli = { version = "0.2", default-features = false, features = ["termina
 pimalaya-config = { version = "0.2", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.3", default-features = false }
 rfc2047-decoder = "1"
+rusqlite = { version = "0.40", default-features = false }
 schemars = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -86,6 +87,6 @@ ical-rs = { git = "https://github.com/pimalaya/ical", rev = "caa14225152a7aff6d8
 io-http = { git = "https://github.com/pimalaya/io-http", rev = "e1815307771c1ec65a86b77256d46c33241d3038" }
 io-imap = { git = "https://github.com/pimalaya/io-imap", rev = "b1ab38ea9f24578b46dda56aa009600571b6b9ef" }
 io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "2ae26370aefa671c16316dbad98107634436bce6" }
-io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "1df2b7063d8fe03c28d9b5ec69badb669e6902c3" }
-io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "62fad898d1ecb3ebb25c37826a79eb72fcd54d7f" }
+io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "8907303902a8d159ad40d27934de802c3afa7d24" }
+io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "b2b9a00462f7d371de3fb419e53288f0a13cee39" }
 pimalaya-cli = { git = "https://github.com/pimalaya/cli", rev = "55b66933950f02541892407667e5e0b254245871" }

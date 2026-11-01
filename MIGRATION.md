@@ -13,7 +13,7 @@ This page lists the changes most likely to bite when upgrading. The full configu
 - **What an account does is its arity plus two flags**, and `collection.namespace` is gone. With no `targets` every source syncs into the local store, isolated from the others; with them the source is copied to each target.
 - **`one-way = true` makes the sources authoritative**, so the other side is overwritten rather than merged and nothing is reported as a conflict. The old `left` / `right` pair was a two-way mirror, which is one source and one target with `one-way` left off.
 - **`store.retention` and `store.hydration` are gone.** Whether the store keeps bodies is the account's `retain`: true with no target, since the store is the destination, false with targets, a configuration naming both having asked to copy between them. A configuration still carrying either key is refused.
-- **`retain = true` alongside a target makes the store a backup** rather than a cache, so `sync --reset` destroys data rather than a derived copy.
+- **`retain = true` alongside a target makes the store a backup** rather than a cache, so `sync --reset` refuses to drop it while it holds anything no server has, and `sync --reset --force` moves it aside.
 - A source is a remote. **Local file backends are no longer sync sources**: the local pimdir store is the local replica, so a Maildir or m2dir tree beside it would be a second local copy. Resync from the authoritative server instead.
 - **CardDAV** and **CalDAV** are new backends, behind the `dav` cargo feature and in the default set. **Microsoft Graph** is behind `msgraph`, which is not a default while it syncs mail alone. JMAP and Gmail sources parse but cannot be opened yet.
 - **Notmuch** is removed.
@@ -33,9 +33,7 @@ This page lists the changes most likely to bite when upgrading. The full configu
 
 No v1.0.0 was ever released: what was prepared under that number ships as v0.2.0.
 
-If you ran a build from master, the store format moved underneath it and is refused as stale. There is no migration: run `neverest sync --reset -a <account>` to drop it and resync.
-
-With `retain = true` beside a target the store is a backup rather than a cache, so that reset destroys data.
+If you ran a build from master, the store format moved underneath it and is refused as stale. There is no migration: run `neverest sync --reset --force -a <account>`, which moves it into a sibling `<dir>.reset-<instant>` directory, nothing deleted, and resyncs into a fresh store.
 
 ## From v1.0.0-beta to v0.2.0
 

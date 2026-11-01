@@ -15,18 +15,18 @@
 pub mod merger;
 pub mod report;
 
-use std::{collections::HashMap, io::Write, path::Path};
+use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result, bail};
 use io_pimdir::{
     client::{PimdirStore, blobs::PimdirBlobs, producer::PimdirProducer, reader::PimdirReader},
     codec::PimdirAction,
-    object::{PimdirHash, PimdirObject},
+    object::PimdirHash,
     placement::PimdirLinkId,
 };
 use log::{info, warn};
 
-use crate::kind::Kind;
+use crate::{error::pimdir_error, kind::Kind};
 
 /// One divergence waiting for a decision: an item whose local body and whose
 /// remote body both moved away from the base the last sync agreed on.
@@ -76,8 +76,9 @@ pub struct Conflict {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Applied {
     /// The chosen body was staged as an edit and drained, so the item is no
-    /// longer conflicted.
-    Resolved,
+    /// longer conflicted. Carries the capabilities a source supports in
+    /// part that the edit relies on, each as a sentence to show.
+    Resolved(Vec<String>),
     /// The store has observed a newer remote revision than the decision was
     /// computed against, so nothing was pushed. Carries what it holds now.
     Moved(Option<String>),
@@ -147,6 +148,7 @@ impl Conflict {
     /// revision that moved is reported rather than pushed over what arrived.
     pub fn apply(&self, dir: &Path, account: &str, body: &[u8]) -> Result<Applied> {
         let mut store = PimdirStore::open(dir)
+            .map_err(pimdir_error)
             .with_context(|| format!("Open the store of account {account}"))?
             .for_account(account)
             .for_source(&self.source);
@@ -173,38 +175,18 @@ impl Conflict {
         kind.validate_body(body, &self.link_id)
             .with_context(|| format!("Settle conflict {} in {}", self.id, self.collection))?;
 
-        let blobs = store.blobs();
-
-        // NOTE: opened before the first blob write, the producer's staging
-        // lock being what keeps a collector out of the window between a body
-        // reaching the blob tree and the queue row pinning it.
         let mut producer = PimdirProducer::open(dir, env!("CARGO_PKG_NAME"))
+            .map_err(pimdir_error)
             .with_context(|| format!("Stage the resolution of conflict {}", self.id))?;
-
-        let hash = blobs.hash(body);
-        let mut writer = blobs
-            .writer()
-            .with_context(|| format!("Store the settled body of conflict {}", self.id))?;
-        writer
-            .write_all(body)
-            .with_context(|| format!("Store the settled body of conflict {}", self.id))?;
-        let size = writer
-            .commit(&hash)
-            .with_context(|| format!("Store the settled body of conflict {}", self.id))?;
-        let object = PimdirObject {
-            hash,
-            size: size as usize,
-        };
-
-        producer
-            .enqueue(
-                &self.collection,
-                &PimdirAction::Update {
-                    seq: self.id,
-                    object: object.hash.clone(),
-                },
-                Some(&object),
-            )
+        // NOTE: the decision was made over the local side, so an edit that
+        // replaced it since parks rather than being dropped unmerged.
+        let enqueued = producer
+            .enqueue_with_body_checked(&self.collection, body, |object| PimdirAction::Update {
+                seq: self.id,
+                object,
+                if_match: self.local.clone(),
+            })
+            .map_err(pimdir_error)
             .with_context(|| format!("Stage the settled body of conflict {}", self.id))?;
 
         drop(producer);
@@ -226,7 +208,8 @@ impl Conflict {
 
         info!("resolved conflict {} in {}", self.id, self.collection);
 
-        Ok(Applied::Resolved)
+        let partial = enqueued.partial.iter().map(ToString::to_string).collect();
+        Ok(Applied::Resolved(partial))
     }
 }
 
@@ -339,6 +322,12 @@ mod tests {
     };
 
     use super::*;
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     use crate::offline::storage::load_side;
 
     /// The account a conflicted store is grouped under.
@@ -411,6 +400,12 @@ mod tests {
     /// overwrite whatever arrived meanwhile, so it is reported as moved and
     /// changes nothing. The same decision against the revision the store does
     /// hold settles the item, so the guard discriminates.
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     #[test]
     fn a_resolution_against_a_moved_revision_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -443,7 +438,7 @@ mod tests {
             conflict
                 .apply(dir.path(), ACCOUNT, card("+4").as_bytes())
                 .unwrap(),
-            Applied::Resolved,
+            Applied::Resolved(Vec::new()),
         );
 
         let placement = load_side(&store, "contacts").unwrap().remove(0);
@@ -497,6 +492,12 @@ mod tests {
     /// A crashed partial write, or a half-finished template saved by hand,
     /// would otherwise replace a real card with something that is not one:
     /// the item keeps its link id and loses every field behind the identity.
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     #[test]
     fn a_settled_body_that_no_parser_reads_is_refused() {
         let dir = tempfile::tempdir().unwrap();
@@ -529,6 +530,12 @@ mod tests {
     /// The bytes read as a card, so nothing structural catches it: the store
     /// would address the row by an identity its content no longer states, a
     /// frontend reading it as one contact and the server as another.
+    #[cfg(any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
     #[test]
     fn a_settled_body_that_renames_the_item_is_refused() {
         let dir = tempfile::tempdir().unwrap();

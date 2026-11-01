@@ -80,7 +80,7 @@ use crate::{
     client::{Gone, Held, Listed, StoredSize, WrittenItem},
     item::{
         collection::Collection,
-        flag::{Flag, FlagOp, IanaFlag},
+        flag::{Flag, IanaFlag},
         summary::{ItemSummary, normalize_message_id},
     },
     throttle::{self, Request, Throttle},
@@ -899,23 +899,24 @@ impl GraphClient {
             .with_context(|| format!("Get raw message {id} error"))
     }
 
-    /// Replaces flags: `\Seen` is `isRead`, `\Flagged` the follow-up status.
+    /// Adds and removes flags: `\Seen` is `isRead`, `\Flagged` the
+    /// follow-up status.
     ///
-    /// Only [`FlagOp::Set`] is supported, the engine pushing full flag sets.
-    /// `\Draft` is read-only on Graph and other keywords have no equivalent,
-    /// both ignored.
-    pub fn store_flags(&mut self, ids: &[&str], flags: &[Flag], op: FlagOp) -> Result<()> {
+    /// The patch names only the properties a flag of `add` or `remove`
+    /// maps to, so one the server changed since the listing keeps its
+    /// value; a change naming none sends nothing. `\Draft` is read-only on
+    /// Graph and other keywords have no equivalent, both ignored.
+    pub fn update_flags(&mut self, ids: &[&str], add: &[Flag], remove: &[Flag]) -> Result<()> {
         if self.kind != GraphKind::Mail {
             bail!(
                 "Graph {} have no flags (store not supported)",
                 self.kind.media_type()
             );
         }
-        if !matches!(op, FlagOp::Set) {
-            bail!("Graph flag updates only support a full set");
-        }
 
-        let patch = flags_patch(flags);
+        let Some(patch) = flags_delta(add, remove) else {
+            return Ok(());
+        };
         for id in ids {
             match self.op(|client| client.message_update(id, &patch)) {
                 Err(err) if is_not_found(&err) => {
@@ -1550,6 +1551,36 @@ fn flags_patch(flags: &[Flag]) -> MsgraphMessage {
     }
 }
 
+/// The patch adding `add` and removing `remove`, naming only the properties
+/// either touches, `None` when neither touches any.
+fn flags_delta(add: &[Flag], remove: &[Flag]) -> Option<MsgraphMessage> {
+    let touched = |iana: IanaFlag| {
+        let named = |flags: &[Flag]| flags.iter().any(|flag| flag.iana() == Some(iana));
+        match (named(add), named(remove)) {
+            (true, _) => Some(true),
+            (false, true) => Some(false),
+            (false, false) => None,
+        }
+    };
+    let is_read = touched(IanaFlag::Seen);
+    let flag = touched(IanaFlag::Flagged).map(|flagged| MsgraphFollowupFlag {
+        flag_status: Some(if flagged {
+            MsgraphFlagStatus::Flagged
+        } else {
+            MsgraphFlagStatus::NotFlagged
+        }),
+    });
+    if is_read.is_none() && flag.is_none() {
+        return None;
+    }
+
+    Some(MsgraphMessage {
+        is_read,
+        flag,
+        ..Default::default()
+    })
+}
+
 /// The author-claimed date of a delta row: `sentDateTime`, Graph's reading
 /// of the `Date` header, which pimdir's mail `date` column holds (STORAGE
 /// Annex A.1). Never `receivedDateTime`, the server's arrival time: absent
@@ -2164,6 +2195,39 @@ mod tests {
         );
     }
 
+    // --- a flag push names only what it changes ---------------------------
+
+    /// A push removing `\Flagged` from a message listed seen and flagged
+    /// patches the follow-up status alone (pimdir SYNC §4): another client
+    /// marking it unread after the listing keeps it unread.
+    #[test]
+    fn a_flag_push_patches_only_what_it_changes() {
+        let (mut client, server) = session(vec![vec![Step::ok(serde_json::json!({ "id": "m1" }))]]);
+
+        let flagged = Flag::from_iana(IanaFlag::Flagged);
+        client.update_flags(&["m1"], &[], &[flagged]).unwrap();
+
+        let written = server.written(0);
+        let body = written.rsplit("\r\n\r\n").next().unwrap_or_default();
+        let patch: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            patch,
+            serde_json::json!({ "flag": { "flagStatus": "notFlagged" } })
+        );
+    }
+
+    /// A push naming no flag Graph maps sends nothing.
+    #[test]
+    fn a_flag_push_naming_nothing_graph_maps_sends_nothing() {
+        let (mut client, server) = session(vec![vec![]]);
+
+        client
+            .update_flags(&["m1"], &[Flag::from_raw("$Work")], &[])
+            .unwrap();
+
+        assert!(server.requests().iter().all(Vec::is_empty));
+    }
+
     // --- a write on an item gone converges --------------------------------
 
     /// A flag set, a move or a delete on a message gone from the server
@@ -2177,7 +2241,7 @@ mod tests {
             .insert(String::from("Archive"), String::from("id-archive"));
 
         client
-            .store_flags(&["m1"], &[Flag::from_iana(IanaFlag::Seen)], FlagOp::Set)
+            .update_flags(&["m1"], &[Flag::from_iana(IanaFlag::Seen)], &[])
             .unwrap();
         client.move_messages("Archive", &["m2"]).unwrap();
         client.delete_item("m3", None).unwrap();

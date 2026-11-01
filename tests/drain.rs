@@ -10,6 +10,8 @@
 //! cargo test --test drain -- --ignored --test-threads=1
 //! ```
 
+#![cfg(feature = "dav")]
+
 use std::{
     fs::{self, File},
     io::{Read, Write},
@@ -27,7 +29,6 @@ use io_pimdir::{
         reader::PimdirReader,
     },
     codec::PimdirAction,
-    object::PimdirObject,
     placement::{PimdirFlags, PimdirLinkId},
 };
 use serde_json::Value;
@@ -125,27 +126,14 @@ impl Fixture {
     /// returns the queue row.
     fn queue_event(&self, uid: &str) -> i64 {
         let body = event(uid);
-        let reader = PimdirReader::open(self.store()).unwrap();
-        let hash = reader.hash(body.as_bytes());
-        let mut writer = reader.blobs().writer().unwrap();
-        writer.write_all(body.as_bytes()).unwrap();
-        let size = writer.commit(&hash).unwrap();
-
-        let mut producer = PimdirProducer::open(self.store(), "neverest-tests").unwrap();
-        producer
-            .enqueue(
-                COLLECTION,
-                &PimdirAction::Add {
-                    link_id: Some(PimdirLinkId(uid.into())),
-                    flags: PimdirFlags::default(),
-                    object: Some(hash.clone()),
-                    supersedes: None,
-                },
-                Some(&PimdirObject {
-                    hash,
-                    size: size as usize,
-                }),
-            )
+        PimdirProducer::open(self.store(), "neverest-tests")
+            .unwrap()
+            .enqueue_with_body(COLLECTION, body.as_bytes(), |object| PimdirAction::Add {
+                link_id: Some(PimdirLinkId(uid.into())),
+                flags: PimdirFlags::default(),
+                object: Some(object),
+                supersedes: None,
+            })
             .unwrap()
     }
 
@@ -260,6 +248,51 @@ fn a_drain_leaves_a_busy_store_alone() {
         fixture.status(id),
         PimdirActionStatus::Applied { seq: Some(_), .. }
     ));
+}
+
+/// A store a newer neverest wrote fails the command with the code io-pimdir
+/// gives the refusal, so a caller tells an upgrade from any other failure.
+#[test]
+fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
+    let fixture = Fixture::new(CLOSED, "user", "pass");
+    fixture.offline_store();
+    rusqlite::Connection::open(fixture.store().join("pimdir.db"))
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
+
+    let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
+
+    assert_eq!(failure["code"], "store-newer", "{failure}");
+    let error = failure["error"].as_str().unwrap_or_default();
+    assert!(error.contains("upgrade neverest"), "{failure}");
+}
+
+/// A pimdir.db another program wrote is never taken for a store: the
+/// command fails with `store-foreign`, so a caller tells a misplaced
+/// `store.root` from a store to repair, and the database stays as it was.
+#[test]
+fn a_database_another_program_wrote_fails_as_foreign() {
+    let fixture = Fixture::new(CLOSED, "user", "pass");
+    fixture.offline_store();
+    let db = fixture.store().join("pimdir.db");
+    for name in ["pimdir.db", "pimdir.db-wal", "pimdir.db-shm"] {
+        let _ = fs::remove_file(fixture.store().join(name));
+    }
+    let foreign = rusqlite::Connection::open(&db).unwrap();
+    foreign
+        .execute("CREATE TABLE notes (body TEXT)", [])
+        .unwrap();
+    drop(foreign);
+
+    let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
+
+    assert_eq!(failure["code"], "store-foreign", "{failure}");
+    let tables: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(tables, 1, "the database is left as it was");
 }
 
 /// The id a drain gives an event is the one it keeps once the sync has

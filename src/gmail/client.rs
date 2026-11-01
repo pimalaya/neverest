@@ -1199,15 +1199,19 @@ impl GmailClient {
             .with_context(|| format!("Move messages from {from} to {to} error"))
     }
 
-    /// Adds, sets or removes flags as `UNREAD`, `STARRED` and `IMPORTANT`
-    /// label changes; flags with no Gmail label are dropped.
-    pub fn store_flags(&mut self, ids: &[&str], flags: &[Flag], op: FlagOp) -> Result<()> {
-        let (add, remove) = label_patch(flags, op);
-        if add.is_empty() && remove.is_empty() {
+    /// Adds `add` and removes `remove` as `UNREAD`, `STARRED` and
+    /// `IMPORTANT` label changes, in one modify naming only the labels
+    /// they map to; flags with no Gmail label are dropped.
+    pub fn update_flags(&mut self, ids: &[&str], add: &[Flag], remove: &[Flag]) -> Result<()> {
+        let (mut labels_add, mut labels_remove) = label_patch(add, FlagOp::Add);
+        let (more_add, more_remove) = label_patch(remove, FlagOp::Remove);
+        labels_add.extend(more_add);
+        labels_remove.extend(more_remove);
+        if labels_add.is_empty() && labels_remove.is_empty() {
             return Ok(());
         }
 
-        self.modify(ids, &add, &remove)
+        self.modify(ids, &labels_add, &labels_remove)
             .context("Update message flags error")
     }
 
@@ -1735,6 +1739,7 @@ pub(crate) mod scripted {
     pub(crate) struct Wire {
         answers: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
         requests: Arc<std::sync::Mutex<Vec<String>>>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
         current: Vec<u8>,
         at: usize,
     }
@@ -1746,6 +1751,11 @@ pub(crate) mod scripted {
 
         pub(crate) fn requests(&self) -> Vec<String> {
             self.requests.lock().unwrap().clone()
+        }
+
+        /// Everything written to the session, requests and bodies.
+        pub(crate) fn written(&self) -> String {
+            String::from_utf8_lossy(&self.written.lock().unwrap()).into_owned()
         }
 
         pub(crate) fn left(&self) -> usize {
@@ -1768,6 +1778,7 @@ pub(crate) mod scripted {
 
     impl Write for Wire {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.written.lock().unwrap().extend_from_slice(buf);
             let text = String::from_utf8_lossy(buf);
             let line = text.lines().next().unwrap_or_default();
             if ["GET ", "POST ", "DELETE ", "PUT ", "PATCH "]
@@ -2169,7 +2180,9 @@ mod tests {
     fn page(listed: Listed) -> Enumeration {
         match listed {
             Listed::Page(page) => page,
-            Listed::CursorRejected | Listed::NoHead | Listed::HeadRejected => panic!("a page"),
+            Listed::CursorRejected | Listed::NoHead | Listed::HeadRejected | Listed::Rekey => {
+                panic!("a page")
+            }
         }
     }
 
@@ -2709,6 +2722,26 @@ mod tests {
         assert!(!Gone::is(&err), "another refusal is no gone: {err:#}");
     }
 
+    /// A push removing `\Flagged` from a message listed seen and flagged
+    /// names only `STARRED` (pimdir SYNC §4): another client marking it
+    /// unread or important after the listing keeps it so.
+    #[test]
+    fn a_flag_push_names_only_the_labels_it_changes() {
+        let (mut client, api, _) = scripted();
+        api.answer(ok(serde_json::json!({ "id": "m1", "labelIds": ["INBOX"] })));
+
+        let flagged = Flag::from_iana(IanaFlag::Flagged);
+        client.update_flags(&["m1"], &[], &[flagged]).unwrap();
+
+        let written = api.written();
+        let body = written.rsplit("\r\n\r\n").next().unwrap_or_default();
+        let modify: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            modify,
+            serde_json::json!({ "addLabelIds": [], "removeLabelIds": ["STARRED"] })
+        );
+    }
+
     /// A write on a message gone already has nothing left to do.
     #[test]
     fn a_write_on_a_message_gone_converges() {
@@ -2726,7 +2759,7 @@ mod tests {
         client.delete_item("INBOX", "m1").unwrap();
         api.answer(gone());
         client
-            .store_flags(&["m1"], &[Flag::from_iana(IanaFlag::Flagged)], FlagOp::Add)
+            .update_flags(&["m1"], &[Flag::from_iana(IanaFlag::Flagged)], &[])
             .unwrap();
 
         // NOTE: a batch modify answered 404 is done again one by one.

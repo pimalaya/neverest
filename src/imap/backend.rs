@@ -113,8 +113,9 @@ impl ImapClient {
     /// Lists one page of a mailbox (pimdir SYNC §4).
     ///
     /// A delta reads what changed since the checkpoint's modseq through a
-    /// QRESYNC `SELECT`; a server without QRESYNC, or a checkpoint whose
-    /// `UIDVALIDITY` moved, answers the first page of a round instead. A
+    /// QRESYNC `SELECT`; a server without QRESYNC answers the first page of
+    /// a round instead. Any listing meeting a `UIDVALIDITY` other than the
+    /// one the store bound its handles under answers [`Listed::Rekey`]. A
     /// round lists the scope newest first, [`PAGE_SIZE`] UIDs a page, its
     /// cursor the lowest UID listed and the highest UID the round found
     /// when it opened; its first page carries the checkpoint taken at the
@@ -151,7 +152,7 @@ impl ImapClient {
     }
 
     /// What changed since `checkpoint`, or a round's first page when the
-    /// server cannot say.
+    /// server cannot say; a rekey when the `UIDVALIDITY` moved.
     fn delta_page(
         &mut self,
         mailbox: &str,
@@ -165,8 +166,8 @@ impl ImapClient {
         match self.qresync_delta(mailbox, position, held)? {
             Some(page) => Ok(Listed::Page(page)),
             None => {
-                debug!("UIDVALIDITY of {mailbox} moved, listing it in a round");
-                self.round_page(mailbox, None, false, scope, held)
+                debug!("UIDVALIDITY of {mailbox} moved, naming a rekey");
+                Ok(Listed::Rekey)
             }
         }
     }
@@ -175,10 +176,8 @@ impl ImapClient {
     /// answered as a delta and never as a round (pimdir SYNC §4).
     ///
     /// A server without QRESYNC, or a checkpoint with no modseq to list
-    /// from, lists none. A checkpoint whose `UIDVALIDITY` moved is refused:
-    /// the round restarts and takes the new one from its first page, and
-    /// the stored checkpoint moving to it when that round closes rebuilds
-    /// the collection, as a delta meeting a moved `UIDVALIDITY` does.
+    /// from, lists none. A checkpoint whose `UIDVALIDITY` moved names a
+    /// rekey, as a delta meeting it does (pimdir SYNC §4).
     fn delta_head(&mut self, mailbox: &str, checkpoint: &[u8], held: &Held<'_>) -> Result<Listed> {
         let Some(position) = qresync_position(checkpoint, self.supports_qresync()) else {
             return Ok(Listed::NoHead);
@@ -186,8 +185,8 @@ impl ImapClient {
         match self.qresync_delta(mailbox, position, held)? {
             Some(page) => Ok(Listed::Page(page)),
             None => {
-                debug!("UIDVALIDITY of {mailbox} moved under the round, refusing its head");
-                Ok(Listed::HeadRejected)
+                debug!("UIDVALIDITY of {mailbox} moved under the round, naming a rekey");
+                Ok(Listed::Rekey)
             }
         }
     }
@@ -258,8 +257,12 @@ impl ImapClient {
         let select = self.select(mbox, ImapMailboxSelectOptions::default())?;
         self.mark_selected(mailbox);
         let uid_validity = select.uid_validity.map(|v| v.get()).unwrap_or(0);
+        if renumbered(held, uid_validity) {
+            debug!("UIDVALIDITY of {mailbox} moved under the round, naming a rekey");
+            return Ok(Listed::Rekey);
+        }
 
-        let uids: Vec<u32> = if select.exists.unwrap_or(0) == 0 {
+        let uids: Vec<u32> = if select.exists == Some(0) {
             Vec::new()
         } else {
             self.search(
@@ -301,8 +304,15 @@ impl ImapClient {
         self.mark_selected(mailbox);
         let uid_validity = select.uid_validity.map(|v| v.get()).unwrap_or(0);
         let highest_mod_seq = select.highest_mod_seq.unwrap_or(0);
-        let exists = select.exists.unwrap_or(0);
+        // NOTE: a server may leave `EXISTS` out, which says nothing of the size.
+        let empty = select.exists == Some(0);
 
+        if renumbered(held, uid_validity) {
+            debug!("UIDVALIDITY of {mailbox} moved, naming a rekey");
+            return Ok(Listed::Rekey);
+        }
+        // NOTE: the store already rekeyed under the new `UIDVALIDITY`, so
+        // only the round's cursor names the old one.
         if let Some(cursor) = cursor
             && cursor.uid_validity != uid_validity
         {
@@ -324,7 +334,7 @@ impl ImapClient {
                 .into_iter()
                 .filter(|uid| below.is_none_or(|below| *uid < below))
                 .collect(),
-            None => self.search_round(scope, None, below, exists)?,
+            None => self.search_round(scope, None, below, empty)?,
         };
         // NOTE: the highest UID the round found when it opened bounds what
         // arrived since, UIDs only ever growing under one `UIDVALIDITY`.
@@ -356,7 +366,7 @@ impl ImapClient {
         // read after this page's `SELECT` (pimdir SYNC §4); a round of one
         // page found them already.
         if next.is_none() && cursor.is_some() {
-            page_uids.extend(self.search_round(scope, Some(top), None, exists)?);
+            page_uids.extend(self.search_round(scope, Some(top), None, empty)?);
             page_uids.sort_unstable_by(|a, b| b.cmp(a));
             page_uids.dedup();
         }
@@ -403,14 +413,15 @@ impl ImapClient {
     /// `SENTSINCE` and `SENTBEFORE` keep with a day's margin around the
     /// scope (the server compares dates, not instants, in its own zone) and
     /// the ones with no `Date`, above `above` and below `below` when given.
+    /// None when the `SELECT` stated the mailbox `empty`.
     fn search_round(
         &mut self,
         scope: &PimdirScope,
         above: Option<u32>,
         below: Option<u32>,
-        exists: u32,
+        empty: bool,
     ) -> Result<Vec<u32>> {
-        if exists == 0 {
+        if empty {
             return Ok(Vec::new());
         }
 
@@ -585,6 +596,25 @@ impl ImapClient {
             ImapMessageStoreOptions { uid: true },
         )?;
 
+        Ok(())
+    }
+
+    /// Adds `add` to and removes `remove` from a UID set's flags in
+    /// `mailbox`, a `+FLAGS` then a `-FLAGS` store, each skipped when it
+    /// names nothing: a flag named in neither stays as the server holds it.
+    pub fn update_flags(
+        &mut self,
+        mailbox: &str,
+        ids: &[&str],
+        add: &[Flag],
+        remove: &[Flag],
+    ) -> Result<()> {
+        if !add.is_empty() {
+            self.store_flags(mailbox, ids, add, FlagOp::Add)?;
+        }
+        if !remove.is_empty() {
+            self.store_flags(mailbox, ids, remove, FlagOp::Remove)?;
+        }
         Ok(())
     }
 
@@ -1073,6 +1103,16 @@ fn trusts(held: &Held<'_>, uid_validity: u32) -> bool {
         .is_some_and(|validity| validity == uid_validity)
 }
 
+/// Whether the store bound its handles under another `UIDVALIDITY` than
+/// `uid_validity`, every one of them then void (pimdir SYNC §4, §8). A store
+/// holding no checkpoint, a rekey's own listing among them, bound none it
+/// could tell.
+fn renumbered(held: &Held<'_>, uid_validity: u32) -> bool {
+    held.checkpoint
+        .and_then(checkpoint_uid_validity)
+        .is_some_and(|validity| validity != uid_validity)
+}
+
 /// Folds one FETCH row into a shared [`ItemSummary`].
 fn envelope_from(seq: u32, items: Vec<MessageDataItem<'static>>) -> ItemSummary {
     let mut id = String::new();
@@ -1336,7 +1376,178 @@ pub(crate) fn checkpoint_uid_validity(bytes: &[u8]) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
+    use io_pimdir::collection::{PimdirCheckpoint, PimdirCursor};
+    use pimalaya_stream::tls::Tls;
+
+    use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+
     use super::*;
+
+    /// A mailbox renumbered to `UIDVALIDITY` 2, its one message now UID 7.
+    fn renumbered(qresync: bool) -> FakeImap {
+        FakeImap::start(
+            FakeMailbox {
+                uid_validity: 2,
+                highest_mod_seq: 9,
+                messages: vec![FakeMessage {
+                    uid: 7,
+                    flags: Vec::new(),
+                    message_id: String::from("a@x"),
+                }],
+                states_exists: true,
+            },
+            qresync,
+        )
+    }
+
+    /// What `listing` answers on `server`, the store binding UID 1 under
+    /// the checkpoint `held`.
+    fn listed(server: &FakeImap, listing: PimdirListing, held: Option<&[u8]>) -> &'static str {
+        let mut client = ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+        let handles = HashSet::from([String::from("1")]);
+        let held = Held {
+            handles: &handles,
+            checkpoint: held,
+            coverage: None,
+        };
+        let request = PimdirEnumerate {
+            listing,
+            scope: PimdirScope::unbounded(),
+        };
+        match client.enumerate("INBOX", &request, held).unwrap() {
+            Listed::Page(_) => "page",
+            Listed::CursorRejected => "cursor rejected",
+            Listed::NoHead => "no head",
+            Listed::HeadRejected => "head rejected",
+            Listed::Rekey => "rekey",
+        }
+    }
+
+    /// A store checkpoint under `UIDVALIDITY` 1.
+    fn stored() -> Vec<u8> {
+        encode_checkpoint(1, 5)
+    }
+
+    /// A round cursor under `uid_validity`.
+    fn cursor(uid_validity: u32) -> PimdirCursor {
+        PimdirCursor(encode_cursor(RoundCursor {
+            uid_validity,
+            lowest: 3,
+            top: 5,
+        }))
+    }
+
+    /// Every listing meeting a moved `UIDVALIDITY` fails and names a rekey
+    /// (pimdir SYNC §4), never answering a round of the new UIDs.
+    #[test]
+    fn a_moved_uidvalidity_names_a_rekey_on_every_listing() {
+        let qresync = renumbered(true);
+        let plain = renumbered(false);
+        let checkpoint = || PimdirCheckpoint(stored());
+        let round = |cursor| PimdirListing::Round {
+            cursor,
+            band: false,
+        };
+
+        let cases = [
+            (
+                "qresync delta",
+                &qresync,
+                PimdirListing::Delta(checkpoint()),
+            ),
+            ("plain delta", &plain, PimdirListing::Delta(checkpoint())),
+            (
+                "delta head",
+                &qresync,
+                PimdirListing::Head(PimdirHead::Delta(checkpoint())),
+            ),
+            (
+                "band head",
+                &plain,
+                PimdirListing::Head(PimdirHead::Band {
+                    since: String::from("2026-10-01T00:00:00Z"),
+                }),
+            ),
+            ("first page", &plain, round(None)),
+            ("resumed page", &plain, round(Some(cursor(1)))),
+        ];
+        let answers: Vec<_> = cases
+            .into_iter()
+            .map(|(case, server, listing)| (case, listed(server, listing, Some(&stored()))))
+            .collect();
+        let rekeys: Vec<_> = answers.iter().map(|(case, _)| (*case, "rekey")).collect();
+        assert_eq!(answers, rekeys);
+    }
+
+    /// A round whose cursor predates a rekey the store already made
+    /// restarts, and a rekey's own round, the store holding no checkpoint
+    /// for it, lists the new UIDs.
+    #[test]
+    fn a_rekeyed_store_lists_the_new_uids() {
+        let server = renumbered(false);
+        let rekeyed = encode_checkpoint(2, 9);
+        let round = |cursor| PimdirListing::Round {
+            cursor,
+            band: false,
+        };
+
+        assert_eq!(
+            listed(&server, round(Some(cursor(1))), Some(&rekeyed)),
+            "cursor rejected"
+        );
+        assert_eq!(listed(&server, round(None), Some(&rekeyed)), "page");
+        assert_eq!(listed(&server, round(None), None), "page");
+    }
+
+    /// A `SELECT` that states no `EXISTS` says nothing of the mailbox's
+    /// size: read as empty, a complete round would delete every message.
+    #[test]
+    fn a_select_without_exists_is_searched() {
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 2,
+                highest_mod_seq: 9,
+                messages: vec![FakeMessage {
+                    uid: 7,
+                    flags: Vec::new(),
+                    message_id: String::from("a@x"),
+                }],
+                states_exists: false,
+            },
+            false,
+        );
+        let listings = [
+            PimdirListing::Round {
+                cursor: None,
+                band: false,
+            },
+            PimdirListing::Head(PimdirHead::Band {
+                since: String::from("2026-10-01T00:00:00Z"),
+            }),
+        ];
+
+        for listing in listings {
+            let mut client =
+                ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+            let handles = HashSet::new();
+            let held = Held {
+                handles: &handles,
+                checkpoint: None,
+                coverage: None,
+            };
+            let request = PimdirEnumerate {
+                listing,
+                scope: PimdirScope::unbounded(),
+            };
+            let Listed::Page(page) = client.enumerate("INBOX", &request, held).unwrap() else {
+                panic!("a page");
+            };
+            let uids: Vec<_> = page.items.iter().map(|item| item.id.as_str()).collect();
+            assert_eq!(uids, ["7"], "{:?}", request.listing);
+        }
+    }
 
     #[test]
     fn checkpoint_round_trips_and_rejects_garbage() {
@@ -1526,6 +1737,36 @@ mod tests {
         let before = imap_day("2026-10-01T23:30:00+02:00", 2).unwrap();
         assert_eq!(before.as_ref().to_string(), "2026-10-03");
         assert!(imap_day("last week", -1).is_none());
+    }
+
+    /// A flag push names only what it changes (pimdir SYNC §4): a flag
+    /// another client set after the listing survives a push removing
+    /// another one.
+    #[test]
+    fn a_flag_the_server_added_after_the_listing_survives_a_push() {
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 1,
+                highest_mod_seq: 1,
+                messages: vec![FakeMessage {
+                    uid: 1,
+                    flags: vec![String::from("\\Seen"), String::from("\\Flagged")],
+                    message_id: String::from("a@x"),
+                }],
+                states_exists: true,
+            },
+            false,
+        );
+        let mut client = ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+
+        // NOTE: listed as seen and flagged; another client answers it.
+        server.set_flags(1, &["\\Seen", "\\Flagged", "\\Answered"]);
+        let flagged = Flag::from_iana(IanaFlag::Flagged);
+        client
+            .update_flags("INBOX", &["1"], &[], &[flagged])
+            .unwrap();
+
+        assert_eq!(server.flags(1), ["\\Seen", "\\Answered"]);
     }
 
     /// Listed rows keep their flags, and each takes the meta read for it.

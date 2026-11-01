@@ -171,6 +171,11 @@ pub enum ConflictResolveOutput {
         /// The side the decision took: the local body, the remote one, or
         /// the one the interactive merger wrote.
         side: String,
+        /// What a source supports in part that the next run's push relies
+        /// on (pimdir STORAGE §15.6), each as a sentence: an event's
+        /// attendees notified by the provider's rules rather than the
+        /// event's own, for one.
+        partial: Vec<String>,
     },
     /// The merger aborted, by exiting non-zero or by leaving its output
     /// untouched, so nothing was decided and nothing was pushed.
@@ -187,10 +192,17 @@ impl fmt::Display for ConflictResolveOutput {
                 id,
                 collection,
                 side,
-            } => writeln!(
-                f,
-                "Settled conflict {id} in {collection} with the {side} body"
-            ),
+                partial,
+            } => {
+                writeln!(
+                    f,
+                    "Settled conflict {id} in {collection} with the {side} body"
+                )?;
+                for partial in partial {
+                    writeln!(f, " - {partial}")?;
+                }
+                Ok(())
+            }
             Self::Aborted { id } => writeln!(
                 f,
                 "The merger decided nothing, so conflict {id} is exactly as it was"

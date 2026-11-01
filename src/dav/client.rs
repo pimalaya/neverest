@@ -54,8 +54,8 @@ use pimalaya_stream::{proxy::Proxy, tls::Tls};
 use url::Url;
 
 use crate::{
-    client::{EnumEntry, Enumeration, WrittenItem},
-    item::{collection::Collection, flag::Flag, flag::FlagOp},
+    client::{EnumEntry, Enumeration, Gone, WrittenItem},
+    item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId},
     throttle::{Request, Throttle},
 };
@@ -484,39 +484,51 @@ impl DavClient {
     }
 
     /// One enumeration, draining every truncated round into a single result.
+    ///
+    /// A listing whose last answer was still truncated, the rounds spent or
+    /// no token to follow, is incomplete: read as a whole collection, every
+    /// member past the cut would read as deleted (RFC 6578 §3.6).
     fn sync(
         &mut self,
         collection: &str,
         token: Option<&str>,
     ) -> Result<Enumeration, WebdavClientStdError> {
-        let complete = token.is_none();
+        let first = token.is_none();
         let mut items = Vec::new();
         let mut vanished = Vec::new();
         let mut token = token.map(String::from);
+        let mut truncated = false;
 
-        for round in 0..MAX_SYNC_ROUNDS {
+        for _ in 0..MAX_SYNC_ROUNDS {
             let delta = self.sync_collection(collection, token.as_deref(), Default::default())?;
 
             items.extend(delta.changed.into_iter().map(entry));
             vanished.extend(delta.vanished.iter().map(|href| href_id(href)));
-            token = delta.sync_token;
+            truncated = delta.truncated;
 
-            if !delta.truncated {
+            // NOTE: a truncated answer without a token cannot be followed,
+            // and listing again from the start would cut it at the same
+            // place: the checkpoint stays the one the listing started from.
+            if truncated && delta.sync_token.is_none() {
                 break;
             }
-            if round + 1 == MAX_SYNC_ROUNDS {
-                warn!(
-                    "{} server kept truncating {collection} after {MAX_SYNC_ROUNDS} rounds, \
-                     continuing with what it returned",
-                    self.kind
-                );
+            token = delta.sync_token;
+            if !truncated {
+                break;
             }
+        }
+
+        if truncated {
+            warn!(
+                "{} server truncated the listing of {collection}, reconciling as a delta",
+                self.kind
+            );
         }
 
         Ok(Enumeration {
             items,
             vanished,
-            complete,
+            complete: first && !truncated,
             checkpoint: Some(token.unwrap_or_default().into_bytes()),
             ..Default::default()
         })
@@ -567,15 +579,27 @@ impl DavClient {
     }
 
     /// Streams one resource's raw bytes, returning the ETag they correspond to.
+    ///
+    /// A resource the server answers missing (404, 410) fails with [`Gone`]:
+    /// a member every read finds missing is owed nothing more in the run,
+    /// rather than failing its collection's fetch in every run.
     pub fn get_item_stream(
         &mut self,
         collection: &str,
         id: &str,
         mut sink: impl Write,
     ) -> Result<Option<String>> {
-        let (data, etag) = self
-            .read(collection, id)
-            .with_context(|| format!("Cannot read {id} in {collection}"))?;
+        let (data, etag) = match self.read(collection, id) {
+            Ok(read) => read,
+            Err(err) if is_gone(&err) => {
+                return Err(anyhow::Error::new(err).context(Gone(format!("{id} in {collection}"))));
+            }
+            Err(err) => {
+                return Err(
+                    anyhow::Error::new(err).context(format!("Cannot read {id} in {collection}"))
+                );
+            }
+        };
 
         sink.write_all(&data)?;
 
@@ -716,7 +740,7 @@ impl DavClient {
     /// Rejected: DAV has no flags. The enumeration reports every member as
     /// known-empty, and a flag kept in the store only is never pushed, the
     /// flag right being withheld for a kind other than mail.
-    pub fn store_flags(&mut self, _ids: &[&str], _flags: &[Flag], _op: FlagOp) -> Result<()> {
+    pub fn update_flags(&mut self, _ids: &[&str], _add: &[Flag], _remove: &[Flag]) -> Result<()> {
         bail!("{} has no flags (store not supported)", self.kind)
     }
 
@@ -1540,5 +1564,126 @@ mod tests {
             ),
             "{request}"
         );
+    }
+
+    /// A stream replaying one canned HTTP answer a read, discarding writes.
+    struct Replay(std::collections::VecDeque<Vec<u8>>);
+
+    impl Read for Replay {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some(answer) = self.0.pop_front() else {
+                return Ok(0);
+            };
+            buf[..answer.len()].copy_from_slice(&answer);
+            Ok(answer.len())
+        }
+    }
+
+    impl Write for Replay {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A `sync-collection` answer listing `card`, truncated when
+    /// `truncated`, carrying `token` when given.
+    fn sync_answer(card: &str, truncated: bool, token: Option<&str>) -> Vec<u8> {
+        let cut = match truncated {
+            true => {
+                "<d:response><d:href>/dav/books/default/</d:href>\
+                 <d:status>HTTP/1.1 507 Insufficient Storage</d:status></d:response>"
+            }
+            false => "",
+        };
+        let token = token
+            .map(|token| format!("<d:sync-token>{token}</d:sync-token>"))
+            .unwrap_or_default();
+        let xml = format!(
+            "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\">\
+             <d:response><d:href>/dav/books/default/{card}.vcf</d:href>\
+             <d:propstat><d:prop><d:getetag>\"e-{card}\"</d:getetag></d:prop>\
+             <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\
+             {cut}{token}</d:multistatus>"
+        );
+        format!(
+            "HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\n\r\n{xml}",
+            xml.len()
+        )
+        .into_bytes()
+    }
+
+    /// A CardDAV session over `answers`, its discovery already made.
+    fn replayed(answers: Vec<Vec<u8>>) -> DavClient {
+        let server = Url::parse("https://dav.example.org/").unwrap();
+        let inner = WebdavClientStd::from_parts(
+            Replay(answers.into()),
+            WebdavAuth::None,
+            server.clone(),
+            None,
+            None,
+            Some(Url::parse("https://dav.example.org/dav/books/").unwrap()),
+        );
+        DavClient {
+            kind: DavKind::Card,
+            inner,
+            server,
+            tls: Tls::default(),
+            auth: WebdavAuth::None,
+            throttle: Arc::new(Throttle::new("carddav")),
+        }
+    }
+
+    /// A first listing the server keeps truncating is no complete snapshot:
+    /// read as one, every card past the cut would be inferred deleted.
+    #[test]
+    fn a_listing_truncated_to_the_last_round_is_incomplete() {
+        let answers = (0..MAX_SYNC_ROUNDS)
+            .map(|round| sync_answer(&format!("c{round}"), true, Some(&format!("t{round}"))))
+            .collect();
+        let listed = replayed(answers).enumerate("default", None).unwrap();
+
+        assert_eq!(listed.items.len(), MAX_SYNC_ROUNDS);
+        assert!(!listed.complete);
+        let last = format!("t{}", MAX_SYNC_ROUNDS - 1);
+        assert_eq!(listed.checkpoint.as_deref(), Some(last.as_bytes()));
+    }
+
+    /// A truncated answer with no token cannot be followed: the listing
+    /// ends there, incomplete, and is never restarted from its start; the
+    /// checkpoint stays the one it started from.
+    #[test]
+    fn a_truncated_answer_without_a_token_ends_the_listing() {
+        let answers = (0..MAX_SYNC_ROUNDS)
+            .map(|round| sync_answer(&format!("c{round}"), true, None))
+            .collect();
+        let listed = replayed(answers).enumerate("default", None).unwrap();
+
+        let ids: Vec<_> = listed.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["c0.vcf"]);
+        assert!(!listed.complete);
+        assert_eq!(listed.checkpoint.as_deref(), Some(&b""[..]));
+
+        let answers = vec![sync_answer("c0", true, None)];
+        let listed = replayed(answers).enumerate("default", Some(b"t0")).unwrap();
+        assert!(!listed.complete);
+        assert_eq!(listed.checkpoint.as_deref(), Some(&b"t0"[..]));
+    }
+
+    /// A truncation followed to its end is a whole first listing.
+    #[test]
+    fn a_truncation_followed_to_its_end_is_complete() {
+        let answers = vec![
+            sync_answer("c0", true, Some("t0")),
+            sync_answer("c1", false, Some("t1")),
+        ];
+        let listed = replayed(answers).enumerate("default", None).unwrap();
+
+        assert_eq!(listed.items.len(), 2);
+        assert!(listed.complete);
+        assert_eq!(listed.checkpoint.as_deref(), Some(&b"t1"[..]));
     }
 }

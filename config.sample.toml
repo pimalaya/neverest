@@ -70,7 +70,9 @@ default = true
 # `msgraph.*`, `carddav.*` or `caldav.*`. Its filter, permissions and pool size
 # live inside that backend table:
 #   - `collection.filter`: which collections this source syncs
-#   - `collection.{create,delete}`, `flag.update`, `item.update`: default true
+#   - `collection.create`, `flag.update`, `item.update`: default true
+#   - `collection.delete`: default false; a collection one endpoint no
+#     longer lists is deleted on the other only when this is true
 #   - `item.{create,delete}`: both required when the block is declared
 #   - `pool-size`: read by Microsoft Graph alone for now (default 3, never
 #     above the account's `connections`); IMAP opens `connections`
@@ -402,6 +404,12 @@ imap.item.delete = false
 # integer plus `s`, `m`, `h`, `d` or `w`. UNSET never purges, `"0"` purges at
 # once, `sync --no-purge` skips one run, `pimdir` restores retained items.
 #store.purge-after = "90d"
+
+# The longest a sync refreshes the store's search index, which frontends query:
+# a large first build spreads over several runs, or `neverest index` builds it
+# whole. `"0"` turns the refresh off; a build without the `search` feature
+# ignores it.
+#store.index-timeout = "60s"
 
 # BACKUP RECIPE: a read-only source plus no purge, so a remote expunge cannot
 # lose anything. The item stays in the store, restorable, until you purge on

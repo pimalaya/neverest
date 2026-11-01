@@ -98,7 +98,8 @@
 //!
 //! [`json_schema`] is the registry behind `neverest json-schema`: one entry
 //! per data command, mapping its invocation path to the schema of what it
-//! prints under `--json`.
+//! prints under `--json`. [`error`] names the failures a caller acts on, a
+//! store failure by the code io-pimdir gives it.
 //!
 //! [io-pimdir]: https://github.com/pimalaya/io-pimdir
 //! [io-pim-discovery]: https://github.com/pimalaya/io-pim-discovery
@@ -110,6 +111,7 @@ mod config;
 mod conflict;
 #[cfg(feature = "dav")]
 mod dav;
+mod error;
 #[cfg(feature = "gcal")]
 mod gcal;
 #[cfg(feature = "gmail")]
@@ -151,6 +153,7 @@ use crate::cli::offer_configuration;
 use crate::{
     cli::{exit::Exit, main::Cli},
     config::Config,
+    error::ErrorCode,
 };
 
 fn main() -> ExitCode {
@@ -160,7 +163,7 @@ fn main() -> ExitCode {
 
     // NOTE: the outcome that is neither success nor failure comes back here
     // rather than exiting inside a subcommand, so one place decides it.
-    ErrorReport::eval(&mut printer, result).into()
+    ErrorReport::<ErrorCode>::eval_coded(&mut printer, result).into()
 }
 
 fn execute(printer: &mut StdoutPrinter, cli: Cli) -> Result<Exit> {

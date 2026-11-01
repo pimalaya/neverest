@@ -17,7 +17,7 @@ An account SHALL NOT constrain its sources to one kind: mail, contacts and calen
 
 `collection.namespace` SHALL likewise be refused by name, naming `targets` and `one-way`. It expressed which sources met, which is now the arity, and never expressed which way, which is now `one-way`.
 
-A store written before collection ids carried their namespace SHALL NOT be read. Neverest keeps its own state beside the store (neverest.json) recording the collection-id layout and the account's mode, and a store directory holding a database but no such file SHALL be refused, naming `sync --reset`.
+A store written before collection ids carried their namespace SHALL NOT be read. Neverest keeps its own state beside the store (neverest.json) recording the collection-id layout and the account's mode, and a store directory holding a database but no such file SHALL be refused, naming `sync --reset --force`.
 
 Whatever materializes the database SHALL write the sidecar in the same act, so that pair only ever describes a store an older neverest wrote. `init` SHALL stamp the store it creates and `sync --reset` SHALL stamp the store it recreates.
 
@@ -38,7 +38,7 @@ Whatever materializes the database SHALL write the sidecar in the same act, so t
 
 #### Scenario: The named remedy clears the refusal
 - GIVEN a store refused for holding a database with no sidecar
-- WHEN `sync --reset` runs
+- WHEN `sync --reset --force` runs
 - THEN the recreated store carries a sidecar and the next run reads it
 
 ### Requirement: The mode is the arity and two flags
@@ -178,12 +178,12 @@ The SMTP menu SHALL be keyed on the capabilities discovery advertised rather tha
 Filters are consequently asymmetric: a collection may be synced on one source and skipped on another, which the documentation SHALL state, since the previous account-level filter guaranteed symmetry. A source and its target SHALL apply the source's filter to both, since they bind one set of hub collections and filtering them apart would read as a delete on the next pass.
 
 ### Requirement: Bodies are content-addressed and deduped
-An item body SHALL be stored once per content hash; an item present on both sources or in several collections is stored once and copied by reference. The link id SHALL be the identity pimdir SPEC Annex A gives, with nothing prepended: the bare `Message-ID` for mail, the bare `UID` for a card. Only a kind's own fallback is marked (`alt:` over subject, date and sender; `hash:` over a card's body), that being the one case a prefix is for, a name no server has heard of; a real id cannot be mistaken for one, RFC 5322 `atext` admitting no colon before the `@`.
+An item body SHALL be stored once per content hash; an item present on both sources or in several collections is stored once and copied by reference. The link id SHALL be the identity pimdir STORAGE Annex A gives, with nothing prepended: the bare `Message-ID` for mail, the bare `UID` for a card. Only a kind's own fallback is marked (`alt:` over subject, date and sender; `hash:` over a card's body), that being the one case a prefix is for, a name no server has heard of; a real id cannot be mistaken for one, RFC 5322 `atext` admitting no colon before the `@`.
 
 Where a kind resolves its link id at more than one tier (`message/rfc822`, from the IMAP ENVELOPE at `Meta` and from the parsed body at `Full`), the two derivations MUST produce the byte-identical string for the same item. In particular the date component SHALL be formatted the one canonical way, the **UTC instant** in RFC 3339 at seconds precision, so a message with no `Message-ID` does not link one way at `Meta` and another at `Full`. Kinds resolving at a single tier (the DAV kinds) cannot hit this class of bug.
 
 ### Requirement: Bodies are named by the store's own hash
-The content hash naming an object SHALL come from the store handle (`PimdirStore::blobs`), which computes the algorithm `store_meta.hash_algo` records (pimdir SPEC §5), never from a digest neverest defines. A consumer picking its own names bodies where no other reader of the same store looks, and it fails silently, as a dedup that never dedups.
+The content hash naming an object SHALL come from the store handle (`PimdirStore::blobs`), which computes the algorithm `store_meta.hash_algo` records (pimdir STORAGE §5), never from a digest neverest defines. A consumer picking its own names bodies where no other reader of the same store looks, and it fails silently, as a dedup that never dedups.
 
 ### Requirement: Every item carries a per-kind sort key
 The sync SHALL write a `sort_key` beside the summary of every item it summarises (pimdir STORAGE §9.3), derived by the same io-pimdir derivation and never parsed back out of the summary by the store. `message/rfc822` SHALL carry the `Date:` header normalised to RFC 3339 in UTC at seconds precision, so byte order is chronological order whatever offset the sender wrote; `text/vcard` SHALL carry the display name (`FN`) casefolded and trimmed. A kind resolving at two tiers SHALL derive the byte-identical key at both, on the same terms as its link id: a key that moved when the body arrived would re-sort the item on hydration. Content carrying nothing to derive from SHALL keep the empty key, which the store reads as unknown.
@@ -264,10 +264,10 @@ A roaming or cache location SHALL NOT be chosen where the platform distinguishes
 Each synced collection's media type SHALL be declared on the store from the backend (`Client::media_type`; `message/rfc822` for the mail backends), so the store is self-describing and ready to carry other item kinds.
 
 ### Requirement: A collection records the account that syncs it
-Every store handle SHALL be opened for the account being synced, so each collection it writes is grouped under that account (pimdir SPEC §9.2). Within the account, a collection is further keyed by its source's namespace, which is its name, so two sources of one kind are told apart without inferring it from the collection naming. Two hand-written accounts may still share one `store.root`, and a reader of such a store SHALL be able to tell whose collection is whose.
+Every store handle SHALL be opened for the account being synced, so each collection it writes is grouped under that account (pimdir STORAGE §9.2). Within the account, a collection is further keyed by its source's namespace, which is its name, so two sources of one kind are told apart without inferring it from the collection naming. Two hand-written accounts may still share one `store.root`, and a reader of such a store SHALL be able to tell whose collection is whose.
 
 ### Requirement: A store the format outgrew is refused with its remedy
-A store an earlier draft of the pimdir format wrote cannot be migrated in place. Opening one SHALL fail naming `sync --reset` for the account, the command that drops the replica and resyncs it, rather than surfacing the raw refusal: the store is a derived cache, so recreating it costs a resync and loses nothing but un-pushed local mutation.
+A store an earlier draft of the pimdir format wrote cannot be migrated in place. Opening one SHALL fail naming `sync --reset --force` for the account, the command that moves the store aside and resyncs it, rather than surfacing the raw refusal. What the old store held that no server holds (queued actions, staged edits, retained items) stays in the store moved aside.
 
 ### Requirement: The report shows remote-originated changes a pull applied
 A sync SHALL report the remote-originated changes a pull applied to already-synced items (flag changes and removals), not only the local→remote pushes and the download plan. Because the pull applies them silently (the item reads `Clean` afterwards), they SHALL be recovered from the sync's per-item `events`: a `FlagsChanged` diffed against a pre-pull `handle → flags` snapshot into precise add/remove flag hunks, and a `Vanished` into a delete hunk. A newly-pulled message (`Added`) is already reported by the pull plan (a `Fetch` hunk) and is not re-itemized.
@@ -356,7 +356,14 @@ The subsequent sync of a drained collection pushes the resulting dirty state. An
 A sync run SHALL hold an advisory sync.lock in the **actual** store directory (honouring `store.root`) for the whole run. A second run SHALL wait for the holder up to a bounded timeout (60 s) and then exit with a clear error, so cron ticks and connector-triggered scoped runs serialize instead of failing or corrupting.
 
 ### Requirement: An IMAP handle-space change rebuilds the collection and bumps its generation
-For an IMAP source, the driver SHALL compare the stored checkpoint's UIDVALIDITY before and after the pull; on a change it SHALL run io-pimdir's rekey, carrying cached bodies, summaries and pending state over by link id. The rebuild batch drops every old handle as `Rekeyed`, which the store reads as the rebuild and answers by bumping `collections.generation` in the transaction applying it (pimdir SYNC §8), so a frontend derives its epoch (an IMAP UIDVALIDITY) from the store alone; the driver reads the generation back rather than routing the batch anywhere special. Ordinary syncs and full resyncs never bump. Graph sources never rebuild: Graph message ids survive a delta reset (an expired delta link restarts a full round without changing identity).
+An IMAP listing SHALL compare the `UIDVALIDITY` its `SELECT` answers with the one the store's handles were bound under: the stored checkpoint's, else, while no round has closed, the open round's. On a mismatch it SHALL fail the enumeration and name a rekey (pimdir SYNC §4, §8), whatever it was asked for (a delta, a head, a round's first page or a resumed page), never answering a round of the new UIDs: a sync reads such a round as every member gone and every new one arrived, merges flags onto whatever an old UID now names, and tombstones every message on another endpoint.
+
+The driver SHALL then run io-pimdir's rekey on the collection before syncing it again, carrying cached bodies, summaries and pending state over by link id. The rebuild batch drops every old handle as `Rekeyed`, which the store reads as the rebuild and answers by bumping `collections.generation` in the transaction applying it (pimdir SYNC §8), so a frontend derives its epoch from the store alone. A rekey that fails leaves the stored checkpoint as it was, so the next run meets the moved `UIDVALIDITY` again and rekeys then. Ordinary syncs and full resyncs never bump. Graph sources never rebuild: Graph message ids survive a delta reset.
+
+#### Scenario: A mailbox renumbered between two runs
+- **GIVEN** a mailbox synced under one `UIDVALIDITY`, one of its messages carrying a flag staged in the store
+- **WHEN** the server renumbers the mailbox and the account is synced
+- **THEN** the message is bound under its new UID with the staged flag, nothing is dropped as deleted, and the flag is pushed to the new UID
 
 ### Requirement: Microsoft Graph is a first-class source
 An `msgraph` source SHALL open protocol-direct over io-msgraph (never through a frozen aggregator). Graph carries several PIM domains behind one protocol, one host and one credential, and which domain a source syncs SHALL fall out of its backend as it does everywhere else: `msgraph` is mail, `msgraph-contacts` is the address book, `msgraph-calendar` the calendars. One adapter SHALL serve both, parameterised by which it speaks, as one adapter serves both DAV protocols. A `kind` field on the configuration SHALL NOT be introduced for this or any other backend.
@@ -406,9 +413,9 @@ The mapping between a Graph contact and a vCard SHALL live in io-msgraph (its `v
 Two copies of a projection drift silently and lose data at the seam between them, which is the failure this rules out rather than mitigates.
 
 ### Requirement: A queued submission is a `submit` queue intent
-Neverest SHALL NOT reserve a collection for queued sends. Submission is a **mail** capability: a `submit` intent belongs to a `message/rfc822` account, and an `smtp` channel declared on a source of any other kind SHALL be refused before any connection is made, rather than silently ignored. A submission SHALL be a **queue action** whose kind (`submit`) is defined by neverest, not by pimdir: the format carries an action kind and a versioned JSON payload, and which kinds an owner can perform is the owner's business. An owner that does not recognise a kind, or recognises it but lacks the capability, SHALL **skip** the row, leaving it pending, never parking it (parking means permanently unappliable) and never blocking later actions of that collection.
+Neverest SHALL NOT reserve a collection for queued sends. Submission is a **mail** capability: a `submit` intent belongs to a `message/rfc822` account, and an `smtp` channel declared on a source of any other kind SHALL be refused before any connection is made, rather than silently ignored. A submission SHALL be a **queue action** whose kind (`submit`) pimdir defines (STORAGE Annex B.2) and io-pimdir types (`PimdirSubmit`), carrying a versioned JSON payload; which kinds an owner can perform is the owner's business. An owner that does not recognise a kind, or recognises it but lacks the capability, SHALL **skip** the row, leaving it pending, never parking it (parking means permanently unappliable) and never blocking later actions of that collection.
 
-The intent's payload SHALL be `v: 1` JSON carrying `object` (the body hash, by the convention every action kind follows), `from` (empty means the null reverse path), `rcpts` and an optional `subject`. The body SHALL be written durably before the enqueue, so the queue row pins it (queued bodies are pinned, and no GC can sweep it between the enqueue and the send); it belongs to no collection. The intent SHALL anchor on whatever collection the producer chose: neverest scans every collection's pending actions, so there is no anchor rule.
+The intent's payload SHALL be `v: 1` JSON, read by io-pimdir's `PimdirSubmit` whatever the order of its keys, carrying `object` (the body hash, required, and the hash the row pins), `from` (empty means the null reverse path), `rcpts` (at least one), and an optional `subject`, `source` and `copy`. A payload `PimdirSubmit` refuses, or one naming another body than the row pins, SHALL park as undecodable. The body SHALL be written durably before the enqueue, so the queue row pins it (queued bodies are pinned, and no GC can sweep it between the enqueue and the send); it belongs to no collection. The intent SHALL anchor on whatever collection the producer chose: neverest scans every collection's pending actions, so there is no anchor rule.
 
 Neverest SHALL perform each pending intent through the one source offering a send channel: its own `smtp` table, else its native send (the Graph `sendMail` action, which files the message in Sent itself), sources walked in the order the account declares them. At most one source may declare an `smtp` table, so the only pick that order decides is between a declared channel and a natively-sending source. On success the row SHALL be acknowledged with its receipt, releasing the body's pin. A **transient** failure, which certainly delivered nothing (an SMTP 4xx, a Graph 401, 408 or 429, a transport error before the message went whole), SHALL leave the row pending; a **permanent** one (an SMTP 5xx, a Graph 400, 403, 404, 413, 422 or other 4xx, an undecodable payload, a missing body) SHALL park it with its error; an **uncertain** one SHALL park it as "A send that may have been delivered is never sent again" says. A refusal SHALL reset the SMTP transaction before the next message; a failure with no reply or status SHALL leave the rest of the run's intents unattempted, pending. A build with no send channel (neither `smtp` nor `msgraph`) SHALL skip submit intents and warn, never park them. Message content is never logged.
 
@@ -432,7 +439,7 @@ The backend-neutral enumeration seam SHALL carry the incremental-sync cursor as 
 While syncing a mailbox, the spinner SHALL report progress through the slow inner phase, body hydration (and, under relay, the relayed messages), as a percentage appended to the mailbox line (`[2/7] Syncing INBOX 66%`), updated per streamed `Full` body. Fast phases (enumerate, the `Meta` upgrade) stay silent. The progress tick is invoked from the concurrent fetch pool and is safe to call from several threads at once.
 
 ### Requirement: IMAP enumeration is incremental (QRESYNC)
-Enumeration SHALL carry a per-mailbox checkpoint `(UIDVALIDITY, HIGHESTMODSEQ)`. On a QRESYNC-capable server (ENABLEd on connect) with a checkpoint whose UIDVALIDITY still matches, a delta SHALL be a QRESYNC `SELECT (QRESYNC (uidvalidity highestmodseq))`: only the messages changed since the modseq, the meta read for the ones the store does not bind, plus the vanished UIDs, issuing **no FETCH when nothing changed**. Without a usable checkpoint (first sync, UIDVALIDITY change, malformed bytes) or on a non-QRESYNC server it SHALL answer a round, page by page.
+Enumeration SHALL carry a per-mailbox checkpoint `(UIDVALIDITY, HIGHESTMODSEQ)`. On a QRESYNC-capable server (ENABLEd on connect) with a checkpoint whose UIDVALIDITY still matches, a delta SHALL be a QRESYNC `SELECT (QRESYNC (uidvalidity highestmodseq))`: only the messages changed since the modseq, the meta read for the ones the store does not bind, plus the vanished UIDs, issuing **no FETCH when nothing changed**. Without a usable checkpoint (first sync, malformed bytes) or on a non-QRESYNC server it SHALL answer a round, page by page. A checkpoint whose UIDVALIDITY moved SHALL fail the delta and name a rekey, never answer a round.
 
 ### Requirement: A connection SELECTs a mailbox once per run of commands
 An IMAP connection SHALL cache the mailbox it currently has `SELECT`ed and skip a redundant `SELECT` when the next command targets the same mailbox, so a run of commands on one mailbox, most importantly a batch of body fetches, pays a single `SELECT`, not one per command. Every select path SHALL record the selection so a cached skip is always correct. For a hydrate of N bodies across a W-connection pool this makes `SELECT`s ~W rather than ~N, halving the fetch path's round trips over a high-latency link without changing what is fetched. (Pipelining the body `FETCH`es themselves, mbsync-style, is a further io-imap change, not yet done.)
@@ -546,7 +553,7 @@ A calendar's stamps SHALL NOT collide. `DTSTAMP`, `LAST-MODIFIED`, `CREATED` and
 ### Requirement: A conflicted run succeeds, with its own exit code
 A run that reconciled its collections and left work behind SHALL exit with a code distinct from both success and failure, and SHALL report the outstanding conflict count read from the store rather than the count the run itself marked.
 
-Four states are that code, and they are one class: a divergence waiting for a decision, a duplicate `UID` a side refuses, a write a side would not take, and a send this run parked as uncertain. Each leaves something a person has to settle, and a rerun on its own changes none of them. The first three are re-reported on every run until a person acts; the uncertain send is reported by the run that parked it, and after it among the parked rows, which never decide the exit code.
+These states are that code, and they are one class: a divergence waiting for a decision, a duplicate `UID` a side refuses, a write a side would not take, a send or an intent this run parked (refused for good, or uncertain), a queued action the store holds parked, a listing that parked a mass absence, and a change withheld over a body the store cannot serve. Each leaves something a person has to settle, and a rerun on its own changes none of them. Conflicts, refusals and parked queue actions are re-reported on every run until a person acts; a parked send or intent is reported by the run that parked it; a parked absence and a withheld change are reported by every run meeting them.
 
 A conflict is one item wide, and so is a refusal. Failing the run would stop every other item over one divergence, and under a supervisor restarting on failure it would loop over a state no supervisor can resolve. The distinct code says the same thing without pretending the run broke.
 
@@ -562,12 +569,17 @@ The two conflict counts differ and the difference matters: the engine emits noth
 - WHEN the run ends
 - THEN it exits with the same code, rather than reporting success over a change that stayed in the store
 
+#### Scenario: A refused send is not a success
+- GIVEN a queued send the server refuses for good
+- WHEN the run ends
+- THEN the send is parked and the run exits with the conflict code
+
 ### Requirement: An incomplete run has its own exit code
-A run that could not do all its work SHALL exit with a code of its own, distinct from success, failure and the conflict code: a source it could not scan, an endpoint or a send channel it could not open, a hunk it could not apply, a send or an intent that failed without parking, a source that gave up throttled, or a round left open on a collection it synced. It SHALL win over the conflict code, the report still counting what waits for a person.
+A run that could not do all its work SHALL exit with a code of its own, distinct from success, failure and the conflict code: a source it could not scan, an endpoint or a send channel it could not open, a hunk it could not apply, a push its server answered nothing for, a send or an intent that failed without parking, a source that gave up throttled, a round left open on a collection it synced (but one its listing parked over a mass absence), or convergence passes that ended still moving. It SHALL win over the conflict code, the report still counting what waits for a person.
 
 An unreachable server is the common case. The run stops nothing else over it, so it is no failure, yet a run with nothing to do and a run that could not reach its server both exited 0, and a caller told offline from idle by parsing error strings. A rerun clears this state on its own, which is what sets it apart from the conflict code: that one waits for a person, this one for the network.
 
-A send or an intent that parked is not this: it waits for a person, and its row says why.
+A send or an intent that parked is not this: it waits for a person, and its row says why. Nor is a round a mass absence parked: a rerun meets the same listing.
 
 #### Scenario: An unreachable source is not an idle run
 - GIVEN an account whose only source refuses the connection
@@ -730,7 +742,7 @@ An unresolved conflict tracks the newest remote revision on every run, so a deci
 - THEN the push is refused and the conflict is reported as moved
 
 ### Requirement: Deciding never owns the store
-A conflict command SHALL read the store through a handle that owns nothing and takes no lock (pimdir SPEC §8), and SHALL NOT hold the store's owner lock across a decision. A resolution SHALL re-read the divergence and its bodies for each attempt, release the store before the merger runs, and take the store again, under the run lock, only to apply what came back.
+A conflict command SHALL read the store through a handle that owns nothing and takes no lock (pimdir STORAGE §8), and SHALL NOT hold the store's owner lock across a decision. A resolution SHALL re-read the divergence and its bodies for each attempt, release the store before the merger runs, and take the store again, under the run lock, only to apply what came back.
 
 The store's owner lock lives on the handle, so a handle kept for a command's lifetime refuses every sync of that store for as long as a person sits in an editor. That is the window the staleness guard exists for, and holding the lock across it makes the guard unreachable: the only thing that moves a placement's conflict revision is a sync of that store, so the revision cannot move, and the refusal, the retry and the re-export never run.
 
@@ -740,7 +752,7 @@ The store's owner lock lives on the handle, so a handle kept for a command's lif
 - THEN the write is not refused, and the decision the merger returns is exported again against what arrived
 
 ### Requirement: A new resource name never collides with a stored one
-A resource name derived for an item being appended SHALL be unique within its collection. Where the item's link id was minted because its identity was already taken (pimdir SPEC §9), the name SHALL carry the same distinguishing part, so two items sharing a `UID` are pushed to two hrefs.
+A resource name derived for an item being appended SHALL be unique within its collection. Where the item's link id was minted because its identity was already taken (pimdir STORAGE §9), the name SHALL carry the same distinguishing part, so two items sharing a `UID` are pushed to two hrefs.
 
 The fallback that derives a name from the body is the trap: a duplicate's body carries the same `UID` as its twin, so a name derived from it collides by construction, and a colliding `PUT` is not refused by the server but applied to the resource already there. The copy that was already synced is overwritten by the copy being appended, which loses an event and reports success.
 
@@ -801,9 +813,9 @@ An account whose endpoints are both authoritative SHALL reconcile them with each
 
 Neither endpoint's own reconcile can see this. Each of them agrees with its own server, and only the pair disagrees, so nothing marks it and the run reads as quiet while the two servers hold different bodies.
 
-The ancestor SHALL be read before the round pulls. Recording a remote content change drops the stale body from the shared item and from that source's base together, so once both endpoints have pulled, the store holds their two new bodies and nothing they both came from, and a merge attempted after that has no base to merge against.
+The store keeps the body the endpoints agreed on until every binding reconciled (pimdir SYNC §9), and records the divergence itself when the second endpoint's pull brings another body than the first's: the binding that diverged parks with the agreed body as its base, the item's body as its own and its server's as the divergence. That endpoint's own merge then settles it or reports it. neverest keeps no snapshot of its own: one read before the round and held in memory was lost to any run that stopped between the two pulls.
 
-The source is the merge's left side, `ours`. That decides which body becomes the shared one and therefore what the target's divergence is recorded against; it decides nothing about a collision, which is a person's to settle through `neverest conflict resolve`.
+The endpoint whose pull landed first is the merge's left side, `ours`. That decides which body becomes the shared one and therefore what the other's divergence is recorded against; it decides nothing about a collision, which is a person's to settle through `neverest conflict resolve`.
 
 Under `one-way` there is no divergence to reconcile: the source is the truth and the target follows it, which is what declaring an authority is for. A dry run stages nothing.
 
@@ -818,32 +830,35 @@ Under `one-way` there is no divergence to reconcile: the source is the truth and
 - THEN the divergence is parked and counted, each endpoint still holds its own body, and rerunning changes neither
 
 ### Requirement: A collection deleted on one endpoint is deleted on the other
-A collection one endpoint of a pair lists and the other does not SHALL be read three ways, the store being the base: where the store knows both endpoints held it (a binding or a checkpoint of each, pimdir SYNC §5), the other endpoint deleted it, and the delete SHALL cross to the one still holding it, as that endpoint's `collection.delete` allows; otherwise it is new on the endpoint listing it, and SHALL be created on the other, as that endpoint's `collection.create` allows. A delete the remaining endpoint forbids SHALL leave the collection where it is, and SHALL NOT create it again where it was deleted.
+A collection one endpoint of a pair lists and the other does not SHALL be read three ways, the store being the base: where the store knows both endpoints held it (a binding or a checkpoint of each, pimdir SYNC §5), the other endpoint deleted it, and the delete SHALL cross to the one still holding it only when that endpoint's `collection.delete` allows it, which it does not unless configured; otherwise it is new on the endpoint listing it, and SHALL be created on the other, as that endpoint's `collection.create` allows. A delete the remaining endpoint forbids SHALL leave the collection where it is, and SHALL NOT create it again where it was deleted.
 
-Once the delete has crossed, the collection SHALL be dropped from the store with what it holds (pimdir §14), the operator having removed it from the account: a collection made again later under its name then reads as new rather than as deleted on the other side. A dry run reports the hunk and changes nothing.
+Absence is the only signal a collection deletion leaves on IMAP and DAV, and a listing may drop a collection nobody deleted, so a server collection is deleted from an absence only where the user asked for it (pimdir SYNC §5).
+
+Once the delete has crossed, the collection SHALL be dropped from the store with what it holds, the operator having removed it from the account: a collection made again later under its name then reads as new rather than as deleted on the other side. A dry run reports the hunk and changes nothing.
 
 Without a base, a collection deleted on one endpoint was created again from the other on every run, which no deletion could outlast.
 
+#### Scenario: A deleted address book stays on the other endpoint by default
+- **GIVEN** an address book both endpoints held, deleted on one of them, the other configured without `collection.delete`
+- **WHEN** the account is synced
+- **THEN** it stays on the other endpoint, and the next run does not create it again
+
 #### Scenario: A deleted address book does not come back
-- GIVEN an address book both endpoints held, deleted on one of them
-- WHEN the account is synced
-- THEN it is deleted on the other, the report naming the delete, and the next run creates nothing
+- **GIVEN** an address book both endpoints held, deleted on one of them, the other configured with `collection.delete = true`
+- **WHEN** the account is synced
+- **THEN** it is deleted on the other, the report naming the delete, and the next run creates nothing
 
 #### Scenario: An address book made again is new
-- GIVEN an address book deleted on both endpoints by a crossed delete, then made again on one
-- WHEN the account is synced
-- THEN it is created on the other
+- **GIVEN** an address book deleted on both endpoints by a crossed delete, then made again on one
+- **WHEN** the account is synced
+- **THEN** it is created on the other
 
 ### Requirement: A divergence with no common ancestor parks rather than resolving itself
 Two endpoints of one account holding one identity under two different bodies, with no body they ever agreed on behind them, SHALL park the divergence and SHALL NOT write either body over the other. A three-way merge SHALL NOT be attempted: with no base it could only ever park, and merging against the target's own body as the base would read the target as having changed nothing and settle on the source's, which is the overwrite parking exists to refuse.
 
 This is the same disagreement as "Two endpoints are reconciled with each other" without the ancestor that requirement merges against, and it is what a migration and a hand-built mirror start from rather than a rare edge.
 
-The engine records it on the shared item rather than on a binding, the two being different questions: one says an endpoint and its own server disagree, the other that the two endpoints do. The parked divergence SHALL be taken from the item, and SHALL be taken before the run pushes, marking the target being what keeps the source's body off it: a conflicted binding projects as a conflict and never as the dirty placement a round would push.
-
-The parked placement SHALL carry the source's body as the item's own, the target's as the divergence recorded against it, and the revision the target's own pull observed, which is the shape `conflict list` and `conflict resolve` read. `--prefer-local` settles on the source's body and `--prefer-remote` on the target's, and the run after either carries the decision to both endpoints.
-
-The item's flag SHALL be read against the same flag as the round found it. It outlives the decision that settles it, no write clearing it where the source restates the shared body, so parking on it alone would re-park what a person has already ruled on and refuse the resolution's own push on every run after.
+The store records it (pimdir SYNC §6, §9): the second endpoint's pull lands its body over an item holding another, and the binding parks with no body as its base, the item's body as its own and its server's as the divergence, before any round pushes, a conflicted binding projecting as a conflict and never as a dirty placement a round would push. That is the shape `conflict list` and `conflict resolve` read. `--prefer-local` settles on the item's body and `--prefer-remote` on the parked endpoint's, and the run after either carries the decision to both endpoints. The store clears the item's conflict on that edit, so a settled divergence does not park again.
 
 Under `one-way` nothing parks: the source decides by declaration. A dry run stages nothing.
 
@@ -908,10 +923,10 @@ A listing the server truncates SHALL be reported as a delta rather than as a com
 A DAV source SHALL reopen its connection and run the exchange again when the server closed it between requests (an HTTP/1.0 answer, a `Connection: close`), carrying the discovery it already paid for over to the new connection. Only an end-of-stream or reset failure SHALL be retried, being the shape of a request the server never read, so a create or a delete is never replayed against a server that acted on it.
 
 ### Requirement: A backend without flags reports them known-empty
-A backend with no flag concept (CardDAV, CalDAV) SHALL report an item's flags as *known-empty*, never as *unknown*. The distinction is normative (pimdir SPEC Annex A): reporting unknown makes the engine treat the flag set as unfetched and re-probe the item on every run.
+A backend with no flag concept (CardDAV, CalDAV) SHALL report an item's flags as *known-empty*, never as *unknown*. The distinction is normative (pimdir STORAGE §13): reporting unknown makes the engine treat the flag set as unfetched and re-probe the item on every run.
 
 ### Requirement: A refused delete is held, never reverted
-Every source SHALL sync under `PimdirDeletePolicy::Keep`. Both refusals (`push` off, or `item.delete = false`) run through that one disposition, and each source here is bound to the store's hub, which fixes the answer: reverting a tombstone states that the source still holds the member, and a hub reads that as the item being alive (add-beats-delete across sources), so it clears the deletion for every source and mirrors the item back to the one it was deleted on.
+Every source SHALL sync beside the other sources of its hub (io-pimdir `PimdirSync::beside_other_sources`), holding a refused delete rather than reverting it. Both refusals (`push` off, or `item.delete = false`) run through that one disposition, and each source here is bound to the store's hub, which fixes the answer: reverting a tombstone states that the source still holds the member, and a hub reads that as the item being alive (add-beats-delete across sources), so it clears the deletion for every source and mirrors the item back to the one it was deleted on.
 
 A source configured to take no deletes would then resurrect on both what the user removed on one, which is the opposite of what that setting is for.
 
@@ -921,7 +936,7 @@ A source configured to take no deletes would then resurrect on both what the use
 - THEN nothing is pushed and the tombstone stays, rather than being undone into a clean row
 
 ### Requirement: A purge is followed by a collection
-The store reclaims nothing by itself (pimdir SPEC §5: an object at refcount zero is unreferenced, not deleted, because the batch that attaches a body may not be the one that indexed it), so the retention sweep SHALL run the collector after a purge that removed rows, and SHALL report the objects it dropped and the bytes it freed beside the items the purge removed. A purge releases a body; it does not reclaim one.
+The store reclaims nothing by itself (pimdir STORAGE §5: an object at refcount zero is unreferenced, not deleted, because the batch that attaches a body may not be the one that indexed it), so the retention sweep SHALL run the collector after a purge that removed rows, and SHALL report the objects it dropped and the bytes it freed beside the items the purge removed. A purge releases a body; it does not reclaim one.
 
 The collector SHALL NOT run after a sweep that took nothing: its cost is a walk of the whole blob tree, and a purge that removed no row released nothing. Orphan blobs a crash left are not this run's to find; they are what `pimdir gc` is for.
 
@@ -1325,7 +1340,7 @@ An account MAY bound its mail by `item.filter.since`, and a run by `sync --since
 A connector MAY narrow a scoped listing by its provider's own filter to a superset of the scope: IMAP `SENTSINCE` a day below the floor (or no `Date` header) and `SENTBEFORE` two days above a ceiling, Gmail `after:` and `before:` two days around the scope, in epoch seconds. Graph lists by `sentDateTime`, its reading of the `Date` header, with no margin. The `Date` SHALL decide what is kept. A connector whose checkpoint is bound to no scope (IMAP, Gmail, Graph mail) SHALL widen a scope by listing only the band its coverage lacks.
 
 ### Requirement: A mail round lands page by page, newest first
-A mail round SHALL be answered in pages, newest first, each landing in its own write with its resume cursor: IMAP 500 UIDs by UID descending, its cursor `(UIDVALIDITY, lowest UID listed, highest UID found when the round opened)`; Graph 1,000 messages a page, from the message delta with no scope (`Prefer: odata.maxpagesize`, sent with every link) or from `/messages` by `sentDateTime` under one (`$top`), its cursor the next link; Gmail 100 ids, its cursor the page token. The checkpoint SHALL be the one taken when the round began where the provider gives one (IMAP `HIGHESTMODSEQ` at the select, Gmail's profile `historyId` read before the listing), Graph's delta link on its last page. An interrupted round SHALL resume from its cursor, and a cursor the provider refuses (an expired Graph link, a Gmail page token, a moved `UIDVALIDITY`) SHALL restart it.
+A mail round SHALL be answered in pages, newest first, each landing in its own write with its resume cursor: IMAP 500 UIDs by UID descending, its cursor `(UIDVALIDITY, lowest UID listed, highest UID found when the round opened)`; Graph 1,000 messages a page, from the message delta with no scope (`Prefer: odata.maxpagesize`, sent with every link) or from `/messages` by `sentDateTime` under one (`$top`), its cursor the second the page ended at, the next page listing below the second after it; Gmail 100 ids, its cursor the page token. The checkpoint SHALL be the one taken when the round began where the provider gives one (IMAP `HIGHESTMODSEQ` at the select, Gmail's profile `historyId` read before the listing), Graph's delta link on its last page. An interrupted round SHALL resume from its cursor, and a cursor the provider refuses (an expired Graph link, a Gmail page token) SHALL restart it, a moved `UIDVALIDITY` being a rekey (see "An IMAP handle-space change rebuilds the collection and bumps its generation").
 
 #### Scenario: A round killed after its first page
 - **GIVEN** a mailbox of 1,100 messages synced for the first time
@@ -1433,7 +1448,7 @@ The one-source sync SHALL take its collections in the order of the roles the run
 - **THEN** the new mail's body is downloaded and the backlog is not
 
 ### Requirement: A body gone from the server is owed nothing more
-A body read the server answers gone SHALL NOT fail the run: a Gmail or Graph read answered 404 (in a batch, a size read, or alone), and an IMAP UID a completed `UID FETCH` answers nothing for (RFC 9051 §6.4.9), or a lone fetch of it that streams nothing. The run SHALL record the body gone for each collection owing it and SHALL NOT ask for it again: no later batch of phase 1 and none of phase 2. The store SHALL keep the member as it was listed, a body read being no listing (pimdir SYNC §5), so the next run's listing takes it away before that run plans its body. DAV, Google Calendar and Google People bodies are not covered.
+A body read the server answers gone SHALL NOT fail the run: a Gmail or Graph read answered 404 (in a batch, a size read, or alone), a CardDAV, CalDAV, Google Calendar or Google People read answered 404 or 410, and an IMAP UID a completed `UID FETCH` answers nothing for (RFC 9051 §6.4.9), or a lone fetch of it that streams nothing. The run SHALL record the body gone for each collection owing it and SHALL NOT ask for it again: no later batch of phase 1 and none of phase 2. The store SHALL keep the member as it was listed, a body read being no listing (pimdir SYNC §5), so the next run's listing takes it away before that run plans its body; a member the listing names and every read finds missing is thus asked for once a run, never failing its collection.
 
 #### Scenario: Expunged while the run downloads
 - **GIVEN** an IMAP folder whose three smallest messages are expunged after a `-j 1` run listed them, while it downloads the largest bodies
@@ -1532,3 +1547,153 @@ A DAV delete answered 404 or 410 SHALL be accepted (pimdir SYNC §4): pushes are
 
 ### Requirement: A DAV relocation moves the member
 A `Remove` relocating a CalDAV member into another calendar SHALL move it with WebDAV `MOVE`, keeping its `UID` in one place. Where the server cannot move it (405, 501, 404), and on CardDAV, the member SHALL be re-created at the target and deleted from the source on its ETag, the delete running only once the create was accepted, so a failure leaves the member where it was.
+
+### Requirement: A truncated `sync-collection` listing is incomplete
+A `sync-collection` answer the server truncates (RFC 6578 §3.6, a `507` row) SHALL be followed from the sync token it carries until an answer is not truncated, a bounded number of times. A listing whose last answer was still truncated, the bound reached or the answer carrying no token, SHALL be returned incomplete, read as a delta: what it lists lands and no member is inferred removed from its absence. A truncated answer without a token SHALL end the listing, never restart it from its start, and the checkpoint SHALL stay the one the listing started from.
+
+#### Scenario: A first listing the server keeps truncating
+- **GIVEN** a CardDAV server truncating every `sync-collection` answer of a new address book
+- **WHEN** the account is synced
+- **THEN** the cards it listed reach the store, and no card is inferred deleted on either endpoint
+
+### Requirement: A collection listing names every collection the source holds
+A source's collection listing SHALL name every collection it holds, whatever the provider leaves out by default: hidden Google calendars, every page and every depth of Graph contact folders. A collection left out of a listing reads as deleted where the store knows both endpoints held it.
+
+### Requirement: A reset never loses work no server holds
+`sync --reset` SHALL read the store before dropping it and SHALL refuse while it holds work no server has: a queued or parked action, a conflict, an item whose flags or body no binding's base holds (a staged edit or create), a staged delete, or a retained item, bound to no server. The refusal SHALL list that work per collection and name `--force`. A store holding none of it SHALL be dropped and recreated, its search index with it.
+
+`--reset --force` SHALL NOT delete anything: it SHALL move the store (the database and its WAL files, the objects, the search index and the sidecar) into a sibling directory named `<account>.reset-<UTC instant>`, then recreate the store. A store that cannot be read, written by an earlier draft or a newer neverest, SHALL be reset this way only.
+
+`--reset` SHALL be refused beside `--dry-run`, which would drop the real store before planning, and beside a collection or source filter, the reset being the whole store's.
+
+#### Scenario: A queued send survives a reset
+- **GIVEN** a store holding a queued action
+- **WHEN** the account is synced with `--reset`
+- **THEN** the run refuses, naming the queued action and `--force`, and the store is untouched
+
+#### Scenario: A forced reset moves the store aside
+- **GIVEN** a store holding a queued action
+- **WHEN** the account is synced with `--reset --force`
+- **THEN** the old store is in a sibling `reset-` directory, whole, and the account syncs into a fresh one
+
+### Requirement: A store a newer neverest wrote asks for an upgrade
+Opening a store whose version is above the one this neverest knows SHALL fail saying a newer neverest wrote it and naming the upgrade, never a reset: the store is good, and a reset would drop what it holds that no server has.
+
+#### Scenario: A downgrade
+- **GIVEN** a store written by a newer neverest
+- **WHEN** an older neverest syncs the account
+- **THEN** the run fails asking for a newer neverest, and the store is untouched
+
+### Requirement: The sidecar is replaced whole
+neverest.json SHALL be written to a temporary file in the store directory, synced, and renamed over the previous one, so a run killed while saving it leaves the previous sidecar or the new one, never a torn file the next run refuses.
+
+### Requirement: A relay appends only where the target's listing is closed
+A message SHALL be relayed to a target only when the target has closed a round over the collection, has none open, and that round's scope holds the message's date (an undated message being in every scope), as pimdir SYNC §5 guards an add: the store then knows what the target holds there, so a message it already holds is bound to it rather than appended twice. A message held back waits for a later pass.
+
+#### Scenario: A target still listing its mailbox
+- **GIVEN** a relay account whose target's first round over the inbox is open
+- **WHEN** the account is synced
+- **THEN** nothing is relayed into that inbox until the round closes
+
+### Requirement: A store error carries its code
+A store failure that ends a command SHALL carry, in its JSON failure object, the code io-pimdir gives it (`PimdirError::code`), spelled the same: `store-newer`, `store-older`, `store-uncreated`, `store-foreign`, `store-corrupt`, `store-not-current`, `store-stale`, `store-hash-algo`, `store-busy`, `store-owned`, `store-staging`, `store-in-flight`, `unsupported`, `index-fts5-missing`. A failure a caller cannot act on (an SQL or I/O error, a malformed action) SHALL carry none, nor SHALL a code neverest cannot meet (`index-busy`, which `index` answers as `busy`; `index-missing`, `index-outdated` and `index-query-only`, a query client's; `cutoff-invalid`, neverest writing its cutoff as the store stamps). No message SHALL advise deleting the store: the remedies are an upgrade, `sync --reset` on a store holding no pending work, and `sync --reset --force`, which moves it aside.
+
+#### Scenario: A downgrade under `--json`
+- **GIVEN** a store written by a newer neverest
+- **WHEN** an older neverest runs `--json drain` on the account
+- **THEN** it exits 1 printing a failure object whose `code` is `store-newer`
+
+#### Scenario: A store root naming another program's database
+- **GIVEN** a pimdir.db holding another program's tables
+- **WHEN** neverest runs `--json drain` on the account
+- **THEN** it exits 1 printing a failure object whose `code` is `store-foreign`, the database untouched
+
+### Requirement: A body reaches the blob tree under a lock
+A body neverest writes SHALL go through the write side io-pimdir hands a lock holder: a fetched body streams into the owner's stage (`PimdirStore::blob_stage`), which hashes it as it passes, and a settled or merged conflict body is staged by the producer that enqueues it, in one step with its action (`PimdirProducer::enqueue_with_body`). neverest SHALL NOT hash or write a body itself.
+
+### Requirement: An IMAP mailbox is never read as smaller than it stated
+A mailbox whose `SELECT` answer states no `EXISTS` SHALL be searched as any other, never read as empty: a listing read short is a delete of everything left out.
+
+### Requirement: A Graph band page resumes below a date
+A Graph band page SHALL resume below the second the page before it ended at, that second included, never at the offset Graph's next link carries: a member deleted between two pages, in one run or across two, would shift a later one out of the round, and a band round has no pass to list it again. A page whose messages were all sent within one second SHALL follow Graph's next link within the same request until a page leaves that second. A band next link a round stored before SHALL be refused, which opens the round again.
+
+#### Scenario: A message deleted between two runs of a band round
+- **GIVEN** a band round whose first page landed, then a message of that page deleted on Graph
+- **WHEN** the next run resumes the round
+- **THEN** every message the band still holds is listed, none shifted out of it
+
+### Requirement: A flag push names what it adds and removes
+A flag change SHALL reach a server as the flags it adds and the flags it removes (pimdir SYNC §4), never as a whole set replacing the server's: an IMAP `UID STORE +FLAGS` and `-FLAGS`, a Graph patch naming only the properties a flag of either set maps to (`isRead` for `\Seen`, the follow-up status for `\Flagged`), a Gmail modify naming only the labels either set maps to. A flag named in neither set SHALL be left as the server holds it, so a flag another client changed between the listing and the push survives; a change naming no flag the server maps SHALL send nothing.
+
+#### Scenario: Another client answers a message while the run removes its flag
+- **GIVEN** a message listed seen and flagged, then answered on the server by another client
+- **WHEN** the run pushes the removal of `\Flagged`
+- **THEN** the message holds `\Seen` and `\Answered` on the server
+
+### Requirement: A listing missing most of a collection waits for a person
+A round of a sync whose listing leaves out more than half of at least 20 bound items in its scope, and the rebuild of a renumbered collection whose listing leaves out more than half of at least 20 bound items, SHALL drop nothing (pimdir SYNC §5, §8): such a listing reads as a truncated or emptied answer. The run SHALL report each under `absences`, with the side, the collection, the items left out and the items counted, and whether it was a rebuild, and SHALL exit 2: a rerun alone meets the same listing and parks again. The round a park leaves open SHALL NOT make the run incomplete. A parked rebuild SHALL keep the collection's handles and checkpoint, and the collection SHALL NOT be listed again that run.
+
+`sync --accept-absences` SHALL confirm the absences for that run only, never stored: its rounds and rebuilds drop what they find absent.
+
+#### Scenario: A mailbox listed nearly empty
+- **GIVEN** an inbox bound to 25 messages, whose server lists one
+- **WHEN** the account is synced
+- **THEN** nothing is dropped, `absences` names 24 of 25, and the run exits 2
+
+#### Scenario: The absences confirmed
+- **GIVEN** the same inbox
+- **WHEN** the account is synced with `--accept-absences`
+- **THEN** the 24 messages are dropped
+
+### Requirement: An edit names the body it was made over
+A conflict resolution, a merge and a one-way overwrite SHALL state the body they were made over (the queued `update`'s `if_match`, the `Edit` mutation's, pimdir STORAGE §15.3, SYNC §7): an edit another write replaced since SHALL park rather than drop that write unmerged. A body staged with its action SHALL be staged in one step with it, so a refused action leaves no body in the tree.
+
+### Requirement: A change over an unreadable body is withheld and reported
+A change whose body is missing from the store or does not hash to its name SHALL be withheld, the placement staying as it was (pimdir STORAGE §7, SYNC §5), and the run SHALL report it under `unreadable` with the side, the collection and the count, and SHALL exit 2: the store needs a repair a rerun does not make.
+
+### Requirement: A body a policy overruled is kept and reported
+A body a policy did not adopt, kept by the store as a retained item (pimdir SYNC §9), SHALL be reported under `overruled` with the collection and the retained item's key, and either the side and the item's handle on it, for a body a side's write or a mutation settled, or the queue row (`action`), for one the drain kept aside applying a queued action, in a sync and in `drain`. It SHALL be a warning and SHALL NOT change the exit code: the policy decided as configured.
+
+### Requirement: A one-way overwrite keeps the body it discards
+A one-way account overwriting a target's own edit SHALL keep the target's body as a retained item and SHALL report it under `overruled`: `one-way` discards the target's change from its server, never from the store. A target body the store holds as wanted only SHALL be fetched before the overwrite settles it, the store refusing to overrule a body nobody read (`conflict-unread`); one still unread after its fetch SHALL stay parked, never failing the run.
+
+#### Scenario: A target edited while the source moved
+- **GIVEN** a one-way account whose source and target agreed on a card, the source then changing it and the target editing it
+- **WHEN** the account is synced
+- **THEN** the target holds the source's card, the store keeps the target's edit as a retained item, and `overruled` names it
+
+#### Scenario: A target edit listed without its body
+- **GIVEN** the same account, the target listing its edited card with no body
+- **WHEN** the account is synced
+- **THEN** the target's card is fetched first, then kept as a retained item and named under `overruled`, and the run does not fail
+
+### Requirement: A stated identity is named without its escape
+A stated identity the store filed with a leading `esc:` (pimdir STORAGE §9), because it begins like a derived key, SHALL be named to a server without it, alone or inside a minted key; a derived key SHALL name none.
+
+### Requirement: A push no server answered is pushed again
+A push the connector gave no outcome for SHALL stay pending (pimdir SYNC §5), and the run SHALL report the count the last pass of each collection left under `unanswered`, with the side and the collection, and SHALL exit 3: the next run pushes them again.
+
+### Requirement: A rejected create is reported once
+A create the engine reports its server rejected (`rejected_creates`) SHALL be reported under `rejected`: with the reason the connector recorded, or under `refused` for a duplicate `UID`, else as a `create` whose server gave no reason. It SHALL be reported once whichever records it.
+
+### Requirement: A resolution names what the push supports in part
+`conflict resolve` SHALL stage its body in one step with the gate (`enqueue_with_body_checked`) and SHALL print the capabilities a source supports in part that the next push relies on, under `partial` in its JSON.
+
+### Requirement: The store's owner builds its search index
+A build with the `search` feature (on by default) SHALL refresh the store's search index (index.db, pimdir SEARCH §3, §4) after a sync, last, for at most the account's `store.index-timeout` (60 seconds unless set, `"0"` turning it off), and after a drain, a run performing the queued intents alone and a run declaring collections, for at most 2 seconds. A dry run SHALL NOT refresh. A refresh cut by its deadline SHALL leave the index behind the store and the next refresh SHALL go on from there.
+
+The run SHALL report the refresh under `index`: the changes folded, the bodies newly indexed, the stamps still `behind`, whether another indexer held it (`busy`), and the error of a failed one. An index failure SHALL be a warning and SHALL NOT fail the run or change its exit code: the index is derived from the store.
+
+`neverest index` SHALL build the index until it holds every change the store has, reading no credential and opening no endpoint, and SHALL exit 3 answering `busy` while another indexer holds it.
+
+A reset SHALL take the index with the store: dropped with an idle store, moved aside with it by `--force`.
+
+#### Scenario: A message a sync landed is found by a frontend
+- **GIVEN** a sync landing a message whose subject says "Quarterly report"
+- **WHEN** a frontend opens the index for queries alone and searches `quarterly`
+- **THEN** it finds the message
+
+#### Scenario: A first build longer than the deadline
+- **GIVEN** a store whose index a refresh's deadline cut
+- **WHEN** the next run refreshes it
+- **THEN** it goes on from where the cut left it until the index is current

@@ -6,110 +6,267 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+Upgrading from 0.3.0:
+
+- A 0.3.0 store is brought to the new schema when first opened. A store a git master build wrote is refused as stale: `neverest sync --reset --force -a <account>` moves it aside and resyncs into a fresh one.
+- `collection.delete` now defaults to false: set `collection.delete = true` on each endpoint whose collection deletions should reach the other.
+- `sync --reset` refuses while the store holds work no server has, listing it; `--reset --force` moves the store aside instead of deleting it.
+- `sync` exits 2 for a parked send, intent or queue action too, and 3 when the run could not do all its work: a script must tell 2 and 3 from 1.
+- A listing that leaves out more than half of at least 20 items a collection held drops nothing and exits 2: `sync --accept-absences` confirms such absences, for one run.
+
 ### Added
 
-- Added the delivery of a task filed into another calendar by a move (pimdir SYNC §3, §4, io-pimdir `8907303`, io-webdav `b2b9a00`): a CalDAV create superseding a member of its own `UID` moves that member into the target with WebDAV `MOVE` (`Overwrite: F`, gated on its ETag), then writes the stored body over it (gated on the ETag the move answered, else unconditional), and is accepted under the moved handle with the write's ETag, so the server never holds the `UID` twice: Fastmail, keeping one per account, refused the upload. A `MOVE` answered 405, 501 or 404 (Google) falls back to the upload; one refused for the identity rejects the create as a refused upload does, a duplicate `UID` reported as one. CardDAV and the other backends upload as before.
-- Added `x-vtodo` `none` (pimdir STORAGE §15.6, io-pimdir cairn/changes/gtd-hardening): a CalDAV calendar whose `supported-calendar-component-set` leaves VTODO out is declared as taking no tasks, so the store's gate refuses a task added or moved there before it is queued and a frontend reading `accepts_vtodo` stops offering it as a task list. A local-mode run records those calendars in the sidecar (neverest.json, `taskless`) at each listing, and every declaration, the one before the drain and `neverest drain` included, reads them from there. A run declares again right after each listing, so a calendar met mid-run is gated from its first item sync rather than from the end of the run. Google Calendar and Graph calendar sources declare `x-vtodo` `none` source-wide from the configuration, their tasks living in Google Tasks and Microsoft To Do. An account with targets declares, under its source, the calendars a target's listing states take no tasks and, for a Google or Graph calendar target, every calendar; targets stay undeclared. `neverest check` lists the source-wide row among a source's capabilities and a CalDAV calendar's statement as `takesTasks` on the collection. A listing records the source as syncing each collection it is about to sync and holds no state in yet, a `sources` row with no checkpoint (the canonical `load_checkpoint` then `upsert_checkpoint`, a checkpoint never overwritten), so a calendar listed but not synced yet, `sync --declare-only` included, refuses a task right after the listing rather than from its first sync; in a pair only the source is recorded.
-- Added attachment stand-ins (pimdir STORAGE §14.3, io-pimdir `14a8fca`): a message body a sync lands records, in the write storing it, one file holding no body per part disposed as an attachment, in the account's attachments collection (`<account>/\u0001attachments`, role `attachments`), with its name, media type, decoded size and IMAP section, and an `attachment` reference from the message, whichever path landed the body (primed, by page while the listing runs, or in phase 2, Gmail's shared landing included). A body the account already held (a copy, a move, a second Gmail label) adds none, and bodies held before are not walked again.
-- Added Graph mail round heads (pimdir `round-head`, io-pimdir `07bd316`): while a folder's first round is open, a run resuming it first lists the messages Graph received since two days before the round began (`receivedDateTime`, newest first), so a message arriving meanwhile lands before the round's next page instead of after the round closes. The round's last page lists them again after its own rows, so what is still there is kept when the round closes and what was deleted meanwhile is dropped. Graph lists no delta head, its delta link arriving with a round's last page only.
-- Added Gmail round heads (pimdir `round-head`, io-pimdir `07bd316`): while a label's first round is open, which on a large Inbox paced by the quota lasts many runs, a run resuming it first lists the history since the round began, so a message arriving meanwhile lands before the round's next page instead of after the round closes, and the round closes on the history id that head read. An expired history id restarts the round. A later page reads again what the head touched and leaves out a message that left the label since it was listed. The driver now hands the sync the heads its source lists; under `--prime`, a resumed round lists its head before it stops.
-- Added heads to IMAP rounds (pimdir SYNC §4, io-pimdir `07bd316`): a run resuming a round an earlier run left open lists first what changed since the round opened, so a message arriving or leaving during a long first sync shows at once rather than after the round's last page. With QRESYNC, a delta head from the round's checkpoint (`SELECT … QRESYNC`: changes, vanished UIDs and the new checkpoint); without, a band head (`UID SEARCH SINCE` the round's opening less two days). The round cursor now carries the highest UID found when the round opened, and the round's last page lists again every message that arrived above it, so nothing a band head named is found absent when the round closes; a round left open by an earlier version lists its whole scope again on its last page, once.
-- Added `sync --prime <N>`: every collection first lists its newest page and downloads its N newest bodies, before any collection lists its second page, so each one is readable early whatever its size, over one connection too; the paused collections are then listed to their end, and phase 2 downloads each collection's N newest owed bodies ahead of the rest. It orders the run and never shortens it. 50 by default under `--download-order newest`, 0 under `largest`; `--prime 0` turns it off. On a local Stalwart account of three folders of 1,100 mails over one connection, the first body is readable after 0.6 s instead of 3.9 s, and every folder's first page after 1.7 s instead of 3.0 s, the whole run unchanged (7.3 s).
-- Added `sync --bodies <all|listed>`: under `listed`, a run downloads only the bodies of what its own pages listed, every other owed body left for a later run, so a mail a targeted run brings is readable at once rather than behind the backlog an interrupted first sync left.
-- Added `sync --max-wait <SECONDS>`, 120 by default: the longest single wait on a throttling provider, past which the source gives up for the run, Graph's body batches and Gmail's batch pauses included. `--prime`, `--bodies` and `--download-order` are refused beside `--intents-only` and `--declare-only`, which list nothing.
-- Added scoped mail syncs (pimdir draft-04 SYNC §5, io-pimdir `35a1c3f`): `item.filter.since` in the account (`30d`, `12w`, `6mo`, `1y`, a date or an RFC 3339 instant) and `sync --since <WHEN>` for one run bound a mail collection by its `Date` header. A message older than the floor is neither listed nor deleted, a message with no usable `Date` is in every scope, and an explicit removal applies whatever the date. The listing is narrowed to a superset (IMAP `SENTSINCE` a day below the floor, or no `Date`; Gmail `after:` two days below), the `Date` deciding; Graph lists the scope exactly by `sentDateTime` (`/messages`, `$filter=sentDateTime ge A and sentDateTime lt B`, newest first). A wider scope lists only the band it lacks on IMAP, Gmail and Graph, whose checkpoint is bound to no scope: Graph keeps one message delta link per folder, made over the whole folder with no date filter (with summaries for a whole-folder round, else by one pass of ids, dates and flags that closes the first round under a scope and corrects what changed while its band was listed), which serves every later scope, a change outside the scope dropped and a new message in it named by its summary read in JSON batches. A Graph link stored under a scope before this, made under a `$filter`, is refused once, which opens a round. Refused, by the key it came from, on an account syncing contacts or calendars.
-- Added paged rounds (SYNC §4): a mail listing lands page by page, newest first, each page committed with its resume cursor, so the first page of a large mailbox is readable within seconds and an interrupted run resumes where it stopped. IMAP pages 500 UIDs (UID descending), Graph 1,000 messages (the message delta with `Prefer: odata.maxpagesize=1000`, io-msgraph `00ef069`, or `/messages` with `$top=1000` under a scope), Gmail 100 ids. A refused cursor (an expired Graph link, a Gmail page token, a moved `UIDVALIDITY`) restarts the round.
-- Added `coverage` to the sync report: per collection synced, the scope of the source's last closed round (`since`, `until`) and when it closed (`at`), and the `round` still open (`since`, `until`, `startedAt`); a round left open makes the run incomplete (exit 3). Added `downloaded: [{ source, bytes }]`, the octets of bodies and listed meta each source received.
-- Added a back-off on throttling for Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV and CardDAV: a request answered 429 or 503, or by Google with a 403 rate limit, is sent again after the wait the provider states (a Graph batch's `Retry-After`, Google's `Retry after <instant>`), else after a bounded exponential back-off with jitter (1 to 16 s, five times). Google's refusals are read by their reason and wording: a burst (Gmail's `Too many concurrent requests for user`, a per-second rate, a 503) waits a second or two, a per-minute quota (`Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'`, which carries the same `rateLimitExceeded` reason) waits 2, 3, 4 then 5 s and then the next minute, and a daily quota (`dailyLimitExceeded`, `per day`) gives the source up until Google's midnight (America/Los_Angeles). Past that, or on a stated wait over two minutes, the source gives up: every connection it opened stops sending until the wait is over, what landed stays, and the report lists it under `throttled: [{ source, until }]`, the run exiting 3.
-- Added Gmail pacing: the Gmail source holds itself to 200 quota units a second across its connections (about 40 reads a second, Gmail metering 250 per user) and to `gmail.units-per-minute` over any sixty seconds (6,000 by default, the per-user quota a Google project gets, a read counting the 5 units Gmail bills), each call or batch taking the cost of all its reads, rather than running into refusals.
-- Added Gmail batched reads: message metadata and raw bodies are read through Gmail's HTTP batch endpoint (`www.googleapis.com/batch/gmail/v1`), `gmail.batch-size` reads a batch (10 by default, at most 100) and `gmail.batches-in-flight` batches at once across the source (1 by default), Gmail running a batch's reads side by side and refusing past its per-user concurrency (measured: no refusal in 2,250 reads by batches of 10 one after another, 19 % at 50). A read refused inside a batch is sent again at the head of the next one; a 404 is a message gone, never an error. A raw batch holds about 8 MiB of messages by their sizes, a message over 5 MiB being read alone, and each body is stored as its batch lands.
+- Added `drain`: applies what frontends queued in the store without reading a credential or opening an endpoint, so a queued create gets its id at once, offline included.
 
-- Added `unreached` to the sync report: every endpoint whose connections the run could not open (a server it could not reach, or one refusing the connection or its credentials), with the error, so a program tells an unreachable provider from an unreadable folder without reading the collection patch. The failed scan and exit 3 are unchanged.
-- Added `drain`: applies what frontends queued in the store (himalaya, calendula, cardamum), reading no credential and opening no endpoint, so a created item gets its id and readers list it at once, offline included; the next sync pushes it. It never waits for a sync holding the store: it answers `busy` with exit 3. It reports each applied row with the `seq` an `add` created, the parked rows, and how many rows wait for a sync (intents).
-- Added collection roles in the store (pimdir draft-04, io-pimdir `ef8eae0`): every sync records the role each server states for a collection it syncs (`collections.role`: `inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`, `all`, `flagged`, `important` for mail, `default` for a calendar or an address book), and clears one the server no longer states. IMAP and Gmail state theirs in the listing the sync already reads, as do Graph calendars and contacts, Google Calendar and People; Graph mail (one well-known folder lookup per role) and CalDAV (`schedule-default-calendar-URL`) are looked up again only when the source's collection set moved, the answer kept in `neverest.json`. Never guessed from a name. A paired sync (with targets) records none yet.
-- Added `sync --declare-only`: lists every collection the sources hold and records its kind, name and role in the store, whatever the collection filter, syncing no item; only queued collection creations run. What a frontend reads to offer the collections it could sync and to learn the inbox or the default calendar, without a throwaway store. Its collections count as held by their source, so the intents a source performs on what it holds (`collection.create`) are declared on them before any sync.
-- Added receipts for the intents neverest performs (pimdir draft-04, io-pimdir `8c83c04`): a `submit` sent, a `calendar-reply` or `calendar-cancel` performed and a `collection-create` done are acknowledged with a receipt, so the frontend that queued them reads them applied (`himalaya pimdir queue show`) rather than unknown, as a cancelled row reads.
-- Added the `collection-create` intent (pimdir draft-04): performed at the start of a sync, before the listing, so the same run lists the new collection. IMAP creates the mailbox under its parent with the server's delimiter, Gmail the label `parent/name`, CalDAV and CardDAV a top-level collection displayed as the name; one already listed is success. Declared as `collection.create` on each collection an IMAP, Gmail or DAV source syncs, `none` on Graph and Google Calendar and People.
-- Added occurrence replies and cancels: a `calendar-reply` or `calendar-cancel` naming a `recurrence_id` acts on that instance of the series on Graph and Google, found among the instances two days either side of its date; one not found parks. Declared as `calendar.reply.occurrence` and `calendar.cancel.occurrence`, `none` on CalDAV.
-- Added `sync --download-order <largest|newest>`: bodies download largest first by default, the fastest whole run, or newest first, so recent mail is readable early in the first sync of a large account. Items without a date come last.
-- Added Microsoft Graph mail writes through the store: a move pushes through Graph's own move, a copy through its copy, and an added message lands in Drafts, the one folder where Graph can create it, Graph filing every uploaded message as a draft. An add into another folder is rejected rather than filed there as a draft. Graph gives a moved or copied message a new id, and the store follows it.
-- Added the `wizard` cargo feature, on by default, gating the interactive configuration: the `configure` command and the offer a first run makes. A build without it drops the prompts and the dependencies only they use, and a missing configuration points at the documented sample instead.
-- Added capability declarations (pimdir draft-03, STORAGE §15.6): every run, before the queue drains, each mail, contacts and calendar source declares in the store what it can push or perform, from its backend and its configured rights alone, so himalaya, cardamum and calendula refuse an unsupported action before it is queued. JMAP sources stay undeclared.
-- Added the sent copy: a `submit` asking for `copy` files the message there once sent, by an `add` queued in the same run, unless the provider files sent mail itself (Gmail, Graph). A failed send files no copy.
-- Added the join link of a Graph online meeting (Teams) to the iCalendar of its event, as a standard `CONFERENCE` (RFC 7986 5.11; io-msgraph `d6cb958`), and the ways of joining a Google conference likewise, one `CONFERENCE` per entry point (io-gcal `1268ef6`), where `X-MICROSOFT-SKYPETEAMSMEETINGURL` and `X-GOOGLE-CONFERENCE` were written before.
-- Added online meetings on push (pimdir STORAGE Annex B.1 `calendar.online-meeting`): an event added or updated with `X-PIMDIR-ONLINE-MEETING:TRUE` gets a Google Meet (`conferenceData.createRequest`, every Google event write now declaring `conferenceDataVersion=1`) or a Graph online meeting (`isOnlineMeeting`, the calendar's default provider). Its write reports no revision, so the next sync reads the event back with its `CONFERENCE` and without the request property. Declared `partial` on Google Calendar (a Workspace domain can turn Meet off) and Graph (an account without a default provider gets no link), `none` on CalDAV.
-- Added the calendar invitation intents (pimdir Annex B.2): a queued `calendar-reply` answers an invitation and a `calendar-cancel` cancels a meeting the account organises, through Graph's event actions (the comment carried) or Google's own notifications (`sendUpdates=all`, a cancellation without the comment). Each sync performs them first, one-way included, and reports them under `intents`; a refusal or a gone item parks, a transient failure retries. They are declared on each calendar the source syncs; CalDAV declares them `none`.
-- Added `sync --intents-only`: applies the queue, then performs what frontends queued (collection creations, sends, invitation replies and cancellations) and stops, listing no collection, pushing no other write and fetching nothing. An endpoint opens only when an intent needs it, so a message leaving through an `smtp` table opens that channel alone, even with the source's own server down. It refuses `--dry-run`, `--reset`, `--declare-only`, `--since` and the collection filters. What a frontend runs right after queueing a send; the copy neverest files in Sent is pushed by the next sync.
-- Added `uncertain` to each `submitted` entry of the sync report: true for a send that may have been delivered despite its failure, false on success and on a failure that certainly delivered nothing.
+  A store a sync holds answers `busy`, exit 3.
+
+- Added `sync --intents-only`: performs what frontends queued (collection creations, sends, invitation replies and cancellations) and stops, listing no collection.
+
+  An endpoint opens only when an intent needs it, so a send through an `smtp` table opens that channel alone.
+
+- Added `sync --declare-only`: records every collection the sources hold, with its kind, name and role, syncing no item.
+
+- Added `sync --reset --force`: moves the store into a sibling `<dir>.reset-<instant>` directory, deleting nothing, and resyncs into a fresh one.
+
+- Added scoped mail syncs: `item.filter.since` in the account and `sync --since <WHEN>` bound a mail collection by its `Date` header.
+
+  A message older than the floor is neither listed nor deleted, one with no usable `Date` is in every scope, and an explicit removal applies whatever the date. A wider scope lists only the band it lacks on IMAP, Gmail and Graph.
+
+- Added paged rounds: a mail listing lands page by page, newest first, each page committed with its resume cursor, so an interrupted run resumes where it stopped.
+
+  While a round is open, a run resuming it first lists what changed since it opened (IMAP, Gmail, Graph), so mail arriving during a long first sync shows at once.
+
+- Added `sync --prime <N>`: every collection lists its newest page and downloads its N newest bodies before any collection lists its second page.
+
+- Added `sync --bodies <all|listed>`: under `listed`, a run downloads only the bodies of what it listed.
+
+- Added `sync --download-order <largest|newest>`: largest first by default, newest first to read recent mail early.
+
+- Added `sync --max-wait <SECONDS>`, 120 by default: the longest single wait on a throttling provider before the source gives up for the run.
+
+- Added a back-off on throttling for Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV and CardDAV.
+
+  A 429, a 502, a 503, a 504 or a Google rate limit is waited out as the provider states, else with a bounded exponential back-off, a create being sent again on a 429 or a rate limit only. A source throttled past `--max-wait` gives up for the run, reported under `throttled`.
+
+- Added Gmail pacing, `gmail.units-per-minute` (6,000 by default).
+
+- Added Gmail batched reads, `gmail.batch-size` (10 by default, at most 100) and `gmail.batches-in-flight` (1 by default).
+
+  A batch with a refused read halves the next one, and a full batch with none doubles it back up to `gmail.batch-size`.
+
+- Added collection roles in the store: every sync records the role each server states for a collection (`inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`, `all`, `flagged`, `important`, or `default` for a calendar or an address book), never guessed from a name.
+
+- Added capability declarations: each source declares in the store what it can push or perform, so a frontend refuses an unsupported action before queueing it.
+
+  A CalDAV calendar whose component set leaves VTODO out, and every Google or Graph calendar, declares that it takes no tasks (`x-vtodo` `none`).
+
+- Added the `collection-create` intent on IMAP, Gmail, CalDAV and CardDAV, performed at the start of a sync.
+
+- Added the `calendar-reply` and `calendar-cancel` intents on Microsoft Graph and Google Calendar, one occurrence of a series included.
+
+- Added receipts for the intents neverest performs, so the frontend that queued one reads it applied.
+
+- Added the sent copy: a `submit` asking for `copy` files the message there once sent, unless the provider files sent mail itself (Gmail, Graph).
+
+- Added online meetings on push: an event carrying `X-PIMDIR-ONLINE-MEETING:TRUE` gets a Google Meet or a Graph online meeting.
+
+- Added attachment stand-ins: a message body the store lands records one bodiless file per attachment in the account's attachments collection, referenced from the message.
+
+- Added Microsoft Graph mail writes through the store: a move, a copy, and an add into Drafts, the one folder Graph creates a message in; an add elsewhere is rejected.
+
+- Added CalDAV moves: a task filed into another calendar, or an item moved between calendars, is moved with WebDAV `MOVE`, so the server never holds its `UID` twice.
+
+  A server without `MOVE` (405, 501, 404) gets a create then a delete; CardDAV and the other backends upload as before.
+
+- Added `coverage`, `downloaded`, `unreached`, `unsettled` and `throttled` to the sync report, and `uncertain` to each `submitted` entry.
+
+- Added the `wizard` cargo feature, on by default, gating `configure` and the offer a first run makes.
+
+- Added `sync --accept-absences`: a listing leaving out more than half of at least 20 items a collection held (a round, or the rebuild of a renumbered IMAP mailbox) drops what it left out, for this run.
+
+  Without it such a listing drops nothing and is reported under `absences`.
+
+- Added `absences`, `unreadable` and `overruled` to the sync report: the listings that left out most of a collection, the changes withheld because their body is missing from the store or does not match its name, and the bodies a policy did not adopt, kept as retained items.
+
+  A body the drain kept aside applying a queued action is named by its queue row (`action`), in the sync report and the `drain` output.
+
+- Added `unanswered` to the sync report: the pushes a server gave no outcome for, pushed again by the next run, the run exiting 3.
+
+- Added the `search` cargo feature, on by default: neverest builds the store's search index (index.db), which frontends query.
+
+  A sync refreshes it last for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), a drain for 2 seconds; a refresh cut short goes on in the next run. The report says what it did under `index`, and a failure is a warning that changes no exit code.
+
+- Added `index`: builds the store's search index whole, reading no credential and opening no endpoint.
+
+  An index another indexer holds answers `busy`, exit 3.
+
+- Added `store.index-timeout`, the longest a sync refreshes the search index.
+
+- Added `partial` to the `conflict resolve` output: the capabilities a source supports in part that the next push relies on.
+
+- Added `neverest-error`, the JSON Schema of the failure object.
+
+- Added `code` to the JSON failure object of a store failure: the code io-pimdir gives it (`store-newer`, `store-stale`, `store-busy`, `store-owned`, `store-foreign`, `index-fts5-missing` and the others its `PimdirError::code` lists), so a caller tells an upgrade or a retry from any other failure.
 
 ### Changed
 
-- Changed the CalDAV relocation of a member (a move between calendars) to a WebDAV `MOVE`, where it re-created the member at the target then deleted it, which Fastmail refuses for a `UID` it already holds; a server without `MOVE` (405, 501, 404) still gets the create then the delete, as CardDAV does.
-- Changed the id of a CalDAV calendar or CardDAV address book outside the home set to its path, starting with a slash (io-webdav `b2b9a00`): Google lists every calendar as `/caldav/v2/<calendar>/events/`, so each was named `events`, one kept and every verb reaching the primary. Such a calendar is now the hub collection `<source>//caldav/v2/<calendar>/events`, addressed, filtered (`collection.filter`) and named the default calendar by that id; one directly under the home set keeps its segment. A store synced before lists them as new collections.
-- Changed io-pimdir to the revision `8907303` and io-webdav to `b2b9a00` in `[patch.crates-io]`; io-webdav's client also resends once a request a server closed the connection before answering (Radicale after a PUT).
-- Bumped crypto-bigint to 0.7.10, ctutils to 0.4.6, rustls-webpki to 0.103.16 and webpki-root-certs to 1.0.11, fixing RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387.
-- Changed Gmail batches to adapt their size, after lieer: a batch with a read refused for concurrency or rate, failed transiently or left unanswered halves the next, down to one read, and a full batch sent at the size in force and answered with no refusal doubles it back, up to `gmail.batch-size`, which becomes the ceiling. Unlike lieer, a per-minute quota refusal leaves the size alone, the minute's waits answering it. The source's connections share the size for the run, each batch adapting from the size it was sent at, so another API client on the same mailbox, which shares Gmail's per-user concurrency limit, meets smaller batches instead of the same refused size again.
-- Changed Microsoft Graph body batches to be bounded in octets: the listings ask Graph for the MAPI message size (`$expand` of `Integer 0x0E08`, io-msgraph `fa73f04`; the whole-folder delta asks without it once Graph refuses it), which the summary now carries, and a batch holds at most 20 gets and 4 MiB of stated size, a message over 1 MiB or of no stated size being read alone (the sizes of several unsized messages read first, 20 a batch). Each body is written to the store as soon as it is decoded rather than once its batch and every retry round were in, so a connection holds one answer of about 4 MiB and one body at a time instead of up to twenty messages of any size.
-- Changed the Graph mail listing to hold a few octets a message: a delta and the pass are read page by page into ids and flags rather than collected whole, and the run no longer keeps the summary of every message it listed: a band round followed by its pass keeps three bits a message, and the pass lists again only what changed since the band. The `Meta` tier reads each summary by id.
-- Changed a throttled get inside a Graph batch to wait its own `Retry-After` rather than the longest of the batch, and to give the source up at once on a stated wait over `--max-wait` (two minutes by default), as a single request does, rather than waiting two minutes and asking again.
-- Changed submission to at-most-once. A send failing after the message was handed over whole with no verdict (SMTP: no reply after the data's final `.`; Graph `sendMail`: the request written whole and no answer, or 500, 502, 503 or 504) is uncertain: parked with an error beginning `uncertain: `, never sent again by any run, the run that parks it exiting 2. Each send's attempt is counted (`attempts`) and its queue id written to `submitting` beside the store before the first byte leaves, so a run killed mid-send leaves the row attempted and the next run parks it as uncertain rather than sending it again. A Graph 401 is now transient (an expired token), where every 4xx but 408 and 429 parked. A refused SMTP message resets the transaction before the next one, and a session lost mid-send leaves the rest of the run's sends pending, unattempted.
-- Changed an SMTP channel that does not open from a warning to a reported failure: a server that cannot be reached is named `<source>.smtp` under `unreached`, the sends pending and unattempted; refused credentials fail each queued send with the reason, not parked. Either makes the run exit 3, as any `unreached` endpoint now does.
-- Changed the one-source sync to take its collections by role, as recorded this run: the inbox (or a default calendar or address book), sent, drafts, every other collection by name, the all-mail archive, junk, then the trash, where it took them by provider id. A batch of bodies tied with another in the download order goes to the collection taken first.
-- Changed the Microsoft Graph sources to open three connections, or their `pool-size`, never more than `connections`, where they opened one; Gmail, Google Calendar, Google People, CalDAV and CardDAV keep one. The bodies of a landed page now download on Graph's spare connections as on IMAP's.
-- Changed io-pimdir to 0.8, patched to the pushed revision `189db40` (pimdir draft-04): opening a store creates the store-wide `items_by_sort_global` index, so a reader paging mail across collections walks it instead of sorting every row, and brings an older store to the canonical schema (the invitation column, references, files, receipts).
-- Changed the other Pimalaya libraries to their latest versions, unreleased fixes taken from pushed revisions through `[patch.crates-io]`, as the Android client pins them: ical-rs 0.6 (`caa1422`), io-msgraph 0.6 (`2ae2637`), io-gcal 0.2, io-gmail 0.5, io-gpeople 0.5, io-smtp 0.6, io-http (`e181530`), io-imap (`b1ab38e`) and io-webdav (`62fad89`). What they change for a sync:
-  - An HTTP response whose head passes 64 KiB or whose body passes 256 MiB fails its exchange, where it was buffered whatever its size; a Graph body batch that large falls back to one get a message. A connection closed mid-body fails the exchange rather than hanging the run.
-  - An IMAP batched body fetch fails on a message announced over 100 MiB, the batch then falling back to one fetch a message, which takes it.
-  - A Graph series no longer keeps its `EXDATE` lines in its stash: Graph states its cancelled occurrences itself, which a stashed copy doubled on read. An `EXDATE` added in the store is still not pushed, Graph cancelling an occurrence only by the deletion of its instance.
-  - A Google Calendar series is updated from its master whatever the order of its components, where the first `VEVENT` of the document was read.
-  - Lines of an iCalendar written from Graph or Google are folded at 75 octets, and a merge settles `DTSTAMP`, `LAST-MODIFIED` and `SEQUENCE` without a conflict.
-- Changed every listed member to arrive named (pimdir draft-04, probes removed): IMAP reads `UID FLAGS RFC822.SIZE` and the header fields Annex A needs, `Content-Type` among them, in the listing's own `UID FETCH`, no `BODYSTRUCTURE`; Graph its summary `$select` (`hasAttachments`, `ccRecipients` added); Gmail its metadata read (`Content-Type` added), in HTTP batches. A message the store already binds is not read again. DAV, Google Calendar and People, Graph contacts and events fetch each page's bodies, 64 a request, before it lands, a member at the revision the store holds being named by its binding. The attachment mark comes from Graph's `hasAttachments`, else from a top-level `multipart/mixed`, until the body is read.
-- Changed body downloads to follow the listing page by page: in the one-source sync, as soon as a mail page has landed its bodiless members are queued, and every connection with no collection left to list downloads them (in the download order, batches of 64) while the next pages list, so the first mail of a large mailbox is readable before its last page is listed rather than after. A round an earlier run left open first queues the bodies its landed pages still owe. What is left (a run over one connection, a failed download) is downloaded after the listing as before. On a local Stalwart folder of 1,600 mails over four connections, the first body is readable after about 0.45 s instead of 1.6 s, and the whole folder with its bodies after 2.4 s instead of 2.7 s.
-- Changed the throttling back-off to send a request creating something (an uploaded or copied message, an event, a contact, a label, an imported message, a send, an invitation reply) again on a 429 or a Google rate limit only, never on a 503, after which it may have landed already. A Graph body batch answered 500, 502 or 504 is still sent again but no longer gives the source up as throttled.
-- Changed `sync` to drain the queue once, at its start, before reading any credential or opening any endpoint, rather than per source after connecting: a run that cannot reach its server (offline, an expired token) still applies what frontends queued. `--declare-only` still drains nothing.
-- Changed the Gmail source to read each message once a run and the mailbox history once a run: a message listed under several labels is named from the read of the first one listing it (its flags from each label's own flag listings), and a delta reads `history.list` once for the whole mailbox, with no `labelId`, and projects it on each label, where it read the history once a label. A message's labels are read again for a delta only when no label read them since the history was.
-- Changed Microsoft Graph mail body fetches to JSON batches: twenty raw MIME gets per request instead of one, the first sync of a large Microsoft 365 box no longer paying a round trip per message. A request Graph throttles (429, common 5xx) is sent again after its `Retry-After`; any other refusal still falls back to a single get.
+- **BREAKING**: changed `collection.delete` to default to false: a collection an endpoint no longer lists is deleted on the other only where that endpoint sets `collection.delete = true`.
 
-- Changed `check` to be documented as a doctor: what it prints about collections, roles and capabilities is for a person, and a program reads the store instead (`sync --declare-only`). IMAP `\Flagged` and `\Important` now state the `flagged` and `important` roles.
-- Changed `check` to mark the default calendar and address book with `default: true` (Google Calendar `primary`, the Google People address book, Graph `isDefaultCalendar` and the default Contacts folder, CalDAV `schedule-default-calendar-URL` per RFC 6638 when the server gives it; none on CardDAV and mail), and to list each source's `capabilities: [{ name, support, detail? }]`, the source-wide rows a sync declares in the store.
-- Changed the UID of a Microsoft Graph event that came in by mail: Exchange files it under its global object id, which wraps the organizer's UID; the event is now stored under that UID (io-msgraph `ical::original_uid`). Stored UIDs of such events change at the next sync.
-- Changed `check` to list each source's collections, `collections: [{ id, name, role? }]`, instead of counting them, `role` being what the server states the collection is for: `inbox`, `sent`, `drafts`, `trash`, `junk`, `all` or `archive`, from IMAP SPECIAL-USE and `INBOX`, Graph's well-known mail folders, or Gmail's system labels; never guessed from a name. A caller adding an account can propose its folders from it. Nothing is written to the store.
-- Changed the one-source sync to keep each body as it arrives: every downloaded batch is written to the store at once, instead of the whole account once everything had downloaded. A mail is readable minutes after a first sync starts, and a run stopped halfway (quit, sleep, a lost connection, a caller's time limit) keeps what it downloaded, the next run fetching only the rest.
-- Changed `sync` to exit 3 when the run could not do all its work, a rerun picking it up: a source it could not reach, or a hunk, a send or an intent that failed without parking. An unreachable server used to exit 0, like a run with nothing to do. Exit 3 wins over the conflict code 2.
-- Changed `check` to also open and authenticate the SMTP channel a source declares, without sending anything, so a wrong submission server or password fails the check rather than the first send. Each endpoint now reports `smtp`, whether its channel was checked.
+  Absence is the only sign of a collection deletion IMAP and DAV give, and a listing can leave out a collection nobody deleted.
+
+- **BREAKING**: changed `sync --reset` to refuse while the store holds work no server has (queued or parked actions, conflicts, unpushed changes, retained items), listing it.
+
+  It is refused beside `--dry-run`, `-m`, `-x` and `-s`, and drops the search index too.
+
+- Changed the `submit` payload to be read by io-pimdir's `PimdirSubmit`: one without `object` or a recipient, or naming another body than the queue row pins, parks instead of being sent.
+
+- **BREAKING**: changed `sync` to exit 2 when a send or an intent parked, or while the store holds a parked queue action, where it exited 0.
+
+- **BREAKING**: changed `sync` to exit 2 when a listing left out more than half of at least 20 items a collection held, or a change was withheld over a body the store cannot serve, where the listing dropped them and the run exited 0.
+
+- **BREAKING**: changed `sync` to exit 3 when the run could not do all its work, where it exited 0: an unreached endpoint (an SMTP channel included), a hunk, a send or an intent failed without parking, a throttled source, a round left open, or a collection still moving after the last convergence pass.
+
+  Exit 3 wins over 2.
+
+- **BREAKING**: changed the id of a CalDAV calendar or CardDAV address book outside the home set to its path, such as Google's `/caldav/v2/<calendar>/events`.
+
+  A store synced before lists such collections as new.
+
+- Changed a conflict resolution and a merged conflict to name the body they were decided on, so an edit that replaced it meanwhile parks rather than being dropped.
+
+- Changed a divergence between two endpoints to be recorded by the store, which keeps the body they agreed on until both reconciled, where neverest read it from a snapshot held in memory for the run.
+
+- Changed submission to at-most-once: a send that may have been delivered despite failing is parked as uncertain and never sent again, a run killed mid-send included.
+
+- Changed `sync` to drain the queue once, at its start, before reading any credential or opening any endpoint.
+
+- Changed every listed member to arrive named: IMAP, Graph and Gmail read what names a message in the listing itself, and DAV, Google and Graph contacts and events fetch each page's bodies before it lands.
+
+- Changed body downloads to follow the listing page by page, each batch landing at once, so mail is readable before its mailbox is listed and an interrupted run keeps what it downloaded.
+
+- Changed the one-source sync to take its collections by role: the inbox (or the default calendar or address book), sent, drafts, the others by name, the all-mail archive, junk, then the trash.
+
+- Changed the Microsoft Graph sources to open three connections, or their `pool-size`, where they opened one.
+
+- Changed Microsoft Graph mail body fetches to JSON batches of at most 20 messages and 4 MiB, each body written as it is decoded.
+
+- Changed the Microsoft Graph mail listing to read a delta page by page, keeping a few octets a message.
+
+- Changed the Gmail source to read each message and the mailbox history once a run, whatever the labels holding the message.
+
+- Changed `check` to list each source's collections with their name and role, mark the default calendar and address book, list the source's capabilities, and open the SMTP channel without sending.
+
+  `check` is a doctor: a program reads the store instead.
+
+- Changed Google Calendar writes to notify the attendees (`sendUpdates`), and a new event the account organises to be inserted with its UID, inviting its attendees.
+
+- Changed the UID of a Microsoft Graph event that came in by mail to the organizer's UID, which Exchange wraps in its global object id.
+
+  Stored UIDs of such events change at the next sync.
+
+- Changed Graph and Google conference links to standard `CONFERENCE` properties (RFC 7986), where `X-MICROSOFT-SKYPETEAMSMEETINGURL` and `X-GOOGLE-CONFERENCE` were written.
+
 - Changed a `submit` naming its sending source to be sent by that source alone.
-- Changed Google Calendar updates and deletes to notify the attendees (`sendUpdates`): an update when the event leaves them to the server (`SCHEDULE-AGENT`), a delete when the event has attendees.
-- Changed a new Google Calendar event the account organises, scheduled on the server, to be inserted with its UID and invite its attendees, rather than imported, which notified nobody.
-- Changed piped `--json` output to print one value per line, each schema of `json-schema` to carry an `$id` naming the contract version (`v0.3`), and added `neverest-error`, the schema of the JSON failure object (pimalaya-cli `55b6693`).
+
+- Changed piped `--json` output to print one value per line, each `json-schema` schema carrying an `$id` naming the contract version.
+
+- Bumped io-pimdir to 0.8: opening a store brings an older one to the canonical schema.
+
+- Bumped ical-rs to 0.6.
+
+- Bumped io-gcal to 0.2.
+
+- Bumped io-gmail to 0.5.
+
+- Bumped io-gpeople to 0.5.
+
+- Bumped io-msgraph to 0.6.
+
+- Bumped io-smtp to 0.6.
 
 ### Fixed
 
-- Fixed a request that creates nothing failing the run on a 502 or a 504 (Google People answered a listing `502` "Error 502 (Server Error)!!1"): a gateway error is now waited out like a 503, on every source, a create still never sent again on a 5xx.
-- Fixed a CalDAV or CardDAV delete of a member already gone (404, 410) being rejected and retried every run: it is accepted, pushes being at least once and a create delivered by a move taking the member it supersedes along before that member's delete.
-- Fixed a flag kept in the store only on a card or a calendar item (`pimdir tag`) being pushed to its source on every run, rejected there and warned about each time: a source syncing a kind other than mail is given no flag push right, so the flag stays local.
-- Fixed a message filed again from a body the account holds (an IMAP COPY or MOVE, a second Gmail label, a body an upgrade links from the store) keeping the size and attachment mark its listing read, and a downloaded message reading no invitation: io-pimdir `ca4c589` states, as the write lands, a linked body's size and the mark and invitation of a row holding it, and walks an entering body once for its stand-ins, mark and invitation.
-- Fixed the attachment mark of a downloaded message reading unknown: the body was streamed into the store and summarised from its header block, `attachment` left `NULL` over the mark the listing had read. io-pimdir's write (`ca4c589`) now walks each body entering the store once, from its blob, and states the mark the whole message gives: set for an attachment under `multipart/signed`, cleared for a `multipart/mixed` holding only an inline image. neverest walks no part itself: a streamed body is read for its header block alone, and a body served from the store to a second Gmail label likewise, taking the mark of a row already holding it.
-- Fixed a body deleted on the server between its listing and its download failing the run: a Gmail or Graph read answered 404 and an IMAP UID a `UID FETCH` answers nothing for are now answered gone, the run completes, and no later batch of the run asks for the body again (phase 2 included); the member stays as listed until the next run's listing takes it away. Graph contacts and events likewise.
-- Fixed a Gmail message filed under several labels downloading its body once a label: a batch reads where its messages are owed across the labels, downloads each body once and lands it under every label holding the message, and a body a label already holds serves a label added later with no download.
-- Fixed a resumed Gmail or Graph hydration asking the server for sizes the store records: the sizes of the owed bodies plan the batches, a `minimal` read (Gmail) or a size batch (Graph) asking only for those neither the run nor the store knows.
-- Fixed Microsoft Graph requests failing on a connection Graph closed while it idled (about two minutes): a connection idle over a minute is reopened first, and a read (a `GET`, a `$batch` of gets) that met a reused connection already closed before any octet of its answer is sent again once on a new one. A connection is no longer reused after a read that timed out or an answer cut short, whose late bytes could have been read as the next request's answer; a timed-out read, a create, a send or a move is never sent again.
-- Fixed a flag change, a move or a delete pushed to Graph on a message gone from the server failing every run: it counts as done (a move is checked by reading the message, so a destination folder removed meanwhile still fails it), as does the delete of a Graph contact or event gone. A copy of a message gone still fails.
-- Fixed Gmail's per-minute quota refusal failing the run: its answer (`Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'`) names its reason only as `rateLimitExceeded` in `errors[]`, which the throttle, reading the message for `Rate Limit Exceeded`, missed; it is now waited out.
-- Fixed a Gmail write on a message gone already failing: removing a label, starring, moving or deleting from `TRASH` a message deleted since (404) now counts as done, a `batchModify` answered 404 being done again one message at a time.
-- Fixed two endpoints holding one `UID` under two bodies before their first sync ending with the source's body on both, the target's own lost: the target's listing landed the create the source's item staged and read the source's body as a local edit (io-pimdir `189db40`). The divergence parks again, as one with no common ancestor must, and either `conflict resolve` direction reaches both endpoints at the next run, `--prefer-local` included (#31).
-- Fixed a one-way account parking a divergence on its target and exiting 2: the target's pull recorded it as a conflict, its pass being unable to push, and the pushing pass never revisited it. The store's body is now kept over it and pushed in the same run, as `one-way` declares.
-- Fixed a widening of the scope deleting the mail of no usable `Date` it did not list: a band round lists by the provider's date filter (IMAP `SENTSINCE`, which skips a garbled `Date`, Gmail's `after:` on the arrival, Graph's `sentDateTime`), which misses such mail, yet its last page inferred it gone. io-pimdir `ff28408` makes a band round infer no delete of an undated member, so the Graph listing no longer relists the bound undated messages on its last band page.
-- Fixed an undated mail a scoped round no longer lists being kept when the round ran in one go but deleted when it was resumed: io-pimdir `f9b13f8` stores an empty mail date as no date, as STORAGE Annex A.1 says, so both paths read it in every scope.
-- Fixed the date of a Microsoft Graph mail: the summary took `receivedDateTime`, the server's arrival time, where pimdir's mail `date` (and its sort key) is the `Date` header, which Graph gives as `sentDateTime`. A message without one has no date rather than its arrival time. A date already stored is corrected when Graph next reports the message.
-- Fixed an IMAP delete expunging more than its message: it marked the UID `\Deleted` then sent a plain `EXPUNGE`, which also removed every message another client had marked `\Deleted` in that mailbox. It now sends `UID EXPUNGE` on that UID (RFC 4315 UIDPLUS, built into IMAP4rev2); a server offering neither gets no delete: the push is rejected, kept in the store, and no `\Deleted` flag is set.
-- Fixed a Google People sync failing when People answers an expired sync token with HTTP 400 rather than 410: the token is dropped and a full listing restarts, as for a 410.
-- Fixed a collection deleted on one endpoint of a two-endpoint account being created again from the other on the next run: the store tells a collection both endpoints held, now deleted on the other (`collection.delete` permitting), from one new on one side, created on the other as before. After a crossed delete the store drops the collection, so one made again later reads as new.
-- Fixed a Graph series over more than five years failing to read, open-ended ones (the Birthdays and holidays calendars) among them: Graph refuses an instances listing over more than five years. A series is now read in windows of at most five years, an open-ended one within five years either side of today.
-- Fixed a CardDAV or CalDAV item whose `UID` holds a `:` (a `urn:uuid:`) read as two resources and copied again on every run: Stalwart lists `urn:uuid:x.vcf` as `urn%3Auuid%3Ax.vcf`. A member now has one spelling, a `:` encoded as `%3A`, and a new resource is named in it. An item an older version created with a literal `:` is read under the new spelling.
-- Fixed a calendar conflict parking over stamps alone: a side rewriting `DTSTAMP`, `LAST-MODIFIED`, `CREATED` or `SEQUENCE` is no longer a collision, so a Graph meeting edited right after its creation, while Graph restamped it on sending the invitations, merges instead of parking, and a later cancellation no longer recreates it. The merged event keeps the higher `SEQUENCE`.
-- Fixed a Graph calendar series with a `numbered` or `noEnd` range failing to read, the Birthdays calendar among them: Graph fills its `endDate` with `0001-01-01`, which ended the instances window before its start, and Graph refused it (400) on every run. The window now follows the range type (io-msgraph 0.4.5).
-- Fixed a Graph calendar enumeration listing an event twice when Graph repeated it across a page boundary; one id at two revisions now fails the enumeration.
-- Fixed a move staged through the store landing twice in its target on IMAP: the run scans collections over several connections, and the target uploaded the message while the source relocated it. A source's collections now push one at a time, scans and fetches staying parallel.
+- Fixed an IMAP `SELECT` answer without `EXISTS` read as an empty mailbox, which deleted every message: such a mailbox is searched.
+
+- Fixed a renumbered IMAP mailbox (a moved `UIDVALIDITY`) listed under its new UIDs before it was rekeyed, which pushed flags to the wrong messages and dropped every message as deleted.
+
+  The collection is rekeyed by link id first, and a rekey that failed runs again at the next sync.
+
+- Fixed a CardDAV or CalDAV listing the server truncated read as complete, which inferred every member past the cut deleted.
+
+- Fixed a body deleted between its listing and its download failing the run: a read answered 404 (410 on DAV, Google Calendar and Google People too) is gone, and the member stays as listed until the next listing takes it away.
+
+  A CardDAV, CalDAV, Google Calendar or Google People member every read finds missing no longer fails its collection in every run.
+
+- Fixed hidden Google calendars missing from the listing, so hiding one in the Google UI read as deleting it.
+
+- Fixed Microsoft Graph contact folders read as one page of 100, two levels deep: every page and every depth is read.
+
+- Fixed a collection deleted on one endpoint of a two-endpoint account being created again from the other.
+
+- Fixed a store written by a newer neverest refused as one predating it, with the advice to reset it: it asks for an upgrade.
+
+- Fixed neverest.json being rewritten in place, so a killed run could leave a torn file: it is written aside, synced and renamed.
+
+- Fixed the relay appending a message twice into a target that had not finished listing its mailbox: a message is relayed once the target closed a round covering its date.
+
+- Fixed two endpoints holding one `UID` under two bodies before their first sync ending with the source's body on both: the divergence parks ([#31](https://github.com/pimalaya/neverest/issues/31)).
+
+- Fixed a one-way account parking a divergence on its target: the store's body is pushed, as `one-way` declares.
+
+  The target's own edit is kept in the store as a retained item and reported under `overruled`, an unread one fetched first.
+
+- Fixed a calendar conflict parking over `DTSTAMP`, `LAST-MODIFIED`, `CREATED` or `SEQUENCE` alone: such edits merge, the higher `SEQUENCE` kept.
+
+- Fixed a move staged through the store landing twice in its IMAP target: a source's collections push one at a time.
+
+- Fixed an IMAP delete expunging every message marked `\Deleted` in its mailbox: it sends `UID EXPUNGE` on its UID, and a server without UIDPLUS gets no delete.
+
+- Fixed a CalDAV or CardDAV delete of a member already gone (404, 410) retried every run: it is done.
+
+- Fixed a CardDAV or CalDAV item whose `UID` holds a `:` read as two resources and copied again every run: a `:` is spelled `%3A`.
+
+- Fixed a DAV request failing when the server closed the connection before answering (Radicale after a `PUT`): it is sent again once.
+
+- Fixed a flag kept in the store only, on a card or a calendar item, pushed and rejected every run: it stays local.
+
+- Fixed a flag another client changed between a run's listing and its push being overwritten: a push names only the flags it adds and removes, on IMAP, Microsoft Graph and Gmail.
+
+- Fixed a `UID` or `Message-ID` beginning like a key the store derives (`alt:`, `hash:`, `dup:`) named to the server with the store's `esc:` escape.
+
+- Fixed the date of a Microsoft Graph mail, which was its arrival time: it is its `Date` header (`sentDateTime`).
+
+- Fixed a Microsoft Graph series over more than five years failing to read: it is read in windows of five years, an open-ended one within five years either side of today.
+
+- Fixed a Microsoft Graph series with a `numbered` or `noEnd` range failing to read (the Birthdays calendar).
+
+- Fixed a Microsoft Graph series doubling its cancelled occurrences on read.
+
+- Fixed a Microsoft Graph calendar listing an event twice across a page boundary: one id at two revisions fails the listing.
+
+- Fixed a flag change, a move or a delete on a Microsoft Graph message gone failing every run: it is done, as is the delete of a Graph contact or event gone.
+
+- Fixed a Gmail write on a message gone failing: it is done.
+
+- Fixed Microsoft Graph requests failing on a connection Graph closed while it idled: an idle connection is reopened, and a read meeting a closed one is sent again once.
+
+- Fixed a Gmail message filed under several labels downloading its body once a label.
+
+- Fixed a Google People sync failing on an expired sync token answered 400: it restarts, as on 410.
+
+- Fixed a Google Calendar series updated from its first `VEVENT` rather than its master.
+
+- Fixed iCalendar lines written from Microsoft Graph or Google left unfolded: they fold at 75 octets.
+
+- Fixed the size, attachment mark and invitation of a message: each body entering the store states them, downloaded or filed again from a body the account holds.
+
+- Fixed an HTTP response buffered whatever its size: a head over 64 KiB or a body over 256 MiB fails its exchange, and a connection closed mid-body fails it rather than hang the run.
+
+- Fixed an IMAP batched body fetch buffering a message of any announced size: one over 100 MiB is fetched alone.
+
+### Security
+
+- Bumped crypto-bigint to 0.7.10, ctutils to 0.4.6, rustls-webpki to 0.103.16 and webpki-root-certs to 1.0.11, fixing RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387.
 
 ## [0.3.0] - 2026-10-02
 

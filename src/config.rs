@@ -788,6 +788,15 @@ pub struct StoreConfig {
     /// purge and `"0"` purges at once; there is deliberately no boolean.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purge_after: Option<HumanDuration>,
+    /// How long the search index may be refreshed after a sync:
+    /// `store.index-timeout = "60s"`, the default.
+    ///
+    /// A large first build spreads over several runs, each going on from
+    /// where the last stopped; `neverest index` builds it whole. A drain
+    /// refreshes for 2 seconds at most, `"0"` turns the refresh off, and a
+    /// build without the `search` feature ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_timeout: Option<HumanDuration>,
     /// Removed keys, kept so a configuration carrying one is refused by
     /// name. See [`StoreConfig::reject_removed_keys`].
     #[serde(default, skip_serializing)]
@@ -823,6 +832,14 @@ impl StoreConfig {
         let after = chrono::Duration::from_std(self.purge_after?.0).ok()?;
         let cutoff = now.checked_sub_signed(after)?;
         Some(cutoff.to_rfc3339_opts(SecondsFormat::Millis, true))
+    }
+
+    /// The longest a search index refresh runs after a sync, 60 seconds
+    /// unless `index-timeout` says otherwise; zero turns it off.
+    #[cfg(feature = "search")]
+    pub fn index_timeout(&self) -> Duration {
+        self.index_timeout
+            .map_or(Duration::from_secs(60), |timeout| timeout.0)
     }
 }
 
@@ -1241,13 +1258,16 @@ pub enum CollectionFilter {
 pub struct CollectionSourceConfig {
     /// Whether the sync may create a collection on this source.
     ///
-    /// It and `delete` grant by default, unlike the `item` block, which must
-    /// be declared in full: this table also carries `filter`, and demanding a
-    /// permission pair from someone writing a filter would be a trap.
+    /// It grants by default, unlike the `item` block, which must be declared
+    /// in full: this table also carries `filter`, and demanding a permission
+    /// pair from someone writing a filter would be a trap.
     #[serde(default = "default_true")]
     pub create: bool,
-    /// Whether the sync may delete one on this source.
-    #[serde(default = "default_true")]
+    /// Whether the sync may delete one on this source, off unless asked for.
+    ///
+    /// A collection delete is inferred from an absence, the only signal IMAP
+    /// and DAV leave, and a listing may drop a collection nobody deleted.
+    #[serde(default)]
     pub delete: bool,
     /// Removed key, kept so a configuration carrying it is refused by name.
     ///
@@ -1278,7 +1298,7 @@ impl Default for CollectionSourceConfig {
     fn default() -> Self {
         Self {
             create: true,
-            delete: true,
+            delete: false,
             namespace: None,
             filter: CollectionFilter::default(),
         }
@@ -1298,7 +1318,7 @@ impl Default for CollectionPermissions {
     fn default() -> Self {
         Self {
             create: true,
-            delete: true,
+            delete: false,
         }
     }
 }
@@ -2422,6 +2442,37 @@ msgraph.user-id = "me"
         assert!(!perms.collection.delete);
         assert!(perms.item.create);
         assert!(!perms.item.delete);
+    }
+
+    /// A collection is deleted on a server only where the user asked for it:
+    /// absence is the only signal IMAP and DAV leave, and a listing may drop
+    /// a collection nobody deleted (pimdir SYNC §5).
+    #[test]
+    fn a_collection_delete_is_granted_only_when_asked_for() {
+        for document in [
+            "imap.server = \"imaps://imap.example.org:993\"",
+            "imap.server = \"imaps://imap.example.org:993\"\n\
+             imap.collection.filter.include = [\"INBOX\"]",
+        ] {
+            let account: AccountConfig = toml::from_str(document).unwrap();
+            let perms = account.sources().unwrap()["imap"].permissions();
+            assert!(perms.collection.create, "{document}");
+            assert!(!perms.collection.delete, "{document}");
+        }
+
+        let account: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            imap.collection.delete = true
+            "#,
+        )
+        .unwrap();
+        assert!(
+            account.sources().unwrap()["imap"]
+                .permissions()
+                .collection
+                .delete
+        );
     }
 
     #[test]

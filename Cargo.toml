@@ -16,7 +16,7 @@ all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
-default = ["rustls-ring", "imap", "smtp", "dav", "msgraph", "gpeople", "gcal", "gmail", "vendored", "wizard"]
+default = ["rustls-ring", "imap", "smtp", "dav", "msgraph", "gpeople", "gcal", "gmail", "vendored", "wizard", "search"]
 native-tls = ["pimalaya-stream/native-tls", "io-pim-discovery?/native-tls", "io-webdav?/native-tls", "io-imap?/native-tls", "io-msgraph?/native-tls", "io-smtp?/native-tls", "io-gpeople?/native-tls", "io-gcal?/native-tls", "io-gmail?/native-tls"]
 rustls-aws = ["pimalaya-stream/rustls-aws", "io-pim-discovery?/rustls-aws", "io-webdav?/rustls-aws", "io-imap?/rustls-aws", "io-msgraph?/rustls-aws", "io-smtp?/rustls-aws", "io-gpeople?/rustls-aws", "io-gcal?/rustls-aws", "io-gmail?/rustls-aws"]
 rustls-ring = ["pimalaya-stream/rustls-ring", "io-pim-discovery?/rustls-ring", "io-webdav?/rustls-ring", "io-imap?/rustls-ring", "io-msgraph?/rustls-ring", "io-smtp?/rustls-ring", "io-gpeople?/rustls-ring", "io-gcal?/rustls-ring", "io-gmail?/rustls-ring"]
@@ -29,6 +29,7 @@ gcal = ["dep:io-gcal", "dep:ical-rs", "dep:jiff", "dep:vcard-rs", "io-gcal/clien
 gmail = ["dep:io-gmail", "io-gmail/client"]
 vendored = ["io-pimdir/vendored", "pimalaya-config/vendored", "pimalaya-stream/vendored", "io-webdav?/vendored", "io-imap?/vendored", "io-msgraph?/vendored", "io-smtp?/vendored", "io-gpeople?/vendored", "io-gcal?/vendored", "io-gmail?/vendored"]
 wizard = ["dep:io-pim-discovery", "pimalaya-cli/prompt", "pimalaya-cli/wizard", "pimalaya-cli/imap", "pimalaya-cli/smtp"]
+search = ["io-pimdir/search"]
 
 [profile.release]
 lto = "fat"
@@ -83,10 +84,12 @@ io-oauth = { version = "0.3", default-features = false, features = ["jwt-bearer"
 
 # NOTE: unreleased fixes, pushed revisions to be replaced by released versions.
 [patch.crates-io]
-ical-rs = { git = "https://github.com/pimalaya/ical", rev = "caa14225152a7aff6d8c86cef1f95e800dd77d20" }
+ical-rs = { git = "https://github.com/pimalaya/ical", rev = "99b92736a6a076c72936fac29c9b85a5168e4c2f" }
 io-http = { git = "https://github.com/pimalaya/io-http", rev = "e1815307771c1ec65a86b77256d46c33241d3038" }
 io-imap = { git = "https://github.com/pimalaya/io-imap", rev = "b1ab38ea9f24578b46dda56aa009600571b6b9ef" }
 io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "2ae26370aefa671c16316dbad98107634436bce6" }
-io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "8907303902a8d159ad40d27934de802c3afa7d24" }
+# NOTE: temporary local checkout until the io-pimdir changes of 2026-10-30
+# are pushed, then it returns to a git rev.
+io-pimdir = { path = "../io-pimdir" }
 io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "b2b9a00462f7d371de3fb419e53288f0a13cee39" }
 pimalaya-cli = { git = "https://github.com/pimalaya/cli", rev = "55b66933950f02541892407667e5e0b254245871" }

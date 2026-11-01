@@ -180,9 +180,9 @@ fn canonical_raw(iana: IanaFlag) -> &'static str {
 
 /// Direction of a flag store operation.
 ///
-/// `Add` and `Remove` patch the existing set, `Set` replaces it. Every
-/// backend implements all three, but the sync engine emits only `Set`,
-/// pushing a whole reconciled set at once.
+/// `Add` and `Remove` patch the existing set, `Set` replaces it. The sync
+/// engine pushes `Add` and `Remove` deltas only (pimdir SYNC §4); `Set` is
+/// left for a create, which states the whole set of a new member.
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum FlagOp {

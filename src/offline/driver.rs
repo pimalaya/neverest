@@ -12,16 +12,17 @@
 //! hub's project and absorb, so there is no hand-rolled cross-merge, and
 //! syncing the sides in turn until quiescent converges them.
 //!
-//! Collection deletion is not propagated yet, only creation. The itemized
-//! report lists the cross-side copies, flags and deletes a run plans, plus what
-//! its opening pull-only round found the servers had already done.
+//! A collection one endpoint lists and the other does not is created on the
+//! other, unless the store knows both held it: then it was deleted, and the
+//! delete crosses only where the other allows collection deletes, which it
+//! does not by default. The itemized report lists the cross-side copies, flags
+//! and deletes a run plans, plus what its opening pull-only round found the
+//! servers had already done.
 
 use std::{
     cmp::Ordering as CmpOrdering,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    fmt, fs,
-    io::Write,
-    mem,
+    fmt, fs, mem,
     path::{Path, PathBuf},
     process,
     sync::{
@@ -39,7 +40,8 @@ use crossbeam_queue::SegQueue;
 use io_pimdir::{
     change::PimdirWriteOp,
     client::{
-        PimdirError, PimdirSourceStore, PimdirStore, blobs::PimdirBlobs, producer::PimdirProducer,
+        PimdirError, PimdirRunError, PimdirSourceStore, PimdirStore, blobs::PimdirBlobStage,
+        producer::PimdirProducer,
     },
     codec::PimdirAction,
     collection::{PimdirCollectionId, PimdirScope},
@@ -56,8 +58,8 @@ use io_pimdir::{
     remote::{PimdirFetchedItem, PimdirListing, PimdirRemote, PimdirTier},
     summary::PimdirSummary,
     sync::{
-        PimdirConflictPolicy, PimdirPushRights, PimdirSync, PimdirSyncEvent, PimdirSyncOptions,
-        PimdirSyncReport,
+        PimdirConflictPolicy, PimdirParked, PimdirPushRights, PimdirSync, PimdirSyncEvent,
+        PimdirSyncOptions, PimdirSyncReport,
     },
     upgrade::PimdirUpgrade,
 };
@@ -73,6 +75,7 @@ use crate::{
         AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceBackendConfig,
         SourceConfig, SourcePermissions,
     },
+    error::pimdir_error,
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId, merge::Merged},
     offline::{
@@ -93,9 +96,10 @@ use crate::{
     sync::{
         hunk::{CollectionHunk, ItemHunk},
         report::{
-            CollectionCoverage, DrainedQueue, IntentEntry, ItemConflict, OpenRound,
-            ParkedQueueAction, PatchEntry, PurgedItems, RefusedDuplicate, RejectedWrite,
-            SourceDownload, SubmitEntry, SyncOutput, ThrottledSource, UnreachedEndpoint,
+            CollectionCoverage, DrainedQueue, IntentEntry, ItemConflict, OpenRound, OverruledBody,
+            ParkedAbsence, ParkedQueueAction, PatchEntry, PurgedItems, RefusedDuplicate,
+            RejectedWrite, SourceDownload, SubmitEntry, SyncOutput, ThrottledSource,
+            UnansweredPushes, UnreachedEndpoint, UnreadableBodies,
         },
     },
     throttle,
@@ -206,18 +210,22 @@ fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
 
 /// Opens one source handle over the account's store.
 ///
-/// Every collection it writes is grouped under `account` (pimdir SPEC §9.2),
+/// Every collection it writes is grouped under `account` (pimdir STORAGE),
 /// so a store shared by two accounts tells whose is whose. A store an earlier
-/// format wrote cannot be migrated, so the refusal names the `--reset` fix.
+/// draft wrote cannot be migrated, so the refusal names the forced reset,
+/// which moves it aside; one a newer neverest wrote is good, so the refusal
+/// names the upgrade.
 pub(crate) fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
     match PimdirStore::open(dir) {
         Ok(store) => Ok(store.for_account(account).for_source(source)),
-        Err(err @ (PimdirError::Version { .. } | PimdirError::Stale { .. })) => Err(
-            anyhow::Error::new(err).context(format!(
-                "The replica store predates this neverest; drop it with `neverest sync --reset -a {account}` and let it resync"
-            )),
-        ),
-        Err(err) => Err(anyhow::Error::new(err).context(format!("Open {source} store"))),
+        Err(err @ PimdirError::Version { .. }) => Err(pimdir_error(err).context(
+            "The store was written by a newer neverest; upgrade neverest to sync this account",
+        )),
+        Err(err @ PimdirError::Stale { .. }) => Err(pimdir_error(err).context(format!(
+            "The store predates this neverest; `neverest sync --reset --force -a {account}` \
+             moves it aside and resyncs the account"
+        ))),
+        Err(err) => Err(pimdir_error(err).context(format!("Open {source} store"))),
     }
 }
 
@@ -365,6 +373,13 @@ struct SourceCtx {
     scope: PimdirScope,
     /// Whether the run only plans, downloading no body.
     dry_run: bool,
+    /// Whether the run confirmed the absences its listings find, so a
+    /// listing leaving most of a collection out drops it rather than parks
+    /// (pimdir SYNC §5, §8).
+    accept_absences: bool,
+    /// What its syncs reported beyond their events, drained by
+    /// [`itemize_noted`].
+    noted: Noted,
 }
 
 impl SourceCtx {
@@ -432,6 +447,7 @@ pub fn run(
     no_purge: bool,
     only_sources: &[String],
     accept_mode: bool,
+    accept_absences: bool,
     pacing: Pacing,
     declare_only: bool,
     intents_only: bool,
@@ -521,6 +537,7 @@ pub fn run(
                 scope,
                 &work_dir,
                 dry_run,
+                accept_absences,
                 connections,
                 pacing,
                 declare_only,
@@ -540,6 +557,7 @@ pub fn run(
                 scope,
                 &work_dir,
                 dry_run,
+                accept_absences,
                 connections,
                 &mut state,
                 &mut report,
@@ -596,6 +614,19 @@ pub fn run(
             let mut store = open_store(&work_dir, sweeper, &account_name)?;
             sweep_retained(account_config, &mut store, &mut report);
         }
+
+        // NOTE: last, over everything the run wrote. A frontend waits on a
+        // run performing intents or declaring collections, which refreshes
+        // briefly.
+        #[cfg(feature = "search")]
+        let quick = intents_only || declare_only;
+        #[cfg(feature = "search")]
+        crate::offline::index::after_run(
+            &work_dir,
+            &account_config.store,
+            quick,
+            &mut report.index,
+        );
 
         state.save(&work_dir)?;
     }
@@ -710,6 +741,7 @@ fn run_targets(
     scope: &PimdirScope,
     work_dir: &Path,
     dry_run: bool,
+    accept_absences: bool,
     connections: usize,
     state: &mut StoreState,
     report: &mut SyncOutput,
@@ -733,6 +765,7 @@ fn run_targets(
             relay,
             work_dir,
             dry_run,
+            accept_absences,
             connections,
             state,
             &mut taskless,
@@ -809,6 +842,7 @@ fn run_pair(
     relay: bool,
     work_dir: &Path,
     dry_run: bool,
+    accept_absences: bool,
     connections: usize,
     state: &mut StoreState,
     taskless: &mut PairTaskless,
@@ -818,7 +852,7 @@ fn run_pair(
 
     let mut left_store = open_store(work_dir, &left_name, account_name)?;
     let mut right_store = open_store(work_dir, &right_name, account_name)?;
-    let blobs = left_store.blobs();
+    let blobs = left_store.blob_stage();
 
     // NOTE: declared, not derived: `retain` says whether the store is a
     // replica, and `relay` is only how a crossing gets there when it is not.
@@ -850,6 +884,8 @@ fn run_pair(
         rejected: Vec::new(),
         scope: scope.clone(),
         dry_run,
+        accept_absences,
+        noted: Noted::default(),
     };
     let mut right = SourceCtx {
         name: right_name.clone(),
@@ -862,6 +898,8 @@ fn run_pair(
         rejected: Vec::new(),
         scope: scope.clone(),
         dry_run,
+        accept_absences,
+        noted: Noted::default(),
     };
     s.success("Opened endpoints");
 
@@ -1194,6 +1232,7 @@ fn run_local(
     scope: &PimdirScope,
     work_dir: &Path,
     dry_run: bool,
+    accept_absences: bool,
     connections: usize,
     pacing: Pacing,
     declare_only: bool,
@@ -1228,11 +1267,12 @@ fn run_local(
         workers,
         scope,
         dry_run,
+        accept_absences,
     )?;
     let mut stores: Vec<PimdirSourceStore> = (0..workers)
         .map(|_| open_store(work_dir, &source, account_name))
         .collect::<Result<_>>()?;
-    let blobs = stores[0].blobs();
+    let blobs = stores[0].blob_stage();
     s.success(format!(
         "Opened {} connection(s) to {source_name}",
         ctxs.len()
@@ -1474,7 +1514,7 @@ fn run_intents(
         .chain(mode.targets.iter().map(String::as_str))
         .collect();
     let mut store = open_store(work_dir, source_name, account_name)?;
-    let blobs = store.blobs();
+    let blobs = store.blob_stage();
     let wanted = wanted_sides(&store, account_config, &names, source_name);
 
     let mut opened: Vec<SourceCtx> = Vec::new();
@@ -1493,6 +1533,7 @@ fn run_intents(
                 authority,
                 1,
                 scope,
+                false,
                 false,
             )
         });
@@ -1636,6 +1677,7 @@ fn open_source_contexts(
     count: usize,
     scope: &PimdirScope,
     dry_run: bool,
+    accept_absences: bool,
 ) -> Result<Vec<SourceCtx>> {
     let perms = config.permissions();
     let opened: Vec<Result<Pool>> = thread::scope(|scope| {
@@ -1662,6 +1704,8 @@ fn open_source_contexts(
             rejected: Vec::new(),
             scope: scope.clone(),
             dry_run,
+            accept_absences,
+            noted: Noted::default(),
         });
     }
     Ok(ctxs)
@@ -1690,7 +1734,7 @@ fn phase1_spine(
     filtered: &[String],
     ctxs: &mut [SourceCtx],
     stores: &mut [PimdirSourceStore],
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     store_dir: &Path,
     dry_run: bool,
     pacing: &Pacing,
@@ -2287,7 +2331,7 @@ fn collection_spine(
     collection: &str,
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     store_dir: &Path,
     pushing: &Mutex<()>,
     dry_run: bool,
@@ -2333,6 +2377,7 @@ fn collection_spine(
             }
             _ => None,
         }));
+        itemize_noted(ctx, &mut report);
         return Ok(Spined {
             report,
             paused,
@@ -2350,6 +2395,7 @@ fn collection_spine(
     )?;
     itemize_single(collection, store, ctx, &mut report)?;
     if dry_run {
+        itemize_noted(ctx, &mut report);
         return Ok(Spined {
             report,
             paused,
@@ -2361,14 +2407,20 @@ fn collection_spine(
     // the second reads the first delivered, the target's create meeting the
     // relocated member as a probe, the source's remove no destination left.
     let push = pushing.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut settled = false;
     for _ in 0..=MAX_EXTRA_PASSES {
         let (pass, _) = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable(), None)?;
         if !moved(&pass) {
+            settled = true;
             break;
         }
     }
     drop(push);
+    if !settled {
+        report.unsettled.push(collection.to_owned());
+    }
     report_coverage(store, collection, ctx, &mut report);
+    itemize_noted(ctx, &mut report);
     itemize_refused(&ctx.name, mem::take(&mut ctx.refused), &mut report);
     itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
     Ok(Spined {
@@ -2439,7 +2491,7 @@ impl GoneBodies {
 /// What the connections landing downloaded bodies share in a phase.
 struct Landing<'a> {
     kind: Kind,
-    blobs: &'a PimdirBlobs,
+    blobs: &'a PimdirBlobStage,
     /// Each collection's gate, which its spine holds but while it waits on
     /// the server (phase 1); none once every spine is over (phase 2).
     gates: Option<&'a HashMap<&'a str, Mutex<()>>>,
@@ -2516,7 +2568,7 @@ impl Landing<'_> {
         let fetched = items.len();
 
         for (handle, hash) in placed.stored {
-            match stored_item(self.kind, self.blobs, handle.clone(), hash) {
+            match stored_item(self.kind, self.blobs.blobs(), handle.clone(), hash) {
                 Ok(Some(item)) => items.push(item),
                 // NOTE: left owed, for the next batch or run to download.
                 Ok(None) => debug!("the stored body of {} is gone", handle.as_str()),
@@ -2678,7 +2730,7 @@ fn phase2_hydrate(
     pacing: &Pacing,
     ctxs: &mut [SourceCtx],
     stores: &mut [PimdirSourceStore],
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     shared: Option<&[String]>,
     gone: &GoneBodies,
 ) -> Result<()> {
@@ -3077,7 +3129,7 @@ fn sync_collection(
     right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     store_dir: &Path,
     dry_run: bool,
     relay: bool,
@@ -3105,6 +3157,8 @@ fn sync_collection(
 
     report_coverage(left_store, collection, left, &mut report);
     report_coverage(right_store, collection, right, &mut report);
+    itemize_noted(left, &mut report);
+    itemize_noted(right, &mut report);
 
     // NOTE: folded whether the collection reconciled or failed: what it
     // reported before it stopped is still what happened.
@@ -3121,7 +3175,7 @@ fn sync_collection_into(
     right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     store_dir: &Path,
     dry_run: bool,
     relay: bool,
@@ -3160,6 +3214,7 @@ fn sync_collection_into(
         return Ok(());
     }
 
+    let mut settled = false;
     for _ in 0..=MAX_EXTRA_PASSES {
         let progressed = reconcile_pass(
             collection,
@@ -3185,8 +3240,12 @@ fn sync_collection_into(
             report,
         )?;
         if !progressed && propagated == 0 {
+            settled = true;
             break;
         }
+    }
+    if !settled {
+        report.unsettled.push(collection.to_owned());
     }
 
     itemize_refused(&left.name, mem::take(&mut left.refused), report);
@@ -3208,7 +3267,7 @@ fn propagate(
     right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     relay: bool,
     progress: &CollectionProgress,
     report: &mut SyncOutput,
@@ -3265,6 +3324,11 @@ struct RelayTarget {
 }
 
 /// The relay targets: a one-sided, never-hydrated item its far side may create.
+///
+/// Only into a target whose listing of the collection is closed and covers
+/// the item's date, as an add is guarded (pimdir SYNC §5): the store then
+/// knows what the target holds there, so a message it holds already is bound
+/// to it by its listing rather than appended twice.
 fn relay_targets(
     store: &PimdirStore,
     kind: Kind,
@@ -3273,6 +3337,17 @@ fn relay_targets(
     right: (&str, bool),
 ) -> Result<Vec<RelayTarget>> {
     let hub = store.load_hub(collection)?;
+    let coverages = store.list_coverage(collection)?;
+    // NOTE: a target with a round open, or that never closed one, covers
+    // nothing yet.
+    let covered = |target: &str| {
+        coverages
+            .iter()
+            .find(|coverage| coverage.source == target && coverage.round.is_none())
+            .and_then(|coverage| coverage.coverage.as_ref())
+            .map(|coverage| &coverage.scope)
+    };
+
     let mut out = Vec::new();
     for (link, item) in &hub.items {
         if item.deleted || item.object.is_some() || item.sources.len() != 1 {
@@ -3280,8 +3355,19 @@ fn relay_targets(
         }
         let (held, binding) = item.sources.iter().next().expect("one source");
         let holding = held.0.clone();
-        let target_creates = if holding == left.0 { right.1 } else { left.1 };
+        let (target, target_creates) = if holding == left.0 { right } else { left };
         if !target_creates {
+            continue;
+        }
+        let date = match &item.summary {
+            Some(PimdirSummary::Mail(mail)) => mail.date.as_deref(),
+            _ => None,
+        };
+        if !covered(target).is_some_and(|scope| scope.contains(date)) {
+            debug!(
+                "relay holds {} of {collection} back until {target} lists it",
+                link.0
+            );
             continue;
         }
         let Some(size) = summary_size(&item.summary) else {
@@ -3433,6 +3519,7 @@ fn bind_relayed(
 
     store
         .write(vec![PimdirWriteOp::UpsertPlacement(placement)])
+        .map(|_| ())
         .map_err(|err| anyhow!("Storage write error: {err}"))
 }
 
@@ -3473,8 +3560,12 @@ fn relay_one(
 /// One reconcile round over both sides, answering whether either moved.
 ///
 /// A side's divergences are itemized right after its own merge, the engine's
-/// events being this pass's alone. The endpoints are then reconciled with each
-/// other, which no side's own merge sees: each agrees with its own server.
+/// events being this pass's alone. A divergence between the endpoints
+/// themselves, both rewriting an item they agreed on or holding one identity
+/// under two bodies before they agreed on any, is the store's to record: it
+/// keeps the body they agreed on until every binding reconciled and parks
+/// the binding that diverged (pimdir SYNC §9), which the side's own merge
+/// then settles or reports.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_pass(
     collection: &str,
@@ -3482,22 +3573,12 @@ fn reconcile_pass(
     right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     store_dir: &Path,
     push: bool,
     dry_run: bool,
     report: &mut SyncOutput,
 ) -> Result<bool> {
-    let reconciles = parks_divergences(left, right, dry_run);
-    let ancestors = match reconciles {
-        true => shared_bodies(left_store, collection)?,
-        false => HashMap::new(),
-    };
-    let divergences = match reconciles {
-        true => hub_divergences(left_store, collection)?,
-        false => HashMap::new(),
-    };
-
     let left_report = reconcile_side(
         collection, left, left_store, blobs, store_dir, push, dry_run, report,
     )?;
@@ -3512,436 +3593,7 @@ fn reconcile_pass(
         report,
     )?;
 
-    let parked = park_divergences(
-        collection,
-        left,
-        right,
-        left_store,
-        right_store,
-        blobs,
-        store_dir,
-        &ancestors,
-        dry_run,
-        report,
-    )? + park_hub_conflicts(
-        collection,
-        left,
-        right,
-        left_store,
-        right_store,
-        &divergences,
-        dry_run,
-        report,
-    )?;
-
-    Ok(moved(&left_report) || moved(&right_report) || parked > 0)
-}
-
-/// Whether a pass reconciles the two endpoints with each other.
-///
-/// Only where neither decides: under `one-way` the source is the truth and a
-/// difference is not a divergence. A dry run stages nothing, the same bar
-/// [`resolve_conflicts`] holds.
-fn parks_divergences(left: &SourceCtx, right: &SourceCtx, dry_run: bool) -> bool {
-    !dry_run && left.authority == Authority::Shared && right.authority == Authority::Shared
-}
-
-/// The body each shared item holds, which is what its two endpoints agreed on.
-///
-/// Read before a round pulls, because pulling loses it: a remote change drops
-/// the stale body from the item and from that source's base, so once both have
-/// pulled the store holds two new bodies and nothing they both came from.
-fn shared_bodies(store: &PimdirStore, collection: &str) -> Result<HashMap<String, PimdirHash>> {
-    let hub = store
-        .load_hub(collection)
-        .with_context(|| format!("Load the hub of {collection}"))?;
-
-    Ok(hub
-        .items
-        .iter()
-        .filter(|(_, item)| !item.deleted)
-        .filter_map(|(link, item)| Some((link.0.clone(), item.object.clone()?)))
-        .collect())
-}
-
-/// The diverging body each item already carries, before a round records one.
-///
-/// The hub keeps its cross-source flag once set, so the flag outlives the
-/// decision that settled it. Read before the round, it tells what the round
-/// newly recorded, which is the divergence a person has not seen yet.
-fn hub_divergences(store: &PimdirStore, collection: &str) -> Result<HashMap<String, PimdirHash>> {
-    let hub = store
-        .load_hub(collection)
-        .with_context(|| format!("Load the hub of {collection}"))?;
-
-    Ok(hub
-        .items
-        .iter()
-        .filter(|(_, item)| item.conflicted)
-        .filter_map(|(link, item)| Some((link.0.clone(), item.conflict_object.clone()?)))
-        .collect())
-}
-
-/// One item both endpoints rewrote since they last agreed on it.
-struct Divergence {
-    /// The cross-side identity, which names the item in a report.
-    link: String,
-    /// The body both endpoints came from, the merge's common ancestor.
-    ancestor: PimdirHash,
-    /// The handle the source holds it under, whose body becomes the shared one.
-    source_handle: PimdirHandle,
-    /// The handle the target holds it under, whose body is the divergence.
-    target_handle: PimdirHandle,
-    /// The revision the target's own pull observed, which a decision about the
-    /// divergence is computed against and refused on once it moves.
-    target_revision: Option<String>,
-    /// The markers the target last agreed on, so parking moves the content axis
-    /// and nothing else.
-    target_flags: PimdirFlags,
-}
-
-/// The items both endpoints changed in one round, read from the store alone.
-///
-/// A pull drops the shared body and that source's base together, so an item
-/// holding a base before the round and none after is one both rewrote. One
-/// endpoint alone leaves the other's base in place, which tells them apart.
-fn diverged_items(
-    store: &PimdirStore,
-    collection: &str,
-    ancestors: &HashMap<String, PimdirHash>,
-    source: &str,
-    target: &str,
-) -> Result<Vec<Divergence>> {
-    let hub = store
-        .load_hub(collection)
-        .with_context(|| format!("Load the hub of {collection}"))?;
-    let (source_id, target_id) = (source_id(source), source_id(target));
-    let mut out = Vec::new();
-
-    for (link, item) in &hub.items {
-        if item.deleted || item.object.is_some() {
-            continue;
-        }
-        let (Some(ancestor), Some(held), Some(diverging)) = (
-            ancestors.get(&link.0),
-            item.sources.get(&source_id),
-            item.sources.get(&target_id),
-        ) else {
-            continue;
-        };
-        let pulled = |binding: &PimdirBinding| {
-            binding
-                .base
-                .as_ref()
-                .is_some_and(|base| base.object.is_none())
-        };
-        if !pulled(held) || !pulled(diverging) {
-            continue;
-        }
-
-        out.push(Divergence {
-            link: link.0.clone(),
-            ancestor: ancestor.clone(),
-            source_handle: held.handle.clone(),
-            target_handle: diverging.handle.clone(),
-            target_revision: diverging.base.as_ref().and_then(|b| b.revision.clone()),
-            target_flags: diverging
-                .base
-                .as_ref()
-                .map(|base| base.flags.clone())
-                .unwrap_or_default(),
-        });
-    }
-
-    Ok(out)
-}
-
-/// Reconciles what both endpoints rewrote, through the three-way merge.
-///
-/// Neither endpoint's own merge sees it: each agrees with its own server, so
-/// the hub would project the last body it kept over the other. The pair gets
-/// a one-endpoint divergence's shape instead; what no merge settles parks.
-#[allow(clippy::too_many_arguments)]
-fn park_divergences(
-    collection: &str,
-    left: &mut SourceCtx,
-    right: &mut SourceCtx,
-    left_store: &mut PimdirSourceStore,
-    right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
-    store_dir: &Path,
-    ancestors: &HashMap<String, PimdirHash>,
-    dry_run: bool,
-    report: &mut SyncOutput,
-) -> Result<usize> {
-    if !parks_divergences(left, right, dry_run) {
-        return Ok(0);
-    }
-
-    let diverged = diverged_items(left_store, collection, ancestors, &left.name, &right.name)?;
-    if diverged.is_empty() {
-        return Ok(0);
-    }
-
-    debug!(
-        "{} item(s) in {collection} changed on both endpoints",
-        diverged.len()
-    );
-
-    // NOTE: the source's body becomes the shared one, which is what makes it
-    // the merge's left side: ours, in the merge's own vocabulary.
-    let mut remote = PimRemote::new(&mut left.pool, blobs.clone(), left.namespace.clone());
-    let handles = diverged.iter().map(|d| d.source_handle.clone()).collect();
-    run_verb(
-        left_store,
-        &mut remote,
-        PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full),
-    )
-    .with_context(|| format!("Fetch the diverging bodies of {} {collection}", &left.name))?;
-
-    let hub = left_store
-        .load_hub(collection)
-        .with_context(|| format!("Load the hub of {collection}"))?;
-    let mut writes = Vec::new();
-    let mut marked = Vec::new();
-
-    for divergence in diverged {
-        let Some(item) = hub.items.get(&PimdirLinkId(divergence.link.clone())) else {
-            continue;
-        };
-        let Some(object) = item.object.clone() else {
-            debug!(
-                "{} in {collection} has no source body to merge",
-                divergence.link
-            );
-            continue;
-        };
-
-        // NOTE: the ancestor is unreferenced between the pull that dropped it
-        // and the write below that pins it again, so a collector that ran in
-        // between leaves a divergence with no base. It parks, unmerged, rather
-        // than being merged against a body nobody wrote.
-        let base = blobs
-            .get(&divergence.ancestor)
-            .with_context(|| {
-                format!(
-                    "Read the shared body of {} in {collection}",
-                    divergence.link
-                )
-            })?
-            .is_some()
-            .then_some(divergence.ancestor);
-
-        writes.push(PimdirWriteOp::UpsertPlacement(PimdirPlacement {
-            collection: PimdirCollectionId(collection.to_string()),
-            handle: divergence.target_handle.clone(),
-            link_id: Some(PimdirLinkId(divergence.link)),
-            object: Some(object),
-            level: PimdirLevel::Full,
-            summary: item.summary.clone(),
-            sort_key: item.sort_key.clone(),
-            flags: item.flags.clone(),
-            status: PimdirStatus::Conflict,
-            conflict_revision: divergence.target_revision.clone(),
-            conflict_object: None,
-            base: Some(PimdirBase {
-                flags: divergence.target_flags,
-                revision: divergence.target_revision,
-                object: base,
-            }),
-            origin: None,
-        }));
-        marked.push(divergence.target_handle);
-    }
-
-    if writes.is_empty() {
-        return Ok(0);
-    }
-
-    let staged = writes.len();
-    right_store
-        .write(writes)
-        .with_context(|| format!("Park the divergences of {} {collection}", &right.name))?;
-
-    resolve_conflicts(collection, right, right_store, blobs, store_dir, dry_run)?;
-
-    let still: HashSet<String> = conflicted_placements(right_store, collection, &right.name)?
-        .into_iter()
-        .map(|placement| placement.handle.0)
-        .collect();
-    let display = display_name(&right.namespace, collection);
-    for handle in marked {
-        if still.contains(&handle.0) {
-            report.note_conflict(ItemConflict {
-                side: right.name.clone(),
-                collection: display.to_string(),
-                id: handle.0,
-            });
-        }
-    }
-
-    Ok(staged)
-}
-
-/// One item two endpoints disagree about with nothing behind them.
-struct HubConflict {
-    /// The cross-side identity, which names the item in a report.
-    link: String,
-    /// The body the hub kept as the shared one, which the source contributed.
-    shared: PimdirHash,
-    /// The body the hub recorded as diverging from it, the target's own.
-    diverging: PimdirHash,
-    /// The summary the shared body carries, so parking restates it rather than
-    /// dropping it.
-    summary: Option<PimdirSummary>,
-    /// The key the shared body sorts by, restated for the same reason.
-    sort_key: PimdirSortKey,
-    /// The markers the item carries, restated for the same reason.
-    flags: PimdirFlags,
-    /// The handle the target holds the item under, whose placement parks.
-    target_handle: PimdirHandle,
-    /// The revision the target's own pull observed, which a decision about the
-    /// divergence is computed against and refused on once it moves.
-    target_revision: Option<String>,
-    /// The markers the target last agreed on, so parking moves the content axis
-    /// and nothing else.
-    target_flags: PimdirFlags,
-}
-
-/// The divergences the round itself recorded between the two endpoints.
-///
-/// The hub's cross-source axis, kept on the shared item: both endpoints held
-/// one identity before the store read either. Read against `before` so a
-/// divergence parks once, the flag outliving the decision that settles it.
-fn hub_conflicts(
-    store: &PimdirStore,
-    collection: &str,
-    before: &HashMap<String, PimdirHash>,
-    source: &str,
-    target: &str,
-) -> Result<Vec<HubConflict>> {
-    let hub = store
-        .load_hub(collection)
-        .with_context(|| format!("Load the hub of {collection}"))?;
-    let (source_id, target_id) = (source_id(source), source_id(target));
-    let mut out = Vec::new();
-
-    for (link, item) in &hub.items {
-        if item.deleted || !item.conflicted {
-            continue;
-        }
-
-        let (Some(shared), Some(diverging)) = (item.object.clone(), item.conflict_object.clone())
-        else {
-            continue;
-        };
-        if before.get(&link.0) == Some(&diverging) {
-            continue;
-        }
-        let (Some(_), Some(binding)) = (item.sources.get(&source_id), item.sources.get(&target_id))
-        else {
-            continue;
-        };
-        if binding.conflicted {
-            continue;
-        }
-        let base = binding.base.as_ref();
-
-        out.push(HubConflict {
-            link: link.0.clone(),
-            shared,
-            diverging,
-            summary: item.summary.clone(),
-            sort_key: item.sort_key.clone(),
-            flags: item.flags.clone(),
-            target_handle: binding.handle.clone(),
-            target_revision: base.and_then(|base| base.revision.clone()),
-            target_flags: base.map(|base| base.flags.clone()).unwrap_or_default(),
-        });
-    }
-
-    Ok(out)
-}
-
-/// Parks what the two endpoints disagreed about before they agreed on anything.
-///
-/// Unlike [`park_divergences`] there is no common ancestor: two servers held
-/// one identity under two bodies before the store read either, so a merge
-/// could only park. Marking it also keeps the source's body off the target.
-#[allow(clippy::too_many_arguments)]
-fn park_hub_conflicts(
-    collection: &str,
-    left: &SourceCtx,
-    right: &SourceCtx,
-    left_store: &PimdirSourceStore,
-    right_store: &mut PimdirSourceStore,
-    before: &HashMap<String, PimdirHash>,
-    dry_run: bool,
-    report: &mut SyncOutput,
-) -> Result<usize> {
-    if !parks_divergences(left, right, dry_run) {
-        return Ok(0);
-    }
-
-    let conflicts = hub_conflicts(left_store, collection, before, &left.name, &right.name)?;
-    if conflicts.is_empty() {
-        return Ok(0);
-    }
-
-    debug!(
-        "{} item(s) in {collection} differ across the endpoints with no shared ancestor",
-        conflicts.len()
-    );
-
-    let mut writes = Vec::with_capacity(conflicts.len());
-    let mut marked = Vec::with_capacity(conflicts.len());
-
-    for conflict in conflicts {
-        marked.push(conflict.target_handle.0.clone());
-        writes.push(PimdirWriteOp::UpsertPlacement(PimdirPlacement {
-            collection: PimdirCollectionId(collection.to_string()),
-            handle: conflict.target_handle,
-            link_id: Some(PimdirLinkId(conflict.link)),
-            object: Some(conflict.shared),
-            level: PimdirLevel::Full,
-            summary: conflict.summary,
-            sort_key: conflict.sort_key,
-            flags: conflict.flags,
-            status: PimdirStatus::Conflict,
-            conflict_revision: conflict.target_revision.clone(),
-            conflict_object: Some(conflict.diverging),
-            // NOTE: the base carries no body, the two endpoints never having
-            // agreed on one. It is also what keeps the automatic merge out:
-            // merging against the target's own body as the base would read the
-            // target as having changed nothing and settle on the source's body,
-            // which is the overwrite parking exists to refuse.
-            base: Some(PimdirBase {
-                flags: conflict.target_flags,
-                revision: conflict.target_revision,
-                object: None,
-            }),
-            origin: None,
-        }));
-    }
-
-    let staged = writes.len();
-    right_store.write(writes).with_context(|| {
-        format!(
-            "Park the endpoint divergences of {} {collection}",
-            &right.name
-        )
-    })?;
-
-    let display = display_name(&right.namespace, collection);
-    for handle in marked {
-        report.note_conflict(ItemConflict {
-            side: right.name.clone(),
-            collection: display.to_string(),
-            id: handle,
-        });
-    }
-
-    Ok(staged)
+    Ok(moved(&left_report) || moved(&right_report))
 }
 
 /// One side of a reconcile round: its merge, its probes and its report.
@@ -3954,7 +3606,7 @@ fn reconcile_side(
     collection: &str,
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     store_dir: &Path,
     push: bool,
     dry_run: bool,
@@ -3993,81 +3645,180 @@ fn moved(report: &PimdirSyncReport) -> bool {
     report.pulled > 0 || report.pushed > 0
 }
 
-/// Runs one side's sync, then the handle-space rebuild guard.
+/// Runs one side's sync, rekeying the collection first when its listing
+/// found the source renumbered every member (pimdir SYNC §4, §8).
 ///
-/// The stored checkpoint's epoch is read before and after; a change means the
-/// server renumbered every handle. The guard is pre/post within one run, so a
-/// crash in between can miss one bump; link ids still converge on the next.
-/// Also answers whether `pager` paused the sync, its round left open.
+/// The listing fails before anything listed under the new handles lands; the
+/// rekey carries every placement onto them by link id, then the sync runs
+/// again. A rekey that fails leaves the stored checkpoint as it was, so the
+/// next run meets the renumbering again and rekeys then. Also answers whether
+/// `pager` paused the sync, its round left open.
 fn sync_side_rebuilding(
     collection: &str,
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     push: bool,
-    pager: Option<&mut dyn Pager>,
+    mut pager: Option<&mut dyn Pager>,
 ) -> Result<(PimdirSyncReport, bool)> {
-    let pre = stored_epoch(ctx.pool.primary(), store, collection)?;
-
-    let synced = sync_side(collection, ctx, store, blobs, push, pager)?;
-
-    if let Some(pre) = pre
-        && let Some(post) = stored_epoch(ctx.pool.primary(), store, collection)?
-        && post != pre
-    {
-        info!("handle-space epoch of {collection} changed, rebuilding the collection");
-        let (rekey, generation) = rebuild_collection(collection, ctx, store, blobs)?;
-        info!(
-            "{collection} rebuilt under generation {generation}: {} carried, {} pulled, {} pending dropped",
-            rekey.rekeyed, rekey.pulled, rekey.dropped
-        );
-    }
-
+    let first = pager.as_mut().map(|pager| &mut **pager as &mut dyn Pager);
+    let synced = match sync_side(collection, ctx, store, blobs, push, first) {
+        Err(err) if err.downcast_ref::<Renumbered>().is_some() => {
+            info!("handles of {collection} were renumbered, rebuilding the collection");
+            let rekey = rebuild_collection(collection, ctx, store, blobs)?;
+            // NOTE: a parked rekey wrote nothing, so the collection stays
+            // under its old handles and is not listed again this run.
+            if let Some(parked) = rekey.parked {
+                warn!(
+                    "rebuilding {collection} would drop {} of {} items, parked",
+                    parked.absent, parked.bound
+                );
+                ctx.noted.park(collection, parked, true);
+                return Ok((PimdirSyncReport::default(), false));
+            }
+            let generation = store
+                .generation(collection)
+                .with_context(|| format!("Read the generation of {collection}"))?
+                .context("Rekey completed without a write")?;
+            info!(
+                "{collection} rebuilt under generation {generation}: {} carried, {} pulled, {} pending dropped",
+                rekey.rekeyed, rekey.pulled, rekey.dropped
+            );
+            sync_side(collection, ctx, store, blobs, push, pager)
+        }
+        synced => synced,
+    }?;
+    ctx.noted.note(collection, &synced.0);
     Ok(synced)
 }
 
-/// The handle-space epoch of `collection`'s stored checkpoint, if any.
+/// What a side's syncs reported beyond their item events, drained into the
+/// run's report by [`itemize_noted`], keyed by hub collection id.
 ///
-/// The checkpoint bytes are the backend's own encoding, so the backend decodes
-/// them ([`Client::handle_space_epoch`]); the driver only compares the number
-/// it gets back, and knows nothing about IMAP's UIDVALIDITY.
-fn stored_epoch(
-    client: &Client,
-    store: &PimdirSourceStore,
-    collection: &str,
-) -> Result<Option<u64>> {
-    let loaded = store
-        .load(
-            &PimdirCollectionId(collection.to_string()),
-            &PimdirLoadScope::All,
-        )
-        .map_err(|err| anyhow!("Load {collection} checkpoint error: {err}"))?;
-    Ok(loaded
-        .checkpoint
-        .as_ref()
-        .and_then(|checkpoint| client.handle_space_epoch(&checkpoint.0)))
+/// The passes of one collection meet each again, so each is kept once.
+#[derive(Default)]
+struct Noted {
+    /// The listings that parked a mass absence, and whether each was a
+    /// rebuild's.
+    parked: BTreeMap<String, (PimdirParked, bool)>,
+    /// The most changes one pass withheld over an unreadable body.
+    unreadable: BTreeMap<String, usize>,
+    /// The bodies a policy did not adopt: the handle whose write settled
+    /// each, and the retained item keeping it.
+    overruled: Vec<(String, PimdirHandle, PimdirLinkId)>,
+    /// The pushes the last pass left unanswered, which the next run pushes
+    /// again: an earlier pass's are pushed again by the later ones.
+    unanswered: BTreeMap<String, usize>,
 }
 
-/// Drives the engine's rekey, returning its report and the new generation.
+impl Noted {
+    /// Notes a listing of `collection` that parked.
+    fn park(&mut self, collection: &str, parked: PimdirParked, rebuild: bool) {
+        self.parked
+            .insert(collection.to_string(), (parked, rebuild));
+    }
+
+    /// Notes what one sync of `collection` reported.
+    fn note(&mut self, collection: &str, report: &PimdirSyncReport) {
+        if let Some(parked) = report.parked {
+            warn!(
+                "{} of {} items of {collection} absent from its listing, parked",
+                parked.absent, parked.bound
+            );
+            self.park(collection, parked, false);
+        }
+        if report.unreadable > 0 {
+            let withheld = self.unreadable.entry(collection.to_string()).or_default();
+            *withheld = (*withheld).max(report.unreadable);
+        }
+        self.unanswered
+            .insert(collection.to_string(), report.unanswered);
+        for event in &report.events {
+            let PimdirSyncEvent::Overruled { handle, link_id } = event else {
+                continue;
+            };
+            let kept = (collection.to_string(), handle.clone(), link_id.clone());
+            if !self.overruled.contains(&kept) {
+                self.overruled.push(kept);
+            }
+        }
+    }
+}
+
+/// Drains what `ctx`'s syncs noted into `report`.
+fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
+    let Noted {
+        parked,
+        unreadable,
+        overruled,
+        unanswered,
+    } = mem::take(&mut ctx.noted);
+    let display = |collection: &str| display_name(&ctx.namespace, collection).to_string();
+
+    for (collection, (parked, rebuild)) in parked {
+        report.absences.push(ParkedAbsence {
+            side: ctx.name.clone(),
+            collection: display(&collection),
+            absent: parked.absent,
+            bound: parked.bound,
+            rebuild,
+        });
+    }
+    for (collection, count) in unreadable {
+        report.unreadable.push(UnreadableBodies {
+            side: ctx.name.clone(),
+            collection: display(&collection),
+            count,
+        });
+    }
+    for (collection, handle, kept) in overruled {
+        report.overruled.push(OverruledBody {
+            side: Some(ctx.name.clone()),
+            collection: display(&collection),
+            id: Some(handle.0),
+            action: None,
+            kept: kept.0,
+        });
+    }
+    for (collection, count) in unanswered {
+        if count == 0 {
+            continue;
+        }
+        report.unanswered.push(UnansweredPushes {
+            side: ctx.name.clone(),
+            collection: display(&collection),
+            count,
+        });
+    }
+}
+
+/// Marks a sync whose listing found the source renumbered every member, which
+/// a rekey of the collection settles before it is listed again.
+#[derive(Debug)]
+struct Renumbered;
+
+impl fmt::Display for Renumbered {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("The source renumbered the collection")
+    }
+}
+
+/// Drives the engine's rekey, returning its report.
 ///
 /// The rebuild batch drops every old handle as `Rekeyed`, which makes the
 /// store bump the collection's generation in the same transaction (pimdir
 /// SYNC §8), so "the ids you cached are void" commits with what voided them.
+/// A listing leaving most of the collection's items out parks the rekey,
+/// nothing written, unless the run accepts absences.
 fn rebuild_collection(
     collection: &str,
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
-) -> Result<(PimdirRekeyReport, i64)> {
+    blobs: &PimdirBlobStage,
+) -> Result<PimdirRekeyReport> {
+    let rekey = PimdirRekey::new(collection.to_string()).accept_absences(ctx.accept_absences);
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-    let report = run_verb(store, &mut remote, PimdirRekey::new(collection.to_string()))
-        .with_context(|| format!("Rebuild {collection}"))?;
-    let generation = store
-        .generation(collection)
-        .with_context(|| format!("Read the generation of {collection}"))?
-        .context("Rekey completed without a write")?;
-
-    Ok((report, generation))
+    run_verb(store, &mut remote, rekey).with_context(|| format!("Rebuild {collection}"))
 }
 
 /// The `sync` verb one side runs, under its options.
@@ -4075,6 +3826,7 @@ fn rebuild_collection(
 /// Being hub-bound fixes the delete disposition: a refused delete is held, not
 /// reverted. Reverting says "this source still holds the member", and an add
 /// beats a delete, so a side taking no deletes would resurrect on both sides.
+#[cfg(test)]
 fn sync_verb(
     collection: &str,
     push: bool,
@@ -4091,6 +3843,11 @@ fn sync_verb(
         ..Default::default()
     };
 
+    sync_verb_with(collection, opts, scope_bound)
+}
+
+/// [`sync_verb`] under options stated whole.
+fn sync_verb_with(collection: &str, opts: PimdirSyncOptions, scope_bound: bool) -> PimdirSync {
     PimdirSync::new(collection.to_string(), opts)
         .beside_other_sources(true)
         .scope_bound(scope_bound)
@@ -4102,7 +3859,7 @@ fn sync_side(
     collection: &str,
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     push: bool,
     pager: Option<&mut dyn Pager>,
 ) -> Result<(PimdirSyncReport, bool)> {
@@ -4113,19 +3870,21 @@ fn sync_side(
         )
         .map(Bound::from_loaded)
         .map_err(|err| anyhow!("Load {collection} error: {err}"))?;
-    let verb = sync_verb(
-        collection,
+    let opts = PimdirSyncOptions {
         push,
-        ctx.push_rights(),
-        ctx.conflict_policy(),
-        ctx.scope.clone(),
-        ctx.pool.primary().scope_bound(),
-    )
-    .heads(ctx.pool.primary().heads());
+        rights: ctx.push_rights(),
+        conflict: ctx.conflict_policy(),
+        scope: ctx.scope.clone(),
+        accept_absences: ctx.accept_absences,
+        ..Default::default()
+    };
+    let verb = sync_verb_with(collection, opts, ctx.pool.primary().scope_bound())
+        .heads(ctx.pool.primary().heads());
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone())
         .with_bound(collection, bound)
         .with_bodies(!ctx.dry_run);
     let report = run_verb_paged(store, &mut remote, verb, pager);
+    let renumbered = remote.rekey_asked();
     // NOTE: kept whether the pass succeeded or not: a later failure does not
     // unlearn a refusal the run already saw.
     let refused = remote.take_refused();
@@ -4133,10 +3892,51 @@ fn sync_side(
     ctx.refused.extend(refused);
     ctx.rejected.extend(rejected);
 
-    match report.with_context(|| format!("Sync {} {collection}", &ctx.name))? {
-        Paged::Done(report) => Ok((report, false)),
-        Paged::Paused(verb) => Ok((verb.report().clone(), true)),
-    }
+    let report = match report {
+        Err(err) if renumbered => Err(err.context(Renumbered)),
+        report => report,
+    };
+    let (report, paused) =
+        match report.with_context(|| format!("Sync {} {collection}", &ctx.name))? {
+            Paged::Done(report) => (report, false),
+            Paged::Paused(verb) => (verb.report().clone(), true),
+        };
+
+    let wire = wire_name(&ctx.namespace, collection);
+    let unnamed = unnamed_creates(&report, wire, &ctx.rejected, &ctx.refused);
+    ctx.rejected.extend(unnamed);
+
+    Ok((report, paused))
+}
+
+/// The creates the engine says `collection`'s server rejected (pimdir SYNC
+/// §5) that no rejection or refusal the connector recorded names, each as a
+/// rejected `create`.
+///
+/// The connector records every rejection it answers with its reason, so this
+/// names none today; it keeps a create a later path rejects silently from
+/// being pushed for ever unreported.
+fn unnamed_creates(
+    report: &PimdirSyncReport,
+    collection: &str,
+    rejected: &[RejectedPush],
+    refused: &[RefusedCreate],
+) -> Vec<RejectedPush> {
+    report
+        .rejected_creates
+        .iter()
+        .filter(|handle| {
+            let named = |c: &str, h: &str| c == collection && h == handle.as_str();
+            !rejected.iter().any(|r| named(&r.collection, &r.handle))
+                && !refused.iter().any(|r| named(&r.collection, &r.handle))
+        })
+        .map(|handle| RejectedPush {
+            collection: collection.to_string(),
+            handle: handle.0.clone(),
+            action: "create",
+            reason: String::from("the server rejected it, giving no reason"),
+        })
+        .collect()
 }
 
 /// One side's placements the engine left marked conflicted in `collection`.
@@ -4161,7 +3961,7 @@ fn resolve_conflicts(
     collection: &str,
     ctx: &mut SourceCtx,
     store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     store_dir: &Path,
     dry_run: bool,
 ) -> Result<usize> {
@@ -4178,7 +3978,9 @@ fn resolve_conflicts(
     // that cannot push, and the pushing pass never revisits it, so the store's
     // body is restated here for that pass to push over the endpoint.
     if ctx.authority == Authority::Store {
-        return keep_store_bodies(collection, &ctx.name, store, blobs);
+        let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
+        let overruled = &mut ctx.noted.overruled;
+        return keep_store_bodies(collection, &ctx.name, store, blobs, &mut remote, overruled);
     }
 
     debug!("merge {} conflicted item(s) in {collection}", parked.len());
@@ -4211,12 +4013,29 @@ fn resolve_conflicts(
 /// next pushing pass overwrites it. Nothing is merged, the endpoint's own edit
 /// being what `one-way` discards. The edit is the engine's own rather than an
 /// owner's through the queue, which a one-way account refuses.
-fn keep_store_bodies(
+///
+/// The edit overrules (pimdir SYNC §7): the store keeps each body it discards,
+/// the endpoint's own edit among them, as a retained item, noted into
+/// `overruled` with the handle whose write settled it and the retained item's
+/// key. A diverging body nobody has read yet is fetched from `remote` first,
+/// as [`resolve_conflicts`] does for a merge, since the store refuses to
+/// overrule a body it cannot keep; one still unread after its fetch stays
+/// parked for a person.
+fn keep_store_bodies<R: PimdirRemote<Error = anyhow::Error>>(
     collection: &str,
     source: &str,
     store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
+    remote: &mut R,
+    overruled: &mut Vec<(String, PimdirHandle, PimdirLinkId)>,
 ) -> Result<usize> {
+    let unread: Vec<PimdirHandle> = conflicted_placements(store, collection, source)?
+        .into_iter()
+        .filter(|placement| placement.conflict_object.is_none())
+        .map(|placement| placement.handle)
+        .collect();
+    fetch_diverging(collection, source, store, remote, unread.clone())?;
+
     let mut kept = 0usize;
 
     for placement in conflicted_placements(store, collection, source)? {
@@ -4228,6 +4047,7 @@ fn keep_store_bodies(
             continue;
         };
         let Some(body) = blobs
+            .blobs()
             .get(&hash)
             .with_context(|| format!("Read the body of {name} in {collection}"))?
         else {
@@ -4235,20 +4055,45 @@ fn keep_store_bodies(
             continue;
         };
 
-        let object = PimdirObject {
-            hash,
-            size: body.len(),
-        };
         let edit = PimdirMutation::Edit {
-            handle,
-            object,
+            handle: handle.clone(),
+            object: PimdirObject {
+                hash: hash.clone(),
+                size: body.len(),
+            },
             body,
             summary: None,
             sort_key: None,
+            if_match: Some(hash),
+            overrule: true,
         };
-        store
-            .mutate(collection, edit)
-            .map_err(|err| anyhow!("Keep the store's body of {name} in {collection}: {err}"))?;
+
+        let mutated = match store.mutate(collection, edit.clone()) {
+            Err(PimdirRunError::Store(PimdirError::Unread { .. })) if !unread.contains(&handle) => {
+                fetch_diverging(collection, source, store, remote, vec![handle])?;
+                store.mutate(collection, edit)
+            }
+            mutated => mutated,
+        };
+
+        let mutated = match mutated {
+            Ok(mutated) => mutated,
+            Err(PimdirRunError::Store(PimdirError::Unread { .. })) => {
+                debug!("the diverging body of {name} in {collection} is still unread, left parked");
+                continue;
+            }
+            Err(PimdirRunError::Store(err)) => {
+                let context = format!("Keep the store's body of {name} in {collection}");
+                return Err(pimdir_error(err).context(context));
+            }
+            Err(err) => bail!("Keep the store's body of {name} in {collection}: {err}"),
+        };
+
+        for event in mutated.events {
+            if let PimdirSyncEvent::Overruled { handle, link_id } = event {
+                overruled.push((collection.to_string(), handle, link_id));
+            }
+        }
 
         kept += 1;
     }
@@ -4258,6 +4103,30 @@ fn keep_store_bodies(
     }
 
     Ok(kept)
+}
+
+/// Fetches the diverging bodies of `handles`, which the store holds as
+/// wanted only, so a settle over them keeps what it discards.
+fn fetch_diverging<R: PimdirRemote<Error = anyhow::Error>>(
+    collection: &str,
+    source: &str,
+    store: &mut PimdirSourceStore,
+    remote: &mut R,
+    handles: Vec<PimdirHandle>,
+) -> Result<()> {
+    if handles.is_empty() {
+        return Ok(());
+    }
+
+    debug!(
+        "fetch {} diverging body(ies) in {collection}",
+        handles.len()
+    );
+    let upgrade = PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full);
+    run_verb(store, remote, upgrade)
+        .with_context(|| format!("Fetch the diverging bodies of {source} {collection}"))?;
+
+    Ok(())
 }
 
 /// The half of [`resolve_conflicts`] that reaches no server.
@@ -4270,7 +4139,7 @@ fn merge_conflicts(
     kind: Kind,
     source: &str,
     store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     store_dir: &Path,
 ) -> Result<usize> {
     // NOTE: opened before the first blob write, its staging lock being what
@@ -4299,7 +4168,7 @@ fn merge_conflicts(
         };
 
         let read = |hash: &PimdirHash| -> Result<Option<Vec<u8>>> {
-            blobs.get(hash).with_context(|| {
+            blobs.blobs().get(hash).with_context(|| {
                 format!(
                     "Read the body {} of {handle} in {collection}",
                     hash.as_str()
@@ -4333,30 +4202,14 @@ fn merge_conflicts(
             continue;
         };
 
-        let hash = blobs.hash(&body);
-        let mut writer = blobs
-            .writer()
-            .with_context(|| format!("Store the merged body of {handle} in {collection}"))?;
-        writer
-            .write_all(&body)
-            .with_context(|| format!("Store the merged body of {handle} in {collection}"))?;
-        let size = writer
-            .commit(&hash)
-            .with_context(|| format!("Store the merged body of {handle} in {collection}"))?;
-        let object = PimdirObject {
-            hash,
-            size: size as usize,
-        };
-
+        // NOTE: merged over the local side, so an edit that replaced it since
+        // parks rather than being dropped unmerged.
         producer
-            .enqueue(
-                collection,
-                &PimdirAction::Update {
-                    seq,
-                    object: object.hash.clone(),
-                },
-                Some(&object),
-            )
+            .enqueue_with_body(collection, &body, |object| PimdirAction::Update {
+                seq,
+                object,
+                if_match: Some(local_hash),
+            })
             .with_context(|| format!("Stage the merged body of {handle} in {collection}"))?;
 
         staged += 1;
@@ -4391,7 +4244,7 @@ fn hydrate_copies(
     right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     progress: &CollectionProgress,
 ) -> Result<usize> {
     let targets = hydration_targets(
@@ -5006,6 +4859,19 @@ pub(crate) fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutpu
             drained.applied, drained.parked, drained.skipped
         );
     }
+    for overruled in drained.overruled {
+        warn!(
+            "queued action #{} in {} kept a body aside as {}",
+            overruled.id, overruled.collection, overruled.link_id.0
+        );
+        report.overruled.push(OverruledBody {
+            side: None,
+            collection: overruled.collection,
+            id: None,
+            action: Some(overruled.id),
+            kept: overruled.link_id.0,
+        });
+    }
     if drained.applied == 0 {
         return;
     }
@@ -5166,7 +5032,7 @@ fn drain_submits(
     account: &Account,
     sides: &mut [SendSide<'_>],
     store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     dir: &Path,
     report: &mut SyncOutput,
 ) {
@@ -5253,7 +5119,7 @@ fn drain_submits(
                 continue;
             }
 
-            let outgoing = match submit::prepare(blobs, intent) {
+            let outgoing = match submit::prepare(blobs.blobs(), intent) {
                 Ok(outgoing) => outgoing,
                 Err(failure) => {
                     let reason = failure.reason();
@@ -5774,7 +5640,8 @@ fn settle_intent(
 ///
 /// It runs after the sync, so an item this run retired starts its delay rather
 /// than going with it, and it warns instead of failing. A purge only releases a
-/// body (pimdir SPEC §5), so the collector runs here too, after a purge only.
+/// body (pimdir STORAGE §5), so the collector runs here too, after a purge
+/// only.
 fn sweep_retained(
     account_config: &AccountConfig,
     store: &mut PimdirStore,
@@ -5953,7 +5820,7 @@ fn hydrate_full_collection(
     right: &mut SourceCtx,
     left_store: &mut PimdirSourceStore,
     right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobs,
+    blobs: &PimdirBlobStage,
     progress: &CollectionProgress,
 ) -> Result<usize> {
     let mut raised = 0;
@@ -5988,7 +5855,8 @@ fn hydrate_full_collection(
     Ok(raised)
 }
 
-/// The blob subdirectory of a pimdir store (SPEC §5), shared by a dry run.
+/// The blob subdirectory of a pimdir store (pimdir STORAGE §5), shared by a
+/// dry run.
 const BLOBS_DIR: &str = "objects";
 
 /// A throwaway replica of the pimdir store, removed however the run ends.
@@ -6121,6 +5989,8 @@ mod tests {
         change::{PimdirChange, PimdirChangeKind, PimdirDropReason},
         client::reader::PimdirReader,
         collection::{PimdirCheckpoint, PimdirCursor},
+        hash::PimdirHashAlgo,
+        hub::PimdirHubConflict,
         object::PimdirObject,
         placement::PimdirOrigin,
         remote::{
@@ -6141,6 +6011,26 @@ mod tests {
             sort_key: PimdirSortKey::default(),
             body: None,
         }
+    }
+
+    /// A store a newer neverest wrote is good: the refusal asks for an
+    /// upgrade and never for the reset that would drop it.
+    #[test]
+    fn a_store_a_newer_neverest_wrote_asks_for_an_upgrade() {
+        let dir = tempfile::tempdir().unwrap();
+        drop(PimdirStore::open(dir.path()).unwrap());
+        rusqlite::Connection::open(dir.path().join("pimdir.db"))
+            .unwrap()
+            .pragma_update(None, "user_version", 99)
+            .unwrap();
+
+        let Err(err) = open_store(dir.path(), "imap", "imap") else {
+            panic!("a newer store is refused");
+        };
+
+        let err = format!("{err:#}");
+        assert!(err.contains("newer neverest"), "{err}");
+        assert!(!err.contains("--reset"), "{err}");
     }
 
     /// The marker survives the context a caller adds on top of the open,
@@ -6444,14 +6334,11 @@ mod tests {
             .ensure_collection("left/INBOX", "message/rfc822")
             .unwrap();
 
-        let blobs = store.blobs();
-        let mut writer = blobs.writer().unwrap();
-        std::io::Write::write_all(&mut writer, b"Subject: queued\r\n\r\nhello").unwrap();
-        let hash = PimdirHash("cafe0001".into());
-        let object = PimdirObject {
-            hash: hash.clone(),
-            size: writer.commit(&hash).unwrap() as usize,
-        };
+        let object = store
+            .blob_stage()
+            .stage_body(b"Subject: queued\r\n\r\nhello")
+            .unwrap();
+        let hash = object.hash.clone();
 
         let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
         producer
@@ -6510,9 +6397,6 @@ mod tests {
     }
 
     /// The stored checkpoint's UIDVALIDITY, as the IMAP adapter encodes it.
-    ///
-    /// The guard itself goes through `Client::handle_space_epoch`, but this
-    /// test has no client, which is also why it is gated on the IMAP feature.
     #[cfg(feature = "imap")]
     fn stored_checkpoint_uid_validity(store: &PimdirSourceStore, collection: &str) -> Option<u32> {
         let loaded = store
@@ -6607,7 +6491,7 @@ mod tests {
             .write(vec![
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
-                        hash: PimdirHash("beef0001".into()),
+                        hash: PimdirHashAlgo::default().hash(b"abc"),
                         size: 3,
                     },
                     body: Some(b"abc".to_vec()),
@@ -6616,7 +6500,7 @@ mod tests {
                     collection: PimdirCollectionId("INBOX".into()),
                     handle: PimdirHandle("1".into()),
                     link_id: Some(PimdirLinkId("mid:a@x".into())),
-                    object: Some(PimdirHash("beef0001".into())),
+                    object: Some(PimdirHashAlgo::default().hash(b"abc")),
                     level: PimdirLevel::Full,
                     summary: None,
                     sort_key: PimdirSortKey::default(),
@@ -6627,7 +6511,7 @@ mod tests {
                     base: Some(PimdirBase {
                         flags: PimdirFlags::default(),
                         revision: None,
-                        object: Some(PimdirHash("beef0001".into())),
+                        object: Some(PimdirHashAlgo::default().hash(b"abc")),
                     }),
                     origin: None,
                 }),
@@ -6651,10 +6535,322 @@ mod tests {
         let placements = load_side(&store, "INBOX").unwrap();
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].handle.0, "7");
-        assert_eq!(placements[0].object, Some(PimdirHash("beef0001".into())));
+        assert_eq!(
+            placements[0].object,
+            Some(PimdirHashAlgo::default().hash(b"abc"))
+        );
         assert_eq!(placements[0].status, PimdirStatus::Clean);
 
         assert_eq!(stored_checkpoint_uid_validity(&store, "INBOX"), Some(2));
+    }
+
+    /// A sync meeting a renumbered mailbox rekeys it before listing it: the
+    /// message moves to its new UID with the flag staged on it, nothing is
+    /// dropped as deleted, and the flag is pushed to the new UID.
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_renumbered_mailbox_is_rekeyed_before_it_is_listed() {
+        use std::sync::{Arc, atomic::AtomicU64};
+
+        use pimalaya_stream::tls::Tls;
+
+        use crate::{
+            account::{ImapAccount, SourceAccountBackend},
+            imap::fake::{FakeImap, FakeMailbox, FakeMessage},
+            throttle::Throttle,
+        };
+
+        const INBOX: &str = "imap/INBOX";
+
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 2,
+                highest_mod_seq: 9,
+                messages: vec![FakeMessage {
+                    uid: 7,
+                    flags: Vec::new(),
+                    message_id: String::from("a@x"),
+                }],
+                states_exists: true,
+            },
+            true,
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open_store(dir.path(), "imap", "imap").unwrap();
+        store.ensure_collection(INBOX, "message/rfc822").unwrap();
+        store
+            .write(vec![
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId(INBOX.into()),
+                    handle: PimdirHandle("1".into()),
+                    link_id: Some(PimdirLinkId("a@x".into())),
+                    object: None,
+                    level: PimdirLevel::Meta,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::from_iter(["\\Flagged"]),
+                    status: PimdirStatus::Dirty,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
+                        revision: None,
+                        object: None,
+                    }),
+                    origin: None,
+                }),
+                PimdirWriteOp::SetCheckpoint {
+                    collection: PimdirCollectionId(INBOX.into()),
+                    checkpoint: PimdirCheckpoint(crate::imap::backend::encode_checkpoint(1, 5)),
+                },
+            ])
+            .unwrap();
+
+        let config: AccountConfig = toml::from_str("imap.server = \"imap://127.0.0.1:1\"").unwrap();
+        let perms = config.sources().unwrap()["imap"].permissions();
+        let account = SourceAccount {
+            backend: SourceAccountBackend::Imap(ImapAccount {
+                server: server.url.clone(),
+                tls: Tls::default(),
+                starttls: false,
+                sasl: None,
+            }),
+            #[cfg(feature = "smtp")]
+            smtp: None,
+            throttle: Arc::new(Throttle::new("imap")),
+            downloaded: Arc::new(AtomicU64::new(0)),
+        };
+        let mut ctx = SourceCtx {
+            name: String::from("imap"),
+            namespace: String::from("imap"),
+            pool: Pool::open(account, 1).unwrap(),
+            perms,
+            authority: Authority::Shared,
+            refused: Vec::new(),
+            rejected: Vec::new(),
+            scope: PimdirScope::unbounded(),
+            dry_run: false,
+            accept_absences: false,
+            noted: Noted::default(),
+        };
+
+        let blobs = store.blob_stage();
+        sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None).expect("the sync");
+
+        let placements = load_side(&store, INBOX).unwrap();
+        let held: Vec<_> = placements
+            .iter()
+            .map(|placement| {
+                (
+                    placement.handle.0.as_str(),
+                    placement.flags.contains("\\Flagged"),
+                )
+            })
+            .collect();
+        assert_eq!(held, [("7", true)]);
+        assert_eq!(store.generation(INBOX).unwrap(), Some(2));
+        assert!(
+            server
+                .sent("UID STORE")
+                .iter()
+                .any(|line| line.starts_with("UID STORE 7 ")),
+            "the staged flag is pushed to the new UID: {:?}",
+            server.commands.lock().unwrap()
+        );
+    }
+
+    /// An IMAP side over `server`, accepting absences when `accept`, and a
+    /// store binding 25 messages of its inbox under `UIDVALIDITY` 1, UIDs 1
+    /// to 25, the checkpoint `checkpoint` when given.
+    #[cfg(feature = "imap")]
+    fn bound_imap_inbox(
+        dir: &Path,
+        server: &crate::imap::fake::FakeImap,
+        accept: bool,
+        checkpoint: Option<Vec<u8>>,
+    ) -> (SourceCtx, PimdirSourceStore) {
+        use std::sync::{Arc, atomic::AtomicU64};
+
+        use pimalaya_stream::tls::Tls;
+
+        use crate::{
+            account::{ImapAccount, SourceAccountBackend},
+            throttle::Throttle,
+        };
+
+        let mut store = open_store(dir, "imap", "imap").unwrap();
+        store
+            .ensure_collection("imap/INBOX", "message/rfc822")
+            .unwrap();
+        let mut writes: Vec<PimdirWriteOp> = (1..=25)
+            .map(|uid| {
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("imap/INBOX".into()),
+                    handle: PimdirHandle(uid.to_string()),
+                    link_id: Some(PimdirLinkId(format!("m{uid}@x"))),
+                    object: None,
+                    level: PimdirLevel::Meta,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Clean,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
+                        revision: None,
+                        object: None,
+                    }),
+                    origin: None,
+                })
+            })
+            .collect();
+        if let Some(checkpoint) = checkpoint {
+            writes.push(PimdirWriteOp::SetCheckpoint {
+                collection: PimdirCollectionId("imap/INBOX".into()),
+                checkpoint: PimdirCheckpoint(checkpoint),
+            });
+        }
+        store.write(writes).unwrap();
+
+        let config: AccountConfig = toml::from_str("imap.server = \"imap://127.0.0.1:1\"").unwrap();
+        let perms = config.sources().unwrap()["imap"].permissions();
+        let account = SourceAccount {
+            backend: SourceAccountBackend::Imap(ImapAccount {
+                server: server.url.clone(),
+                tls: Tls::default(),
+                starttls: false,
+                sasl: None,
+            }),
+            #[cfg(feature = "smtp")]
+            smtp: None,
+            throttle: Arc::new(Throttle::new("imap")),
+            downloaded: Arc::new(AtomicU64::new(0)),
+        };
+        let ctx = SourceCtx {
+            name: String::from("imap"),
+            namespace: String::from("imap"),
+            pool: Pool::open(account, 1).unwrap(),
+            perms,
+            authority: Authority::Shared,
+            refused: Vec::new(),
+            rejected: Vec::new(),
+            scope: PimdirScope::unbounded(),
+            dry_run: false,
+            accept_absences: accept,
+            noted: Noted::default(),
+        };
+        (ctx, store)
+    }
+
+    /// The fake server's one message, `m1@x` under `uid` and
+    /// `uid_validity`.
+    #[cfg(feature = "imap")]
+    fn one_message(uid_validity: u32, uid: u32) -> crate::imap::fake::FakeImap {
+        use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+
+        FakeImap::start(
+            FakeMailbox {
+                uid_validity,
+                highest_mod_seq: 9,
+                messages: vec![FakeMessage {
+                    uid,
+                    flags: Vec::new(),
+                    message_id: String::from("m1@x"),
+                }],
+                states_exists: true,
+            },
+            false,
+        )
+    }
+
+    /// The live handles of the inbox.
+    #[cfg(feature = "imap")]
+    fn live_inbox(store: &PimdirSourceStore) -> usize {
+        load_side(store, "imap/INBOX")
+            .unwrap()
+            .iter()
+            .filter(|placement| placement.status != PimdirStatus::Tombstone)
+            .count()
+    }
+
+    /// A round listing one of 25 bound messages parks (pimdir SYNC §5):
+    /// nothing is dropped and the report names the absence, which makes
+    /// the run wait for a person; `--accept-absences` drops them.
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_round_missing_most_of_the_inbox_parks_until_accepted() {
+        let server = one_message(1, 1);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, mut store) = bound_imap_inbox(dir.path(), &server, false, None);
+        let blobs = store.blob_stage();
+        sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+
+        assert_eq!(live_inbox(&store), 25, "nothing dropped");
+        let mut report = SyncOutput::default();
+        itemize_noted(&mut ctx, &mut report);
+        let absences: Vec<_> = report
+            .absences
+            .iter()
+            .map(|a| {
+                (
+                    a.side.as_str(),
+                    a.collection.as_str(),
+                    a.absent,
+                    a.bound,
+                    a.rebuild,
+                )
+            })
+            .collect();
+        assert_eq!(absences, [("imap", "INBOX", 24, 25, false)]);
+        assert_eq!(Exit::from(&report), Exit::Conflicted);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, mut store) = bound_imap_inbox(dir.path(), &server, true, None);
+        let blobs = store.blob_stage();
+        sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+
+        assert_eq!(live_inbox(&store), 1, "the absences accepted");
+        let mut report = SyncOutput::default();
+        itemize_noted(&mut ctx, &mut report);
+        assert!(report.absences.is_empty());
+    }
+
+    /// A renumbered mailbox whose new listing holds one of 25 bound
+    /// messages parks its rebuild (pimdir SYNC §8): the store keeps its old
+    /// handles and checkpoint, the sync ends without listing it and the
+    /// report names the rebuild; `--accept-absences` rebuilds it.
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_rebuild_missing_most_of_the_inbox_parks_until_accepted() {
+        let server = one_message(2, 100);
+        let checkpoint = || Some(crate::imap::backend::encode_checkpoint(1, 25));
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, mut store) = bound_imap_inbox(dir.path(), &server, false, checkpoint());
+        let blobs = store.blob_stage();
+        sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+
+        assert_eq!(live_inbox(&store), 25, "nothing dropped");
+        assert_eq!(store.generation("imap/INBOX").unwrap(), Some(1));
+        let mut report = SyncOutput::default();
+        itemize_noted(&mut ctx, &mut report);
+        let absences: Vec<_> = report
+            .absences
+            .iter()
+            .map(|a| (a.absent, a.bound, a.rebuild))
+            .collect();
+        assert_eq!(absences, [(24, 25, true)]);
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, mut store) = bound_imap_inbox(dir.path(), &server, true, checkpoint());
+        let blobs = store.blob_stage();
+        sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+
+        assert_eq!(live_inbox(&store), 1, "rebuilt onto the new UIDs");
+        assert_eq!(store.generation("imap/INBOX").unwrap(), Some(2));
     }
 
     fn names(names: &[&str]) -> BTreeSet<String> {
@@ -6798,14 +6994,11 @@ mod tests {
             .ensure_collection("left/Sent", "message/rfc822")
             .unwrap();
 
-        let blobs = store.blobs();
-        let mut writer = blobs.writer().unwrap();
-        std::io::Write::write_all(&mut writer, b"Subject: hi\r\n\r\nhello").unwrap();
-        let hash = PimdirHash("cafe0002".into());
-        let object = PimdirObject {
-            hash: hash.clone(),
-            size: writer.commit(&hash).unwrap() as usize,
-        };
+        let object = store
+            .blob_stage()
+            .stage_body(b"Subject: hi\r\n\r\nhello")
+            .unwrap();
+        let hash = object.hash.clone();
 
         let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
         producer
@@ -6969,21 +7162,12 @@ mod tests {
     /// Queues the add of a new task into `collection`, as a frontend does.
     fn queue_task(dir: &Path, collection: &str) -> Result<i64, PimdirError> {
         let mut producer = PimdirProducer::open(dir, "test-frontend").unwrap();
-        let blobs = producer.blobs();
-        let hash = blobs.hash(TODO.as_bytes());
-        let mut writer = blobs.writer().unwrap();
-        writer.write_all(TODO.as_bytes()).unwrap();
-        let object = PimdirObject {
-            hash: hash.clone(),
-            size: writer.commit(&hash).unwrap() as usize,
-        };
-        let action = PimdirAction::Add {
+        producer.enqueue_with_body(collection, TODO.as_bytes(), |hash| PimdirAction::Add {
             link_id: None,
             flags: PimdirFlags::default(),
             object: Some(hash),
             supersedes: None,
-        };
-        producer.enqueue(collection, &action, Some(&object))
+        })
     }
 
     /// A calendar whose server keeps it from tasks refuses one at the gate,
@@ -7465,8 +7649,8 @@ mod tests {
     /// A purged item's body actually leaves the disk.
     ///
     /// A purge releases a reference, it does not reclaim bytes, and the store
-    /// collects nothing by itself (pimdir SPEC §5). Without a collector here a
-    /// backup store grows without bound while reporting reclaimed bytes.
+    /// collects nothing by itself (pimdir STORAGE §5). Without a collector here
+    /// a backup store grows without bound while reporting reclaimed bytes.
     #[test]
     fn the_sweep_collects_the_bodies_the_purge_released() {
         let dir = tempfile::tempdir().unwrap();
@@ -7672,10 +7856,10 @@ mod tests {
             .for_source("dav");
         store.ensure_collection("contacts", "text/vcard").unwrap();
 
-        let blobs = store.blobs();
+        let blobs = store.blob_stage();
         let stored = |body: &str| PimdirWriteOp::StoreObject {
             object: PimdirObject {
-                hash: blobs.hash(body.as_bytes()),
+                hash: blobs.blobs().hash(body.as_bytes()),
                 size: body.len(),
             },
             body: Some(body.as_bytes().to_vec()),
@@ -7690,18 +7874,18 @@ mod tests {
                     collection: PimdirCollectionId("contacts".into()),
                     handle: PimdirHandle("card1".into()),
                     link_id: Some(PimdirLinkId("uid:a".into())),
-                    object: Some(blobs.hash(local.as_bytes())),
+                    object: Some(blobs.blobs().hash(local.as_bytes())),
                     level: PimdirLevel::Full,
                     summary: None,
                     sort_key: PimdirSortKey::default(),
                     flags: PimdirFlags::default(),
                     status: PimdirStatus::Conflict,
                     conflict_revision: Some(String::from("etag-2")),
-                    conflict_object: Some(blobs.hash(remote.as_bytes())),
+                    conflict_object: Some(blobs.blobs().hash(remote.as_bytes())),
                     base: Some(PimdirBase {
                         flags: PimdirFlags::default(),
                         revision: Some(String::from("etag-1")),
-                        object: Some(blobs.hash(base.as_bytes())),
+                        object: Some(blobs.blobs().hash(base.as_bytes())),
                     }),
                     origin: None,
                 }),
@@ -7733,7 +7917,7 @@ mod tests {
             &card("+2", "old"),
             &card("+1", "new"),
         );
-        let blobs = store.blobs();
+        let blobs = store.blob_stage();
 
         let merged = merge_conflicts(
             "contacts",
@@ -7756,7 +7940,11 @@ mod tests {
              was merged against, not on the one the divergence started from",
         );
 
-        let body = blobs.get(&placement.object.unwrap()).unwrap().unwrap();
+        let body = blobs
+            .blobs()
+            .get(&placement.object.unwrap())
+            .unwrap()
+            .unwrap();
         let body = String::from_utf8(body).unwrap();
         assert!(body.contains("TEL:+2"), "{body}");
         assert!(body.contains("NOTE:new"), "{body}");
@@ -7781,6 +7969,238 @@ mod tests {
         assert_eq!(report.outstanding_conflicts, 0);
     }
 
+    /// One card a fake CardDAV server holds under `card1`, its body read
+    /// with the listing as a DAV listing does.
+    #[cfg(feature = "dav")]
+    struct CardServer {
+        revision: String,
+        body: String,
+        /// Whether the listing leaves the body out, to be fetched.
+        bare: bool,
+        /// How many bodies were fetched.
+        fetched: usize,
+    }
+
+    #[cfg(feature = "dav")]
+    impl CardServer {
+        fn at(revision: &str, body: &str) -> Self {
+            Self {
+                revision: revision.into(),
+                body: body.into(),
+                bare: false,
+                fetched: 0,
+            }
+        }
+
+        /// A server listing the card with no body, as a listing of
+        /// metadata alone does.
+        fn bare(revision: &str, body: &str) -> Self {
+            Self {
+                bare: true,
+                ..Self::at(revision, body)
+            }
+        }
+
+        fn item(&self) -> PimdirFetchedItem {
+            let bytes = self.body.as_bytes().to_vec();
+            PimdirFetchedItem {
+                handle: PimdirHandle("card1".into()),
+                link_id: PimdirLinkId("uid:a".into()),
+                summary: None,
+                sort_key: PimdirSortKey::default(),
+                body: Some(PimdirFetchedBody::Inline {
+                    hash: PimdirHashAlgo::default().hash(&bytes),
+                    bytes,
+                }),
+                revision: Some(self.revision.clone()),
+            }
+        }
+    }
+
+    #[cfg(feature = "dav")]
+    impl PimdirRemote for CardServer {
+        type Error = anyhow::Error;
+
+        fn enumerate(
+            &mut self,
+            _collection: &PimdirCollectionId,
+            _request: PimdirEnumerate,
+        ) -> Result<PimdirEnumerated, Self::Error> {
+            let item = self.item();
+            let meta = match item.body {
+                Some(body) if !self.bare => named("uid:a").with_body(body),
+                _ => named("uid:a"),
+            };
+            let items = vec![PimdirRemoteItem {
+                handle: item.handle,
+                flags: PimdirFlags::default(),
+                revision: item.revision,
+                meta,
+            }];
+            Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::round(
+                items, None,
+            )))
+        }
+
+        fn fetch(
+            &mut self,
+            _collection: &PimdirCollectionId,
+            _handles: Vec<PimdirHandle>,
+            _tier: PimdirTier,
+        ) -> Result<Vec<PimdirFetchedItem>, Self::Error> {
+            self.fetched += 1;
+            Ok(vec![self.item()])
+        }
+
+        fn push(
+            &mut self,
+            _collection: &PimdirCollectionId,
+            changes: Vec<PimdirChange>,
+        ) -> Result<Vec<PimdirPushResult>, Self::Error> {
+            panic!("a pulling pass pushes nothing: {changes:?}");
+        }
+    }
+
+    /// One endpoint's pulling pass over `server`, as a reconcile's first
+    /// pass runs it.
+    #[cfg(feature = "dav")]
+    fn pull_endpoint(store: &mut PimdirSourceStore, server: &mut CardServer) -> PimdirSyncReport {
+        let verb = sync_verb(
+            "contacts",
+            false,
+            PimdirPushRights::all(),
+            PimdirConflictPolicy::Manual,
+            PimdirScope::unbounded(),
+            false,
+        );
+        run_verb(store, server, verb).unwrap()
+    }
+
+    /// Two endpoints of one account over one store, `left` and `right`.
+    #[cfg(feature = "dav")]
+    fn two_endpoints(dir: &Path) -> (PimdirSourceStore, PimdirSourceStore) {
+        let open = |source: &str| {
+            PimdirStore::open(dir)
+                .unwrap()
+                .for_account(CONFLICT_ACCOUNT)
+                .for_source(source)
+        };
+        let left = open("left");
+        left.ensure_collection("contacts", "text/vcard").unwrap();
+        (left, open("right"))
+    }
+
+    /// A divergence as its source and its base, local and remote bodies.
+    #[cfg(feature = "dav")]
+    type CardDivergence = (String, Option<String>, Option<String>, Option<String>);
+
+    /// The divergences the store holds for the card.
+    #[cfg(feature = "dav")]
+    fn card_divergence(store: &PimdirSourceStore, blobs: &PimdirBlobStage) -> Vec<CardDivergence> {
+        let read = |hash: &Option<PimdirHash>| {
+            let body = blobs.blobs().get(hash.as_ref()?).unwrap()?;
+            Some(String::from_utf8(body).unwrap())
+        };
+        crate::conflict::list(store, CONFLICT_ACCOUNT)
+            .unwrap()
+            .into_iter()
+            .map(|c| {
+                (
+                    c.source.clone(),
+                    read(&c.base),
+                    read(&c.local),
+                    read(&c.remote),
+                )
+            })
+            .collect()
+    }
+
+    /// Both endpoints rewrite a card they agreed on, each pass pulling
+    /// only, as a reconcile's first pass does: the store keeps the body
+    /// they agreed on and records the divergence itself (pimdir SYNC §9),
+    /// so the merge reads all three bodies and settles disjoint edits.
+    /// What neverest's own snapshot of the shared bodies did before.
+    #[cfg(feature = "dav")]
+    #[test]
+    fn a_card_both_endpoints_rewrote_diverges_against_their_agreed_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut left, mut right) = two_endpoints(dir.path());
+        let blobs = left.blob_stage();
+        let agreed = card("+1", "old");
+
+        pull_endpoint(&mut left, &mut CardServer::at("v1", &agreed));
+        pull_endpoint(&mut right, &mut CardServer::at("w1", &agreed));
+        assert!(card_divergence(&left, &blobs).is_empty());
+
+        pull_endpoint(&mut left, &mut CardServer::at("v2", &card("+2", "old")));
+        pull_endpoint(&mut right, &mut CardServer::at("w2", &card("+1", "new")));
+
+        assert_eq!(
+            card_divergence(&left, &blobs),
+            [(
+                String::from("right"),
+                Some(agreed),
+                Some(card("+2", "old")),
+                Some(card("+1", "new")),
+            )]
+        );
+
+        let merged = merge_conflicts(
+            "contacts",
+            Kind::Vcard,
+            "right",
+            &mut right,
+            &blobs,
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(merged, 1);
+        assert!(card_divergence(&left, &blobs).is_empty());
+        let item = load_side(&right, "contacts").unwrap().remove(0);
+        let body = String::from_utf8(blobs.blobs().get(&item.object.unwrap()).unwrap().unwrap());
+        let body = body.unwrap();
+        assert!(
+            body.contains("TEL:+2") && body.contains("NOTE:new"),
+            "{body}"
+        );
+    }
+
+    /// Two endpoints holding one card under two bodies before they ever
+    /// agreed park it with no ancestor (pimdir SYNC §6): neither body is
+    /// taken over the other. What neverest's own reading of the hub's
+    /// conflict flag did before.
+    #[cfg(feature = "dav")]
+    #[test]
+    fn a_card_two_endpoints_never_agreed_on_parks_with_no_ancestor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut left, mut right) = two_endpoints(dir.path());
+        let blobs = left.blob_stage();
+
+        pull_endpoint(&mut left, &mut CardServer::at("v1", &card("+1", "old")));
+        pull_endpoint(&mut right, &mut CardServer::at("w1", &card("+9", "old")));
+
+        assert_eq!(
+            card_divergence(&left, &blobs),
+            [(
+                String::from("right"),
+                None,
+                Some(card("+1", "old")),
+                Some(card("+9", "old")),
+            )]
+        );
+
+        let merged = merge_conflicts(
+            "contacts",
+            Kind::Vcard,
+            "right",
+            &mut right,
+            &blobs,
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(merged, 0, "nothing to merge against");
+    }
+
     /// A side the store decides keeps the store's body over its own edit.
     ///
     /// The engine parks a store-wins divergence on a pass that cannot push,
@@ -7795,22 +8215,176 @@ mod tests {
             &card("+2", "old"),
             &card("+3", "old"),
         );
-        let blobs = store.blobs();
+        let blobs = store.blob_stage();
 
-        let kept = keep_store_bodies("contacts", "dav", &mut store, &blobs).unwrap();
+        let mut remote = MutableRemote::at("card1", "etag-2");
+        let kept = keep_store_bodies(
+            "contacts",
+            "dav",
+            &mut store,
+            &blobs,
+            &mut remote,
+            &mut Vec::new(),
+        )
+        .unwrap();
         assert_eq!(kept, 1);
 
         let placement = load_side(&store, "contacts").unwrap().remove(0);
         assert_eq!(placement.status, PimdirStatus::Dirty, "a push is owed");
         assert_eq!(
             placement.object,
-            Some(blobs.hash(card("+2", "old").as_bytes()))
+            Some(blobs.blobs().hash(card("+2", "old").as_bytes()))
         );
         assert!(placement.conflict_revision.is_none());
         assert_eq!(
             placement.base.and_then(|base| base.revision).as_deref(),
             Some("etag-2"),
             "the overwrite is conditioned on the revision the endpoint holds",
+        );
+    }
+
+    /// A one-way overwrite discards the target's own edit, which the store
+    /// keeps as a retained item and the run reports as overruled: the
+    /// target's body leaves its server, never the store. The source moved
+    /// the card both endpoints agreed on, the target edited it meanwhile,
+    /// and the target's pull, which may not push, parked the divergence.
+    #[cfg(feature = "dav")]
+    #[test]
+    fn a_one_way_overwrite_keeps_the_target_body_as_a_retained_item() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut source, mut target) = two_endpoints(dir.path());
+        let blobs = source.blob_stage();
+        let agreed = card("+1", "old");
+
+        pull_endpoint(&mut source, &mut CardServer::at("v1", &agreed));
+        pull_endpoint(&mut target, &mut CardServer::at("w1", &agreed));
+        pull_endpoint(&mut source, &mut CardServer::at("v2", &card("+2", "old")));
+        let verb = sync_verb(
+            "contacts",
+            false,
+            PimdirPushRights::all(),
+            PimdirConflictPolicy::PreferLocal,
+            PimdirScope::unbounded(),
+            false,
+        );
+        let edited = card("+3", "old");
+        let parked = run_verb(&mut target, &mut CardServer::at("w2", &edited), verb).unwrap();
+        assert_eq!(parked.conflicts, 1, "the target's pull parked it");
+
+        let mut overruled = Vec::new();
+        let mut server = CardServer::at("w2", &edited);
+        let kept = keep_store_bodies(
+            "contacts",
+            "right",
+            &mut target,
+            &blobs,
+            &mut server,
+            &mut overruled,
+        );
+        assert_eq!(kept.unwrap(), 1);
+
+        let retained = PimdirReader::open(dir.path())
+            .unwrap()
+            .list_retained("contacts", None, 10)
+            .unwrap();
+        assert_eq!(retained.len(), 1, "{retained:?}");
+        assert_eq!(
+            retained[0].object,
+            Some(blobs.blobs().hash(edited.as_bytes())),
+            "the target's own body",
+        );
+        assert_eq!(
+            overruled,
+            [(
+                String::from("contacts"),
+                PimdirHandle::from("card1"),
+                retained[0].link_id.clone(),
+            )]
+        );
+
+        let placement = load_side(&target, "contacts").unwrap().remove(0);
+        assert_eq!(
+            placement.status,
+            PimdirStatus::Dirty,
+            "the overwrite is owed"
+        );
+        assert_eq!(
+            placement.object,
+            Some(blobs.blobs().hash(card("+2", "old").as_bytes()))
+        );
+        assert_eq!(
+            placement.base.and_then(|base| base.revision).as_deref(),
+            Some("w2"),
+            "gated on the revision the target holds",
+        );
+    }
+
+    /// A target edit listed with no body is fetched before the one-way
+    /// overwrite settles it, so the store keeps it as a retained item: the
+    /// store refuses to overrule a body nobody has read, and the run takes
+    /// that as a fetch owed, never as a failure.
+    #[cfg(feature = "dav")]
+    #[test]
+    fn a_one_way_overwrite_fetches_an_unread_target_body_before_keeping_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut source, mut target) = two_endpoints(dir.path());
+        let blobs = source.blob_stage();
+        let agreed = card("+1", "old");
+
+        pull_endpoint(&mut source, &mut CardServer::at("v1", &agreed));
+        pull_endpoint(&mut target, &mut CardServer::at("w1", &agreed));
+        pull_endpoint(&mut source, &mut CardServer::at("v2", &card("+2", "old")));
+        let verb = sync_verb(
+            "contacts",
+            false,
+            PimdirPushRights::all(),
+            PimdirConflictPolicy::PreferLocal,
+            PimdirScope::unbounded(),
+            false,
+        );
+        let edited = card("+3", "old");
+        let parked = run_verb(&mut target, &mut CardServer::bare("w2", &edited), verb).unwrap();
+        assert_eq!(parked.conflicts, 1, "the target's pull parked it");
+        let placement = load_side(&target, "contacts").unwrap().remove(0);
+        assert_eq!(placement.conflict_object, None, "the target's body unread");
+
+        let mut server = CardServer::bare("w2", &edited);
+        let mut overruled = Vec::new();
+        let kept = keep_store_bodies(
+            "contacts",
+            "right",
+            &mut target,
+            &blobs,
+            &mut server,
+            &mut overruled,
+        );
+        assert_eq!(kept.unwrap(), 1);
+        assert_eq!(server.fetched, 1, "the target's body fetched first");
+
+        let retained = PimdirReader::open(dir.path())
+            .unwrap()
+            .list_retained("contacts", None, 10)
+            .unwrap();
+        assert_eq!(retained.len(), 1, "{retained:?}");
+        assert_eq!(
+            retained[0].object,
+            Some(blobs.blobs().hash(edited.as_bytes())),
+            "the target's own body",
+        );
+        assert_eq!(
+            overruled,
+            [(
+                String::from("contacts"),
+                PimdirHandle::from("card1"),
+                retained[0].link_id.clone(),
+            )]
+        );
+
+        let placement = load_side(&target, "contacts").unwrap().remove(0);
+        assert_eq!(placement.status, PimdirStatus::Dirty, "the overwrite owed");
+        assert_eq!(
+            placement.object,
+            Some(blobs.blobs().hash(card("+2", "old").as_bytes()))
         );
     }
 
@@ -7870,8 +8444,8 @@ mod tests {
             &card("+2", "old"),
             &card("+3", "old"),
         );
-        let blobs = store.blobs();
-        let local = blobs.hash(card("+2", "old").as_bytes());
+        let blobs = store.blob_stage();
+        let local = blobs.blobs().hash(card("+2", "old").as_bytes());
 
         let merged = merge_conflicts(
             "contacts",
@@ -7936,7 +8510,7 @@ mod tests {
         );
 
         let mut store = store_with_conflict(dir.path(), &base, &local, &remote);
-        let blobs = store.blobs();
+        let blobs = store.blob_stage();
 
         // NOTE: a second item diverging the same way, over the same three
         // bodies: the report prints a number, and one item cannot tell a
@@ -7946,18 +8520,18 @@ mod tests {
                 collection: PimdirCollectionId("contacts".into()),
                 handle: PimdirHandle("card2".into()),
                 link_id: Some(PimdirLinkId("uid:b".into())),
-                object: Some(blobs.hash(local.as_bytes())),
+                object: Some(blobs.blobs().hash(local.as_bytes())),
                 level: PimdirLevel::Full,
                 summary: None,
                 sort_key: PimdirSortKey::default(),
                 flags: PimdirFlags::default(),
                 status: PimdirStatus::Conflict,
                 conflict_revision: Some(String::from("etag-2")),
-                conflict_object: Some(blobs.hash(remote.as_bytes())),
+                conflict_object: Some(blobs.blobs().hash(remote.as_bytes())),
                 base: Some(PimdirBase {
                     flags: PimdirFlags::default(),
                     revision: Some(String::from("etag-1")),
-                    object: Some(blobs.hash(base.as_bytes())),
+                    object: Some(blobs.blobs().hash(base.as_bytes())),
                 }),
                 origin: None,
             })])
@@ -7984,7 +8558,7 @@ mod tests {
             assert_eq!(placement.status, PimdirStatus::Conflict);
             assert_eq!(
                 placement.object,
-                Some(blobs.hash(local.as_bytes())),
+                Some(blobs.blobs().hash(local.as_bytes())),
                 "the local side of {} is untouched",
                 placement.handle.0,
             );
@@ -8166,14 +8740,8 @@ mod tests {
             .unwrap();
 
         let body = card("+1", "new");
-        let blobs = store.blobs();
-        let hash = blobs.hash(body.as_bytes());
-        let mut writer = blobs.writer().unwrap();
-        writer.write_all(body.as_bytes()).unwrap();
-        let object = PimdirObject {
-            hash: hash.clone(),
-            size: writer.commit(&hash).unwrap() as usize,
-        };
+        let object = store.blob_stage().stage_body(body.as_bytes()).unwrap();
+        let hash = object.hash.clone();
 
         let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
         producer
@@ -8201,6 +8769,17 @@ mod tests {
         );
     }
 
+    /// The name of the item's original body, `old`: a real one, a body
+    /// being verified against its name before it is pushed.
+    fn old_hash() -> PimdirHash {
+        PimdirHashAlgo::default().hash(b"old")
+    }
+
+    /// The name of the item's edited body, `new`.
+    fn new_hash() -> PimdirHash {
+        PimdirHashAlgo::default().hash(b"new")
+    }
+
     /// Seeds a store holding one locally edited item.
     ///
     /// Its body points at `edited`, its base at `original` and
@@ -8212,14 +8791,14 @@ mod tests {
             .write(vec![
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
-                        hash: PimdirHash("0rig".into()),
+                        hash: old_hash(),
                         size: 3,
                     },
                     body: Some(b"old".to_vec()),
                 },
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
-                        hash: PimdirHash("ed17".into()),
+                        hash: new_hash(),
                         size: 3,
                     },
                     body: Some(b"new".to_vec()),
@@ -8228,7 +8807,7 @@ mod tests {
                     collection: PimdirCollectionId("contacts".into()),
                     handle: PimdirHandle("card1".into()),
                     link_id: Some(PimdirLinkId("uid:a".into())),
-                    object: Some(PimdirHash("ed17".into())),
+                    object: Some(new_hash()),
                     level: PimdirLevel::Full,
                     summary: None,
                     sort_key: PimdirSortKey::default(),
@@ -8239,7 +8818,7 @@ mod tests {
                     base: Some(PimdirBase {
                         flags: PimdirFlags::default(),
                         revision: Some(base_revision.to_string()),
-                        object: Some(PimdirHash("0rig".into())),
+                        object: Some(old_hash()),
                     }),
                     origin: None,
                 }),
@@ -8264,14 +8843,14 @@ mod tests {
             .write(vec![
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
-                        hash: PimdirHash("0rig".into()),
+                        hash: old_hash(),
                         size: 3,
                     },
                     body: Some(b"old".to_vec()),
                 },
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
-                        hash: PimdirHash("ed17".into()),
+                        hash: new_hash(),
                         size: 3,
                     },
                     body: Some(b"new".to_vec()),
@@ -8280,7 +8859,7 @@ mod tests {
                     collection: PimdirCollectionId("contacts".into()),
                     handle: PimdirHandle("card1".into()),
                     link_id: Some(PimdirLinkId("uid:a".into())),
-                    object: Some(PimdirHash("ed17".into())),
+                    object: Some(new_hash()),
                     level: PimdirLevel::Full,
                     summary: None,
                     sort_key: PimdirSortKey::default(),
@@ -8291,7 +8870,7 @@ mod tests {
                     base: Some(PimdirBase {
                         flags: PimdirFlags::default(),
                         revision: Some(base_revision.to_string()),
-                        object: Some(PimdirHash("0rig".into())),
+                        object: Some(old_hash()),
                     }),
                     origin: None,
                 }),
@@ -8313,7 +8892,7 @@ mod tests {
         placement.base = Some(PimdirBase {
             flags: PimdirFlags::default(),
             revision,
-            object: Some(PimdirHash("0rig".into())),
+            object: Some(old_hash()),
         });
 
         store
@@ -8429,7 +9008,7 @@ mod tests {
             .write(vec![
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
-                        hash: PimdirHash("0rig".into()),
+                        hash: old_hash(),
                         size: 3,
                     },
                     body: Some(b"old".to_vec()),
@@ -8438,7 +9017,7 @@ mod tests {
                     collection: PimdirCollectionId("contacts".into()),
                     handle: PimdirHandle("card1".into()),
                     link_id: Some(PimdirLinkId("uid:a".into())),
-                    object: Some(PimdirHash("0rig".into())),
+                    object: Some(old_hash()),
                     level: PimdirLevel::Full,
                     summary: None,
                     sort_key: PimdirSortKey::default(),
@@ -8449,7 +9028,7 @@ mod tests {
                     base: Some(PimdirBase {
                         flags: PimdirFlags::default(),
                         revision: Some(revision.to_string()),
-                        object: Some(PimdirHash("0rig".into())),
+                        object: Some(old_hash()),
                     }),
                     origin: None,
                 }),
@@ -8539,7 +9118,7 @@ mod tests {
             .write(vec![
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
-                        hash: PimdirHash("0rig".into()),
+                        hash: old_hash(),
                         size: 3,
                     },
                     body: Some(b"old".to_vec()),
@@ -8548,7 +9127,7 @@ mod tests {
                     collection: PimdirCollectionId("contacts".into()),
                     handle: PimdirHandle("card1".into()),
                     link_id: Some(PimdirLinkId("uid:a".into())),
-                    object: Some(PimdirHash("0rig".into())),
+                    object: Some(old_hash()),
                     level: PimdirLevel::Full,
                     summary: None,
                     sort_key: PimdirSortKey::default(),
@@ -8559,7 +9138,7 @@ mod tests {
                     base: Some(PimdirBase {
                         flags: PimdirFlags::default(),
                         revision: Some(String::from("v1")),
-                        object: Some(PimdirHash("0rig".into())),
+                        object: Some(old_hash()),
                     }),
                     origin: None,
                 }),
@@ -8689,13 +9268,13 @@ mod tests {
 
         assert_eq!(
             remote.items["card1"],
-            (String::from("v2"), Some(PimdirHash("ed17".into())))
+            (String::from("v2"), Some(new_hash()))
         );
         let placements = load_side(&store, "contacts").unwrap();
         assert_eq!(placements[0].status, PimdirStatus::Clean);
         let base = placements[0].base.as_ref().expect("a rebased base");
         assert_eq!(base.revision.as_deref(), Some("v2"));
-        assert_eq!(base.object, Some(PimdirHash("ed17".into())));
+        assert_eq!(base.object, Some(new_hash()));
     }
 
     #[test]
@@ -8752,7 +9331,7 @@ mod tests {
         );
         let placements = load_side(&store, "contacts").unwrap();
         assert_eq!(placements[0].status, PimdirStatus::Dirty);
-        assert_eq!(placements[0].object, Some(PimdirHash("ed17".into())));
+        assert_eq!(placements[0].object, Some(new_hash()));
     }
 
     /// A `Meta`-level placement with a base, as after a first reconcile,
@@ -8927,6 +9506,8 @@ mod tests {
                 Some(42),
             ))])
             .unwrap();
+        let mut right = PimdirStore::open(dir.path()).unwrap().for_source("right");
+        right.write(covered(None)).unwrap();
 
         let targets = relay_targets(
             &store,
@@ -8964,6 +9545,95 @@ mod tests {
         assert!(text.contains("from left to right"), "{text}");
     }
 
+    /// A store whose `left` holds `mid:a@x` dated `date`, the `right`
+    /// target's coverage of the inbox written by `right`.
+    fn relay_store(dir: &Path, date: Option<&str>, right: Vec<PimdirWriteOp>) -> PimdirStore {
+        let mut placement = linked("1", "mid:a@x", Some(42));
+        placement.summary = Some(PimdirSummary::Mail(PimdirMailSummary {
+            size: Some(42),
+            date: date.map(String::from),
+            ..Default::default()
+        }));
+        let mut left = PimdirStore::open(dir).unwrap().for_source("left");
+        left.ensure_collection("INBOX", "message/rfc822").unwrap();
+        left.write(vec![PimdirWriteOp::UpsertPlacement(placement)])
+            .unwrap();
+        let mut target = PimdirStore::open(dir).unwrap().for_source("right");
+        target.write(right).unwrap();
+        PimdirStore::open(dir).unwrap()
+    }
+
+    /// The writes of a source that closed a round over the inbox covering
+    /// from `since`.
+    fn covered(since: Option<&str>) -> Vec<PimdirWriteOp> {
+        let scope = PimdirScope {
+            since: since.map(String::from),
+            until: None,
+        };
+        vec![
+            PimdirWriteOp::OpenRound {
+                collection: PimdirCollectionId("INBOX".into()),
+                scope: scope.clone(),
+                band: false,
+            },
+            PimdirWriteOp::CloseRound {
+                collection: PimdirCollectionId("INBOX".into()),
+                coverage: scope,
+                checkpoint: Some(PimdirCheckpoint(b"c".to_vec())),
+            },
+        ]
+    }
+
+    /// The links a relay would copy into `right`.
+    fn relayed(store: &PimdirStore) -> Vec<String> {
+        relay_targets(store, Kind::Mail, "INBOX", ("left", false), ("right", true))
+            .unwrap()
+            .into_iter()
+            .map(|target| target.link)
+            .collect()
+    }
+
+    /// A relay appends only where the target's listing is closed (pimdir
+    /// SYNC §5): before the target closed a round, or while one is open,
+    /// the store cannot tell whether it already holds the message.
+    #[test]
+    fn a_relay_waits_for_the_target_to_close_a_round() {
+        let never = tempfile::tempdir().unwrap();
+        assert!(relayed(&relay_store(never.path(), None, vec![])).is_empty());
+
+        let open = tempfile::tempdir().unwrap();
+        let opening = PimdirWriteOp::OpenRound {
+            collection: PimdirCollectionId("INBOX".into()),
+            scope: PimdirScope::unbounded(),
+            band: false,
+        };
+        let store = relay_store(open.path(), None, [covered(None), vec![opening]].concat());
+        assert!(relayed(&store).is_empty());
+
+        let closed = tempfile::tempdir().unwrap();
+        let store = relay_store(closed.path(), None, covered(None));
+        assert_eq!(relayed(&store), ["mid:a@x"]);
+    }
+
+    /// A message dated outside the target's covered scope waits: the
+    /// target never listed there; an undated one is in every scope.
+    #[test]
+    fn a_relay_keeps_to_the_target_s_scope() {
+        let since = Some("2026-10-01T00:00:00Z");
+
+        let old = tempfile::tempdir().unwrap();
+        let store = relay_store(old.path(), Some("2026-01-01T00:00:00Z"), covered(since));
+        assert!(relayed(&store).is_empty());
+
+        let recent = tempfile::tempdir().unwrap();
+        let store = relay_store(recent.path(), Some("2026-10-20T00:00:00Z"), covered(since));
+        assert_eq!(relayed(&store), ["mid:a@x"]);
+
+        let undated = tempfile::tempdir().unwrap();
+        let store = relay_store(undated.path(), None, covered(since));
+        assert_eq!(relayed(&store), ["mid:a@x"]);
+    }
+
     /// What keeps a relay from repeating itself.
     ///
     /// A relay bypasses the engine, so nothing else writes the copy down: an
@@ -8981,6 +9651,11 @@ mod tests {
             Some(42),
         ))])
         .unwrap();
+        PimdirStore::open(dir.path())
+            .unwrap()
+            .for_source("right")
+            .write(covered(None))
+            .unwrap();
 
         let sides = |store: &PimdirStore| {
             relay_targets(store, Kind::Mail, "INBOX", ("left", false), ("right", true)).unwrap()
@@ -9150,7 +9825,7 @@ mod tests {
             .ensure_collection("dav/contacts", "text/vcard")
             .unwrap();
 
-        let object = PimdirHash("beef0001".into());
+        let object = PimdirHashAlgo::default().hash(b"abc");
         store
             .write(vec![
                 PimdirWriteOp::StoreObject {
@@ -9630,14 +10305,14 @@ mod tests {
                         "Message-ID: <{}@example.org>\r\nSubject: {collection}\r\n\r\nhi\r\n",
                         handle.0
                     );
-                    let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
+                    let blobs = PimdirStore::open(dir.path()).unwrap().blob_stage();
                     PimdirFetchedItem {
                         handle: handle.clone(),
                         link_id: PimdirLinkId(format!("mid:{}@example.org", handle.0)),
                         summary: None,
                         sort_key: PimdirSortKey::default(),
                         body: Some(PimdirFetchedBody::Inline {
-                            hash: blobs.hash(body.as_bytes()),
+                            hash: blobs.blobs().hash(body.as_bytes()),
                             bytes: body.into_bytes(),
                         }),
                         revision: None,
@@ -10132,7 +10807,7 @@ mod tests {
             if !self.hydrate {
                 return Rest::Go;
             }
-            let blobs = store.blobs();
+            let blobs = store.blob_stage();
             let items = placements
                 .into_iter()
                 .map(|placement| {
@@ -10146,7 +10821,7 @@ mod tests {
                         summary: None,
                         sort_key: PimdirSortKey::default(),
                         body: Some(PimdirFetchedBody::Inline {
-                            hash: blobs.hash(body.as_bytes()),
+                            hash: blobs.blobs().hash(body.as_bytes()),
                             bytes: body.into_bytes(),
                         }),
                         revision: None,
@@ -10618,6 +11293,124 @@ mod tests {
         assert_eq!(pacing(DownloadOrder::Newest, Some(0)), 0);
         assert_eq!(pacing(DownloadOrder::Largest, Some(10)), 10);
     }
+
+    /// A create the engine says its server rejected is reported once: by
+    /// the connector's own record, with its reason, else as a rejected
+    /// `create`.
+    #[test]
+    fn a_rejected_create_is_named_once() {
+        let report = PimdirSyncReport {
+            rejected_creates: vec![
+                PimdirHandle::from("a\u{1}1"),
+                PimdirHandle::from("b\u{1}1"),
+                PimdirHandle::from("c\u{1}1"),
+            ],
+            ..Default::default()
+        };
+        let rejected = [RejectedPush {
+            collection: String::from("INBOX"),
+            handle: String::from("a\u{1}1"),
+            action: "append",
+            reason: String::from("NO over quota"),
+        }];
+        let refused = [RefusedCreate {
+            collection: String::from("INBOX"),
+            uid: String::from("b"),
+            handle: String::from("b\u{1}1"),
+        }];
+
+        let unnamed = unnamed_creates(&report, "INBOX", &rejected, &refused);
+
+        let named: Vec<(&str, &str)> = unnamed
+            .iter()
+            .map(|push| (push.handle.as_str(), push.action))
+            .collect();
+        assert_eq!(named, [("c\u{1}1", "create")]);
+    }
+
+    /// A queued edit a collection's policy settles against another body
+    /// keeps the loser as a retained item, and the run names it by its row:
+    /// nothing else reports a body kept aside while the queue was applied.
+    #[test]
+    fn a_body_the_drain_kept_aside_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let card = |name: &str| {
+            format!("BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u1\r\nFN:{name}\r\nEND:VCARD\r\n")
+        };
+        let bound = |handle: &str, body: &str| {
+            let hash = PimdirHashAlgo::default().hash(body.as_bytes());
+            vec![
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: hash.clone(),
+                        size: body.len(),
+                    },
+                    body: Some(body.as_bytes().to_vec()),
+                },
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("contacts".into()),
+                    handle: PimdirHandle(handle.into()),
+                    link_id: Some(PimdirLinkId("u1".into())),
+                    object: Some(hash.clone()),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Clean,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
+                        revision: Some("1".into()),
+                        object: Some(hash),
+                    }),
+                    origin: None,
+                }),
+            ]
+        };
+
+        let store = PimdirStore::open(dir.path()).unwrap();
+        store.ensure_collection("contacts", "text/vcard").unwrap();
+        store
+            .set_collection_conflict("contacts", PimdirHubConflict::PreferIncoming)
+            .unwrap();
+        store
+            .for_source("a")
+            .write(bound("a1", &card("Ann")))
+            .unwrap();
+        let mut b = PimdirStore::open(dir.path()).unwrap().for_source("b");
+        b.write(bound("b1", &card("Ann B"))).unwrap();
+        let seq = b.list_items("contacts", None, 10).unwrap()[0].seq;
+        drop(b);
+
+        let mut producer = PimdirProducer::open(dir.path(), "himalaya").unwrap();
+        let row = producer
+            .enqueue_with_body("contacts", card("Ann A").as_bytes(), |object| {
+                PimdirAction::Update {
+                    seq,
+                    object,
+                    if_match: None,
+                }
+            })
+            .unwrap();
+        drop(producer);
+
+        let mut owner = PimdirStore::open(dir.path()).unwrap().for_source("a");
+        let mut report = SyncOutput::default();
+        drain_queues(&mut owner, &mut report);
+
+        let kept: Vec<String> = owner
+            .list_retained("contacts", None, 10)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.link_id.0)
+            .collect();
+        assert_eq!(report.overruled.len(), 1, "{:?}", report.overruled);
+        let overruled = &report.overruled[0];
+        assert_eq!(overruled.action, Some(row));
+        assert_eq!(overruled.collection, "contacts");
+        assert!(kept.contains(&overruled.kept), "{kept:?}");
+    }
 }
 
 /// Several Microsoft Graph connections of one source against a fake Graph
@@ -10897,7 +11690,7 @@ mod graph_budget {
         let (mut clients, _) = clients(&graph, &ids);
         assert_eq!(clients.len(), 3, "Graph's default budget");
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blob_stage();
         let fetched = AtomicUsize::new(0);
 
         hydrate_pool(&mut clients, batches(&ids, 5), |client, batch| {
@@ -10958,7 +11751,7 @@ mod graph_budget {
         let (mut clients, throttle) = clients(&graph, &ids);
         assert!(graph.gate.set(Arc::clone(&throttle)).is_ok());
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blob_stage();
         let queue = SegQueue::new();
         for batch in batches(&ids, 5) {
             queue.push(batch);
@@ -11022,7 +11815,7 @@ mod graph_budget {
         let ids = ids(5);
         let (mut clients, throttle) = clients_waiting(&graph, &ids, Duration::from_secs(1));
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirStore::open(dir.path()).unwrap().blobs();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blob_stage();
 
         let start = Instant::now();
         let handles: Vec<PimdirHandle> = ids.iter().map(|id| PimdirHandle(id.clone())).collect();
@@ -11071,7 +11864,7 @@ mod gmail_bodies {
     use secrecy::SecretString;
 
     use super::{
-        Authority, GoneBodies, Pacing, SourceCtx, hydrate_plans, open_store, phase2_hydrate,
+        Authority, GoneBodies, Noted, Pacing, SourceCtx, hydrate_plans, open_store, phase2_hydrate,
         projection_view,
     };
     use crate::{
@@ -11164,6 +11957,8 @@ mod gmail_bodies {
             rejected: Vec::new(),
             scope: PimdirScope::unbounded(),
             dry_run: false,
+            accept_absences: false,
+            noted: Noted::default(),
         };
         (ctx, api, batch)
     }
@@ -11176,7 +11971,7 @@ mod gmail_bodies {
         gone: &GoneBodies,
     ) {
         let plans = hydrate_plans(store, "gmail", collections, None, gone).unwrap();
-        let blobs = store.blobs();
+        let blobs = store.blob_stage();
         phase2_hydrate(
             "gmail",
             plans,
@@ -11403,7 +12198,7 @@ mod gmail_heads {
             pause,
             rests: Vec::new(),
         };
-        let blobs = store.blobs();
+        let blobs = store.blob_stage();
         let (_, paused) =
             sync_side(INBOX, &mut ctx, store, &blobs, false, Some(&mut watch)).expect("the sync");
         assert_eq!(
@@ -11600,7 +12395,7 @@ mod graph_heads {
     use pimalaya_stream::tls::Tls;
     use secrecy::SecretString;
 
-    use super::{Authority, SourceCtx, open_store, projection_view, sync_side};
+    use super::{Authority, Noted, SourceCtx, open_store, projection_view, sync_side};
     use crate::{
         account::{MsgraphAccount, SourceAccount, SourceAccountBackend},
         client::{Client, Pool},
@@ -11732,7 +12527,7 @@ mod graph_heads {
             pause,
             rests: Vec::new(),
         };
-        let blobs = store.blobs();
+        let blobs = store.blob_stage();
         let (_, paused) =
             sync_side(INBOX, &mut ctx, store, &blobs, false, Some(&mut watch)).expect("the sync");
         (paused, watch.rests, requests(&server))
@@ -11768,6 +12563,8 @@ mod graph_heads {
             rejected: Vec::new(),
             scope: PimdirScope::unbounded(),
             dry_run: false,
+            accept_absences: false,
+            noted: Noted::default(),
         }
     }
 

@@ -32,6 +32,7 @@
 - **Retention**: a removed item is kept, never lost, and reclaimed on a schedule
 - **Relay** mode: a body crossing two IMAP servers is streamed server-to-server, never stored
 - **Queued submission**: a message a frontend enqueued leaves through its source's send channel
+- **Search index**: the store's full-text index <sup>[specs](https://github.com/pimalaya/pimdir)</sup>, kept current at every sync for the frontends to query
 - **Auth** support: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256 for IMAP; basic and bearer for CardDAV and CalDAV; bearer for Microsoft Graph, Google People and Google Calendar
 - **TLS** support: [Rustls](https://crates.io/crates/rustls) with ring or aws crypto (`rustls-aws` feature), [Native TLS](https://crates.io/crates/native-tls) (`native-tls` feature)
 - **Discovery** support: known provider rules, PACC, Thunderbird Autoconfiguration, SRV <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup> and DAV <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup>, all run in parallel
@@ -44,6 +45,8 @@
 > The default `wizard` feature brings the interactive `configure`; leave it out of a scripted or embedded build that never prompts.
 >
 > The default `vendored` feature builds SQLite from source; leave it out (`--no-default-features --features …`) to link the system one.
+>
+> The default `search` feature builds the store's search index, which frontends such as himalaya search through and never build themselves; leave it out only where no frontend searches the store.
 
 ## Installation
 
@@ -124,6 +127,8 @@ An account is one pimdir store fed by one or more named **sources**, each a remo
 
 `one-way` makes the sources authoritative, so the other side's changes are overwritten rather than merged, and `retain` says whether the store keeps bodies or is only the ledger it has to be anyway. Sources never meet, so several cache side by side for a frontend to union at display time.
 
+A collection one endpoint no longer lists is deleted on the other only where that endpoint sets `collection.delete = true`. It is off by default: a missing collection is the only sign IMAP and DAV give of a deletion, and a listing can leave out one nobody deleted.
+
 ## Usage
 
 Every command carries its own `--help`, the source of truth for its flags and syntax.
@@ -134,13 +139,16 @@ neverest sync  -a <account> --dry-run
 neverest sync  -a <account> --include-collection INBOX
 neverest check -a <account>
 neverest drain -a <account>
+neverest index -a <account>
 neverest conflict list -a <account>
 neverest conflict resolve <id> -a <account> --interactive
 ```
 
-An account is initialized once, which opens every source so credential and network errors surface up front, then creates the empty store. `sync` refuses to run without it, and `init` refuses to run over it. `--reset` drops the cached state before a run, rebuilding it as a first sync would.
+An account is initialized once, which opens every source so credential and network errors surface up front, then creates the empty store. `sync` refuses to run without it, and `init` refuses to run over it. `--reset` drops the store before a run, rebuilding it as a first sync would. It refuses while the store holds work no server has (queued sends and edits, conflicts, mail a replica keeps after the server expunged it) and lists that work; `--reset --force` moves the store into a sibling `<dir>.reset-<instant>` directory instead, deleting nothing. A reset is the whole store's, so it is refused beside `--dry-run`, `-m`, `-x` and `-s`.
 
 What himalaya, calendula and cardamum write is queued in the store, and only neverest applies it. A sync does so first, before reaching any server; `drain` does it alone, offline, so a frontend reads a created item back at once, the next sync pushing it.
+
+neverest also keeps the store's search index (index.db), which the frontends query and only the store's owner builds. A sync refreshes it last, for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), and a drain for 2 seconds; a large first build spreads over several runs, each going on where the last stopped, or `index` builds it whole at once. The report says how far it got under `index`; an index failure is a warning and never changes the exit code. A reset drops the index with the store, or moves it aside with it.
 
 ### Conflicts
 
@@ -159,7 +167,9 @@ Deciding is a command and never a run. `conflict list` names what is waiting, `c
 
 A settled body has to be a body of that item, so one no parser reads and one stating another `UID` are both refused. A decision is refused when the remote moved while it was being made, and nothing here holds the store, so a sync stays free to run while a merger is open.
 
-Exit 2 is wider than conflicts: the run reconciled its collections but left something waiting for a person, be it a parked conflict, a duplicate `UID` the other side refuses, or a write it would not take. The report names which. A write that did not land is never counted, so `already in sync` means the run wrote nothing.
+Exit 2 is wider than conflicts: the run reconciled its collections but left something waiting for a person, be it a parked conflict, a duplicate `UID` the other side refuses, a write it would not take, a send the server refused for good, a queued action that could not be applied, a listing that left out most of a collection, or a change withheld over a body the store cannot serve. The report names which. A write that did not land is never counted, so `already in sync` means the run wrote nothing.
+
+A listing that leaves out more than half of at least 20 items a collection held drops nothing: it reads as a server answering short, and the report names it under `absences`. Once the server is known to hold no more, `sync --accept-absences` drops them, for that run only.
 
 ### Retention and backup
 

@@ -1049,11 +1049,12 @@ dependencies = [
 [[package]]
 name = "ical-rs"
 version = "0.6.1"
-source = "git+https://github.com/pimalaya/ical?rev=caa14225152a7aff6d8c86cef1f95e800dd77d20#caa14225152a7aff6d8c86cef1f95e800dd77d20"
+source = "git+https://github.com/pimalaya/ical?rev=99b92736a6a076c72936fac29c9b85a5168e4c2f#99b92736a6a076c72936fac29c9b85a5168e4c2f"
 dependencies = [
  "base64 0.23.1",
  "encoding_rs",
  "jiff",
+ "jiff-tzdb",
  "memchr",
  "quoted_printable",
 ]
@@ -1367,15 +1368,17 @@ dependencies = [
 [[package]]
 name = "io-pimdir"
 version = "0.8.0"
-source = "git+https://github.com/pimalaya/io-pimdir?rev=8907303902a8d159ad40d27934de802c3afa7d24#8907303902a8d159ad40d27934de802c3afa7d24"
 dependencies = [
  "blake3",
  "fs4",
+ "ical-rs",
  "log",
+ "mail-parser",
  "rusqlite",
  "serde",
  "serde_json",
  "sha2",
+ "vcard-rs",
 ]
 
 [[package]]
@@ -1692,6 +1695,7 @@ version = "0.11.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ec00bda90c6e645a54506c630c2820cd6b1890cfd2b0a169b50f74b2b8c7c86"
 dependencies = [
+ "encoding_rs",
  "hashify",
  "serde",
 ]

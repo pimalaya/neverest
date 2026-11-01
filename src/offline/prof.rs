@@ -52,6 +52,8 @@ pub static FETCH: Stat = Stat::new();
 pub static PUSH: Stat = Stat::new();
 /// Time spent resolving link ids against the store.
 pub static LOOKUP: Stat = Stat::new();
+/// Time spent checking bodies against their name before a push.
+pub static VERIFY: Stat = Stat::new();
 
 /// Whether profiling is enabled (`NEVEREST_PROFILE` set to a non-empty value).
 pub fn enabled() -> bool {
@@ -71,6 +73,7 @@ pub fn report() {
         ("fetch   ", &FETCH),
         ("push    ", &PUSH),
         ("lookup  ", &LOOKUP),
+        ("verify  ", &VERIFY),
     ] {
         let (count, secs) = stat.read();
         eprintln!("  {name}  {count:>8}  {secs:>10.3}s");

@@ -40,6 +40,10 @@ const MINT_PREFIX: &str = "dup:";
 /// (pimdir STORAGE §9).
 const MINT_SEPARATOR: char = '#';
 
+/// The prefix escaping a stated identity that begins like a derived key
+/// (pimdir STORAGE §9), stripped once before the identity reaches a server.
+const ESCAPE: &str = "esc:";
+
 /// A link id read as its parts by [`Kind::split_link_id`].
 ///
 /// Both parts are absent for a key the item's content never stated, which is
@@ -259,8 +263,10 @@ impl Kind {
     /// The identity in a key, or `None` for the kind's own fallback (`alt:`,
     /// `hash:`), which no server has heard of.
     ///
-    /// The one case a prefix marks: a real `Message-ID` or `UID` cannot be
-    /// mistaken for one, RFC 5322 `atext` admitting no colon before the `@`.
+    /// A stated identity beginning like a derived key is filed with one
+    /// leading `esc:` (pimdir STORAGE §9), which the server never heard of
+    /// either: it is named without it, as [`PimdirLinkId::stated`] does,
+    /// also for the key a mint carries.
     fn hint(self, key: &str) -> Option<&str> {
         let fallback = match self {
             Self::Mail => "alt:",
@@ -273,7 +279,8 @@ impl Kind {
             Self::Vcard | Self::Ical => "hash:",
         };
 
-        (!key.is_empty() && !key.starts_with(fallback)).then_some(key)
+        (!key.is_empty() && !key.starts_with(fallback))
+            .then(|| key.strip_prefix(ESCAPE).unwrap_or(key))
     }
 
     /// The derivations from a server-side summary, for a kind with `Meta`.
@@ -402,6 +409,34 @@ mod tests {
                 mint: Some("event-1%2540google.com.ics"),
             },
         );
+    }
+
+    /// A stated identity beginning like a derived key is filed escaped
+    /// (pimdir STORAGE §9) and named to the server without its escape,
+    /// minted or not; a derived key names none.
+    #[test]
+    fn an_escaped_key_names_its_stated_identity() {
+        let escaped = PimdirLinkId::from_hint("alt:a@example.org");
+        assert_eq!(escaped.0, "esc:alt:a@example.org");
+        assert_eq!(
+            Kind::Mail.split_link_id(&escaped),
+            LinkId {
+                hint: Some("alt:a@example.org"),
+                mint: None,
+            },
+        );
+
+        let minted = escaped.minted(&"146".into());
+        assert_eq!(
+            Kind::Mail.split_link_id(&minted),
+            LinkId {
+                hint: Some("alt:a@example.org"),
+                mint: Some("146"),
+            },
+        );
+
+        let derived = PimdirLinkId::from("alt:0123456789abcdef");
+        assert_eq!(Kind::Mail.split_link_id(&derived), LinkId::default());
     }
 
     /// The keys the engine mints read back as the parts a write needs, so the

@@ -29,9 +29,8 @@ use anyhow::{Context, Result, bail};
 use crossbeam_queue::SegQueue;
 use io_pimdir::{
     change::{PimdirChange, PimdirChangeKind},
-    client::blobs::{PimdirBlobWriter, PimdirBlobs},
+    client::blobs::{PimdirBlobReader, PimdirBlobStage, PimdirBlobWriter, PimdirBlobs},
     collection::{PimdirCheckpoint, PimdirCollectionId, PimdirCursor, PimdirScope},
-    hash::PimdirHasher,
     load::PimdirLoaded,
     object::PimdirHash,
     placement::{
@@ -50,10 +49,7 @@ use log::{debug, warn};
 use crate::dav::client::is_duplicate_uid;
 use crate::{
     client::{Client, EnumEntry, Gone, Held, Listed, Pool, StoredSize, WrittenItem},
-    item::{
-        flag::{Flag, FlagOp},
-        summary::ItemSummary,
-    },
+    item::{flag::Flag, summary::ItemSummary},
     kind::{Kind, LinkId},
 };
 
@@ -75,7 +71,7 @@ pub struct PimRemote<'a> {
     /// before any remote is built.
     kind: Kind,
     pool: &'a mut Pool,
-    blob: PimdirBlobs,
+    blob: PimdirBlobStage,
     /// The hub namespace, stripped off before any wire call. See [`wire_name`].
     namespace: String,
     /// Ticked once per `Full` body, for the driver's progress counter.
@@ -114,6 +110,9 @@ pub struct PimRemote<'a> {
     scope_bound: bool,
     /// The heads the connector lists, read once from [`Client::heads`].
     heads: PimdirHeads,
+    /// Whether a listing found the source renumbered (an IMAP
+    /// `UIDVALIDITY` bump), failing its enumeration so the driver rekeys.
+    rekey: bool,
 }
 
 /// What the store binds of a collection for one source.
@@ -123,7 +122,9 @@ pub struct Bound {
     handles: HashSet<String>,
     /// The name of each, by handle.
     metas: HashMap<String, BoundMeta>,
-    /// The checkpoint the store holds.
+    /// The checkpoint the store holds, or while no round has closed, the
+    /// one the open round's first page handed: the handle space the
+    /// store's bindings were made under.
     checkpoint: Option<Vec<u8>>,
     /// The scope of the source's last closed round.
     coverage: Option<PimdirScope>,
@@ -151,7 +152,10 @@ impl Bound {
         Self {
             handles: metas.keys().cloned().collect(),
             metas,
-            checkpoint: loaded.checkpoint.map(|checkpoint| checkpoint.0),
+            checkpoint: loaded
+                .checkpoint
+                .or(loaded.round.and_then(|round| round.checkpoint))
+                .map(|checkpoint| checkpoint.0),
             coverage: loaded.coverage.map(|coverage| coverage.scope),
         }
     }
@@ -297,7 +301,7 @@ pub struct RejectedPush {
 
 impl<'a> PimRemote<'a> {
     /// Binds a remote to the pool it calls through and the namespace it strips.
-    pub fn new(pool: &'a mut Pool, blob: PimdirBlobs, namespace: impl Into<String>) -> Self {
+    pub fn new(pool: &'a mut Pool, blob: PimdirBlobStage, namespace: impl Into<String>) -> Self {
         let kind = resolve_kind(pool);
         let scope_bound = pool.primary().scope_bound();
         let heads = pool.primary().heads();
@@ -315,6 +319,7 @@ impl<'a> PimRemote<'a> {
             bodies: true,
             scope_bound,
             heads,
+            rekey: false,
         }
     }
 
@@ -324,7 +329,7 @@ impl<'a> PimRemote<'a> {
     /// mail summary. An empty map keeps handle order.
     pub fn with_progress(
         pool: &'a mut Pool,
-        blob: PimdirBlobs,
+        blob: PimdirBlobStage,
         namespace: impl Into<String>,
         on_body: &'a (dyn Fn() + Sync),
         sizes: HashMap<String, u64>,
@@ -346,6 +351,7 @@ impl<'a> PimRemote<'a> {
             bodies: true,
             scope_bound,
             heads,
+            rekey: false,
         }
     }
 
@@ -377,6 +383,12 @@ impl<'a> PimRemote<'a> {
     /// The rejected writes, taken off so the driver can name them in reports.
     pub fn take_rejected(&mut self) -> Vec<RejectedPush> {
         mem::take(&mut self.rejected)
+    }
+
+    /// Whether a listing failed because the source renumbered every
+    /// member, which a rekey of the collection settles first.
+    pub fn rekey_asked(&self) -> bool {
+        self.rekey
     }
 
     /// Records a write that did not land, answering the engine's rejection.
@@ -487,6 +499,10 @@ impl PimdirRemote for PimRemote<'_> {
             Listed::CursorRejected => return Ok(PimdirEnumerated::CursorRejected),
             Listed::NoHead => return Ok(PimdirEnumerated::NoHead),
             Listed::HeadRejected => return Ok(PimdirEnumerated::HeadRejected),
+            Listed::Rekey => {
+                self.rekey = true;
+                bail!("The handles of {collection} were renumbered, it is rekeyed first");
+            }
         };
         self.pool.downloaded(page.bytes);
 
@@ -583,13 +599,21 @@ impl PimdirRemote for PimRemote<'_> {
 
         for change in changes {
             let result = match change.kind {
-                PimdirChangeKind::SetFlags { handle, flags } => {
-                    let email_flags = to_item_flags(&flags);
-                    let stored = self.pool.primary().store_flags(
+                PimdirChangeKind::SetFlags {
+                    handle,
+                    add,
+                    remove,
+                } => {
+                    // NOTE: deltas, never the whole set (pimdir SYNC §4): a
+                    // flag the server changed since the listing survives.
+                    let raw = |flags: BTreeSet<String>| -> Vec<Flag> {
+                        flags.into_iter().map(Flag::from_raw).collect()
+                    };
+                    let stored = self.pool.primary().update_flags(
                         &collection,
                         &[handle.as_str()],
-                        &email_flags,
-                        FlagOp::Set,
+                        &raw(add),
+                        &raw(remove),
                     );
 
                     match stored {
@@ -992,10 +1016,10 @@ fn fetch_one_full(
     client: &mut Client,
     collection: &str,
     handle: PimdirHandle,
-    blob: &PimdirBlobs,
+    blob: &PimdirBlobStage,
 ) -> Result<PimdirFetchedItem> {
     let writer = blob.writer().context("Open blob writer error")?;
-    let mut sink = HydrateSink::new(writer, blob.hasher());
+    let mut sink = HydrateSink::new(writer);
     let revision = client
         .get_item_stream(collection, handle.as_str(), &mut sink)
         .with_context(|| format!("Stream item {} in {collection} error", handle.as_str()))?;
@@ -1106,7 +1130,7 @@ pub(crate) fn hydrate_batch(
     collection: &str,
     handles: &[PimdirHandle],
     sizes: StoredSize<'_>,
-    blob: &PimdirBlobs,
+    blob: &PimdirBlobStage,
     on_body: Option<&(dyn Fn() + Sync)>,
 ) -> Result<Hydrated> {
     let ids: Vec<&str> = handles.iter().map(|h| h.as_str()).collect();
@@ -1116,10 +1140,7 @@ pub(crate) fn hydrate_batch(
         collection,
         &ids,
         sizes,
-        |_id| {
-            blob.writer()
-                .map(|writer| HydrateSink::new(writer, blob.hasher()))
-        },
+        |_id| blob.writer().map(HydrateSink::new),
         |id, revision, sink: HydrateSink| {
             let (hash, size, scan) = sink.finish().map_err(io::Error::other)?;
             let PimdirDerivation {
@@ -1216,7 +1237,7 @@ impl PimRemote<'_> {
             return self.reject(collection, handle, "append", "no body was stored for it");
         };
 
-        let reader = match self.blob.reader(&hash) {
+        let reader = match self.blob.blobs().reader(&hash) {
             Ok(Some(file)) => file,
             Ok(None) => {
                 let reason = format!("its body {} is missing from the blob tree", hash.as_str());
@@ -1355,8 +1376,8 @@ impl PimRemote<'_> {
 
     /// Opens a stored body for an upload, with its length, or says why it
     /// cannot be.
-    fn body(&self, object: &PimdirHash) -> Result<(std::fs::File, usize), String> {
-        let reader = match self.blob.reader(object) {
+    fn body(&self, object: &PimdirHash) -> Result<(PimdirBlobReader, usize), String> {
+        let reader = match self.blob.blobs().reader(object) {
             Ok(Some(file)) => file,
             Ok(None) => {
                 return Err(format!(
@@ -1437,7 +1458,7 @@ impl PimRemote<'_> {
         object: PimdirHash,
         if_match: Option<&str>,
     ) -> PimdirPushResult {
-        let reader = match self.blob.reader(&object) {
+        let reader = match self.blob.blobs().reader(&object) {
             Ok(Some(file)) => file,
             Ok(None) => {
                 let reason = format!("its body {} is missing from the blob tree", object.as_str());
@@ -1547,40 +1568,37 @@ impl HeaderScan {
 
 /// A [`Write`] sink for a streaming `Full` fetch.
 ///
-/// It tees each chunk into the blob store, folds it into the content hash, and
-/// captures the header prefix ([`HeaderScan`]) so the link id and summary
-/// derive without a second pass. The whole body never sits in memory.
+/// It tees each chunk into the blob store, whose writer hashes it as it
+/// passes, and captures the header prefix ([`HeaderScan`]) so the link id and
+/// summary derive without a second pass. The whole body never sits in memory.
 struct HydrateSink {
     writer: PimdirBlobWriter,
-    hasher: PimdirHasher,
     scan: HeaderScan,
 }
 
 impl HydrateSink {
-    /// Builds the sink over a blob writer and the store's own hasher.
+    /// Builds the sink over a blob writer.
     ///
-    /// A body is then named by the algorithm the store records (pimdir SPEC §5)
-    /// and dedups against what any other consumer of that store wrote.
-    fn new(writer: PimdirBlobWriter, hasher: PimdirHasher) -> Self {
+    /// The writer names a body by the algorithm the store records (pimdir
+    /// STORAGE §5), so it dedups against what any other consumer of that
+    /// store wrote.
+    fn new(writer: PimdirBlobWriter) -> Self {
         Self {
             writer,
-            hasher,
             scan: HeaderScan::default(),
         }
     }
 
     /// Commits the blob under its hash, returning `(hash, size, scan)`.
     fn finish(self) -> Result<(PimdirHash, usize, HeaderScan)> {
-        let hash = self.hasher.finish();
-        let size = self.writer.commit(&hash)? as usize;
-        Ok((hash, size, self.scan))
+        let object = self.writer.commit()?;
+        Ok((object.hash, object.size, self.scan))
     }
 }
 
 impl Write for HydrateSink {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.writer.write_all(buf)?;
-        self.hasher.update(buf);
         self.scan.feed(buf);
         Ok(buf.len())
     }
@@ -1768,7 +1786,7 @@ mod scope_tests {
 #[cfg(test)]
 mod scan_tests {
     use io_pimdir::{
-        hash::PimdirHashAlgo,
+        client::PimdirStore,
         summary::{PimdirSummary, mail},
     };
 
@@ -1810,12 +1828,12 @@ mod scan_tests {
     #[test]
     fn a_streamed_body_is_named_by_its_header_block() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
 
         for (label, body) in MESSAGES {
             let whole = mail::derive(body.as_bytes());
             for chunk in [1, 7, 64, body.len()] {
-                let mut sink = HydrateSink::new(blobs.writer().unwrap(), blobs.hasher());
+                let mut sink = HydrateSink::new(stage.writer().unwrap());
                 for part in body.as_bytes().chunks(chunk) {
                     sink.write_all(part).unwrap();
                 }
@@ -1835,14 +1853,14 @@ mod scan_tests {
     #[test]
     fn a_stored_body_is_named_by_its_header_block() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
 
         for (label, body) in MESSAGES {
-            let mut sink = HydrateSink::new(blobs.writer().unwrap(), blobs.hasher());
+            let mut sink = HydrateSink::new(stage.writer().unwrap());
             sink.write_all(body.as_bytes()).unwrap();
             let (hash, _, _) = sink.finish().unwrap();
 
-            let item = stored_item(Kind::Mail, &blobs, PimdirHandle("7".into()), hash)
+            let item = stored_item(Kind::Mail, stage.blobs(), PimdirHandle("7".into()), hash)
                 .unwrap()
                 .expect("the body is stored");
             assert_eq!(
@@ -1904,13 +1922,10 @@ mod push_tests {
     }
 
     /// The blobs of a store holding the task's body, and its hash.
-    fn stored(dir: &std::path::Path) -> (PimdirBlobs, PimdirHash) {
-        let blobs = PimdirStore::open(dir).unwrap().for_source("caldav").blobs();
-        let hash = blobs.hash(TODO.as_bytes());
-        let mut writer = blobs.writer().unwrap();
-        writer.write_all(TODO.as_bytes()).unwrap();
-        writer.commit(&hash).unwrap();
-        (blobs, hash)
+    fn stored(dir: &std::path::Path) -> (PimdirBlobStage, PimdirHash) {
+        let stage = PimdirStore::open(dir).unwrap().blob_stage();
+        let object = stage.stage_body(TODO.as_bytes()).unwrap();
+        (stage, object.hash)
     }
 
     /// The create of the task into [`TARGET`], superseding member `t1.ics`
@@ -1937,7 +1952,7 @@ mod push_tests {
     /// Pushes `change` into [`TARGET`] through a remote over `pool`.
     fn push(
         pool: &mut Pool,
-        blobs: PimdirBlobs,
+        blobs: PimdirBlobStage,
         change: PimdirChange,
     ) -> (PimdirPushResult, Vec<RefusedCreate>, Vec<RejectedPush>) {
         let mut remote = PimRemote::new(pool, blobs, "caldav");
@@ -2125,5 +2140,60 @@ mod push_tests {
 
         assert_eq!(results[0].outcome, PimdirPushOutcome::Accepted);
         assert!(remote.take_rejected().is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "dav"))]
+mod hydrate_tests {
+    use io_pimdir::client::PimdirStore;
+
+    use super::*;
+    use crate::dav::client::{
+        DavClient, DavKind,
+        scripted::{answer, reply},
+    };
+
+    /// A multiget naming a member 404 and a read of it alone answering 404
+    /// again leaves it gone, owed nothing more in the run: the batch, and
+    /// the collection with it, is not failed for good by a member every
+    /// read finds missing.
+    #[test]
+    fn a_member_missing_from_every_read_is_gone() {
+        let missing = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+                       <d:multistatus xmlns:d=\"DAV:\"><d:response>\
+                       <d:href>/caldav/v2/alice%40g/tasks/t1.ics</d:href>\
+                       <d:status>HTTP/1.1 404 Not Found</d:status>\
+                       </d:response></d:multistatus>";
+        let (client, wire) = DavClient::scripted(
+            DavKind::Cal,
+            "/caldav/v2/alice%40g/",
+            vec![
+                answer(
+                    "207 Multi-Status",
+                    &[("Content-Type", "application/xml")],
+                    missing,
+                ),
+                reply("404 Not Found", &[]),
+            ],
+        );
+        let mut client = Client::Dav(Box::new(client));
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blob_stage();
+
+        let handles = [PimdirHandle("t1.ics".into())];
+        let hydrated = hydrate_batch(
+            Kind::Ical,
+            &mut client,
+            "tasks",
+            &handles,
+            &|_| None,
+            &blobs,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(wire.lines().len(), 2, "{:?}", wire.lines());
+        assert!(hydrated.items.is_empty());
+        assert_eq!(hydrated.gone, handles);
     }
 }

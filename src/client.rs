@@ -40,7 +40,7 @@ use crate::imap::client::ImapClient;
 use crate::msgraph::client::{GraphClient, GraphKind};
 use crate::{
     account::{SourceAccount, SourceAccountBackend},
-    item::{collection::Collection, flag::Flag, flag::FlagOp, summary::ItemSummary},
+    item::{collection::Collection, flag::Flag, summary::ItemSummary},
     kind::LinkId,
     offline::invitation::Refusal,
 };
@@ -132,6 +132,10 @@ pub enum Listed {
     /// The source refused the head's position: the engine restarts the
     /// round over the run's scope (an expired Gmail history id).
     HeadRejected,
+    /// The source renumbered every member since the store bound them (an
+    /// IMAP `UIDVALIDITY` bump): the enumeration fails and the collection
+    /// is rekeyed before it is listed again (pimdir SYNC §4, §8).
+    Rekey,
 }
 
 /// What the store already binds of a collection, which a mail listing reads
@@ -725,7 +729,8 @@ impl Client {
     ///
     /// The bytes are RFC 5322 for mail and a vCard or iCalendar object for
     /// the DAV kinds. On the IMAP path they never land in memory whole. An
-    /// item IMAP, Gmail or Graph no longer holds fails with [`Gone`].
+    /// item IMAP, Gmail, Graph, DAV, Google Calendar or Google People no
+    /// longer holds fails with [`Gone`].
     pub fn get_item_stream(
         &mut self,
         collection: &str,
@@ -901,6 +906,7 @@ impl Client {
         match self {
             #[cfg(feature = "dav")]
             Client::Dav(c) => c.move_item(from, to, id, if_match),
+            #[allow(unreachable_patterns)]
             _ => Ok(None),
         }
     }
@@ -934,28 +940,29 @@ impl Client {
         }
     }
 
-    /// Adds, sets or removes `flags` on an id set; Graph supports the
-    /// full-set replace only.
-    pub fn store_flags(
+    /// Adds `add` to and removes `remove` from an id set's flags, as deltas:
+    /// a flag named in neither is left as the server holds it (pimdir SYNC
+    /// §4), so a change the server made since the listing survives.
+    pub fn update_flags(
         &mut self,
         collection: &str,
         ids: &[&str],
-        flags: &[Flag],
-        op: FlagOp,
+        add: &[Flag],
+        remove: &[Flag],
     ) -> Result<()> {
         match self {
             #[cfg(feature = "imap")]
-            Client::Imap(c) => c.store_flags(collection, ids, flags, op),
+            Client::Imap(c) => c.update_flags(collection, ids, add, remove),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.store_flags(ids, flags, op),
+            Client::Msgraph(c) => c.update_flags(ids, add, remove),
             #[cfg(feature = "dav")]
-            Client::Dav(c) => c.store_flags(ids, flags, op),
+            Client::Dav(c) => c.update_flags(ids, add, remove),
             #[cfg(feature = "gpeople")]
-            Client::Gpeople(c) => c.store_flags(ids, flags, op),
+            Client::Gpeople(c) => c.update_flags(ids, add, remove),
             #[cfg(feature = "gcal")]
-            Client::Gcal(c) => c.store_flags(ids, flags, op),
+            Client::Gcal(c) => c.update_flags(ids, add, remove),
             #[cfg(feature = "gmail")]
-            Client::Gmail(c) => c.store_flags(ids, flags, op),
+            Client::Gmail(c) => c.update_flags(ids, add, remove),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
@@ -996,39 +1003,6 @@ impl Client {
                 feature = "gmail"
             )))]
             Client::Unavailable => "",
-        }
-    }
-
-    /// The epoch a checkpoint carries, changing when handles are reassigned.
-    ///
-    /// A change means every cached handle is void, so the driver rebuilds
-    /// the collection by link id; `None` is a backend that never rebuilds.
-    /// It lives on the seam: only a backend reads its own checkpoint bytes.
-    pub fn handle_space_epoch(&self, checkpoint: &[u8]) -> Option<u64> {
-        match self {
-            #[cfg(feature = "imap")]
-            Client::Imap(_) => {
-                crate::imap::backend::checkpoint_uid_validity(checkpoint).map(u64::from)
-            }
-            #[cfg(feature = "msgraph")]
-            Client::Msgraph(_) => None,
-            #[cfg(feature = "dav")]
-            Client::Dav(_) => None,
-            #[cfg(feature = "gpeople")]
-            Client::Gpeople(_) => None,
-            #[cfg(feature = "gcal")]
-            Client::Gcal(_) => None,
-            #[cfg(feature = "gmail")]
-            Client::Gmail(_) => None,
-            #[cfg(not(any(
-                feature = "imap",
-                feature = "msgraph",
-                feature = "dav",
-                feature = "gpeople",
-                feature = "gcal",
-                feature = "gmail"
-            )))]
-            Client::Unavailable => None,
         }
     }
 }
@@ -1140,7 +1114,7 @@ impl Pool {
     }
 
     /// A pool of one connection already open, for the tests.
-    #[cfg(all(test, feature = "gmail"))]
+    #[cfg(all(test, any(feature = "dav", feature = "msgraph", feature = "gmail")))]
     pub fn of(account: SourceAccount, client: Client) -> Self {
         Self {
             account,

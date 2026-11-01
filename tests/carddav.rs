@@ -38,12 +38,11 @@
 //! cargo test --features dav --test carddav -- --ignored --test-threads=1
 //! ```
 
-use std::{fs, io::Write, path::Path, process::Command};
+use std::{fs, path::Path, process::Command};
 
 use io_pimdir::{
     client::{producer::PimdirProducer, reader::PimdirReader},
     codec::PimdirAction,
-    object::PimdirObject,
 };
 
 const DAV: &str = "http://127.0.0.1:5232";
@@ -447,24 +446,18 @@ fn queue_update(state: &Path, account: &str, book: &str, link_id: &str, body: &s
         .seq_for_link(&collection, link_id)
         .expect("resolve the item's public id")
         .unwrap_or_else(|| panic!("no item {link_id} in {collection}"));
-    let blobs = reader.blobs();
     drop(reader);
 
-    let hash = blobs.hash(body.as_bytes());
-    let mut writer = blobs.writer().expect("open a blob writer");
-    writer.write_all(body.as_bytes()).expect("write the body");
-    let object = PimdirObject {
-        hash: hash.clone(),
-        size: writer.commit(&hash).expect("commit the body") as usize,
-    };
-
+    // NOTE: no body was read, the edit standing over whatever the item holds.
     let mut producer = PimdirProducer::open(&dir, "carddav-test").expect("open the store to stage");
     producer
-        .enqueue(
-            &collection,
-            &PimdirAction::Update { seq, object: hash },
-            Some(&object),
-        )
+        .enqueue_with_body(&collection, body.as_bytes(), |object| {
+            PimdirAction::Update {
+                seq,
+                object,
+                if_match: None,
+            }
+        })
         .expect("stage the edit");
 }
 

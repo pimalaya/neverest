@@ -27,6 +27,8 @@ use io_pimdir::{
 pub mod capability;
 pub mod create;
 pub mod driver;
+#[cfg(feature = "search")]
+pub mod index;
 pub mod invitation;
 pub mod pipe;
 pub mod prof;
@@ -156,6 +158,7 @@ where
             PimdirYield::WantsEnumerate { .. } => &prof::ENUMERATE,
             PimdirYield::WantsFetch { .. } => &prof::FETCH,
             PimdirYield::WantsPush { .. } => &prof::PUSH,
+            PimdirYield::WantsVerify(_) => &prof::VERIFY,
         };
         let t = Instant::now();
 

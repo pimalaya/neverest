@@ -18,7 +18,7 @@ use crate::{
     cli::{exit::Exit, sync::try_store_lock},
     config::Config,
     offline::{driver, state::StoreState},
-    sync::report::SyncOutput,
+    sync::report::{IndexRefresh, OverruledBody, SyncOutput},
 };
 
 /// Applies the store changes frontends queued, without syncing.
@@ -91,6 +91,10 @@ impl DrainCommand {
         driver::drain_queues(&mut store, &mut report);
 
         let mut output = DrainOutput::new(name);
+        output.overruled = report.overruled;
+        // NOTE: briefly, a frontend waiting on the drain.
+        #[cfg(feature = "search")]
+        crate::offline::index::after_run(&dir, &account_config.store, true, &mut output.index);
         for row in queued {
             let status = store
                 .action_status(row.id)
@@ -142,6 +146,15 @@ pub struct DrainOutput {
     /// The rows left queued for a sync: intents, a send or a reply, and
     /// actions a transient failure deferred.
     pub waiting: usize,
+    /// The bodies a collection's conflict policy kept aside as retained
+    /// items while an action was applied (pimdir SYNC §9).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub overruled: Vec<OverruledBody>,
+    /// What the drain did to the store's search index, absent from a
+    /// build without the `search` feature: a failure is reported here and
+    /// never fails the drain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<IndexRefresh>,
 }
 
 impl DrainOutput {
@@ -152,6 +165,8 @@ impl DrainOutput {
             applied: Vec::new(),
             parked: Vec::new(),
             waiting: 0,
+            overruled: Vec::new(),
+            index: None,
         }
     }
 
@@ -185,8 +200,14 @@ impl fmt::Display for DrainOutput {
         for action in &self.parked {
             writeln!(f, "  {action}")?;
         }
+        for overruled in &self.overruled {
+            writeln!(f, "  {overruled}")?;
+        }
         if self.waiting > 0 {
             writeln!(f, "{} left queued for the next sync", self.waiting)?;
+        }
+        if let Some(index) = &self.index {
+            writeln!(f, "Search index: {index}")?;
         }
         Ok(())
     }

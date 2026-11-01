@@ -14,7 +14,10 @@
 //! the write: a contact edited on Graph since the last sync is refused, the
 //! next run enumerating the edit, as a DAV server's 412 would make it.
 
-use std::io::{Read, Write};
+use std::{
+    collections::VecDeque,
+    io::{Read, Write},
+};
 
 use anyhow::{Context, Result, bail};
 use io_msgraph::v1::rest::users::{
@@ -49,15 +52,11 @@ const CONTACTS_PAGE_SIZE: u32 = 1000;
 const FOLDER_PAGE_SIZE: u32 = 100;
 
 impl GraphClient {
-    /// Lists the default Contacts folder and every top-level contact folder
-    /// with its children, keyed by folder id, named by display name.
+    /// Lists the default Contacts folder and every contact folder at every
+    /// depth, every page of each listing read, keyed by folder id, named by
+    /// display name. A folder left out would read as deleted.
     pub(super) fn list_contact_folders(&mut self) -> Result<Vec<Collection>> {
         debug!("begin graph contact folder listing");
-
-        let params = MsgraphContactFoldersListParams {
-            top: Some(FOLDER_PAGE_SIZE),
-            ..Default::default()
-        };
 
         let mut collections = vec![Collection {
             id: CONTACTS_FOLDER.to_owned(),
@@ -68,19 +67,34 @@ impl GraphClient {
             takes_tasks: None,
         }];
 
-        let top = self
-            .op(|client| client.contact_folders_list(&params))
-            .context("List contact folders error")?
-            .value;
+        let mut parents: VecDeque<Option<String>> = VecDeque::from([None]);
+        while let Some(parent) = parents.pop_front() {
+            let mut skip = 0;
+            loop {
+                let params = MsgraphContactFoldersListParams {
+                    top: Some(FOLDER_PAGE_SIZE),
+                    skip: (skip > 0).then_some(skip),
+                    ..Default::default()
+                };
+                let page = match &parent {
+                    None => self
+                        .op(|client| client.contact_folders_list(&params))
+                        .context("List contact folders error")?,
+                    Some(id) => self
+                        .op(|client| client.contact_child_folders_list(id, &params))
+                        .with_context(|| format!("List child folders of {id} error"))?,
+                };
 
-        for folder in &top {
-            push_folder(&mut collections, folder);
-            let children = self
-                .op(|client| client.contact_child_folders_list(&folder.id, &params))
-                .with_context(|| format!("List child folders of {} error", folder.display_name))?
-                .value;
-            for child in &children {
-                push_folder(&mut collections, child);
+                skip += page.value.len() as u32;
+                for folder in &page.value {
+                    push_folder(&mut collections, folder);
+                    if !folder.id.is_empty() {
+                        parents.push_back(Some(folder.id.clone()));
+                    }
+                }
+                if page.next_link.is_none() || page.value.is_empty() {
+                    break;
+                }
             }
         }
 
@@ -365,6 +379,18 @@ fn check_revision(id: &str, current: &MsgraphContact, if_match: Option<&str>) ->
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeSet, sync::Arc};
+
+    use secrecy::SecretString;
+
+    use crate::{
+        msgraph::client::{
+            GraphKind, SizeHints,
+            scripted::{Server, Step},
+        },
+        throttle::Throttle,
+    };
+
     use super::*;
 
     #[test]
@@ -383,5 +409,53 @@ mod tests {
         assert!(check_revision("c1", &current, Some("v2")).is_ok());
         assert!(check_revision("c1", &current, None).is_ok());
         assert!(check_revision("c1", &current, Some("v1")).is_err());
+    }
+
+    /// A page of contact folders: `ids`, with a next page when `more`.
+    fn folders(ids: &[&str], more: bool) -> Step {
+        let value: Vec<_> = ids
+            .iter()
+            .map(|id| serde_json::json!({ "id": id, "displayName": id }))
+            .collect();
+        let mut page = serde_json::json!({ "value": value });
+        if more {
+            page["@odata.nextLink"] = "https://graph.microsoft.com/v1.0/me/contactFolders?$skip=1"
+                .to_owned()
+                .into();
+        }
+        Step::ok(page)
+    }
+
+    /// A folder on a second page, and one three levels down, are the
+    /// account's too: left out of the listing, they would read as deleted.
+    #[test]
+    fn every_page_and_depth_of_contact_folders_is_listed() {
+        let server = Server::new(vec![vec![
+            folders(&["f1"], true),
+            folders(&["f2"], false),
+            folders(&["f1a"], false),
+            folders(&[], false),
+            folders(&["f1a1"], false),
+            folders(&[], false),
+        ]]);
+        let mut client = GraphClient::over(
+            GraphKind::Contacts,
+            &SecretString::from("token"),
+            "me",
+            server.connect(),
+            SizeHints::default(),
+            Arc::new(Throttle::new("msgraph")),
+        )
+        .unwrap();
+
+        let listed: BTreeSet<String> = client
+            .list_contact_folders()
+            .unwrap()
+            .into_iter()
+            .map(|folder| folder.id)
+            .collect();
+
+        let all = [CONTACTS_FOLDER, "f1", "f2", "f1a", "f1a1"];
+        assert_eq!(listed, all.into_iter().map(String::from).collect());
     }
 }

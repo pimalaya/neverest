@@ -4,9 +4,9 @@
 //! disagreements: one side changed a phone number and the other a note, and
 //! the base proves it by naming which side touched which field.
 //!
-//! Built in rather than configured, at build time too: it rides on the `dav`
-//! cargo feature rather than one of its own, every mutable-content kind
-//! arriving with `dav`. Contacts are vcard-rs, calendars and tasks and
+//! Built in rather than configured, at build time too: it rides on the
+//! mutable-content backends (`dav`, `msgraph`, `gpeople`, `gcal`) rather than
+//! a feature of its own. Contacts are vcard-rs, calendars and tasks and
 //! journals ical-rs, and mail is immutable-content and reaches none of this.
 //!
 //! Because it cannot be swapped it is strictly conservative, resolving on an

@@ -12,12 +12,13 @@
 //!   summary `$select`, a page per request, its delta link the checkpoint.
 //! - **Under a scope**: a round lists the scope's mail by date band, a
 //!   plain `/messages` listing filtered on `sentDateTime` (Graph's reading
-//!   of the `Date` header, exact), newest first, each page with its summary;
-//!   once the band is listed, one pass of the folder's delta with ids,
-//!   dates and flags only makes the link, lands as the round's last page,
-//!   and corrects what changed or went while the band was listed. A round
-//!   over the band a coverage lacks lists that band alone and keeps the
-//!   link.
+//!   of the `Date` header, exact), newest first, each page with its summary
+//!   and resuming below the second the page before ended at, never at an
+//!   offset a delete would shift; once the band is listed, one pass of the
+//!   folder's delta with ids, dates and flags only makes the link, lands as
+//!   the round's last page, and corrects what changed or went while the
+//!   band was listed. A round over the band a coverage lacks lists that
+//!   band alone and keeps the link.
 //! - **A delta** follows the stored link: a change outside the scope is
 //!   dropped, by `sentDateTime`; a changed member in scope the store does
 //!   not bind is named by its summary, read in JSON batches when the link
@@ -178,8 +179,10 @@ impl Link {
 enum Step {
     /// The next page of a whole-folder delta round.
     Summary(String),
-    /// The next page of a band listing.
-    Band(String),
+    /// The next page of a band listing: the band's messages sent before
+    /// this instant, exclusive, never an offset into the band, which a
+    /// delete between two runs would shift.
+    Below(String),
     /// The band listed, the pass over the folder that makes the link.
     Pass,
 }
@@ -188,26 +191,28 @@ impl Step {
     fn encode(&self) -> Vec<u8> {
         match self {
             Self::Summary(link) => format!("summary {link}").into_bytes(),
-            Self::Band(link) => format!("band {link}").into_bytes(),
+            Self::Below(ceiling) => format!("below {ceiling}").into_bytes(),
             Self::Pass => b"pass".to_vec(),
         }
     }
 
     /// Reads cursor bytes back. A bare link, stored before cursors were
     /// tagged, is a delta round's next link: whole-folder when `scope` is
-    /// unbounded, else made under a `$filter`, and refused.
+    /// unbounded, else made under a `$filter`, and refused. A band's next
+    /// link, stored before a band resumed below a date, is an offset into
+    /// the band and refused too: the round opens again.
     fn decode(bytes: &[u8], scope: &PimdirScope) -> Option<Self> {
         let text = std::str::from_utf8(bytes).ok()?;
         if let Some(link) = text.strip_prefix("summary ") {
             return Some(Self::Summary(link.to_owned()));
         }
-        if let Some(link) = text.strip_prefix("band ") {
-            return Some(Self::Band(link.to_owned()));
+        if let Some(ceiling) = text.strip_prefix("below ") {
+            return instant(ceiling).map(Self::Below);
         }
         if text == "pass" {
             return Some(Self::Pass);
         }
-        if text.is_empty() || !scope.is_unbounded() {
+        if text.is_empty() || text.starts_with("band ") || !scope.is_unbounded() {
             return None;
         }
         Some(Self::Summary(text.to_owned()))
@@ -316,8 +321,8 @@ pub(super) fn enumerate(
             Some(Step::Summary(next)) if scope.is_unbounded() => {
                 summary_page(wire, folder, mailbox, Some(&next), held)
             }
-            Some(Step::Band(next)) => {
-                band_page(wire, folder, mailbox, Some(&next), *band, scope, held)
+            Some(Step::Below(ceiling)) => {
+                band_page(wire, folder, mailbox, Some(&ceiling), *band, scope, held)
             }
             Some(Step::Pass) if !band => pass(wire, folder, mailbox, scope, held),
             _ => Ok(Listed::CursorRejected),
@@ -379,32 +384,53 @@ fn summary_page(
 /// needs the marks of what the band listed. A message with no date, which a
 /// filter on `sentDateTime` never lists, stays bound: a band round infers
 /// no delete of an undated member (pimdir SYNC §5).
+///
+/// A page resumes `below` the second the page before it ended at, that
+/// second included, so a member deleted between two pages, in one run or
+/// across two, shifts no other out of the round: a band round has no pass
+/// to list it again.
 fn band_page(
     wire: &mut impl MailWire,
     folder: &mut Folder,
     mailbox: &str,
-    next: Option<&str>,
+    below: Option<&str>,
     band: bool,
     scope: &PimdirScope,
     held: Held<'_>,
 ) -> Result<Listed> {
-    let page = match next {
-        None => wire.band_first(mailbox, scope)?,
-        Some(next) => match wire.band_next(next)? {
-            Some(page) => page,
-            None => return Ok(Listed::CursorRejected),
-        },
+    let listed = PimdirScope {
+        since: scope.since.clone(),
+        until: below.map(str::to_owned).or_else(|| scope.until.clone()),
     };
+    let page = wire.band_first(mailbox, &listed)?;
+    let mut messages = page.value;
+    let mut next = page.next_link;
 
-    let cursor = match (page.next_link, band) {
-        (Some(next), _) => Some(Step::Band(next)),
+    // NOTE: the next page lists again the second this one ended at, so a
+    // page lying within one second would list itself again: Graph's next
+    // link is followed within this request until a page leaves that
+    // second, never across two.
+    while let Some(link) = next.take_if(|_| within_one_second(&messages)) {
+        let page = wire
+            .band_next(&link)?
+            .with_context(|| format!("Band listing of {mailbox} expired"))?;
+        messages.extend(page.value);
+        next = page.next_link;
+    }
+
+    let cursor = match (next, band) {
+        (Some(_), _) => {
+            let ceiling = resume_below(&messages)
+                .with_context(|| format!("Band page of {mailbox} ends on no date"))?;
+            Some(Step::Below(ceiling))
+        }
         (None, true) => None,
         (None, false) => Some(Step::Pass),
     };
     let last = cursor.is_none();
 
     let mut listing = Listing::default();
-    for message in page.value {
+    for message in messages {
         if in_scope(scope, &message) {
             if !band {
                 folder
@@ -427,6 +453,22 @@ fn band_page(
         cursor.map(|step| step.encode()),
         None,
     )))
+}
+
+/// Whether `messages` were sent within one second, the first and the last
+/// alike: a page the next would list again whole.
+fn within_one_second(messages: &[MsgraphMessage]) -> bool {
+    let second = |message: Option<&MsgraphMessage>| message_date(message?).map(|at| at.timestamp());
+    second(messages.first()) == second(messages.last())
+}
+
+/// The instant the page after `messages` lists below, exclusive: the
+/// second after the one the last dated message was sent at, so the next
+/// page lists that second again rather than leave out one sent then.
+fn resume_below(messages: &[MsgraphMessage]) -> Option<String> {
+    let at = messages.iter().rev().find_map(message_date)?;
+    let below = DateTime::from_timestamp(at.timestamp().checked_add(1)?, 0)?;
+    Some(below.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 
 /// The open round's band head (pimdir SYNC §4): every message of `scope`
@@ -1156,12 +1198,17 @@ mod tests {
         );
         assert_eq!(Step::decode(link.as_bytes(), &bounded), None);
         for step in [
-            Step::Band(link.into()),
+            Step::Below("2026-09-03T10:00:01Z".into()),
             Step::Pass,
             Step::Summary(link.into()),
         ] {
             assert_eq!(Step::decode(&step.encode(), &bounded), Some(step.clone()));
         }
+        assert_eq!(
+            Step::decode(format!("band {link}").as_bytes(), &bounded),
+            None,
+            "a band's next link of before is an offset, refused",
+        );
     }
 
     // --- a fake Graph folder ---------------------------------------------
@@ -1184,7 +1231,7 @@ mod tests {
     /// What the fake answered, by kind of request.
     #[derive(Clone, Debug, Default, PartialEq)]
     struct Counts {
-        /// Band listings started.
+        /// Band pages asked by date, each a listing of its own.
         bands: usize,
         /// Band pages served, the first included.
         band_pages: usize,
@@ -1536,6 +1583,7 @@ mod tests {
                 Listed::CursorRejected => return Ok(PimdirEnumerated::CursorRejected),
                 Listed::NoHead => return Ok(PimdirEnumerated::NoHead),
                 Listed::HeadRejected => return Ok(PimdirEnumerated::HeadRejected),
+                Listed::Rekey => anyhow::bail!("a Graph folder is never rekeyed"),
             };
 
             let mut items: Vec<PimdirRemoteItem> = page
@@ -1720,8 +1768,11 @@ mod tests {
         sync(&mut store, &mut remote, since("2026-09-01")).unwrap();
         assert_eq!(stored(&store), months(&["2026-09"]));
         let counts = remote.graph.counts.clone();
-        assert_eq!(counts.bands, 1);
-        assert_eq!(counts.band_rows, 10, "the band lists its ten messages");
+        assert_eq!(counts.bands, 5, "five pages of three, each resuming below");
+        assert_eq!(
+            counts.band_rows, 14,
+            "the band lists its ten messages, the next page again the one a page ended at"
+        );
         assert_eq!(counts.passes, [IDS_SELECT], "one pass, ids only");
         assert_eq!(
             counts.delta_rows, 41,
@@ -1762,8 +1813,11 @@ mod tests {
         }
 
         let counts = remote.graph.counts.clone();
-        assert_eq!(counts.bands, 4);
-        assert_eq!(counts.band_rows, 40, "each dated message listed once");
+        assert_eq!(counts.bands, 20);
+        assert_eq!(
+            counts.band_rows, 56,
+            "each dated message listed once, and the one each page ended at again"
+        );
         assert_eq!(counts.passes.len(), 1, "the folder passed over once");
         assert_eq!(counts.delta_rows, 41);
         assert_eq!(counts.metas, 1);
@@ -1775,7 +1829,7 @@ mod tests {
             PimdirListing::Delta(_)
         ));
         assert_eq!(remote.graph.counts.delta_rows, 41, "nothing changed");
-        assert_eq!(remote.graph.counts.band_rows, 40);
+        assert_eq!(remote.graph.counts.band_rows, 56);
     }
 
     /// A delta drops what changed outside the scope, follows a bound
@@ -1812,7 +1866,7 @@ mod tests {
         assert_eq!(remote.graph.counts.passes.len(), 1);
     }
 
-    /// A round broken in its band resumes from the band's next link; broken
+    /// A round broken in its band resumes below where its band ended; broken
     /// in its pass, it passes again, the band left alone; a member deleted
     /// while the band was listed vanishes with the pass, and one added then
     /// is named by it.
@@ -1825,13 +1879,18 @@ mod tests {
 
         let err = sync(&mut store, &mut remote, since("2026-07-01")).unwrap_err();
         assert!(format!("{err:#}").contains("connection reset"), "{err:#}");
-        assert_eq!(stored(&store).len(), 6, "two band pages landed");
+        assert_eq!(
+            stored(&store).len(),
+            5,
+            "two band pages landed, the second listing again the message the first ended at"
+        );
 
-        // NOTE: the band holds 20 messages, 7 pages of 3: the pass is the
-        // eighth request of the round, the third of this run.
-        remote.fail_at = Some(remote.requests.len() + 5);
+        // NOTE: the band holds 20 messages, 10 pages of 3 that each list
+        // again the message the page before ended at: the pass is the
+        // eleventh request of the round, the ninth of this run.
+        remote.fail_at = Some(remote.requests.len() + 8);
         remote.between = Some((
-            remote.requests.len() + 5,
+            remote.requests.len() + 8,
             Box::new(|graph: &mut FakeGraph| {
                 graph.delete("2026-09-10");
                 graph.add("late", Some("2026-10-06T08:00:00Z"));
@@ -1840,12 +1899,12 @@ mod tests {
         let err = sync(&mut store, &mut remote, since("2026-07-01")).unwrap_err();
         assert!(format!("{err:#}").contains("connection reset"), "{err:#}");
         assert_eq!(
-            remote.graph.counts.bands, 1,
+            remote.graph.counts.bands, 10,
             "the band resumed, not restarted"
         );
         assert_eq!(
-            remote.graph.counts.band_rows, 20,
-            "each message listed once"
+            remote.graph.counts.band_rows, 29,
+            "each message listed once, and the one each page ended at again"
         );
         assert!(remote.graph.counts.passes.is_empty());
         assert!(
@@ -1861,7 +1920,7 @@ mod tests {
             "the third run resumes with the pass",
         );
         assert_eq!(remote.graph.counts.passes.len(), 1);
-        assert_eq!(remote.graph.counts.bands, 1);
+        assert_eq!(remote.graph.counts.bands, 10);
 
         let mut expected = months(&["2026-07", "2026-09"]);
         expected.remove("2026-09-10");
@@ -1870,6 +1929,56 @@ mod tests {
 
         let coverage = store.list_coverage(COLLECTION).unwrap();
         assert!(coverage[0].round.is_none(), "the round closed");
+    }
+
+    /// A band round broken after its first page resumes below the date
+    /// that page ended at: a message deleted from the page in between
+    /// shifts no later one out of the round, which has no pass to correct
+    /// it.
+    #[test]
+    fn a_band_round_resumed_after_a_delete_misses_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut remote = Remote::new(folder());
+        sync(&mut store, &mut remote, since("2026-07-01")).unwrap();
+
+        remote.fail_at = Some(remote.requests.len() + 1);
+        let err = sync(&mut store, &mut remote, since("2026-06-01")).unwrap_err();
+        assert!(format!("{err:#}").contains("connection reset"), "{err:#}");
+        assert!(
+            stored(&store).contains("2026-06-10"),
+            "the first page landed"
+        );
+
+        remote.graph.delete("2026-06-10");
+        sync(&mut store, &mut remote, since("2026-06-01")).unwrap();
+        sync(&mut store, &mut remote, since("2026-06-01")).unwrap();
+
+        let mut expected = months(&["2026-06", "2026-07", "2026-09"]);
+        expected.remove("2026-06-10");
+        assert_eq!(stored(&store), expected);
+    }
+
+    /// Pages sent within one second, which the next page would list again
+    /// whole, are followed by Graph's next link in the same request until
+    /// one leaves that second: the round goes on and lists each.
+    #[test]
+    fn a_band_dense_in_one_second_still_goes_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut graph = folder();
+        let burst: Vec<String> = (1..=7).map(|n| format!("burst-{n}")).collect();
+        for id in &burst {
+            graph.add(id, Some("2026-06-15T10:00:00Z"));
+        }
+        let mut remote = Remote::new(graph);
+        sync(&mut store, &mut remote, since("2026-07-01")).unwrap();
+
+        sync(&mut store, &mut remote, since("2026-06-01")).unwrap();
+
+        let mut expected = months(&["2026-06", "2026-07", "2026-09"]);
+        expected.extend(burst);
+        assert_eq!(stored(&store), expected);
     }
 
     /// With no scope, a round is the delta with summaries, as before. A
@@ -1906,7 +2015,10 @@ mod tests {
         assert_eq!(stored(&store).len(), 42, "a narrower scope deletes nothing");
 
         sync(&mut store, &mut remote, PimdirScope::unbounded()).unwrap();
-        assert_eq!(remote.graph.counts.bands, 1, "the band below the coverage");
+        assert_eq!(
+            remote.graph.counts.bands, 10,
+            "the band below the coverage, twenty messages"
+        );
         assert_eq!(remote.graph.counts.passes.len(), 1, "and the link kept");
         assert!(
             flags_of(&store, "2026-03-02").contains("\\Flagged"),
@@ -1932,7 +2044,7 @@ mod tests {
             remote.graph.counts.passes[1], IDS_SELECT,
             "made under the scope"
         );
-        assert_eq!(remote.graph.counts.bands, 2);
+        assert_eq!(remote.graph.counts.bands, 15);
         assert_eq!(
             stored(&store).len(),
             42,

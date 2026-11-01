@@ -21,7 +21,7 @@ use std::{
     borrow::Cow,
     collections::BTreeSet,
     env, fs,
-    io::{Read, Write},
+    io::Read,
     panic::{self, AssertUnwindSafe},
     path::PathBuf,
     process::Command,
@@ -45,7 +45,6 @@ use io_pimdir::{
     },
     codec::PimdirAction,
     collection::PimdirCollectionId,
-    object::PimdirObject,
     placement::PimdirFlags,
 };
 use pimalaya_stream::tls::Tls;
@@ -313,24 +312,21 @@ impl Replica {
 
     /// Stages a creation, as a frontend does.
     pub fn add(&self, key: &str, body: &str, flags: &[&str]) {
-        let (hash, object) = self.stage(body);
-        let action = PimdirAction::Add {
+        self.enqueue_body(key, body, |hash| PimdirAction::Add {
             link_id: None,
             flags: known(flags),
             object: Some(hash),
             supersedes: None,
-        };
-        self.enqueue(key, action, Some(object));
+        });
     }
 
     /// Stages a new body for an item.
     pub fn update(&self, key: &str, seq: i64, body: &str) {
-        let (hash, object) = self.stage(body);
-        self.enqueue(
-            key,
-            PimdirAction::Update { seq, object: hash },
-            Some(object),
-        );
+        self.enqueue_body(key, body, |hash| PimdirAction::Update {
+            seq,
+            object: hash,
+            if_match: None,
+        });
     }
 
     /// Stages a whole new flag set for an item.
@@ -339,12 +335,12 @@ impl Replica {
             seq,
             flags: known(flags),
         };
-        self.enqueue(key, action, None);
+        self.enqueue(key, action);
     }
 
     /// Stages the removal of an item.
     pub fn remove(&self, key: &str, seq: i64) {
-        self.enqueue(key, PimdirAction::Remove { seq }, None);
+        self.enqueue(key, PimdirAction::Remove { seq });
     }
 
     /// Stages the move of an item from `key` into `to`.
@@ -353,7 +349,7 @@ impl Replica {
             seq,
             to: PimdirCollectionId(self.collection(to)),
         };
-        self.enqueue(key, action, None);
+        self.enqueue(key, action);
     }
 
     /// Queues an intent of `kind` (pimdir STORAGE Annex B.2) carrying
@@ -364,7 +360,7 @@ impl Replica {
             payload: payload.to_string(),
             object_hash: None,
         };
-        self.enqueue(key, action, None);
+        self.enqueue(key, action);
     }
 
     /// Syncs once and returns the report's `intents` entries.
@@ -387,24 +383,24 @@ impl Replica {
         (pending, parked)
     }
 
-    /// Writes a body to the blob tree, durably, before any queue row names it.
-    fn stage(&self, body: &str) -> (io_pimdir::object::PimdirHash, PimdirObject) {
-        let producer = PimdirProducer::open(self.store(), "neverest-live").expect("open producer");
-        let hash = producer.hash(body.as_bytes());
-        let blobs = PimdirBlobs::open(self.store(), producer.hash_algo());
-        let mut writer = blobs.writer().expect("blob writer");
-        writer.write_all(body.as_bytes()).unwrap();
-        let object = PimdirObject {
-            hash: hash.clone(),
-            size: writer.commit(&hash).expect("commit the body") as usize,
-        };
-        (hash, object)
-    }
-
-    fn enqueue(&self, key: &str, action: PimdirAction, object: Option<PimdirObject>) {
+    /// Stages `body` and the action naming it in one step, as a frontend
+    /// does, so a refused action leaves no body behind.
+    fn enqueue_body(
+        &self,
+        key: &str,
+        body: &str,
+        action: impl FnOnce(io_pimdir::object::PimdirHash) -> PimdirAction,
+    ) {
         PimdirProducer::open(self.store(), "neverest-live")
             .expect("open producer")
-            .enqueue(&self.collection(key), &action, object.as_ref())
+            .enqueue_with_body(&self.collection(key), body.as_bytes(), action)
+            .expect("enqueue the action");
+    }
+
+    fn enqueue(&self, key: &str, action: PimdirAction) {
+        PimdirProducer::open(self.store(), "neverest-live")
+            .expect("open producer")
+            .enqueue(&self.collection(key), &action, None)
             .expect("enqueue the action");
     }
 }

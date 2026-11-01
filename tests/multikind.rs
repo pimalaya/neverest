@@ -34,13 +34,12 @@
 //! cargo test --all-features --test multikind -- --ignored
 //! ```
 
-use std::{fs, io::Write, path::Path, process::Command};
+use std::{fs, path::Path, process::Command};
 
 use io_pimdir::{
-    client::{blobs::PimdirBlobs, producer::PimdirProducer, reader::PimdirReader},
+    client::{producer::PimdirProducer, reader::PimdirReader},
     codec::PimdirAction,
     collection::PimdirCollectionId,
-    object::PimdirObject,
 };
 
 const IMAP_ROOT: &str = "imap://127.0.0.1:143";
@@ -266,29 +265,22 @@ fn sync(config: &Path, state: &Path, code: i32) -> String {
 /// queue row naming it, which the next run drains before it reconciles.
 fn edit_card_in_store(store: &Path, body: &str) {
     let reader = PimdirReader::open(store).expect("open the store");
-    let seq = reader
+    let card = reader
         .list_items(CARD_COLLECTION, None, 10)
         .expect("list the address book")
-        .first()
-        .expect("the card is in the store")
-        .seq;
+        .into_iter()
+        .next()
+        .expect("the card is in the store");
 
     let mut producer = PimdirProducer::open(store, "neverest-tests").expect("open producer");
-    let hash = producer.hash(body.as_bytes());
-    let blobs = PimdirBlobs::open(store, producer.hash_algo());
-    let mut writer = blobs.writer().expect("blob writer");
-    writer.write_all(body.as_bytes()).unwrap();
-    let object = PimdirObject {
-        hash: hash.clone(),
-        size: writer.commit(&hash).expect("commit the body") as usize,
-    };
-
     producer
-        .enqueue(
-            CARD_COLLECTION,
-            &PimdirAction::Update { seq, object: hash },
-            Some(&object),
-        )
+        .enqueue_with_body(CARD_COLLECTION, body.as_bytes(), |object| {
+            PimdirAction::Update {
+                seq: card.seq,
+                object,
+                if_match: card.object,
+            }
+        })
         .expect("enqueue the edit");
 }
 

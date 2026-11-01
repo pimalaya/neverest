@@ -64,7 +64,10 @@ mod tests {
     use super::*;
     use crate::sync::{
         hunk::CollectionHunk,
-        report::{PatchEntry, SubmitEntry, ThrottledSource, UnreachedEndpoint},
+        report::{
+            IntentEntry, ParkedQueueAction, PatchEntry, SubmitEntry, ThrottledSource,
+            UnreachedEndpoint,
+        },
     };
 
     fn unreachable() -> PatchEntry<CollectionHunk> {
@@ -90,9 +93,10 @@ mod tests {
         assert_eq!(Exit::from(&report), Exit::Incomplete);
     }
 
-    /// A send that parked waits for a person, not for a rerun.
+    /// A send the server refused for good parked: the message was not sent,
+    /// which waits for a person, not for a rerun, and is no success.
     #[test]
-    fn a_parked_send_is_not_incomplete() {
+    fn a_parked_send_waits_for_a_person() {
         let mut report = SyncOutput::default();
         report.submitted.push(SubmitEntry {
             id: 1,
@@ -102,9 +106,44 @@ mod tests {
             parked: true,
             uncertain: false,
         });
-        assert_eq!(Exit::from(&report), Exit::Success);
+        assert_eq!(Exit::from(&report), Exit::Conflicted);
 
         report.submitted[0].parked = false;
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
+    }
+
+    /// A parked intent and a parked queue action wait for a person too.
+    #[test]
+    fn a_parked_intent_or_queue_action_waits_for_a_person() {
+        let mut report = SyncOutput::default();
+        report.intents.push(IntentEntry {
+            id: 2,
+            collection: String::from("caldav/work"),
+            kind: String::from("calendar-reply"),
+            source: String::from("caldav"),
+            seq: None,
+            error: Some(String::from("refused")),
+            parked: true,
+        });
+        assert_eq!(Exit::from(&report), Exit::Conflicted);
+
+        let mut report = SyncOutput::default();
+        report.parked.push(ParkedQueueAction {
+            id: 3,
+            collection: String::from("imap/INBOX"),
+            action: String::from("remove"),
+            producer: String::from("himalaya"),
+            error: String::from("unknown seq 9"),
+        });
+        assert_eq!(Exit::from(&report), Exit::Conflicted);
+    }
+
+    /// A run whose convergence passes ended still moving stopped before
+    /// its collections settled: a rerun goes on.
+    #[test]
+    fn an_unsettled_run_is_incomplete() {
+        let mut report = SyncOutput::default();
+        report.unsettled.push(String::from("imap/INBOX"));
         assert_eq!(Exit::from(&report), Exit::Incomplete);
     }
 
@@ -217,6 +256,172 @@ mod tests {
                 "since": "2025-10-07T00:00:00Z",
                 "startedAt": "2026-10-07T10:05:00Z",
             })
+        );
+    }
+
+    /// A listing that parked a mass absence waits for a person to confirm
+    /// it, a rerun alone parking again: the round it left open makes the
+    /// run no less complete, another one still does.
+    #[test]
+    fn a_parked_absence_waits_for_a_person() {
+        use crate::sync::report::{CollectionCoverage, OpenRound, ParkedAbsence};
+
+        let open = |collection: &str| CollectionCoverage {
+            source: String::from("imap"),
+            collection: String::from(collection),
+            since: None,
+            until: None,
+            at: None,
+            round: Some(OpenRound {
+                since: None,
+                until: None,
+                started_at: String::from("2026-10-30T10:00:00Z"),
+            }),
+        };
+        let mut report = SyncOutput::default();
+        report.coverage.push(open("INBOX"));
+        report.absences.push(ParkedAbsence {
+            side: String::from("imap"),
+            collection: String::from("INBOX"),
+            absent: 24,
+            bound: 25,
+            rebuild: false,
+        });
+        assert_eq!(Exit::from(&report), Exit::Conflicted);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["absences"],
+            serde_json::json!([{
+                "side": "imap",
+                "collection": "INBOX",
+                "absent": 24,
+                "bound": 25,
+                "rebuild": false,
+            }])
+        );
+        assert!(report.to_string().contains(
+            "the listing of INBOX on imap left out 24 of 25 items, so nothing was dropped"
+        ));
+
+        report.coverage.push(open("Archive"));
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
+    }
+
+    /// A change withheld over a body the store cannot serve waits for a
+    /// person; a body a policy overruled is reported and waits for none.
+    #[test]
+    fn an_unreadable_body_waits_and_an_overruled_one_does_not() {
+        use crate::sync::report::{OverruledBody, UnreadableBodies};
+
+        let mut report = SyncOutput::default();
+        report.overruled.push(OverruledBody {
+            side: Some(String::from("caldav")),
+            collection: String::from("work"),
+            id: Some(String::from("e1.ics")),
+            action: None,
+            kept: String::from("dup:e1@x#e1.ics"),
+        });
+        assert_eq!(Exit::from(&report), Exit::Success);
+        assert!(
+            report
+                .to_string()
+                .contains("kept as retained item dup:e1@x#e1.ics")
+        );
+
+        report.unreadable.push(UnreadableBodies {
+            side: String::from("caldav"),
+            collection: String::from("work"),
+            count: 2,
+        });
+        assert_eq!(Exit::from(&report), Exit::Conflicted);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["unreadable"],
+            serde_json::json!([{ "side": "caldav", "collection": "work", "count": 2 }])
+        );
+    }
+
+    /// A body the drain kept aside applying a queued action is a warning
+    /// naming the row, as one a side's write kept is.
+    #[test]
+    fn a_body_the_drain_overruled_is_named_by_its_row_and_waits_for_none() {
+        use crate::sync::report::OverruledBody;
+
+        let mut report = SyncOutput::default();
+        report.overruled.push(OverruledBody {
+            side: None,
+            collection: String::from("work"),
+            id: None,
+            action: Some(7),
+            kept: String::from("dup:e1@x#e1.ics"),
+        });
+
+        assert_eq!(Exit::from(&report), Exit::Success);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["overruled"],
+            serde_json::json!([{
+                "collection": "work",
+                "action": 7,
+                "kept": "dup:e1@x#e1.ics",
+            }])
+        );
+        let text = report.to_string();
+        assert!(text.contains("Warnings (1)"), "{text}");
+        assert!(
+            text.contains("queued action #7 in work settled by policy"),
+            "{text}"
+        );
+    }
+
+    /// A push its server answered nothing for is pushed again by the next
+    /// run, as a hunk that failed is: the run is incomplete.
+    #[test]
+    fn an_unanswered_push_makes_the_run_incomplete() {
+        use crate::sync::report::UnansweredPushes;
+
+        let mut report = SyncOutput::default();
+        report.unanswered.push(UnansweredPushes {
+            side: String::from("caldav"),
+            collection: String::from("work"),
+            count: 3,
+        });
+
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["unanswered"],
+            serde_json::json!([{ "side": "caldav", "collection": "work", "count": 3 }])
+        );
+        assert!(report.to_string().contains("got no answer from the server"));
+    }
+
+    /// The search index is derived: a refresh failing, busy or cut by its
+    /// deadline is reported and changes no exit code.
+    #[test]
+    fn an_index_refresh_never_changes_the_exit_code() {
+        use crate::sync::report::IndexRefresh;
+
+        let mut report = SyncOutput {
+            index: Some(IndexRefresh {
+                behind: 12,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(Exit::from(&report), Exit::Success);
+        assert!(report.to_string().contains("12 change(s) behind"));
+
+        report.index = Some(IndexRefresh {
+            error: Some(String::from("disk full")),
+            ..Default::default()
+        });
+        assert_eq!(Exit::from(&report), Exit::Success);
+        let text = report.to_string();
+        assert!(text.contains("Warnings (1)"), "{text}");
+        assert!(
+            text.contains("search index not refreshed: disk full"),
+            "{text}"
+        );
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["index"]["error"],
+            "disk full"
         );
     }
 }

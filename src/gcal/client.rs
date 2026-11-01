@@ -58,11 +58,8 @@ use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
 use crate::{
-    client::{EnumEntry, Enumeration, WrittenItem},
-    item::{
-        collection::Collection,
-        flag::{Flag, FlagOp},
-    },
+    client::{EnumEntry, Enumeration, Gone, WrittenItem},
+    item::{collection::Collection, flag::Flag},
     offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp, wall_stamp},
     throttle::{GoogleAnswer, GoogleWaits, Request, Throttle},
 };
@@ -225,6 +222,9 @@ impl GcalClient {
         loop {
             let params = GcalCalendarListListParams {
                 page_token: page_token.as_deref(),
+                // NOTE: a calendar hidden in the UI is still the account's,
+                // and left out it would read as deleted.
+                show_hidden: true,
                 ..Default::default()
             };
             let page = self
@@ -423,13 +423,23 @@ impl GcalClient {
 
     /// Streams one item's iCalendar object into `sink`, returning its
     /// joined revision.
+    ///
+    /// An event Google answers missing (404, 410) fails with [`Gone`]: one
+    /// deleted since its listing is owed nothing more in the run, rather
+    /// than failing its calendar's fetch in every run.
     pub fn get_item_stream(
         &mut self,
         calendar: &str,
         id: &str,
         mut sink: impl Write,
     ) -> Result<Option<String>> {
-        let (ical, revision) = self.item(calendar, id)?;
+        let (ical, revision) = match self.item(calendar, id) {
+            Ok(read) => read,
+            Err(err) if is_missing(&err) => {
+                return Err(err.context(Gone(format!("{id} in {calendar}"))));
+            }
+            Err(err) => return Err(err),
+        };
         sink.write_all(ical.as_bytes())
             .with_context(|| format!("Stream event {id} error"))?;
         Ok(Some(revision))
@@ -685,7 +695,7 @@ impl GcalClient {
     }
 
     /// Rejected: calendar events have no flags.
-    pub fn store_flags(&mut self, _ids: &[&str], _flags: &[Flag], _op: FlagOp) -> Result<()> {
+    pub fn update_flags(&mut self, _ids: &[&str], _add: &[Flag], _remove: &[Flag]) -> Result<()> {
         bail!("Google calendar events have no flags (store not supported)")
     }
 }
@@ -771,6 +781,16 @@ fn is_expired(err: &anyhow::Error) -> bool {
         matches!(
             cause.downcast_ref::<GcalClientStdError>(),
             Some(GcalClientStdError::Send(send)) if send.status() == Some(410)
+        )
+    })
+}
+
+/// Whether a read failed on an event Google no longer holds (HTTP 404, 410).
+fn is_missing(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<GcalClientStdError>(),
+            Some(GcalClientStdError::Send(send)) if matches!(send.status(), Some(404 | 410))
         )
     })
 }
@@ -902,5 +922,94 @@ mod tests {
     #[test]
     fn a_lone_event_revision_is_its_etag() {
         assert_eq!(revision(&[event("lunch", None, "\"7\"")]), "\"7\"");
+    }
+
+    /// A stream answering one canned response and keeping what was written.
+    struct Recorded {
+        answer: Vec<u8>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl Read for Recorded {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.answer.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.answer[..n]);
+            self.answer.drain(..n);
+            Ok(n)
+        }
+    }
+
+    impl Write for Recorded {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A calendar the user hid in the Google UI is still the account's:
+    /// left out of the listing, it would read as deleted.
+    #[test]
+    fn the_calendar_list_names_hidden_calendars() {
+        let body = r#"{"items":[{"id":"c1","summary":"Hidden","hidden":true}]}"#;
+        let answer = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stream = Recorded {
+            answer: answer.into_bytes(),
+            written: Arc::clone(&written),
+        };
+        let mut client = GcalClient {
+            inner: GcalClientStd::new(stream, "token"),
+            tls: Tls::default(),
+            alive: true,
+            throttle: Arc::new(Throttle::new("gcal")),
+            owner: None,
+        };
+
+        let calendars = client.list_collections().unwrap();
+
+        assert_eq!(calendars.len(), 1);
+        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        let request = written.lines().next().unwrap_or_default().to_owned();
+        assert!(request.contains("showHidden=true"), "{request}");
+    }
+
+    /// An event deleted between its listing and its read is gone: failing
+    /// instead, it would fail the fetch of its calendar in every run until
+    /// a listing took it away.
+    #[test]
+    fn an_event_missing_from_its_read_is_gone() {
+        for status in ["404 Not Found", "410 Gone"] {
+            let body = r#"{"error":{"code":404,"message":"Not Found"}}"#;
+            let answer = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let mut client = GcalClient {
+                inner: GcalClientStd::new(
+                    Recorded {
+                        answer: answer.into_bytes(),
+                        written: Arc::default(),
+                    },
+                    "token",
+                ),
+                tls: Tls::default(),
+                alive: true,
+                throttle: Arc::new(Throttle::new("gcal")),
+                owner: None,
+            };
+
+            let err = client
+                .get_item_stream("c1", "e1", Vec::new())
+                .expect_err("no event to read");
+
+            assert!(Gone::is(&err), "{status}: {err:#}");
+        }
     }
 }

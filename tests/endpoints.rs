@@ -528,9 +528,11 @@ fn account() -> String {
          sources.a.carddav.server = \"{DAV}/\"\n\
          sources.a.carddav.auth.basic.username = \"{SOURCE}\"\n\
          sources.a.carddav.auth.basic.password.raw = \"{SOURCE}\"\n\
+         sources.a.carddav.collection.delete = true\n\
          targets.b.carddav.server = \"{DAV}/\"\n\
          targets.b.carddav.auth.basic.username = \"{TARGET}\"\n\
-         targets.b.carddav.auth.basic.password.raw = \"{TARGET}\"\n",
+         targets.b.carddav.auth.basic.password.raw = \"{TARGET}\"\n\
+         targets.b.carddav.collection.delete = true\n",
     )
 }
 

@@ -27,7 +27,6 @@
 
 use std::{
     fs,
-    io::Write,
     path::Path,
     process::Command,
     thread::sleep,
@@ -36,12 +35,11 @@ use std::{
 
 use io_pimdir::{
     client::{
-        blobs::PimdirBlobs,
         producer::{PimdirActionStatus, PimdirProducer},
         reader::PimdirReader,
     },
-    codec::PimdirAction,
-    object::PimdirObject,
+    collection::PimdirCollectionId,
+    intent::PimdirSubmit,
 };
 
 const IMAP_ROOT: &str = "imap://127.0.0.1:143";
@@ -111,29 +109,17 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     let marker = marker();
     let body = message(&marker);
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
-    let hash = producer.hash(&body);
-    let blobs = PimdirBlobs::open(&store, producer.hash_algo());
-    let mut writer = blobs.writer().expect("blob writer");
-    writer.write_all(&body).unwrap();
-    let object = PimdirObject {
-        hash: hash.clone(),
-        size: writer.commit(&hash).expect("commit the body") as usize,
+    let submit = |object| PimdirSubmit {
+        source: None,
+        object,
+        from: String::from(USER),
+        rcpts: vec![String::from(USER)],
+        subject: Some(format!("neverest submission {marker}")),
+        copy: None,
     };
 
     let id = producer
-        .enqueue(
-            "INBOX",
-            &PimdirAction::Unknown {
-                kind: SUBMIT.into(),
-                payload: format!(
-                    "{{\"v\":1,\"object\":\"{}\",\"from\":\"{USER}\",\
-                     \"rcpts\":[\"{USER}\"],\"subject\":\"neverest submission {marker}\"}}",
-                    hash.0,
-                ),
-                object_hash: Some(hash.clone()),
-            },
-            Some(&object),
-        )
+        .enqueue_with_body("INBOX", &body, |object| submit(object).to_action().unwrap())
         .expect("enqueue the intent");
     drop(producer);
 
@@ -312,28 +298,16 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     let marker = marker();
     let body = message(&marker);
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
-    let hash = producer.hash(&body);
-    let blobs = PimdirBlobs::open(&store, producer.hash_algo());
-    let mut writer = blobs.writer().expect("blob writer");
-    writer.write_all(&body).unwrap();
-    let object = PimdirObject {
-        hash: hash.clone(),
-        size: writer.commit(&hash).expect("commit the body") as usize,
+    let submit = |object| PimdirSubmit {
+        source: Some(String::from("imap")),
+        object,
+        from: String::from(USER),
+        rcpts: vec![String::from(USER)],
+        subject: Some(marker.clone()),
+        copy: Some(PimdirCollectionId(sent.clone())),
     };
     let id = producer
-        .enqueue(
-            &sent,
-            &PimdirAction::Unknown {
-                kind: SUBMIT.into(),
-                payload: format!(
-                    "{{\"v\":1,\"object\":\"{}\",\"from\":\"{USER}\",\"rcpts\":[\"{USER}\"],\
-                     \"subject\":\"{marker}\",\"source\":\"imap\",\"copy\":\"{sent}\"}}",
-                    hash.0,
-                ),
-                object_hash: Some(hash.clone()),
-            },
-            Some(&object),
-        )
+        .enqueue_with_body(&sent, &body, |object| submit(object).to_action().unwrap())
         .expect("enqueue the intent");
     drop(producer);
 

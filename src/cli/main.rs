@@ -18,6 +18,8 @@ use pimalaya_cli::{
 
 #[cfg(feature = "wizard")]
 use crate::cli::configure::ConfigureCommand;
+#[cfg(feature = "search")]
+use crate::cli::index::IndexCommand;
 use crate::{
     cli::{
         check::CheckCommand, conflict::ConflictCommand, drain::DrainCommand, exit::Exit,
@@ -63,6 +65,8 @@ pub enum Command {
     Init(InitCommand),
     Sync(SyncCommand),
     Drain(DrainCommand),
+    #[cfg(feature = "search")]
+    Index(IndexCommand),
     #[command(arg_required_else_help = true)]
     #[command(alias = "conflicts")]
     Conflict(ConflictCommand),
@@ -95,6 +99,8 @@ impl Command {
         let done = match self {
             Self::Sync(cmd) => return cmd.execute(printer, config_paths, account),
             Self::Drain(cmd) => return cmd.execute(printer, config_paths, account),
+            #[cfg(feature = "search")]
+            Self::Index(cmd) => return cmd.execute(printer, config_paths, account),
             Self::Check(cmd) => cmd.execute(printer, config_paths, account),
             Self::Conflict(cmd) => cmd.execute(printer, config_paths, account),
             Self::Init(cmd) => cmd.execute(printer, config_paths, account),

@@ -9,12 +9,12 @@
 //! without the capability skips the row rather than parking it.
 //!
 //! A producer enqueues a `submit` row whose payload is the `v: 1` envelope
-//! ([`SubmitMeta`]) and whose body is written into the object store before the
+//! io-pimdir types as [`PimdirSubmit`], and whose body it stages before the
 //! enqueue, so the row pins it and GC cannot sweep it in between. The anchor
 //! collection is the producer's choice, every collection's queue being scanned.
 //!
 //! ```json
-//! {"v":1,"from":"a@x.org","rcpts":["b@y.org","c@y.org"],"subject":"hi"}
+//! {"from":"a@x.org","object":"<hash>","rcpts":["b@y.org","c@y.org"],"subject":"hi","v":1}
 //! ```
 //!
 //! Submission is at-most-once on its own: a message handed over whole with no
@@ -40,7 +40,9 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 use io_pimdir::client::blobs::PimdirBlobs;
-use io_pimdir::{client::PimdirStore, codec::PimdirAction, object::PimdirHash};
+use io_pimdir::{
+    client::PimdirStore, codec::PimdirAction, intent::PimdirSubmit, object::PimdirHash,
+};
 #[cfg(feature = "smtp")]
 use io_smtp::{
     client::{SmtpClient as _, SmtpClientError, SmtpClientStd, SmtpClientStdConnectOptions},
@@ -55,7 +57,6 @@ use io_smtp::{
 };
 #[cfg(feature = "smtp")]
 use pimalaya_stream::proxy::Proxy;
-use serde::Deserialize;
 
 #[cfg(feature = "smtp")]
 use crate::account::SmtpAccount;
@@ -98,35 +99,28 @@ pub struct SubmitIntent {
 
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
 impl SubmitIntent {
-    /// The decoded envelope.
+    /// The decoded envelope, read by io-pimdir's [`PimdirSubmit`].
     ///
     /// A payload that does not decode is a permanent failure: no later run
-    /// decodes it any better.
-    pub fn envelope(&self) -> Result<SubmitMeta, SubmitFailure> {
-        let meta: SubmitMeta = serde_json::from_str(&self.payload)
-            .map_err(|err| SubmitFailure::permanent(anyhow!("Malformed submit payload: {err}")))?;
-        if meta.v != 1 {
-            return Err(SubmitFailure::permanent(anyhow!(
-                "Unsupported submit payload version {}",
-                meta.v
-            )));
-        }
-        Ok(meta)
+    /// decodes it any better. A native sender (Graph) reads the addresses
+    /// out of the MIME body itself, yet decodes the payload all the same so
+    /// a broken one parks.
+    pub fn envelope(&self) -> Result<PimdirSubmit, SubmitFailure> {
+        PimdirSubmit::from_payload(&self.payload)
+            .map_err(|err| SubmitFailure::permanent(anyhow!("Malformed submit payload: {err}")))
     }
 
     /// The collection the producer asked the sent copy filed in, best
     /// effort.
     pub fn copy(&self) -> Option<String> {
-        serde_json::from_str::<SubmitMeta>(&self.payload)
-            .ok()
-            .and_then(|meta| meta.copy)
+        self.decoded()
+            .and_then(|submit| submit.copy)
+            .map(|copy| copy.0)
     }
 
     /// The source the producer named to perform it, best effort.
     pub fn source(&self) -> Option<String> {
-        serde_json::from_str::<SubmitMeta>(&self.payload)
-            .ok()
-            .and_then(|meta| meta.source)
+        self.decoded().and_then(|submit| submit.source)
     }
 
     /// The subject for the report, best effort.
@@ -134,38 +128,13 @@ impl SubmitIntent {
     /// An intent whose payload is too broken to decode still has to be
     /// reportable.
     pub fn subject(&self) -> Option<String> {
-        serde_json::from_str::<SubmitMeta>(&self.payload)
-            .ok()
-            .and_then(|meta| meta.subject)
+        self.decoded().and_then(|submit| submit.subject)
     }
-}
 
-/// The `v: 1` submit payload: the SMTP envelope plus one display field.
-///
-/// A native sender (Graph) reads the addresses out of the MIME body itself and
-/// only needs the blob, so a Graph-only build decodes the payload (a broken one
-/// still parks) without reading the envelope back out.
-#[cfg_attr(not(feature = "smtp"), allow(dead_code))]
-#[derive(Debug, Deserialize)]
-pub struct SubmitMeta {
-    /// The schema version (1).
-    pub v: u8,
-    /// The envelope sender (`MAIL FROM`); empty means the null path.
-    pub from: String,
-    /// The envelope recipients (`RCPT TO`).
-    #[serde(default)]
-    pub rcpts: Vec<String>,
-    /// The subject, for the report only.
-    #[serde(default)]
-    pub subject: Option<String>,
-    /// The source named to perform it (pimdir STORAGE §15.6), absent from
-    /// a producer predating the field.
-    #[serde(default)]
-    pub source: Option<String>,
-    /// The collection a copy of the sent message is filed in (pimdir
-    /// STORAGE Annex B.2), none when the producer asked for none.
-    #[serde(default)]
-    pub copy: Option<String>,
+    /// The decoded payload, or `None` for a broken one.
+    fn decoded(&self) -> Option<PimdirSubmit> {
+        PimdirSubmit::from_payload(&self.payload).ok()
+    }
 }
 
 /// How a failed submission is dispositioned.
@@ -513,7 +482,7 @@ fn ehlo_domain() -> SmtpEhloDomain<'static> {
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 pub struct Outgoing {
     #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
-    meta: SubmitMeta,
+    submit: PimdirSubmit,
     bytes: Vec<u8>,
 }
 
@@ -521,16 +490,25 @@ pub struct Outgoing {
 /// held in memory at a time.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 pub fn prepare(blobs: &PimdirBlobs, intent: &SubmitIntent) -> Result<Outgoing, SubmitFailure> {
-    let meta = intent.envelope()?;
+    let submit = intent.envelope()?;
     let hash = intent
         .object
         .as_ref()
         .ok_or_else(|| SubmitFailure::permanent(anyhow!("Submit intent has no stored body")))?;
+    // NOTE: the row pins one body and the payload names one: a producer
+    // writing them apart is broken, and either could be the wrong message.
+    if submit.object != *hash {
+        return Err(SubmitFailure::permanent(anyhow!(
+            "Submit payload names body {} but the row pins {}",
+            submit.object.as_str(),
+            hash.as_str()
+        )));
+    }
     let bytes = blobs
         .get(hash)
         .map_err(|err| SubmitFailure::Transient(anyhow!("Cannot read the queued blob: {err}")))?
         .ok_or_else(|| SubmitFailure::permanent(anyhow!("The queued body is missing")))?;
-    Ok(Outgoing { meta, bytes })
+    Ok(Outgoing { submit, bytes })
 }
 
 /// Hands one message over through `channel`.
@@ -548,12 +526,12 @@ pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), 
     }
 
     #[cfg_attr(not(feature = "smtp"), allow(unused_variables))]
-    let Outgoing { meta, bytes } = outgoing;
+    let Outgoing { submit, bytes } = outgoing;
     match &mut channel.link {
         #[cfg(feature = "smtp")]
         Link::Smtp(client) => {
-            let reverse = reverse_path(&meta.from).map_err(SubmitFailure::permanent)?;
-            let forwards = meta
+            let reverse = reverse_path(&submit.from).map_err(SubmitFailure::permanent)?;
+            let forwards = submit
                 .rcpts
                 .iter()
                 .map(|rcpt| Ok(SmtpForwardPath(smtp_mailbox(rcpt)?)))
@@ -791,7 +769,7 @@ mod tests {
         thread,
     };
 
-    use io_pimdir::{client::blobs::PimdirBlobs, hash::PimdirHashAlgo};
+    use io_pimdir::client::blobs::{PimdirBlobStage, PimdirBlobs};
 
     use super::*;
     use crate::config::SmtpConfig;
@@ -892,17 +870,32 @@ mod tests {
         (port, rx)
     }
 
-    /// Stages a body in the blob store and returns the intent pointing at it.
-    fn stage_intent(blobs: &PimdirBlobs, id: i64, payload: &str, body: &[u8]) -> SubmitIntent {
-        let hash = PimdirHash(format!("hash-{id}"));
-        let mut writer = blobs.writer().expect("blob writer");
-        std::io::Write::write_all(&mut writer, body).expect("write body");
-        writer.commit(&hash).expect("commit body");
+    /// Stages a body and returns the intent pinning it, sent from `a@x.org`
+    /// to `rcpts` under the payload himalaya writes
+    /// ([`PimdirSubmit::to_action`]).
+    fn stage_intent(stage: &PimdirBlobStage, id: i64, rcpts: &[&str], body: &[u8]) -> SubmitIntent {
+        let object = stage.stage_body(body).expect("stage body");
+        let submit = PimdirSubmit {
+            source: None,
+            object: object.hash,
+            from: String::from("a@x.org"),
+            rcpts: rcpts.iter().map(ToString::to_string).collect(),
+            subject: Some(String::from("hi")),
+            copy: None,
+        };
+        let PimdirAction::Unknown {
+            payload,
+            object_hash,
+            ..
+        } = submit.to_action().expect("submit action")
+        else {
+            unreachable!("a submit is an intent");
+        };
         SubmitIntent {
             id,
             collection: String::from("Sent"),
-            object: Some(hash),
-            payload: payload.to_owned(),
+            object: object_hash,
+            payload,
         }
     }
 
@@ -926,24 +919,18 @@ mod tests {
         deliver(channel, prepare(blobs, intent)?)
     }
 
-    const PAYLOAD: &str = r#"{"v":1,"from":"a@x.org","rcpts":["b@y.org"],"subject":"hi"}"#;
-
     #[test]
     fn an_intent_sends_its_pinned_body_through_the_envelope_it_carries() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let blobs = stage.blobs();
         let body = b"Subject: hi\r\n\r\nhello".to_vec();
-        let intent = stage_intent(
-            &blobs,
-            1,
-            r#"{"v":1,"from":"a@x.org","rcpts":["b@y.org","c@y.org"],"subject":"hi"}"#,
-            &body,
-        );
+        let intent = stage_intent(&stage, 1, &["b@y.org", "c@y.org"], &body);
         assert_eq!(intent.subject().as_deref(), Some("hi"));
 
         let (port, captured) = spawn_smtp_sink(Sink::Accept);
         let mut channel = channel_to(port);
-        send_one(&mut channel, &blobs, &intent).expect("send");
+        send_one(&mut channel, blobs, &intent).expect("send");
         channel.close();
 
         let captured = captured.recv().expect("captured session");
@@ -961,18 +948,14 @@ mod tests {
     #[test]
     fn a_bcc_recipient_is_in_the_envelope_but_not_in_the_transmitted_body() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let blobs = stage.blobs();
         let body = b"To: b@y.org\r\nBcc: c@y.org\r\nSubject: hi\r\n\r\nhello".to_vec();
-        let intent = stage_intent(
-            &blobs,
-            1,
-            r#"{"v":1,"from":"a@x.org","rcpts":["b@y.org","c@y.org"],"subject":"hi"}"#,
-            &body,
-        );
+        let intent = stage_intent(&stage, 1, &["b@y.org", "c@y.org"], &body);
 
         let (port, captured) = spawn_smtp_sink(Sink::Accept);
         let mut channel = channel_to(port);
-        send_one(&mut channel, &blobs, &intent).expect("send");
+        send_one(&mut channel, blobs, &intent).expect("send");
         channel.close();
 
         let captured = captured.recv().expect("captured session");
@@ -990,12 +973,13 @@ mod tests {
     #[test]
     fn a_5xx_rejection_parks_the_intent_and_a_4xx_one_keeps_it() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let blobs = stage.blobs();
 
-        let intent = stage_intent(&blobs, 1, PAYLOAD, b"body");
+        let intent = stage_intent(&stage, 1, &["b@y.org"], b"body");
         let (port, _) = spawn_smtp_sink(Sink::RejectData("554 rejected\r\n"));
         let mut channel = channel_to(port);
-        let failure = send_one(&mut channel, &blobs, &intent).expect_err("rejected");
+        let failure = send_one(&mut channel, blobs, &intent).expect_err("rejected");
         assert!(failure.parks(), "5xx must park: {}", failure.error());
         assert!(!failure.uncertain());
         assert!(
@@ -1003,10 +987,10 @@ mod tests {
             "a reply leaves the session usable"
         );
 
-        let intent = stage_intent(&blobs, 2, PAYLOAD, b"body");
+        let intent = stage_intent(&stage, 2, &["b@y.org"], b"body");
         let (port, _) = spawn_smtp_sink(Sink::RejectData("451 try later\r\n"));
         let mut channel = channel_to(port);
-        let failure = send_one(&mut channel, &blobs, &intent).expect_err("deferred");
+        let failure = send_one(&mut channel, blobs, &intent).expect_err("deferred");
         assert!(!failure.parks(), "4xx must retry: {}", failure.error());
         assert!(!failure.uncertain());
     }
@@ -1014,21 +998,22 @@ mod tests {
     #[test]
     fn a_reply_to_the_data_is_a_verdict_not_an_uncertainty() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let blobs = stage.blobs();
 
-        let intent = stage_intent(&blobs, 1, PAYLOAD, b"body");
+        let intent = stage_intent(&stage, 1, &["b@y.org"], b"body");
         let (port, _) = spawn_smtp_sink(Sink::RejectBody("452 mailbox full\r\n"));
         let mut channel = channel_to(port);
-        let failure = send_one(&mut channel, &blobs, &intent).expect_err("deferred");
+        let failure = send_one(&mut channel, blobs, &intent).expect_err("deferred");
         assert!(
             matches!(failure, SubmitFailure::Transient(_)),
             "{failure:?}"
         );
 
-        let intent = stage_intent(&blobs, 2, PAYLOAD, b"body");
+        let intent = stage_intent(&stage, 2, &["b@y.org"], b"body");
         let (port, _) = spawn_smtp_sink(Sink::RejectBody("552 too large\r\n"));
         let mut channel = channel_to(port);
-        let failure = send_one(&mut channel, &blobs, &intent).expect_err("refused");
+        let failure = send_one(&mut channel, blobs, &intent).expect_err("refused");
         assert!(
             matches!(failure, SubmitFailure::Permanent(_)),
             "{failure:?}"
@@ -1038,30 +1023,31 @@ mod tests {
     #[test]
     fn a_hang_up_after_the_dot_is_uncertain_and_before_it_is_not() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let blobs = stage.blobs();
 
-        let intent = stage_intent(&blobs, 1, PAYLOAD, b"body");
+        let intent = stage_intent(&stage, 1, &["b@y.org"], b"body");
         let (port, captured) = spawn_smtp_sink(Sink::HangUpAfterData);
         let mut channel = channel_to(port);
-        let failure = send_one(&mut channel, &blobs, &intent).expect_err("no verdict");
+        let failure = send_one(&mut channel, blobs, &intent).expect_err("no verdict");
         assert!(failure.uncertain(), "{failure:?}");
         assert!(failure.parks());
         assert!(channel.lost().is_some(), "the session is gone");
         assert_eq!(captured.recv().unwrap().data, b"body\r\n");
 
         // NOTE: the next message is not attempted on a lost session.
-        let next = stage_intent(&blobs, 2, PAYLOAD, b"body");
-        let failure = send_one(&mut channel, &blobs, &next).expect_err("not attempted");
+        let next = stage_intent(&stage, 2, &["b@y.org"], b"body");
+        let failure = send_one(&mut channel, blobs, &next).expect_err("not attempted");
         assert!(
             matches!(failure, SubmitFailure::Transient(_)),
             "{failure:?}"
         );
         channel.close();
 
-        let intent = stage_intent(&blobs, 3, PAYLOAD, b"body");
+        let intent = stage_intent(&stage, 3, &["b@y.org"], b"body");
         let (port, _) = spawn_smtp_sink(Sink::HangUpOnData);
         let mut channel = channel_to(port);
-        let failure = send_one(&mut channel, &blobs, &intent).expect_err("cut before data");
+        let failure = send_one(&mut channel, blobs, &intent).expect_err("cut before data");
         assert!(
             matches!(failure, SubmitFailure::Transient(_)),
             "{failure:?}"
@@ -1072,12 +1058,13 @@ mod tests {
     #[test]
     fn a_refusal_resets_the_transaction_for_the_next_message() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let blobs = stage.blobs();
 
-        let intent = stage_intent(&blobs, 1, PAYLOAD, b"body");
+        let intent = stage_intent(&stage, 1, &["b@y.org"], b"body");
         let (port, captured) = spawn_smtp_sink(Sink::RejectData("554 rejected\r\n"));
         let mut channel = channel_to(port);
-        send_one(&mut channel, &blobs, &intent).expect_err("rejected");
+        send_one(&mut channel, blobs, &intent).expect_err("rejected");
         channel.close();
 
         let captured = captured.recv().unwrap();
@@ -1087,20 +1074,86 @@ mod tests {
     #[test]
     fn an_undecodable_or_bodyless_intent_parks_instead_of_looping() {
         let dir = tempfile::tempdir().unwrap();
-        let blobs = PimdirBlobs::open(dir.path(), PimdirHashAlgo::default());
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let blobs = stage.blobs();
 
-        let broken = stage_intent(&blobs, 1, "not json", b"body");
+        let with_payload = |id, payload: &str| SubmitIntent {
+            payload: payload.to_owned(),
+            ..stage_intent(&stage, id, &["b@y.org"], b"body")
+        };
+
+        let broken = with_payload(1, "not json");
         assert!(broken.envelope().expect_err("malformed").parks());
         assert!(broken.subject().is_none());
-        let future = stage_intent(&blobs, 2, r#"{"v":9,"from":"a@x.org"}"#, b"body");
+        let future = with_payload(2, r#"{"v":9,"from":"a@x.org"}"#);
         assert!(future.envelope().expect_err("v9").parks());
 
         let bodyless = SubmitIntent {
             object: None,
-            ..stage_intent(&blobs, 3, r#"{"v":1,"from":"a@x.org"}"#, b"body")
+            ..stage_intent(&stage, 3, &["b@y.org"], b"body")
         };
-        let failure = prepare(&blobs, &bodyless).err().expect("no body to send");
+        let failure = prepare(blobs, &bodyless).err().expect("no body to send");
         assert!(failure.parks() && !failure.uncertain());
+    }
+
+    /// The payload himalaya wrote before io-pimdir typed it, its keys in
+    /// declaration order, reads as the one it writes now, its keys sorted.
+    #[test]
+    fn a_payload_reads_alike_whatever_its_key_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let object = stage.stage_body(b"Subject: hi\r\n\r\nhello").unwrap();
+        let hash = object.hash.as_str();
+
+        let declared = format!(
+            r#"{{"v":1,"object":"{hash}","from":"a@x.org","rcpts":["b@y.org"],"subject":"hi","source":"smtp","copy":"Sent"}}"#
+        );
+        let sorted = format!(
+            r#"{{"copy":"Sent","from":"a@x.org","object":"{hash}","rcpts":["b@y.org"],"source":"smtp","subject":"hi","v":1}}"#
+        );
+
+        let read = |payload: String| {
+            let intent = SubmitIntent {
+                id: 1,
+                collection: String::from("Sent"),
+                object: Some(object.hash.clone()),
+                payload,
+            };
+            prepare(stage.blobs(), &intent).expect("a sendable intent");
+            (
+                intent.envelope().expect("an envelope"),
+                intent.source(),
+                intent.copy(),
+                intent.subject(),
+            )
+        };
+
+        let now = read(sorted);
+        assert_eq!(read(declared), now);
+
+        let (envelope, source, copy, subject) = now;
+        assert_eq!(envelope.from, "a@x.org");
+        assert_eq!(envelope.rcpts, ["b@y.org"]);
+        assert_eq!(
+            (source.as_deref(), copy.as_deref(), subject.as_deref()),
+            (Some("smtp"), Some("Sent"), Some("hi"))
+        );
+    }
+
+    /// A payload naming another body than the row pins parks: either could
+    /// be the wrong message.
+    #[test]
+    fn a_payload_naming_another_body_parks() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let other = stage.stage_body(b"Subject: other\r\n\r\nother").unwrap();
+
+        let intent = SubmitIntent {
+            object: Some(other.hash),
+            ..stage_intent(&stage, 1, &["b@y.org"], b"Subject: hi\r\n\r\nhello")
+        };
+        let failure = prepare(stage.blobs(), &intent).err().expect("no send");
+        assert!(failure.parks() && !failure.uncertain(), "{failure:?}");
     }
 
     #[test]

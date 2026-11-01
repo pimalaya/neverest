@@ -20,6 +20,7 @@ use crate::{
         merger::Merger,
         report::{ConflictListOutput, ConflictResolveOutput, ConflictShowOutput, ConflictSummary},
     },
+    error::pimdir_error,
     offline::driver,
 };
 
@@ -210,11 +211,12 @@ impl ConflictResolveCommand {
             let _lock = acquire_store_lock(dir, LOCK_TIMEOUT)?;
 
             match conflict.apply(dir, name, &body)? {
-                Applied::Resolved => {
+                Applied::Resolved(partial) => {
                     return printer.out(ConflictResolveOutput::Resolved {
                         id: conflict.id,
                         collection: conflict.collection,
                         side: String::from(self.side()),
+                        partial,
                     });
                 }
                 Applied::Settled => bail!(
@@ -328,14 +330,26 @@ fn store_dir(name: &str, account_config: &AccountConfig) -> Result<PathBuf> {
 
 /// Opens the account's store for reading only.
 ///
-/// A reader owns nothing and takes no lock (pimdir SPEC §8), so any number of
-/// them run against a store a sync is holding. Every conflict command is a
+/// A reader owns nothing and takes no lock (pimdir STORAGE §8), so any number
+/// of them run against a store a sync is holding. Every conflict command is a
 /// read, and no read is a reason to keep a sync out.
 fn read(name: &str, dir: &Path) -> Result<PimdirReader> {
-    PimdirReader::open(dir).with_context(|| format!("Read the store of account {name}"))
+    PimdirReader::open(dir)
+        .map_err(pimdir_error)
+        .with_context(|| format!("Read the store of account {name}"))
 }
 
-#[cfg(test)]
+// NOTE: its one test settles a card, which a build without a contacts
+// backend cannot parse.
+#[cfg(all(
+    test,
+    any(
+        feature = "dav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    )
+))]
 mod tests {
     use std::{
         fmt, fs, thread,

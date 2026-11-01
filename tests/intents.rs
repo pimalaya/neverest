@@ -8,6 +8,11 @@
 //! ```sh
 //! cargo test --test intents
 //! ```
+//!
+//! Every test configures an IMAP source sending through an `smtp` table, so
+//! a build without either has nothing here to run.
+
+#![cfg(all(feature = "imap", feature = "smtp"))]
 
 use std::{
     fs,
@@ -25,8 +30,8 @@ use io_pimdir::{
         producer::{PimdirActionStatus, PimdirProducer},
         reader::PimdirReader,
     },
-    codec::PimdirAction,
-    object::PimdirObject,
+    collection::PimdirCollectionId,
+    intent::PimdirSubmit,
 };
 use serde_json::Value;
 
@@ -185,34 +190,17 @@ impl Fixture {
     /// Queues a send of `body`, as `himalaya pimdir message send` does,
     /// its copy filed in Sent when `copy` says so; returns the queue row.
     fn queue_send(&self, body: &[u8], copy: bool) -> i64 {
-        let reader = PimdirReader::open(self.store()).unwrap();
-        let hash = reader.hash(body);
-        let mut writer = reader.blobs().writer().unwrap();
-        writer.write_all(body).unwrap();
-        let size = writer.commit(&hash).unwrap();
-        let copy = match copy {
-            true => format!(",\"copy\":\"{SENT}\""),
-            false => String::new(),
+        let submit = |object| PimdirSubmit {
+            source: Some(String::from("imap")),
+            object,
+            from: String::from("a@example.org"),
+            rcpts: vec![String::from("b@example.org")],
+            subject: Some(String::from(SUBJECT)),
+            copy: copy.then(|| PimdirCollectionId::from(SENT)),
         };
-
         PimdirProducer::open(self.store(), "neverest-tests")
             .unwrap()
-            .enqueue(
-                SENT,
-                &PimdirAction::Unknown {
-                    kind: String::from("submit"),
-                    payload: format!(
-                        "{{\"v\":1,\"object\":\"{}\",\"from\":\"a@example.org\",\"rcpts\":[\"b@example.org\"],\
-                         \"subject\":\"{SUBJECT}\",\"source\":\"imap\"{copy}}}",
-                        hash.0,
-                    ),
-                    object_hash: Some(hash.clone()),
-                },
-                Some(&PimdirObject {
-                    hash,
-                    size: size as usize,
-                }),
-            )
+            .enqueue_with_body(SENT, body, |object| submit(object).to_action().unwrap())
             .unwrap()
     }
 
@@ -309,8 +297,9 @@ fn a_send_without_a_verdict_is_parked_as_uncertain() {
     };
     assert!(error.starts_with("uncertain: "), "{error}");
 
-    // NOTE: the next run has nothing to send, the server being gone.
-    let report = fixture.intents_only(0);
+    // NOTE: the next run has nothing to send, the server being gone, and
+    // still exits 2 over the parked send waiting for a person.
+    let report = fixture.intents_only(2);
     assert!(report.get("submitted").is_none(), "{report}");
     assert!(report.get("unreached").is_none(), "{report}");
     assert_eq!(report["parked"][0]["id"], id, "{report}");

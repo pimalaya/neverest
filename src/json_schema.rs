@@ -36,6 +36,8 @@ pub fn registry() -> JsonSchemaRegistry {
 
     insert!("neverest-check", crate::cli::check::CheckOutput);
     insert!("neverest-drain", crate::cli::drain::DrainOutput);
+    #[cfg(feature = "search")]
+    insert!("neverest-index", crate::cli::index::IndexOutput);
     #[cfg(feature = "wizard")]
     insert!("neverest-configure", crate::cli::configure::ConfigureOutput);
     insert!("neverest-init", crate::cli::init::InitOutput);
@@ -53,7 +55,7 @@ pub fn registry() -> JsonSchemaRegistry {
         crate::conflict::report::ConflictResolveOutput
     );
 
-    insert!("neverest-error", ErrorReport);
+    insert!("neverest-error", ErrorReport<crate::error::ErrorCode>);
 
     JsonSchemaRegistry {
         bin: "neverest",

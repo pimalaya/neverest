@@ -103,6 +103,43 @@ pub struct SyncOutput {
     /// of its listings, not the protocol around them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub downloaded: Vec<SourceDownload>,
+    /// The collections whose last convergence pass still moved something:
+    /// the run stopped before they settled, so it is incomplete (exit 3)
+    /// and a rerun goes on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unsettled: Vec<String>,
+    /// The listings that found most of what a collection held gone, and so
+    /// dropped nothing (pimdir SYNC §5, §8; counted as warnings).
+    ///
+    /// Read as a truncated or emptied answer until a person confirms it
+    /// with `sync --accept-absences`: a rerun alone parks again, so the run
+    /// waits for a person (exit 2), its round left open not counting as
+    /// incomplete.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absences: Vec<ParkedAbsence>,
+    /// The changes withheld because the body they upload was missing from
+    /// the store or did not match its name (pimdir STORAGE §7; counted as
+    /// warnings). The store needs a repair a rerun does not make, so the
+    /// run waits for a person (exit 2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unreadable: Vec<UnreadableBodies>,
+    /// The bodies a policy did not adopt, each kept as a retained item
+    /// (pimdir SYNC §9; counted as warnings): settling a side's write, or
+    /// applying a queued action.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overruled: Vec<OverruledBody>,
+    /// The pushes a side's server gave no outcome for, left pending: a
+    /// rerun pushes them again, so the run is incomplete (exit 3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unanswered: Vec<UnansweredPushes>,
+    /// What the run did to the store's search index (pimdir SEARCH), absent
+    /// from a dry run and from a build without the `search` feature.
+    ///
+    /// An index failure is reported here and counted as a warning, and
+    /// never changes the exit code: the index is derived, the next run
+    /// refreshes it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<IndexRefresh>,
 }
 
 impl SyncOutput {
@@ -134,6 +171,12 @@ impl SyncOutput {
             throttled,
             coverage,
             downloaded,
+            unsettled,
+            absences,
+            unreadable,
+            overruled,
+            unanswered,
+            index: _,
         } = other;
 
         self.collection.patch.extend(collection.patch);
@@ -150,6 +193,11 @@ impl SyncOutput {
         self.throttled.extend(throttled);
         self.coverage.extend(coverage);
         self.downloaded.extend(downloaded);
+        self.unsettled.extend(unsettled);
+        self.absences.extend(absences);
+        self.unreadable.extend(unreadable);
+        self.overruled.extend(overruled);
+        self.unanswered.extend(unanswered);
     }
 
     /// Records a divergence this run parked, unless the run named it already.
@@ -172,29 +220,40 @@ impl SyncOutput {
     /// Whether the run left work no rerun clears, which the exit code answers.
     ///
     /// A divergence waiting for a decision, a duplicate `UID` the other side
-    /// will not take, a write a remote refused and a send that may have been
-    /// delivered are one class: waiting until a person acts, and none of
-    /// them a failure of the run.
+    /// will not take, a write a remote refused, a send or an intent parked
+    /// (refused for good, or possibly delivered) and a queued action the
+    /// store holds parked are one class: waiting until a person acts, and
+    /// none of them a failure of the run. So are a listing that parked a
+    /// mass absence, which a person confirms, and a change withheld over a
+    /// body the store cannot serve, which a person repairs: a rerun alone
+    /// meets each again.
     pub fn left_waiting(&self) -> bool {
         self.outstanding_conflicts > 0
+            || !self.absences.is_empty()
+            || !self.unreadable.is_empty()
             || !self.refused.is_empty()
             || !self.rejected.is_empty()
-            || self.submitted.iter().any(|entry| entry.uncertain)
+            || !self.parked.is_empty()
+            || self.submitted.iter().any(|entry| entry.parked)
+            || self.intents.iter().any(|entry| entry.parked)
     }
 
     /// Whether the run left work a rerun picks up: a source it could not
     /// scan, a hunk it could not apply, a send or an intent that failed
-    /// without parking, a source that gave up throttled. An unreachable
-    /// server reads this way, and only this way, a run with nothing to do
-    /// never carrying an error. A send channel that did not open is named
-    /// in `unreached` alone, having no collection to scan.
+    /// without parking, a source that gave up throttled, a collection that
+    /// had not settled, a push its server answered nothing for. An
+    /// unreachable server reads this way, and only this way, a run with
+    /// nothing to do never carrying an error. A send channel that did not
+    /// open is named in `unreached` alone, having no collection to scan.
     pub fn incomplete(&self) -> bool {
         !self.throttled.is_empty()
+            || !self.unanswered.is_empty()
             || !self.unreached.is_empty()
+            || !self.unsettled.is_empty()
             || self
                 .coverage
                 .iter()
-                .any(|coverage| coverage.round.is_some())
+                .any(|coverage| coverage.round.is_some() && !self.parks(coverage))
             || self
                 .collection
                 .patch
@@ -209,6 +268,195 @@ impl SyncOutput {
                 .intents
                 .iter()
                 .any(|entry| entry.error.is_some() && !entry.parked)
+    }
+}
+
+impl SyncOutput {
+    /// Whether `coverage`'s round is open because its listing parked a
+    /// mass absence: it waits for a person, not for a rerun.
+    fn parks(&self, coverage: &CollectionCoverage) -> bool {
+        self.absences.iter().any(|parked| {
+            parked.side == coverage.source && parked.collection == coverage.collection
+        })
+    }
+}
+
+/// A listing that found most of what a collection held gone, and dropped
+/// nothing (pimdir SYNC §5, §8).
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ParkedAbsence {
+    /// The side whose listing it was.
+    pub side: String,
+    /// The collection, as the side names it.
+    pub collection: String,
+    /// The bound items the listing left out.
+    pub absent: usize,
+    /// The bound items counted: those in the round's scope, or the whole
+    /// collection for a rebuild.
+    pub bound: usize,
+    /// Whether it was the rebuild a renumbered collection asks for, rather
+    /// than a round of a sync.
+    pub rebuild: bool,
+}
+
+impl fmt::Display for ParkedAbsence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            absent,
+            bound,
+            rebuild,
+        } = self;
+        let listing = if *rebuild {
+            "the rebuild of"
+        } else {
+            "the listing of"
+        };
+        write!(
+            f,
+            "{listing} {collection} on {side} left out {absent} of {bound} items, so nothing was dropped; once the server is known to hold no more, sync again with --accept-absences"
+        )
+    }
+}
+
+/// The changes one side withheld over bodies the store could not serve.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnreadableBodies {
+    /// The side the changes were for.
+    pub side: String,
+    /// The collection, as the side names it.
+    pub collection: String,
+    /// How many changes were withheld.
+    pub count: usize,
+}
+
+impl fmt::Display for UnreadableBodies {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            count,
+        } = self;
+        write!(
+            f,
+            "{count} change(s) to {collection} on {side} withheld: their body is missing from the store or does not match its name"
+        )
+    }
+}
+
+/// A body a policy did not adopt, kept as a retained item.
+///
+/// Settled by a side's write, which `side` and `id` name, or by the drain
+/// applying a queued action, which `action` names.
+#[derive(Debug, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OverruledBody {
+    /// The side whose write settled it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub side: Option<String>,
+    /// The collection: as the side names it, else as the store does.
+    pub collection: String,
+    /// The item's handle on that side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The queue row whose apply settled it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<i64>,
+    /// The key of the retained item keeping the losing body.
+    pub kept: String,
+}
+
+impl fmt::Display for OverruledBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            id,
+            action,
+            kept,
+        } = self;
+        match (side, id, action) {
+            (Some(side), Some(id), _) => write!(f, "item {id} in {collection} on {side}")?,
+            (_, _, Some(action)) => write!(f, "queued action #{action} in {collection}")?,
+            _ => write!(f, "an item in {collection}")?,
+        }
+        write!(
+            f,
+            " settled by policy, the other body kept as retained item {kept}"
+        )
+    }
+}
+
+/// The pushes one side's server gave no outcome for.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnansweredPushes {
+    /// The side the pushes were for.
+    pub side: String,
+    /// The collection, as the side names it.
+    pub collection: String,
+    /// How many pushes the last pass left unanswered.
+    pub count: usize,
+}
+
+impl fmt::Display for UnansweredPushes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            count,
+        } = self;
+        write!(
+            f,
+            "{count} change(s) to {collection} on {side} got no answer from the server, pushed again by the next run"
+        )
+    }
+}
+
+/// What a refresh did to the store's search index.
+///
+/// The index folds the store's change feed in batches until it is current
+/// or a deadline passes; a refresh the deadline cut leaves it `behind`, and
+/// the next refresh goes on from there.
+#[derive(Debug, Default, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexRefresh {
+    /// Changes of the store folded in.
+    pub folded: u64,
+    /// Bodies extracted and indexed for the first time.
+    pub indexed: u64,
+    /// Changes of the store not folded in yet: 0 once the index is current.
+    pub behind: u64,
+    /// Whether another indexer held the index, so this one did nothing.
+    pub busy: bool,
+    /// Why the refresh failed, the index left as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl fmt::Display for IndexRefresh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            folded,
+            indexed,
+            behind,
+            busy,
+            error,
+        } = self;
+        if let Some(error) = error {
+            return write!(f, "search index not refreshed: {error}");
+        }
+        if *busy {
+            return write!(f, "search index held by another indexer, not refreshed");
+        }
+        write!(f, "folded {folded} change(s), {indexed} new body(ies)")?;
+        match behind {
+            0 => write!(f, ", current"),
+            n => write!(f, ", {n} change(s) behind, the next run goes on"),
+        }
     }
 }
 
@@ -677,7 +925,15 @@ impl fmt::Display for SyncOutput {
             + self.parked.len()
             + self.conflicts.len()
             + self.refused.len()
-            + self.rejected.len();
+            + self.rejected.len()
+            + self.absences.len()
+            + self.unreadable.len()
+            + self.overruled.len()
+            + self.unanswered.len()
+            + self
+                .index
+                .as_ref()
+                .map_or(0, |index| usize::from(index.error.is_some()));
 
         if !self.drained.is_empty() {
             writeln!(f, "Queue ({n}):", n = self.drained.len())?;
@@ -746,6 +1002,17 @@ impl fmt::Display for SyncOutput {
             writeln!(f)?;
         }
 
+        // NOTE: a refresh with nothing to fold says nothing worth a line, and
+        // a failed one is a warning.
+        if let Some(index) = &self.index
+            && index.error.is_none()
+            && (index.folded > 0 || index.behind > 0 || index.busy)
+        {
+            writeln!(f, "Search index:")?;
+            writeln!(f, " - {index}")?;
+            writeln!(f)?;
+        }
+
         if warnings > 0 {
             writeln!(f, "Warnings ({warnings}):")?;
             for c in &self.collisions {
@@ -763,6 +1030,23 @@ impl fmt::Display for SyncOutput {
             for p in &self.parked {
                 writeln!(f, " - {p}")?;
             }
+            for a in &self.absences {
+                writeln!(f, " - {a}")?;
+            }
+            for u in &self.unreadable {
+                writeln!(f, " - {u}")?;
+            }
+            for o in &self.overruled {
+                writeln!(f, " - {o}")?;
+            }
+            for u in &self.unanswered {
+                writeln!(f, " - {u}")?;
+            }
+            if let Some(index) = &self.index
+                && index.error.is_some()
+            {
+                writeln!(f, " - {index}")?;
+            }
             writeln!(f)?;
         }
 
@@ -772,6 +1056,14 @@ impl fmt::Display for SyncOutput {
                 "Conflicts: {n} item(s) waiting for a decision",
                 n = self.outstanding_conflicts,
             )?;
+            writeln!(f)?;
+        }
+
+        if !self.unsettled.is_empty() {
+            writeln!(f, "Unsettled ({n}):", n = self.unsettled.len())?;
+            for collection in &self.unsettled {
+                writeln!(f, " - {collection} was still moving when the run stopped")?;
+            }
             writeln!(f)?;
         }
 

@@ -4,7 +4,7 @@
 //!
 //! One collection may hold two messages with the same `Message-ID`, and a copy
 //! legitimately carries the identifier of the message it copies. The engine
-//! mints a key of its own for the second copy (pimdir SPEC §9) instead of
+//! mints a key of its own for the second copy (pimdir STORAGE §9) instead of
 //! freezing the identity, so what this replays is the write side of that:
 //!   1. Seed one copy on A and two on B, then sync. Both copies cross: A ends
 //!      up holding the message twice, and the report warns about nothing.

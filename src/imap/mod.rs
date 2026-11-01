@@ -5,3 +5,5 @@
 
 pub mod backend;
 pub mod client;
+#[cfg(test)]
+pub mod fake;

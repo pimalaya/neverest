@@ -40,11 +40,8 @@ use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
 use crate::{
-    client::{EnumEntry, Enumeration, WrittenItem},
-    item::{
-        collection::Collection,
-        flag::{Flag, FlagOp},
-    },
+    client::{EnumEntry, Enumeration, Gone, WrittenItem},
+    item::{collection::Collection, flag::Flag},
     throttle::{GoogleAnswer, GoogleWaits, Request, Throttle},
 };
 
@@ -310,6 +307,10 @@ impl GpeopleClient {
     }
 
     /// Streams one person's vCard into `sink`, returning its etag.
+    ///
+    /// A person People answers missing (404, 410) fails with [`Gone`]: one
+    /// deleted since its listing is owed nothing more in the run, rather
+    /// than failing the address book's fetch in every run.
     pub fn get_item_stream(
         &mut self,
         collection: &str,
@@ -318,7 +319,13 @@ impl GpeopleClient {
     ) -> Result<Option<String>> {
         ensure_contacts(collection)?;
 
-        let person = self.person(id)?;
+        let person = match self.person(id) {
+            Ok(person) => person,
+            Err(err) if is_missing(&err) => {
+                return Err(err.context(Gone(format!("{id} in {collection}"))));
+            }
+            Err(err) => return Err(err),
+        };
         sink.write_all(person.to_vcard().as_bytes())
             .with_context(|| format!("Stream person {id} error"))?;
         Ok(Some(person.etag))
@@ -423,7 +430,7 @@ impl GpeopleClient {
     }
 
     /// Rejected: People contacts have no flags.
-    pub fn store_flags(&mut self, _ids: &[&str], _flags: &[Flag], _op: FlagOp) -> Result<()> {
+    pub fn update_flags(&mut self, _ids: &[&str], _add: &[Flag], _remove: &[Flag]) -> Result<()> {
         bail!("Google contacts have no flags (store not supported)")
     }
 }
@@ -449,6 +456,16 @@ fn is_expired(err: &anyhow::Error) -> bool {
             _ => false,
         },
     )
+}
+
+/// Whether a read failed on a person People no longer holds (HTTP 404, 410).
+fn is_missing(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<GpeopleClientStdError>(),
+            Some(GpeopleClientStdError::Send(send)) if matches!(send.status(), Some(404 | 410))
+        )
+    })
 }
 
 /// Whether an error text names an expired sync token.
@@ -488,5 +505,53 @@ mod tests {
     fn people_has_one_address_book() {
         assert!(ensure_contacts(CONTACTS).is_ok());
         assert!(ensure_contacts("friends").is_err());
+    }
+
+    /// A stream answering one canned response, discarding what is written.
+    struct Canned(Vec<u8>);
+
+    impl Read for Canned {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.0.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.0[..n]);
+            self.0.drain(..n);
+            Ok(n)
+        }
+    }
+
+    impl Write for Canned {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A person deleted between its listing and its read is gone: failing
+    /// instead, it would fail the fetch of the address book in every run
+    /// until a listing took it away.
+    #[test]
+    fn a_person_missing_from_its_read_is_gone() {
+        for status in ["404 Not Found", "410 Gone"] {
+            let body = r#"{"error":{"code":404,"message":"Not Found"}}"#;
+            let answer = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let mut client = GpeopleClient {
+                inner: GpeopleClientStd::new(Canned(answer.into_bytes()), "token"),
+                tls: Tls::default(),
+                alive: true,
+                throttle: Arc::new(Throttle::new("gpeople")),
+            };
+
+            let err = client
+                .get_item_stream(CONTACTS, "c1", Vec::new())
+                .expect_err("no person to read");
+
+            assert!(Gone::is(&err), "{status}: {err:#}");
+        }
     }
 }

@@ -17,6 +17,7 @@ use crate::{
     account::Account,
     client,
     config::Config,
+    error::pimdir_error,
     offline::{driver, state::StoreState},
 };
 
@@ -69,6 +70,7 @@ impl InitCommand {
         fs::create_dir_all(&replica)
             .with_context(|| format!("Create replica dir {}", replica.display()))?;
         PimdirStore::open(&replica)
+            .map_err(pimdir_error)
             .with_context(|| format!("Create pimdir store {}", replica.display()))?;
         // NOTE: stamped here, so the first sync compares against what `init`
         // opened rather than against nothing.

@@ -13,6 +13,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -116,8 +117,8 @@ impl StoreState {
             if dir.join("pimdir.db").exists() {
                 bail!(
                     "The store at {} was written before collection ids carried their \
-                     namespace, and is not read. Drop it with `neverest sync --reset` and let it \
-                     resync.",
+                     namespace, and is not read: `neverest sync --reset --force` moves \
+                     it aside, deleting nothing, and syncs the account anew.",
                     dir.display(),
                 );
             }
@@ -135,8 +136,9 @@ impl StoreState {
 
         if state.layout != LAYOUT {
             bail!(
-                "The store at {} uses collection-id layout {} and this neverest writes {LAYOUT}; \
-                 drop it with `neverest sync --reset` and let it resync.",
+                "The store at {} uses collection-id layout {} and this neverest writes {LAYOUT}: \
+                 `neverest sync --reset --force` moves it aside, deleting nothing, and \
+                 syncs the account anew.",
                 dir.display(),
                 state.layout,
             );
@@ -167,13 +169,23 @@ impl StoreState {
     }
 
     /// Writes the sidecar back, stamping the current layout.
+    ///
+    /// Written aside, synced, then renamed over the old one, so a run killed
+    /// while saving leaves the old sidecar or the new one, never a torn file
+    /// the next run refuses.
     pub fn save(&mut self, dir: &Path) -> Result<()> {
         self.layout = LAYOUT;
 
         let path = Self::path(dir);
         let raw = serde_json::to_string_pretty(self).context("Serialize store state error")?;
 
-        fs::write(&path, raw).with_context(|| format!("Write {} error", path.display()))
+        let staged = path.with_extension("json.new");
+        let mut file =
+            fs::File::create(&staged).with_context(|| format!("Create {}", staged.display()))?;
+        file.write_all(raw.as_bytes())
+            .and_then(|()| file.sync_all())
+            .with_context(|| format!("Write {} error", staged.display()))?;
+        fs::rename(&staged, &path).with_context(|| format!("Write {} error", path.display()))
     }
 
     /// Refuses a run whose mode would discard what the previous one kept.
@@ -234,6 +246,32 @@ impl StoreState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A save replaces the sidecar whole, by a rename over it, rather than
+    /// rewriting it in place, where a crash leaves a torn file the next run
+    /// refuses: the file after a save is another one, and nothing is left
+    /// beside it.
+    #[test]
+    #[cfg(unix)]
+    fn a_save_replaces_the_sidecar_whole() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        StoreState::stamp(dir.path(), None).unwrap();
+        let before = fs::metadata(StoreState::path(dir.path())).unwrap().ino();
+
+        let mut state = StoreState::load(dir.path()).unwrap();
+        state.save(dir.path()).unwrap();
+
+        let after = fs::metadata(StoreState::path(dir.path())).unwrap().ino();
+        assert_ne!(before, after);
+        let names: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, [FILE]);
+        StoreState::load(dir.path()).unwrap();
+    }
 
     fn mode(sources: usize, targets: usize, one_way: bool, retain: bool) -> AccountMode {
         AccountMode {

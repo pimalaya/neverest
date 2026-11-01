@@ -108,8 +108,9 @@ pub struct SyncOutput {
     /// and a rerun goes on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unsettled: Vec<String>,
-    /// The listings that found most of what a collection held gone, and so
-    /// dropped nothing (pimdir SYNC §5, §8; counted as warnings).
+    /// The listings that found most of what a collection held gone, or that
+    /// named no member while the collection held some, and so dropped
+    /// nothing (pimdir SYNC §5, §8; counted as warnings).
     ///
     /// Read as a truncated or emptied answer until a person confirms it
     /// with `sync --accept-absences`: a rerun alone parks again, so the run
@@ -224,9 +225,9 @@ impl SyncOutput {
     /// (refused for good, or possibly delivered) and a queued action the
     /// store holds parked are one class: waiting until a person acts, and
     /// none of them a failure of the run. So are a listing that parked a
-    /// mass absence, which a person confirms, and a change withheld over a
-    /// body the store cannot serve, which a person repairs: a rerun alone
-    /// meets each again.
+    /// mass absence or an emptied collection, which a person confirms, and
+    /// a change withheld over a body the store cannot serve, which a person
+    /// repairs: a rerun alone meets each again.
     pub fn left_waiting(&self) -> bool {
         self.outstanding_conflicts > 0
             || !self.absences.is_empty()
@@ -273,7 +274,8 @@ impl SyncOutput {
 
 impl SyncOutput {
     /// Whether `coverage`'s round is open because its listing parked a
-    /// mass absence: it waits for a person, not for a rerun.
+    /// mass absence or an emptied collection: it waits for a person, not
+    /// for a rerun.
     fn parks(&self, coverage: &CollectionCoverage) -> bool {
         self.absences.iter().any(|parked| {
             parked.side == coverage.source && parked.collection == coverage.collection
@@ -281,8 +283,9 @@ impl SyncOutput {
     }
 }
 
-/// A listing that found most of what a collection held gone, and dropped
-/// nothing (pimdir SYNC §5, §8).
+/// A listing that found most of what a collection held gone, or that named
+/// no member while the collection held some, and dropped nothing (pimdir
+/// SYNC §5, §8).
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ParkedAbsence {

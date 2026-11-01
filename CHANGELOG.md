@@ -8,11 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 Upgrading from 0.3.0:
 
-- A 0.3.0 store is brought to the new schema when first opened. A store a git master build wrote is refused as stale: `neverest sync --reset --force -a <account>` moves it aside and resyncs into a fresh one.
+- Every store an earlier neverest wrote, 0.3.0 or a git build, is refused (`store-version`), never migrated: sync it with the neverest that wrote it until nothing is queued, upgrade, then move it aside and sync a new one (MIGRATION.md).
 - `collection.delete` now defaults to false: set `collection.delete = true` on each endpoint whose collection deletions should reach the other.
 - `sync --reset` refuses while the store holds work no server has, listing it; `--reset --force` moves the store aside instead of deleting it.
 - `sync` exits 2 for a parked send, intent or queue action too, and 3 when the run could not do all its work: a script must tell 2 and 3 from 1.
-- A listing that leaves out more than half of at least 20 items a collection held drops nothing and exits 2: `sync --accept-absences` confirms such absences, for one run.
+- A listing that leaves out more than half of at least 20 items a collection held, or names none while it held some, drops nothing and exits 2: `sync --accept-absences` confirms such absences, for one run.
+- A store another user can read is refused (`store-exposed`): `chmod 700` its directory and `chmod 600` its pimdir.db.
 
 ### Added
 
@@ -58,7 +59,7 @@ Upgrading from 0.3.0:
 
 - Added capability declarations: each source declares in the store what it can push or perform, so a frontend refuses an unsupported action before queueing it.
 
-  A CalDAV calendar whose component set leaves VTODO out, and every Google or Graph calendar, declares that it takes no tasks (`x-vtodo` `none`).
+  A CalDAV calendar whose component set leaves VTODO out, and every Google or Graph calendar, declares that it takes no tasks (`calendar.component.vtodo` `none`).
 
 - Added the `collection-create` intent on IMAP, Gmail, CalDAV and CardDAV, performed at the start of a sync.
 
@@ -82,11 +83,11 @@ Upgrading from 0.3.0:
 
 - Added the `wizard` cargo feature, on by default, gating `configure` and the offer a first run makes.
 
-- Added `sync --accept-absences`: a listing leaving out more than half of at least 20 items a collection held (a round, or the rebuild of a renumbered IMAP mailbox) drops what it left out, for this run.
+- Added `sync --accept-absences`: a listing leaving out more than half of at least 20 items a collection held, or naming none while it held some (a round, or the rebuild of a renumbered IMAP mailbox), drops what it left out, for this run.
 
   Without it such a listing drops nothing and is reported under `absences`.
 
-- Added `absences`, `unreadable` and `overruled` to the sync report: the listings that left out most of a collection, the changes withheld because their body is missing from the store or does not match its name, and the bodies a policy did not adopt, kept as retained items.
+- Added `absences`, `unreadable` and `overruled` to the sync report: the listings that left out most of a collection or all of it, the changes withheld because their body is missing from the store or does not match its name, and the bodies a policy did not adopt, kept as retained items, a body fetched to settle a divergence by the endpoint's policy included.
 
   A body the drain kept aside applying a queued action is named by its queue row (`action`), in the sync report and the `drain` output.
 
@@ -106,7 +107,11 @@ Upgrading from 0.3.0:
 
 - Added `neverest-error`, the JSON Schema of the failure object.
 
-- Added `code` to the JSON failure object of a store failure: the code io-pimdir gives it (`store-newer`, `store-stale`, `store-busy`, `store-owned`, `store-foreign`, `index-fts5-missing` and the others its `PimdirError::code` lists), so a caller tells an upgrade or a retry from any other failure.
+- Added `code` to the JSON failure object of a store failure: the code io-pimdir gives it (`store-version`, `sync-version`, `store-exposed`, `store-busy`, `store-owned`, `store-foreign`, `action-malformed`, `flag-invalid`, `index-fts5-missing`, `index-version` and the others its `PimdirError::code` lists), so a caller tells a reinstall, an upgrade or a retry from any other failure.
+
+- Added the enumeration of a scoped mail round: every page of a round a date filter narrowed says so, and its last page hands every handle the collection holds, read with no date filter (IMAP `UID SEARCH ALL`, the Gmail label's ids, the Graph folder's ids from the pass closing the round).
+
+  An undated draft received before the window, or a message whose `Date` runs ahead of its arrival, is no longer dropped from the store by a scoped round that did not list it.
 
 ### Changed
 
@@ -118,11 +123,11 @@ Upgrading from 0.3.0:
 
   It is refused beside `--dry-run`, `-m`, `-x` and `-s`, and drops the search index too.
 
-- Changed the `submit` payload to be read by io-pimdir's `PimdirSubmit`: one without `object` or a recipient, or naming another body than the queue row pins, parks instead of being sent.
+- Changed the `submit` payload to be read by io-pimdir's `PimdirSubmit`: one without `source` or a recipient, or naming a body (`object`, the message being the queue row's body), parks instead of being sent.
 
 - **BREAKING**: changed `sync` to exit 2 when a send or an intent parked, or while the store holds a parked queue action, where it exited 0.
 
-- **BREAKING**: changed `sync` to exit 2 when a listing left out more than half of at least 20 items a collection held, or a change was withheld over a body the store cannot serve, where the listing dropped them and the run exited 0.
+- **BREAKING**: changed `sync` to exit 2 when a listing left out more than half of at least 20 items a collection held, or named none while it held some, or a change was withheld over a body the store cannot serve, where the listing dropped them and the run exited 0.
 
 - **BREAKING**: changed `sync` to exit 3 when the run could not do all its work, where it exited 0: an unreached endpoint (an SMTP channel included), a hunk, a send or an intent failed without parking, a throttled source, a round left open, or a collection still moving after the last convergence pass.
 
@@ -170,7 +175,15 @@ Upgrading from 0.3.0:
 
 - Changed piped `--json` output to print one value per line, each `json-schema` schema carrying an `$id` naming the contract version.
 
-- Bumped io-pimdir to 0.8: opening a store brings an older one to the canonical schema.
+- Changed a body fetched to settle a divergence to settle it by the endpoint's policy: a one-way target's own edit is kept as a retained item and reported under `overruled`, a source's adopted, a two-way endpoint's left for the merge.
+
+- Changed the store a dry run copies, and the directory `sync --reset --force` moves a store into, to be their user's alone, as the store is.
+
+- Changed `init` on an initialized account to name `sync --reset`, where it advised deleting the store.
+
+- Bumped io-pimdir to 0.8 (pimdir storage-draft-08, sync-draft-07, search-draft-08): a store any earlier neverest wrote is refused, never migrated.
+
+- Bumped rusqlite to 0.41.
 
 - Bumped ical-rs to 0.6.
 

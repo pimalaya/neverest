@@ -721,6 +721,23 @@ impl GmailClient {
             trace!("left: {left:?}");
         }
 
+        // NOTE: `after:` and `before:` read the arrival, so they miss an
+        // undated draft received before the window and a message whose
+        // `Date` runs ahead of its arrival: a narrowed round's last page
+        // hands every id of the label, which no date filter narrowed
+        // (pimdir SYNC §4, §5), ids alone, PAGE_SIZE a listing, read after
+        // the page's own. A band round hands none: the engine finds absent
+        // there only a member dated in the band, below the round's opening,
+        // which the enumeration could not keep.
+        let narrowed = query.is_some();
+        let enumerated = match narrowed && !band && page.next_page_token.is_none() {
+            true => Some(
+                self.list_ids(label, None, None)
+                    .with_context(|| format!("Enumerate the ids of {collection} error"))?,
+            ),
+            false => None,
+        };
+
         debug!("end of gmail round page");
         trace!(
             "items: {}, last: {}",
@@ -735,6 +752,8 @@ impl GmailClient {
             cursor: page.next_page_token.map(String::into_bytes),
             checkpoint,
             bytes,
+            narrowed,
+            enumerated,
         }))
     }
 

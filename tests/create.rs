@@ -154,11 +154,19 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
     let id = created["id"].as_str().unwrap().to_owned();
     assert_eq!(id, name.replace(' ', "-"), "{checked}");
 
-    // NOTE: a calendar does not nest, so a parent parks the row.
+    // NOTE: a calendar does not nest, so a parent parks the row, and a
+    // parked intent waits for a person (exit 2).
     producer
         .enqueue_collection_create("caldav/default", "Sub", Some("caldav/default"), None)
         .expect("queue a child calendar");
-    let report = sync(&config, &state, "default");
+    let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &config.to_string_lossy()])
+        .args(["sync", "-a", "create", "-m", "default", "--json"])
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .expect("spawn neverest");
+    let report = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(2), "{report}");
     let intents: Value = serde_json::from_str(&report).unwrap();
     assert_eq!(intents["intents"][0]["parked"], true, "{report}");
 

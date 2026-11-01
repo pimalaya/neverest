@@ -39,6 +39,7 @@ use io_oauth::{
 };
 use io_pimdir::{
     client::{
+        PimdirStore,
         blobs::PimdirBlobs,
         producer::PimdirProducer,
         reader::{PimdirItem, PimdirReader},
@@ -252,12 +253,31 @@ impl Replica {
     /// may touch an item on its own (Exchange bumps an event's change key
     /// after creating it), which parks a push until the next run merges it.
     /// A wait out of a throttled run moves the deadline as far.
-    pub fn sync_until(&self, key: &str, what: &str, mut check: impl FnMut(&Self) -> bool) {
+    pub fn sync_until(&self, key: &str, what: &str, check: impl FnMut(&Self) -> bool) {
+        self.sync_until_with(key, what, &[], check);
+    }
+
+    /// Syncs as [`sync_until`](Self::sync_until) does a collection whose
+    /// last member goes: a round listing it empty parks the absence (pimdir
+    /// SYNC §5), so each run confirms it with `--accept-absences`, as the
+    /// person who emptied it does.
+    pub fn sync_until_emptied(&self, key: &str, what: &str, check: impl FnMut(&Self) -> bool) {
+        self.sync_until_with(key, what, &["--accept-absences"], check);
+    }
+
+    fn sync_until_with(
+        &self,
+        key: &str,
+        what: &str,
+        extra: &[&str],
+        mut check: impl FnMut(&Self) -> bool,
+    ) {
         let mut deadline = Instant::now() + SETTLE;
+        let mut args = vec!["sync", "-a", ACCOUNT, "-m", key, "--json"];
+        args.extend(extra);
 
         loop {
-            let (code, report, waited) =
-                self.run_waiting(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[0, 2]);
+            let (code, report, waited) = self.run_waiting(&args, &[0, 2]);
             deadline += waited;
             if code == 0 && check(self) {
                 return;
@@ -301,8 +321,7 @@ impl Replica {
             return String::new();
         };
 
-        let reader = PimdirReader::open(self.store()).expect("open the store");
-        let blobs = PimdirBlobs::open(self.store(), reader.hash_algo());
+        let blobs = PimdirBlobs::open(self.store());
         let mut body = String::new();
         if let Some(mut file) = blobs.reader(hash).expect("open the blob") {
             file.read_to_string(&mut body).expect("read the blob");
@@ -367,6 +386,42 @@ impl Replica {
     pub fn sync_intents(&self, key: &str) -> Vec<serde_json::Value> {
         let report: serde_json::Value =
             serde_json::from_str(&self.sync(key)).expect("the report is JSON");
+        report["intents"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// Syncs once as [`sync_intents`](Self::sync_intents) does, for an
+    /// intent removing the collection's last member (a cancelled meeting):
+    /// the run's round lists the collection empty, which parks unless the
+    /// run confirms it (pimdir SYNC §5), as the person cancelling does.
+    pub fn sync_intents_emptied(&self, key: &str) -> Vec<serde_json::Value> {
+        let args = [
+            "sync",
+            "-a",
+            ACCOUNT,
+            "-m",
+            key,
+            "--accept-absences",
+            "--json",
+        ];
+        let (_, stdout) = self.run(&args, &[0]);
+        let report: serde_json::Value = serde_json::from_str(&stdout).expect("the report is JSON");
+        report["intents"].as_array().cloned().unwrap_or_default()
+    }
+
+    /// Syncs once, expecting an intent to park, a run that then waits for
+    /// a person (exit 2), and returns the report's `intents` entries. The
+    /// parked rows are then cancelled, as the person settling them does, so
+    /// the next run has nothing left to decide.
+    pub fn sync_parked_intents(&self, key: &str) -> Vec<serde_json::Value> {
+        let (_, stdout) = self.run(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[2]);
+        let report: serde_json::Value = serde_json::from_str(&stdout).expect("the report is JSON");
+        let parked = PimdirReader::open(self.store())
+            .expect("open the store")
+            .parked_actions()
+            .expect("list the parked actions");
+        for row in parked {
+            PimdirStore::cancel_action(self.store(), row.id).expect("cancel the parked row");
+        }
         report["intents"].as_array().cloned().unwrap_or_default()
     }
 
@@ -461,7 +516,7 @@ pub fn round_trip(
     a.remove(key, seq);
     a.sync_until(key, "the removal settles", |_| true);
 
-    b.sync_until(key, "the removal reaches the other replica", |b| {
+    b.sync_until_emptied(key, "the removal reaches the other replica", |b| {
         b.item(key, &uid).is_none()
     });
 }

@@ -780,7 +780,7 @@ fn a_graph_meeting_is_cancelled() {
                 "calendar-reply",
                 serde_json::json!({ "v": 1, "source": "msgraph-calendar", "seq": seq, "partstat": "DECLINED" }),
             );
-            let intents = a.sync_intents(&calendar);
+            let intents = a.sync_parked_intents(&calendar);
             assert_eq!(intents.len(), 1, "{intents:?}");
             assert_eq!(
                 intents[0]["parked"], true,
@@ -797,12 +797,12 @@ fn a_graph_meeting_is_cancelled() {
                     "comment": "Cancelled by the neverest live tests",
                 }),
             );
-            let intents = a.sync_intents(&calendar);
+            let intents = a.sync_intents_emptied(&calendar);
             assert_eq!(intents.len(), 1, "{intents:?}");
             assert!(intents[0]["error"].is_null(), "{intents:?}");
             assert_eq!(a.queue().0, 0, "the cancel is acknowledged");
 
-            a.sync_until(&calendar, "the cancelled meeting leaves the store", |a| {
+            a.sync_until_emptied(&calendar, "the cancelled meeting leaves the store", |a| {
                 a.item(&calendar, &uid).is_none()
             });
         },
@@ -891,9 +891,9 @@ fn a_graph_meeting_edited_right_after_creation_is_pushed_then_cancelled() {
                     "comment": "Cancelled by the neverest live tests",
                 }),
             );
-            let intents = a.sync_intents(&calendar);
+            let intents = a.sync_intents_emptied(&calendar);
             assert!(intents[0]["error"].is_null(), "{intents:?}");
-            a.sync_until(&calendar, "the cancelled meeting leaves the store", |a| {
+            a.sync_until_emptied(&calendar, "the cancelled meeting leaves the store", |a| {
                 a.item(&calendar, &uid).is_none()
             });
 

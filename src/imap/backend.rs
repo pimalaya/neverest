@@ -373,6 +373,19 @@ impl ImapClient {
 
         let (items, bytes) = self.list_uids(&page_uids, uid_validity, held)?;
 
+        // NOTE: a date filter misses what the server dates otherwise than
+        // the store, so a narrowed round's last page hands every UID of the
+        // mailbox, which no date filter narrowed (pimdir SYNC §4, §5), read
+        // after the page's listing: a message arrived since is in it and
+        // absent from nothing. A band round hands none: the engine finds
+        // absent there only a member dated in the band, below the round's
+        // opening, which the enumeration could not keep.
+        let narrowed = narrows(scope);
+        let enumerated = match narrowed && !band && next.is_none() {
+            true => Some(self.search_all(empty)?),
+            false => None,
+        };
+
         let first = cursor.is_none();
         Ok(Listed::Page(Enumeration {
             items,
@@ -381,7 +394,23 @@ impl ImapClient {
             cursor: next,
             checkpoint: (first && !band).then(|| encode_checkpoint(uid_validity, highest_mod_seq)),
             bytes,
+            narrowed,
+            enumerated,
         }))
+    }
+
+    /// Every UID of the selected mailbox, by `UID SEARCH ALL`, as handles.
+    /// None when the `SELECT` stated it `empty`.
+    fn search_all(&mut self, empty: bool) -> Result<Vec<String>> {
+        if empty {
+            return Ok(Vec::new());
+        }
+
+        let uids = self.search(
+            Vec1::from(SearchKey::All),
+            ImapMessageSearchOptions { uid: true },
+        )?;
+        Ok(uids.into_iter().map(|uid| uid.get().to_string()).collect())
     }
 
     /// What a UID set names, read now: the flags of the messages the store
@@ -1037,6 +1066,14 @@ fn uid_set(uids: &[u32]) -> Result<Option<SequenceSet>> {
         .map_err(|_| anyhow!("Invalid UID set"))
 }
 
+/// Whether a round's search over `scope` is narrowed by a date filter
+/// (`SENTSINCE` or `SENTBEFORE`), as [`ImapClient::search_round`] builds it.
+fn narrows(scope: &PimdirScope) -> bool {
+    let since = scope.since.as_deref().and_then(|at| imap_day(at, -1));
+    let until = scope.until.as_deref().and_then(|at| imap_day(at, 2));
+    since.is_some() || until.is_some()
+}
+
 /// The day an RFC 3339 instant falls on in UTC, moved by `shift` days, as
 /// an IMAP search date.
 fn imap_day(instant: &str, shift: i64) -> Option<ImapDate> {
@@ -1546,6 +1583,69 @@ mod tests {
             };
             let uids: Vec<_> = page.items.iter().map(|item| item.id.as_str()).collect();
             assert_eq!(uids, ["7"], "{:?}", request.listing);
+        }
+    }
+
+    /// A round a scope narrows by `SENTSINCE` states it on its page, and
+    /// its last page hands every UID by `UID SEARCH ALL` (pimdir SYNC §4,
+    /// §5); a band round states it alone, and a round over the whole
+    /// mailbox states neither.
+    #[test]
+    fn a_narrowed_round_hands_every_uid_on_its_last_page() {
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 2,
+                highest_mod_seq: 9,
+                messages: ["a@x", "b@x"]
+                    .into_iter()
+                    .zip(1..)
+                    .map(|(id, uid)| FakeMessage {
+                        uid,
+                        flags: Vec::new(),
+                        message_id: String::from(id),
+                    })
+                    .collect(),
+                states_exists: true,
+            },
+            false,
+        );
+        let since = PimdirScope::since("2026-09-01T00:00:00Z");
+        let cases = [
+            ("scoped", false, since.clone(), true, Some(vec!["1", "2"])),
+            ("band", true, since, true, None),
+            ("whole", false, PimdirScope::unbounded(), false, None),
+        ];
+
+        for (case, band, scope, narrowed, enumerated) in cases {
+            let searches = server.sent("UID SEARCH").len();
+            let mut client =
+                ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+            let handles = HashSet::new();
+            let held = Held {
+                handles: &handles,
+                checkpoint: None,
+                coverage: None,
+            };
+            let request = PimdirEnumerate {
+                listing: PimdirListing::Round { cursor: None, band },
+                scope,
+            };
+            let Listed::Page(page) = client.enumerate("INBOX", &request, held).unwrap() else {
+                panic!("a page");
+            };
+
+            assert_eq!(page.narrowed, narrowed, "{case}");
+            let enumerated: Option<Vec<String>> =
+                enumerated.map(|uids| uids.into_iter().map(String::from).collect());
+            assert_eq!(page.enumerated, enumerated, "{case}");
+            let sent = server.sent("UID SEARCH");
+            let all = sent[searches..]
+                .iter()
+                .filter(|line| line.eq_ignore_ascii_case("UID SEARCH ALL"))
+                .count();
+            // NOTE: the whole mailbox's round searches `ALL` itself, the
+            // scoped one for its enumeration, the band one not at all.
+            assert_eq!(all, usize::from(case != "band"), "{case}: {sent:?}");
         }
     }
 

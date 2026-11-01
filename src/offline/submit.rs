@@ -120,7 +120,7 @@ impl SubmitIntent {
 
     /// The source the producer named to perform it, best effort.
     pub fn source(&self) -> Option<String> {
-        self.decoded().and_then(|submit| submit.source)
+        self.decoded().map(|submit| submit.source)
     }
 
     /// The subject for the report, best effort.
@@ -495,15 +495,6 @@ pub fn prepare(blobs: &PimdirBlobs, intent: &SubmitIntent) -> Result<Outgoing, S
         .object
         .as_ref()
         .ok_or_else(|| SubmitFailure::permanent(anyhow!("Submit intent has no stored body")))?;
-    // NOTE: the row pins one body and the payload names one: a producer
-    // writing them apart is broken, and either could be the wrong message.
-    if submit.object != *hash {
-        return Err(SubmitFailure::permanent(anyhow!(
-            "Submit payload names body {} but the row pins {}",
-            submit.object.as_str(),
-            hash.as_str()
-        )));
-    }
     let bytes = blobs
         .get(hash)
         .map_err(|err| SubmitFailure::Transient(anyhow!("Cannot read the queued blob: {err}")))?
@@ -876,8 +867,7 @@ mod tests {
     fn stage_intent(stage: &PimdirBlobStage, id: i64, rcpts: &[&str], body: &[u8]) -> SubmitIntent {
         let object = stage.stage_body(body).expect("stage body");
         let submit = PimdirSubmit {
-            source: None,
-            object: object.hash,
+            source: String::from("imap"),
             from: String::from("a@x.org"),
             rcpts: rcpts.iter().map(ToString::to_string).collect(),
             subject: Some(String::from("hi")),
@@ -887,7 +877,7 @@ mod tests {
             payload,
             object_hash,
             ..
-        } = submit.to_action().expect("submit action")
+        } = submit.to_action(object.hash).expect("submit action")
         else {
             unreachable!("a submit is an intent");
         };
@@ -1103,13 +1093,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
         let object = stage.stage_body(b"Subject: hi\r\n\r\nhello").unwrap();
-        let hash = object.hash.as_str();
 
-        let declared = format!(
-            r#"{{"v":1,"object":"{hash}","from":"a@x.org","rcpts":["b@y.org"],"subject":"hi","source":"smtp","copy":"Sent"}}"#
+        let declared = String::from(
+            r#"{"v":1,"from":"a@x.org","rcpts":["b@y.org"],"subject":"hi","source":"smtp","copy":"Sent"}"#,
         );
-        let sorted = format!(
-            r#"{{"copy":"Sent","from":"a@x.org","object":"{hash}","rcpts":["b@y.org"],"source":"smtp","subject":"hi","v":1}}"#
+        let sorted = String::from(
+            r#"{"copy":"Sent","from":"a@x.org","rcpts":["b@y.org"],"source":"smtp","subject":"hi","v":1}"#,
         );
 
         let read = |payload: String| {
@@ -1140,17 +1129,23 @@ mod tests {
         );
     }
 
-    /// A payload naming another body than the row pins parks: either could
-    /// be the wrong message.
+    /// A payload naming a body, as one written before the message became
+    /// the row's body alone (pimdir STORAGE Annex B.2), is malformed and
+    /// parks: the payload and the row could name two messages.
     #[test]
-    fn a_payload_naming_another_body_parks() {
+    fn a_payload_naming_a_body_parks() {
         let dir = tempfile::tempdir().unwrap();
         let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
-        let other = stage.stage_body(b"Subject: other\r\n\r\nother").unwrap();
+        let intent = stage_intent(&stage, 1, &["b@y.org"], b"Subject: hi\r\n\r\nhello");
+        let hash = intent.object.clone().expect("a pinned body");
 
         let intent = SubmitIntent {
-            object: Some(other.hash),
-            ..stage_intent(&stage, 1, &["b@y.org"], b"Subject: hi\r\n\r\nhello")
+            payload: intent.payload.replacen(
+                '{',
+                &format!(r#"{{"object":"{}","#, hash.as_str()),
+                1,
+            ),
+            ..intent
         };
         let failure = prepare(stage.blobs(), &intent).err().expect("no send");
         assert!(failure.parks() && !failure.uncertain(), "{failure:?}");

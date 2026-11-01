@@ -84,8 +84,9 @@ pub struct StoreState {
     pub looked_up_roles: BTreeMap<String, LookedUpRoles>,
     /// The calendars a source's last listing stated take no tasks (their
     /// `supported-calendar-component-set` leaving VTODO out), as hub ids,
-    /// by source: declared `x-vtodo` `none` there (pimdir STORAGE §15.6)
-    /// by every declaration, the one before the drain opening no endpoint.
+    /// by source: declared `calendar.component.vtodo` `none` there (pimdir
+    /// STORAGE §15.6) by every declaration, the one before the drain opening
+    /// no endpoint.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub taskless: BTreeMap<String, BTreeSet<String>>,
 }

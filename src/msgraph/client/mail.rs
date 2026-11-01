@@ -18,7 +18,11 @@
 //!   folder's delta with ids, dates and flags only makes the link, lands as
 //!   the round's last page, and corrects what changed or went while the
 //!   band was listed. A round over the band a coverage lacks lists that
-//!   band alone and keeps the link.
+//!   band alone and keeps the link. Every page of a round under a scope
+//!   states it narrowed by its `sentDateTime` filter, which lists no
+//!   undated message, and the pass hands every id of the folder (pimdir
+//!   SYNC §4, §5); a band round hands none, the engine finding absent there
+//!   only a member dated in the band.
 //! - **A delta** follows the stored link: a change outside the scope is
 //!   dropped, by `sentDateTime`; a changed member in scope the store does
 //!   not bind is named by its summary, read in JSON batches when the link
@@ -381,9 +385,11 @@ fn summary_page(
 /// newest first, each with its summary. Past its last page, a band round
 /// ends, its last page listing again what the round's band head would list
 /// in the band; a round over the whole scope goes on with the pass, which
-/// needs the marks of what the band listed. A message with no date, which a
-/// filter on `sentDateTime` never lists, stays bound: a band round infers
-/// no delete of an undated member (pimdir SYNC §5).
+/// needs the marks of what the band listed. A filter on `sentDateTime`
+/// lists no message with no date, so every page states the round narrowed
+/// (pimdir SYNC §4, §5). A band round hands no enumeration: the engine
+/// finds absent there only a member dated in the band, which lies below
+/// the round's opening, never an undated one (pimdir SYNC §5).
 ///
 /// A page resumes `below` the second the page before it ended at, that
 /// second included, so a member deleted between two pages, in one run or
@@ -447,6 +453,7 @@ fn band_page(
     if last {
         relist_head(wire, folder, mailbox, scope, held, &mut listing)?;
     }
+    listing.narrowed = true;
 
     Ok(Listed::Page(listing.page(
         true,
@@ -685,6 +692,10 @@ fn pass(
     for id in gone {
         listing.vanish(folder, id);
     }
+    // NOTE: the band pages were narrowed by `sentDateTime`, and the pass,
+    // narrowed by none, read every id the folder holds (pimdir SYNC §4).
+    listing.narrowed = true;
+    listing.enumerated = Some(present.into_iter().map(String::from).collect());
 
     Ok(Listed::Page(listing.page(
         true,
@@ -874,12 +885,15 @@ pub(super) fn band_filter(scope: &PimdirScope) -> Option<String> {
     (!terms.is_empty()).then(|| terms.join(" and "))
 }
 
-/// A page being built: its entries, its removals and its meta octets.
+/// A page being built: its entries, its removals, its meta octets, and
+/// what it states of a date filter (pimdir SYNC §4, §5).
 #[derive(Default)]
 struct Listing {
     items: Vec<EnumEntry>,
     vanished: Vec<String>,
     bytes: u64,
+    narrowed: bool,
+    enumerated: Option<Vec<String>>,
 }
 
 impl Listing {
@@ -951,6 +965,8 @@ impl Listing {
             cursor,
             checkpoint,
             bytes: self.bytes,
+            narrowed: self.narrowed,
+            enumerated: self.enumerated,
         }
     }
 }
@@ -1120,7 +1136,7 @@ mod tests {
         change::PimdirChange,
         client::{PimdirSourceStore, PimdirStore},
         collection::{PimdirCollectionId, PimdirCursor},
-        load::PimdirLoadScope,
+        load::PimdirLoadSelection,
         placement::{PimdirHandle, PimdirLinkId, PimdirSortKey},
         remote::{
             PimdirEnumerated, PimdirFetchedItem, PimdirHeads, PimdirPushResult, PimdirRemote,
@@ -1131,7 +1147,7 @@ mod tests {
 
     use super::*;
     use crate::offline::{
-        remote::{keep_in_scope, snapshot},
+        remote::{Narrowing, keep_in_scope, snapshot},
         run_verb,
         storage::load_side,
     };
@@ -1534,6 +1550,9 @@ mod tests {
         between: Option<(usize, Change)>,
         /// The heads the remote states, none unless a test lists them.
         heads: PimdirHeads,
+        /// What each page stated of its date filter: whether it was
+        /// narrowed, and how many handles its enumeration held.
+        stated: Vec<(bool, Option<usize>)>,
     }
 
     impl Remote {
@@ -1549,6 +1568,7 @@ mod tests {
                 fail_at: None,
                 between: None,
                 heads: PimdirHeads::NONE,
+                stated: Vec::new(),
             }
         }
     }
@@ -1618,12 +1638,19 @@ mod tests {
                     items,
                 )));
             }
+            self.stated
+                .push((page.narrowed, page.enumerated.as_ref().map(Vec::len)));
+            let narrowing = Narrowing {
+                narrowed: page.narrowed,
+                enumerated: page.enumerated,
+            };
             Ok(PimdirEnumerated::Page(snapshot(
                 page.complete,
                 page.cursor,
                 page.checkpoint,
                 items,
                 vanished,
+                narrowing,
             )))
         }
 
@@ -1667,7 +1694,7 @@ mod tests {
         let loaded = store
             .load(
                 &PimdirCollectionId(COLLECTION.into()),
-                &PimdirLoadScope::All,
+                &PimdirLoadSelection::All,
             )
             .unwrap();
         remote.checkpoint = loaded.checkpoint.map(|checkpoint| checkpoint.0);
@@ -1697,7 +1724,7 @@ mod tests {
         store
             .load(
                 &PimdirCollectionId(COLLECTION.into()),
-                &PimdirLoadScope::Handles(Vec::new()),
+                &PimdirLoadSelection::Handles(Vec::new()),
             )
             .unwrap()
     }
@@ -1830,6 +1857,38 @@ mod tests {
         ));
         assert_eq!(remote.graph.counts.delta_rows, 41, "nothing changed");
         assert_eq!(remote.graph.counts.band_rows, 56);
+    }
+
+    /// Every page of a round under a scope states it narrowed by its
+    /// `sentDateTime` filter, and the pass closing it hands every id of the
+    /// folder (pimdir SYNC §4, §5); a band round, widening the coverage,
+    /// states it narrowed alone, and a delta neither.
+    #[test]
+    fn a_scoped_round_is_narrowed_and_its_pass_enumerates_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut remote = Remote::new(folder());
+
+        sync(&mut store, &mut remote, since("2026-09-01")).unwrap();
+        let (pass, band) = remote.stated.split_last().unwrap();
+        assert_eq!(*pass, (true, Some(41)), "the pass lists the whole folder");
+        assert!(
+            band.iter().all(|stated| *stated == (true, None)),
+            "{band:?}"
+        );
+
+        let pages = remote.stated.len();
+        sync(&mut store, &mut remote, since("2026-07-01")).unwrap();
+        let widened = &remote.stated[pages..];
+        assert!(!widened.is_empty());
+        assert!(
+            widened.iter().all(|stated| *stated == (true, None)),
+            "{widened:?}"
+        );
+
+        let pages = remote.stated.len();
+        sync(&mut store, &mut remote, since("2026-07-01")).unwrap();
+        assert_eq!(remote.stated[pages..], [(false, None)], "a delta");
     }
 
     /// A delta drops what changed outside the scope, follows a bound

@@ -43,9 +43,11 @@ impl InitCommand {
 
         let replica = driver::store_dir(&name, &account_config)?;
         let store_db = replica.join("pimdir.db");
+        // NOTE: never a delete: the store may hold work no server has, which
+        // the reset refuses to drop unless forced, and then moves aside.
         if store_db.exists() {
             bail!(
-                "Account {name} already initialized, delete {} to reset",
+                "Account {name} already initialized at {}, `neverest sync --reset -a {name}` resets it",
                 replica.display()
             );
         }

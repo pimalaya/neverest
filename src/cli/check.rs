@@ -82,9 +82,9 @@ impl CheckCommand {
 }
 
 /// What a sync declares `endpoint` can do, from the configuration alone:
-/// every Annex B capability of its kind and the source-wide `x-vtodo` row,
-/// its provider's or a target's (pimdir STORAGE §15.6). A target is written
-/// to, never declared, as in a sync.
+/// every Annex B capability of its kind and the source-wide
+/// `calendar.component.vtodo` row, its provider's or a target's (pimdir
+/// STORAGE §15.6). A target is written to, never declared, as in a sync.
 fn declared(
     endpoint: &str,
     config: &SourceConfig,
@@ -266,8 +266,9 @@ pub struct CheckedCollection {
     pub default: bool,
     /// Whether the calendar takes tasks, as a CalDAV server states it by
     /// its `supported-calendar-component-set` (RFC 4791 §5.2.3): `false`
-    /// when the set leaves VTODO out, which a sync declares as `x-vtodo`
-    /// `none` on the source's calendar of that id, a target's included.
+    /// when the set leaves VTODO out, which a sync declares as
+    /// `calendar.component.vtodo` `none` on the source's calendar of that id, a
+    /// target's included.
     /// Left out where no set is stated, which takes any component, and on
     /// every other backend: Google and Graph, whose calendars take no task,
     /// say so by a source-wide capability.
@@ -317,12 +318,15 @@ mod tests {
     }
 
     fn vtodo(capabilities: &[CheckedCapability]) -> Option<&CheckedCapability> {
-        capabilities.iter().find(|row| row.name == "x-vtodo")
+        capabilities
+            .iter()
+            .find(|row| row.name == io_pimdir::capability::CALENDAR_COMPONENT_VTODO)
     }
 
-    /// The source-wide `x-vtodo` row a sync declares is reported with the
-    /// Annex B ones: a Google or Graph calendar source, and a source copied
-    /// to a Google target, take no task; a target lists nothing.
+    /// The source-wide `calendar.component.vtodo` row a sync declares is
+    /// reported with the Annex B ones: a Google or Graph calendar source, and
+    /// a source copied to a Google target, take no task; a target lists
+    /// nothing.
     #[test]
     fn a_check_reports_the_calendars_that_take_no_tasks() {
         let declared = declared_by("gcal.auth.token.raw = \"token\"");

@@ -8,6 +8,8 @@ status: current
 
 `neverest sync` reconciles an account's named sources through the io-pimdir engine over its own pimdir store. It is sync-on-demand: one reconcile per invocation, no daemon.
 
+The store and the engine follow pimdir storage-draft-08, sync-draft-07 and search-draft-08 (io-pimdir 0.8 at bff5737): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
+
 ### Requirement: An account holds named sources
 An account SHALL hold a map of named sources (`sources.<name>`), each declaring exactly one remote backend, and SHALL require at least one. It MAY additionally hold a map of named targets (`targets.<name>`) on the same terms. Both map keys SHALL be pimdir source ids, so a name is what every binding it owns in the store is recorded against, and a rename SHALL be treated as a new source. One name SHALL NOT be both a source and a target.
 
@@ -267,7 +269,12 @@ Each synced collection's media type SHALL be declared on the store from the back
 Every store handle SHALL be opened for the account being synced, so each collection it writes is grouped under that account (pimdir STORAGE §9.2). Within the account, a collection is further keyed by its source's namespace, which is its name, so two sources of one kind are told apart without inferring it from the collection naming. Two hand-written accounts may still share one `store.root`, and a reader of such a store SHALL be able to tell whose collection is whose.
 
 ### Requirement: A store the format outgrew is refused with its remedy
-A store an earlier draft of the pimdir format wrote cannot be migrated in place. Opening one SHALL fail naming `sync --reset --force` for the account, the command that moves the store aside and resyncs it, rather than surfacing the raw refusal. What the old store held that no server holds (queued actions, staged edits, retained items) stays in the store moved aside.
+A store opens under its own format version alone (pimdir STORAGE §4.2, §6): one any earlier neverest wrote, naming no `store_meta.format_version` or an earlier draft, is refused as `store-version` and never migrated. Opening one SHALL fail naming the reinstall in the order that keeps its queued writes, which live only in that store: sync it with the neverest that wrote it until nothing is queued, then `neverest sync --reset --force -a <account>`, which moves it aside and syncs a new one, rather than surfacing the raw refusal alone. The message SHALL never say to delete the store. What the old store held that no server holds (retained items, whatever was still queued) stays in the store moved aside. MIGRATION.md SHALL give the same order.
+
+#### Scenario: A store an earlier neverest wrote
+- **GIVEN** a store whose `store_meta.format_version` names `storage-draft-07`
+- **WHEN** neverest runs `--json drain` on the account
+- **THEN** it exits 1 with `code` `store-version`, the message naming the sync with the previous neverest until nothing is queued and `neverest sync --reset --force -a <account>`, and no delete
 
 ### Requirement: The report shows remote-originated changes a pull applied
 A sync SHALL report the remote-originated changes a pull applied to already-synced items (flag changes and removals), not only the local→remote pushes and the download plan. Because the pull applies them silently (the item reads `Clean` afterwards), they SHALL be recovered from the sync's per-item `events`: a `FlagsChanged` diffed against a pre-pull `handle → flags` snapshot into precise add/remove flag hunks, and a `Vanished` into a delete hunk. A newly-pulled message (`Added`) is already reported by the pull plan (a `Fetch` hunk) and is not re-itemized.
@@ -1078,12 +1085,12 @@ A caller choosing one calendar and one address book for an account takes the mar
 - THEN that calendar is listed with `default: true`, and no other
 
 ### Requirement: A check reports what each source declares it can do
-`neverest check` SHALL list, for each source, the capabilities a sync declares for it in the store (pimdir STORAGE §15.6) as `capabilities: [{ name, support, detail? }]`, one row per capability, `support` being `full`, `partial` or `none`, from its backend and configured rights alone. An intent a source performs on the collections it holds (`calendar.reply`, `calendar.cancel`, their `.occurrence` options, `collection.create`), which the store gets as a `none` source-wide row and one row per collection, SHALL read as it does on those collections: the store's collections are unknown to a check. The source-wide `x-vtodo` row a sync declares from the configuration (a Google Calendar or Graph calendar source, or a source one of whose targets is one) SHALL be listed with them. What a CalDAV listing states of a calendar SHALL be listed on that collection as `takesTasks`, `false` for a component set without `VTODO`, `true` for one naming it, left out where no set is stated, on a target's collections as on a source's: a sync declares it as `x-vtodo` `none` on the source's calendar of that name. A target and an undeclared (JMAP) source SHALL list no capability. A capability a source learns to declare is reported by the check with no change to it.
+`neverest check` SHALL list, for each source, the capabilities a sync declares for it in the store (pimdir STORAGE §15.6) as `capabilities: [{ name, support, detail? }]`, one row per capability, `support` being `full`, `partial` or `none`, from its backend and configured rights alone. An intent a source performs on the collections it holds (`calendar.reply`, `calendar.cancel`, their `.occurrence` options, `collection.create`), which the store gets as a `none` source-wide row and one row per collection, SHALL read as it does on those collections: the store's collections are unknown to a check. The source-wide `calendar.component.vtodo` row a sync declares from the configuration (a Google Calendar or Graph calendar source, or a source one of whose targets is one) SHALL be listed with them. What a CalDAV listing states of a calendar SHALL be listed on that collection as `takesTasks`, `false` for a component set without `VTODO`, `true` for one naming it, left out where no set is stated, on a target's collections as on a source's: a sync declares it as `calendar.component.vtodo` `none` on the source's calendar of that name. A target and an undeclared (JMAP) source SHALL list no capability. A capability a source learns to declare is reported by the check with no change to it.
 
 #### Scenario: A check names the calendars that take no tasks
 - **GIVEN** a CalDAV source whose server lists `events` with `VEVENT` alone and a Google Calendar target
 - **WHEN** `neverest check --json` runs
-- **THEN** `events` is listed with `takesTasks: false`, and the source's capabilities hold `x-vtodo` `none` naming the target
+- **THEN** `events` is listed with `takesTasks: false`, and the source's capabilities hold `calendar.component.vtodo` `none` naming the target
 
 ### Requirement: JSON keys are camelCase
 Every output type neverest prints SHALL serialize its keys as camelCase, matching the wire formats the endpoints speak (JMAP per RFC 8620, Microsoft Graph, the Google APIs) and keeping every key reachable by dot access in jq and JavaScript, which is how the README's notifier reads a report.
@@ -1189,7 +1196,7 @@ Auth SHALL be a bearer access token only, as for every other HTTP source.
 - **THEN** the run lists the history since 500 first, the message lands before the round's next page, and the round closes on the history id that head read, which the next delta lists from
 
 ### Requirement: Every source declares its capabilities before the drain
-At every run, before it drains an action, neverest SHALL declare each source it runs in the store (pimdir STORAGE §15.6): every Annex B capability of the source's kind, from its backend and its configured rights alone, `none` with the reason, and the `x-vtodo` rows of `A calendar its server keeps from tasks is declared so`, the source-wide ones from the configuration and the per-calendar ones from the sidecar rather than the network. A right the configuration withholds SHALL be `none`; a one-way source SHALL support no write. A JMAP source stays undeclared.
+At every run, before it drains an action, neverest SHALL declare each source it runs in the store (pimdir STORAGE §15.6): every Annex B capability of the source's kind, from its backend and its configured rights alone, `none` with the reason, and the `calendar.component.vtodo` rows of `A calendar its server keeps from tasks is declared so`, the source-wide ones from the configuration and the per-calendar ones from the sidecar rather than the network. A right the configuration withholds SHALL be `none`; a one-way source SHALL support no write. A JMAP source stays undeclared.
 
 #### Scenario: A source is declared with no network
 - **GIVEN** a Graph source whose token command fails
@@ -1319,7 +1326,9 @@ A Graph mail source SHALL fetch the `Full` tier of an id set through JSON batche
 - **THEN** each of the three is read by its own get, and no batch asks for more than 4 MiB
 
 ### Requirement: A mail sync lists within a scope on the `Date`
-An account MAY bound its mail by `item.filter.since`, and a run by `sync --since`, which overrides it: a duration back from today (`30d`, `12w`, `6mo`, `1y`), taken to the start of its UTC day so the runs of one day list one scope, a date at midnight UTC, or an RFC 3339 instant. A mail collection SHALL then sync under the scope from that floor (pimdir SYNC §5): a listed message whose `Date` lies below it SHALL be left out of the page, a message with no usable `Date` SHALL be in every scope, and an explicit removal SHALL apply whatever the date. What a scope leaves out SHALL NOT be deleted, neither in the store nor on the server. A round over the band a coverage lacks SHALL infer no delete of a member with no usable `Date` it did not list, the provider's date filter (a garbled `Date` to IMAP `SENTSINCE`, Gmail's `after:` on the arrival, Graph's `sentDateTime`) being free to miss it (io-pimdir `ff28408`, pimdir SYNC §5). A scope SHALL be refused, by the key or flag it came from, when an endpoint the run syncs holds contacts or calendars.
+An account MAY bound its mail by `item.filter.since`, and a run by `sync --since`, which overrides it: a duration back from today (`30d`, `12w`, `6mo`, `1y`), taken to the start of its UTC day so the runs of one day list one scope, a date at midnight UTC, or an RFC 3339 instant. A mail collection SHALL then sync under the scope from that floor (pimdir SYNC §5): a listed message whose `Date` lies below it SHALL be left out of the page, a message with no usable `Date` SHALL be in every scope, and an explicit removal SHALL apply whatever the date. What a scope leaves out SHALL NOT be deleted, neither in the store nor on the server.
+
+A round whose listing a provider's date filter narrowed (IMAP `SENTSINCE` and `SENTBEFORE`, Gmail's `after:` and `before:` on the arrival, Graph's `sentDateTime`) SHALL state it on every page (`narrowed`), and its last page SHALL hand every handle the collection holds, read by an enumeration no date filter narrowed (`enumerated`, pimdir SYNC §4, §5): the engine then finds absent only a member dated before the round opened or one the enumeration lacks, so an undated draft received before the window and a message whose `Date` runs ahead of its arrival stay in the store. A round over the band a coverage lacks SHALL state `narrowed` and hand no enumeration: the engine finds absent there only a member dated in the band, below the round's opening, and never one with no usable `Date`, which an enumeration could not keep further. A round over the whole collection, a delta and a head SHALL state neither. A scope SHALL be refused, by the key or flag it came from, when an endpoint the run syncs holds contacts or calendars.
 
 #### Scenario: An old message received today
 - **GIVEN** a mailbox holding, all appended today, a message dated 2020, one dated in the future and one with no `Date`
@@ -1336,8 +1345,15 @@ An account MAY bound its mail by `item.filter.since`, and a run by `sync --since
 - **WHEN** the run ends
 - **THEN** the message dated 2020 is still in the store and on the server, and once deleted on the server the next run removes it from the store
 
+#### Scenario: What an arrival filter misses
+- **GIVEN** a Gmail inbox the store binds, holding an undated draft received before the window and a message dated 2030 received before it, which `after:` lists neither of
+- **WHEN** a round under `--since` closes, its last page handing the label's ids
+- **THEN** both stay in the store
+
 ### Requirement: A provider narrows a scope with a margin
 A connector MAY narrow a scoped listing by its provider's own filter to a superset of the scope: IMAP `SENTSINCE` a day below the floor (or no `Date` header) and `SENTBEFORE` two days above a ceiling, Gmail `after:` and `before:` two days around the scope, in epoch seconds. Graph lists by `sentDateTime`, its reading of the `Date` header, with no margin. The `Date` SHALL decide what is kept. A connector whose checkpoint is bound to no scope (IMAP, Gmail, Graph mail) SHALL widen a scope by listing only the band its coverage lacks.
+
+The enumeration a narrowed round's last page hands SHALL be read after that page's listing, so a member arrived since is in it: IMAP's `UID SEARCH ALL` on the selected mailbox, one command a round; Gmail's ids of the label, listed with no query, 500 ids a request at 5 quota units each, once a round; Graph's ids of the folder's delta pass, the scoped round's last page, which reads them already and costs no request more.
 
 ### Requirement: A mail round lands page by page, newest first
 A mail round SHALL be answered in pages, newest first, each landing in its own write with its resume cursor: IMAP 500 UIDs by UID descending, its cursor `(UIDVALIDITY, lowest UID listed, highest UID found when the round opened)`; Graph 1,000 messages a page, from the message delta with no scope (`Prefer: odata.maxpagesize`, sent with every link) or from `/messages` by `sentDateTime` under one (`$top`), its cursor the second the page ended at, the next page listing below the second after it; Gmail 100 ids, its cursor the page token. The checkpoint SHALL be the one taken when the round began where the provider gives one (IMAP `HIGHESTMODSEQ` at the select, Gmail's profile `historyId` read before the listing), Graph's delta link on its last page. An interrupted round SHALL resume from its cursor, and a cursor the provider refuses (an expired Graph link, a Gmail page token) SHALL restart it, a moved `UIDVALIDITY` being a rekey (see "An IMAP handle-space change rebuilds the collection and bumps its generation").
@@ -1487,30 +1503,30 @@ Every body a run lands SHALL reach the store through io-pimdir's write (`PimdirS
 - **THEN** the arrival's stand-in is recorded by the first, the backlog's by the second (tests/attachments.rs `a_body_landing_later_stands_for_its_attachments_then`)
 
 ### Requirement: A calendar its server keeps from tasks is declared so
-A source SHALL declare `x-vtodo` `none` (pimdir STORAGE §15.6), the detail naming why, wherever a calendar it syncs takes no VTODO resource, so the store's gate refuses a task added or moved there before it is queued and a client reading the store does not offer the calendar as a task list:
+A source SHALL declare `calendar.component.vtodo` `none` (pimdir STORAGE §15.6), the detail naming why, wherever a calendar it syncs takes no VTODO resource, so the store's gate refuses a task added or moved there before it is queued and a client reading the store does not offer the calendar as a task list:
 
 - source-wide, from the configuration alone, for a Google Calendar or a Graph calendar source, whose provider keeps tasks apart (Google Tasks, Microsoft To Do);
 - on each CalDAV calendar whose `supported-calendar-component-set` (RFC 4791 §5.2.3) its listing reads without `VTODO`.
 
-A CalDAV calendar whose listing states no component set, which takes any component, or one naming `VTODO`, SHALL get no `x-vtodo` row, nor SHALL a source of another kind.
+A CalDAV calendar whose listing states no component set, which takes any component, or one naming `VTODO`, SHALL get no `calendar.component.vtodo` row, nor SHALL a source of another kind.
 
 In an account with targets, a hub calendar takes a task only where both endpoints of its pair take one, the task crossing to the target. The source SHALL therefore declare `none` on each calendar of its namespace a target's listing reads without `VTODO`, as on those its own listing does, and source-wide when one of its targets is a Google Calendar or a Graph calendar endpoint, the detail naming that target. A target SHALL stay undeclared: a row would make it a declared source, refusing every capability it has no row for.
 
 What a listing stated SHALL be kept in the sidecar (neverest.json, `taskless`) by source, as hub ids, replaced at the source's next listing, so the declaration before the drain, which opens no endpoint, carries it from the run that listed it. With targets, the record SHALL be replaced once every target of the source has listed; a run stopping earlier SHALL add what it listed to the record rather than drop what a target it did not reach stated. A source never listed declares no per-calendar row.
 
-A run SHALL declare again as soon as a listing is recorded and its collections are in the store, before any item of theirs moves, so a calendar met for the first time carries its `x-vtodo` row from the listing on rather than from the end of the run. A created calendar is met by the listing that follows its creation, the same run's.
+A run SHALL declare again as soon as a listing is recorded and its collections are in the store, before any item of theirs moves, so a calendar met for the first time carries its `calendar.component.vtodo` row from the listing on rather than from the end of the run. A created calendar is met by the listing that follows its creation, the same run's.
 
 The store reads a source as syncing a collection from its `sources` row or a binding there (pimdir STORAGE §15.6, `load_capabilities`), and a declaration holds only where its source syncs. Before that declaration, a run SHALL therefore record the source as syncing each collection it is about to sync and holds no state in yet (local: every collection kept, all of them under `sync --declare-only`; paired: every collection common to the pair, the target left unrecorded as it stays undeclared): a `sources` row with no checkpoint, which reads as no sync state, written through the canonical `upsert_checkpoint` only after the canonical `load_checkpoint` found no row, in one transaction, so a checkpoint already there SHALL never be overwritten. A dry run records nothing. A failure SHALL be logged, the first item sync recording the source anyway.
 
 #### Scenario: An events-only calendar refuses a task before the push
 - **GIVEN** a CalDAV source whose last listing read `events` with the component set `VEVENT` alone and `work` with `VEVENT` and `VTODO`
 - **WHEN** the account's sources are declared and a frontend then queues a VTODO add into each
-- **THEN** the add into `events` is refused at the producer's gate as `x-vtodo` unsupported, the store reads `events` as taking no tasks, and the add into `work` is queued
+- **THEN** the add into `events` is refused at the producer's gate as `calendar.component.vtodo` unsupported, the store reads `events` as taking no tasks, and the add into `work` is queued
 
 #### Scenario: A Google or Graph calendar refuses a task
 - **GIVEN** a Google Calendar source syncing `gcal/primary` and a Graph calendar source syncing `msgraph-calendar/AAMk`
 - **WHEN** the account's sources are declared from the configuration alone and a frontend queues a VTODO add into each
-- **THEN** both adds are refused at the gate as `x-vtodo` unsupported, the detail naming where the provider keeps tasks
+- **THEN** both adds are refused at the gate as `calendar.component.vtodo` unsupported, the detail naming where the provider keeps tasks
 
 #### Scenario: A target's events-only calendar refuses a task
 - **GIVEN** a CalDAV source paired with a CalDAV target whose listing reads `events` with `VEVENT` alone, the source's listing stating no component set
@@ -1562,7 +1578,7 @@ A source's collection listing SHALL name every collection it holds, whatever the
 ### Requirement: A reset never loses work no server holds
 `sync --reset` SHALL read the store before dropping it and SHALL refuse while it holds work no server has: a queued or parked action, a conflict, an item whose flags or body no binding's base holds (a staged edit or create), a staged delete, or a retained item, bound to no server. The refusal SHALL list that work per collection and name `--force`. A store holding none of it SHALL be dropped and recreated, its search index with it.
 
-`--reset --force` SHALL NOT delete anything: it SHALL move the store (the database and its WAL files, the objects, the search index and the sidecar) into a sibling directory named `<account>.reset-<UTC instant>`, then recreate the store. A store that cannot be read, written by an earlier draft or a newer neverest, SHALL be reset this way only.
+`--reset --force` SHALL NOT delete anything: it SHALL move the store (the database and its WAL files, the objects, the search index and the sidecar) into a sibling directory named `<account>.reset-<UTC instant>`, created its user's alone as the store was, so the moved store still opens as one, then recreate the store. A store that cannot be read, written by an earlier draft or a newer neverest, SHALL be reset this way only.
 
 `--reset` SHALL be refused beside `--dry-run`, which would drop the real store before planning, and beside a collection or source filter, the reset being the whole store's.
 
@@ -1577,7 +1593,7 @@ A source's collection listing SHALL name every collection it holds, whatever the
 - **THEN** the old store is in a sibling `reset-` directory, whole, and the account syncs into a fresh one
 
 ### Requirement: A store a newer neverest wrote asks for an upgrade
-Opening a store whose version is above the one this neverest knows SHALL fail saying a newer neverest wrote it and naming the upgrade, never a reset: the store is good, and a reset would drop what it holds that no server has.
+Opening a store refused as `store-version` whose `store_meta.format_version` names a later draft than this neverest's, or any version not of the `storage-draft-NN` form (a release), SHALL fail saying a newer neverest wrote it and naming the upgrade, never a reset: the store is good, and a reset would drop what it holds that no server has.
 
 #### Scenario: A downgrade
 - **GIVEN** a store written by a newer neverest
@@ -1596,12 +1612,12 @@ A message SHALL be relayed to a target only when the target has closed a round o
 - **THEN** nothing is relayed into that inbox until the round closes
 
 ### Requirement: A store error carries its code
-A store failure that ends a command SHALL carry, in its JSON failure object, the code io-pimdir gives it (`PimdirError::code`), spelled the same: `store-newer`, `store-older`, `store-uncreated`, `store-foreign`, `store-corrupt`, `store-not-current`, `store-stale`, `store-hash-algo`, `store-busy`, `store-owned`, `store-staging`, `store-in-flight`, `unsupported`, `index-fts5-missing`. A failure a caller cannot act on (an SQL or I/O error, a malformed action) SHALL carry none, nor SHALL a code neverest cannot meet (`index-busy`, which `index` answers as `busy`; `index-missing`, `index-outdated` and `index-query-only`, a query client's; `cutoff-invalid`, neverest writing its cutoff as the store stamps). No message SHALL advise deleting the store: the remedies are an upgrade, `sync --reset` on a store holding no pending work, and `sync --reset --force`, which moves it aside.
+A store failure that ends a command SHALL carry, in its JSON failure object, the code io-pimdir gives it (`PimdirError::code`), spelled the same: `store-version`, `store-uncreated`, `store-foreign`, `store-corrupt`, `store-not-current`, `store-hash-algo`, `sync-version`, `store-busy`, `store-owned`, `store-staging`, `store-in-flight`, `store-exposed`, `action-malformed`, `flag-invalid`, `unsupported`, `index-fts5-missing`, `index-version`. A failure a caller cannot act on (an SQL or I/O error) SHALL carry none, nor SHALL a code neverest cannot meet (`index-busy`, which `index` answers as `busy`; `index-missing`, `index-outdated` and `index-query-only`, a query client's; `index-zone-unknown`, neverest keeping io-pimdir's floating zone, `UTC`; `cutoff-invalid`, neverest writing its cutoff as the store stamps; `conflict-unread`, which the one-way overwrite answers by fetching the unread body). No message SHALL advise deleting the store: the remedies are an upgrade, the reinstall of "A store the format outgrew is refused with its remedy", `sync --reset` on a store holding no pending work, and `sync --reset --force`, which moves it aside.
 
 #### Scenario: A downgrade under `--json`
-- **GIVEN** a store written by a newer neverest
-- **WHEN** an older neverest runs `--json drain` on the account
-- **THEN** it exits 1 printing a failure object whose `code` is `store-newer`
+- **GIVEN** a store whose `store_meta.format_version` names a later draft
+- **WHEN** neverest runs `--json drain` on the account
+- **THEN** it exits 1 printing a failure object whose `code` is `store-version`, the message asking for an upgrade and naming no reset
 
 #### Scenario: A store root naming another program's database
 - **GIVEN** a pimdir.db holding another program's tables
@@ -1631,7 +1647,7 @@ A flag change SHALL reach a server as the flags it adds and the flags it removes
 - **THEN** the message holds `\Seen` and `\Answered` on the server
 
 ### Requirement: A listing missing most of a collection waits for a person
-A round of a sync whose listing leaves out more than half of at least 20 bound items in its scope, and the rebuild of a renumbered collection whose listing leaves out more than half of at least 20 bound items, SHALL drop nothing (pimdir SYNC §5, §8): such a listing reads as a truncated or emptied answer. The run SHALL report each under `absences`, with the side, the collection, the items left out and the items counted, and whether it was a rebuild, and SHALL exit 2: a rerun alone meets the same listing and parks again. The round a park leaves open SHALL NOT make the run incomplete. A parked rebuild SHALL keep the collection's handles and checkpoint, and the collection SHALL NOT be listed again that run.
+A round of a sync whose listing leaves out more than half of at least 20 bound items in its scope, or names no member, none of its pages nor heads listing one, while any bound item is absent, and the rebuild of a renumbered collection whose listing leaves out more than half of at least 20 bound items or names none, SHALL drop nothing (pimdir SYNC §5, §8): such a listing reads as a truncated or emptied answer, an emptied collection and a failing server answering alike. The run SHALL report each under `absences`, with the side, the collection, the items left out and the items counted, and whether it was a rebuild, and SHALL exit 2: a rerun alone meets the same listing and parks again. The round a park leaves open SHALL NOT make the run incomplete. A parked rebuild SHALL keep the collection's handles and checkpoint, and the collection SHALL NOT be listed again that run.
 
 `sync --accept-absences` SHALL confirm the absences for that run only, never stored: its rounds and rebuilds drop what they find absent.
 
@@ -1645,6 +1661,11 @@ A round of a sync whose listing leaves out more than half of at least 20 bound i
 - **WHEN** the account is synced with `--accept-absences`
 - **THEN** the 24 messages are dropped
 
+#### Scenario: An address book listed empty
+- **GIVEN** an address book bound to one card, whose server lists none
+- **WHEN** the account is synced
+- **THEN** the card stays, `absences` names 1 of 1, and the run exits 2; synced with `--accept-absences`, the card is dropped
+
 ### Requirement: An edit names the body it was made over
 A conflict resolution, a merge and a one-way overwrite SHALL state the body they were made over (the queued `update`'s `if_match`, the `Edit` mutation's, pimdir STORAGE §15.3, SYNC §7): an edit another write replaced since SHALL park rather than drop that write unmerged. A body staged with its action SHALL be staged in one step with it, so a refused action leaves no body in the tree.
 
@@ -1655,7 +1676,7 @@ A change whose body is missing from the store or does not hash to its name SHALL
 A body a policy did not adopt, kept by the store as a retained item (pimdir SYNC §9), SHALL be reported under `overruled` with the collection and the retained item's key, and either the side and the item's handle on it, for a body a side's write or a mutation settled, or the queue row (`action`), for one the drain kept aside applying a queued action, in a sync and in `drain`. It SHALL be a warning and SHALL NOT change the exit code: the policy decided as configured.
 
 ### Requirement: A one-way overwrite keeps the body it discards
-A one-way account overwriting a target's own edit SHALL keep the target's body as a retained item and SHALL report it under `overruled`: `one-way` discards the target's change from its server, never from the store. A target body the store holds as wanted only SHALL be fetched before the overwrite settles it, the store refusing to overrule a body nobody read (`conflict-unread`); one still unread after its fetch SHALL stay parked, never failing the run.
+A one-way account overwriting a target's own edit SHALL keep the target's body as a retained item and SHALL report it under `overruled`: `one-way` discards the target's change from its server, never from the store. A target body the store holds as wanted only SHALL be fetched before the overwrite settles it, the store refusing to overrule a body nobody read (`conflict-unread`); the fetch itself settles it by the target's `prefer-local` (see "A fetched divergence settles by the endpoint's policy"), and one still unread after its fetch SHALL stay parked, never failing the run.
 
 #### Scenario: A target edited while the source moved
 - **GIVEN** a one-way account whose source and target agreed on a card, the source then changing it and the target editing it
@@ -1666,6 +1687,27 @@ A one-way account overwriting a target's own edit SHALL keep the target's body a
 - **GIVEN** the same account, the target listing its edited card with no body
 - **WHEN** the account is synced
 - **THEN** the target's card is fetched first, then kept as a retained item and named under `overruled`, and the run does not fail
+
+### Requirement: A fetched divergence settles by the endpoint's policy
+Every upgrade neverest runs (a page's or phase 2's body landing, a full hydration, the copy hydration of a pair, the fetch of a diverging body before a merge or an overwrite) SHALL take the options of the endpoint's pushing sync (`PimdirUpgradeOptions::from(&sync_options)`): its conflict policy and whether it may push content, a dry run or an endpoint that writes nothing back pushing none. An upgrade fetching the body of a divergence then settles it by that policy (pimdir SYNC §6): a one-way target's `prefer-local` keeps the store's body, owed to the target, and the target's own as a retained item; a one-way source's `prefer-remote` adopts the source's; a two-way endpoint's `manual` records it for the merge. A body an upgrade kept and did not adopt SHALL be reported under `overruled` with the endpoint and the item's handle, whichever upgrade kept it.
+
+#### Scenario: A one-way target's edit read late
+- **GIVEN** a one-way account whose target edited a card the source changed, the target's pull parking the divergence with no body
+- **WHEN** the run fetches the target's body
+- **THEN** the fetch settles it: the store's body is owed to the target, the target's own is a retained item, and `overruled` names it
+
+### Requirement: A store is its user's alone
+A store another user can read or write is refused by every profile as `store-exposed` (pimdir STORAGE §18). Every store directory neverest makes SHALL be its user's alone, so its own readers and frontends open it: the store `init` creates, which io-pimdir restricts at creation whatever the umask; the replica a dry run copies the store into, created `0700` before the copy, its files keeping the store's modes; and the directory `sync --reset --force` moves a store into.
+
+#### Scenario: A store made under umask 022
+- **GIVEN** a shell whose umask is 022
+- **WHEN** `neverest init` creates an account's store
+- **THEN** its directory and pimdir.db grant nothing to group or others, and a reader and a producer open it
+
+#### Scenario: A dry run under umask 022
+- **GIVEN** a store and a shell whose umask is 022
+- **WHEN** `sync --dry-run` runs
+- **THEN** its replica opens as a store
 
 ### Requirement: A stated identity is named without its escape
 A stated identity the store filed with a leading `esc:` (pimdir STORAGE §9), because it begins like a derived key, SHALL be named to a server without it, alone or inside a minted key; a derived key SHALL name none.
@@ -1687,6 +1729,8 @@ The run SHALL report the refresh under `index`: the changes folded, the bodies n
 `neverest index` SHALL build the index until it holds every change the store has, reading no credential and opening no endpoint, and SHALL exit 3 answering `busy` while another indexer holds it.
 
 A reset SHALL take the index with the store: dropped with an idle store, moved aside with it by `--force`.
+
+An index of the canonical shape at an earlier search draft SHALL be rebuilt by the next refresh; an index of another shape, or at a later or unknown version, SHALL be refused as `index-version` and left as it is, never rebuilt, written nor deleted (pimdir SEARCH §2), the refusal reported under `index` like any index failure. neverest SHALL read floating times in io-pimdir's default zone (`UTC`).
 
 #### Scenario: A message a sync landed is found by a frontend
 - **GIVEN** a sync landing a message whose subject says "Quarterly report"

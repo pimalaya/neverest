@@ -373,7 +373,7 @@ fn a_google_meeting_is_invited_to_and_cancelled() {
             "calendar-reply",
             serde_json::json!({ "v": 1, "source": "gcal", "seq": seq, "partstat": "ACCEPTED" }),
         );
-        let intents = a.sync_intents(calendar);
+        let intents = a.sync_parked_intents(calendar);
         assert_eq!(intents.len(), 1, "{intents:?}");
         assert_eq!(
             intents[0]["parked"], true,

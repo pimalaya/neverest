@@ -17,7 +17,7 @@ use io_pimdir::{
     client::{PimdirError, PimdirSourceStore, PimdirStore},
     collection::PimdirCollectionId,
     hub::PimdirSourceId,
-    load::PimdirLoadScope,
+    load::PimdirLoadSelection,
     placement::{PimdirHandle, PimdirPlacement},
     sql,
 };
@@ -36,7 +36,7 @@ pub fn load_side(
     Ok(store
         .load(
             &PimdirCollectionId(collection.to_string()),
-            &PimdirLoadScope::All,
+            &PimdirLoadSelection::All,
         )?
         .placements)
 }
@@ -153,12 +153,13 @@ pub fn hydration_targets(
 ///
 /// The store counts a source as syncing a collection from its `sources` row
 /// or a binding there (pimdir STORAGE §15.6, `load_capabilities`), so what
-/// the source declares for a calendar listed but not synced yet, `x-vtodo`
-/// among it, holds from the listing on rather than from its first
-/// checkpoint. A row with no checkpoint reads as no sync state at all. A row
-/// already there is left alone, its checkpoint the next delta's base: the
-/// canonical `load_checkpoint` reads it before `upsert_checkpoint` writes
-/// one, in one transaction, as Android's calendar does.
+/// the source declares for a calendar listed but not synced yet,
+/// `calendar.component.vtodo` among it, holds from the listing on rather
+/// than from its first checkpoint. A row with no checkpoint reads as no
+/// sync state at all. A row already there is left alone, its checkpoint the
+/// next delta's base: the canonical `load_checkpoint` reads it before
+/// `upsert_checkpoint` writes one, in one transaction, as Android's
+/// calendar does.
 ///
 /// io-pimdir has no owner write for it, so this holds a connection of its
 /// own, which pimdir's canonical statements are vendored for. Each
@@ -240,23 +241,24 @@ mod tests {
     fn a_one_sided_body_projects_as_a_copy_and_is_a_hydration_target() {
         let dir = tempfile::tempdir().unwrap();
         let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
+        let hash = io_pimdir::hash::hash(b"abc");
 
         left.write(vec![
             PimdirWriteOp::StoreObject {
                 object: PimdirObject {
-                    hash: PimdirHash("abcd0000".into()),
+                    hash: hash.clone(),
                     size: 3,
                 },
                 body: Some(b"abc".to_vec()),
             },
-            PimdirWriteOp::UpsertPlacement(linked("INBOX", "1", "mid:a", Some("abcd0000"))),
+            PimdirWriteOp::UpsertPlacement(linked("INBOX", "1", "mid:a", Some(hash.as_str()))),
         ])
         .unwrap();
 
         let right_view = projection_view(&left, "INBOX", "right").unwrap();
         assert_eq!(right_view.len(), 1);
         assert_eq!(right_view[0].status, PimdirStatus::Created);
-        assert_eq!(right_view[0].object, Some(PimdirHash("abcd0000".into())));
+        assert_eq!(right_view[0].object, Some(hash));
     }
 
     #[test]

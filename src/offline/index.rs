@@ -207,6 +207,56 @@ mod tests {
         assert_eq!(found(dir.path(), "quarterly"), 1);
     }
 
+    /// Rewrites the index's `index_meta.format_version`, as another build
+    /// of the index would have written it.
+    fn restamp_index(dir: &Path, version: &str) {
+        rusqlite::Connection::open(dir.join("index.db"))
+            .unwrap()
+            .execute("UPDATE index_meta SET format_version = ?1", [version])
+            .unwrap();
+    }
+
+    /// An index a later draft of the search format wrote is refused and
+    /// left as it is (pimdir SEARCH §2): the refusal is reported with its
+    /// code, the run standing, and a later neverest still reads it.
+    #[test]
+    fn an_index_of_a_later_draft_is_refused_and_left() {
+        let dir = tempfile::tempdir().unwrap();
+        land(dir.path(), "m1@x", "Quarterly report");
+        after_run(dir.path(), &StoreConfig::default(), false, &mut None);
+        restamp_index(dir.path(), "search-draft-99");
+        let before = fs::read(dir.path().join("index.db")).unwrap();
+
+        let mut refreshed = None;
+        after_run(dir.path(), &StoreConfig::default(), false, &mut refreshed);
+
+        let refreshed = refreshed.unwrap();
+        assert!(refreshed.error.is_some(), "{refreshed:?}");
+        let Err(err) = PimdirIndex::open(dir.path()) else {
+            panic!("an index of a later draft opens");
+        };
+        assert_eq!(err.code(), "index-version");
+        assert_eq!(fs::read(dir.path().join("index.db")).unwrap(), before);
+    }
+
+    /// An index an earlier draft of the search format wrote is rebuilt by
+    /// the next refresh, reported as a whole fold.
+    #[test]
+    fn an_index_of_an_earlier_draft_is_rebuilt() {
+        let dir = tempfile::tempdir().unwrap();
+        land(dir.path(), "m1@x", "Quarterly report");
+        after_run(dir.path(), &StoreConfig::default(), false, &mut None);
+        restamp_index(dir.path(), "search-draft-07");
+
+        let mut refreshed = None;
+        after_run(dir.path(), &StoreConfig::default(), false, &mut refreshed);
+
+        let refreshed = refreshed.unwrap();
+        assert_eq!(refreshed.error, None);
+        assert!(refreshed.folded > 0, "folded again: {refreshed:?}");
+        assert_eq!(found(dir.path(), "quarterly"), 1);
+    }
+
     /// A refresh its deadline cut leaves the index behind, and the next one
     /// goes on from there.
     #[test]

@@ -190,9 +190,8 @@ impl Fixture {
     /// Queues a send of `body`, as `himalaya pimdir message send` does,
     /// its copy filed in Sent when `copy` says so; returns the queue row.
     fn queue_send(&self, body: &[u8], copy: bool) -> i64 {
-        let submit = |object| PimdirSubmit {
-            source: Some(String::from("imap")),
-            object,
+        let submit = PimdirSubmit {
+            source: String::from("imap"),
             from: String::from("a@example.org"),
             rcpts: vec![String::from("b@example.org")],
             subject: Some(String::from(SUBJECT)),
@@ -200,7 +199,7 @@ impl Fixture {
         };
         PimdirProducer::open(self.store(), "neverest-tests")
             .unwrap()
-            .enqueue_with_body(SENT, body, |object| submit(object).to_action().unwrap())
+            .enqueue_with_body(SENT, body, |object| submit.to_action(object).unwrap())
             .unwrap()
     }
 

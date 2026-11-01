@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use chrono::Utc;
 use clap::{ArgAction, Parser};
 use io_pimdir::{
-    client::PimdirStore,
+    client::{PimdirStore, modes},
     object::PimdirHash,
     placement::{PimdirBase, PimdirFlags},
 };
@@ -134,11 +134,11 @@ pub struct SyncCommand {
     /// Drop the items a listing left out, even when it left out most of a
     /// collection, for this run.
     ///
-    /// A listing leaving out more than half of at least 20 items is read as
-    /// a truncated or emptied answer: nothing is dropped, the run reports
-    /// it and exits 2. Once the server is known to hold no more, this
-    /// confirms the absences, also for the rebuild of a renumbered IMAP
-    /// mailbox.
+    /// A listing leaving out more than half of at least 20 items, or naming
+    /// none while the collection held some, is read as a truncated or
+    /// emptied answer: nothing is dropped, the run reports it and exits 2.
+    /// Once the server is known to hold no more, this confirms the
+    /// absences, also for the rebuild of a renumbered IMAP mailbox.
     #[arg(long)]
     pub accept_absences: bool,
     /// The order bodies download in: `largest` first, the fastest whole run,
@@ -480,7 +480,9 @@ fn move_aside(replica: &Path) -> Result<PathBuf> {
     let instant = Utc::now().format("%Y%m%dT%H%M%SZ");
     let aside = replica.with_file_name(format!("{name}.reset-{instant}"));
 
-    fs::create_dir(&aside).with_context(|| format!("Create {}", aside.display()))?;
+    // NOTE: the moved store stays its user's alone, as it was (pimdir STORAGE
+    // §18), so it opens again as a store.
+    modes::create_dir(&aside).with_context(|| format!("Create {}", aside.display()))?;
     let entries = fs::read_dir(replica).with_context(|| format!("Read {}", replica.display()))?;
     for entry in entries {
         let entry = entry.with_context(|| format!("Read {}", replica.display()))?;

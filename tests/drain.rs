@@ -183,6 +183,19 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Makes `path` readable and writable by its user alone.
+#[cfg(unix)]
+fn restrict(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+/// Makes `path` readable and writable by its user alone: nothing to do off
+/// Unix, where a store's modes are not checked.
+#[cfg(not(unix))]
+fn restrict(_path: &std::path::Path) {}
+
 /// `neverest drain` gives a queued create its id, offline, and says which.
 #[test]
 fn a_drain_applies_a_queued_create_without_any_server() {
@@ -250,22 +263,52 @@ fn a_drain_leaves_a_busy_store_alone() {
     ));
 }
 
+/// Rewrites the store's `store_meta.format_version`, as another draft of
+/// the format would have written it.
+fn restamp_store(fixture: &Fixture, version: &str) {
+    rusqlite::Connection::open(fixture.store().join("pimdir.db"))
+        .unwrap()
+        .execute("UPDATE store_meta SET format_version = ?1", [version])
+        .unwrap();
+}
+
 /// A store a newer neverest wrote fails the command with the code io-pimdir
-/// gives the refusal, so a caller tells an upgrade from any other failure.
+/// gives the refusal, so a caller tells a version from any other failure,
+/// and the message asks for an upgrade, never a reset.
 #[test]
 fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
-    rusqlite::Connection::open(fixture.store().join("pimdir.db"))
-        .unwrap()
-        .pragma_update(None, "user_version", 99)
-        .unwrap();
+    restamp_store(&fixture, "storage-draft-99");
 
     let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
 
-    assert_eq!(failure["code"], "store-newer", "{failure}");
+    assert_eq!(failure["code"], "store-version", "{failure}");
     let error = failure["error"].as_str().unwrap_or_default();
     assert!(error.contains("upgrade neverest"), "{failure}");
+    assert!(!error.contains("--reset"), "{failure}");
+}
+
+/// A store an earlier neverest wrote is refused, never migrated (pimdir
+/// STORAGE §6): the message names the reinstall, syncing with that
+/// neverest first so no queued write is lost, then moving the store aside,
+/// and never says to delete it.
+#[test]
+fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
+    let fixture = Fixture::new(CLOSED, "user", "pass");
+    fixture.offline_store();
+    restamp_store(&fixture, "storage-draft-07");
+
+    let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
+
+    assert_eq!(failure["code"], "store-version", "{failure}");
+    let error = failure["error"].as_str().unwrap_or_default();
+    assert!(error.contains("until nothing is queued"), "{failure}");
+    assert!(
+        error.contains(&format!("neverest sync --reset --force -a {ACCOUNT}")),
+        "{failure}"
+    );
+    assert!(!error.to_lowercase().contains("delete "), "{failure}");
 }
 
 /// A pimdir.db another program wrote is never taken for a store: the
@@ -284,6 +327,9 @@ fn a_database_another_program_wrote_fails_as_foreign() {
         .execute("CREATE TABLE notes (body TEXT)", [])
         .unwrap();
     drop(foreign);
+    // NOTE: the user's own file, so the refusal is the database's and not
+    // its mode's (pimdir STORAGE §18).
+    restrict(&db);
 
     let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
 
@@ -390,4 +436,71 @@ fn a_throttling_server_is_named_in_the_report() {
         until.len() == 20 && until.ends_with('Z'),
         "RFC 3339 UTC at seconds: {until}"
     );
+}
+
+/// A CalDAV server answering every request with the principal and the
+/// calendar home set, enough for `neverest init` to open the endpoint;
+/// answers its port.
+fn home_set_server() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            thread::spawn(move || {
+                let body = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+                    <d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">\
+                    <d:response><d:href>/</d:href><d:propstat><d:prop>\
+                    <d:current-user-principal><d:href>/principal/</d:href></d:current-user-principal>\
+                    <c:calendar-home-set><d:href>/calendars/</d:href></c:calendar-home-set>\
+                    </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\
+                    </d:multistatus>";
+                let mut request = [0; 8192];
+                while let Ok(n) = stream.read(&mut request) {
+                    if n == 0 {
+                        break;
+                    }
+                    let answer = format!(
+                        "HTTP/1.1 207 Multi-Status\r\n\
+                         Content-Type: application/xml; charset=utf-8\r\n\
+                         Content-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    if stream.write_all(answer.as_bytes()).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+/// `neverest init` under the usual umask 022 makes a store its readers
+/// open: one another user can read is refused as `store-exposed` by every
+/// profile (pimdir STORAGE §18), a frontend's reader included.
+#[cfg(unix)]
+#[test]
+fn init_makes_a_store_its_readers_open() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let port = home_set_server();
+    let fixture = Fixture::new(&format!("http://127.0.0.1:{port}/"), "user", "pass");
+    let output = Command::new("sh")
+        .args(["-c", "umask 022 && exec \"$0\" \"$@\""])
+        .arg(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &fixture.config.to_string_lossy()])
+        .args(["init", "-a", ACCOUNT])
+        .env("XDG_STATE_HOME", &fixture.state)
+        .output()
+        .expect("spawn neverest");
+    assert!(output.status.success(), "{}", stderr(&output));
+
+    let store = fixture.store();
+    for path in [store.clone(), store.join("pimdir.db")] {
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0, "{} is {mode:o}", path.display());
+    }
+    PimdirReader::open(&store).expect("a reader opens the store");
+    PimdirProducer::open(&store, "neverest-tests").expect("a producer opens the store");
 }

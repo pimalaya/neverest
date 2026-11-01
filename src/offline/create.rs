@@ -48,7 +48,7 @@ impl CreateIntent {
 
     /// The source the producer named to perform it, best effort.
     pub fn source(&self) -> Option<String> {
-        self.request().ok().and_then(|request| request.source)
+        self.request().ok().map(|request| request.source)
     }
 }
 

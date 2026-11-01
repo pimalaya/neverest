@@ -68,7 +68,7 @@ pimalaya-cli = { version = "0.2", default-features = false, features = ["termina
 pimalaya-config = { version = "0.2", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.3", default-features = false }
 rfc2047-decoder = "1"
-rusqlite = { version = "0.40", default-features = false }
+rusqlite = { version = "0.41", default-features = false }
 schemars = "1"
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
@@ -88,8 +88,6 @@ ical-rs = { git = "https://github.com/pimalaya/ical", rev = "99b92736a6a076c7293
 io-http = { git = "https://github.com/pimalaya/io-http", rev = "e1815307771c1ec65a86b77256d46c33241d3038" }
 io-imap = { git = "https://github.com/pimalaya/io-imap", rev = "b1ab38ea9f24578b46dda56aa009600571b6b9ef" }
 io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "2ae26370aefa671c16316dbad98107634436bce6" }
-# NOTE: temporary local checkout until the io-pimdir changes of 2026-10-30
-# are pushed, then it returns to a git rev.
-io-pimdir = { path = "../io-pimdir" }
+io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "bff573783364a9bba3104c5e11c01fb944d67e62" }
 io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "b2b9a00462f7d371de3fb419e53288f0a13cee39" }
 pimalaya-cli = { git = "https://github.com/pimalaya/cli", rev = "55b66933950f02541892407667e5e0b254245871" }

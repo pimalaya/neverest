@@ -199,16 +199,25 @@ pub(crate) fn snapshot(
     checkpoint: Option<Vec<u8>>,
     items: Vec<PimdirRemoteItem>,
     vanished: Vec<PimdirHandle>,
+    narrowing: Narrowing,
 ) -> PimdirRemoteSnapshot {
     match complete {
-        true => PimdirRemoteSnapshot {
-            vanished,
-            ..PimdirRemoteSnapshot::page(
-                items,
-                cursor.map(PimdirCursor),
-                checkpoint.map(PimdirCheckpoint),
-            )
-        },
+        true => {
+            let last = cursor.is_none();
+            PimdirRemoteSnapshot {
+                vanished,
+                narrowed: narrowing.narrowed,
+                enumerated: narrowing
+                    .enumerated
+                    .filter(|_| narrowing.narrowed && last)
+                    .map(|handles| handles.into_iter().map(PimdirHandle::from).collect()),
+                ..PimdirRemoteSnapshot::page(
+                    items,
+                    cursor.map(PimdirCursor),
+                    checkpoint.map(PimdirCheckpoint),
+                )
+            }
+        }
         false => PimdirRemoteSnapshot {
             items,
             vanished,
@@ -216,8 +225,20 @@ pub(crate) fn snapshot(
             last: true,
             cursor: None,
             checkpoint: checkpoint.map(PimdirCheckpoint),
+            narrowed: false,
+            enumerated: None,
         },
     }
+}
+
+/// What a backend states of the date filter a round's listing ran under
+/// (pimdir SYNC §4, §5): whether one narrowed it, and on its last page the
+/// handles an unfiltered enumeration read. A delta and a round no filter
+/// narrowed state neither.
+#[derive(Debug, Default)]
+pub(crate) struct Narrowing {
+    pub(crate) narrowed: bool,
+    pub(crate) enumerated: Option<Vec<String>>,
 }
 
 /// The date a listed member is in scope by: its summary's, else its sort
@@ -558,12 +579,17 @@ impl PimdirRemote for PimRemote<'_> {
             )));
         }
 
+        let narrowing = Narrowing {
+            narrowed: page.narrowed,
+            enumerated: page.enumerated,
+        };
         Ok(PimdirEnumerated::Page(snapshot(
             page.complete,
             page.cursor,
             page.checkpoint,
             items,
             vanished,
+            narrowing,
         )))
     }
 

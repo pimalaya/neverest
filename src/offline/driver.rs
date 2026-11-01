@@ -40,14 +40,14 @@ use crossbeam_queue::SegQueue;
 use io_pimdir::{
     change::PimdirWriteOp,
     client::{
-        PimdirError, PimdirRunError, PimdirSourceStore, PimdirStore, blobs::PimdirBlobStage,
+        PimdirError, PimdirRunError, PimdirSourceStore, PimdirStore, blobs::PimdirBlobStage, modes,
         producer::PimdirProducer,
     },
     codec::PimdirAction,
     collection::{PimdirCollectionId, PimdirScope},
     hub::{PimdirBinding, PimdirSourceId},
     intent::{COLLECTION_CREATE, PimdirCollectionCreate},
-    load::PimdirLoadScope,
+    load::PimdirLoadSelection,
     mutate::PimdirMutation,
     object::{PimdirHash, PimdirObject},
     placement::{
@@ -61,7 +61,7 @@ use io_pimdir::{
         PimdirConflictPolicy, PimdirParked, PimdirPushRights, PimdirSync, PimdirSyncEvent,
         PimdirSyncOptions, PimdirSyncReport,
     },
-    upgrade::PimdirUpgrade,
+    upgrade::{PimdirUpgrade, PimdirUpgradeOptions, PimdirUpgradeReport},
 };
 use log::{debug, info, warn};
 use pimalaya_cli::spinner::Spinner;
@@ -211,21 +211,49 @@ fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
 /// Opens one source handle over the account's store.
 ///
 /// Every collection it writes is grouped under `account` (pimdir STORAGE),
-/// so a store shared by two accounts tells whose is whose. A store an earlier
-/// draft wrote cannot be migrated, so the refusal names the forced reset,
-/// which moves it aside; one a newer neverest wrote is good, so the refusal
-/// names the upgrade.
+/// so a store shared by two accounts tells whose is whose. A store opens
+/// under its own format version alone, never migrated (pimdir STORAGE §6):
+/// one an earlier neverest wrote is reinstalled, so the refusal names the
+/// order that keeps its queued writes (sync it with that neverest first,
+/// then the forced reset, which moves it aside); one a newer neverest wrote
+/// is good, so the refusal names the upgrade.
 pub(crate) fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
     match PimdirStore::open(dir) {
         Ok(store) => Ok(store.for_account(account).for_source(source)),
+        Err(err @ PimdirError::Version { .. }) if written_earlier(&err) => Err(pimdir_error(err)
+            .context(format!(
+                "The store was written by an earlier neverest and cannot be migrated: \
+                 sync it with the neverest that wrote it until nothing is queued, then \
+                 `neverest sync --reset --force -a {account}` moves it aside, deleting \
+                 nothing, and syncs a new one (see MIGRATION.md)"
+            ))),
         Err(err @ PimdirError::Version { .. }) => Err(pimdir_error(err).context(
             "The store was written by a newer neverest; upgrade neverest to sync this account",
         )),
-        Err(err @ PimdirError::Stale { .. }) => Err(pimdir_error(err).context(format!(
-            "The store predates this neverest; `neverest sync --reset --force -a {account}` \
-             moves it aside and resyncs the account"
-        ))),
         Err(err) => Err(pimdir_error(err).context(format!("Open {source} store"))),
+    }
+}
+
+/// Whether a store refused for its format version was written by an earlier
+/// draft than this neverest's: one naming no version (every draft before
+/// storage-draft-08), or a draft numbered below
+/// [`FORMAT_VERSION`](io_pimdir::sql::FORMAT_VERSION). Any other, a later
+/// draft or a release, is a newer neverest's.
+fn written_earlier(err: &PimdirError) -> bool {
+    let PimdirError::Version { found } = err else {
+        return false;
+    };
+    let Some(found) = found else {
+        return true;
+    };
+    let draft = |version: &str| {
+        version
+            .strip_prefix("storage-draft-")
+            .and_then(|number| number.parse::<u32>().ok())
+    };
+    match (draft(found), draft(io_pimdir::sql::FORMAT_VERSION)) {
+        (Some(found), Some(ours)) => found < ours,
+        _ => false,
     }
 }
 
@@ -404,6 +432,25 @@ impl SourceCtx {
     /// propagate, which is what makes a side read-only for some operations.
     fn push_rights(&self) -> PimdirPushRights {
         push_rights(&self.perms, self.pool.media_type())
+    }
+
+    /// The options the side's sync runs under, pushing when `push`.
+    fn sync_options(&self, push: bool) -> PimdirSyncOptions {
+        PimdirSyncOptions {
+            push,
+            rights: self.push_rights(),
+            conflict: self.conflict_policy(),
+            scope: self.scope.clone(),
+            accept_absences: self.accept_absences,
+            ..Default::default()
+        }
+    }
+
+    /// How an upgrade on the side settles a divergence whose body it fetches
+    /// (pimdir SYNC §6): by the policy of the side's pushing sync, a dry run
+    /// or a side that writes nothing back pushing nothing.
+    fn upgrade_options(&self) -> PimdirUpgradeOptions {
+        PimdirUpgradeOptions::from(&self.sync_options(!self.dry_run && self.writable()))
     }
 }
 
@@ -637,9 +684,9 @@ pub fn run(
 
 /// Declares what every source of the account can do (pimdir STORAGE §15.6),
 /// replacing what an earlier run or configuration declared: what its
-/// backend and rights allow, and `x-vtodo` `none` source-wide where its
-/// provider or a target's keeps tasks apart, else on the calendars its last
-/// listings stated take no tasks, which `state` keeps.
+/// backend and rights allow, and `calendar.component.vtodo` `none`
+/// source-wide where its provider or a target's keeps tasks apart, else on
+/// the calendars its last listings stated take no tasks, which `state` keeps.
 pub(crate) fn declare(
     dir: &Path,
     account: &str,
@@ -1071,6 +1118,11 @@ fn run_pair(
         {
             warn!("{name} full hydration error: {err:#}");
         }
+        // NOTE: a body the full hydration fetched may settle a divergence by
+        // a side's policy (pimdir SYNC §6), after the collection itemized
+        // what its sync noted.
+        itemize_noted(&mut left, report);
+        itemize_noted(&mut right, report);
 
         s.success(format!("{name}: done"));
     }
@@ -1396,7 +1448,7 @@ fn run_local(
     // NOTE: read once phase 1 is over, so a body a landed page's hydration
     // kept is not downloaded again, nor one it found gone.
     let plans = hydrate_plans(&stores[0], source_name, &spined, listed_log.as_ref(), &gone)?;
-    phase2_hydrate(
+    let hydrated = phase2_hydrate(
         source_name,
         plans,
         &pacing,
@@ -1405,7 +1457,14 @@ fn run_local(
         &blobs,
         shared.then_some(&filtered[..]),
         &gone,
-    )
+    );
+    // NOTE: a body a connection landed may settle a divergence by the
+    // source's policy (pimdir SYNC §6), noted on that connection: the spines
+    // itemized what they noted, this drains what the landings did after.
+    for ctx in &mut ctxs {
+        itemize_noted(ctx, report);
+    }
+    hydrated
 }
 
 /// What a declaration reads: the store, the account and its mode.
@@ -1921,7 +1980,7 @@ fn prime_bodies(
     listed: Option<&Listed>,
 ) {
     let id = PimdirCollectionId(collection.to_string());
-    let mut owed = match store.load(&id, &PimdirLoadScope::All) {
+    let mut owed = match store.load(&id, &PimdirLoadSelection::All) {
         Ok(loaded) => bodiless(loaded.placements),
         // NOTE: what is not queued waits for phase 2.
         Err(err) => {
@@ -2233,12 +2292,12 @@ impl Pager for PageFeed<'_> {
         let Some(feed) = self.feed else {
             return Rest::Go;
         };
-        let scope = match (resumed && self.resumed, landed.is_empty()) {
-            (true, _) => PimdirLoadScope::All,
+        let selection = match (resumed && self.resumed, landed.is_empty()) {
+            (true, _) => PimdirLoadSelection::All,
             (false, true) => return Rest::Go,
-            (false, false) => PimdirLoadScope::Handles(landed),
+            (false, false) => PimdirLoadSelection::Handles(landed),
         };
-        match store.load(collection, &scope) {
+        match store.load(collection, &selection) {
             Ok(loaded) => {
                 let mut owed = bodiless(loaded.placements);
                 if let Some(listed) = self.listed {
@@ -2616,9 +2675,11 @@ impl Landing<'_> {
                 .and_then(|gates| gates.get(place.as_str()))
                 .map(|gate| gate.lock().unwrap_or_else(PoisonError::into_inner));
             let _applying = self.applying.lock().unwrap_or_else(PoisonError::into_inner);
+            let options = ctx.upgrade_options();
             let fallback = PimRemote::new(&mut ctx.pool, self.blobs.clone(), ctx.namespace.clone());
-            if let Err(err) = apply_batch(store, fallback, &place, landed) {
-                warn!("{place} write error: {err:#}");
+            match apply_batch(store, fallback, &place, landed, options) {
+                Ok(upgraded) => ctx.noted.overrule(&place, &upgraded.events),
+                Err(err) => warn!("{place} write error: {err:#}"),
             }
         }
 
@@ -2663,7 +2724,7 @@ impl Placed {
         for collection in collections {
             let id = PimdirCollectionId(collection.clone());
             let loaded = store
-                .load(&id, &PimdirLoadScope::Handles(handles.to_vec()))
+                .load(&id, &PimdirLoadSelection::Handles(handles.to_vec()))
                 .with_context(|| format!("Load {collection}"))?;
             let mut its = Vec::new();
             for placement in loaded.placements {
@@ -2895,25 +2956,24 @@ fn hydrate_pool<W: Send>(
 /// Raises one fetched batch to `Full`, serving its bodies from the batch.
 ///
 /// The retained store then holds each body for the app to read offline. A
-/// handle the batch lacks is fetched through `fallback`.
+/// handle the batch lacks is fetched through `fallback`. A divergence whose
+/// body the batch brings is settled under `options` (pimdir SYNC §6), the
+/// report naming each body it kept and did not adopt.
 fn apply_batch<R: PimdirRemote<Error = anyhow::Error>>(
     store: &mut PimdirSourceStore,
     fallback: R,
     collection: &str,
     items: Vec<PimdirFetchedItem>,
-) -> Result<()> {
+    options: PimdirUpgradeOptions,
+) -> Result<PimdirUpgradeReport> {
     let handles: Vec<PimdirHandle> = items.iter().map(|item| item.handle.clone()).collect();
     if handles.is_empty() {
-        return Ok(());
+        return Ok(PimdirUpgradeReport::default());
     }
     let mut remote = CachedFetchRemote::new(collection, items, fallback);
-    run_verb(
-        store,
-        &mut remote,
-        PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full),
-    )
-    .with_context(|| format!("Apply bodies {collection}"))?;
-    Ok(())
+    let upgrade =
+        PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full).options(options);
+    run_verb(store, &mut remote, upgrade).with_context(|| format!("Apply bodies {collection}"))
 }
 
 /// A `handle -> flags` snapshot of a side's items, taken before a pull.
@@ -3698,7 +3758,7 @@ fn sync_side_rebuilding(
 /// The passes of one collection meet each again, so each is kept once.
 #[derive(Default)]
 struct Noted {
-    /// The listings that parked a mass absence, and whether each was a
+    /// The listings that parked their absences, and whether each was a
     /// rebuild's.
     parked: BTreeMap<String, (PimdirParked, bool)>,
     /// The most changes one pass withheld over an unreadable body.
@@ -3733,7 +3793,13 @@ impl Noted {
         }
         self.unanswered
             .insert(collection.to_string(), report.unanswered);
-        for event in &report.events {
+        self.overrule(collection, &report.events);
+    }
+
+    /// Notes the bodies `events` say a policy did not adopt in `collection`,
+    /// from a sync or an upgrade, each once.
+    fn overrule(&mut self, collection: &str, events: &[PimdirSyncEvent]) {
+        for event in events {
             let PimdirSyncEvent::Overruled { handle, link_id } = event else {
                 continue;
             };
@@ -3866,20 +3932,16 @@ fn sync_side(
     let bound = store
         .load(
             &PimdirCollectionId(collection.to_string()),
-            &PimdirLoadScope::All,
+            &PimdirLoadSelection::All,
         )
         .map(Bound::from_loaded)
         .map_err(|err| anyhow!("Load {collection} error: {err}"))?;
-    let opts = PimdirSyncOptions {
-        push,
-        rights: ctx.push_rights(),
-        conflict: ctx.conflict_policy(),
-        scope: ctx.scope.clone(),
-        accept_absences: ctx.accept_absences,
-        ..Default::default()
-    };
-    let verb = sync_verb_with(collection, opts, ctx.pool.primary().scope_bound())
-        .heads(ctx.pool.primary().heads());
+    let verb = sync_verb_with(
+        collection,
+        ctx.sync_options(push),
+        ctx.pool.primary().scope_bound(),
+    )
+    .heads(ctx.pool.primary().heads());
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone())
         .with_bound(collection, bound)
         .with_bodies(!ctx.dry_run);
@@ -3978,9 +4040,18 @@ fn resolve_conflicts(
     // that cannot push, and the pushing pass never revisits it, so the store's
     // body is restated here for that pass to push over the endpoint.
     if ctx.authority == Authority::Store {
+        let options = ctx.upgrade_options();
         let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
         let overruled = &mut ctx.noted.overruled;
-        return keep_store_bodies(collection, &ctx.name, store, blobs, &mut remote, overruled);
+        return keep_store_bodies(
+            collection,
+            &ctx.name,
+            store,
+            blobs,
+            &mut remote,
+            options,
+            overruled,
+        );
     }
 
     debug!("merge {} conflicted item(s) in {collection}", parked.len());
@@ -3992,13 +4063,13 @@ fn resolve_conflicts(
         .collect();
 
     if !wanted.is_empty() {
+        let options = ctx.upgrade_options();
         let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
-        run_verb(
-            store,
-            &mut remote,
-            PimdirUpgrade::new(collection.to_string(), wanted, PimdirTier::Full),
-        )
-        .with_context(|| format!("Fetch the diverging bodies of {} {collection}", &ctx.name))?;
+        let upgrade =
+            PimdirUpgrade::new(collection.to_string(), wanted, PimdirTier::Full).options(options);
+        let upgraded = run_verb(store, &mut remote, upgrade)
+            .with_context(|| format!("Fetch the diverging bodies of {} {collection}", &ctx.name))?;
+        ctx.noted.overrule(collection, &upgraded.events);
     }
 
     let kind = resolve_kind(&mut ctx.pool);
@@ -4020,13 +4091,16 @@ fn resolve_conflicts(
 /// key. A diverging body nobody has read yet is fetched from `remote` first,
 /// as [`resolve_conflicts`] does for a merge, since the store refuses to
 /// overrule a body it cannot keep; one still unread after its fetch stays
-/// parked for a person.
+/// parked for a person. The fetch itself settles what it reads under
+/// `options` (pimdir SYNC §6), the side's `prefer-local` keeping the
+/// endpoint's body as the edit would, and such a divergence counts as kept.
 fn keep_store_bodies<R: PimdirRemote<Error = anyhow::Error>>(
     collection: &str,
     source: &str,
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobStage,
     remote: &mut R,
+    options: PimdirUpgradeOptions,
     overruled: &mut Vec<(String, PimdirHandle, PimdirLinkId)>,
 ) -> Result<usize> {
     let unread: Vec<PimdirHandle> = conflicted_placements(store, collection, source)?
@@ -4034,11 +4108,16 @@ fn keep_store_bodies<R: PimdirRemote<Error = anyhow::Error>>(
         .filter(|placement| placement.conflict_object.is_none())
         .map(|placement| placement.handle)
         .collect();
-    fetch_diverging(collection, source, store, remote, unread.clone())?;
+    let fetched = fetch_diverging(collection, source, store, remote, options, unread.clone())?;
+    note_overruled(overruled, collection, fetched.events);
 
-    let mut kept = 0usize;
+    let parked = conflicted_placements(store, collection, source)?;
+    let mut kept = unread
+        .iter()
+        .filter(|handle| !parked.iter().any(|placement| &placement.handle == *handle))
+        .count();
 
-    for placement in conflicted_placements(store, collection, source)? {
+    for placement in parked {
         let handle = placement.handle;
         let name = handle.0.clone();
 
@@ -4070,7 +4149,9 @@ fn keep_store_bodies<R: PimdirRemote<Error = anyhow::Error>>(
 
         let mutated = match store.mutate(collection, edit.clone()) {
             Err(PimdirRunError::Store(PimdirError::Unread { .. })) if !unread.contains(&handle) => {
-                fetch_diverging(collection, source, store, remote, vec![handle])?;
+                let fetched =
+                    fetch_diverging(collection, source, store, remote, options, vec![handle])?;
+                note_overruled(overruled, collection, fetched.events);
                 store.mutate(collection, edit)
             }
             mutated => mutated,
@@ -4089,11 +4170,7 @@ fn keep_store_bodies<R: PimdirRemote<Error = anyhow::Error>>(
             Err(err) => bail!("Keep the store's body of {name} in {collection}: {err}"),
         };
 
-        for event in mutated.events {
-            if let PimdirSyncEvent::Overruled { handle, link_id } = event {
-                overruled.push((collection.to_string(), handle, link_id));
-            }
-        }
+        note_overruled(overruled, collection, mutated.events);
 
         kept += 1;
     }
@@ -4105,28 +4182,42 @@ fn keep_store_bodies<R: PimdirRemote<Error = anyhow::Error>>(
     Ok(kept)
 }
 
+/// Notes the bodies `events` say a policy kept and did not adopt.
+fn note_overruled(
+    overruled: &mut Vec<(String, PimdirHandle, PimdirLinkId)>,
+    collection: &str,
+    events: Vec<PimdirSyncEvent>,
+) {
+    for event in events {
+        if let PimdirSyncEvent::Overruled { handle, link_id } = event {
+            overruled.push((collection.to_string(), handle, link_id));
+        }
+    }
+}
+
 /// Fetches the diverging bodies of `handles`, which the store holds as
-/// wanted only, so a settle over them keeps what it discards.
+/// wanted only, so a settle over them keeps what it discards; the fetch
+/// settles what it reads under `options` (pimdir SYNC §6).
 fn fetch_diverging<R: PimdirRemote<Error = anyhow::Error>>(
     collection: &str,
     source: &str,
     store: &mut PimdirSourceStore,
     remote: &mut R,
+    options: PimdirUpgradeOptions,
     handles: Vec<PimdirHandle>,
-) -> Result<()> {
+) -> Result<PimdirUpgradeReport> {
     if handles.is_empty() {
-        return Ok(());
+        return Ok(PimdirUpgradeReport::default());
     }
 
     debug!(
         "fetch {} diverging body(ies) in {collection}",
         handles.len()
     );
-    let upgrade = PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full);
+    let upgrade =
+        PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full).options(options);
     run_verb(store, remote, upgrade)
-        .with_context(|| format!("Fetch the diverging bodies of {source} {collection}"))?;
-
-    Ok(())
+        .with_context(|| format!("Fetch the diverging bodies of {source} {collection}"))
 }
 
 /// The half of [`resolve_conflicts`] that reaches no server.
@@ -4281,35 +4372,26 @@ fn hydrate_copies(
     let done = AtomicUsize::new(0);
     let tick = || progress.tick(done.fetch_add(1, Ordering::Relaxed) + 1, total);
 
-    if !left_handles.is_empty() {
+    for (ctx, store, handles) in [
+        (left, left_store, left_handles),
+        (right, right_store, right_handles),
+    ] {
+        if handles.is_empty() {
+            continue;
+        }
+        let options = ctx.upgrade_options();
         let mut remote = PimRemote::with_progress(
-            &mut left.pool,
+            &mut ctx.pool,
             blobs.clone(),
-            left.namespace.clone(),
+            ctx.namespace.clone(),
             &tick,
             HashMap::new(),
         );
-        run_verb(
-            left_store,
-            &mut remote,
-            PimdirUpgrade::new(collection.to_string(), left_handles, PimdirTier::Full),
-        )
-        .with_context(|| format!("Hydrate bodies for {} {collection}", left.name))?;
-    }
-    if !right_handles.is_empty() {
-        let mut remote = PimRemote::with_progress(
-            &mut right.pool,
-            blobs.clone(),
-            right.namespace.clone(),
-            &tick,
-            HashMap::new(),
-        );
-        run_verb(
-            right_store,
-            &mut remote,
-            PimdirUpgrade::new(collection.to_string(), right_handles, PimdirTier::Full),
-        )
-        .with_context(|| format!("Hydrate bodies for {} {collection}", right.name))?;
+        let upgrade =
+            PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full).options(options);
+        let upgraded = run_verb(store, &mut remote, upgrade)
+            .with_context(|| format!("Hydrate bodies for {} {collection}", ctx.name))?;
+        ctx.noted.overrule(collection, &upgraded.events);
     }
     Ok(total)
 }
@@ -5048,7 +5130,8 @@ fn drain_submits(
         return;
     };
     // NOTE: an intent naming another source is that source's to send, on its
-    // own run (pimdir STORAGE §15.6); one naming none predates the field.
+    // own run (pimdir STORAGE §15.6); one whose payload does not decode names
+    // none, and is sent here to be parked as malformed.
     let sender = sending_source(account_config, sides);
     let intents: Vec<_> = intents
         .into_iter()
@@ -5331,8 +5414,9 @@ fn drain_collection_creates(
     };
 
     for intent in &intents {
-        // NOTE: an intent naming no source predates pimdir STORAGE §15.6,
-        // and is performed by a side of its anchor's namespace.
+        // NOTE: an intent names its source (pimdir STORAGE §15.6); one whose
+        // payload does not decode names none, and goes to a side of its
+        // anchor's namespace, which parks it as malformed.
         let index = match intent.source() {
             Some(name) => sides.iter().position(|ctx| ctx.name == name),
             None => sides.iter().position(|ctx| {
@@ -5415,9 +5499,10 @@ fn drain_invitations(
 
     for intent in &intents {
         let located = locate_invitation(store, intent);
-        // NOTE: an intent naming no source predates pimdir STORAGE §15.6,
-        // and is performed by a side of its collection's namespace, the
-        // one binding the item when two do.
+        // NOTE: an intent names its source (pimdir STORAGE §15.6); one whose
+        // payload does not decode names none, and goes to a side of its
+        // collection's namespace, the one binding the item when two do,
+        // which parks it as malformed.
         let index = match intent.source() {
             Some(name) => sides.iter().position(|ctx| ctx.name == name),
             None => {
@@ -5837,6 +5922,7 @@ fn hydrate_full_collection(
         let total = targets.len();
         let done = AtomicUsize::new(0);
         let tick = || progress.tick(done.fetch_add(1, Ordering::Relaxed) + 1, total);
+        let options = ctx.upgrade_options();
         let mut remote = PimRemote::with_progress(
             &mut ctx.pool,
             blobs.clone(),
@@ -5844,12 +5930,11 @@ fn hydrate_full_collection(
             &tick,
             HashMap::new(),
         );
-        run_verb(
-            store,
-            &mut remote,
-            PimdirUpgrade::new(collection.to_string(), targets, PimdirTier::Full),
-        )
-        .with_context(|| format!("Hydrate all bodies {} {collection}", &ctx.name))?;
+        let upgrade =
+            PimdirUpgrade::new(collection.to_string(), targets, PimdirTier::Full).options(options);
+        let upgraded = run_verb(store, &mut remote, upgrade)
+            .with_context(|| format!("Hydrate all bodies {} {collection}", &ctx.name))?;
+        ctx.noted.overrule(collection, &upgraded.events);
         raised += total;
     }
     Ok(raised)
@@ -5885,8 +5970,10 @@ impl DryRunReplica {
 
         clear_stale_replicas(parent, &prefix);
 
+        // NOTE: the replica is a store, its user's alone (pimdir STORAGE §18),
+        // or its open refuses it as exposed.
         let dir = parent.join(format!("{prefix}{}", process::id()));
-        fs::create_dir_all(&dir)
+        modes::create_dir_all(&dir)
             .with_context(|| format!("Create dry-run replica {} error", dir.display()))?;
 
         if real_dir.exists() {
@@ -5963,7 +6050,7 @@ fn clear_stale_replicas(dir: &Path, prefix: &str) {
 /// A link the filesystem refuses falls back to a copy, so the cost of
 /// misjudging a file is a slower dry run and never a corrupted store.
 fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> Result<()> {
-    fs::create_dir_all(dst)?;
+    modes::create_dir_all(dst)?;
 
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -5989,7 +6076,6 @@ mod tests {
         change::{PimdirChange, PimdirChangeKind, PimdirDropReason},
         client::reader::PimdirReader,
         collection::{PimdirCheckpoint, PimdirCursor},
-        hash::PimdirHashAlgo,
         hub::PimdirHubConflict,
         object::PimdirObject,
         placement::PimdirOrigin,
@@ -6021,7 +6107,10 @@ mod tests {
         drop(PimdirStore::open(dir.path()).unwrap());
         rusqlite::Connection::open(dir.path().join("pimdir.db"))
             .unwrap()
-            .pragma_update(None, "user_version", 99)
+            .execute(
+                "UPDATE store_meta SET format_version = 'storage-draft-99'",
+                [],
+            )
             .unwrap();
 
         let Err(err) = open_store(dir.path(), "imap", "imap") else {
@@ -6031,6 +6120,22 @@ mod tests {
         let err = format!("{err:#}");
         assert!(err.contains("newer neverest"), "{err}");
         assert!(!err.contains("--reset"), "{err}");
+    }
+
+    /// A store refused for its version is an earlier neverest's when it
+    /// names no version, as every draft before storage-draft-08 wrote it,
+    /// or an earlier draft; a later draft or a release is a newer one's.
+    #[test]
+    fn a_store_version_tells_an_earlier_neverest_from_a_newer_one() {
+        let refused = |found: Option<&str>| PimdirError::Version {
+            found: found.map(String::from),
+        };
+
+        assert!(written_earlier(&refused(None)));
+        assert!(written_earlier(&refused(Some("storage-draft-07"))));
+        assert!(!written_earlier(&refused(Some("storage-draft-09"))));
+        assert!(!written_earlier(&refused(Some("storage-v1"))));
+        assert!(!written_earlier(&PimdirError::Busy));
     }
 
     /// The marker survives the context a caller adds on top of the open,
@@ -6169,6 +6274,20 @@ mod tests {
         );
     }
 
+    /// A dry run's replica of a store opens as one: a store is its user's
+    /// alone (pimdir STORAGE §18), so a replica made under the umask was
+    /// refused as exposed and no dry run ran.
+    #[test]
+    fn a_dry_run_replica_opens_as_a_store() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("account");
+        drop(PimdirStore::open(&store).unwrap());
+
+        let replica = DryRunReplica::new(&store).unwrap();
+
+        PimdirStore::open(&replica.dir).expect("the replica opens");
+    }
+
     /// Writing to the replica's index leaves the real one alone.
     ///
     /// That is what a dry run means, and what a shared index would break.
@@ -6258,17 +6377,15 @@ mod tests {
 
         let mut producer = PimdirProducer::open(dir.path(), "himalaya").unwrap();
         let queue = |producer: &mut PimdirProducer, link: &str| {
+            let id = link.trim_start_matches("mid:");
+            let body = format!("Message-ID: <{id}>\r\nSubject: hi\r\n\r\nhello\r\n");
             producer
-                .enqueue(
-                    "imap/INBOX",
-                    &PimdirAction::Add {
-                        link_id: Some(PimdirLinkId(link.into())),
-                        flags: PimdirFlags::default(),
-                        object: None,
-                        supersedes: None,
-                    },
-                    None,
-                )
+                .enqueue_with_body("imap/INBOX", body.as_bytes(), |hash| PimdirAction::Add {
+                    link_id: Some(PimdirLinkId(link.into())),
+                    flags: PimdirFlags::default(),
+                    object: Some(hash),
+                    supersedes: None,
+                })
                 .unwrap();
         };
 
@@ -6402,7 +6519,7 @@ mod tests {
         let loaded = store
             .load(
                 &PimdirCollectionId(collection.to_string()),
-                &PimdirLoadScope::All,
+                &PimdirLoadSelection::All,
             )
             .unwrap();
         loaded
@@ -6491,7 +6608,7 @@ mod tests {
             .write(vec![
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
-                        hash: PimdirHashAlgo::default().hash(b"abc"),
+                        hash: io_pimdir::hash::hash(b"abc"),
                         size: 3,
                     },
                     body: Some(b"abc".to_vec()),
@@ -6500,7 +6617,7 @@ mod tests {
                     collection: PimdirCollectionId("INBOX".into()),
                     handle: PimdirHandle("1".into()),
                     link_id: Some(PimdirLinkId("mid:a@x".into())),
-                    object: Some(PimdirHashAlgo::default().hash(b"abc")),
+                    object: Some(io_pimdir::hash::hash(b"abc")),
                     level: PimdirLevel::Full,
                     summary: None,
                     sort_key: PimdirSortKey::default(),
@@ -6511,7 +6628,7 @@ mod tests {
                     base: Some(PimdirBase {
                         flags: PimdirFlags::default(),
                         revision: None,
-                        object: Some(PimdirHashAlgo::default().hash(b"abc")),
+                        object: Some(io_pimdir::hash::hash(b"abc")),
                     }),
                     origin: None,
                 }),
@@ -6535,10 +6652,7 @@ mod tests {
         let placements = load_side(&store, "INBOX").unwrap();
         assert_eq!(placements.len(), 1);
         assert_eq!(placements[0].handle.0, "7");
-        assert_eq!(
-            placements[0].object,
-            Some(PimdirHashAlgo::default().hash(b"abc"))
-        );
+        assert_eq!(placements[0].object, Some(io_pimdir::hash::hash(b"abc")));
         assert_eq!(placements[0].status, PimdirStatus::Clean);
 
         assert_eq!(stored_checkpoint_uid_validity(&store, "INBOX"), Some(2));
@@ -7006,9 +7120,9 @@ mod tests {
                 "left/Sent",
                 &PimdirAction::Unknown {
                     kind: submit::SUBMIT.into(),
-                    payload: r#"{"v":1,"object":"cafe0002","from":"a@x.org","rcpts":["b@y.org"],"subject":"hi"}"#
+                    payload: r#"{"v":1,"source":"left","from":"a@x.org","rcpts":["b@y.org"],"subject":"hi"}"#
                         .into(),
-                    object_hash: Some(hash),
+                    object_hash: Some(hash.clone()),
                 },
                 Some(&object),
             )
@@ -7024,10 +7138,7 @@ mod tests {
         assert_eq!(intents.len(), 1);
         assert_eq!(intents[0].collection, "left/Sent");
         assert_eq!(intents[0].subject().as_deref(), Some("hi"));
-        assert_eq!(
-            intents[0].object.as_ref().map(|h| h.0.as_str()),
-            Some("cafe0002")
-        );
+        assert_eq!(intents[0].object.as_ref(), Some(&hash));
 
         assert!(store.drop_action(intents[0].id).unwrap());
         assert!(submit::pending(&store).unwrap().is_empty());
@@ -7217,7 +7328,10 @@ mod tests {
         let Err(PimdirError::Unsupported(refusal)) = queue_task(dir.path(), "caldav/events") else {
             panic!("a task into an events-only calendar is refused at the gate");
         };
-        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(
+            refusal.capability,
+            io_pimdir::capability::CALENDAR_COMPONENT_VTODO
+        );
         assert_eq!(refusal.source, "caldav");
         queue_task(dir.path(), "caldav/work").unwrap();
         queue_task(dir.path(), "caldav/any").unwrap();
@@ -7299,7 +7413,10 @@ mod tests {
             declare(dir.path(), "live", &config, &mode, &StoreState::default()).unwrap();
 
             let refusal = refused_task(dir.path(), collection);
-            assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+            assert_eq!(
+                refusal.capability,
+                io_pimdir::capability::CALENDAR_COMPONENT_VTODO
+            );
             assert_eq!(refusal.source, source);
             assert!(refusal.detail.unwrap().contains(tasks));
             let reader = PimdirReader::open(dir.path()).unwrap();
@@ -7346,7 +7463,10 @@ mod tests {
         );
 
         let refusal = refused_task(dir.path(), "caldav/events");
-        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(
+            refusal.capability,
+            io_pimdir::capability::CALENDAR_COMPONENT_VTODO
+        );
         assert_eq!(refusal.source, "caldav");
         queue_task(dir.path(), "caldav/work").unwrap();
         let reader = PimdirReader::open(dir.path()).unwrap();
@@ -7378,7 +7498,10 @@ mod tests {
         declare(dir.path(), "live", &config, &mode, &StoreState::default()).unwrap();
 
         let refusal = refused_task(dir.path(), "caldav/events");
-        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(
+            refusal.capability,
+            io_pimdir::capability::CALENDAR_COMPONENT_VTODO
+        );
         assert_eq!(refusal.source, "caldav");
         assert!(refusal.detail.unwrap().contains("target google"));
     }
@@ -7432,7 +7555,10 @@ mod tests {
         assert!(reader.accepts_vtodo("caldav/work").unwrap());
         drop(reader);
         let refusal = refused_task(dir.path(), "caldav/events");
-        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(
+            refusal.capability,
+            io_pimdir::capability::CALENDAR_COMPONENT_VTODO
+        );
     }
 
     /// A Google calendar outside the home set, as io-webdav lists it: by
@@ -7488,7 +7614,10 @@ mod tests {
 
         let collection = format!("caldav/{GOOGLE_EVENTS}");
         let refusal = refused_task(dir.path(), &collection);
-        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(
+            refusal.capability,
+            io_pimdir::capability::CALENDAR_COMPONENT_VTODO
+        );
         assert_eq!(refusal.source, "caldav");
         queue_task(dir.path(), "caldav/work").unwrap();
         let reader = PimdirReader::open(dir.path()).unwrap();
@@ -7527,7 +7656,7 @@ mod tests {
             store
                 .load(
                     &PimdirCollectionId(collection.into()),
-                    &PimdirLoadScope::All,
+                    &PimdirLoadSelection::All,
                 )
                 .unwrap()
         };
@@ -7589,7 +7718,10 @@ mod tests {
         );
 
         let refusal = refused_task(dir.path(), "caldav/events");
-        assert_eq!(refusal.capability, io_pimdir::capability::X_VTODO);
+        assert_eq!(
+            refusal.capability,
+            io_pimdir::capability::CALENDAR_COMPONENT_VTODO
+        );
         assert_eq!(refusal.source, "caldav");
         queue_task(dir.path(), "caldav/work").unwrap();
         let reader = PimdirReader::open(dir.path()).unwrap();
@@ -7655,12 +7787,13 @@ mod tests {
     fn the_sweep_collects_the_bodies_the_purge_released() {
         let dir = tempfile::tempdir().unwrap();
         let mut source = PimdirStore::open(dir.path()).unwrap().for_source("left");
+        let hash = io_pimdir::hash::hash(b"abc");
 
         source
             .write(vec![
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
-                        hash: PimdirHash("beef0002".into()),
+                        hash: hash.clone(),
                         size: 3,
                     },
                     body: Some(b"abc".to_vec()),
@@ -7669,7 +7802,7 @@ mod tests {
                     collection: PimdirCollectionId("INBOX".into()),
                     handle: PimdirHandle("1".into()),
                     link_id: Some(PimdirLinkId("mid:gone@x".into())),
-                    object: Some(PimdirHash("beef0002".into())),
+                    object: Some(hash.clone()),
                     level: PimdirLevel::Full,
                     summary: None,
                     sort_key: PimdirSortKey::default(),
@@ -7680,14 +7813,14 @@ mod tests {
                     base: Some(PimdirBase {
                         flags: PimdirFlags::default(),
                         revision: None,
-                        object: Some(PimdirHash("beef0002".into())),
+                        object: Some(hash.clone()),
                     }),
                     origin: None,
                 }),
             ])
             .unwrap();
 
-        let body = source.blobs().path(&PimdirHash("beef0002".into()));
+        let body = source.blobs().path(&hash).unwrap();
         assert!(body.is_file(), "the body was stored");
 
         source
@@ -8009,7 +8142,7 @@ mod tests {
                 summary: None,
                 sort_key: PimdirSortKey::default(),
                 body: Some(PimdirFetchedBody::Inline {
-                    hash: PimdirHashAlgo::default().hash(&bytes),
+                    hash: io_pimdir::hash::hash(&bytes),
                     bytes,
                 }),
                 revision: Some(self.revision.clone()),
@@ -8201,6 +8334,13 @@ mod tests {
         assert_eq!(merged, 0, "nothing to merge against");
     }
 
+    /// How a one-way target's upgrade settles what it fetches: its pushing
+    /// sync's policy.
+    const STORE_WINS: PimdirUpgradeOptions = PimdirUpgradeOptions {
+        conflict: PimdirConflictPolicy::PreferLocal,
+        push_content: true,
+    };
+
     /// A side the store decides keeps the store's body over its own edit.
     ///
     /// The engine parks a store-wins divergence on a pass that cannot push,
@@ -8224,6 +8364,7 @@ mod tests {
             &mut store,
             &blobs,
             &mut remote,
+            STORE_WINS,
             &mut Vec::new(),
         )
         .unwrap();
@@ -8241,6 +8382,87 @@ mod tests {
             Some("etag-2"),
             "the overwrite is conditioned on the revision the endpoint holds",
         );
+    }
+
+    /// The fetch of a diverging body settles it by the side's policy
+    /// (pimdir SYNC §6): a one-way target's `prefer-local` keeps the store's
+    /// body, owed to the target, and the target's own as a retained item,
+    /// which the upgrade reports overruled. Under the default options, as
+    /// every upgrade ran before, the fetch settles nothing and the item
+    /// stays parked.
+    #[cfg(feature = "dav")]
+    #[test]
+    fn a_fetched_divergence_settles_by_the_side_s_policy() {
+        for (options, settles) in [(STORE_WINS, true), (PimdirUpgradeOptions::default(), false)] {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut source, mut target) = two_endpoints(dir.path());
+            let agreed = card("+1", "old");
+
+            pull_endpoint(&mut source, &mut CardServer::at("v1", &agreed));
+            pull_endpoint(&mut target, &mut CardServer::at("w1", &agreed));
+            pull_endpoint(&mut source, &mut CardServer::at("v2", &card("+2", "old")));
+            let verb = sync_verb(
+                "contacts",
+                false,
+                PimdirPushRights::all(),
+                PimdirConflictPolicy::PreferLocal,
+                PimdirScope::unbounded(),
+                false,
+            );
+            let edited = card("+3", "old");
+            let parked = run_verb(&mut target, &mut CardServer::bare("w2", &edited), verb).unwrap();
+            assert_eq!(parked.conflicts, 1, "the target's pull parked it");
+            let unread: Vec<PimdirHandle> = conflicted_placements(&target, "contacts", "right")
+                .unwrap()
+                .into_iter()
+                .filter(|placement| placement.conflict_object.is_none())
+                .map(|placement| placement.handle)
+                .collect();
+            assert_eq!(unread, [PimdirHandle::from("card1")], "nobody read it");
+
+            let mut server = CardServer::at("w2", &edited);
+            let fetched = fetch_diverging(
+                "contacts",
+                "right",
+                &mut target,
+                &mut server,
+                options,
+                unread,
+            )
+            .unwrap();
+
+            let overruled = fetched
+                .events
+                .iter()
+                .filter(|event| matches!(event, PimdirSyncEvent::Overruled { .. }))
+                .count();
+            let placement = load_side(&target, "contacts").unwrap().remove(0);
+            let retained = PimdirReader::open(dir.path())
+                .unwrap()
+                .list_retained("contacts", None, 10)
+                .unwrap();
+            if settles {
+                assert_eq!(overruled, 1, "{:?}", fetched.events);
+                assert_eq!(
+                    placement.status,
+                    PimdirStatus::Dirty,
+                    "the overwrite is owed"
+                );
+                assert!(placement.conflict_revision.is_none(), "{placement:?}");
+                assert_eq!(
+                    retained
+                        .iter()
+                        .map(|item| item.object.clone())
+                        .collect::<Vec<_>>(),
+                    [Some(target.blob_stage().blobs().hash(edited.as_bytes()))],
+                    "the target's own body kept",
+                );
+            } else {
+                assert_eq!(overruled, 0, "{:?}", fetched.events);
+                assert!(placement.conflict_revision.is_some(), "still parked");
+                assert!(retained.is_empty(), "{retained:?}");
+            }
+        }
     }
 
     /// A one-way overwrite discards the target's own edit, which the store
@@ -8279,6 +8501,7 @@ mod tests {
             &mut target,
             &blobs,
             &mut server,
+            STORE_WINS,
             &mut overruled,
         );
         assert_eq!(kept.unwrap(), 1);
@@ -8356,6 +8579,7 @@ mod tests {
             &mut target,
             &blobs,
             &mut server,
+            STORE_WINS,
             &mut overruled,
         );
         assert_eq!(kept.unwrap(), 1);
@@ -8772,12 +8996,12 @@ mod tests {
     /// The name of the item's original body, `old`: a real one, a body
     /// being verified against its name before it is pushed.
     fn old_hash() -> PimdirHash {
-        PimdirHashAlgo::default().hash(b"old")
+        io_pimdir::hash::hash(b"old")
     }
 
     /// The name of the item's edited body, `new`.
     fn new_hash() -> PimdirHash {
-        PimdirHashAlgo::default().hash(b"new")
+        io_pimdir::hash::hash(b"new")
     }
 
     /// Seeds a store holding one locally edited item.
@@ -9050,19 +9274,35 @@ mod tests {
 
         let mut left_remote = MutableRemote::at("card1", "l1");
         left_remote.items.clear();
+        let opts = |accept_absences| PimdirSyncOptions {
+            push: false,
+            accept_absences,
+            ..Default::default()
+        };
+
+        // NOTE: a listing naming no member parks any absence (pimdir SYNC
+        // §5, §8), an emptied address book reading as a failing server
+        // until a person accepts it.
+        let parked = run_verb(
+            &mut left,
+            &mut left_remote,
+            sync_verb_with("contacts", opts(false), true),
+        )
+        .unwrap();
+        assert_eq!(
+            parked.parked,
+            Some(PimdirParked {
+                absent: 1,
+                bound: 1
+            })
+        );
+        assert!(parked.events.is_empty(), "{:?}", parked.events);
 
         let before = flag_snapshot(&left, "contacts", "left").unwrap();
         let pull = run_verb(
             &mut left,
             &mut left_remote,
-            sync_verb(
-                "contacts",
-                false,
-                PimdirPushRights::all(),
-                PimdirConflictPolicy::Manual,
-                PimdirScope::unbounded(),
-                true,
-            ),
+            sync_verb_with("contacts", opts(true), true),
         )
         .unwrap();
         assert!(
@@ -9190,7 +9430,7 @@ mod tests {
         let placements = store
             .load(
                 &PimdirCollectionId("contacts".into()),
-                &PimdirLoadScope::All,
+                &PimdirLoadSelection::All,
             )
             .unwrap()
             .placements;
@@ -9219,7 +9459,7 @@ mod tests {
         let mut store = store_with_local_delete(dir.path());
         let contacts = PimdirCollectionId("contacts".into());
         let mut placement = store
-            .load(&contacts, &PimdirLoadScope::All)
+            .load(&contacts, &PimdirLoadSelection::All)
             .unwrap()
             .placements
             .remove(0);
@@ -9236,7 +9476,7 @@ mod tests {
 
         assert!(remote.pushed.is_empty(), "no flag change pushed");
         let placements = store
-            .load(&contacts, &PimdirLoadScope::All)
+            .load(&contacts, &PimdirLoadSelection::All)
             .unwrap()
             .placements;
         assert_eq!(
@@ -9725,15 +9965,18 @@ mod tests {
         assert!(err.contains("no source named nope"), "got {err}");
     }
 
-    /// Stages one `submit` in the store at `dir`, anchored on `collection`.
-    fn queue_submit(dir: &Path, collection: &str) {
+    /// Stages one `submit` in the store at `dir`, anchored on `collection`,
+    /// for `source` to send.
+    fn queue_submit(dir: &Path, collection: &str, source: &str) {
+        let payload =
+            format!(r#"{{"v":1,"source":"{source}","from":"a@x.org","rcpts":["b@y.org"]}}"#);
         PimdirProducer::open(dir, "test-frontend")
             .unwrap()
             .enqueue(
                 collection,
                 &PimdirAction::Unknown {
                     kind: submit::SUBMIT.into(),
-                    payload: r#"{"v":1,"from":"a@x.org","rcpts":["b@y.org"]}"#.into(),
+                    payload,
                     object_hash: None,
                 },
                 None,
@@ -9764,7 +10007,7 @@ mod tests {
         store
             .ensure_collection("imap/Sent", "message/rfc822")
             .unwrap();
-        queue_submit(dir.path(), "imap/Sent");
+        queue_submit(dir.path(), "imap/Sent", "imap");
         assert!(wanted_sides(&store, &smtp, &["imap"], "imap").is_empty());
 
         let dir = tempfile::tempdir().unwrap();
@@ -9773,7 +10016,7 @@ mod tests {
             .ensure_collection("msgraph/Sent Items", "message/rfc822")
             .unwrap();
         assert!(wanted_sides(&store, &graph, &["msgraph"], "msgraph").is_empty());
-        queue_submit(dir.path(), "msgraph/Sent Items");
+        queue_submit(dir.path(), "msgraph/Sent Items", "msgraph");
         assert_eq!(
             wanted_sides(&store, &graph, &["msgraph"], "msgraph"),
             BTreeSet::from([String::from("msgraph")])
@@ -9825,7 +10068,7 @@ mod tests {
             .ensure_collection("dav/contacts", "text/vcard")
             .unwrap();
 
-        let object = PimdirHashAlgo::default().hash(b"abc");
+        let object = io_pimdir::hash::hash(b"abc");
         store
             .write(vec![
                 PimdirWriteOp::StoreObject {
@@ -9970,7 +10213,7 @@ mod tests {
                     None => {
                         self.fetched.push(handle.clone());
                         named(&uid).with_body(PimdirFetchedBody::Inline {
-                            hash: PimdirHash(format!("{:016x}", digest(&body))),
+                            hash: io_pimdir::hash::hash(&body),
                             bytes: body,
                         })
                     }
@@ -10011,7 +10254,7 @@ mod tests {
                     summary: None,
                     sort_key: PimdirSortKey::default(),
                     body: Some(PimdirFetchedBody::Inline {
-                        hash: PimdirHash(format!("{:016x}", digest(&body))),
+                        hash: io_pimdir::hash::hash(&body),
                         bytes: body,
                     }),
                     revision: Some(String::from("etag-1")),
@@ -10027,16 +10270,6 @@ mod tests {
         ) -> Result<Vec<PimdirPushResult>, Self::Error> {
             anyhow::bail!("the listing remote is never pushed to")
         }
-    }
-
-    /// A content hash for a fake body, standing in for the store's own hasher.
-    ///
-    /// Distinct bodies must name distinct objects, or a test proves
-    /// deduplication rather than storage.
-    fn digest(body: &[u8]) -> u64 {
-        body.iter().fold(0xcbf29ce484222325u64, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
-        })
     }
 
     /// One collection's spine as `collection_spine` runs it for a lone source.
@@ -10319,7 +10552,13 @@ mod tests {
                     }
                 })
                 .collect();
-            if let Err(err) = apply_batch(store, NoWire, collection, items) {
+            if let Err(err) = apply_batch(
+                store,
+                NoWire,
+                collection,
+                items,
+                PimdirUpgradeOptions::default(),
+            ) {
                 warn!("{collection} write error: {err:#}");
             }
             Ok(())
@@ -10800,7 +11039,7 @@ mod tests {
             }
 
             let placements = store
-                .load(collection, &PimdirLoadScope::Handles(landed.clone()))
+                .load(collection, &PimdirLoadSelection::Handles(landed.clone()))
                 .unwrap()
                 .placements;
             assert_eq!(placements.len(), landed.len(), "the page has landed");
@@ -10828,7 +11067,14 @@ mod tests {
                     }
                 })
                 .collect();
-            apply_batch(store, NoWire, collection.as_str(), items).unwrap();
+            apply_batch(
+                store,
+                NoWire,
+                collection.as_str(),
+                items,
+                PimdirUpgradeOptions::default(),
+            )
+            .unwrap();
             Rest::Go
         }
 
@@ -11338,7 +11584,7 @@ mod tests {
             format!("BEGIN:VCARD\r\nVERSION:4.0\r\nUID:u1\r\nFN:{name}\r\nEND:VCARD\r\n")
         };
         let bound = |handle: &str, body: &str| {
-            let hash = PimdirHashAlgo::default().hash(body.as_bytes());
+            let hash = io_pimdir::hash::hash(body.as_bytes());
             vec![
                 PimdirWriteOp::StoreObject {
                     object: PimdirObject {
@@ -11865,14 +12111,14 @@ mod gmail_bodies {
 
     use super::{
         Authority, GoneBodies, Noted, Pacing, SourceCtx, hydrate_plans, open_store, phase2_hydrate,
-        projection_view,
+        projection_view, sync_side,
     };
     use crate::{
         account::{GmailAccount, SourceAccount, SourceAccountBackend},
         client::{Client, Pool},
         config::AccountConfig,
         gmail::{
-            client::scripted::{Wire, batch_answer, scripted},
+            client::scripted::{Wire, batch_answer, ok, scripted},
             run::GmailRun,
         },
         throttle::Throttle,
@@ -12066,6 +12312,73 @@ mod gmail_bodies {
         assert!(work[0].1.is_some(), "{work:?}");
         assert_eq!(work[0].1, inbox[0].1);
     }
+
+    /// A message the store binds in the inbox, dated `date` by its `Date`,
+    /// none for an undated draft.
+    fn dated(handle: &str, date: Option<&str>) -> PimdirWriteOp {
+        let PimdirWriteOp::UpsertPlacement(mut placement) = owed(INBOX, handle, 40) else {
+            unreachable!("owed upserts a placement");
+        };
+        if let Some(PimdirSummary::Mail(mail)) = &mut placement.summary {
+            mail.date = date.map(String::from);
+        }
+        placement.sort_key = PimdirSortKey(date.unwrap_or_default().to_owned());
+        PimdirWriteOp::UpsertPlacement(placement)
+    }
+
+    fn ids(ids: &[&str]) -> Vec<u8> {
+        let messages: Vec<_> = ids
+            .iter()
+            .map(|id| serde_json::json!({ "id": id }))
+            .collect();
+        ok(serde_json::json!({ "messages": messages }))
+    }
+
+    /// A scoped round finds absent neither an undated draft received
+    /// before its window nor a message whose `Date` runs ahead of its
+    /// arrival: `after:` reads the arrival and lists neither, so the round
+    /// states it is narrowed and its last page hands the label's ids, which
+    /// name both (pimdir SYNC §4, §5). A round stating neither dropped both.
+    #[test]
+    fn a_scoped_round_keeps_what_its_arrival_filter_misses() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_holding(
+            dir.path(),
+            vec![
+                dated("recent", Some("2026-10-20T10:00:00Z")),
+                dated("draft", None),
+                dated("ahead", Some("2030-01-01T10:00:00Z")),
+            ],
+        );
+        let blobs = store.blob_stage();
+        let (mut ctx, api, batch) = connection();
+        ctx.scope = PimdirScope::since("2026-09-01T00:00:00Z");
+
+        api.answer(ok(serde_json::json!({
+            "emailAddress": "user@example.org",
+            "historyId": "500"
+        })));
+        api.answer(ids(&["recent"]));
+        // NOTE: the unread, starred and important listings of the window.
+        for _ in 0..3 {
+            api.answer(ids(&[]));
+        }
+        api.answer(ids(&["ahead", "draft", "recent"]));
+
+        let (report, _) = sync_side(INBOX, &mut ctx, &mut store, &blobs, false, None).unwrap();
+
+        assert_eq!(report.parked, None);
+        let held: Vec<String> = bodies(&store, INBOX)
+            .into_iter()
+            .map(|(handle, _)| handle)
+            .collect();
+        assert_eq!(held, ["ahead", "draft", "recent"]);
+        let requests = api.requests();
+        let enumeration = requests.last().unwrap();
+        assert!(enumeration.contains("/messages"), "{requests:?}");
+        assert!(!enumeration.contains("q="), "no date filter: {requests:?}");
+        assert_eq!(api.left() + batch.left(), 0, "{requests:?}");
+    }
 }
 
 /// Heads of a Gmail round (pimdir SYNC §4, §5), over scripted sessions: a
@@ -12079,7 +12392,7 @@ mod gmail_heads {
     use io_pimdir::{
         client::PimdirSourceStore,
         collection::{PimdirCheckpoint, PimdirCollectionId},
-        load::{PimdirLoadScope, PimdirLoaded},
+        load::{PimdirLoadSelection, PimdirLoaded},
         placement::PimdirHandle,
         remote::PimdirListing,
     };
@@ -12157,7 +12470,7 @@ mod gmail_heads {
         store
             .load(
                 &PimdirCollectionId(INBOX.to_string()),
-                &PimdirLoadScope::All,
+                &PimdirLoadSelection::All,
             )
             .unwrap()
     }
@@ -12388,7 +12701,7 @@ mod graph_heads {
     use io_pimdir::{
         client::PimdirSourceStore,
         collection::{PimdirCollectionId, PimdirScope},
-        load::{PimdirLoadScope, PimdirLoaded},
+        load::{PimdirLoadSelection, PimdirLoaded},
         placement::PimdirHandle,
         remote::PimdirListing,
     };
@@ -12476,7 +12789,7 @@ mod graph_heads {
         store
             .load(
                 &PimdirCollectionId(INBOX.to_string()),
-                &PimdirLoadScope::All,
+                &PimdirLoadSelection::All,
             )
             .unwrap()
     }

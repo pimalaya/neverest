@@ -3,19 +3,20 @@
 //! What each source declares it can do (pimdir STORAGE §15.6), derived
 //! from its backend and its configured rights alone, so a declaration
 //! needs no network. JMAP sources stay undeclared, which gates nothing.
-//! A calendar taking no tasks (`x-vtodo`) is the provider's when it keeps
-//! tasks apart (Google, Graph), from the configuration too, and otherwise a
-//! fact a CalDAV server states, which comes from the source's last listing,
-//! kept in the sidecar.
+//! A calendar taking no tasks (`calendar.component.vtodo`) is the provider's
+//! when it keeps tasks apart (Google, Graph), from the configuration too, and
+//! otherwise a fact a CalDAV server states, which comes from the source's
+//! last listing, kept in the sidecar.
 
 use std::collections::BTreeSet;
 
 use io_pimdir::capability::{
-    CALENDAR, CALENDAR_CANCEL, CALENDAR_CANCEL_OCCURRENCE, CALENDAR_OCCURRENCE_UPDATE,
-    CALENDAR_ONLINE_MEETING, CALENDAR_REPLY, CALENDAR_REPLY_OCCURRENCE, CALENDAR_SCHEDULING,
-    COLLECTION_CREATE, CONTACTS, CONTACTS_CARD_COPY, CONTACTS_CARD_MOVE, MAIL, MAIL_FLAGS_ANSWERED,
-    MAIL_FLAGS_DRAFT, MAIL_FLAGS_FLAGGED, MAIL_FLAGS_KEYWORDS, MAIL_FLAGS_SEEN, MAIL_MESSAGE_ADD,
-    MAIL_MESSAGE_REMOVE, MAIL_SUBMIT, MAIL_SUBMIT_COPY, PimdirCapability, PimdirSupport, X_VTODO,
+    CALENDAR, CALENDAR_CANCEL, CALENDAR_CANCEL_OCCURRENCE, CALENDAR_COMPONENT_VTODO,
+    CALENDAR_OCCURRENCE_UPDATE, CALENDAR_ONLINE_MEETING, CALENDAR_REPLY, CALENDAR_REPLY_OCCURRENCE,
+    CALENDAR_SCHEDULING, COLLECTION_CREATE, CONTACTS, CONTACTS_CARD_COPY, CONTACTS_CARD_MOVE, MAIL,
+    MAIL_FLAGS_ANSWERED, MAIL_FLAGS_DRAFT, MAIL_FLAGS_FLAGGED, MAIL_FLAGS_KEYWORDS,
+    MAIL_FLAGS_SEEN, MAIL_MESSAGE_ADD, MAIL_MESSAGE_REMOVE, MAIL_SUBMIT, MAIL_SUBMIT_COPY,
+    PimdirCapability, PimdirSupport,
 };
 
 use crate::config::{SourceBackendConfig, SourceConfig};
@@ -93,17 +94,18 @@ pub fn declaration(
         .collect()
 }
 
-/// The `x-vtodo` rows of one source (pimdir STORAGE §15.6): `none` on each
-/// of `collections`, the store collections it syncs, that its last listing
-/// or the last listing of a target paired with it stated take no tasks
-/// (`taskless`). Nothing elsewhere: a collection with no row refuses no task.
+/// The `calendar.component.vtodo` rows of one source (pimdir STORAGE §15.6):
+/// `none` on each of `collections`, the store collections it syncs, that its
+/// last listing or the last listing of a target paired with it stated take no
+/// tasks (`taskless`). Nothing elsewhere: a collection with no row refuses no
+/// task.
 pub fn vtodo(collections: &[String], taskless: &BTreeSet<String>) -> Vec<PimdirCapability> {
     collections
         .iter()
         .filter(|collection| taskless.contains(*collection))
         .map(|collection| PimdirCapability {
             collection: Some(collection.clone()),
-            name: X_VTODO.to_string(),
+            name: CALENDAR_COMPONENT_VTODO.to_string(),
             support: PimdirSupport::None,
             detail: Some(NO_VTODO.to_string()),
         })
@@ -121,11 +123,11 @@ fn keeps_tasks_apart(source: &SourceConfig) -> Option<&'static str> {
     }
 }
 
-/// The source-wide `x-vtodo` row of one source (pimdir STORAGE §15.6),
-/// from the configuration alone: `none` where its provider keeps tasks
-/// apart, or the provider of one of `targets`, by name, which every calendar
-/// of the source is copied to. `None` elsewhere, and for a source syncing
-/// no calendar (an undeclared JMAP one among them).
+/// The source-wide `calendar.component.vtodo` row of one source (pimdir
+/// STORAGE §15.6), from the configuration alone: `none` where its provider
+/// keeps tasks apart, or the provider of one of `targets`, by name, which
+/// every calendar of the source is copied to. `None` elsewhere, and for a
+/// source syncing no calendar (an undeclared JMAP one among them).
 pub fn vtodo_wide(
     source: &SourceConfig,
     targets: &[(&str, &SourceConfig)],
@@ -147,7 +149,7 @@ pub fn vtodo_wide(
     };
     Some(PimdirCapability {
         collection: None,
-        name: X_VTODO.to_string(),
+        name: CALENDAR_COMPONENT_VTODO.to_string(),
         support: PimdirSupport::None,
         detail: Some(detail),
     })
@@ -649,7 +651,7 @@ mod tests {
     #[test]
     fn a_provider_keeping_tasks_apart_declares_none_source_wide() {
         let gcal_row = vtodo_wide(&gcal(), &[]).unwrap();
-        assert_eq!(gcal_row.name, X_VTODO);
+        assert_eq!(gcal_row.name, CALENDAR_COMPONENT_VTODO);
         assert_eq!(gcal_row.collection, None);
         assert_eq!(gcal_row.support, PimdirSupport::None);
         assert_eq!(gcal_row.detail.as_deref(), Some(GCAL_NO_VTODO));

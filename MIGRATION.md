@@ -29,11 +29,24 @@ This page lists the changes most likely to bite when upgrading. The full configu
 4. Run `neverest sync -a <account> --dry-run` to inspect the first patch.
 5. Drop `--dry-run`, replace the old config, done.
 
+## From v0.3.0, or any earlier build, to the next release
+
+The store follows pimdir storage-draft-08, sync-draft-07 and search-draft-08 (io-pimdir 0.8). A store any earlier neverest wrote, v0.3.0 or a git build, is refused by every profile as `store-version`, never migrated: neverest, and every frontend reading the store, reinstall it. What only the old store holds is the work it queued (a send, an edit or a create staged by a frontend) and its retained items, so reinstall in this order:
+
+1. With the neverest that wrote the store, run `neverest sync -a <account>` until nothing is queued: the run exits 0, its report lists no `parked` action, no `submitted` entry left parked and no conflict, and `neverest drain -a <account>` applies nothing more. Settle or cancel what stays parked.
+2. Upgrade neverest.
+3. Move the store aside, deleting nothing: `mv` its directory (the path `neverest init` printed: `store.root`, else `$XDG_STATE_HOME/neverest/<account>` on Linux) to a sibling name.
+4. Run `neverest init -a <account>` to create the new store, then `neverest sync -a <account>`, which lists every collection again and downloads its bodies.
+
+`neverest sync --reset --force -a <account>` does steps 3 and 4 in one command, moving the store into a sibling `<dir>.reset-<instant>` directory before syncing into a new one. Keep the moved store until the new one holds what you expect: its retained items are only there.
+
+A store another user can read is refused too, as `store-exposed`: one `neverest init` creates is its user's alone, and an older one moved back in place needs `chmod 700` on its directory and `chmod 600` on its pimdir.db.
+
 ## From a git master build
 
 No v1.0.0 was ever released: what was prepared under that number ships as v0.2.0.
 
-If you ran a build from master, the store format moved underneath it and is refused as stale. There is no migration: run `neverest sync --reset --force -a <account>`, which moves it into a sibling `<dir>.reset-<instant>` directory, nothing deleted, and resyncs into a fresh store.
+If you ran a build from master, its store is refused as `store-version`: reinstall it as the section above says.
 
 ## From v1.0.0-beta to v0.2.0
 

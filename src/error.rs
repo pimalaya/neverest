@@ -13,7 +13,8 @@
 //! vocabulary. Those neverest cannot meet are left out: `index-busy`, which
 //! the indexer answers as busy; `index-missing`, `index-outdated` and
 //! `index-query-only`, which answer a query client, which neverest never
-//! is; `cutoff-invalid`, neverest writing its purge cutoff as the store
+//! is; `index-zone-unknown`, neverest keeping io-pimdir's floating zone
+//! (`UTC`); `cutoff-invalid`, neverest writing its purge cutoff as the store
 //! stamps; and `conflict-unread`, which the one-way overwrite answers by
 //! fetching the unread body, an item still unread after it staying parked.
 
@@ -26,10 +27,12 @@ use serde::Serialize;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
-    /// The store's schema is newer than neverest's: upgrade neverest.
-    StoreNewer,
-    /// The store's schema is older than this reader's: a sync migrates it.
-    StoreOlder,
+    /// The store is of another format version than neverest's (pimdir
+    /// STORAGE §4.2, §6), never migrated: one an earlier neverest wrote is
+    /// synced by that neverest until nothing is queued, then moved aside
+    /// (`sync --reset --force`); one a newer neverest wrote asks for an
+    /// upgrade.
+    StoreVersion,
     /// The store has no schema yet: a sync creates it.
     StoreUncreated,
     /// The store's database is another program's, never written: the
@@ -39,11 +42,11 @@ pub enum ErrorCode {
     StoreCorrupt,
     /// The store is not at neverest's schema: a sync brings it there.
     StoreNotCurrent,
-    /// An earlier draft of the format wrote the store: `sync --reset
-    /// --force` moves it aside.
-    StoreStale,
     /// The store names its bodies with a hash neverest does not compute.
     StoreHashAlgo,
+    /// Another engine version wrote the store's sync state (pimdir SYNC
+    /// §10): the store is moved aside and synced anew.
+    SyncVersion,
     /// Another writer holds the store's write lock: retry.
     StoreBusy,
     /// Another sync owns the store: retry once it ends.
@@ -52,36 +55,52 @@ pub enum ErrorCode {
     StoreStaging,
     /// A store verb is between two of its chunks: retry.
     StoreInFlight,
+    /// Another user can read or write the store, or a link stands where a
+    /// lock file belongs (pimdir STORAGE §18): restrict it to its user.
+    StoreExposed,
+    /// A queued action's payload is malformed (pimdir STORAGE §15.3): its
+    /// producer wrote what no schema reads.
+    ActionMalformed,
+    /// A flag the store cannot hold (pimdir STORAGE §13): empty, or holding
+    /// a space, a control or a non-ASCII character.
+    FlagInvalid,
     /// A source of the store does not support the write: nothing was
     /// staged.
     Unsupported,
     /// The SQLite neverest was built with has no full-text search: a
     /// `vendored` build bundles one that has.
     IndexFts5Missing,
+    /// The search index is of another shape, or of a later version, than
+    /// neverest's (pimdir SEARCH §2), left as it is: one of its shape at an
+    /// earlier version is rebuilt instead.
+    IndexVersion,
 }
 
 /// The store codes neverest relays, by io-pimdir's spelling, which
 /// serialises each.
 const PIMDIR_CODES: &[(&str, ErrorCode)] = &[
-    ("store-newer", ErrorCode::StoreNewer),
-    ("store-older", ErrorCode::StoreOlder),
+    ("store-version", ErrorCode::StoreVersion),
     ("store-uncreated", ErrorCode::StoreUncreated),
     ("store-foreign", ErrorCode::StoreForeign),
     ("store-corrupt", ErrorCode::StoreCorrupt),
     ("store-not-current", ErrorCode::StoreNotCurrent),
-    ("store-stale", ErrorCode::StoreStale),
     ("store-hash-algo", ErrorCode::StoreHashAlgo),
+    ("sync-version", ErrorCode::SyncVersion),
     ("store-busy", ErrorCode::StoreBusy),
     ("store-owned", ErrorCode::StoreOwned),
     ("store-staging", ErrorCode::StoreStaging),
     ("store-in-flight", ErrorCode::StoreInFlight),
+    ("store-exposed", ErrorCode::StoreExposed),
+    ("action-malformed", ErrorCode::ActionMalformed),
+    ("flag-invalid", ErrorCode::FlagInvalid),
     ("unsupported", ErrorCode::Unsupported),
     ("index-fts5-missing", ErrorCode::IndexFts5Missing),
+    ("index-version", ErrorCode::IndexVersion),
 ];
 
 impl ErrorCode {
     /// The code of a store failure, `None` for one the caller cannot act
-    /// on (an SQL or I/O failure, a malformed action).
+    /// on (an SQL or I/O failure).
     pub fn of_pimdir(err: &PimdirError) -> Option<Self> {
         let code = err.code();
         PIMDIR_CODES

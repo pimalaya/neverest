@@ -109,9 +109,8 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     let marker = marker();
     let body = message(&marker);
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
-    let submit = |object| PimdirSubmit {
-        source: None,
-        object,
+    let submit = PimdirSubmit {
+        source: String::from("imap"),
         from: String::from(USER),
         rcpts: vec![String::from(USER)],
         subject: Some(format!("neverest submission {marker}")),
@@ -119,7 +118,9 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     };
 
     let id = producer
-        .enqueue_with_body("INBOX", &body, |object| submit(object).to_action().unwrap())
+        .enqueue_with_body("imap/INBOX", &body, |object| {
+            submit.to_action(object).unwrap()
+        })
         .expect("enqueue the intent");
     drop(producer);
 
@@ -298,16 +299,15 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     let marker = marker();
     let body = message(&marker);
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
-    let submit = |object| PimdirSubmit {
-        source: Some(String::from("imap")),
-        object,
+    let submit = PimdirSubmit {
+        source: String::from("imap"),
         from: String::from(USER),
         rcpts: vec![String::from(USER)],
         subject: Some(marker.clone()),
         copy: Some(PimdirCollectionId(sent.clone())),
     };
     let id = producer
-        .enqueue_with_body(&sent, &body, |object| submit(object).to_action().unwrap())
+        .enqueue_with_body(&sent, &body, |object| submit.to_action(object).unwrap())
         .expect("enqueue the intent");
     drop(producer);
 

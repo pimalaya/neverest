@@ -456,6 +456,7 @@ fn queue_update(state: &Path, account: &str, book: &str, link_id: &str, body: &s
                 seq,
                 object,
                 if_match: None,
+                resolves: None,
             }
         })
         .expect("stage the edit");

@@ -115,6 +115,7 @@ Upgrading from 0.3.0:
 
 ### Changed
 
+- Changed `conflict resolve` and the merger to name the divergence they settle (pimdir STORAGE §15.3 `resolves`): a frontend's edit queued over a conflict now parks, naming it, where it settled the conflict and dropped the server's body silently. An item conflict between two sources, which `conflict list` does not show yet, parks a resolution rather than being settled unseen.
 - **BREAKING**: changed `collection.delete` to default to false: a collection an endpoint no longer lists is deleted on the other only where that endpoint sets `collection.delete = true`.
 
   Absence is the only sign of a collection deletion IMAP and DAV give, and a listing can leave out a collection nobody deleted.

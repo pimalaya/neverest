@@ -4145,6 +4145,7 @@ fn keep_store_bodies<R: PimdirRemote<Error = anyhow::Error>>(
             sort_key: None,
             if_match: Some(hash),
             overrule: true,
+            resolves: None,
         };
 
         let mutated = match store.mutate(collection, edit.clone()) {
@@ -4294,12 +4295,14 @@ fn merge_conflicts(
         };
 
         // NOTE: merged over the local side, so an edit that replaced it since
-        // parks rather than being dropped unmerged.
+        // parks rather than being dropped unmerged; it resolves the remote
+        // side it merged, and a conflict it never read parks it.
         producer
             .enqueue_with_body(collection, &body, |object| PimdirAction::Update {
                 seq,
                 object,
                 if_match: Some(local_hash),
+                resolves: Some(vec![remote_hash.clone()]),
             })
             .with_context(|| format!("Stage the merged body of {handle} in {collection}"))?;
 
@@ -11636,6 +11639,7 @@ mod tests {
                     seq,
                     object,
                     if_match: None,
+                    resolves: None,
                 }
             })
             .unwrap();

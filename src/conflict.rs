@@ -179,12 +179,15 @@ impl Conflict {
             .map_err(pimdir_error)
             .with_context(|| format!("Stage the resolution of conflict {}", self.id))?;
         // NOTE: the decision was made over the local side, so an edit that
-        // replaced it since parks rather than being dropped unmerged.
+        // replaced it since parks rather than being dropped unmerged. It
+        // resolves the divergence it was shown, the remote side, and no other
+        // (pimdir STORAGE §15.3): a conflict the person never saw parks it.
         let enqueued = producer
             .enqueue_with_body_checked(&self.collection, body, |object| PimdirAction::Update {
                 seq: self.id,
                 object,
                 if_match: self.local.clone(),
+                resolves: self.remote.clone().map(|remote| vec![remote]),
             })
             .map_err(pimdir_error)
             .with_context(|| format!("Stage the settled body of conflict {}", self.id))?;

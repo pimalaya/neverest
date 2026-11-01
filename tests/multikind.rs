@@ -279,6 +279,7 @@ fn edit_card_in_store(store: &Path, body: &str) {
                 seq: card.seq,
                 object,
                 if_match: card.object,
+                resolves: None,
             }
         })
         .expect("enqueue the edit");

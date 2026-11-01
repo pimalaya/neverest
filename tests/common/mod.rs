@@ -345,6 +345,7 @@ impl Replica {
             seq,
             object: hash,
             if_match: None,
+            resolves: None,
         });
     }
 

@@ -247,6 +247,20 @@ pub struct WrittenItem {
     pub revision: Option<String>,
 }
 
+/// What a collection rename left on the server (pimdir Annex B.2
+/// `collection-rename`).
+#[derive(Clone, Debug)]
+pub struct Renamed {
+    /// The collection's id after the rename: a new one where the backend
+    /// keys a collection by its name (IMAP, Gmail), the same on DAV.
+    pub id: String,
+    /// What its next listing names it.
+    pub name: String,
+    /// The separator nesting a collection under it, by which the ones under
+    /// it took a new id too; `None` on a flat namespace.
+    pub delimiter: Option<char>,
+}
+
 /// An item a read found gone from the server: deleted, or moved out of
 /// its collection, since it was listed.
 ///
@@ -520,6 +534,88 @@ impl Client {
             #[allow(unreachable_patterns)]
             _ => refused(format!(
                 "This source creates no collection, so {name} cannot be created"
+            )),
+        }
+    }
+
+    /// Renames the collection `collection` to `name`, one level of the
+    /// hierarchy under the parent it has (pimdir Annex B.2
+    /// `collection-rename`).
+    ///
+    /// A collection already so named is success, and so is one gone where
+    /// a collection of the new name stands, the intent being at least once;
+    /// a sibling already named `name`, a collection the server keeps fixed
+    /// (an IMAP `INBOX`, a Gmail system label) and one gone with nothing in
+    /// its place fail with a [`Refusal`]. IMAP renames the mailbox, which
+    /// takes the ones under it along; Gmail renames the label and every
+    /// label nested under it, the deepest first; DAV sets the display name,
+    /// its id kept. Graph and Google Calendar and People rename none.
+    pub fn rename_named_collection(&mut self, collection: &str, name: &str) -> Result<Renamed> {
+        let refused = |why: String| Err(anyhow::Error::new(Refusal(why)));
+
+        match self {
+            #[cfg(feature = "imap")]
+            Client::Imap(c) => c.rename_named_mailbox(collection, name),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.rename_label(collection, name),
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => {
+                if name.trim().is_empty() {
+                    return refused(format!("A collection name is not blank: {name:?}"));
+                }
+                let listed = c.list_collections(false)?;
+                let Some(found) = listed.iter().find(|listed| listed.id == collection) else {
+                    return refused(format!("No collection {collection} to rename"));
+                };
+                if found.name != name {
+                    if listed
+                        .iter()
+                        .any(|other| other.id != collection && other.name == name)
+                    {
+                        return refused(format!("A collection is already named {name}"));
+                    }
+                    c.rename_collection(collection, name)?;
+                }
+                Ok(Renamed {
+                    id: collection.to_owned(),
+                    name: name.to_owned(),
+                    delimiter: None,
+                })
+            }
+            #[allow(unreachable_patterns)]
+            _ => refused(format!(
+                "This source renames no collection, so {collection} cannot be renamed"
+            )),
+        }
+    }
+
+    /// Deletes the collection `collection` with the items it holds, and
+    /// never another (pimdir Annex B.2 `collection-delete`).
+    ///
+    /// A collection already gone is success, the intent being at least once.
+    /// One holding a collection under it on the server, or one the server
+    /// keeps fixed (an IMAP `INBOX`, a Gmail system label), fails with a
+    /// [`Refusal`], deleting nothing. Graph and Google Calendar and People
+    /// delete none.
+    pub fn delete_named_collection(&mut self, collection: &str) -> Result<()> {
+        let refused = |why: String| Err(anyhow::Error::new(Refusal(why)));
+
+        match self {
+            #[cfg(feature = "imap")]
+            Client::Imap(c) => c.delete_named_mailbox(collection),
+            #[cfg(feature = "gmail")]
+            Client::Gmail(c) => c.delete_label(collection),
+            #[cfg(feature = "dav")]
+            Client::Dav(c) => {
+                let listed = c.list_collections(false)?;
+                if listed.iter().any(|listed| listed.id == collection) {
+                    c.delete_collection(collection)?;
+                }
+                Ok(())
+            }
+            #[allow(unreachable_patterns)]
+            _ => refused(format!(
+                "This source deletes no collection, so {collection} cannot be deleted"
             )),
         }
     }

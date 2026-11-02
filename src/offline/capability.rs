@@ -13,8 +13,9 @@ use std::collections::BTreeSet;
 use io_pimdir::capability::{
     CALENDAR, CALENDAR_CANCEL, CALENDAR_CANCEL_OCCURRENCE, CALENDAR_COMPONENT_VTODO,
     CALENDAR_OCCURRENCE_UPDATE, CALENDAR_ONLINE_MEETING, CALENDAR_REPLY, CALENDAR_REPLY_OCCURRENCE,
-    CALENDAR_SCHEDULING, COLLECTION_CREATE, CONTACTS, CONTACTS_CARD_COPY, CONTACTS_CARD_MOVE, MAIL,
-    MAIL_FLAGS_ANSWERED, MAIL_FLAGS_DRAFT, MAIL_FLAGS_FLAGGED, MAIL_FLAGS_KEYWORDS,
+    CALENDAR_SCHEDULING, COLLECTION_CREATE, COLLECTION_DELETE, COLLECTION_RENAME, CONTACTS,
+    CONTACTS_CARD_COPY, CONTACTS_CARD_MOVE, MAIL, MAIL_FLAGS_ANSWERED, MAIL_FLAGS_DRAFT,
+    MAIL_FLAGS_FLAGGED, MAIL_FLAGS_IMPORTANT, MAIL_FLAGS_JUNK, MAIL_FLAGS_KEYWORDS,
     MAIL_FLAGS_SEEN, MAIL_MESSAGE_ADD, MAIL_MESSAGE_REMOVE, MAIL_SUBMIT, MAIL_SUBMIT_COPY,
     PimdirCapability, PimdirSupport,
 };
@@ -44,9 +45,16 @@ const GRAPH_NO_VTODO: &str = "Graph calendars hold events: tasks live in Microso
 /// collections it holds.
 const HELD_ONLY: &str = "performed on the collections this source syncs only";
 
+/// Why a collection stating a role is neither renamed nor deleted.
+const FIXED: &str = "the provider's own collection, stating a role, stays as it is";
+
+/// Why a paired account renames no collection.
+const PAIRED_RENAME: &str =
+    "the pair mirrors its collections by name, so a rename would read as a delete and a create";
+
 /// The intents a source performs through its provider on what it holds:
 /// an item it binds, or a collection it syncs to create one under or
-/// beside.
+/// beside, or to rename or delete.
 fn held_only(name: &str) -> bool {
     matches!(
         name,
@@ -55,6 +63,8 @@ fn held_only(name: &str) -> bool {
             | CALENDAR_REPLY_OCCURRENCE
             | CALENDAR_CANCEL_OCCURRENCE
             | COLLECTION_CREATE
+            | COLLECTION_RENAME
+            | COLLECTION_DELETE
     )
 }
 
@@ -64,13 +74,19 @@ fn held_only(name: &str) -> bool {
 /// `collections` are the store collections the source syncs. An intent the
 /// source performs through its provider's own verbs reaches only what it
 /// holds, so it is declared on each of them and `none` source-wide
-/// (pimdir STORAGE §15.6 Implementations).
+/// (pimdir STORAGE §15.6 Implementations). `fixed` are those of them
+/// stating a role (an inbox, a system folder or label, a default calendar
+/// or address book), which the provider keeps: a rename or a delete is
+/// `none` there. `paired` is whether the account mirrors the source onto
+/// targets.
 pub fn declaration(
     source: &SourceConfig,
     one_way: bool,
+    paired: bool,
     collections: &[String],
+    fixed: &BTreeSet<String>,
 ) -> Vec<PimdirCapability> {
-    supports(source, one_way)
+    supports(source, one_way, paired)
         .into_iter()
         .flat_map(|(name, support, detail)| {
             let row =
@@ -80,14 +96,16 @@ pub fn declaration(
                     support,
                     detail: detail.map(String::from),
                 };
+            let kept = matches!(name, COLLECTION_RENAME | COLLECTION_DELETE);
             match held_only(name) && support != PimdirSupport::None {
                 false => vec![row(None, support, detail)],
                 true => std::iter::once(row(None, PimdirSupport::None, Some(HELD_ONLY)))
-                    .chain(
-                        collections
-                            .iter()
-                            .map(|collection| row(Some(collection), support, detail)),
-                    )
+                    .chain(collections.iter().map(|collection| {
+                        match kept && fixed.contains(collection) {
+                            true => row(Some(collection), PimdirSupport::None, Some(FIXED)),
+                            false => row(Some(collection), support, detail),
+                        }
+                    }))
                     .collect(),
             }
         })
@@ -161,7 +179,17 @@ pub fn vtodo_wide(
 /// An intent performed on what the source holds reads as it does there,
 /// where [`declaration`] splits it into a `none` source-wide row and one
 /// row per collection: this is what a check reports.
-pub fn supports(source: &SourceConfig, one_way: bool) -> Vec<SupportRow> {
+///
+/// A Gmail source also states `mail.flags.important` and `mail.flags.junk`,
+/// which Gmail carries as labels of their own rather than as keywords; a
+/// source stating none has them read under `mail.flags.keywords` (pimdir
+/// STORAGE Annex B.1). `paired` is whether the account mirrors the source
+/// onto targets.
+pub fn supports(source: &SourceConfig, one_way: bool, paired: bool) -> Vec<SupportRow> {
+    let flags: &[&str] = match &source.backend {
+        SourceBackendConfig::Gmail(_) => &[MAIL_FLAGS_IMPORTANT, MAIL_FLAGS_JUNK],
+        _ => &[],
+    };
     let (names, backend): (&[&str], Backend) = match &source.backend {
         SourceBackendConfig::Imap(_) => (MAIL, imap),
         SourceBackendConfig::Gmail(_) => (MAIL, gmail),
@@ -179,22 +207,29 @@ pub fn supports(source: &SourceConfig, one_way: bool) -> Vec<SupportRow> {
 
     names
         .iter()
+        .chain(flags)
         .map(|&name| {
             let (create, delete) = (perms.item.create, perms.item.delete);
             let refused = match name {
                 COLLECTION_CREATE if !perms.collection.create => {
                     Some("collection.create is disabled")
                 }
+                COLLECTION_DELETE if !perms.collection.delete => {
+                    Some("collection.delete is disabled")
+                }
+                COLLECTION_RENAME if paired => Some(PAIRED_RENAME),
                 MAIL_SUBMIT
                 | MAIL_SUBMIT_COPY
                 | CALENDAR_REPLY
                 | CALENDAR_CANCEL
                 | CALENDAR_REPLY_OCCURRENCE
                 | CALENDAR_CANCEL_OCCURRENCE
-                | COLLECTION_CREATE => None,
+                | COLLECTION_CREATE
+                | COLLECTION_RENAME
+                | COLLECTION_DELETE => None,
                 _ if one_way => Some("one-way copy: the server wins"),
                 MAIL_FLAGS_SEEN | MAIL_FLAGS_FLAGGED | MAIL_FLAGS_ANSWERED | MAIL_FLAGS_DRAFT
-                | MAIL_FLAGS_KEYWORDS
+                | MAIL_FLAGS_KEYWORDS | MAIL_FLAGS_IMPORTANT | MAIL_FLAGS_JUNK
                     if !perms.flag.update =>
                 {
                     Some("flag.update is disabled")
@@ -251,7 +286,15 @@ fn gmail(name: &str, smtp: bool) -> Support {
             PimdirSupport::None,
             Some("Gmail drafts are the DRAFT label, not a flag"),
         ),
-        MAIL_FLAGS_KEYWORDS => (PimdirSupport::Partial, Some("$Important only")),
+        MAIL_FLAGS_KEYWORDS => (
+            PimdirSupport::Partial,
+            Some("$Important only, which mail.flags.important states too"),
+        ),
+        MAIL_FLAGS_IMPORTANT => (PimdirSupport::Full, Some("the IMPORTANT label")),
+        MAIL_FLAGS_JUNK => (
+            PimdirSupport::None,
+            Some("Gmail spam is the SPAM label, a collection: a move there"),
+        ),
         MAIL_SUBMIT | MAIL_SUBMIT_COPY if !smtp => (
             PimdirSupport::None,
             Some("no smtp table: Gmail sends through SMTP here"),
@@ -262,6 +305,14 @@ fn gmail(name: &str, smtp: bool) -> Support {
         ),
         MAIL_SUBMIT_COPY => (PimdirSupport::Full, Some("Gmail files it in SENT itself")),
         COLLECTION_CREATE => (PimdirSupport::Full, Some("a label, nested by `/`")),
+        COLLECTION_RENAME => (
+            PimdirSupport::Full,
+            Some("a label, the labels nested under it following"),
+        ),
+        COLLECTION_DELETE => (
+            PimdirSupport::Partial,
+            Some("removes the label, its messages staying in All Mail"),
+        ),
         _ => (PimdirSupport::Full, None),
     }
 }
@@ -297,6 +348,10 @@ fn msgraph(name: &str, _smtp: bool) -> Support {
             PimdirSupport::None,
             Some("Graph mail folders are not created yet"),
         ),
+        COLLECTION_RENAME | COLLECTION_DELETE => (
+            PimdirSupport::None,
+            Some("Graph mail folders are not renamed or deleted yet"),
+        ),
         _ => (PimdirSupport::Full, None),
     }
 }
@@ -311,7 +366,7 @@ fn gpeople(name: &str, _smtp: bool) -> Support {
             PimdirSupport::None,
             Some("Google People has a single address book"),
         ),
-        COLLECTION_CREATE => (
+        COLLECTION_CREATE | COLLECTION_RENAME | COLLECTION_DELETE => (
             PimdirSupport::None,
             Some("Google People has a single address book"),
         ),
@@ -324,6 +379,10 @@ fn msgraph_contacts(name: &str, _smtp: bool) -> Support {
         COLLECTION_CREATE => (
             PimdirSupport::None,
             Some("Graph contact folders are not created yet"),
+        ),
+        COLLECTION_RENAME | COLLECTION_DELETE => (
+            PimdirSupport::None,
+            Some("Graph contact folders are not renamed or deleted yet"),
         ),
         _ => (PimdirSupport::Full, None),
     }
@@ -372,6 +431,10 @@ fn gcal(name: &str, _smtp: bool) -> Support {
             PimdirSupport::None,
             Some("Google calendars are not created yet"),
         ),
+        COLLECTION_RENAME | COLLECTION_DELETE => (
+            PimdirSupport::None,
+            Some("Google calendars are not renamed or deleted yet"),
+        ),
         _ => (PimdirSupport::Full, None),
     }
 }
@@ -393,6 +456,10 @@ fn msgraph_calendar(name: &str, _smtp: bool) -> Support {
         COLLECTION_CREATE => (
             PimdirSupport::None,
             Some("Graph calendars are not created yet"),
+        ),
+        COLLECTION_RENAME | COLLECTION_DELETE => (
+            PimdirSupport::None,
+            Some("Graph calendars are not renamed or deleted yet"),
         ),
         _ => (PimdirSupport::Full, None),
     }
@@ -449,7 +516,13 @@ mod tests {
     #[test]
     fn a_calendar_source_declares_every_calendar_capability() {
         let source = caldav();
-        let declaration = declaration(&source, false, &["caldav/work".into()]);
+        let declaration = declaration(
+            &source,
+            false,
+            false,
+            &["caldav/work".into()],
+            &BTreeSet::new(),
+        );
 
         let wide = declaration.iter().filter(|row| row.collection.is_none());
         assert_eq!(wide.count(), CALENDAR.len());
@@ -467,7 +540,7 @@ mod tests {
     fn a_graph_mail_source_moves_copies_and_adds_drafts() {
         let account: AccountConfig = toml::from_str("msgraph.auth.token.raw = \"token\"").unwrap();
         let source = account.sources().unwrap().remove("msgraph").unwrap();
-        let declaration = declaration(&source, false, &[]);
+        let declaration = declaration(&source, false, false, &[], &BTreeSet::new());
         let row = |name: &str| declaration.iter().find(|row| row.name == name).unwrap();
 
         assert_eq!(declaration.len(), MAIL.len());
@@ -485,7 +558,7 @@ mod tests {
     #[test]
     fn a_one_way_source_refuses_writes_but_not_intents() {
         let collections = ["gcal/primary".to_string()];
-        let declaration = declaration(&gcal(), true, &collections);
+        let declaration = declaration(&gcal(), true, false, &collections, &BTreeSet::new());
 
         assert_eq!(
             support(&declaration, CALENDAR_ITEM_ADD),
@@ -499,19 +572,29 @@ mod tests {
 
     #[test]
     fn a_caldav_source_points_its_intents_at_scheduling() {
-        let declaration = declaration(&caldav(), false, &["caldav/work".into()]);
+        let declaration = declaration(
+            &caldav(),
+            false,
+            false,
+            &["caldav/work".into()],
+            &BTreeSet::new(),
+        );
 
         for name in [CALENDAR_REPLY, CALENDAR_CANCEL] {
             let row = row(&declaration, name, None);
             assert_eq!(row.support, PimdirSupport::None);
             assert!(row.detail.as_deref().unwrap().contains("RFC 6638"));
         }
-        // NOTE: a calendar is created on the server, under no other.
+        // NOTE: a calendar is created, renamed and deleted on the server, the
+        // only intents it takes on what it holds.
         assert!(
             declaration
                 .iter()
                 .filter(|row| row.collection.is_some())
-                .all(|row| row.name == COLLECTION_CREATE)
+                .all(|row| matches!(
+                    row.name.as_str(),
+                    COLLECTION_CREATE | COLLECTION_RENAME | COLLECTION_DELETE
+                ))
         );
         for name in [CALENDAR_REPLY_OCCURRENCE, CALENDAR_CANCEL_OCCURRENCE] {
             assert_eq!(support(&declaration, name), PimdirSupport::None);
@@ -521,7 +604,7 @@ mod tests {
     #[test]
     fn a_provider_performs_its_intents_on_the_calendars_it_holds() {
         let collections = ["gcal/primary".to_string(), "gcal/team".to_string()];
-        let declaration = declaration(&gcal(), false, &collections);
+        let declaration = declaration(&gcal(), false, false, &collections, &BTreeSet::new());
 
         assert_eq!(declaration.len(), CALENDAR.len() + 4 * collections.len());
         for name in [
@@ -562,7 +645,13 @@ mod tests {
     #[test]
     fn graph_performs_both_intents_fully() {
         let collections = ["msgraph-calendar/AAMk".to_string()];
-        let declaration = declaration(&msgraph_calendar(), false, &collections);
+        let declaration = declaration(
+            &msgraph_calendar(),
+            false,
+            false,
+            &collections,
+            &BTreeSet::new(),
+        );
 
         for name in [CALENDAR_REPLY, CALENDAR_CANCEL] {
             assert_eq!(support(&declaration, name), PimdirSupport::None);
@@ -576,7 +665,7 @@ mod tests {
     #[test]
     fn google_and_graph_create_online_meetings_with_their_provider() {
         for source in [gcal(), msgraph_calendar()] {
-            let declaration = declaration(&source, false, &[]);
+            let declaration = declaration(&source, false, false, &[], &BTreeSet::new());
             let online = row(&declaration, CALENDAR_ONLINE_MEETING, None);
             assert_eq!(online.support, PimdirSupport::Partial);
             assert!(online.detail.is_some());
@@ -591,7 +680,13 @@ mod tests {
              imap.sasl.plain.password.raw = \"pw\"",
             "imap",
         );
-        let declaration = declaration(&imap, false, &["imap/INBOX".into()]);
+        let declaration = declaration(
+            &imap,
+            false,
+            false,
+            &["imap/INBOX".into()],
+            &BTreeSet::new(),
+        );
         assert_eq!(
             support(&declaration, COLLECTION_CREATE),
             PimdirSupport::None
@@ -602,7 +697,7 @@ mod tests {
         );
 
         // NOTE: what a check reports, as the source does it where it holds.
-        let supports = supports(&imap, false);
+        let supports = supports(&imap, false, false);
         let create = supports
             .iter()
             .find(|(name, ..)| *name == COLLECTION_CREATE);
@@ -610,7 +705,13 @@ mod tests {
 
         let account: AccountConfig = toml::from_str("msgraph.auth.token.raw = \"token\"").unwrap();
         let graph = account.sources().unwrap().remove("msgraph").unwrap();
-        let graph_rows = super::declaration(&graph, false, &["msgraph/Inbox".into()]);
+        let graph_rows = super::declaration(
+            &graph,
+            false,
+            false,
+            &["msgraph/Inbox".into()],
+            &BTreeSet::new(),
+        );
         assert!(
             graph_rows
                 .iter()
@@ -618,7 +719,10 @@ mod tests {
                 .all(|row| row.support == PimdirSupport::None && row.collection.is_none())
         );
         assert_eq!(
-            support(&super::declaration(&gcal(), false, &[]), COLLECTION_CREATE),
+            support(
+                &super::declaration(&gcal(), false, false, &[], &BTreeSet::new()),
+                COLLECTION_CREATE
+            ),
             PimdirSupport::None
         );
     }
@@ -632,7 +736,13 @@ mod tests {
              imap.collection.create = false",
             "imap",
         );
-        let declaration = declaration(&imap, false, &["imap/INBOX".into()]);
+        let declaration = declaration(
+            &imap,
+            false,
+            false,
+            &["imap/INBOX".into()],
+            &BTreeSet::new(),
+        );
         let rows: Vec<_> = declaration
             .iter()
             .filter(|row| row.name == COLLECTION_CREATE)
@@ -679,9 +789,95 @@ mod tests {
 
     #[test]
     fn a_source_with_no_calendar_yet_declares_its_intents_nowhere() {
-        let declaration = declaration(&gcal(), false, &[]);
+        let declaration = declaration(&gcal(), false, false, &[], &BTreeSet::new());
 
         assert_eq!(declaration.len(), CALENDAR.len());
         assert_eq!(support(&declaration, CALENDAR_REPLY), PimdirSupport::None);
+    }
+
+    fn imap_deleting() -> SourceConfig {
+        source(
+            "imap.server = \"imap://imap.example.org\"\n\
+             imap.sasl.plain.username = \"user\"\n\
+             imap.sasl.plain.password.raw = \"pw\"\n\
+             imap.collection.delete = true",
+            "imap",
+        )
+    }
+
+    #[test]
+    fn a_rename_and_a_delete_are_declared_on_each_collection_but_a_fixed_one() {
+        let collections = ["imap/INBOX".to_string(), "imap/Projects".to_string()];
+        let fixed = BTreeSet::from(["imap/INBOX".to_string()]);
+        let declaration = declaration(&imap_deleting(), false, false, &collections, &fixed);
+
+        for name in [COLLECTION_RENAME, COLLECTION_DELETE] {
+            assert_eq!(support(&declaration, name), PimdirSupport::None);
+            let inbox = row(&declaration, name, Some("imap/INBOX"));
+            assert_eq!(inbox.support, PimdirSupport::None);
+            assert_eq!(inbox.detail.as_deref(), Some(FIXED));
+            let projects = row(&declaration, name, Some("imap/Projects"));
+            assert_eq!(projects.support, PimdirSupport::Full);
+        }
+        // NOTE: a create goes under the inbox as under any collection.
+        let create = row(&declaration, COLLECTION_CREATE, Some("imap/INBOX"));
+        assert_eq!(create.support, PimdirSupport::Full);
+    }
+
+    #[test]
+    fn a_delete_is_declared_only_where_collection_delete_is_granted() {
+        let imap = source(
+            "imap.server = \"imap://imap.example.org\"\n\
+             imap.sasl.plain.username = \"user\"\n\
+             imap.sasl.plain.password.raw = \"pw\"",
+            "imap",
+        );
+        let rows = supports(&imap, false, false);
+        let row = |name: &str| rows.iter().find(|row| row.0 == name).unwrap();
+
+        assert_eq!(row(COLLECTION_DELETE).1, PimdirSupport::None);
+        assert_eq!(
+            row(COLLECTION_DELETE).2,
+            Some("collection.delete is disabled")
+        );
+        assert_eq!(row(COLLECTION_RENAME).1, PimdirSupport::Full);
+        // NOTE: a rename and a delete are asked for, never derived.
+        let one_way = supports(&imap_deleting(), true, false);
+        let row = |name: &str| one_way.iter().find(|row| row.0 == name).unwrap();
+        assert_eq!(row(COLLECTION_DELETE).1, PimdirSupport::Full);
+        assert_eq!(row(COLLECTION_RENAME).1, PimdirSupport::Full);
+    }
+
+    #[test]
+    fn a_paired_account_renames_no_collection() {
+        let rows = supports(&imap_deleting(), false, true);
+        let row = |name: &str| rows.iter().find(|row| row.0 == name).unwrap();
+
+        assert_eq!(row(COLLECTION_RENAME).1, PimdirSupport::None);
+        assert_eq!(row(COLLECTION_RENAME).2, Some(PAIRED_RENAME));
+        assert_eq!(row(COLLECTION_DELETE).1, PimdirSupport::Full);
+    }
+
+    #[test]
+    fn a_gmail_source_states_its_important_and_junk_rows() {
+        let gmail = source("gmail.auth.token.raw = \"x\"", "gmail");
+        let declaration = declaration(&gmail, false, false, &[], &BTreeSet::new());
+
+        assert_eq!(declaration.len(), MAIL.len() + 2);
+        assert_eq!(
+            support(&declaration, MAIL_FLAGS_IMPORTANT),
+            PimdirSupport::Full
+        );
+        assert_eq!(support(&declaration, MAIL_FLAGS_JUNK), PimdirSupport::None);
+        assert_eq!(
+            support(&declaration, MAIL_FLAGS_KEYWORDS),
+            PimdirSupport::Partial
+        );
+        let imap = declaration_of(&imap_deleting());
+        assert!(!imap.iter().any(|row| row.name == MAIL_FLAGS_IMPORTANT));
+    }
+
+    fn declaration_of(source: &SourceConfig) -> Vec<PimdirCapability> {
+        declaration(source, false, false, &[], &BTreeSet::new())
     }
 }

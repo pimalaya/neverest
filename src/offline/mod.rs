@@ -25,7 +25,7 @@ use io_pimdir::{
 };
 
 pub mod capability;
-pub mod create;
+pub mod collection;
 pub mod driver;
 #[cfg(feature = "search")]
 pub mod index;

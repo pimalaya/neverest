@@ -43,7 +43,7 @@ use io_webdav::{
         WebdavAuth, WebdavProperty, collection_id, follow_redirects::WebdavFollowRedirectsError,
         propfind::WebdavPropfind, resolve_href, send::WebdavSendError,
     },
-    rfc6352::addressbook::CarddavAddressbook,
+    rfc6352::addressbook::{CarddavAddressbook, CarddavAddressbookPatch},
     rfc6578::sync_collection::{
         SYNC_COLLECTION, WebdavSyncChange, WebdavSyncCollectionError, WebdavSyncCollectionOptions,
         WebdavSyncDelta,
@@ -373,6 +373,34 @@ impl DavClient {
             }
         }
         .with_context(|| format!("Cannot create the {kind} collection {collection}"))
+    }
+
+    /// Displays the collection keyed `collection` as `name`, its key kept:
+    /// a `PROPPATCH` of `DAV:displayname` alone.
+    pub fn rename_collection(&mut self, collection: &str, name: &str) -> Result<()> {
+        let kind = self.kind;
+        let name = Some(name.to_owned());
+
+        match kind {
+            DavKind::Card => {
+                let patch = CarddavAddressbookPatch {
+                    id: collection.to_owned(),
+                    display_name: Some(name),
+                    description: None,
+                    color: None,
+                };
+                self.op(|dav| dav.update_addressbook(&patch))
+            }
+            DavKind::Cal => {
+                let calendar = CaldavCalendar {
+                    id: collection.to_owned(),
+                    display_name: name,
+                    ..Default::default()
+                };
+                self.op(|dav| dav.update_calendar(&calendar))
+            }
+        }
+        .with_context(|| format!("Cannot rename the {kind} collection {collection}"))
     }
 
     /// Deletes a collection.

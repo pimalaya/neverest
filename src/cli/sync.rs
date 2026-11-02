@@ -166,7 +166,8 @@ pub struct SyncCommand {
     /// and role in the store, whatever the collection filter, syncing no
     /// item. What a client reads to offer the collections it could sync,
     /// and to learn which one is the inbox or the default calendar. Only
-    /// the queued collection creations run; sends and intents wait.
+    /// the queued collection intents run (create, rename, delete); sends and
+    /// the other intents wait.
     #[arg(long, conflicts_with_all = ["reset", "download_order", "prime", "bodies"])]
     pub declare_only: bool,
     /// Perform what frontends queued and nothing else: apply the queue,

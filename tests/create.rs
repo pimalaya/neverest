@@ -1,4 +1,4 @@
-//! The `collection-create` intent against a local Stalwart (server A: IMAP
+//! The collection intents against a local Stalwart (server A: IMAP
 //! on :143, HTTP and DAV on :8080), spawned via `tests/stalwart2.sh`.
 //! Ignored by default.
 //!
@@ -21,7 +21,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use io_pimdir::client::producer::{PimdirActionStatus, PimdirProducer};
+use io_pimdir::client::{
+    PimdirStore,
+    producer::{PimdirActionStatus, PimdirProducer},
+    reader::PimdirReader,
+};
 use serde_json::Value;
 
 const IMAP_ROOT: &str = "imap://127.0.0.1:143";
@@ -285,4 +289,142 @@ fn neverest(args: &[&str], config: &Path, state: &Path) -> String {
     );
 
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A renamed mailbox takes the one under it along, and the store follows it
+/// with its message rather than finding it again under the new name; a
+/// mailbox holding another is deleted only once that one is gone, and the
+/// store then drops it.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
+fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let state = tmp.path().join("state");
+    let config = tmp.path().join("config.toml");
+    fs::create_dir_all(&state).unwrap();
+    fs::write(
+        &config,
+        format!(
+            "[accounts.create]\n\
+             imap.server = \"{IMAP_ROOT}\"\n\
+             imap.starttls = false\n\
+             imap.sasl.plain.username = \"{USER}\"\n\
+             imap.sasl.plain.password.raw = \"{PASS}\"\n\
+             imap.collection.delete = true\n",
+        ),
+    )
+    .unwrap();
+    neverest(&["init", "-a", "create"], &config, &state);
+    sync(&config, &state, "INBOX");
+
+    let folder = unique("Renamed");
+    let store = state.join("neverest").join("create");
+    let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
+    producer
+        .enqueue_collection_create("imap/INBOX", &folder, None, None)
+        .expect("queue the folder");
+    sync(&config, &state, &folder);
+    producer
+        .enqueue_collection_create("imap/INBOX", "2026", Some(&format!("imap/{folder}")), None)
+        .expect("queue the child");
+    sync(&config, &state, &folder);
+    let child = listed(&config, &state)
+        .into_iter()
+        .find(|id| id.starts_with(&folder) && *id != folder)
+        .expect("the child is listed");
+    let delimiter = &child[folder.len()..folder.len() + 1];
+
+    let message = tmp.path().join("message.eml");
+    fs::write(
+        &message,
+        format!(
+            "From: a@example.org\r\nTo: {USER}\r\nSubject: kept\r\n\
+             Message-ID: <{}@example.org>\r\nDate: Mon, 2 Nov 2026 10:00:00 +0000\r\n\r\nbody\r\n",
+            unique("kept")
+        ),
+    )
+    .unwrap();
+    let appended = Command::new("curl")
+        .args(["-sS", "-u", &format!("{USER}:{PASS}"), "-T"])
+        .arg(&message)
+        .arg(format!("{IMAP_ROOT}/{folder}"))
+        .output()
+        .expect("spawn curl");
+    assert!(appended.status.success(), "{appended:?}");
+    sync(&config, &state, &folder);
+
+    let renamed = unique("Kept");
+    producer
+        .enqueue_collection_rename(&format!("imap/{folder}"), &renamed, None)
+        .expect("queue the rename");
+    let report = sync(&config, &state, &renamed);
+    assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
+    let listed_now = listed(&config, &state);
+    assert!(listed_now.contains(&renamed), "{listed_now:?}");
+    assert!(!listed_now.contains(&folder), "{listed_now:?}");
+
+    let reader = PimdirReader::open(&store).expect("open the store");
+    let ids: Vec<String> = reader
+        .list_collections()
+        .unwrap()
+        .into_iter()
+        .map(|collection| collection.id)
+        .collect();
+    let moved_child = format!("imap/{renamed}{delimiter}2026");
+    assert!(ids.contains(&format!("imap/{renamed}")), "{ids:?}");
+    assert!(ids.contains(&moved_child), "{ids:?}");
+    assert!(
+        !ids.iter()
+            .any(|id| id.starts_with(&format!("imap/{folder}"))),
+        "{ids:?}"
+    );
+    assert_eq!(reader.count_items(format!("imap/{renamed}")).unwrap(), 1);
+    drop(reader);
+
+    // NOTE: a mailbox holding another parks, deleting nothing.
+    let id = producer
+        .enqueue_collection_delete(&format!("imap/{renamed}"), None)
+        .expect("queue the delete");
+    let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &config.to_string_lossy()])
+        .args(["sync", "-a", "create", "-m", &renamed, "--json"])
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .expect("spawn neverest");
+    let report = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(output.status.code(), Some(2), "{report}");
+    let parsed: Value = serde_json::from_str(&report).unwrap();
+    assert_eq!(parsed["intents"][0]["parked"], true, "{report}");
+    assert!(listed(&config, &state).contains(&renamed));
+    assert!(PimdirStore::cancel_action(&store, id).expect("cancel the parked delete"));
+
+    producer
+        .enqueue_collection_delete(&moved_child, None)
+        .expect("queue the child's delete");
+    producer
+        .enqueue_collection_delete(&format!("imap/{renamed}"), None)
+        .expect("queue the delete again");
+    let report = sync(&config, &state, "INBOX");
+    assert_eq!(
+        intent_errors(&report),
+        vec![Value::Null, Value::Null],
+        "{report}"
+    );
+    let listed_now = listed(&config, &state);
+    assert!(
+        !listed_now.iter().any(|id| id.starts_with(&renamed)),
+        "{listed_now:?}"
+    );
+    let ids: Vec<String> = PimdirReader::open(&store)
+        .unwrap()
+        .list_collections()
+        .unwrap()
+        .into_iter()
+        .map(|collection| collection.id)
+        .collect();
+    assert!(
+        !ids.iter()
+            .any(|id| id.starts_with(&format!("imap/{renamed}"))),
+        "{ids:?}"
+    );
 }

@@ -63,6 +63,12 @@ Upgrading from 0.3.0:
 
 - Added the `collection-create` intent on IMAP, Gmail, CalDAV and CardDAV, performed at the start of a sync.
 
+- Added the `collection-rename` and `collection-delete` intents on IMAP, Gmail, CalDAV and CardDAV, performed with the creations at the start of a sync.
+
+  A rename keeps the parent, the mailboxes or labels under it following, and on an account syncing its source alone the store follows it, so the messages are not downloaded again. A delete parks while a collection stands under the one it names, and the store drops the collection once performed. Neither is offered on a collection stating a role (the inbox, a system folder or label, a default calendar); a delete only where `collection.delete = true`, and a rename not on an account with targets.
+
+- Added the `mail.flags.important` and `mail.flags.junk` rows to a Gmail source's declaration: `$Important` is the IMPORTANT label, and `$Junk` is refused, spam being the SPAM collection.
+
 - Added the `calendar-reply` and `calendar-cancel` intents on Microsoft Graph and Google Calendar, one occurrence of a series included.
 
 - Added receipts for the intents neverest performs, so the frontend that queued one reads it applied.

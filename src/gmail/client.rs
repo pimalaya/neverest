@@ -78,7 +78,7 @@ use super::{
 };
 use crate::{
     account::GmailAccount,
-    client::{EnumEntry, Enumeration, Gone, Held, Listed, StoredSize, WrittenItem},
+    client::{EnumEntry, Enumeration, Gone, Held, Listed, Renamed, StoredSize, WrittenItem},
     item::{
         address::Address,
         collection::Collection,
@@ -150,6 +150,7 @@ mod units {
     pub const LABELS_LIST: u32 = 1;
     pub const LABEL_CREATE: u32 = 5;
     pub const LABEL_DELETE: u32 = 5;
+    pub const LABEL_PATCH: u32 = 5;
     pub const PROFILE_GET: u32 = 1;
     pub const MESSAGES_LIST: u32 = 5;
     pub const HISTORY_LIST: u32 = 2;
@@ -486,6 +487,111 @@ impl GmailClient {
             .with_context(|| format!("Delete label {name} error"))?;
 
         self.labels.retain(|_, label| *label != id);
+        Ok(())
+    }
+
+    /// Renames the label `label` to `name` under the parent it has, every
+    /// label nested under it following, the deepest first, and answers what
+    /// it is then (pimdir Annex B.2 `collection-rename`).
+    ///
+    /// Gmail nests a label by its name, so the labels under it are renamed
+    /// one by one; a run cut between two resumes from what is left. One
+    /// already so named, or gone where the new name stands, is success; a
+    /// system label, a sibling already named `name` and a label gone with
+    /// nothing in its place are refused.
+    pub fn rename_label(&mut self, label: &str, name: &str) -> Result<Renamed> {
+        let refused = |why: String| Err(anyhow::Error::new(Refusal(why)));
+
+        if is_system(label) {
+            return refused(format!("Gmail system label {label} keeps its name"));
+        }
+        let parent = label.rsplit_once('/').map(|(parent, _)| parent);
+        let target = child_label(parent, name)?.name;
+        let renamed = Renamed {
+            id: target.clone(),
+            name: target.clone(),
+            delimiter: Some('/'),
+        };
+        if target == label {
+            return Ok(renamed);
+        }
+
+        self.list_labels()?;
+        let held = |labels: &HashMap<String, String>, name: &str| lookup_label(labels, name);
+        let under = format!("{label}/");
+        let mut nested: Vec<(String, String)> = self
+            .labels
+            .iter()
+            .filter(|(name, _)| name.starts_with(&under))
+            .map(|(name, id)| (name.clone(), id.clone()))
+            .collect();
+        match (held(&self.labels, label), held(&self.labels, &target)) {
+            // NOTE: Gmail matches names ignoring case, so a rename changing
+            // the case alone finds the label itself under the new name.
+            (Some(held), Some(other)) if held != other => {
+                return refused(format!("Gmail label {target} already exists"));
+            }
+            (None, None) if nested.is_empty() => {
+                return refused(format!("No Gmail label {label} to rename"));
+            }
+            _ => {}
+        }
+
+        // NOTE: the deepest first, so a cut run leaves every label it did
+        // not reach under the old name, where the next attempt finds it.
+        nested.sort_by_key(|(name, _)| std::cmp::Reverse(name.matches('/').count()));
+        if let Some(id) = held(&self.labels, label) {
+            nested.push((label.to_owned(), id));
+        }
+        for (old, id) in nested {
+            let new = format!("{target}{}", &old[label.len()..]);
+            let patch = GmailLabel {
+                id,
+                name: new.clone(),
+                ..Default::default()
+            };
+            self.op(units::LABEL_PATCH, |client| client.label_patch(&patch))
+                .with_context(|| format!("Rename label {old} to {new} error"))?;
+            self.labels.remove(&old);
+            self.labels.insert(new, patch.id);
+        }
+
+        Ok(renamed)
+    }
+
+    /// Deletes the label `label`, unless a label is nested under it (pimdir
+    /// Annex B.2 `collection-delete`). Its messages keep their other labels,
+    /// in All Mail at least: Gmail deletes no message with a label.
+    ///
+    /// One already gone is success; a system label is refused.
+    pub fn delete_label(&mut self, label: &str) -> Result<()> {
+        if is_system(label) {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "Gmail system label {label} cannot be deleted"
+            ))));
+        }
+        self.list_labels()?;
+        let Some(id) = lookup_label(&self.labels, label) else {
+            return Ok(());
+        };
+        let under = format!("{label}/");
+        let mut nested: Vec<&str> = self
+            .labels
+            .keys()
+            .filter(|name| name.starts_with(&under))
+            .map(String::as_str)
+            .collect();
+        if !nested.is_empty() {
+            nested.sort();
+            return Err(anyhow::Error::new(Refusal(format!(
+                "Gmail label {label} holds {}: delete them first",
+                nested.join(", ")
+            ))));
+        }
+
+        self.op(units::LABEL_DELETE, |client| client.label_delete(&id))
+            .with_context(|| format!("Delete label {label} error"))?;
+        self.labels.retain(|_, held| *held != id);
         Ok(())
     }
 

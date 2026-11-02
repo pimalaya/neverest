@@ -99,10 +99,11 @@ fn declared(
         .iter()
         .filter_map(|name| Some((name.as_str(), endpoints.get(name)?)))
         .collect();
-    let mut capabilities: Vec<CheckedCapability> = capability::supports(config, mode.one_way)
-        .into_iter()
-        .map(CheckedCapability::from)
-        .collect();
+    let mut capabilities: Vec<CheckedCapability> =
+        capability::supports(config, mode.one_way, !mode.targets.is_empty())
+            .into_iter()
+            .map(CheckedCapability::from)
+            .collect();
     if let Some(wide) = capability::vtodo_wide(config, &targets) {
         capabilities.push(CheckedCapability {
             name: wide.name,

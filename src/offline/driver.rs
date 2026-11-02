@@ -46,7 +46,7 @@ use io_pimdir::{
     codec::PimdirAction,
     collection::{PimdirCollectionId, PimdirScope},
     hub::{PimdirBinding, PimdirSourceId},
-    intent::{COLLECTION_CREATE, PimdirCollectionCreate},
+    intent::PimdirCollectionCreate,
     load::PimdirLoadSelection,
     mutate::PimdirMutation,
     object::{PimdirHash, PimdirObject},
@@ -70,7 +70,7 @@ use pimalaya_cli::spinner::Spinner;
 use crate::msgraph::client::GraphKind;
 use crate::{
     account::{Account, SourceAccount},
-    client::{Client, Pool, WrittenItem},
+    client::{Client, Pool, Renamed, WrittenItem},
     config::{
         AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceBackendConfig,
         SourceConfig, SourcePermissions,
@@ -79,7 +79,8 @@ use crate::{
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId, merge::Merged},
     offline::{
-        Paged, Pager, Rest, capability, create,
+        Paged, Pager, Rest, capability,
+        collection::{self, CollectionIntent},
         invitation::{
             self, Failure as InvitationFailure, Invitation, InvitationIntent, Refusal, Target,
         },
@@ -480,7 +481,7 @@ fn push_rights(perms: &SourcePermissions, media_type: &str) -> PimdirPushRights 
 /// moves: what a client reads to offer the collections it could sync.
 ///
 /// Under `intents_only`, the run drains the queue and performs what
-/// frontends queued (collection creations, sends, calendar intents), opening
+/// frontends queued (collection intents, sends, calendar intents), opening
 /// an endpoint only for an intent that needs it, then stops: it lists no
 /// collection, pushes no other write and fetches nothing.
 #[allow(clippy::too_many_arguments)]
@@ -544,7 +545,7 @@ pub fn run(
     // NOTE: once, before any credential is read or any endpoint opened, so a
     // run that cannot reach its servers still applies what frontends queued,
     // which they then read back. A declaration moves no item, so it leaves
-    // the queue alone but for the collections to create, which it lists.
+    // the queue alone but for the collection intents, whose result it lists.
     if !declare_only {
         let first = running
             .first()
@@ -718,15 +719,20 @@ pub(crate) fn declare(
         // server, synced yet or only declared (`sync --declare-only`).
         let namespace = format!("{name}/");
         let mut held = Vec::new();
+        let mut fixed = BTreeSet::new();
         for collection in &collections {
             let syncing = store
                 .collection_sources(&collection.id)
                 .with_context(|| format!("List the sources of {}", collection.id))?;
             if syncing.contains(name) || collection.id.starts_with(&namespace) {
                 held.push(collection.id.clone());
+                if collection.role.is_some() {
+                    fixed.insert(collection.id.clone());
+                }
             }
         }
-        let mut capabilities = capability::declaration(source, mode.one_way, &held);
+        let paired = !mode.targets.is_empty();
+        let mut capabilities = capability::declaration(source, mode.one_way, paired, &held, &fixed);
         // NOTE: a source-wide `none` already covers every calendar, and an
         // undeclared source gets no row, which would refuse all it lacks.
         match capability::vtodo_wide(source, &targets) {
@@ -954,7 +960,7 @@ fn run_pair(
     let media_type = kind.media_type();
 
     if !dry_run {
-        drain_collection_creates(&mut [&mut left, &mut right], &mut left_store, report);
+        drain_collection_intents(&mut [&mut left, &mut right], &mut left_store, true, report);
         drain_submits(
             account_config,
             account,
@@ -1337,7 +1343,7 @@ fn run_local(
 
     if !dry_run {
         let (first, _) = ctxs.split_first_mut().expect("at least one connection");
-        drain_collection_creates(&mut [&mut *first], &mut stores[0], report);
+        drain_collection_intents(&mut [&mut *first], &mut stores[0], false, report);
         if !declare_only {
             drain_submits(
                 account_config,
@@ -1548,7 +1554,7 @@ fn record_listing(
 }
 
 /// Performs what frontends queued for one source and, in a paired account,
-/// its targets, syncing nothing: the collection creations, the sends and
+/// its targets, syncing nothing: the collection intents, the sends and
 /// the calendar intents, as a full run does before it lists anything.
 ///
 /// An endpoint is opened only when one of these needs its session: an
@@ -1602,9 +1608,10 @@ fn run_intents(
         }
     }
 
-    drain_collection_creates(
+    drain_collection_intents(
         &mut opened.iter_mut().collect::<Vec<_>>(),
         &mut store,
+        !mode.targets.is_empty(),
         report,
     );
 
@@ -1639,7 +1646,7 @@ fn run_intents(
 /// The endpoints among `names` whose session a queued intent needs, the
 /// drains picking their performer as they do.
 ///
-/// A collection creation or a calendar intent needs the endpoint it names,
+/// A collection intent or a calendar intent needs the endpoint it names,
 /// or, naming none (a producer predating pimdir STORAGE §15.6), the first
 /// endpoint of its namespace; an unnamed calendar intent may need any of
 /// them, the one binding its item being known only once they are open. A
@@ -1666,7 +1673,7 @@ fn wanted_sides(
         None => {}
     };
 
-    match create::pending(store) {
+    match collection::pending(store) {
         Ok(intents) => {
             for intent in intents {
                 want(intent.source(), &intent.collection, false);
@@ -5398,17 +5405,22 @@ fn park_interrupted(
     Some(intents)
 }
 
-/// Performs the queued collection-create intents (pimdir STORAGE Annex
-/// B.2), each by the side it names, and settles their rows.
+/// Performs the queued collection intents (pimdir STORAGE Annex B.2), each
+/// by the side it names, and settles their rows.
 ///
-/// It runs before the listing, so a collection created here is listed, and
-/// synced, by the same run.
-fn drain_collection_creates(
+/// It runs before the listing, so a collection created, renamed or deleted
+/// here is listed as it now stands by the same run. `paired` is whether the
+/// account mirrors its source onto targets: there a rename parks, the pair
+/// reading it as a delete and a create, and the store follows a rename or a
+/// delete only on an account syncing its source alone, a pair settling the
+/// collections both endpoints list itself (pimdir SYNC §5).
+fn drain_collection_intents(
     sides: &mut [&mut SourceCtx],
     store: &mut PimdirSourceStore,
+    paired: bool,
     report: &mut SyncOutput,
 ) {
-    let intents = match create::pending(store) {
+    let intents = match collection::pending(store) {
         Ok(intents) => intents,
         Err(err) => {
             warn!("cannot read the queued collection intents: {err:#}");
@@ -5435,15 +5447,146 @@ fn drain_collection_creates(
         let side = &mut *sides[index];
         let outcome = intent
             .request()
-            .and_then(|request| perform_collection_create(side, &request));
+            .and_then(|request| perform_collection_intent(side, intent, &request, paired));
         let row = QueuedIntent {
             id: intent.id,
             collection: &intent.collection,
-            kind: COLLECTION_CREATE,
+            kind: intent.kind,
             seq: None,
         };
         let performer = side.name.clone();
+        let namespace = side.namespace.clone();
+        let (outcome, follow) = match outcome {
+            Ok(performed) => (Ok(()), Some(performed)),
+            Err(failure) => (Err(failure), None),
+        };
         settle_intent(store, row, &performer, outcome, report);
+
+        if paired {
+            continue;
+        }
+        match follow {
+            Some(Performed::Renamed(renamed)) => {
+                follow_rename(store, &namespace, &intent.collection, &renamed)
+            }
+            // NOTE: the source alone held it, and its server no longer does:
+            // the collection leaves the store as a pair's leaves it once
+            // neither endpoint lists it. A row still queued on it keeps it,
+            // the store refusing to drop one.
+            Some(Performed::Deleted) => match store.delete_collection(&intent.collection) {
+                Ok(_) => info!("collection {} dropped from the store", intent.collection),
+                Err(err) => warn!(
+                    "cannot drop the deleted collection {} from the store: {err}",
+                    intent.collection
+                ),
+            },
+            Some(Performed::Created) | None => {}
+        }
+    }
+}
+
+/// What a performed collection intent left on the server.
+#[derive(Clone, Debug)]
+enum Performed {
+    Created,
+    Renamed(Renamed),
+    Deleted,
+}
+
+/// Performs one collection intent on `side`'s server.
+fn perform_collection_intent(
+    side: &mut SourceCtx,
+    intent: &CollectionIntent,
+    request: &collection::Request,
+    paired: bool,
+) -> Result<Performed, InvitationFailure> {
+    let prefix = format!("{}/", side.namespace);
+    let anchor = || match intent.collection.strip_prefix(&prefix) {
+        Some(id) => Ok(id.to_owned()),
+        None => Err(InvitationFailure::Permanent(anyhow!(
+            "Collection {} is not one of source {}",
+            intent.collection,
+            side.name
+        ))),
+    };
+
+    match request {
+        collection::Request::Create(request) => {
+            perform_collection_create(side, request)?;
+            Ok(Performed::Created)
+        }
+        collection::Request::Rename(_) if paired => Err(InvitationFailure::Permanent(anyhow!(
+            "A paired account mirrors its collections by name, a rename reading there as a delete and a create"
+        ))),
+        collection::Request::Rename(request) => {
+            let id = anchor()?;
+            let renamed = side
+                .pool
+                .primary()
+                .rename_named_collection(&id, &request.name)
+                .map_err(InvitationFailure::classify)?;
+            info!("collection {id} renamed {} on {}", renamed.id, side.name);
+            Ok(Performed::Renamed(renamed))
+        }
+        collection::Request::Delete(_) => {
+            let id = anchor()?;
+            side.pool
+                .primary()
+                .delete_named_collection(&id)
+                .map_err(InvitationFailure::classify)?;
+            info!("collection {id} deleted on {}", side.name);
+            Ok(Performed::Deleted)
+        }
+    }
+}
+
+/// Follows a rename its server performed in the store (pimdir STORAGE Annex
+/// B.2): where the id derives from the name (IMAP, Gmail), the collection
+/// and every one under it take their new id through `rename_collection`,
+/// so their items keep their bindings rather than leaving under the old id
+/// and arriving again under the new one; each is named as its next listing
+/// names it. A failure is logged: the next listing then reads the renamed
+/// collection as a new one.
+fn follow_rename(store: &mut PimdirSourceStore, namespace: &str, anchor: &str, renamed: &Renamed) {
+    let to = hub_id(namespace, &renamed.id);
+    if anchor == to {
+        if let Err(err) = store.set_collection_name(anchor, &renamed.name) {
+            warn!("cannot name {anchor} `{}`: {err}", renamed.name);
+        }
+        return;
+    }
+
+    let collections = match store.list_collections() {
+        Ok(collections) => collections,
+        Err(err) => return warn!("cannot follow the rename of {anchor} in the store: {err}"),
+    };
+    let under = renamed
+        .delimiter
+        .map(|delimiter| format!("{anchor}{delimiter}"));
+    for collection in collections {
+        let rest = match &under {
+            _ if collection.id == anchor => "",
+            Some(under) if collection.id.starts_with(under.as_str()) => {
+                &collection.id[anchor.len()..]
+            }
+            _ => continue,
+        };
+        let id = format!("{to}{rest}");
+        let name = match rest {
+            "" => renamed.name.clone(),
+            rest => format!("{}{rest}", renamed.id),
+        };
+        if let Err(err) = store.rename_collection(&collection.id, &id) {
+            warn!(
+                "cannot rename {} to {id} in the store: {err}",
+                collection.id
+            );
+            continue;
+        }
+        if let Err(err) = store.set_collection_name(&id, &name) {
+            warn!("cannot name {id} `{name}`: {err}");
+        }
+        info!("collection {} renamed {id} in the store", collection.id);
     }
 }
 
@@ -7159,7 +7302,13 @@ mod tests {
             .unwrap();
         let config: AccountConfig = toml::from_str(r#"gcal.auth.token.raw = "token""#).unwrap();
         let source = config.sources().unwrap().remove("gcal").unwrap();
-        let declared = capability::declaration(&source, false, &["gcal/primary".into()]);
+        let declared = capability::declaration(
+            &source,
+            false,
+            false,
+            &["gcal/primary".into()],
+            &BTreeSet::new(),
+        );
         store.declare("gcal", &declared).unwrap();
 
         PimdirProducer::open(dir, "test-frontend")
@@ -12997,5 +13146,63 @@ mod graph_heads {
             "m8 went before the last page"
         );
         assert!(loaded(&store).round.is_none(), "the round closed");
+    }
+}
+
+#[cfg(test)]
+mod collection_intent_tests {
+    use io_pimdir::client::reader::PimdirReader;
+
+    use super::*;
+
+    /// A rename the server performed under a new id carries the collection
+    /// and every one under it in the store, its siblings left alone, each
+    /// named as its next listing names it; one keeping its id is renamed.
+    #[test]
+    fn a_performed_rename_carries_the_collections_under_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = open_store(dir.path(), "imap", "live").unwrap();
+        for collection in ["imap/A", "imap/A/B", "imap/AB", "imap/C"] {
+            store
+                .ensure_collection(collection, "message/rfc822")
+                .unwrap();
+        }
+
+        let renamed = Renamed {
+            id: "Z".into(),
+            name: "Z".into(),
+            delimiter: Some('/'),
+        };
+        follow_rename(&mut store, "imap", "imap/A", &renamed);
+
+        let collections = PimdirReader::open(dir.path())
+            .unwrap()
+            .list_collections()
+            .unwrap();
+        let mut names: Vec<(String, String)> = collections
+            .into_iter()
+            .map(|collection| (collection.id, collection.name))
+            .collect();
+        names.sort();
+        let ids: Vec<&str> = names.iter().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(ids, ["imap/AB", "imap/C", "imap/Z", "imap/Z/B"]);
+        let name = |id: &str| names.iter().find(|(held, _)| held == id).unwrap().1.clone();
+        assert_eq!(name("imap/Z"), "Z");
+        assert_eq!(name("imap/Z/B"), "Z/B");
+
+        let kept = Renamed {
+            id: "C".into(),
+            name: "Team".into(),
+            delimiter: None,
+        };
+        follow_rename(&mut store, "imap", "imap/C", &kept);
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        let c = reader
+            .list_collections()
+            .unwrap()
+            .into_iter()
+            .find(|collection| collection.id == "imap/C")
+            .unwrap();
+        assert_eq!(c.name, "Team");
     }
 }

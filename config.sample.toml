@@ -72,7 +72,9 @@ default = true
 #   - `collection.filter`: which collections this source syncs
 #   - `collection.create`, `flag.update`, `item.update`: default true
 #   - `collection.delete`: default false; a collection one endpoint no
-#     longer lists is deleted on the other only when this is true
+#     longer lists is deleted on the other only when this is true, and a
+#     frontend may ask to delete one (a `collection-delete` intent) only
+#     then
 #   - `item.{create,delete}`: both required when the block is declared
 #   - `pool-size`: read by Microsoft Graph alone for now (default 3, never
 #     above the account's `connections`); IMAP opens `connections`

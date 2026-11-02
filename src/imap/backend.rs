@@ -43,7 +43,7 @@ use log::debug;
 use rfc2047_decoder::{Decoder, RecoverStrategy};
 
 use crate::{
-    client::{EnumEntry, Enumeration, Gone, Held, Listed},
+    client::{EnumEntry, Enumeration, Gone, Held, Listed, Renamed},
     imap::client::{ImapClient, RoundUids},
     item::{
         address::Address,
@@ -822,6 +822,89 @@ impl ImapClient {
         Ok(())
     }
 
+    /// Every mailbox the server lists, `\Noselect` ones included, by name,
+    /// with the hierarchy delimiter its row states.
+    fn mailbox_tree(&mut self) -> Result<Vec<(String, Option<char>)>> {
+        let reference: ImapMailbox<'static> = ""
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IMAP list reference"))?;
+        let pattern: ListMailbox<'static> = "*"
+            .try_into()
+            .map_err(|_| anyhow!("Invalid IMAP list pattern"))?;
+
+        Ok(self
+            .list(reference, pattern)?
+            .into_iter()
+            .map(|row| {
+                let delimiter = row.1.as_ref().map(|delimiter| delimiter.inner());
+                (mailbox_from(row).id, delimiter)
+            })
+            .collect())
+    }
+
+    /// Renames `mailbox` to `name` under the parent it has, the mailboxes
+    /// under it following (RFC 9051 §6.3.6), and answers what it is then
+    /// (pimdir Annex B.2 `collection-rename`).
+    ///
+    /// One already so named, or gone where the new name stands, is success;
+    /// `INBOX`, a sibling already named `name`, a name holding the delimiter
+    /// and a mailbox gone with nothing in its place are refused.
+    pub fn rename_named_mailbox(&mut self, mailbox: &str, name: &str) -> Result<Renamed> {
+        let refused = |why: String| Err(anyhow::Error::new(Refusal(why)));
+
+        if mailbox.eq_ignore_ascii_case("INBOX") {
+            return refused(String::from("The IMAP INBOX keeps its name"));
+        }
+        let tree = self.mailbox_tree()?;
+        let listed = |id: &str| tree.iter().find(|(listed, _)| listed == id);
+        let delimiter = listed(mailbox)
+            .or_else(|| tree.first())
+            .and_then(|(_, delimiter)| *delimiter);
+        let target = renamed_mailbox(mailbox, name, delimiter)?;
+        let renamed = Renamed {
+            id: target.clone(),
+            name: target.clone(),
+            delimiter,
+        };
+
+        match (listed(mailbox).is_some(), listed(&target).is_some()) {
+            _ if target == mailbox => Ok(renamed),
+            (true, true) => refused(format!("IMAP mailbox {target} already exists")),
+            (false, true) => Ok(renamed),
+            (false, false) => refused(format!("No IMAP mailbox {mailbox} to rename")),
+            (true, false) => {
+                self.rename(parse_mailbox(mailbox)?, parse_mailbox(&target)?)?;
+                Ok(renamed)
+            }
+        }
+    }
+
+    /// Deletes `mailbox` with its messages, unless a mailbox stands under it
+    /// (pimdir Annex B.2 `collection-delete`): a server deleting it then
+    /// keeps it as a `\Noselect` container (RFC 9051 §6.3.5), half done.
+    ///
+    /// One already gone is success; `INBOX` is refused.
+    pub fn delete_named_mailbox(&mut self, mailbox: &str) -> Result<()> {
+        if mailbox.eq_ignore_ascii_case("INBOX") {
+            return Err(anyhow::Error::new(Refusal(String::from(
+                "The IMAP INBOX cannot be deleted",
+            ))));
+        }
+        let tree = self.mailbox_tree()?;
+        let Some((_, delimiter)) = tree.iter().find(|(listed, _)| listed == mailbox) else {
+            return Ok(());
+        };
+        let children = children_of(&tree, mailbox, *delimiter);
+        if !children.is_empty() {
+            return Err(anyhow::Error::new(Refusal(format!(
+                "IMAP mailbox {mailbox} holds {}: delete them first",
+                children.join(", ")
+            ))));
+        }
+
+        self.delete_mailbox(mailbox)
+    }
+
     /// Deletes one message: marks it `\Deleted`, then `UID EXPUNGE`s that
     /// UID alone (RFC 4315, built into IMAP4rev2).
     ///
@@ -852,6 +935,40 @@ impl ImapClient {
 
         Ok(())
     }
+}
+
+/// The name `mailbox` takes renamed `name`: under the parent it has, joined
+/// by `delimiter`, at the top on a flat namespace. A blank name, or one
+/// holding the delimiter, which would nest by itself, is refused.
+fn renamed_mailbox(mailbox: &str, name: &str, delimiter: Option<char>) -> Result<String> {
+    if name.trim().is_empty() || delimiter.is_some_and(|delimiter| name.contains(delimiter)) {
+        return Err(anyhow::Error::new(Refusal(format!(
+            "An IMAP mailbox name is not blank and holds no hierarchy delimiter: {name:?}"
+        ))));
+    }
+
+    Ok(
+        match delimiter.and_then(|delimiter| Some((delimiter, mailbox.rsplit_once(delimiter)?))) {
+            Some((delimiter, (parent, _))) => format!("{parent}{delimiter}{name}"),
+            None => name.to_owned(),
+        },
+    )
+}
+
+/// The mailboxes of `tree` standing under `mailbox`, at any depth.
+fn children_of(
+    tree: &[(String, Option<char>)],
+    mailbox: &str,
+    delimiter: Option<char>,
+) -> Vec<String> {
+    let Some(delimiter) = delimiter else {
+        return Vec::new();
+    };
+    let under = format!("{mailbox}{delimiter}");
+    tree.iter()
+        .filter(|(id, _)| id.starts_with(&under))
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// One IMAP LIST row (mailbox, delimiter, attributes).
@@ -1421,6 +1538,32 @@ mod tests {
     use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
 
     use super::*;
+
+    #[test]
+    fn a_renamed_mailbox_keeps_its_parent() {
+        assert_eq!(
+            renamed_mailbox("Projects/2025", "2026", Some('/')).unwrap(),
+            "Projects/2026"
+        );
+        assert_eq!(renamed_mailbox("Old", "New", Some('.')).unwrap(), "New");
+        assert_eq!(renamed_mailbox("A.B", "C", None).unwrap(), "C");
+        assert!(renamed_mailbox("Old", "A/B", Some('/')).is_err());
+        assert!(renamed_mailbox("Old", " ", Some('/')).is_err());
+    }
+
+    #[test]
+    fn the_mailboxes_under_one_are_found_at_any_depth() {
+        let tree = [
+            ("A".to_string(), Some('/')),
+            ("A/B".to_string(), Some('/')),
+            ("A/B/C".to_string(), Some('/')),
+            ("AB".to_string(), Some('/')),
+        ];
+
+        assert_eq!(children_of(&tree, "A", Some('/')), ["A/B", "A/B/C"]);
+        assert!(children_of(&tree, "AB", Some('/')).is_empty());
+        assert!(children_of(&tree, "A", None).is_empty());
+    }
 
     /// A mailbox renumbered to `UIDVALIDITY` 2, its one message now UID 7.
     fn renumbered(qresync: bool) -> FakeImap {

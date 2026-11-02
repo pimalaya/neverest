@@ -127,7 +127,7 @@ An account is one pimdir store fed by one or more named **sources**, each a remo
 
 `one-way` makes the sources authoritative, so the other side's changes are overwritten rather than merged, and `retain` says whether the store keeps bodies or is only the ledger it has to be anyway. Sources never meet, so several cache side by side for a frontend to union at display time.
 
-A collection one endpoint no longer lists is deleted on the other only where that endpoint sets `collection.delete = true`. It is off by default: a missing collection is the only sign IMAP and DAV give of a deletion, and a listing can leave out one nobody deleted.
+A collection one endpoint no longer lists is deleted on the other only where that endpoint sets `collection.delete = true`. It is off by default: a missing collection is the only sign IMAP and DAV give of a deletion, and a listing can leave out one nobody deleted. The same setting lets a frontend ask neverest to delete a collection on that server (pimdir's `collection-delete` intent, `himalaya pimdir mailbox delete`); renaming one (`collection-rename`) needs no setting.
 
 ## Usage
 

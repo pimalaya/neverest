@@ -1287,7 +1287,7 @@ dependencies = [
 [[package]]
 name = "io-imap"
 version = "0.7.1"
-source = "git+https://github.com/pimalaya/io-imap?rev=b1ab38ea9f24578b46dda56aa009600571b6b9ef#b1ab38ea9f24578b46dda56aa009600571b6b9ef"
+source = "git+https://github.com/pimalaya/io-imap?rev=2f17d6a2d898fa0bca91da35af9cb8023dc8f150#2f17d6a2d898fa0bca91da35af9cb8023dc8f150"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1295,6 +1295,7 @@ dependencies = [
  "imap-codec",
  "io-sasl",
  "log",
+ "nom",
  "pimalaya-stream",
  "rand",
  "secrecy",

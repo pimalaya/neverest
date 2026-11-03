@@ -38,7 +38,7 @@ strip = "symbols"
 panic = "abort"
 
 [build-dependencies]
-pimalaya-cli = { version = "0.2", default-features = false, features = ["build"] }
+pimalaya-cli = { version = "0.3", default-features = false, features = ["build"] }
 
 [dependencies]
 anyhow = "1"
@@ -53,18 +53,18 @@ io-gcal = { version = "0.2", default-features = false, optional = true }
 io-gmail = { version = "0.5", default-features = false, optional = true }
 io-gpeople = { version = "0.5", default-features = false, optional = true }
 io-http = { version = "0.5", default-features = false, optional = true }
-io-imap = { version = "0.7", default-features = false, optional = true }
+io-imap = { version = "0.8", default-features = false, optional = true }
 io-msgraph = { version = "0.6", default-features = false, optional = true }
-io-pim-discovery = { version = "0.8", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "stream"], optional = true }
+io-pim-discovery = { version = "0.9", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "stream"], optional = true }
 io-pimdir = { version = "0.8", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }
-jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
 io-smtp = { version = "0.6", default-features = false, optional = true }
 io-webdav = { version = "0.5", default-features = false, optional = true }
+jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
 log = "0.4"
 percent-encoding = "2"
-pimalaya-cli = { version = "0.2", default-features = false, features = ["terminal", "spinner"] }
-pimalaya-config = { version = "0.2", default-features = false, features = ["toml", "secret"] }
+pimalaya-cli = { version = "0.3", default-features = false, features = ["terminal", "spinner"] }
+pimalaya-config = { version = "0.3", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.3", default-features = false }
 rfc2047-decoder = "1"
 rusqlite = { version = "0.41", default-features = false }
@@ -81,12 +81,9 @@ vcard-rs = { version = "0.5", optional = true }
 [dev-dependencies]
 io-oauth = { version = "0.3", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
 
-# NOTE: unreleased fixes, pushed revisions to be replaced by released versions.
 [patch.crates-io]
 ical-rs = { git = "https://github.com/pimalaya/ical", rev = "99b92736a6a076c72936fac29c9b85a5168e4c2f" }
 io-http = { git = "https://github.com/pimalaya/io-http", rev = "e1815307771c1ec65a86b77256d46c33241d3038" }
-io-imap = { git = "https://github.com/pimalaya/io-imap", rev = "2f17d6a2d898fa0bca91da35af9cb8023dc8f150" }
 io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "2ae26370aefa671c16316dbad98107634436bce6" }
 io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "0c701447473a03e5cf9effcd0039a49a78419c4d" }
 io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "b2b9a00462f7d371de3fb419e53288f0a13cee39" }
-pimalaya-cli = { git = "https://github.com/pimalaya/cli", rev = "55b66933950f02541892407667e5e0b254245871" }

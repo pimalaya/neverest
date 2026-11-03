@@ -367,6 +367,7 @@ mod tests {
             PimdirSortKey, PimdirStatus,
         },
     };
+    use pimalaya_cli::output::Bytes;
     use serde::Serialize;
 
     use super::*;
@@ -393,6 +394,15 @@ mod tests {
     impl Printer for TestPrinter {
         fn out<T: fmt::Display + Serialize>(&mut self, data: T) -> Result<()> {
             self.0 = data.to_string();
+            Ok(())
+        }
+
+        fn event<T: fmt::Display + Serialize>(&mut self, _event: T) -> Result<()> {
+            Ok(())
+        }
+
+        fn out_bytes(&mut self, bytes: Bytes) -> Result<()> {
+            self.0 = String::from_utf8_lossy(&bytes.data).into_owned();
             Ok(())
         }
     }

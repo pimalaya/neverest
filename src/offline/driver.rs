@@ -2409,7 +2409,7 @@ fn collection_spine(
     let mut report = SyncOutput::default();
 
     let loaded =
-        load_side(store, collection).with_context(|| format!("Load {} {collection}", &ctx.name))?;
+        load_side(store, collection).with_context(|| format!("Load {} {collection}", ctx.name))?;
     let mut owed = owed;
     owed.extend(
         loaded
@@ -3968,7 +3968,7 @@ fn sync_side(
         report => report,
     };
     let (report, paused) =
-        match report.with_context(|| format!("Sync {} {collection}", &ctx.name))? {
+        match report.with_context(|| format!("Sync {} {collection}", ctx.name))? {
             Paged::Done(report) => (report, false),
             Paged::Paused(verb) => (verb.report().clone(), true),
         };
@@ -4077,7 +4077,7 @@ fn resolve_conflicts(
         let upgrade =
             PimdirUpgrade::new(collection.to_string(), wanted, PimdirTier::Full).options(options);
         let upgraded = run_verb(store, &mut remote, upgrade)
-            .with_context(|| format!("Fetch the diverging bodies of {} {collection}", &ctx.name))?;
+            .with_context(|| format!("Fetch the diverging bodies of {} {collection}", ctx.name))?;
         ctx.noted.overrule(collection, &upgraded.events);
     }
 
@@ -6059,7 +6059,7 @@ fn hydrate_full_collection(
     let mut raised = 0;
     for (ctx, store) in [(left, left_store), (right, right_store)] {
         let targets: Vec<PimdirHandle> = load_side(store, collection)
-            .with_context(|| format!("Load {} {collection}", &ctx.name))?
+            .with_context(|| format!("Load {} {collection}", ctx.name))?
             .into_iter()
             .filter(|p| {
                 p.status != PimdirStatus::Tombstone
@@ -6084,7 +6084,7 @@ fn hydrate_full_collection(
         let upgrade =
             PimdirUpgrade::new(collection.to_string(), targets, PimdirTier::Full).options(options);
         let upgraded = run_verb(store, &mut remote, upgrade)
-            .with_context(|| format!("Hydrate all bodies {} {collection}", &ctx.name))?;
+            .with_context(|| format!("Hydrate all bodies {} {collection}", ctx.name))?;
         ctx.noted.overrule(collection, &upgraded.events);
         raised += total;
     }

@@ -9,4 +9,4 @@ change: machine-output-contract
 - [x] Return a `JsonSchemaRegistry`, register `neverest-error`, assert object roots
 - [x] CHANGELOG
 - [x] Fold into cairn/spec/sync.md; log; land
-- [ ] Move to the pimalaya-cli 0.3.0 release once published
+- [x] Move to the pimalaya-cli 0.3.0 release once published

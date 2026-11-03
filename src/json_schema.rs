@@ -61,6 +61,7 @@ pub fn registry() -> JsonSchemaRegistry {
         bin: "neverest",
         version: env!("CARGO_PKG_VERSION"),
         schemas,
+        events: BTreeMap::new(),
     }
 }
 

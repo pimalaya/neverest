@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::{Read, Write},
     num::NonZeroU32,
+    ops::RangeInclusive,
     str::from_utf8,
 };
 
@@ -215,11 +216,7 @@ impl ImapClient {
             .iter()
             .filter_map(|fetch| spine(&fetch.items.clone().into_inner()))
             .collect();
-        let vanished = data
-            .vanished_earlier
-            .iter()
-            .map(|uid| uid.get().to_string())
-            .collect();
+        let vanished = held_vanished(&data.vanished_earlier, held);
 
         // NOTE: a head's checkpoint may be newer than the store's, whose
         // handles then name what an older `UIDVALIDITY` numbered.
@@ -1248,6 +1245,27 @@ fn qresync_position(checkpoint: &[u8], qresync: bool) -> Option<(NonZeroU32, u64
     (qresync && modseq > 0).then_some((validity, modseq))
 }
 
+/// The handles the store binds among the `VANISHED (EARLIER)` UID ranges.
+///
+/// A handle the store does not bind names nothing to remove, and the ranges
+/// are never expanded: a server may announce `1:4294967295`.
+fn held_vanished(ranges: &[RangeInclusive<NonZeroU32>], held: &Held<'_>) -> Vec<String> {
+    let uids: BTreeMap<u32, &String> = held
+        .handles
+        .iter()
+        .filter_map(|handle| Some((handle.parse().ok()?, handle)))
+        .collect();
+
+    // NOTE: ranges may overlap, the set keeps each handle once.
+    let vanished: BTreeSet<&String> = ranges
+        .iter()
+        .flat_map(|range| uids.range(range.start().get()..=range.end().get()))
+        .map(|(_, handle)| *handle)
+        .collect();
+
+    vanished.into_iter().cloned().collect()
+}
+
 /// Whether the store's handles name what `uid_validity` numbers: a handle
 /// names what the store binds only under the `UIDVALIDITY` its checkpoint
 /// was made under.
@@ -1942,6 +1960,25 @@ mod tests {
         );
         assert_eq!(qresync_position(&encode_checkpoint(0, 42), true), None);
         assert_eq!(qresync_position(&[1, 2, 3], true), None);
+    }
+
+    /// A `VANISHED (EARLIER)` set spanning every UID names only what the
+    /// store binds, each handle once however the ranges overlap.
+    #[test]
+    fn vanished_ranges_name_the_held_handles_only() {
+        let handles = HashSet::from(["3", "9", "12", "x"].map(str::to_owned));
+        let held = Held {
+            handles: &handles,
+            checkpoint: None,
+            coverage: None,
+        };
+        let range = |start, end| NonZeroU32::new(start).unwrap()..=NonZeroU32::new(end).unwrap();
+
+        assert_eq!(
+            held_vanished(&[range(1, u32::MAX), range(2, 9)], &held),
+            ["12", "3", "9"]
+        );
+        assert_eq!(held_vanished(&[range(4, 8)], &held), Vec::<String>::new());
     }
 
     /// The store's handles are trusted only under the `UIDVALIDITY` its

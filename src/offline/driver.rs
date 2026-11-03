@@ -2327,12 +2327,14 @@ impl Pager for PageFeed<'_> {
     }
 }
 
-/// The placements still owed a body, with what orders their download.
+/// The placements still owed a body, or a base body under an edit (pimdir
+/// SYNC §5), with what orders their download.
 fn bodiless(placements: impl IntoIterator<Item = PimdirPlacement>) -> Vec<HydrateTarget> {
     placements
         .into_iter()
         .filter(|placement| {
-            placement.status != PimdirStatus::Tombstone && placement.object.is_none()
+            placement.status != PimdirStatus::Tombstone
+                && (placement.object.is_none() || placement.awaits_base())
         })
         .map(|placement| HydrateTarget {
             size: summary_size(&placement.summary).unwrap_or(0) as u64,
@@ -6059,7 +6061,10 @@ fn hydrate_full_collection(
         let targets: Vec<PimdirHandle> = load_side(store, collection)
             .with_context(|| format!("Load {} {collection}", &ctx.name))?
             .into_iter()
-            .filter(|p| p.status != PimdirStatus::Tombstone && p.level < PimdirLevel::Full)
+            .filter(|p| {
+                p.status != PimdirStatus::Tombstone
+                    && (p.level < PimdirLevel::Full || p.awaits_base())
+            })
             .map(|p| p.handle)
             .collect();
         if targets.is_empty() {
@@ -9143,6 +9148,57 @@ mod tests {
             "a staged create the store reads back as {:?} is never pushed",
             placement.status,
         );
+    }
+
+    /// An edit over a base naming a revision and no body is owed that body:
+    /// the engine pushes it only once a fetch reads the base (pimdir SYNC §5).
+    #[test]
+    fn an_edit_over_an_unread_base_is_owed_its_base_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account(CONFLICT_ACCOUNT)
+            .for_source("dav");
+        store
+            .ensure_collection("dav/contacts", "text/vcard")
+            .unwrap();
+        let object = store
+            .blob_stage()
+            .stage_body(card("+2", "edited").as_bytes())
+            .unwrap();
+        store
+            .write(vec![
+                PimdirWriteOp::StoreObject {
+                    object: object.clone(),
+                    body: None,
+                },
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId("dav/contacts".into()),
+                    handle: PimdirHandle::from("card1"),
+                    link_id: Some(PimdirLinkId("uid:card1".into())),
+                    object: Some(object.hash.clone()),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Dirty,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
+                        revision: Some("r1".into()),
+                        object: None,
+                    }),
+                    origin: None,
+                }),
+            ])
+            .unwrap();
+
+        let collections = vec![String::from("dav/contacts")];
+        let plans =
+            hydrate_plans(&store, "dav", &collections, None, &GoneBodies::default()).unwrap();
+        let owed: Vec<_> = plans[0].1.iter().map(|target| &target.handle).collect();
+        assert_eq!(owed, [&PimdirHandle::from("card1")]);
     }
 
     /// The name of the item's original body, `old`: a real one, a body

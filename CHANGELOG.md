@@ -190,6 +190,10 @@ Upgrading from 0.3.0:
 
 - Bumped io-pimdir to 0.8 (pimdir storage-draft-08, sync-draft-07, search-draft-08): a store any earlier neverest wrote is refused, never migrated.
 
+- Changed a local edit over a body the store never read to wait for it: the run reads that body first, so a server edit made meanwhile conflicts instead of being overwritten (io-pimdir 0c70144).
+
+- Changed a copy or a move of an item whose body the store does not hold to fail unless its source syncs the target (io-pimdir 0c70144).
+
 - Bumped rusqlite to 0.41.
 
 - Bumped ical-rs to 0.6.

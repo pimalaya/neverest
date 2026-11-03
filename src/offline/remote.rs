@@ -227,6 +227,7 @@ pub(crate) fn snapshot(
             checkpoint: checkpoint.map(PimdirCheckpoint),
             narrowed: false,
             enumerated: None,
+            capped: false,
         },
     }
 }

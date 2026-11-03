@@ -150,7 +150,7 @@ A source syncing a kind other than `message/rfc822` SHALL be given no flag push 
 ### Requirement: A source retains every body when the store is a replica
 Where `retain` is true the sync SHALL hydrate every synced item to `Full`, the store being the app's offline copy. It SHALL pull before pushing so an edit the app staged locally stays pending and is reported rather than swallowed, and it SHALL open the store as the source it syncs so an app writing under the same id stages edits the sync pushes.
 
-The item a hydration pass picks up SHALL be selected by the absence of a stored body, not by its detail level. A remote content change drops the stale body while the hub keeps the level the item had reached, so a pass keyed on the level would leave an edited item bodiless for good.
+The item a hydration pass picks up SHALL be selected by the absence of a stored body, or of its base body under a local edit (pimdir SYNC §5, the edit pushing only once that base is read), not by its detail level. A remote content change drops the stale body while the hub keeps the level the item had reached, so a pass keyed on the level would leave an edited item bodiless for good.
 
 ### Requirement: Sync narrows by source
 `sync --source <name>` SHALL narrow a run to the named sources. Narrowing no longer picks namespaces, there being none: an account is one mode, and a source is addressable on its own.

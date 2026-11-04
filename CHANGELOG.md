@@ -204,9 +204,15 @@ Upgrading from 0.3.0:
 
 - Bumped io-gpeople to 0.5.
 
+- Bumped io-http to 0.6.
+
 - Bumped io-msgraph to 0.6.
 
 - Bumped io-smtp to 0.6.
+
+- Bumped io-webdav to 0.7.
+
+  A CalDAV or CardDAV multistatus is parsed 3.4 to 9 times faster.
 
 ### Fixed
 

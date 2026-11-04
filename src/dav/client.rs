@@ -331,7 +331,7 @@ impl DavClient {
         prop: WebdavProperty,
     ) -> Result<Option<Url>, WebdavClientStdError> {
         let multistatus = self.op(|dav| {
-            let coroutine =
+            let coroutine: WebdavPropfind =
                 WebdavPropfind::new(&dav.base_url, dav.auth(), &dav.user_agent, path, 0, &[prop]);
             run(dav, coroutine)
         })?;

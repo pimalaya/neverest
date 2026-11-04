@@ -158,7 +158,16 @@ name = "base64-codec"
 version = "0.0.1"
 source = "git+https://github.com/pimalaya/base64-codec?rev=d39f6b90f02abf8eb91ef041b7601320df8def99#d39f6b90f02abf8eb91ef041b7601320df8def99"
 dependencies = [
- "simd-cpu",
+ "simd-cpu 0.0.1",
+]
+
+[[package]]
+name = "base64-codec"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8c21fac036871f0cc54f32f04486210962fea0b2450233906c1b5b957be5262"
+dependencies = [
+ "simd-cpu 0.1.0",
 ]
 
 [[package]]
@@ -1219,7 +1228,7 @@ checksum = "17a7b0824811316d554c22abce3a7b85f03d6e224cbf11e44792894c1d0aa28b"
 dependencies = [
  "anyhow",
  "ical-rs",
- "io-http",
+ "io-http 0.5.0",
  "jiff",
  "log",
  "pimalaya-stream",
@@ -1237,7 +1246,7 @@ checksum = "9395ae6abe2e10289147290316e62226bedbd20a6b29fd6d9ae903d1483344c0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "io-http",
+ "io-http 0.5.0",
  "log",
  "pimalaya-stream",
  "serde",
@@ -1254,7 +1263,7 @@ checksum = "cfdcb1fd99f34eba6f6c4246fc7b1d7bdfa6ac0c32f1a574a819b8aca799b6cd"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "io-http",
+ "io-http 0.5.0",
  "log",
  "pimalaya-stream",
  "serde",
@@ -1275,6 +1284,20 @@ dependencies = [
  "log",
  "memchr",
  "pimalaya-stream",
+ "secrecy",
+ "thiserror",
+ "url",
+]
+
+[[package]]
+name = "io-http"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9086cd840a757b9dd4105caad54a59fdb440c49be33882491a07274ca32e06"
+dependencies = [
+ "base64-codec 0.1.0",
+ "httparse",
+ "log",
  "secrecy",
  "thiserror",
  "url",
@@ -1307,7 +1330,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "ical-rs",
- "io-http",
+ "io-http 0.5.0",
  "jiff",
  "log",
  "pimalaya-stream",
@@ -1325,7 +1348,7 @@ checksum = "ada4f4b661b47b6e6d69e15ff342653f40446866762e1744270d721eb3a92276"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "io-http",
+ "io-http 0.5.0",
  "log",
  "pimalaya-stream",
  "rand",
@@ -1348,7 +1371,7 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "domain",
- "io-http",
+ "io-http 0.5.0",
  "ipconfig",
  "log",
  "pimalaya-stream",
@@ -1431,17 +1454,18 @@ dependencies = [
 
 [[package]]
 name = "io-webdav"
-version = "0.5.1"
-source = "git+https://github.com/pimalaya/io-webdav?rev=b2b9a00462f7d371de3fb419e53288f0a13cee39#b2b9a00462f7d371de3fb419e53288f0a13cee39"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8fe0634d06f91a00dd0a36431c072ebd3482b6731bf7cc2f9e7e8b645bdf3f84"
 dependencies = [
  "anyhow",
- "io-http",
+ "io-http 0.6.0",
  "log",
+ "memchr",
  "pimalaya-stream",
  "serde",
  "thiserror",
  "url",
- "xmlparser",
 ]
 
 [[package]]
@@ -1710,11 +1734,11 @@ name = "mime-rs"
 version = "0.0.1"
 source = "git+https://github.com/pimalaya/mime-rs?rev=d7ea03296a197647a6effeb593a8528b47bdb0ed#d7ea03296a197647a6effeb593a8528b47bdb0ed"
 dependencies = [
- "base64-codec",
+ "base64-codec 0.0.1",
  "encoding_rs",
  "memchr",
  "quoted-printable-codec",
- "simd-cpu",
+ "simd-cpu 0.0.1",
 ]
 
 [[package]]
@@ -1773,7 +1797,7 @@ dependencies = [
  "io-gcal",
  "io-gmail",
  "io-gpeople",
- "io-http",
+ "io-http 0.6.0",
  "io-imap",
  "io-msgraph",
  "io-oauth",
@@ -2189,7 +2213,7 @@ name = "quoted-printable-codec"
 version = "0.0.1"
 source = "git+https://github.com/pimalaya/quoted-printable-codec?rev=d63612b0f9c046717e183e3be534c98f300d913a#d63612b0f9c046717e183e3be534c98f300d913a"
 dependencies = [
- "simd-cpu",
+ "simd-cpu 0.0.1",
 ]
 
 [[package]]
@@ -2721,6 +2745,12 @@ dependencies = [
 name = "simd-cpu"
 version = "0.0.1"
 source = "git+https://github.com/pimalaya/simd-cpu?rev=f2eb72cff2fafad8ae135e00685bc19f9e80e5cc#f2eb72cff2fafad8ae135e00685bc19f9e80e5cc"
+
+[[package]]
+name = "simd-cpu"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d362f934351780e3ec67adf32bcb5bc341f23a393076d17a600a699c0c93b726"
 
 [[package]]
 name = "simd_cesu8"
@@ -3419,12 +3449,6 @@ name = "xml"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2f45bb2c13fec6a6cb4c0f76a7e94839e110a14ec803ec2940777a94c347bc52"
-
-[[package]]
-name = "xmlparser"
-version = "0.13.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
 
 [[package]]
 name = "yoke"

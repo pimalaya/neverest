@@ -8,7 +8,7 @@ status: current
 
 `neverest sync` reconciles an account's named sources through the io-pimdir engine over its own pimdir store. It is sync-on-demand: one reconcile per invocation, no daemon.
 
-The store and the engine follow pimdir storage-draft-08, sync-draft-07 and search-draft-08 (io-pimdir 0.8 at bff5737): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
+The store and the engine follow pimdir storage-draft-09, sync-draft-08 and search-draft-09 (io-pimdir 0.9 at 5c18a02): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
 
 ### Requirement: An account holds named sources
 An account SHALL hold a map of named sources (`sources.<name>`), each declaring exactly one remote backend, and SHALL require at least one. It MAY additionally hold a map of named targets (`targets.<name>`) on the same terms. Both map keys SHALL be pimdir source ids, so a name is what every binding it owns in the store is recorded against, and a rename SHALL be treated as a new source. One name SHALL NOT be both a source and a target.
@@ -272,7 +272,7 @@ Every store handle SHALL be opened for the account being synced, so each collect
 A store opens under its own format version alone (pimdir STORAGE §4.2, §6): one any earlier neverest wrote, naming no `store_meta.format_version` or an earlier draft, is refused as `store-version` and never migrated. Opening one SHALL fail naming the reinstall in the order that keeps its queued writes, which live only in that store: sync it with the neverest that wrote it until nothing is queued, then `neverest sync --reset --force -a <account>`, which moves it aside and syncs a new one, rather than surfacing the raw refusal alone. The message SHALL never say to delete the store. What the old store held that no server holds (retained items, whatever was still queued) stays in the store moved aside. MIGRATION.md SHALL give the same order.
 
 #### Scenario: A store an earlier neverest wrote
-- **GIVEN** a store whose `store_meta.format_version` names `storage-draft-07`
+- **GIVEN** a store whose `store_meta.format_version` names `storage-draft-08`
 - **WHEN** neverest runs `--json drain` on the account
 - **THEN** it exits 1 with `code` `store-version`, the message naming the sync with the previous neverest until nothing is queued and `neverest sync --reset --force -a <account>`, and no delete
 
@@ -1671,7 +1671,7 @@ A message SHALL be relayed to a target only when the target has closed a round o
 - **THEN** nothing is relayed into that inbox until the round closes
 
 ### Requirement: A store error carries its code
-A store failure that ends a command SHALL carry, in its JSON failure object, the code io-pimdir gives it (`PimdirError::code`), spelled the same: `store-version`, `store-uncreated`, `store-foreign`, `store-corrupt`, `store-not-current`, `store-hash-algo`, `sync-version`, `store-busy`, `store-owned`, `store-staging`, `store-in-flight`, `store-exposed`, `action-malformed`, `flag-invalid`, `unsupported`, `index-fts5-missing`, `index-version`. A failure a caller cannot act on (an SQL or I/O error) SHALL carry none, nor SHALL a code neverest cannot meet (`index-busy`, which `index` answers as `busy`; `index-missing`, `index-outdated` and `index-query-only`, a query client's; `index-zone-unknown`, neverest keeping io-pimdir's floating zone, `UTC`; `cutoff-invalid`, neverest writing its cutoff as the store stamps; `conflict-unread`, which the one-way overwrite answers by fetching the unread body). No message SHALL advise deleting the store: the remedies are an upgrade, the reinstall of "A store the format outgrew is refused with its remedy", `sync --reset` on a store holding no pending work, and `sync --reset --force`, which moves it aside.
+A store failure that ends a command SHALL carry, in its JSON failure object, the code io-pimdir gives it (`PimdirError::code`), spelled the same: `store-version`, `store-uncreated`, `store-foreign`, `store-corrupt`, `store-not-current`, `store-hash-algo`, `sync-version`, `store-busy`, `store-owned`, `store-staging`, `store-in-flight`, `store-exposed`, `action-malformed`, `flag-invalid`, `unsupported`, `index-fts5-missing`, `index-version`. A failure a caller cannot act on (an SQL or I/O error) SHALL carry none, nor SHALL a code neverest cannot meet (`index-busy`, which `index` answers as `busy`; `index-missing`, `index-outdated` and `index-query-only`, a query client's; `index-zone-unknown`, neverest stating only a zone its time zone database named; `cutoff-invalid`, neverest writing its cutoff as the store stamps; `conflict-unread`, which the one-way overwrite answers by fetching the unread body). No message SHALL advise deleting the store: the remedies are an upgrade, the reinstall of "A store the format outgrew is refused with its remedy", `sync --reset` on a store holding no pending work, and `sync --reset --force`, which moves it aside.
 
 #### Scenario: A downgrade under `--json`
 - **GIVEN** a store whose `store_meta.format_version` names a later draft
@@ -1789,7 +1789,7 @@ The run SHALL report the refresh under `index`: the changes folded, the bodies n
 
 A reset SHALL take the index with the store: dropped with an idle store, moved aside with it by `--force`.
 
-An index of the canonical shape at an earlier search draft SHALL be rebuilt by the next refresh; an index of another shape, or at a later or unknown version, SHALL be refused as `index-version` and left as it is, never rebuilt, written nor deleted (pimdir SEARCH §2), the refusal reported under `index` like any index failure. neverest SHALL read floating times in io-pimdir's default zone (`UTC`).
+An index of the canonical shape at an earlier search draft SHALL be rebuilt by the next refresh; an index of another shape, or at a later or unknown version, SHALL be refused as `index-version` and left as it is, never rebuilt, written nor deleted (pimdir SEARCH §2), the refusal reported under `index` like any index failure. Every refresh SHALL state the user's zone as the index's floating zone (pimdir SEARCH §7, §8.1): the IANA name of the zone `TZ` names, else of the system's; a zone with no IANA name (a POSIX `TZ` rule) or none found SHALL read as `UTC`, with one warning a run. The first refresh in another zone than the index records re-expands every calendar item.
 
 #### Scenario: A message a sync landed is found by a frontend
 - **GIVEN** a sync landing a message whose subject says "Quarterly report"
@@ -1800,3 +1800,8 @@ An index of the canonical shape at an earlier search draft SHALL be rebuilt by t
 - **GIVEN** a store whose index a refresh's deadline cut
 - **WHEN** the next run refreshes it
 - **THEN** it goes on from where the cut left it until the index is current
+
+#### Scenario: A floating meeting in Paris
+- **GIVEN** `TZ=Europe/Paris` and a calendar holding a meeting at a floating 09:00 on 7 January
+- **WHEN** a run refreshes the index
+- **THEN** the index records `Europe/Paris` as its floating zone and places the meeting at 08:00 UTC, 09:00 in Paris

@@ -82,7 +82,7 @@ impl IndexCommand {
         };
 
         loop {
-            let slice = index::refresh(&mut index, Some(SLICE))
+            let slice = index::refresh(&mut index, Some(SLICE), index::floating_zone())
                 .map_err(pimdir_error)
                 .with_context(|| format!("Refresh the search index of account {name}"))?;
             built.folded += slice.folded;

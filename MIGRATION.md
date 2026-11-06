@@ -31,7 +31,7 @@ This page lists the changes most likely to bite when upgrading. The full configu
 
 ## From v0.3.0, or any earlier build, to the next release
 
-The store follows pimdir storage-draft-08, sync-draft-07 and search-draft-08 (io-pimdir 0.8). A store any earlier neverest wrote, v0.3.0 or a git build, is refused by every profile as `store-version`, never migrated: neverest, and every frontend reading the store, reinstall it. What only the old store holds is the work it queued (a send, an edit or a create staged by a frontend) and its retained items, so reinstall in this order:
+The store follows pimdir storage-draft-09, sync-draft-08 and search-draft-09 (io-pimdir 0.9). A store any earlier neverest wrote, v0.3.0 or a git build, is refused by every profile as `store-version`, never migrated: neverest, and every frontend reading the store, reinstall it. What only the old store holds is the work it queued (a send, an edit or a create staged by a frontend) and its retained items, so reinstall in this order:
 
 1. With the neverest that wrote the store, run `neverest sync -a <account>` until nothing is queued: the run exits 0, its report lists no `parked` action, no `submitted` entry left parked and no conflict, and `neverest drain -a <account>` applies nothing more. Settle or cancel what stays parked.
 2. Upgrade neverest.

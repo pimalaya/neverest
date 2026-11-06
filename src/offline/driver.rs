@@ -6376,7 +6376,8 @@ mod tests {
 
         assert!(written_earlier(&refused(None)));
         assert!(written_earlier(&refused(Some("storage-draft-07"))));
-        assert!(!written_earlier(&refused(Some("storage-draft-09"))));
+        assert!(written_earlier(&refused(Some("storage-draft-08"))));
+        assert!(!written_earlier(&refused(Some("storage-draft-10"))));
         assert!(!written_earlier(&refused(Some("storage-v1"))));
         assert!(!written_earlier(&PimdirError::Busy));
     }

@@ -148,7 +148,7 @@ An account is initialized once, which opens every source so credential and netwo
 
 What himalaya, calendula and cardamum write is queued in the store, and only neverest applies it. A sync does so first, before reaching any server; `drain` does it alone, offline, so a frontend reads a created item back at once, the next sync pushing it.
 
-neverest also keeps the store's search index (index.db), which the frontends query and only the store's owner builds. A sync refreshes it last, for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), and a drain for 2 seconds; a large first build spreads over several runs, each going on where the last stopped, or `index` builds it whole at once. The report says how far it got under `index`; an index failure is a warning and never changes the exit code. A reset drops the index with the store, or moves it aside with it.
+neverest also keeps the store's search index (index.db), which the frontends query and only the store's owner builds. A sync refreshes it last, for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), and a drain for 2 seconds; a large first build spreads over several runs, each going on where the last stopped, or `index` builds it whole at once. The report says how far it got under `index`; an index failure is a warning and never changes the exit code. A reset drops the index with the store, or moves it aside with it. The index reads floating times and all-day dates in your time zone, `TZ` else the system's, UTC when it has no IANA name; changing it re-expands every calendar item at the next refresh.
 
 ### Conflicts
 

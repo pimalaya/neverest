@@ -209,7 +209,11 @@ Upgrading from 0.3.0:
 
 - Changed `init` on an initialized account to name `sync --reset`, where it advised deleting the store.
 
-- Bumped io-pimdir to 0.8 (pimdir storage-draft-08, sync-draft-07, search-draft-08): a store any earlier neverest wrote is refused, never migrated.
+- Changed the search index to read floating times and all-day dates in the user's time zone, `TZ` else the system's, rather than in UTC.
+
+  A zone with no IANA name reads as UTC, with a warning. The first refresh in another zone re-expands every calendar item.
+
+- Bumped io-pimdir to 0.9 (pimdir storage-draft-09, sync-draft-08, search-draft-09): a store any earlier neverest wrote is refused, never migrated.
 
 - Changed a local edit over a body the store never read to wait for it: the run reads that body first, so a server edit made meanwhile conflicts instead of being overwritten (io-pimdir 0c70144).
 
@@ -217,23 +221,27 @@ Upgrading from 0.3.0:
 
 - Bumped rusqlite to 0.41.
 
-- Bumped ical-rs to 0.6.
+- Bumped ical-rs to 0.7.
 
-- Bumped io-gcal to 0.2.
+- Bumped io-gcal to 0.3.
+
+  An event giving its end as a `DURATION` is pushed to Google Calendar, no longer refused.
 
 - Bumped io-gmail to 0.5.
 
-- Bumped io-gpeople to 0.5.
+- Bumped io-gpeople to 0.6.
 
 - Bumped io-http to 0.6.
 
-- Bumped io-msgraph to 0.6.
+- Bumped io-msgraph to 0.7.
 
 - Bumped io-smtp to 0.6.
 
 - Bumped io-webdav to 0.7.
 
   A CalDAV or CardDAV multistatus is parsed 3.4 to 9 times faster.
+
+- Bumped vcard-rs to 0.6.
 
 ### Fixed
 

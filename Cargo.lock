@@ -155,19 +155,11 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64-codec"
-version = "0.0.1"
-source = "git+https://github.com/pimalaya/base64-codec?rev=d39f6b90f02abf8eb91ef041b7601320df8def99#d39f6b90f02abf8eb91ef041b7601320df8def99"
-dependencies = [
- "simd-cpu 0.0.1",
-]
-
-[[package]]
-name = "base64-codec"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8c21fac036871f0cc54f32f04486210962fea0b2450233906c1b5b957be5262"
 dependencies = [
- "simd-cpu 0.1.0",
+ "simd-cpu",
 ]
 
 [[package]]
@@ -998,6 +990,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashlink"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1053,15 +1054,16 @@ dependencies = [
 
 [[package]]
 name = "ical-rs"
-version = "0.6.1"
-source = "git+https://github.com/pimalaya/ical?rev=99b92736a6a076c72936fac29c9b85a5168e4c2f#99b92736a6a076c72936fac29c9b85a5168e4c2f"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5dbc009237124ae236eb886a57bda65357729b6b8ff7ad21113de2cea933e02a"
 dependencies = [
- "base64 0.23.1",
+ "base64-codec",
  "encoding_rs",
  "jiff",
  "jiff-tzdb",
  "memchr",
- "quoted_printable",
+ "quoted-printable-codec",
 ]
 
 [[package]]
@@ -1222,13 +1224,13 @@ dependencies = [
 
 [[package]]
 name = "io-gcal"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17a7b0824811316d554c22abce3a7b85f03d6e224cbf11e44792894c1d0aa28b"
+checksum = "d0d23bf4c6cc8c4adfc657e2438698084128350787761dac5d2e7da66e664cc1"
 dependencies = [
  "anyhow",
  "ical-rs",
- "io-http 0.5.0",
+ "io-http 0.6.0",
  "jiff",
  "log",
  "pimalaya-stream",
@@ -1257,13 +1259,13 @@ dependencies = [
 
 [[package]]
 name = "io-gpeople"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfdcb1fd99f34eba6f6c4246fc7b1d7bdfa6ac0c32f1a574a819b8aca799b6cd"
+checksum = "41b759c1a47fc928782416f373b41ce04204c3506c5a69cc9ad5e05419b8342d"
 dependencies = [
  "anyhow",
- "base64 0.23.1",
- "io-http 0.5.0",
+ "base64-codec",
+ "io-http 0.6.0",
  "log",
  "pimalaya-stream",
  "serde",
@@ -1295,7 +1297,7 @@ version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a9086cd840a757b9dd4105caad54a59fdb440c49be33882491a07274ca32e06"
 dependencies = [
- "base64-codec 0.1.0",
+ "base64-codec",
  "httparse",
  "log",
  "secrecy",
@@ -1324,13 +1326,14 @@ dependencies = [
 
 [[package]]
 name = "io-msgraph"
-version = "0.6.0"
-source = "git+https://github.com/pimalaya/io-msgraph?rev=2ae26370aefa671c16316dbad98107634436bce6#2ae26370aefa671c16316dbad98107634436bce6"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89da8753e70f7f48c32d2816162c69b3f146629a559045ad5f321a638f8b6698"
 dependencies = [
  "anyhow",
- "base64 0.23.1",
+ "base64-codec",
  "ical-rs",
- "io-http 0.5.0",
+ "io-http 0.6.0",
  "jiff",
  "log",
  "pimalaya-stream",
@@ -1387,8 +1390,8 @@ dependencies = [
 
 [[package]]
 name = "io-pimdir"
-version = "0.8.0"
-source = "git+https://github.com/pimalaya/io-pimdir?rev=0c701447473a03e5cf9effcd0039a49a78419c4d#0c701447473a03e5cf9effcd0039a49a78419c4d"
+version = "0.9.0"
+source = "git+https://github.com/pimalaya/io-pimdir?rev=5c18a026b9c85b470984192452c2aa66e060a3fe#5c18a026b9c85b470984192452c2aa66e060a3fe"
 dependencies = [
  "blake3",
  "encoding_rs",
@@ -1507,6 +1510,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
+ "windows-link",
 ]
 
 [[package]]
@@ -1731,14 +1735,15 @@ dependencies = [
 
 [[package]]
 name = "mime-rs"
-version = "0.0.1"
-source = "git+https://github.com/pimalaya/mime-rs?rev=d7ea03296a197647a6effeb593a8528b47bdb0ed#d7ea03296a197647a6effeb593a8528b47bdb0ed"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44ca77080cce04174d6788fb762d0a5576a1a4902291da9f30862fa4180ec130"
 dependencies = [
- "base64-codec 0.0.1",
+ "base64-codec",
  "encoding_rs",
  "memchr",
  "quoted-printable-codec",
- "simd-cpu 0.0.1",
+ "simd-cpu",
 ]
 
 [[package]]
@@ -2210,10 +2215,11 @@ dependencies = [
 
 [[package]]
 name = "quoted-printable-codec"
-version = "0.0.1"
-source = "git+https://github.com/pimalaya/quoted-printable-codec?rev=d63612b0f9c046717e183e3be534c98f300d913a#d63612b0f9c046717e183e3be534c98f300d913a"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4bd7adfa2b96b04bcb6034ab1a09de12ffed8454cc3b30a5dd91c19072301549"
 dependencies = [
- "simd-cpu 0.0.1",
+ "simd-cpu",
 ]
 
 [[package]]
@@ -2382,6 +2388,7 @@ dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
  "fallible-streaming-iterator",
+ "hashlink",
  "libsqlite3-sys",
  "smallvec",
 ]
@@ -2743,11 +2750,6 @@ dependencies = [
 
 [[package]]
 name = "simd-cpu"
-version = "0.0.1"
-source = "git+https://github.com/pimalaya/simd-cpu?rev=f2eb72cff2fafad8ae135e00685bc19f9e80e5cc#f2eb72cff2fafad8ae135e00685bc19f9e80e5cc"
-
-[[package]]
-name = "simd-cpu"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d362f934351780e3ec67adf32bcb5bc341f23a393076d17a600a699c0c93b726"
@@ -3098,14 +3100,14 @@ dependencies = [
 
 [[package]]
 name = "vcard-rs"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a40d51ee30e110bb162cb9bc8d5d27696eb2d5e39ecff4e67de6069d014b230b"
+checksum = "e4e9d3a6221632badbdc1b7fa9bb8518386ff0b5dfd12eacfcbcec88db38884d"
 dependencies = [
- "base64 0.23.1",
+ "base64-codec",
  "encoding_rs",
  "memchr",
- "quoted_printable",
+ "quoted-printable-codec",
 ]
 
 [[package]]

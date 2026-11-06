@@ -13,10 +13,11 @@
 //! vocabulary. Those neverest cannot meet are left out: `index-busy`, which
 //! the indexer answers as busy; `index-missing`, `index-outdated` and
 //! `index-query-only`, which answer a query client, which neverest never
-//! is; `index-zone-unknown`, neverest keeping io-pimdir's floating zone
-//! (`UTC`); `cutoff-invalid`, neverest writing its purge cutoff as the store
-//! stamps; and `conflict-unread`, which the one-way overwrite answers by
-//! fetching the unread body, an item still unread after it staying parked.
+//! is; `index-zone-unknown`, neverest stating only a zone its time zone
+//! database named; `cutoff-invalid`, neverest writing its purge cutoff as
+//! the store stamps; and `conflict-unread`, which the one-way overwrite
+//! answers by fetching the unread body, an item still unread after it
+//! staying parked.
 
 use io_pimdir::client::PimdirError;
 use pimalaya_cli::error::CodedError;

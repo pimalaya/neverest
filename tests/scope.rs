@@ -83,7 +83,7 @@ fn a_scope_lists_by_date_widens_and_never_deletes_what_it_leaves() {
     let floor = coverage["since"].as_str().expect("a scoped coverage");
     assert!(floor.ends_with("T00:00:00Z"), "the floor is a day: {floor}");
     assert!(coverage["at"].is_string(), "the round closed");
-    assert!(coverage.get("round").is_none());
+    assert!(coverage["round"].is_null());
     assert!(
         report["downloaded"]
             .as_array()
@@ -198,7 +198,7 @@ fn an_interrupted_round_resumes_and_lands_every_message_once() {
     let report = sync(&config, "paged", &[]);
     let coverage = coverage_of(&report, &mailbox);
     assert!(coverage["at"].is_string(), "the round closed: {coverage}");
-    assert!(coverage.get("round").is_none());
+    assert!(coverage["round"].is_null());
     assert_eq!(
         round_state(&store, &collection),
         Some((PAGED, false)),
@@ -336,7 +336,7 @@ fn sync(config: &Path, account: &str, extra: &[&str]) -> serde_json::Value {
     let mut args = vec!["--json", "sync", "-a", account];
     args.extend_from_slice(extra);
     let out = neverest(&args, config);
-    serde_json::from_str(&out).expect("a JSON report")
+    serde_json::from_str(out.lines().last().unwrap_or_default()).expect("a JSON report")
 }
 
 /// The coverage the report states for `mailbox`.

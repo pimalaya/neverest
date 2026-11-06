@@ -108,7 +108,7 @@ pub struct ConflictShowOutput {
     pub base: Option<String>,
     /// The local side of the divergence.
     pub local: Option<String>,
-    /// The remote side, absent until a run has fetched it.
+    /// The remote side, `null` until a run has fetched it.
     pub remote: Option<String>,
 }
 

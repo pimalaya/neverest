@@ -148,12 +148,10 @@ pub struct DrainOutput {
     pub waiting: usize,
     /// The bodies a collection's conflict policy kept aside as retained
     /// items while an action was applied (pimdir SYNC §9).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub overruled: Vec<OverruledBody>,
-    /// What the drain did to the store's search index, absent from a
+    /// What the drain did to the store's search index, `null` in a
     /// build without the `search` feature: a failure is reported here and
     /// never fails the drain.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub index: Option<IndexRefresh>,
 }
 
@@ -225,7 +223,6 @@ pub struct DrainedAction {
     /// `copy`.
     pub kind: String,
     /// The item an `add` created, the id readers list it under.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub seq: Option<i64>,
 }
 

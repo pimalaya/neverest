@@ -104,7 +104,7 @@ fn a_duplicated_identity_syncs_both_copies_and_settles() {
         "nothing is ambiguous any more: {report}"
     );
     assert!(
-        report.get("refused").is_none(),
+        report["refused"] == serde_json::json!([]),
         "an IMAP server holds no UID to refuse: {report}"
     );
     assert_eq!(
@@ -243,7 +243,7 @@ fn expunge(url: &str, uid: &str) {
 /// Syncs the account and returns the parsed `--json` report.
 fn sync(config: &Path, state: &Path) -> serde_json::Value {
     let stdout = neverest(&["--json", "sync", "-a", ACCOUNT], config, state);
-    serde_json::from_str(&stdout).expect("the report is JSON")
+    serde_json::from_str(stdout.lines().last().unwrap_or_default()).expect("the report is JSON")
 }
 
 fn neverest(args: &[&str], config: &Path, state: &Path) -> String {

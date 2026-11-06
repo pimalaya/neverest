@@ -27,48 +27,38 @@ pub struct SyncOutput {
     /// The item-level patch, one entry per hunk.
     pub item: PatchOutcome<ItemHunk>,
     /// Content-key collisions this sync surfaced; the first entry is kept.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub collisions: Vec<MessageCollision>,
     /// Frontend-queued actions the pre-sync drain applied, per collection.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub drained: Vec<DrainedQueue>,
     /// Queue actions parked as permanently unappliable, surfaced until an
     /// operator repairs them (counted as warnings).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parked: Vec<ParkedQueueAction>,
     /// The queued submit intents attempted this run, one entry each.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub submitted: Vec<SubmitEntry>,
     /// The queued calendar intents attempted this run, one entry each.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub intents: Vec<IntentEntry>,
     /// What the retention sweep reclaimed, when one ran.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purged: Option<PurgedItems>,
     /// Items this run left conflicted (counted as warnings).
     ///
     /// Their content diverged on both sides beyond what the run's own
     /// three-way merge could settle.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conflicts: Vec<ItemConflict>,
     /// Items waiting for a decision, and what the exit code answers.
     ///
     /// Not the length of [`conflicts`](Self::conflicts): the engine emits
     /// nothing for a placement it already parked, which is what keeps a
     /// five-minute schedule from notifying about one card all day.
-    #[serde(default)]
     pub outstanding_conflicts: usize,
     /// Creates a side refused because it already holds the item's `UID`.
     ///
     /// Re-reported by every run until that side stops holding the identity
     /// twice (counted as warnings).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<RefusedDuplicate>,
     /// Writes a remote refused, so the change stayed in the store.
     ///
     /// Re-tried and re-reported by every run until it lands or an operator
     /// removes the reason (counted as warnings).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rejected: Vec<RejectedWrite>,
     /// The endpoints the run could not open: a server it could not reach, or
     /// one refusing the connection or its credentials.
@@ -81,14 +71,12 @@ pub struct SyncOutput {
     /// server could not be reached: one refusing the credentials fails each
     /// queued `submit` under `submitted` instead, not parked. It has no `*`
     /// scan, but still makes the run exit 3.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreached: Vec<UnreachedEndpoint>,
     /// The sources that gave up after their provider throttled them (HTTP
     /// 429, 503, a Google rate limit) past the waits neverest takes.
     ///
     /// What landed before stays; the run is incomplete (exit 3) and a rerun
     /// after `until` picks up the rest.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub throttled: Vec<ThrottledSource>,
     /// What each source's collections are known to hold once the run ends
     /// (pimdir SYNC §5): the scope of the last round that closed and when,
@@ -97,16 +85,13 @@ pub struct SyncOutput {
     /// A round left open was interrupted (a failure, a throttled provider,
     /// a stopped run): the run is incomplete (exit 3), and the next one
     /// resumes it.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub coverage: Vec<CollectionCoverage>,
     /// The octets each source received this run: the bodies and the meta
     /// of its listings, not the protocol around them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub downloaded: Vec<SourceDownload>,
     /// The collections whose last convergence pass still moved something:
     /// the run stopped before they settled, so it is incomplete (exit 3)
     /// and a rerun goes on.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unsettled: Vec<String>,
     /// The listings that found most of what a collection held gone, or that
     /// named no member while the collection held some, and so dropped
@@ -116,30 +101,25 @@ pub struct SyncOutput {
     /// with `sync --accept-absences`: a rerun alone parks again, so the run
     /// waits for a person (exit 2), its round left open not counting as
     /// incomplete.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub absences: Vec<ParkedAbsence>,
     /// The changes withheld because the body they upload was missing from
     /// the store or did not match its name (pimdir STORAGE §7; counted as
     /// warnings). The store needs a repair a rerun does not make, so the
     /// run waits for a person (exit 2).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unreadable: Vec<UnreadableBodies>,
     /// The bodies a policy did not adopt, each kept as a retained item
     /// (pimdir SYNC §9; counted as warnings): settling a side's write, or
     /// applying a queued action.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overruled: Vec<OverruledBody>,
     /// The pushes a side's server gave no outcome for, left pending: a
     /// rerun pushes them again, so the run is incomplete (exit 3).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub unanswered: Vec<UnansweredPushes>,
-    /// What the run did to the store's search index (pimdir SEARCH), absent
-    /// from a dry run and from a build without the `search` feature.
+    /// What the run did to the store's search index (pimdir SEARCH), `null`
+    /// in a dry run and in a build without the `search` feature.
     ///
     /// An index failure is reported here and counted as a warning, and
     /// never changes the exit code: the index is derived, the next run
     /// refreshes it again.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<IndexRefresh>,
 }
 
@@ -358,15 +338,12 @@ impl fmt::Display for UnreadableBodies {
 #[serde(rename_all = "camelCase")]
 pub struct OverruledBody {
     /// The side whose write settled it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub side: Option<String>,
     /// The collection: as the side names it, else as the store does.
     pub collection: String,
     /// The item's handle on that side.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// The queue row whose apply settled it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub action: Option<i64>,
     /// The key of the retained item keeping the losing body.
     pub kept: String,
@@ -436,7 +413,6 @@ pub struct IndexRefresh {
     /// Whether another indexer held the index, so this one did nothing.
     pub busy: bool,
     /// Why the refresh failed, the index left as it was.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
@@ -471,19 +447,15 @@ pub struct CollectionCoverage {
     pub source: String,
     /// The collection, as the source names it.
     pub collection: String,
-    /// The floor of the last closed round's scope, RFC 3339 UTC; absent
+    /// The floor of the last closed round's scope, RFC 3339 UTC; `null`
     /// when it had none, or no round ever closed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
-    /// Its ceiling, exclusive; absent when it had none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Its ceiling, exclusive; `null` when it had none.
     pub until: Option<String>,
-    /// When that round closed; absent while none ever did, the source
+    /// When that round closed; `null` while none ever did, the source
     /// holding no complete listing of the collection yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
     /// The round still open, which the next run resumes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<OpenRound>,
 }
 
@@ -526,10 +498,8 @@ impl fmt::Display for CollectionCoverage {
 #[serde(rename_all = "camelCase")]
 pub struct OpenRound {
     /// The floor of the scope it lists.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
     /// The ceiling of the scope it lists, exclusive.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub until: Option<String>,
     /// When it opened, RFC 3339 UTC.
     pub started_at: String,

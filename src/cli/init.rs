@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::{
     account::Account,
     client,
-    config::Config,
+    config::{AccountMode, Config},
     error::pimdir_error,
     offline::{driver, state::StoreState},
 };
@@ -84,7 +84,7 @@ impl InitCommand {
         // account will do stands in for a confirmation.
         printer.out(InitOutput {
             account: name,
-            mode: mode.to_string(),
+            mode,
             store: replica,
             sources,
         })
@@ -98,8 +98,9 @@ impl InitCommand {
 pub struct InitOutput {
     /// The account that was initialized.
     pub account: String,
-    /// What the account will do, as its mode reads.
-    pub mode: String,
+    /// What the account will do: its endpoints, direction and whether the
+    /// store keeps bodies.
+    pub mode: AccountMode,
     /// The replica store directory that was created.
     pub store: PathBuf,
     /// The endpoints that were opened, sorted.

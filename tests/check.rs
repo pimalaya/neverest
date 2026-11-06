@@ -11,7 +11,7 @@
 //! cargo test --test check -- --ignored
 //! ```
 
-use std::{fs, path::Path, process::Command};
+use std::{fs, net::TcpListener, path::Path, process::Command};
 
 use serde_json::Value;
 
@@ -48,7 +48,7 @@ fn a_carddav_check_names_no_default_address_book() {
     assert!(
         collections
             .iter()
-            .all(|collection| collection.get("default").is_none()),
+            .all(|collection| collection["default"] == false),
         "{report}"
     );
     assert_eq!(support(source, "contacts.card.add"), "full", "{report}");
@@ -104,4 +104,74 @@ fn neverest(args: &[&str], config: &Path, state: &Path) -> String {
     );
 
     String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A port nothing listens on.
+fn closed_port() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+/// An endpoint that does not answer fails its row, not the check: every
+/// endpoint is still checked and printed, and the command exits 2 rather
+/// than printing a failure object. Runs without any server.
+#[test]
+fn a_check_names_every_endpoint_that_did_not_answer() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let state = tmp.path().join("state");
+    let config = tmp.path().join("config.toml");
+    fs::create_dir_all(&state).unwrap();
+    let (source, target) = (closed_port(), closed_port());
+    fs::write(
+        &config,
+        format!(
+            "[accounts.check]\n\
+             caldav.server = \"http://127.0.0.1:{source}/\"\n\
+             caldav.auth.basic.username = \"{USER}\"\n\
+             caldav.auth.basic.password.raw = \"{PASS}\"\n\
+             targets.backup.caldav.server = \"http://127.0.0.1:{target}/\"\n\
+             targets.backup.caldav.auth.basic.username = \"{USER}\"\n\
+             targets.backup.caldav.auth.basic.password.raw = \"{PASS}\"\n",
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &config.to_string_lossy()])
+        .args(["--json", "check", "-a", "check"])
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .expect("spawn neverest");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(2), "{stdout}");
+
+    let report: Value = serde_json::from_str(&stdout).expect("one JSON document");
+    assert_eq!(
+        report["mode"],
+        serde_json::json!({
+            "sources": ["caldav"],
+            "targets": ["backup"],
+            "oneWay": false,
+            "retain": false,
+        }),
+        "{report}"
+    );
+
+    let sources = report["sources"].as_array().expect("sources");
+    let names: Vec<&str> = sources
+        .iter()
+        .filter_map(|s| s["source"].as_str())
+        .collect();
+    assert_eq!(names, ["backup", "caldav"], "{report}");
+    for source in sources {
+        assert_eq!(source["backend"], "caldav", "{report}");
+        assert_eq!(source["ok"], false, "{report}");
+        assert!(source["error"].is_string(), "{report}");
+        assert_eq!(source["collections"], serde_json::json!([]), "{report}");
+        assert!(source["smtp"].is_null(), "{report}");
+    }
+    assert!(
+        !sources[1]["capabilities"].as_array().unwrap().is_empty(),
+        "a source declares what it can do from its configuration: {report}"
+    );
 }

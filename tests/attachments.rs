@@ -477,8 +477,9 @@ fn held(store: &Path, folder: &str) -> (usize, usize) {
     (items.len(), bodies)
 }
 
+/// The result of a sync, the last line, after its events.
 fn report(out: &str) -> serde_json::Value {
-    serde_json::from_str(out).expect("a JSON report")
+    serde_json::from_str(out.lines().last().unwrap_or_default()).expect("a JSON report")
 }
 
 /// The bodies a run's report says it fetched.

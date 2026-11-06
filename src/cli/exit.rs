@@ -235,7 +235,9 @@ mod tests {
                 "source": "imap",
                 "collection": "INBOX",
                 "since": "2026-09-07T00:00:00Z",
+                "until": null,
                 "at": "2026-10-07T10:00:00Z",
+                "round": null,
             }])
         );
         assert_eq!(
@@ -254,6 +256,7 @@ mod tests {
             json["coverage"][0]["round"],
             serde_json::json!({
                 "since": "2025-10-07T00:00:00Z",
+                "until": null,
                 "startedAt": "2026-10-07T10:05:00Z",
             })
         );
@@ -358,7 +361,9 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&report).unwrap()["overruled"],
             serde_json::json!([{
+                "side": null,
                 "collection": "work",
+                "id": null,
                 "action": 7,
                 "kept": "dup:e1@x#e1.ics",
             }])

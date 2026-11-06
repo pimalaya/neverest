@@ -443,7 +443,7 @@ A read-only source (`<protocol>.item.delete = false`, `collection.delete = false
 The backend-neutral enumeration seam SHALL carry the incremental-sync cursor as opaque checkpoint bytes and string member handles: the IMAP adapter encodes its `(UIDVALIDITY, HIGHESTMODSEQ)` pair, the Graph adapter its delta link, and the engine stores whichever bytes the source produced. (Supersedes the IMAP-shaped `(u32, u64)` cursor on the shared seam; the QRESYNC behaviour itself is unchanged and stays specified under "IMAP enumeration is incremental".)
 
 ### Requirement: The spinner reports in-mailbox progress
-While syncing a mailbox, the spinner SHALL report progress through the slow inner phase, body hydration (and, under relay, the relayed messages), as a percentage appended to the mailbox line (`[2/7] Syncing INBOX 66%`), updated per streamed `Full` body. Fast phases (enumerate, the `Meta` upgrade) stay silent. The progress tick is invoked from the concurrent fetch pool and is safe to call from several threads at once.
+In text mode, while syncing a mailbox, the spinner SHALL report progress through the slow inner phase, body hydration (and, under relay, the relayed messages), as a percentage appended to the mailbox line (`[2/7] Syncing INBOX 66%`), updated per streamed `Full` body. Fast phases (enumerate, the `Meta` upgrade) stay silent. The progress tick is invoked from the concurrent fetch pool and is safe to call from several threads at once. Under `--json` the same ticks print `collection-progressed` events instead.
 
 ### Requirement: IMAP enumeration is incremental (QRESYNC)
 Enumeration SHALL carry a per-mailbox checkpoint `(UIDVALIDITY, HIGHESTMODSEQ)`. On a QRESYNC-capable server (ENABLEd on connect) with a checkpoint whose UIDVALIDITY still matches, a delta SHALL be a QRESYNC `SELECT (QRESYNC (uidvalidity highestmodseq))`: only the messages changed since the modseq, the meta read for the ones the store does not bind, plus the vanished UIDs, issuing **no FETCH when nothing changed**. Without a usable checkpoint (first sync, malformed bytes) or on a non-QRESYNC server it SHALL answer a round, page by page. A checkpoint whose UIDVALIDITY moved SHALL fail the delta and name a rekey, never answer a round.
@@ -1029,7 +1029,7 @@ A command returning data SHALL hand the printer one named `*Output` type derivin
 
 `configure` returns data: the account it generated, under the name and default claim it derived. Its `Display` is the TOML document alone, which is what makes a redirected stdout a usable configuration file.
 
-Every such output type SHALL be registered in the schema registry under its invocation path, the command path joined with hyphens and prefixed `neverest-`, and `neverest json-schema` SHALL print one schema to the standard output or write one file per command into a directory. A key naming no command, `neverest-error` aside, SHALL be refused, so a renamed subcommand cannot leave a schema nobody can ask for.
+Every such output type SHALL be registered in the schema registry under its invocation path, the command path joined with hyphens and prefixed `neverest-`, as printed (the serialize contract, so a key always printed is required, `null` or not), and `neverest json-schema` SHALL print one schema to the standard output or write one file per command into a directory. A test SHALL run pimalaya-cli's registry check over the command tree: every runnable command described, bare `neverest` aside (it shows the help or runs the wizard `configure` describes), and every key naming a command, `neverest-error` aside, so a renamed subcommand cannot leave a schema nobody can ask for.
 
 #### Scenario: A notifier reads the sync payload from its schema
 - GIVEN a build of neverest
@@ -1039,7 +1039,7 @@ Every such output type SHALL be registered in the schema registry under its invo
 #### Scenario: A checked account is one JSON document
 - GIVEN a configured account
 - WHEN `neverest check --json` runs
-- THEN one document is printed, naming the account, its mode and every endpoint that answered
+- THEN one document is printed, naming the account, its mode and every endpoint, answered or not
 
 ### Requirement: The JSON contract is described and versioned
 `neverest json-schema` SHALL describe, under the key `neverest-error`, the failure object every command prints under `--json`. Every generated schema SHALL carry an `$id` naming the contract version, which is the minor version while Neverest is below 1.0 (`v0.3`) and the major version after. Every registered payload SHALL be a JSON object, checked by a test. Piped `--json` output SHALL print one value per line.
@@ -1049,18 +1049,33 @@ Every such output type SHALL be registered in the schema registry under its invo
 - WHEN it runs
 - THEN the schema of the JSON failure object is printed, its `$id` being `https://pimalaya.org/schemas/neverest/v0.3/neverest-error.json`
 
+### Requirement: A sync prints its progress as events
+Under `--json`, `neverest sync` SHALL print its progress as events before its report, one line each, each an object carrying `event`: `opened` (`endpoint`) once an endpoint's first connection is open, `listed` (`endpoint`, `collections`) once it listed its collections; for a pair, `collection-started` (`source`, `target`, `collection`, `position`, `total`), `collection-progressed` (`source`, `target`, `collection`, `done`, `total`) and `collection-finished` (`source`, `target`, `collection`, `error`, `null` unless the collection stopped short); for a source with no target, `scan-progressed` and `download-progressed` (`source`, `done`, `total`), each printed as its phase starts. A progress count SHALL be printed at most once per percent of its total, a new count of a collection's next phase starting again. Events SHALL report progress only: everything the run did or left SHALL stay in the report, the last line. The events SHALL be registered as `neverest-sync.events`.
+
+Text mode SHALL print no event, the spinner on stderr being their text form; under `--json` no spinner SHALL be drawn.
+
+#### Scenario: A frontend follows a long download
+- GIVEN an account with no target whose store owes 2 bodies
+- WHEN `neverest sync --json` downloads them
+- THEN it prints `download-progressed` with `done` 0, 1 and 2 of `total` 2, then the report
+
+#### Scenario: A script reads the report alone
+- GIVEN a sync piped to a script
+- WHEN the run succeeds
+- THEN the last line is the report, without an `event` key, and every line before it carries one
+
 ### Requirement: A check opens the send channel too
-`neverest check` SHALL open the SMTP channel an endpoint declares, upgrade it and authenticate, then quit without sending, and SHALL fail on the first channel that does not open, naming its endpoint. Each endpoint's entry SHALL say whether its channel was checked (`smtp`).
+`neverest check` SHALL open the SMTP channel an endpoint declares, upgrade it and authenticate, then quit without sending. Each endpoint's row SHALL carry the channel's own check row as `smtp`, `{backend: "smtp", ok, code, error}`, `null` when the endpoint declares no channel, when its credentials did not resolve, or in a build without SMTP. A channel that does not open SHALL fail its row and make the check exit 2, the other endpoints still checked.
 
 A send channel holds its own server and often its own credential. Checking the sources alone left a wrong SMTP password to surface at the first send, a queued submission parked for a reason the check had said nothing about.
 
 #### Scenario: A wrong submission server fails the check
 - GIVEN an account whose IMAP source answers and whose SMTP channel does not
-- WHEN `neverest check` runs
-- THEN it fails naming the SMTP channel of that source
+- WHEN `neverest check --json` runs
+- THEN the source's row is `ok: true` with its collections, its `smtp` row `ok: false` naming why, and the check exits 2
 
 ### Requirement: A check lists collections with their roles
-`neverest check` SHALL list, for each endpoint, every collection it answered with: its id, its name and, when the server states one, its role among `inbox`, `sent`, `drafts`, `trash`, `junk`, `all`, `archive`, `flagged` and `important`. A role SHALL come from the server alone, never from a collection's name: on IMAP the SPECIAL-USE attributes of the `LIST` rows (RFC 6154) and `INBOX` (RFC 3501 §5.1); on Graph mail the well-known folders, one lookup per role, a well-known folder the mailbox does not have being skipped; on the Gmail API the system labels. Other backends state no role. The check SHALL write nothing to the store. It is a doctor: what it prints is for a person, and a program reads roles from the store a sync fills.
+`neverest check` SHALL list, for each endpoint, every collection it answered with: its id, its name and its role among `inbox`, `sent`, `drafts`, `trash`, `junk`, `all`, `archive`, `flagged` and `important`, `null` when the server states none. A role SHALL come from the server alone, never from a collection's name: on IMAP the SPECIAL-USE attributes of the `LIST` rows (RFC 6154) and `INBOX` (RFC 3501 §5.1); on Graph mail the well-known folders, one lookup per role, a well-known folder the mailbox does not have being skipped; on the Gmail API the system labels. Other backends state no role. The check SHALL write nothing to the store. It is a doctor: what it prints is for a person, and a program reads roles from the store a sync fills.
 
 Display names are localised (`[Gmail]/Bin`, "Éléments envoyés") and an IMAP server need not name its folders after their use: only the server's statement lets a caller propose the right folder for each use. On Graph, the Drafts folder is the one place a message can be created, so a caller has to know which listed folder it is.
 
@@ -1072,10 +1087,10 @@ Display names are localised (`[Gmail]/Bin`, "Éléments envoyés") and an IMAP s
 #### Scenario: A folder without a statement has no role
 - GIVEN a folder the server marks with no SPECIAL-USE attribute
 - WHEN `neverest check --json` runs
-- THEN the folder is listed without a role, whatever its name
+- THEN the folder is listed with `role: null`, whatever its name
 
 ### Requirement: A check names the default calendar and address book
-`neverest check` SHALL mark with `default: true` the collection of an endpoint where a new item goes when none is named, as the server states it: on Google Calendar the calendar the calendar list marks `primary`; on Google People the one address book; on a Graph calendar source the calendar with `isDefaultCalendar`; on a Graph contacts source the default Contacts folder; on CalDAV the calendar the principal's scheduling inbox names as `schedule-default-calendar-URL` (RFC 6638 §9.2), when the server gives it. CardDAV states none, nor does mail, whose folders have roles. At most one collection per endpoint SHALL carry the mark, and the key SHALL be left out when false. A failed CalDAV scheduling lookup SHALL be no default, never a failed check.
+`neverest check` SHALL mark with `default: true` the collection of an endpoint where a new item goes when none is named, as the server states it: on Google Calendar the calendar the calendar list marks `primary`; on Google People the one address book; on a Graph calendar source the calendar with `isDefaultCalendar`; on a Graph contacts source the default Contacts folder; on CalDAV the calendar the principal's scheduling inbox names as `schedule-default-calendar-URL` (RFC 6638 §9.2), when the server gives it. CardDAV states none, nor does mail, whose folders have roles. At most one collection per endpoint SHALL carry the mark, every other `default: false`. A failed CalDAV scheduling lookup SHALL be no default, never a failed check.
 
 A caller choosing one calendar and one address book for an account takes the marked one, and the first listed when none is marked.
 
@@ -1085,12 +1100,22 @@ A caller choosing one calendar and one address book for an account takes the mar
 - THEN that calendar is listed with `default: true`, and no other
 
 ### Requirement: A check reports what each source declares it can do
-`neverest check` SHALL list, for each source, the capabilities a sync declares for it in the store (pimdir STORAGE §15.6) as `capabilities: [{ name, support, detail? }]`, one row per capability, `support` being `full`, `partial` or `none`, from its backend and configured rights alone. An intent a source performs on the collections it holds (`calendar.reply`, `calendar.cancel`, their `.occurrence` options, `collection.create`, `collection.rename`, `collection.delete`), which the store gets as a `none` source-wide row and one row per collection, SHALL read as it does on those collections: the store's collections are unknown to a check, so the `none` a rename or a delete gets on a collection stating a role is not listed. The source-wide `calendar.component.vtodo` row a sync declares from the configuration (a Google Calendar or Graph calendar source, or a source one of whose targets is one) SHALL be listed with them. What a CalDAV listing states of a calendar SHALL be listed on that collection as `takesTasks`, `false` for a component set without `VTODO`, `true` for one naming it, left out where no set is stated, on a target's collections as on a source's: a sync declares it as `calendar.component.vtodo` `none` on the source's calendar of that name. A target and an undeclared (JMAP) source SHALL list no capability. A capability a source learns to declare is reported by the check with no change to it.
+`neverest check` SHALL list, for each source, the capabilities a sync declares for it in the store (pimdir STORAGE §15.6) as `capabilities: [{ name, support, detail }]`, one row per capability, `support` being `full`, `partial` or `none` and `detail` why it is partial or refused, `null` otherwise, from its backend and configured rights alone. An intent a source performs on the collections it holds (`calendar.reply`, `calendar.cancel`, their `.occurrence` options, `collection.create`, `collection.rename`, `collection.delete`), which the store gets as a `none` source-wide row and one row per collection, SHALL read as it does on those collections: the store's collections are unknown to a check, so the `none` a rename or a delete gets on a collection stating a role is not listed. The source-wide `calendar.component.vtodo` row a sync declares from the configuration (a Google Calendar or Graph calendar source, or a source one of whose targets is one) SHALL be listed with them. What a CalDAV listing states of a calendar SHALL be listed on that collection as `takesTasks`, `false` for a component set without `VTODO`, `true` for one naming it, `null` where no set is stated, on a target's collections as on a source's: a sync declares it as `calendar.component.vtodo` `none` on the source's calendar of that name. A target and an undeclared (JMAP) source SHALL list no capability. A capability a source learns to declare is reported by the check with no change to it.
 
 #### Scenario: A check names the calendars that take no tasks
 - **GIVEN** a CalDAV source whose server lists `events` with `VEVENT` alone and a Google Calendar target
 - **WHEN** `neverest check --json` runs
 - **THEN** `events` is listed with `takesTasks: false`, and the source's capabilities hold `calendar.component.vtodo` `none` naming the target
+
+### Requirement: A check reports every endpoint
+`neverest check` SHALL check every endpoint the account declares whatever the others answer, and SHALL print one row per endpoint, sorted by name: `source`, `backend` (its protocol table), `ok`, `code` and `error` (`null` when it answered), then `collections` (empty when it did not answer), `capabilities` and `smtp`. A credential that does not resolve SHALL fail its endpoint's row alone. When an endpoint or its send channel did not answer, the command SHALL print the report and exit 2, never the failure object.
+
+A frontend adding an account shows what works and what does not in one run, rather than one failure per attempt.
+
+#### Scenario: Two endpoints that do not answer
+- GIVEN an account whose source and target both point at a closed port
+- WHEN `neverest check --json` runs
+- THEN it prints both rows, each with `ok: false`, its `error` and no collection, and exits 2
 
 ### Requirement: JSON keys are camelCase
 Every output type neverest prints SHALL serialize its keys as camelCase, matching the wire formats the endpoints speak (JMAP per RFC 8620, Microsoft Graph, the Google APIs) and keeping every key reachable by dot access in jq and JavaScript, which is how the README's notifier reads a report.
@@ -1103,6 +1128,22 @@ Configuration types SHALL stay kebab-case, since what the loader reads from TOML
 - GIVEN a run that parked a divergence
 - WHEN `neverest sync --json` prints its report
 - THEN every key of the document is camelCase, `dryRun` and `outstandingConflicts` among them, and none carries a hyphen or an underscore
+
+### Requirement: Every key is printed
+Every output type neverest prints SHALL print every key it declares: a list as `[]` when empty, an absent value as `null`, a bool as `false`, never leaving a key out. Its schema SHALL mark each such key required. State neverest writes for itself and reads back (the sidecar beside the store) is not output and MAY leave keys out.
+
+#### Scenario: A quiet run still names its lists
+- GIVEN a sync that parked, refused and conflicted nothing
+- WHEN `neverest sync --json` runs
+- THEN the report holds `conflicts`, `parked`, `refused` and `unreached`, each `[]`, and `purged` as `null` when no sweep ran
+
+### Requirement: The mode is data
+`check` and `init` SHALL print the account's mode as an object, `{sources, targets, oneWay, retain}`: the source and target names sorted, whether the sources are authoritative, and whether the store keeps bodies. The sentence describing it SHALL be its text form only.
+
+#### Scenario: A caller reads the direction of an account
+- GIVEN an account with a CalDAV source and a target `backup`
+- WHEN `neverest check --json` runs
+- THEN `mode` is `{"sources": ["caldav"], "targets": ["backup"], "oneWay": false, "retain": false}`
 
 ### Requirement: A change one endpoint made crosses in the run that observed it
 An item an account's two endpoints both hold, whose body exactly one of them changed, SHALL be delivered to the other in the run that observed the change. The changed body SHALL be hydrated before the pushing passes, so the run that reports the update is the run that makes it.

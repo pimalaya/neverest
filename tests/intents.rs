@@ -256,7 +256,7 @@ fn intents_only_sends_through_smtp_without_opening_the_source() {
     assert_eq!(submitted["error"], Value::Null, "{report}");
     assert_eq!(submitted["parked"], false, "{report}");
     assert_eq!(submitted["uncertain"], false, "{report}");
-    assert!(report.get("unreached").is_none(), "{report}");
+    assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     assert_eq!(
         report["collection"]["patch"],
         serde_json::json!([]),
@@ -299,8 +299,8 @@ fn a_send_without_a_verdict_is_parked_as_uncertain() {
     // NOTE: the next run has nothing to send, the server being gone, and
     // still exits 2 over the parked send waiting for a person.
     let report = fixture.intents_only(2);
-    assert!(report.get("submitted").is_none(), "{report}");
-    assert!(report.get("unreached").is_none(), "{report}");
+    assert_eq!(report["submitted"], serde_json::json!([]), "{report}");
+    assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     assert_eq!(report["parked"][0]["id"], id, "{report}");
 }
 
@@ -319,7 +319,7 @@ fn a_send_a_stopped_run_was_handing_over_is_never_sent_again() {
     assert_eq!(submitted["id"], id, "{report}");
     assert_eq!(submitted["parked"], true, "{report}");
     assert_eq!(submitted["uncertain"], true, "{report}");
-    assert!(report.get("unreached").is_none(), "{report}");
+    assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     assert!(matches!(
         fixture.status(id),
         PimdirActionStatus::Parked { ref error, .. } if error.starts_with("uncertain: ")
@@ -339,7 +339,7 @@ fn an_unreached_smtp_server_is_named_and_the_send_waits() {
     let unreached = report["unreached"].as_array().expect("unreached");
     assert_eq!(unreached.len(), 1, "{report}");
     assert_eq!(unreached[0]["endpoint"], "imap.smtp", "{report}");
-    assert!(report.get("submitted").is_none(), "{report}");
+    assert_eq!(report["submitted"], serde_json::json!([]), "{report}");
     assert!(matches!(
         fixture.status(id),
         PimdirActionStatus::Pending { attempts: 0, .. }
@@ -356,7 +356,7 @@ fn refused_credentials_fail_the_send_without_parking_it() {
 
     let report = fixture.intents_only(3);
 
-    assert!(report.get("unreached").is_none(), "{report}");
+    assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     let submitted = &report["submitted"][0];
     assert!(
         submitted["error"].as_str().unwrap().contains("535"),
@@ -454,7 +454,7 @@ fn a_run_killed_mid_send_never_sends_the_message_again() {
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["id"], id, "{report}");
     assert_eq!(submitted["uncertain"], true, "{report}");
-    assert!(report.get("unreached").is_none(), "{report}");
+    assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     assert!(matches!(
         fixture.status(id),
         PimdirActionStatus::Parked { ref error, .. } if error.starts_with("uncertain: ")

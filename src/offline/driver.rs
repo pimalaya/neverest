@@ -64,7 +64,6 @@ use io_pimdir::{
     upgrade::{PimdirUpgrade, PimdirUpgradeOptions, PimdirUpgradeReport},
 };
 use log::{debug, info, warn};
-use pimalaya_cli::spinner::Spinner;
 
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::GraphKind;
@@ -85,6 +84,7 @@ use crate::{
             self, Failure as InvitationFailure, Invitation, InvitationIntent, Refusal, Target,
         },
         pipe,
+        progress::{PercentGate, Progress, Step},
         remote::{
             BATCH_SIZE, Bound, CachedFetchRemote, PimRemote, RefusedCreate, RejectedPush,
             body_bytes, hydrate_batch, resolve_kind, stored_item, wire_name,
@@ -95,6 +95,7 @@ use crate::{
         submit,
     },
     sync::{
+        event::SyncEvent,
         hunk::{CollectionHunk, ItemHunk},
         report::{
             CollectionCoverage, DrainedQueue, IntentEntry, ItemConflict, OpenRound, OverruledBody,
@@ -330,21 +331,38 @@ fn pair_kind(left: (&str, &str), right: (&str, &str)) -> Result<Kind> {
     Ok(left_kind)
 }
 
-/// Live per-collection progress: the spinner and its base label.
+/// Live per-collection progress of a pair: the spinner and its base label in
+/// text mode, `collection-progressed` events under `--json`.
 ///
 /// An inner phase such as body hydration or relay appends a percentage to the
 /// `[2/7] Syncing INBOX` line.
 struct CollectionProgress<'a> {
-    spinner: &'a Spinner,
+    step: &'a Step,
     label: &'a str,
+    progress: Progress<'a>,
+    gate: PercentGate,
+    source: &'a str,
+    target: &'a str,
+    collection: &'a str,
 }
 
 impl CollectionProgress<'_> {
-    /// Updates the spinner to `<label> <percent>%` of `done`/`total`.
+    /// Reports `done` of `total`: the spinner shows `<label> <percent>%`, an
+    /// event is printed once per percent.
     fn tick(&self, done: usize, total: usize) {
         let percent = (done * 100).checked_div(total).unwrap_or(100);
-        self.spinner
+        self.step
             .set_message(format!("{} ({percent}%)", self.label));
+
+        if self.gate.passes(done, total) {
+            self.progress.emit(|| SyncEvent::CollectionProgressed {
+                source: self.source.to_owned(),
+                target: self.target.to_owned(),
+                collection: self.collection.to_owned(),
+                done,
+                total,
+            });
+        }
     }
 }
 
@@ -499,6 +517,7 @@ pub fn run(
     pacing: Pacing,
     declare_only: bool,
     intents_only: bool,
+    progress: Progress<'_>,
 ) -> Result<SyncOutput> {
     let account_name = account_name.into();
     let endpoints = account_config.endpoints()?;
@@ -589,6 +608,7 @@ pub fn run(
                 connections,
                 pacing,
                 declare_only,
+                progress,
                 &mut state,
                 &mut report,
             )
@@ -607,6 +627,7 @@ pub fn run(
                 dry_run,
                 accept_absences,
                 connections,
+                progress,
                 &mut state,
                 &mut report,
             )
@@ -796,6 +817,7 @@ fn run_targets(
     dry_run: bool,
     accept_absences: bool,
     connections: usize,
+    progress: Progress<'_>,
     state: &mut StoreState,
     report: &mut SyncOutput,
 ) -> Result<()> {
@@ -820,6 +842,7 @@ fn run_targets(
             dry_run,
             accept_absences,
             connections,
+            progress,
             state,
             &mut taskless,
             report,
@@ -897,6 +920,7 @@ fn run_pair(
     dry_run: bool,
     accept_absences: bool,
     connections: usize,
+    progress: Progress<'_>,
     state: &mut StoreState,
     taskless: &mut PairTaskless,
     report: &mut SyncOutput,
@@ -925,7 +949,7 @@ fn run_pair(
     let left_account = account.get(&left_name)?;
     let right_account = account.get(&right_name)?;
 
-    let s = Spinner::start("Opening endpoints…");
+    let s = progress.start("Opening endpoints…");
     let mut left = SourceCtx {
         name: left_name.clone(),
         namespace: namespace.to_string(),
@@ -955,6 +979,11 @@ fn run_pair(
         noted: Noted::default(),
     };
     s.success("Opened endpoints");
+    for endpoint in [&left_name, &right_name] {
+        progress.emit(|| SyncEvent::Opened {
+            endpoint: endpoint.clone(),
+        });
+    }
 
     let kind = check_kinds(&mut left, &mut right)?;
     let media_type = kind.media_type();
@@ -973,7 +1002,7 @@ fn run_pair(
         drain_invitations(&mut [&mut left, &mut right], &mut left_store, report);
     }
 
-    let s = Spinner::start("Listing collections…");
+    let s = progress.start("Listing collections…");
     let left_listed = left
         .pool
         .primary()
@@ -991,6 +1020,15 @@ fn run_pair(
         left_collections.len(),
         right_collections.len()
     ));
+    for (endpoint, listed) in [
+        (&left_name, &left_collections),
+        (&right_name, &right_collections),
+    ] {
+        progress.emit(|| SyncEvent::Listed {
+            endpoint: endpoint.clone(),
+            collections: listed.len(),
+        });
+    }
 
     let filter = collection_filter.unwrap_or(left_filter);
     let left_filtered = filter_collections(&left_collections, &filter);
@@ -1085,10 +1123,28 @@ fn run_pair(
     for (index, name) in common.iter().enumerate() {
         let collection = &hub_id(namespace, name);
         let label = format!("[{}/{total}] Syncing {name}", index + 1);
-        let s = Spinner::start(label.clone());
-        let progress = CollectionProgress {
-            spinner: &s,
+        let s = progress.start(label.clone());
+        progress.emit(|| SyncEvent::CollectionStarted {
+            source: left_name.clone(),
+            target: right_name.clone(),
+            collection: name.clone(),
+            position: index + 1,
+            total,
+        });
+        let finished = |error: Option<String>| SyncEvent::CollectionFinished {
+            source: left_name.clone(),
+            target: right_name.clone(),
+            collection: name.clone(),
+            error,
+        };
+        let ticks = CollectionProgress {
+            step: &s,
             label: &label,
+            progress,
+            gate: PercentGate::default(),
+            source: &left_name,
+            target: &right_name,
+            collection: name,
         };
 
         if let Err(err) = sync_collection(
@@ -1102,14 +1158,16 @@ fn run_pair(
             work_dir,
             dry_run,
             relay,
-            &progress,
+            &ticks,
             report,
         ) {
             warn!("{name} sync error: {err:#}");
             s.success(format!("{name}: error ({err:#})"));
+            progress.emit(|| finished(Some(format!("{err:#}"))));
             continue;
         }
 
+        let mut error = None;
         if hydrate_full
             && !dry_run
             && let Err(err) = hydrate_full_collection(
@@ -1119,10 +1177,11 @@ fn run_pair(
                 &mut left_store,
                 &mut right_store,
                 &blobs,
-                &progress,
+                &ticks,
             )
         {
             warn!("{name} full hydration error: {err:#}");
+            error = Some(format!("{err:#}"));
         }
         // NOTE: a body the full hydration fetched may settle a divergence by
         // a side's policy (pimdir SYNC §6), after the collection itemized
@@ -1130,7 +1189,11 @@ fn run_pair(
         itemize_noted(&mut left, report);
         itemize_noted(&mut right, report);
 
-        s.success(format!("{name}: done"));
+        match &error {
+            Some(err) => s.success(format!("{name}: error ({err})")),
+            None => s.success(format!("{name}: done")),
+        }
+        progress.emit(|| finished(error));
     }
 
     Ok(())
@@ -1294,6 +1357,7 @@ fn run_local(
     connections: usize,
     pacing: Pacing,
     declare_only: bool,
+    progress: Progress<'_>,
     state: &mut StoreState,
     report: &mut SyncOutput,
 ) -> Result<()> {
@@ -1306,7 +1370,7 @@ fn run_local(
     } else {
         connection_budget(&source_config, connections)
     };
-    let s = Spinner::start(format!("Opening connections to {source_name}…"));
+    let s = progress.start(format!("Opening connections to {source_name}…"));
     // NOTE: with no target the store is the destination: `one-way` discards
     // what was staged locally, leaving it off merges the two.
     let authority = if mode.one_way {
@@ -1335,6 +1399,9 @@ fn run_local(
         "Opened {} connection(s) to {source_name}",
         ctxs.len()
     ));
+    progress.emit(|| SyncEvent::Opened {
+        endpoint: source.clone(),
+    });
 
     let raw = ctxs[0].pool.primary().media_type();
     let kind = Kind::from_media_type(raw)
@@ -1358,7 +1425,7 @@ fn run_local(
         }
     }
 
-    let s = Spinner::start(format!("Listing collections on {source_name}…"));
+    let s = progress.start(format!("Listing collections on {source_name}…"));
     let listed = ctxs[0]
         .pool
         .primary()
@@ -1372,6 +1439,10 @@ fn run_local(
         "Listed {} collection(s) on {source_name}",
         collections.len()
     ));
+    progress.emit(|| SyncEvent::Listed {
+        endpoint: source.clone(),
+        collections: collections.len(),
+    });
 
     let filter = if declare_only {
         CollectionFilter::All
@@ -1444,6 +1515,7 @@ fn run_local(
         listed_log.as_ref(),
         shared,
         &gone,
+        progress,
         report,
     )?;
 
@@ -1463,6 +1535,7 @@ fn run_local(
         &blobs,
         shared.then_some(&filtered[..]),
         &gone,
+        progress,
     );
     // NOTE: a body a connection landed may settle a divergence by the
     // source's policy (pimdir SYNC §6), noted on that connection: the spines
@@ -1807,6 +1880,7 @@ fn phase1_spine(
     listed: Option<&Listed>,
     shared: bool,
     gone: &GoneBodies,
+    progress: Progress<'_>,
     report: &mut SyncOutput,
 ) -> Result<Vec<String>> {
     let total = filtered.len();
@@ -1817,7 +1891,13 @@ fn phase1_spine(
     let merged: Mutex<SyncOutput> = Mutex::new(SyncOutput::default());
     let scanned = AtomicUsize::new(0);
     let pushing: Mutex<()> = Mutex::new(());
-    let s = Spinner::start(format!("Scanning {source} (0/{total})"));
+    let s = progress.start(format!("Scanning {source} (0/{total})"));
+    let scan_event = |done| SyncEvent::ScanProgressed {
+        source: source.to_owned(),
+        done,
+        total,
+    };
+    progress.emit(|| scan_event(0));
 
     // NOTE: one connection has none to spare: its bodies wait for phase 2,
     // which orders them across the whole account, but for the primed ones.
@@ -1952,6 +2032,7 @@ fn phase1_spine(
                     if !paused {
                         let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
                         s_ref.set_message(format!("Scanning {source} ({n}/{total})"));
+                        progress.emit(|| scan_event(n));
                     }
                 }
             });
@@ -2803,6 +2884,7 @@ fn phase2_hydrate(
     blobs: &PimdirBlobStage,
     shared: Option<&[String]>,
     gone: &GoneBodies,
+    progress: Progress<'_>,
 ) -> Result<()> {
     let batches = hydrate_batches(plans, pacing.order, pacing.prime, shared.is_some());
     let total_bodies: usize = batches.iter().map(|batch| batch.bodies.len()).sum();
@@ -2817,13 +2899,23 @@ fn phase2_hydrate(
 
     let done = AtomicUsize::new(0);
     let fetched = AtomicUsize::new(0);
-    let s = Spinner::start(format!("Downloading {source} 0% (0/{total_bodies})"));
+    let s = progress.start(format!("Downloading {source} 0% (0/{total_bodies})"));
+    let gate = PercentGate::default();
+    let download_event = |done| SyncEvent::DownloadProgressed {
+        source: source.to_owned(),
+        done,
+        total: total_bodies,
+    };
+    progress.emit(|| download_event(0));
     let on_body = || {
         let n = done.fetch_add(1, Ordering::Relaxed) + 1;
         let percent = (n * 100).checked_div(total_bodies).unwrap_or(100);
         s.set_message(format!(
             "Downloading {source} {percent}% ({n}/{total_bodies})"
         ));
+        if gate.passes(n, total_bodies) {
+            progress.emit(|| download_event(n));
+        }
     };
     let applying = Mutex::new(());
     let landing = Landing {
@@ -9845,7 +9937,7 @@ mod tests {
 
         let json = serde_json::to_value(&report).unwrap();
         assert!(json.get("ambiguous").is_none(), "{json}");
-        assert!(json.get("refused").is_none(), "{json}");
+        assert_eq!(json["refused"], serde_json::json!([]), "{json}");
     }
 
     /// A target refusing the second copy is the one thing worth a line.
@@ -12300,7 +12392,7 @@ mod graph_budget {
 mod gmail_bodies {
     use std::{
         path::Path,
-        sync::{Arc, atomic::AtomicU64},
+        sync::{Arc, Mutex, atomic::AtomicU64},
     };
 
     use io_gmail::v1::rest::messages::encode_raw;
@@ -12330,6 +12422,8 @@ mod gmail_bodies {
             client::scripted::{Wire, batch_answer, ok, scripted},
             run::GmailRun,
         },
+        offline::progress::Progress,
+        sync::event::SyncEvent,
         throttle::Throttle,
     };
 
@@ -12425,6 +12519,17 @@ mod gmail_bodies {
         collections: &[String],
         gone: &GoneBodies,
     ) {
+        hydrate_reporting(store, ctx, collections, gone, Progress::default());
+    }
+
+    /// [`hydrate`], reporting to `progress`.
+    fn hydrate_reporting(
+        store: &mut PimdirSourceStore,
+        ctx: &mut SourceCtx,
+        collections: &[String],
+        gone: &GoneBodies,
+        progress: Progress<'_>,
+    ) {
         let plans = hydrate_plans(store, "gmail", collections, None, gone).unwrap();
         let blobs = store.blob_stage();
         phase2_hydrate(
@@ -12436,6 +12541,7 @@ mod gmail_bodies {
             &blobs,
             Some(collections),
             gone,
+            progress,
         )
         .unwrap();
     }
@@ -12493,6 +12599,42 @@ mod gmail_bodies {
         hydrate(&mut store, &mut ctx, &collections, &run);
         assert_eq!(batch.requests().len(), 2, "nothing asked again");
         assert_eq!(batch.left(), 0);
+    }
+
+    /// Under `--json`, the download prints its start, then its progress as
+    /// bodies land: a caller sees the total before the first body.
+    #[test]
+    fn a_download_prints_its_progress_as_events() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_holding(
+            dir.path(),
+            vec![owed(INBOX, "m1", 40), owed(INBOX, "m2", 40)],
+        );
+        let (mut ctx, _, batch) = connection();
+        batch.answer(batch_answer(&[
+            (0, "200 OK", raw("m1")),
+            (1, "200 OK", raw("m2")),
+        ]));
+
+        let seen = Mutex::new(Vec::new());
+        let sink = |event| seen.lock().unwrap().push(event);
+        let collections = vec![INBOX.to_string()];
+        let progress = Progress::events(&sink);
+        hydrate_reporting(
+            &mut store,
+            &mut ctx,
+            &collections,
+            &GoneBodies::default(),
+            progress,
+        );
+
+        let progressed = |done| SyncEvent::DownloadProgressed {
+            source: "gmail".into(),
+            done,
+            total: 2,
+        };
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen, [progressed(0), progressed(1), progressed(2)]);
     }
 
     /// A message a label holds a body for, listed under another label

@@ -92,7 +92,7 @@ impl Command {
     /// [`Exit`]; every other works or errors.
     pub fn execute(
         self,
-        printer: &mut impl Printer,
+        printer: &mut (impl Printer + Send),
         config_paths: &[PathBuf],
         account: Option<&str>,
     ) -> Result<Exit> {

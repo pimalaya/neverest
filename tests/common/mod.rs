@@ -196,7 +196,8 @@ impl Replica {
     }
 
     /// Runs neverest as [`run`](Self::run) does, waiting out a provider
-    /// that throttled it, and answers how long it waited.
+    /// that throttled it, and answers its result line and how long it
+    /// waited.
     ///
     /// A run a provider throttled past what it waits itself ends incomplete
     /// (3), naming the source and when it may send again, and a rerun picks
@@ -219,11 +220,13 @@ impl Replica {
 
             let code = output.status.code().unwrap_or(-1);
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            // NOTE: the last line, after the events a sync prints.
+            let result = stdout.lines().last().unwrap_or_default().to_owned();
 
             if code == 3
                 && !codes.contains(&3)
                 && reruns < THROTTLED_RUNS
-                && let Some(wait) = throttled_wait(&stdout)
+                && let Some(wait) = throttled_wait(&result)
             {
                 eprintln!(
                     "`neverest {}` throttled, running it again in {}s",
@@ -243,7 +246,7 @@ impl Replica {
                 String::from_utf8_lossy(&output.stderr),
             );
 
-            return (code, stdout, waited);
+            return (code, result, waited);
         }
     }
 

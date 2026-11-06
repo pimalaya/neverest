@@ -171,7 +171,7 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
         .expect("spawn neverest");
     let report = String::from_utf8_lossy(&output.stdout).into_owned();
     assert_eq!(output.status.code(), Some(2), "{report}");
-    let intents: Value = serde_json::from_str(&report).unwrap();
+    let intents: Value = serde_json::from_str(report.lines().last().unwrap_or_default()).unwrap();
     assert_eq!(intents["intents"][0]["parked"], true, "{report}");
 
     let _ = Command::new("curl")
@@ -218,7 +218,7 @@ fn a_queued_folder_is_created_by_a_run_performing_intents_alone() {
         &state,
     );
     assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
-    let parsed: Value = serde_json::from_str(&report).unwrap();
+    let parsed: Value = serde_json::from_str(report.lines().last().unwrap_or_default()).unwrap();
     assert_eq!(
         parsed["collection"]["patch"],
         serde_json::json!([]),
@@ -245,7 +245,8 @@ fn sync(config: &Path, state: &Path, collection: &str) -> String {
 
 /// The error of each intent the report names, `null` for one performed.
 fn intent_errors(report: &str) -> Vec<Value> {
-    let report: Value = serde_json::from_str(report).expect("one JSON document");
+    let report: Value =
+        serde_json::from_str(report.lines().last().unwrap_or_default()).expect("one JSON document");
     report["intents"]
         .as_array()
         .map(|intents| {
@@ -393,7 +394,7 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
         .expect("spawn neverest");
     let report = String::from_utf8_lossy(&output.stdout).into_owned();
     assert_eq!(output.status.code(), Some(2), "{report}");
-    let parsed: Value = serde_json::from_str(&report).unwrap();
+    let parsed: Value = serde_json::from_str(report.lines().last().unwrap_or_default()).unwrap();
     assert_eq!(parsed["intents"][0]["parked"], true, "{report}");
     assert!(listed(&config, &state).contains(&renamed));
     assert!(PimdirStore::cancel_action(&store, id).expect("cancel the parked delete"));

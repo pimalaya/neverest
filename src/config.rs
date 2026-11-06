@@ -28,6 +28,7 @@ use pimalaya_config::{
     toml::{TomlConfig, shell_expanded_string},
 };
 use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -932,7 +933,8 @@ impl Serialize for HumanDuration {
 /// Declared, never derived: the mode is the arity of `sources` and
 /// `targets` plus the two flags, so no behaviour depends on a coincidence
 /// between two sources.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct AccountMode {
     /// The source names, sorted, so a report reads the same twice.
     pub sources: Vec<String>,

@@ -107,7 +107,6 @@ pub enum ItemHunk {
         /// The collection the server copies from on `target_side`, for a
         /// move or a copy a frontend staged; `None` for a body uploaded from
         /// `source_side`.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         origin: Option<String>,
         /// The cross-side alignment key, never serialized.
         #[serde(skip)]

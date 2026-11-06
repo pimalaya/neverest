@@ -51,7 +51,7 @@ fn a_delta_head_shows_what_changed_while_a_round_is_open() {
     let report = sync(&open.config, open.account, &open.env, &[]);
     let coverage = coverage_of(&report, &open.mailbox);
     assert!(coverage["at"].is_string(), "the round closed: {coverage}");
-    assert!(coverage.get("round").is_none());
+    assert!(coverage["round"].is_null());
     let markers = stored(&open.store, &open.collection);
     assert!(
         markers.contains(&open.arrival),
@@ -88,7 +88,7 @@ fn a_band_head_shows_what_arrived_while_a_round_is_open() {
     let report = sync(&open.config, open.account, &open.env, &[]);
     let coverage = coverage_of(&report, &open.mailbox);
     assert!(coverage["at"].is_string(), "the round closed: {coverage}");
-    assert!(coverage.get("round").is_none());
+    assert!(coverage["round"].is_null());
     let markers = stored(&open.store, &open.collection);
     assert!(
         markers.contains(&open.arrival),
@@ -255,7 +255,7 @@ fn sync(config: &Path, account: &str, env: &[(&str, &str)], extra: &[&str]) -> s
     let mut args = vec!["--json", "sync", "-a", account];
     args.extend_from_slice(extra);
     let out = neverest(&args, config, env);
-    serde_json::from_str(&out).expect("a JSON report")
+    serde_json::from_str(out.lines().last().unwrap_or_default()).expect("a JSON report")
 }
 
 /// How many bodies a report fetched.

@@ -13,23 +13,28 @@ use std::{
 use anyhow::{Result, bail};
 use clap::Parser;
 use log::info;
-use pimalaya_cli::{printer::Printer, spinner::Spinner};
+use pimalaya_cli::{
+    error::{PartialOutcome, code_of},
+    printer::Printer,
+    spinner::Spinner,
+};
 use pimalaya_config::toml::TomlConfig;
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
-    account::Account,
+    account::{Account, SourceAccount},
     client,
     config::{AccountMode, Config, SourceConfig},
+    error::ErrorCode,
     item::collection::Collection,
     offline::capability,
 };
 
 /// Probes every configured source before a real sync.
 ///
-/// Reports the account's namespaces, then opens each source and lists its
-/// collections, and opens and authenticates the SMTP channel a source
+/// Reports the account's mode, then opens each endpoint and lists its
+/// collections, and opens and authenticates the SMTP channel an endpoint
 /// declares, surfacing credential, network or config errors before a real
 /// sync or a first send.
 ///
@@ -37,6 +42,10 @@ use crate::{
 /// prints are diagnostics for a person. A program reads whether each
 /// endpoint answered; what an account holds it reads from the store, which
 /// `sync --declare-only` fills without fetching an item.
+///
+/// Every endpoint is checked, whatever the others answer, and the report
+/// names each one's outcome. An endpoint or a channel that did not answer
+/// exits 2, the report being the output rather than a failure object.
 #[derive(Debug, Parser)]
 pub struct CheckCommand {}
 
@@ -58,26 +67,42 @@ impl CheckCommand {
 
         info!("checking account {name}");
 
-        let account_mode = account_config.mode()?;
-        let mode = account_mode.to_string();
+        let mode = account_config.mode()?;
 
         // NOTE: every credential at once, so a check costs one unlock per
-        // password command rather than one per endpoint.
+        // password command rather than one per endpoint. One that fails
+        // fails its endpoint's row alone.
         let account = Account::resolve(&account_config)?;
 
-        let mut sources = Vec::new();
         let endpoints = account_config.endpoints()?;
+        let mut names: Vec<&String> = endpoints.keys().collect();
+        names.sort();
 
-        for (endpoint, endpoint_config) in &endpoints {
-            let capabilities = declared(endpoint, endpoint_config, &account_mode, &endpoints);
-            sources.push(check_source(endpoint, &account, capabilities)?);
-        }
+        let sources: Vec<SourceCheck> = names
+            .into_iter()
+            .map(|endpoint| {
+                let config = &endpoints[endpoint];
+                let capabilities = declared(endpoint, config, &mode, &endpoints);
+                check_source(endpoint, config, &account, capabilities)
+            })
+            .collect();
 
-        printer.out(CheckOutput {
+        let report = CheckOutput {
             account: name,
             mode,
             sources,
-        })
+        };
+        let failed = report.failed();
+        printer.out(report)?;
+
+        // NOTE: the report names every endpoint's outcome, so a failed one
+        // ends the command with the partial-outcome status rather than a
+        // failure object.
+        if failed {
+            return Err(PartialOutcome::default().into());
+        }
+
+        Ok(())
     }
 }
 
@@ -114,52 +139,89 @@ fn declared(
     capabilities
 }
 
-/// Opens the source and lists its collections with the role each states on
-/// the server, then opens its SMTP channel, if it declares one, up to
-/// authentication.
+/// Opens the endpoint and lists its collections with the role each states
+/// on the server, then opens its SMTP channel, if it declares one, up to
+/// authentication. A failure lands in the row, never ends the check.
 fn check_source(
     label: &str,
+    config: &SourceConfig,
     account: &Account,
     capabilities: Vec<CheckedCapability>,
-) -> Result<SourceCheck> {
+) -> SourceCheck {
     let s = Spinner::start(format!("Checking source {label}…"));
-    let source = account.get(label)?;
-    let mut client = client::open(&source)?;
-    let mut roles = client.collection_roles()?;
-    let default = client.default_collection()?;
-    let collections: Vec<CheckedCollection> = client
-        .list_collections(false)?
-        .into_iter()
-        .map(|collection| checked(collection, &mut roles, default.as_ref()))
-        .collect();
-    s.success(format!(
-        "Checked source {label} ({} collections)",
-        collections.len()
-    ));
+    let (listed, source) = match account.get(label) {
+        Ok(source) => (list(&source), Some(source)),
+        Err(err) => (Err(err), None),
+    };
+
+    match &listed {
+        Ok(collections) => s.success(format!(
+            "Checked source {label} ({} collections)",
+            collections.len()
+        )),
+        Err(err) => s.success(format!("Source {label} failed ({err:#})")),
+    }
 
     // NOTE: nothing is sent: the session is opened, upgraded and
     // authenticated, then quit.
     #[cfg(feature = "smtp")]
-    let smtp = match &source.smtp {
-        Some(smtp) => {
+    let smtp = source
+        .as_ref()
+        .and_then(|source| source.smtp.as_ref())
+        .map(|smtp| {
             let s = Spinner::start(format!("Checking the SMTP channel of {label}…"));
-            let mut session = crate::offline::submit::connect_smtp(smtp)
-                .map_err(|err| err.context(format!("Check the SMTP channel of {label}")))?;
-            let _ = io_smtp::client::SmtpClient::quit(&mut session);
-            s.success(format!("Checked the SMTP channel of {label}"));
-            true
-        }
-        None => false,
-    };
+            let opened = crate::offline::submit::connect_smtp(smtp)
+                .map(|mut session| {
+                    let _ = io_smtp::client::SmtpClient::quit(&mut session);
+                })
+                .map_err(|err| err.context(format!("Check the SMTP channel of {label}")));
+            match &opened {
+                Ok(()) => s.success(format!("Checked the SMTP channel of {label}")),
+                Err(err) => s.success(format!("SMTP channel of {label} failed ({err:#})")),
+            }
+            ChannelCheck::from("smtp", opened)
+        });
     #[cfg(not(feature = "smtp"))]
-    let smtp = false;
+    let smtp = {
+        let _ = source;
+        None
+    };
 
-    Ok(SourceCheck {
+    let (collections, outcome) = match listed {
+        Ok(collections) => (collections, Ok(())),
+        Err(err) => (Vec::new(), Err(err)),
+    };
+    let ChannelCheck {
+        backend,
+        ok,
+        code,
+        error,
+    } = ChannelCheck::from(config.backend.protocol(), outcome);
+
+    SourceCheck {
         source: label.to_owned(),
+        backend,
+        ok,
+        code,
+        error,
         collections,
         capabilities,
         smtp,
-    })
+    }
+}
+
+/// Opens one connection to `source` and lists its collections, with the
+/// role and the default mark the server states.
+fn list(source: &SourceAccount) -> Result<Vec<CheckedCollection>> {
+    let mut client = client::open(source)?;
+    let mut roles = client.collection_roles()?;
+    let default = client.default_collection()?;
+    let collections = client
+        .list_collections(false)?
+        .into_iter()
+        .map(|collection| checked(collection, &mut roles, default.as_ref()))
+        .collect();
+    Ok(collections)
 }
 
 /// One listed collection as a check reports it, with the role and the
@@ -178,20 +240,28 @@ fn checked(
     }
 }
 
-/// What `neverest check` reports: the account's declared mode, and every
-/// source that answered.
-///
-/// A source that did not answer is not in here: the command stops on the
-/// first failure, so reaching this output means every endpoint opened.
+/// What `neverest check` reports: the account's declared mode, and the
+/// outcome of every endpoint, whether it answered or not.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckOutput {
     /// The account that was checked.
     pub account: String,
-    /// What the account does, as its mode reads.
-    pub mode: String,
-    /// One entry per endpoint the account opens, source and target alike.
+    /// What the account does: its endpoints, direction and whether the
+    /// store keeps bodies.
+    pub mode: AccountMode,
+    /// One row per endpoint the account opens, source and target alike,
+    /// sorted by name.
     pub sources: Vec<SourceCheck>,
+}
+
+impl CheckOutput {
+    /// Whether an endpoint or its send channel did not answer.
+    pub fn failed(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|source| !source.ok || source.smtp.as_ref().is_some_and(|smtp| !smtp.ok))
+    }
 }
 
 impl fmt::Display for CheckOutput {
@@ -204,41 +274,99 @@ impl fmt::Display for CheckOutput {
         }
 
         writeln!(f)?;
-        writeln!(f, "Account {account} looks healthy", account = self.account)
+
+        let account = &self.account;
+        match self.failed() {
+            true => writeln!(f, "Account {account} has endpoints that did not answer"),
+            false => writeln!(f, "Account {account} looks healthy"),
+        }
     }
 }
 
-/// One endpoint that answered, and how much it holds.
+/// One endpoint, whether it answered, and how much it holds.
+///
+/// Its first four keys are the backend check row every pimalaya binary
+/// prints.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceCheck {
     /// The endpoint's pimdir source id.
     pub source: String,
-    /// Every collection it listed, with the role the server states.
+    /// Its protocol, the table it is written under: `imap`, `caldav`,
+    /// `msgraph-calendar`…
+    pub backend: &'static str,
+    /// Whether it opened and listed its collections.
+    pub ok: bool,
+    /// The stable code of the failure, `null` when it answered or the
+    /// failure carries none.
+    pub code: Option<ErrorCode>,
+    /// Why it did not answer, `null` when it did.
+    pub error: Option<String>,
+    /// Every collection it listed, with the role the server states; empty
+    /// when it did not answer.
     pub collections: Vec<CheckedCollection>,
     /// What the source can do, as a sync declares it in the store (pimdir
     /// STORAGE §15.6), one row per capability: an intent performed on the
-    /// collections the source holds reads as it does on them. Empty for a
-    /// target and for an undeclared (JMAP) source.
+    /// collections the source holds reads as it does on them. Read from
+    /// the configuration, so present whether it answered or not. Empty for
+    /// a target and for an undeclared (JMAP) source.
     pub capabilities: Vec<CheckedCapability>,
-    /// Whether its SMTP channel was opened and authenticated, `false` when
-    /// it declares none.
-    pub smtp: bool,
+    /// Whether its SMTP channel opened and authenticated, `null` when it
+    /// declares none, when its credentials did not resolve, or in a build
+    /// without SMTP.
+    pub smtp: Option<ChannelCheck>,
 }
 
 impl fmt::Display for SourceCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self {
-            source,
-            collections,
-            smtp,
-            ..
-        } = self;
-        write!(f, "{source} ({} collection(s))", collections.len())?;
-        if *smtp {
-            write!(f, ", SMTP channel authenticated")?;
+        let source = &self.source;
+        match &self.error {
+            None => write!(f, "{source} ({} collection(s))", self.collections.len())?,
+            Some(err) => write!(f, "{source}: FAIL ({err})")?,
         }
-        Ok(())
+        match &self.smtp {
+            Some(ChannelCheck { error: None, .. }) => write!(f, ", SMTP channel authenticated"),
+            Some(ChannelCheck {
+                error: Some(err), ..
+            }) => write!(f, ", SMTP channel: FAIL ({err})"),
+            None => Ok(()),
+        }
+    }
+}
+
+/// One channel an endpoint opens beside its own, and whether it answered:
+/// the backend check row every pimalaya binary prints.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelCheck {
+    /// The backend that was checked.
+    pub backend: &'static str,
+    /// Whether it answered.
+    pub ok: bool,
+    /// The stable code of the failure, `null` when it answered or the
+    /// failure carries none.
+    pub code: Option<ErrorCode>,
+    /// Why it did not answer, `null` when it did.
+    pub error: Option<String>,
+}
+
+impl ChannelCheck {
+    /// Folds an attempt at `backend` into its outcome.
+    fn from(backend: &'static str, result: Result<()>) -> Self {
+        match result {
+            Ok(()) => Self {
+                backend,
+                ok: true,
+                code: None,
+                error: None,
+            },
+            Err(err) => Self {
+                backend,
+                ok: false,
+                code: code_of(&err),
+                error: Some(format!("{err:#}")),
+            },
+        }
     }
 }
 
@@ -255,25 +383,22 @@ pub struct CheckedCollection {
     /// `trash`, `junk`, `all`, `archive`), never guessed from its name:
     /// IMAP SPECIAL-USE and `INBOX`, Graph's well-known folders, Gmail's
     /// system labels.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
     /// Whether it is where a new item goes when none is named, as the
     /// server states it: Google's primary calendar, Graph's default
     /// calendar and default Contacts folder, the one People address book,
     /// the CalDAV calendar the scheduling inbox names (RFC 6638
     /// `schedule-default-calendar-URL`). Never set on mail nor CardDAV, at
-    /// most once per source, and left out when false.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    /// most once per source.
     pub default: bool,
     /// Whether the calendar takes tasks, as a CalDAV server states it by
     /// its `supported-calendar-component-set` (RFC 4791 §5.2.3): `false`
     /// when the set leaves VTODO out, which a sync declares as
     /// `calendar.component.vtodo` `none` on the source's calendar of that id, a
     /// target's included.
-    /// Left out where no set is stated, which takes any component, and on
+    /// `null` where no set is stated, which takes any component, and on
     /// every other backend: Google and Graph, whose calendars take no task,
     /// say so by a source-wide capability.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub takes_tasks: Option<bool>,
 }
 
@@ -286,7 +411,6 @@ pub struct CheckedCapability {
     /// `full`, `partial` or `none`.
     pub support: String,
     /// Why it is partial or refused.
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
@@ -354,7 +478,7 @@ mod tests {
     }
 
     /// A CalDAV calendar's component set is reported on the collection, a
-    /// listing stating none leaving the key out.
+    /// listing stating none printing `null`.
     #[test]
     fn a_check_names_what_each_calendar_takes() {
         let listed = |id: &str, takes_tasks| Collection {
@@ -378,6 +502,9 @@ mod tests {
             json(listed("work", Some(true)))["takesTasks"],
             serde_json::Value::Bool(true)
         );
-        assert!(json(listed("any", None)).get("takesTasks").is_none());
+        assert_eq!(
+            json(listed("any", None))["takesTasks"],
+            serde_json::Value::Null
+        );
     }
 }

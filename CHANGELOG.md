@@ -14,6 +14,9 @@ Upgrading from 0.3.0:
 - `sync` exits 2 for a parked send, intent or queue action too, and 3 when the run could not do all its work: a script must tell 2 and 3 from 1.
 - A listing that leaves out more than half of at least 20 items a collection held, or names none while it held some, drops nothing and exits 2: `sync --accept-absences` confirms such absences, for one run.
 - A store another user can read is refused (`store-exposed`): `chmod 700` its directory and `chmod 600` its pimdir.db.
+- `sync --json` prints progress events before its report: read the last line, or skip the lines carrying `event`.
+- Every `--json` output prints every key: an empty list as `[]`, an absent value as `null`, a bool as `false`. Test `.conflicts | length`, not whether `conflicts` is there.
+- `check` checks every endpoint and exits 2, printing its report, when one does not answer; it exited 1 with the failure object of the first.
 
 ### Added
 
@@ -113,6 +116,12 @@ Upgrading from 0.3.0:
 
 - Added `neverest-error`, the JSON Schema of the failure object.
 
+- **BREAKING**: added progress events to `sync --json`, one line each before the report, carrying `event`: `opened`, `listed`, `collection-started`, `collection-progressed`, `collection-finished`, `scan-progressed` and `download-progressed`, described by `neverest json-schema neverest-sync.events`.
+
+  A count prints at most once per percent. Text mode keeps the spinner, and `--json` no longer draws it.
+
+- Added the JSON Schemas of `completion`, `manual` and `json-schema` (`neverest-completion`, `neverest-manual`, `neverest-json-schema`).
+
 - Added `code` to the JSON failure object of a store failure: the code io-pimdir gives it (`store-version`, `sync-version`, `store-exposed`, `store-busy`, `store-owned`, `store-foreign`, `action-malformed`, `flag-invalid`, `index-fts5-missing`, `index-version` and the others its `PimdirError::code` lists), so a caller tells a reinstall, an upgrade or a retry from any other failure.
 
 - Added the enumeration of a scoped mail round: every page of a round a date filter narrowed says so, and its last page hands every handle the collection holds, read with no date filter (IMAP `UID SEARCH ALL`, the Gmail label's ids, the Graph folder's ids from the pass closing the round).
@@ -181,6 +190,18 @@ Upgrading from 0.3.0:
 - Changed a `submit` naming its sending source to be sent by that source alone.
 
 - Changed piped `--json` output to print one value per line, each `json-schema` schema carrying an `$id` naming the contract version.
+
+- Changed the JSON Schemas to describe a value as printed: a key always printed is required, `null` or not.
+
+- **BREAKING**: changed every `--json` output to print every key it declares, rather than leaving out an empty list, an absent value or a false `default`.
+
+- **BREAKING**: changed `mode` in the `check` and `init` output from a sentence to an object, `{sources, targets, oneWay, retain}`.
+
+- **BREAKING**: changed `check` to check every endpoint whatever the others answer: each row carries `backend`, `ok`, `code` and `error`, a failed one listing no collection, and a failed endpoint or SMTP channel exits 2 with the report.
+
+  `smtp` is the channel's own row, `{backend, ok, code, error}`, or `null` when the endpoint declares none; it was a bool. Rows are sorted by name.
+
+- Changed a collection whose full hydration fails to end on its error rather than `done`.
 
 - Changed a body fetched to settle a divergence to settle it by the endpoint's policy: a one-way target's own edit is kept as a retained item and reported under `overruled`, a source's adopted, a two-way endpoint's left for the merge.
 

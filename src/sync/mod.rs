@@ -7,5 +7,6 @@
 //! translates what the engine did back into these DTOs, so the CLI output
 //! stays stable.
 
+pub mod event;
 pub mod hunk;
 pub mod report;

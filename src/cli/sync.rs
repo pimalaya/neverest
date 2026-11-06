@@ -6,6 +6,7 @@
 use std::{
     fs::{self, File, TryLockError},
     path::{Path, PathBuf},
+    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
@@ -28,8 +29,10 @@ use crate::{
     error::pimdir_error,
     offline::{
         driver::{self, Bodies, DownloadOrder, Pacing},
+        progress::Progress,
         state::StoreState,
     },
+    sync::event::SyncEvent,
 };
 
 /// How long a run waits for another run's store lock before giving up.
@@ -203,7 +206,7 @@ impl SyncCommand {
     /// Reconciles the account, or plans the run under `--dry-run`.
     pub fn execute(
         self,
-        printer: &mut impl Printer,
+        printer: &mut (impl Printer + Send),
         config_paths: &[PathBuf],
         account_name: Option<&str>,
     ) -> Result<Exit> {
@@ -246,6 +249,19 @@ impl SyncCommand {
 
         let scope = account_config.scope(self.since.as_deref(), &self.source, Utc::now())?;
 
+        // NOTE: the driver reports from its worker threads, which share the
+        // printer. A line that cannot be printed stops no sync.
+        let printer = Mutex::new(printer);
+        let sink = |event: SyncEvent| {
+            if let Err(err) = printer.lock().unwrap().event(event) {
+                debug!("cannot print sync event: {err:#}");
+            }
+        };
+        let progress = match printer.lock().unwrap().is_json() {
+            true => Progress::events(&sink),
+            false => Progress::default(),
+        };
+
         let report = driver::run(
             &name,
             &account_config,
@@ -265,11 +281,12 @@ impl SyncCommand {
             ),
             self.declare_only,
             self.intents_only,
+            progress,
         )?;
 
         // NOTE: read before printing, which consumes the report.
         let exit = Exit::from(&report);
-        printer.out(report)?;
+        printer.into_inner().unwrap().out(report)?;
 
         Ok(exit)
     }

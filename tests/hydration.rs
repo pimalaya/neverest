@@ -130,7 +130,8 @@ fn a_body_is_kept_as_it_arrives() {
     );
 
     let report = neverest(&["--json", "sync", "-a", "hydrate"], &config);
-    let report: serde_json::Value = serde_json::from_str(&report).expect("a JSON report");
+    let report: serde_json::Value =
+        serde_json::from_str(report.lines().last().unwrap_or_default()).expect("a JSON report");
     let fetched = report["item"]["patch"]
         .as_array()
         .expect("item patch")
@@ -449,7 +450,8 @@ fn every_folder_is_readable_from_its_newest_mail_early() {
     );
 
     let report = neverest(&["--json", "sync", "-a", "prime"], &config);
-    let report: serde_json::Value = serde_json::from_str(&report).expect("a JSON report");
+    let report: serde_json::Value =
+        serde_json::from_str(report.lines().last().unwrap_or_default()).expect("a JSON report");
     for coverage in report["coverage"].as_array().expect("coverage") {
         assert!(
             coverage["round"].is_null(),
@@ -521,8 +523,13 @@ fn a_primed_run_reports_each_fetch_once() {
             "-j {connections} --prime {prime}: first body {first_body:?}, every first page {first_pages:?}, whole run {whole:?}"
         );
 
-        let report: serde_json::Value =
-            serde_json::from_slice(&output.stdout).expect("a JSON report");
+        let report: serde_json::Value = serde_json::from_str(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .last()
+                .unwrap_or_default(),
+        )
+        .expect("a JSON report");
         let fetched: Vec<&str> = report["item"]["patch"]
             .as_array()
             .expect("item patch")
@@ -698,7 +705,8 @@ fn a_body_gone_mid_run_is_owed_nothing() {
     );
 
     let report = neverest(&["--json", "sync", "-a", "gone"], &config);
-    let report: serde_json::Value = serde_json::from_str(&report).expect("a JSON report");
+    let report: serde_json::Value =
+        serde_json::from_str(report.lines().last().unwrap_or_default()).expect("a JSON report");
     let fetched = report["item"]["patch"]
         .as_array()
         .expect("item patch")

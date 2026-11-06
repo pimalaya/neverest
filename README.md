@@ -157,11 +157,13 @@ A card or an event edited on both sides is merged against the base the last sync
 Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries the two numbers a notifier needs: `conflicts` is what this run marked, `outstandingConflicts` what the store holds waiting. Testing the first notifies on entry, once, with no state of its own to keep:
 
 ```sh
-neverest sync --json | jq -e '.conflicts | length > 0' >/dev/null \
+neverest sync --json | jq -e 'select(has("event") | not) | .conflicts | length > 0' >/dev/null \
   && notify-send "neverest" "an item needs a decision"
 ```
 
 A wrapper reading that report can name the item, its collection and its side, which a fixed summary and body could not.
+
+Before its report, `sync --json` prints its progress, one line per event, each carrying `event` (`neverest json-schema neverest-sync.events` describes them), so a frontend can show how far a long run got; the report is the last line.
 
 Deciding is a command and never a run. `conflict list` names what is waiting, `conflict show <id>` prints the three bodies, and `conflict resolve <id>` settles one, either by taking a side with `--prefer-local` or `--prefer-remote` or by handing the bodies to the merger `conflict.merger` names.
 

@@ -32,6 +32,7 @@ pub mod index;
 pub mod invitation;
 pub mod pipe;
 pub mod prof;
+pub mod progress;
 pub mod remote;
 pub mod state;
 pub mod storage;

@@ -168,11 +168,8 @@ pub struct SourceAccount {
 }
 
 impl SourceAccount {
-    /// Resolves one endpoint on its own, for the wizard's checks.
-    #[cfg(all(
-        feature = "wizard",
-        any(feature = "imap", feature = "msgraph", feature = "dav")
-    ))]
+    /// Resolves one endpoint on its own, for the wizard's sign-in tests.
+    #[cfg(feature = "wizard")]
     pub fn resolve(name: &str, config: &SourceConfig) -> Result<Self> {
         Self::resolve_with(
             name,
@@ -457,7 +454,7 @@ pub struct SmtpAccount {
 impl SmtpAccount {
     /// Resolves a send channel on its own, for the wizard's check and
     /// the submission tests.
-    #[cfg(any(test, all(feature = "wizard", feature = "imap")))]
+    #[cfg(any(test, feature = "wizard"))]
     pub fn resolve(config: &SmtpConfig) -> Result<Self> {
         Self::resolve_with(config, &mut SecretResolver::new())
     }

@@ -1,40 +1,25 @@
-//! # Secret prompts
+//! # Secret choices
 //!
-//! Shared by the discovered-backend wizards, delegating to pimalaya-cli's
-//! OS-aware pickers: [`configure_password`] offers the OS keyrings,
-//! [`configure_token`] the OAuth 2.0 token brokers, both a custom command or
-//! a raw value too.
+//! Turns what pimalaya-cli's secret prompts answer into the [`Secret`] the
+//! configuration holds.
 //!
-//! A known provider or broker yields an argv command (a TOML array); a custom
-//! command is a shell string. Neverest only reads the secret: the value must
-//! already be stored, and a missing one surfaces when the connection is
-//! tested right after.
-
-#![cfg_attr(not(feature = "imap"), allow(dead_code, unused_imports))]
+//! A known keyring or token broker yields an argv command (a TOML array), a
+//! custom one a shell string, and raw storage the value itself.
 
 use anyhow::{Result, bail};
 use pimalaya_cli::wizard::keyring::{self, SecretChoice};
 use pimalaya_config::{command::CommandConfig, secret::Secret};
 
-/// Prompts for a password [`Secret`] through the shared keyring picker.
+/// Prompts for an OAuth 2.0 access token through the shared token picker,
+/// which offers the token brokers beside the keyrings.
 ///
-/// `key_default` seeds the keyring entry (typically `<account>-<protocol>`),
-/// used verbatim, so a pre-existing secret is read exactly as named.
-pub fn configure_password(label: &str, key_default: &str) -> Result<Secret> {
-    to_secret(keyring::prompt_secret(label, key_default)?)
-}
-
-/// Prompts for an API token [`Secret`] through the shared token picker.
-///
-/// It combines the OS keyrings with the OAuth 2.0 brokers when `oauth` is
-/// true (a broker prints a fresh token on every read). `key_default` seeds
-/// the keyring entry or the broker account handle.
-pub fn configure_token(label: &str, key_default: &str, oauth: bool) -> Result<Secret> {
-    to_secret(keyring::prompt_token(label, key_default, oauth)?)
+/// `key_default` seeds the keyring entry or the broker account handle.
+pub fn configure_token(label: &str, key_default: &str) -> Result<Secret> {
+    to_secret(keyring::prompt_token(label, key_default, true)?)
 }
 
 /// Turns a picker choice into the [`Secret`] the configuration stores.
-fn to_secret(choice: SecretChoice) -> Result<Secret> {
+pub fn to_secret(choice: SecretChoice) -> Result<Secret> {
     Ok(match choice {
         SecretChoice::Command(argv) => command_secret(argv)?,
         SecretChoice::Shell(line) => shell_secret(&line)?,
@@ -44,7 +29,7 @@ fn to_secret(choice: SecretChoice) -> Result<Secret> {
 
 /// Builds a [`Secret::Command`] from an argv, the form a known keyring
 /// provider or token broker yields. It serializes back as a TOML array.
-fn command_secret(argv: Vec<String>) -> Result<Secret> {
+pub fn command_secret(argv: Vec<String>) -> Result<Secret> {
     let Some((program, args)) = argv.split_first() else {
         bail!("Empty command for secret");
     };
@@ -68,7 +53,7 @@ fn shell_secret(line: &str) -> Result<Secret> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::wizard::secret::*;
 
     #[test]
     fn empty_command_secret_is_rejected() {

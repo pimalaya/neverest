@@ -1,7 +1,7 @@
 //! # Configure command
 //!
 //! The wizard generates, it never edits: it discovers an account from one
-//! prompt (see [`crate::wizard::discover`]), tests it, then hands the
+//! prompt (see [`crate::wizard::discover`]), signs it in, then hands the
 //! resulting `[accounts.<name>]` table back as a file to create, a block
 //! to append, or a document on stdout.
 //!
@@ -10,10 +10,11 @@
 //! configuration. That offer is the only place the wizard introduces
 //! itself, the command asked for by name going straight to the prompts.
 //!
-//! One account, one source, in the direct-backend sugar
-//! (`imap.server = …`). A second kind, a mirror, a fan-in and every field
-//! discovery does not cover are written by hand against the documented
-//! sample, and so is a change to an account already there.
+//! One account, one source per domain set up (mail, contacts, calendar), in
+//! the direct-backend sugar (`imap.server = …`), plus the mail source's
+//! `smtp` channel. A mirror, a fan-in and every field discovery does not
+//! cover are written by hand against the documented sample, and so is a
+//! change to an account already there.
 //!
 //! Appending is a plain text append rather than a re-serialization, so
 //! comments, ordering and hand-written formatting come out untouched.
@@ -43,23 +44,26 @@ use crate::{
 
 /// Configure an account interactively.
 ///
-/// Discovers a provider's settings from an email address, tests the
-/// connection, then saves the resulting account to the configuration
-/// file, appends it to the one already there, or prints it for you to
-/// place by hand.
+/// Discovers your mail, sending, contacts and calendar servers from an
+/// email address, reviews what it picked, signs each identity in once and
+/// tests it, asks which collections to sync, then saves the resulting
+/// account to the configuration file, appends it to the one already there,
+/// or prints it for you to place by hand.
 ///
-/// Anything discovery does not cover, a second source, a mirror or a
-/// change to an account already configured, is written by hand.
+/// Anything discovery does not cover, a mirror or a change to an account
+/// already configured, is written by hand.
 #[derive(Debug, Parser)]
 pub struct ConfigureCommand;
 
 impl ConfigureCommand {
     /// Runs the wizard, then saves, appends or prints the account.
     ///
-    /// The account name is not asked, being only the TOML table key, and
-    /// `-a` names nothing here: the wizard generates rather than edits. A
-    /// redirected stdout or the JSON output stays non-interactive, the
-    /// prompts rendering on stderr and no file being touched.
+    /// The account name is not asked, being only the TOML table key, but it
+    /// is settled before the sign-ins, which name the keyring entries and
+    /// the Ortie account after it. `-a` names nothing here: the wizard
+    /// generates rather than edits. A redirected stdout or the JSON output
+    /// stays non-interactive, the prompts rendering on stderr and no file
+    /// being touched.
     pub fn execute(self, printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<()> {
         if !stdin().is_terminal() {
             bail!(
@@ -71,8 +75,7 @@ impl ConfigureCommand {
         let path = Config::target_path(config_paths)?;
         let existing = ExistingConfig::read(&path)?;
 
-        let (base_name, account) = discover::run()?;
-        let name = account_name(&base_name, existing.as_ref());
+        let (name, account) = discover::run(|base| account_name(base, existing.as_ref()))?;
 
         let config = ConfigureOutput {
             document: account.render(&name)?,
@@ -171,16 +174,17 @@ pub fn print_welcome(path: &Path) {
     eprintln!();
     eprintln!("Welcome to Neverest, the CLI to synchronize PIM collections.");
     eprintln!();
-    eprintln!("Neverest reconciles what you already have, mail over IMAP or Microsoft");
-    eprintln!("Graph and contacts and calendar over DAV, into a local pimdir store the");
-    eprintln!("apps read and edit. It needs one account to know what to reconcile, and");
-    eprintln!("no configuration file was found at:");
+    eprintln!("Neverest reconciles what you already have, mail over IMAP, the Gmail API or");
+    eprintln!("Microsoft Graph and contacts and calendars over DAV or their provider's");
+    eprintln!("API, into a local pimdir store the apps read and edit. It needs one account");
+    eprintln!("to know what to reconcile, and no configuration file was found at:");
     eprintln!();
     eprintln!("  {}", path.display());
     eprintln!();
-    eprintln!("The wizard discovers a provider's settings from your email address, tests");
-    eprintln!("the connection and generates a ready-to-use account. Everything discovery");
-    eprintln!("does not cover is written by hand, and every field is documented at:");
+    eprintln!("The wizard discovers your mail, contacts and calendar servers from your");
+    eprintln!("email address, signs each in once and generates one ready-to-use account");
+    eprintln!("covering them. Everything discovery does not cover is written by hand, and");
+    eprintln!("every field is documented at:");
     eprintln!();
     eprintln!("  {CONFIG_SAMPLE_URL}");
     eprintln!();
@@ -286,9 +290,14 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
+    use pimalaya_config::{command::CommandConfig, secret::Secret};
+
     use crate::{
         cli::configure::*,
-        config::{AccountConfig, ImapConfig, SourceBackendConfig, SourceConfig},
+        config::{
+            AccountConfig, CaldavConfig, CarddavConfig, CollectionFilter, DavAuthConfig,
+            ImapConfig, SaslConfig, SaslPlainConfig, SmtpConfig, SourceBackendConfig,
+        },
     };
 
     static NEXT_CONFIG: AtomicUsize = AtomicUsize::new(0);
@@ -302,7 +311,13 @@ mod tests {
     /// A minimal account naming one IMAP source, the shape the wizard
     /// writes.
     fn account() -> AccountConfig {
-        AccountConfig::with_source(SourceConfig::new(SourceBackendConfig::Imap(ImapConfig {
+        let mut account = AccountConfig::default();
+        account.set_direct_backend(SourceBackendConfig::Imap(imap()));
+        account
+    }
+
+    fn imap() -> ImapConfig {
+        ImapConfig {
             server: String::from("imaps://imap.example.org:993"),
             tls: Default::default(),
             starttls: false,
@@ -312,7 +327,15 @@ mod tests {
             flag: Default::default(),
             item: Default::default(),
             pool_size: None,
-        })))
+        }
+    }
+
+    /// The keyring entry a typed password was stored under.
+    fn stored() -> Secret {
+        Secret::Command(CommandConfig::Argv {
+            program: String::from("pass"),
+            args: vec![String::from("show"), String::from("neverest-perso-imap")],
+        })
     }
 
     /// A generated account claims no default: every command runs over
@@ -339,6 +362,100 @@ mod tests {
         let lines: Vec<&str> = document.lines().collect();
         assert_eq!(lines[0], "[accounts.perso]");
         assert_eq!(lines[1], "imap.server = \"imaps://imap.example.org:993\"");
+    }
+
+    /// The account the wizard writes for mail, sending, contacts and
+    /// calendar of one provider: one source per domain under one header,
+    /// read in domain order, the mail folders left out as an exclusion and
+    /// no permission written beside it, every source reading the one
+    /// stored password.
+    #[test]
+    fn an_account_covering_every_domain_parses_back() {
+        let sasl = Some(SaslConfig::Plain(SaslPlainConfig {
+            authzid: None,
+            authcid: String::from("jane@example.org"),
+            passwd: stored(),
+        }));
+        let auth = DavAuthConfig::Basic {
+            username: String::from("jane@example.org"),
+            password: stored(),
+        };
+
+        let mut imap = ImapConfig {
+            sasl: sasl.clone(),
+            ..imap()
+        };
+        imap.collection.filter =
+            CollectionFilter::Exclude(vec![String::from("Junk"), String::from("Trash")]);
+
+        let mut account = AccountConfig::default();
+        account.set_direct_backend(SourceBackendConfig::Imap(imap));
+        account.set_direct_backend(SourceBackendConfig::Carddav(CarddavConfig {
+            server: String::from("https://dav.example.org/"),
+            tls: Default::default(),
+            alpn: vec![String::from("http/1.1")],
+            auth: auth.clone(),
+            collection: Default::default(),
+            flag: Default::default(),
+            item: Default::default(),
+            pool_size: None,
+        }));
+        account.set_direct_backend(SourceBackendConfig::Caldav(CaldavConfig {
+            server: String::from("https://dav.example.org/"),
+            tls: Default::default(),
+            alpn: vec![String::from("http/1.1")],
+            auth,
+            collection: Default::default(),
+            flag: Default::default(),
+            item: Default::default(),
+            pool_size: None,
+        }));
+        account.smtp = Some(SmtpConfig {
+            server: String::from("smtps://smtp.example.org:465"),
+            tls: Default::default(),
+            starttls: false,
+            alpn: None,
+            sasl,
+        });
+
+        let document = account.render("perso").expect("render the account");
+
+        assert_eq!(document.matches("[accounts").count(), 1, "{document}");
+        assert!(
+            document.contains("imap.collection.filter.exclude = [\"Junk\", \"Trash\"]"),
+            "{document}"
+        );
+        assert!(!document.contains("collection.create"), "{document}");
+        assert!(!document.contains("collection.delete"), "{document}");
+        assert!(!document.contains("default"), "{document}");
+
+        let position = |group: &str| document.find(&format!("\n{group}.")).expect(group);
+        assert!(position("imap") < position("smtp"));
+        assert!(position("smtp") < position("carddav"));
+        assert!(position("carddav") < position("caldav"));
+
+        let config: Config = toml::from_str(&document).expect("parse the rendered account");
+        let account = &config.accounts["perso"];
+        account.validate().expect("a valid account");
+
+        let sources = account.sources().expect("the account's sources");
+        let mut names: Vec<&String> = sources.keys().collect();
+        names.sort();
+        assert_eq!(names, ["caldav", "carddav", "imap"]);
+        assert!(sources["imap"].smtp.is_some(), "the channel completes mail");
+        assert_eq!(
+            sources["imap"].collection().filter,
+            CollectionFilter::Exclude(vec![String::from("Junk"), String::from("Trash")])
+        );
+        assert_eq!(
+            sources["carddav"].collection().filter,
+            CollectionFilter::All
+        );
+        assert_eq!(
+            document.matches("neverest-perso-imap").count(),
+            4,
+            "{document}"
+        );
     }
 
     /// A hand-written account naming several sources still renders as

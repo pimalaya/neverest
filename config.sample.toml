@@ -11,7 +11,9 @@
 # rest are deep-merged on top of it.
 #
 # Bare `neverest` with no configuration file on disk offers the wizard, which
-# writes a one-account, one-source configuration in the flat spelling below.
+# writes one account with one source per domain it found (mail, contacts,
+# calendar) and the mail source's `smtp` channel, in the flat spelling below,
+# a `collection.filter.exclude` on a source whose collections you unpicked.
 # Everything else on this page is written by hand.
 #
 # Every account shares ONE pimdir STORE, each fed by one or more named SOURCES,

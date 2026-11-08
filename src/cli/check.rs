@@ -278,8 +278,9 @@ fn check_source(
 }
 
 /// Opens one connection to `source` and lists its collections, with the
-/// role and the default mark the server states.
-fn list(source: &SourceAccount) -> Result<Vec<CheckedCollection>> {
+/// role and the default mark the server states: the per-endpoint test the
+/// wizard signs a source in with too.
+pub fn list(source: &SourceAccount) -> Result<Vec<CheckedCollection>> {
     let mut client = client::open(source)?;
     let mut roles = client.collection_roles()?;
     let default = client.default_collection()?;
@@ -493,7 +494,7 @@ impl ChannelCheck {
 }
 
 /// One collection a source listed, and what the server says it is for.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckedCollection {
     /// The collection's id on its source: the mailbox name on IMAP, the

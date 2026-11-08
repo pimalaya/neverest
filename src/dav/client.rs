@@ -91,16 +91,6 @@ impl DavKind {
         }
     }
 
-    /// The configuration table this flavour is written under, also the id of
-    /// the source the direct-backend sugar builds from it.
-    #[cfg(feature = "wizard")]
-    pub fn protocol(self) -> &'static str {
-        match self {
-            Self::Card => "carddav",
-            Self::Cal => "caldav",
-        }
-    }
-
     /// The conventional extension a new resource is named with.
     fn extension(self) -> &'static str {
         match self {

@@ -164,6 +164,12 @@ Upgrading from 0.3.0:
 
 - Changed `default = true` on an account to be read and ignored, with a warning, and the wizard to write none.
 
+- Changed the wizard to write one account covering every domain discovery found: one source per domain set up, mail, contacts and calendar, through the direct-backend sugar, and the mail source's `smtp` channel.
+
+  It picks the best option per domain without a question and reviews the picks in plain words before any sign-in, signs each identity in once (one Ortie hand-off per authorization server, one password per group of servers of one name), tests it at once and stores a typed password in a keyring under `neverest-<account>-<source>`, then asks which collections each source syncs, mail starting without junk and trash. Nothing discovered asks for a server URL. No SASL mechanism, HTTP scheme or user id is asked any more.
+
+- Changed a rendered account to read mail, its `smtp` channel, contacts then calendar, and to omit `collection.create` and `collection.delete` beside a collection filter when they hold their defaults.
+
 - Changed the retention sweep to purge the account's own retained items alone, so one account's `store.purge-after` never empties another's trash.
 
 - Changed the store-wide lock to make a second run over a held store report its accounts `busy` and exit 3 after the bounded wait, where it failed.
@@ -252,6 +258,10 @@ Upgrading from 0.3.0:
 - Changed the search index to read floating times and all-day dates in the user's time zone, `TZ` else the system's, rather than in UTC.
 
   A zone with no IANA name reads as UTC, with a warning. The first refresh in another zone re-expands every calendar item.
+
+- Bumped io-pim-discovery to 0.11.
+
+  Discovery falls back to the autoconfig of the provider a domain's MX records name, and resolves the CalDAV and CardDAV roots a provider advertises (RFC 6764).
 
 - Bumped io-pimdir to 0.9 (pimdir storage-draft-09, sync-draft-08, search-draft-09): a store any earlier neverest wrote is refused, never migrated.
 

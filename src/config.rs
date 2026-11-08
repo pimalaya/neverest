@@ -60,6 +60,11 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
 
+/// [`is_default`] for a flag defaulting to true.
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
 /// [`is_default`] for the HTTP ALPN list, whose default is not empty.
 fn is_default_http_alpn(alpn: &[String]) -> bool {
     alpn == default_http_alpn().as_slice()
@@ -385,8 +390,9 @@ pub struct AccountConfig {
     collection: Option<RemovedKey>,
 }
 
-/// The account groups in reading order: the backend the wizard writes
-/// first, the sync options it never writes last.
+/// The account groups in reading order: the backends the wizard writes
+/// first, mail then its send channel, contacts, then calendar, the sync
+/// options it never writes last.
 ///
 /// Serialized alphabetically a generated account would open on
 /// `connections` and bury its backend under `conflict`.
@@ -394,16 +400,16 @@ pub struct AccountConfig {
 const RENDER_ORDER: [&str; 20] = [
     "default",
     "imap",
-    "carddav",
-    "caldav",
     "jmap",
     "gmail",
     "msgraph",
-    "msgraph-contacts",
-    "msgraph-calendar",
-    "gpeople",
-    "gcal",
     "smtp",
+    "carddav",
+    "gpeople",
+    "msgraph-contacts",
+    "caldav",
+    "gcal",
+    "msgraph-calendar",
     "sources",
     "targets",
     "one-way",
@@ -493,26 +499,10 @@ impl AccountConfig {
         Ok(document)
     }
 
-    /// A single-source account, the only shape the wizard writes: one
-    /// provider, one protocol, a store keeping every body.
-    ///
-    /// The `default` flag is left to the caller, which claims it only when
-    /// no account already in the configuration holds it.
+    /// Writes `backend` as the direct-backend sugar, a source named after
+    /// its protocol, replacing the backend of that protocol.
     #[cfg(feature = "wizard")]
-    pub fn with_source(source: SourceConfig) -> Self {
-        let mut account = Self::default();
-        account.set_direct_source(source);
-        account
-    }
-
-    /// Writes `source` as the direct-backend sugar, replacing the backend of
-    /// that protocol and lifting its send channel to the account `smtp`.
-    #[cfg(feature = "wizard")]
-    pub fn set_direct_source(&mut self, source: SourceConfig) {
-        let SourceConfig { backend, smtp } = source;
-
-        self.smtp = smtp;
-
+    pub fn set_direct_backend(&mut self, backend: SourceBackendConfig) {
         match backend {
             SourceBackendConfig::Imap(config) => self.imap = Some(config),
             SourceBackendConfig::Carddav(config) => self.carddav = Some(config),
@@ -1184,6 +1174,22 @@ impl SourceBackendConfig {
             Self::Gcal(_) => "gcal",
         }
     }
+
+    /// The backend's collection table, to set its filter.
+    #[cfg(feature = "wizard")]
+    pub fn collection_mut(&mut self) -> &mut CollectionSourceConfig {
+        match self {
+            Self::Imap(c) => &mut c.collection,
+            Self::Carddav(c) => &mut c.collection,
+            Self::Caldav(c) => &mut c.collection,
+            Self::Jmap(c) => &mut c.collection,
+            Self::Gmail(c) => &mut c.collection,
+            Self::Msgraph(c) | Self::MsgraphContacts(c) | Self::MsgraphCalendar(c) => {
+                &mut c.collection
+            }
+            Self::Gpeople(c) | Self::Gcal(c) => &mut c.collection,
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -1375,13 +1381,13 @@ pub struct CollectionSourceConfig {
     /// It grants by default, unlike the `item` block, which must be declared
     /// in full: this table also carries `filter`, and demanding a permission
     /// pair from someone writing a filter would be a trap.
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub create: bool,
     /// Whether the sync may delete one on this source, off unless asked for.
     ///
     /// A collection delete is inferred from an absence, the only signal IMAP
     /// and DAV leave, and a listing may drop a collection nobody deleted.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub delete: bool,
     /// Removed key, kept so a configuration carrying it is refused by name.
     ///

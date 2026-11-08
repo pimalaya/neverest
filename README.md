@@ -36,7 +36,7 @@
 - **Auth** support: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256 for IMAP; basic and bearer for CardDAV and CalDAV; bearer for Microsoft Graph, Google People and Google Calendar
 - **TLS** support: [Rustls](https://crates.io/crates/rustls) with ring or aws crypto (`rustls-aws` feature), [Native TLS](https://crates.io/crates/native-tls) (`native-tls` feature)
 - **Discovery** support: known provider rules, PACC, Thunderbird Autoconfiguration, SRV <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup> and DAV <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup>, all run in parallel
-- **Interactive wizard** turning an email address into a tested account
+- **Interactive wizard** turning an email address into one tested account covering mail, sending, contacts and calendar
 - **TOML configuration** with multi-account support, and **JSON** output via `--json`, described by `neverest json-schema`
 
 > [!TIP]
@@ -117,7 +117,9 @@ A configuration is loaded from the first valid path among:
 
 Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths can be passed at once, separated by `:`. The first one is the base and the rest are deep-merged on top. The full field reference lives in [config.sample.toml](./config.sample.toml).
 
-Run `neverest` with no configuration file on disk and a minimal wizard discovers a provider from an email address, tests it, then offers to write the result. It sets up **one account with one backend**, the offline replica most setups want; anything else is written by hand against [config.sample.toml](./config.sample.toml).
+Run `neverest` with no configuration file on disk and a wizard discovers your servers from an email address, then offers to write the result. It sets up **one account with one source per domain** it found, mail (IMAP, the Gmail API or Microsoft Graph), contacts (CardDAV, the People API or Graph) and calendar (CalDAV, the Calendar API or Graph), plus an SMTP channel for sending, the offline replica most setups want; a mirror, a fan-in and anything else are written by hand against [config.sample.toml](./config.sample.toml).
+
+Each domain gets the best option found without a question, and a review shows the picks in plain words, each one a change away (another option, a server URL, or leaving the domain out). Each identity then signs in once: one password for the servers of one name (imap.example.org, smtp.example.org and dav.example.org share one), typed once, tested at once, then stored in a keyring you pick under `neverest-<account>-<source>`, or one browser sign-in through [Ortie](https://github.com/pimalaya/ortie) per authorization server. Last, each source lists its collections to pick from, mail starting without junk and trash. Finding nothing asks for a server URL (`imaps://`, `https://`, `carddavs://`, `caldavs://`).
 
 `neverest configure` runs the same flow to add another account. It generates and never edits: the account it produces is appended to the file already there as plain text, so your comments and formatting survive, and changing an account is a job for your editor.
 

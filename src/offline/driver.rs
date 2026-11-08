@@ -5474,7 +5474,7 @@ fn drain_submits(
         // overwrite.
         let mut halted: Option<String> = None;
         for intent in &intents {
-            if let Some(why) = halted.as_deref().or(channel.lost()) {
+            if let Some(why) = halted.as_deref().or(channel.stopped()) {
                 let error = format!("Not attempted, {why}");
                 report
                     .submitted

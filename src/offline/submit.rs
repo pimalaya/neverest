@@ -205,6 +205,8 @@ pub fn uncertain_reason(detail: &str) -> String {
 pub enum Disposition {
     /// Certainly not delivered, worth trying again.
     Transient,
+    /// Certainly not delivered, nothing taken until a sending limit lifts.
+    Limited,
     /// Refused for good.
     Permanent,
     /// Maybe delivered.
@@ -215,28 +217,54 @@ pub enum Disposition {
 impl Disposition {
     fn with(self, err: anyhow::Error) -> SubmitFailure {
         match self {
-            Self::Transient => SubmitFailure::Transient(err),
+            Self::Transient | Self::Limited => SubmitFailure::Transient(err),
             Self::Permanent => SubmitFailure::Permanent(err),
             Self::Uncertain => SubmitFailure::Uncertain(err),
         }
     }
 }
 
-/// An SMTP failure by its reply code (RFC 5321 §4.2.1), `None` when no
-/// reply came, and whether the data's final `.` had been written whole.
+/// An SMTP failure by its reply (RFC 5321 §4.2.1), `None` when no reply
+/// came, and whether the data's final `.` had been written whole.
 ///
-/// A 5yz reply refuses the message for good and a 4yz one asks for it
-/// later; both are a verdict, so the message was not taken. Without a reply,
-/// a failure before the final `.` left the transaction unfinished, which the
-/// server discards; after it, the server may have taken the message.
+/// A 5yz reply refuses the message for good, unless it names a sending limit,
+/// and a 4yz one asks for it later; both are a verdict, so the message was
+/// not taken. Without a reply, a failure before the final `.` left the
+/// transaction unfinished, which the server discards; after it, the server
+/// may have taken the message.
 #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
-pub fn smtp_disposition(code: Option<u16>, handed_over: bool) -> Disposition {
-    match code {
-        Some(code) if (500..600).contains(&code) => Disposition::Permanent,
+pub fn smtp_disposition(reply: Option<(u16, &str)>, handed_over: bool) -> Disposition {
+    match reply {
+        Some((code, text)) if (500..600).contains(&code) && names_a_sending_limit(text) => {
+            Disposition::Limited
+        }
+        Some((code, _)) if (500..600).contains(&code) => Disposition::Permanent,
         Some(_) => Disposition::Transient,
         None if handed_over => Disposition::Uncertain,
         None => Disposition::Transient,
     }
+}
+
+/// Enhanced status codes (RFC 3463) meaning a sending rate or quota alone.
+#[cfg_attr(not(feature = "smtp"), allow(dead_code))]
+const SENDING_LIMIT_CODES: &[&str] = &["5.4.5", "5.1.90", "5.7.232", "5.7.233", "5.7.236"];
+
+/// Wording of a sending rate or quota refusal under an ambiguous code.
+#[cfg_attr(not(feature = "smtp"), allow(dead_code))]
+const SENDING_LIMIT_WORDS: &[&str] = &[
+    "submissionquotaexceeded",
+    "submission quota",
+    "sending limit exceeded",
+    "rate limited",
+    "daily limit for message recipients",
+];
+
+/// Whether a 5yz reply text names a sending rate or quota.
+#[cfg_attr(not(feature = "smtp"), allow(dead_code))]
+fn names_a_sending_limit(text: &str) -> bool {
+    let code = text.split_ascii_whitespace().next().unwrap_or_default();
+    let text = text.to_ascii_lowercase();
+    SENDING_LIMIT_CODES.contains(&code) || SENDING_LIMIT_WORDS.iter().any(|w| text.contains(w))
 }
 
 /// A Graph `sendMail` failure by its HTTP status, `None` when no answer was
@@ -347,6 +375,8 @@ pub struct SendChannel<'a> {
     link: Link<'a>,
     /// Why the session cannot carry another message, once it cannot.
     lost: Option<String>,
+    /// Why the provider takes no other message this run, once it said so.
+    held: Option<String>,
 }
 
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
@@ -371,6 +401,7 @@ impl<'a> SendChannel<'a> {
         Self {
             link: Link::Smtp(client),
             lost: None,
+            held: None,
         }
     }
 
@@ -380,13 +411,14 @@ impl<'a> SendChannel<'a> {
         Self {
             link: Link::Graph(client),
             lost: None,
+            held: None,
         }
     }
 
-    /// Why the session can carry no further message, once a failure broke
-    /// it: the intents behind are left for the next run, untouched.
-    pub fn lost(&self) -> Option<&str> {
-        self.lost.as_deref()
+    /// Why the channel carries no further message: a failure broke it or a
+    /// sending limit holds it, the intents behind left for the next run.
+    pub fn stopped(&self) -> Option<&str> {
+        self.lost.as_deref().or(self.held.as_deref())
     }
 
     /// Closes the channel once the run's intents are attempted.
@@ -505,15 +537,13 @@ pub fn prepare(blobs: &PimdirBlobs, intent: &SubmitIntent) -> Result<Outgoing, S
 /// Hands one message over through `channel`.
 ///
 /// The payload provides the SMTP envelope, the pinned blob the raw bytes.
-/// Message content is never logged. A failure leaving the session unusable
-/// marks the channel [`lost`](SendChannel::lost), and a lost channel
-/// attempts nothing.
+/// Message content is never logged. A failure leaving the session unusable,
+/// or a refusal for a sending limit, [`stops`](SendChannel::stopped) the
+/// channel, and a stopped channel attempts nothing.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), SubmitFailure> {
-    if let Some(lost) = &channel.lost {
-        return Err(SubmitFailure::Transient(anyhow!(
-            "Not attempted, the send channel broke on an earlier message: {lost}"
-        )));
+    if let Some(why) = channel.stopped() {
+        return Err(SubmitFailure::Transient(anyhow!("Not attempted, {why}")));
     }
 
     #[cfg_attr(not(feature = "smtp"), allow(unused_variables))]
@@ -532,15 +562,20 @@ pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), 
             let Err(failed) = hand_over_smtp(client, reverse, forwards, bytes) else {
                 return Ok(());
             };
-            let code = reply_code(&failed.error);
+            let reply = reply_of(&failed.error);
+            let replied = reply.is_some();
+            let disposition = smtp_disposition(reply, failed.handed_over);
             let error = anyhow!(failed.error).context("SMTP submission error");
-            let failure = smtp_disposition(code, failed.handed_over).with(error);
+            let failure = disposition.with(error);
+            let error = format!("{:#}", failure.error());
             // NOTE: a reply leaves the session usable once the transaction
             // is reset; a failure without one leaves it in no known state.
-            if code.is_none() {
-                channel.lost = Some(format!("{:#}", failure.error()));
+            if !replied {
+                channel.lost = Some(format!("the send channel broke: {error}"));
             } else if let Err(err) = client.rset() {
                 channel.lost = Some(format!("RSET after a refusal failed: {err}"));
+            } else if disposition == Disposition::Limited {
+                channel.held = Some(format!("a sending limit holds the channel: {error}"));
             }
             Err(failure)
         }
@@ -556,7 +591,7 @@ pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), 
             let error = anyhow!(error).context("Graph sendMail error");
             let failure = graph_disposition(status, unanswered).with(error);
             if status.is_none() {
-                channel.lost = Some(format!("{:#}", failure.error()));
+                channel.lost = Some(format!("the send channel broke: {:#}", failure.error()));
             }
             Err(failure)
         }
@@ -629,24 +664,27 @@ fn hand_over_smtp(
     }
 }
 
-/// The reply code an SMTP failure carries, `None` when no reply came.
+/// The reply code and text an SMTP failure carries, `None` when no reply
+/// came.
 #[cfg(feature = "smtp")]
-fn reply_code(err: &SmtpClientError) -> Option<u16> {
+fn reply_of(err: &SmtpClientError) -> Option<(u16, &str)> {
     let send = match err {
         SmtpClientError::MessageSend(send) => send,
-        SmtpClientError::Mail(SmtpMailError::Rejected { code, .. })
-        | SmtpClientError::Rcpt(SmtpRcptError::Rejected { code, .. })
+        SmtpClientError::Mail(SmtpMailError::Rejected { code, message })
+        | SmtpClientError::Rcpt(SmtpRcptError::Rejected { code, message })
         | SmtpClientError::Data(
-            SmtpDataError::CommandRejected { code, .. } | SmtpDataError::BodyRejected { code, .. },
-        ) => return Some(*code),
+            SmtpDataError::CommandRejected { code, message }
+            | SmtpDataError::BodyRejected { code, message },
+        ) => return Some((*code, message)),
         _ => return None,
     };
     match send {
-        SmtpMessageSendError::MailFrom(SmtpMailError::Rejected { code, .. })
-        | SmtpMessageSendError::RcptTo(SmtpRcptError::Rejected { code, .. })
+        SmtpMessageSendError::MailFrom(SmtpMailError::Rejected { code, message })
+        | SmtpMessageSendError::RcptTo(SmtpRcptError::Rejected { code, message })
         | SmtpMessageSendError::Data(
-            SmtpDataError::CommandRejected { code, .. } | SmtpDataError::BodyRejected { code, .. },
-        ) => Some(*code),
+            SmtpDataError::CommandRejected { code, message }
+            | SmtpDataError::BodyRejected { code, message },
+        ) => Some((*code, message)),
         _ => None,
     }
 }
@@ -678,16 +716,54 @@ mod dispositions {
 
     #[test]
     fn an_smtp_reply_decides_and_only_silence_after_the_dot_is_uncertain() {
-        assert_eq!(smtp_disposition(Some(554), false), Disposition::Permanent);
-        assert_eq!(smtp_disposition(Some(550), true), Disposition::Permanent);
-        assert_eq!(smtp_disposition(Some(451), false), Disposition::Transient);
+        let refused = Some((554, "rejected"));
+        assert_eq!(smtp_disposition(refused, false), Disposition::Permanent);
+        let refused = Some((550, "5.1.1 User unknown"));
+        assert_eq!(smtp_disposition(refused, true), Disposition::Permanent);
+        let deferred = Some((451, "4.3.0 try later"));
+        assert_eq!(smtp_disposition(deferred, false), Disposition::Transient);
         assert_eq!(
-            smtp_disposition(Some(452), true),
+            smtp_disposition(Some((452, "mailbox full")), true),
             Disposition::Transient,
             "a 4yz after the data is a verdict: not taken"
         );
         assert_eq!(smtp_disposition(None, false), Disposition::Transient);
         assert_eq!(smtp_disposition(None, true), Disposition::Uncertain);
+    }
+
+    #[test]
+    fn a_5yz_refusing_for_a_sending_limit_holds_the_message() {
+        for text in [
+            "5.4.5 Daily user sending limit exceeded.",
+            "5.1.90 Your message can't be sent because you've reached your daily limit",
+            "5.2.0 STOREDRV.Submission.Exception:SubmissionQuotaExceededException",
+            "5.2.2 Submission quota exceeded",
+            "5.7.1 Daily SMTP relay sending limit exceeded for this customer.",
+            "5.7.1 This email has been rate limited.",
+            "Daily user sending limit exceeded",
+        ] {
+            let reply = Some((550, text));
+            assert_eq!(
+                smtp_disposition(reply, true),
+                Disposition::Limited,
+                "{text}"
+            );
+        }
+        assert!(!Disposition::Limited.with(anyhow!("550")).parks());
+
+        for text in [
+            "5.4.50 Unknown",
+            "5.2.2 mailbox full; STOREDRV.Submission.Exception:QuotaExceededException",
+            "5.1.8 Access denied, bad outbound sender",
+            "5.7.1 Delivery not authorized",
+        ] {
+            let reply = Some((550, text));
+            assert_eq!(
+                smtp_disposition(reply, true),
+                Disposition::Permanent,
+                "{text}"
+            );
+        }
     }
 
     #[test]
@@ -973,7 +1049,7 @@ mod tests {
         assert!(failure.parks(), "5xx must park: {}", failure.error());
         assert!(!failure.uncertain());
         assert!(
-            channel.lost().is_none(),
+            channel.stopped().is_none(),
             "a reply leaves the session usable"
         );
 
@@ -983,6 +1059,30 @@ mod tests {
         let failure = send_one(&mut channel, blobs, &intent).expect_err("deferred");
         assert!(!failure.parks(), "4xx must retry: {}", failure.error());
         assert!(!failure.uncertain());
+    }
+
+    #[test]
+    fn a_refusal_for_a_sending_limit_stops_the_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let blobs = stage.blobs();
+
+        let intent = stage_intent(&stage, 1, &["b@y.org"], b"body");
+        let reply = "550 5.4.5 Daily user sending limit exceeded\r\n";
+        let (port, captured) = spawn_smtp_sink(Sink::RejectBody(reply));
+        let mut channel = channel_to(port);
+        let failure = send_one(&mut channel, blobs, &intent).expect_err("limited");
+        assert!(!failure.parks(), "{failure:?}");
+        assert!(channel.stopped().is_some());
+
+        let next = stage_intent(&stage, 2, &["b@y.org"], b"other");
+        let failure = send_one(&mut channel, blobs, &next).expect_err("not attempted");
+        assert!(!failure.parks(), "{failure:?}");
+        channel.close();
+
+        let captured = captured.recv().unwrap();
+        assert_eq!(captured.data, b"body\r\n", "the second never left");
+        assert_eq!(captured.commands.last().map(String::as_str), Some("RSET"));
     }
 
     #[test]
@@ -1022,7 +1122,7 @@ mod tests {
         let failure = send_one(&mut channel, blobs, &intent).expect_err("no verdict");
         assert!(failure.uncertain(), "{failure:?}");
         assert!(failure.parks());
-        assert!(channel.lost().is_some(), "the session is gone");
+        assert!(channel.stopped().is_some(), "the session is gone");
         assert_eq!(captured.recv().unwrap().data, b"body\r\n");
 
         // NOTE: the next message is not attempted on a lost session.
@@ -1042,7 +1142,7 @@ mod tests {
             matches!(failure, SubmitFailure::Transient(_)),
             "{failure:?}"
         );
-        assert!(channel.lost().is_some());
+        assert!(channel.stopped().is_some());
     }
 
     #[test]

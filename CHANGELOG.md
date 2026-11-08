@@ -297,6 +297,8 @@ Upgrading from 0.3.0:
 
 - Fixed `sync --accept-mode` being refused like the run it answers: it lets that run through and records the new mode.
 
+- Fixed a send the SMTP server refused for a sending rate or quota (a 5xx such as `550 5.4.5`) being parked: it stays queued for a later run, and the run attempts no other send.
+
 - Fixed an IMAP `SELECT` answer without `EXISTS` read as an empty mailbox, which deleted every message: such a mailbox is searched.
 
 - Fixed a renumbered IMAP mailbox (a moved `UIDVALIDITY`) listed under its new UIDs before it was rekeyed, which pushed flags to the wrong messages and dropped every message as deleted.

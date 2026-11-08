@@ -54,6 +54,8 @@ enum Smtp {
     Accept,
     /// Reads the whole message, then hangs up without a verdict.
     HangUpAfterData,
+    /// Reads the whole message, then refuses it with this reply.
+    RefuseData(&'static str),
     /// Refuses the credentials.
     RefuseAuth,
 }
@@ -109,10 +111,12 @@ fn spawn_gated_smtp(
                     read.send(()).unwrap();
                     answer.recv().unwrap();
                 }
-                if let Smtp::HangUpAfterData = smtp {
-                    break;
-                }
-                let _ = stream.write_all(b"250 queued\r\n");
+                let reply = match smtp {
+                    Smtp::HangUpAfterData => break,
+                    Smtp::RefuseData(reply) => reply,
+                    _ => "250 queued\r\n",
+                };
+                let _ = stream.write_all(reply.as_bytes());
             } else if upper.starts_with("QUIT") {
                 let _ = stream.write_all(b"221 bye\r\n");
                 break;
@@ -372,6 +376,38 @@ fn refused_credentials_fail_the_send_without_parking_it() {
     assert_eq!(submitted["uncertain"], false, "{report}");
     assert!(matches!(
         fixture.status(id),
+        PimdirActionStatus::Pending { attempts: 0, .. }
+    ));
+}
+
+/// A send refused for a daily limit waits for the next run, which the run's
+/// other sends wait for too: the limit holds for the account.
+#[test]
+fn a_send_refused_for_a_quota_stays_queued() {
+    let reply = "550 5.4.5 Daily user sending limit exceeded\r\n";
+    let (port, data) = spawn_smtp(Smtp::RefuseData(reply));
+    let fixture = Fixture::new(port, false);
+    let first = fixture.queue_send(BODY, false);
+    let second = fixture.queue_send(BODY, false);
+
+    let report = fixture.intents_only(3);
+
+    assert_eq!(data.recv().unwrap(), BODY, "{report}");
+    let submitted = &report["submitted"];
+    assert_eq!(submitted[0]["id"], first, "{report}");
+    let error = submitted[0]["error"].as_str().unwrap();
+    assert!(error.contains("5.4.5"), "{report}");
+    assert_eq!(submitted[0]["parked"], false, "{report}");
+    assert_eq!(submitted[1]["id"], second, "{report}");
+    let error = submitted[1]["error"].as_str().unwrap();
+    assert!(error.starts_with("Not attempted"), "{report}");
+    assert_eq!(submitted[1]["parked"], false, "{report}");
+    assert!(matches!(
+        fixture.status(first),
+        PimdirActionStatus::Pending { attempts: 1, .. }
+    ));
+    assert!(matches!(
+        fixture.status(second),
         PimdirActionStatus::Pending { attempts: 0, .. }
     ));
 }

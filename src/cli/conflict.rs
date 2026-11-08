@@ -352,7 +352,9 @@ fn read(name: &str, dir: &Path) -> Result<PimdirReader> {
 ))]
 mod tests {
     use std::{
-        fmt, fs, thread,
+        fmt, fs,
+        sync::PoisonError,
+        thread,
         time::{Duration, Instant},
     };
 
@@ -371,7 +373,7 @@ mod tests {
     use serde::Serialize;
 
     use super::*;
-    use crate::offline::storage::load_side;
+    use crate::{conflict::merger::SPAWNS, offline::storage::load_side};
 
     /// The account the seeded store is grouped under.
     const ACCOUNT: &str = "cards";
@@ -472,6 +474,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_store_written_under_the_merger_sends_the_decision_back_for_another_look() {
+        let _spawning = SPAWNS.write().unwrap_or_else(PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let scripts = tempfile::tempdir().unwrap();
         drop(store_with_conflict(dir.path()));

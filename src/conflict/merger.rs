@@ -38,6 +38,12 @@ const PLACEHOLDERS: [&str; 4] = ["{base}", "{local}", "{remote}", "{output}"];
 /// same abort, which they are: an empty card settles nothing.
 const UNWRITTEN: &[u8] = b"";
 
+/// Held exclusively by a test whose merger spawns, shared by one releasing a
+/// store and owning it again: a child holds the test process's locks until
+/// its exec, so a store owned again beside a spawn is refused as owned.
+#[cfg(test)]
+pub(crate) static SPAWNS: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 /// One invocation of the configured interactive merger over one divergence.
 pub struct Merger<'a> {
     /// The command the account's `conflict.merger` names.
@@ -205,6 +211,8 @@ fn quote(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::PoisonError;
+
     use super::*;
 
     /// The three bodies every merger test hands over.
@@ -222,6 +230,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_merger_that_aborts_or_writes_nothing_yields_no_body() {
+        let _spawning = SPAWNS.write().unwrap_or_else(PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
 
         for line in ["false", "true", "cat {base} > /dev/null"] {
@@ -237,6 +246,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_positional_merger_is_handed_the_four_paths_in_order() {
+        let _spawning = SPAWNS.write().unwrap_or_else(PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let command = CommandConfig::Shell(String::from(r#"sh -c 'cat "$1" "$2" "$3" > "$4"' --"#));
         let merger = Merger::export(&command, dir.path(), "vcf", &sides()).unwrap();
@@ -249,6 +259,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_merger_naming_its_placeholders_is_substituted_rather_than_appended() {
+        let _spawning = SPAWNS.write().unwrap_or_else(PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         let command = CommandConfig::Argv {
             program: String::from("cp"),

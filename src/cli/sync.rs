@@ -517,12 +517,15 @@ fn move_aside(replica: &Path) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::PoisonError;
+
     use io_pimdir::{
         client::{producer::PimdirProducer, reader::PimdirReader},
         codec::PimdirAction,
     };
 
     use super::*;
+    use crate::conflict::merger::SPAWNS;
 
     /// Ordering and pacing flags mean nothing to a run that lists nothing,
     /// so they are refused beside `--intents-only` and `--declare-only`;
@@ -570,6 +573,7 @@ mod tests {
     /// remedy, so a reset leaving it sidecar-less would raise it again.
     #[test]
     fn a_reset_leaves_a_store_the_next_run_can_read() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
 
         reset_replica(dir.path(), false).unwrap();
@@ -619,6 +623,7 @@ mod tests {
     /// pending and `--force`, and leaves the store as it was.
     #[test]
     fn a_reset_refuses_while_work_is_pending() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         store_with_queued_action(dir.path());
 
@@ -634,6 +639,7 @@ mod tests {
     /// A forced reset moves the store aside, whole, and starts a new one.
     #[test]
     fn a_forced_reset_moves_the_store_aside() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
         let root = tempfile::tempdir().unwrap();
         let dir = root.path().join("account");
         fs::create_dir_all(&dir).unwrap();
@@ -663,6 +669,7 @@ mod tests {
     #[cfg(feature = "search")]
     #[test]
     fn a_reset_takes_the_search_index_with_the_store() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
         use io_pimdir::client::search::{PimdirIndex, PimdirIndexRefreshOptions};
 
         let index = |dir: &Path| {

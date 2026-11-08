@@ -28,6 +28,9 @@
 #   143  → plain IMAP (mapped to container 993, which we reconfigured
 #          to be plain)
 #
+# STALWART_ADMIN_PORT and STALWART_IMAP_PORT move them, for a rootless
+# Docker that binds no port under 1024 (see tests/pasta.sh).
+#
 # The chosen password is `P!malaya-test-2026`. Stalwart's password
 # strength check rejects shorter / weaker secrets like `test`.
 
@@ -36,8 +39,8 @@ set -eu
 NAME="io-imap-tests"
 ADMIN_PASS="test"
 IMAP_PASS='P!malaya-test-2026'
-ADMIN_PORT=8080
-IMAP_HOST_PORT=143
+ADMIN_PORT="${STALWART_ADMIN_PORT:-8080}"
+IMAP_HOST_PORT="${STALWART_IMAP_PORT:-143}"
 IMAGE="stalwartlabs/stalwart:v0.16-alpine"
 
 CONFIG=$(mktemp)

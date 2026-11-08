@@ -33,10 +33,15 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
+//! ./tests/pimdir.sh
 //! cargo test --features dav --test endpoints -- --ignored
 //! ```
 
+mod common;
+
 use std::{fs, path::Path, process::Command};
+
+use crate::common::{none, pimdir_cli};
 
 const DAV: &str = "http://127.0.0.1:5232";
 /// The address book the divergence test owns on both principals.
@@ -253,7 +258,7 @@ fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
         "an authoritative source leaves nothing waiting; report was:\n{report}",
     );
     assert!(
-        !report.contains(r#""conflicts""#),
+        none(&report, "conflicts"),
         "and names nothing parked; report was:\n{report}",
     );
 
@@ -371,7 +376,7 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
         "the second holder is bound, not minted a key of its own; report was:\n{report}",
     );
     assert!(
-        !report.contains(r#""refused""#) && !report.contains(r#""rejected""#),
+        none(&report, "refused") && none(&report, "rejected"),
         "neither endpoint is asked to take a card it already holds; report was:\n{report}",
     );
 
@@ -449,7 +454,7 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
     // divergence once rather than once per run.
     let report = sync(&config, &state, SEED_BOOK, 2);
     assert!(
-        !report.contains(r#""kind":"update""#) && !report.contains(r#""conflicts""#),
+        !report.contains(r#""kind":"update""#) && none(&report, "conflicts"),
         "a rerun pushes nothing and re-announces nothing; report was:\n{report}",
     );
     assert!(
@@ -659,11 +664,11 @@ fn sync(config: &Path, state: &Path, book: &str, code: i32) -> String {
 /// them.
 fn store_items(state: &Path, book: &str) -> String {
     let store = state.join("neverest").join("div");
-    let output = Command::new("pimdir")
+    let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
         .args(["item", "list", &format!("a/{book}"), "--json"])
         .output()
-        .expect("spawn pimdir (cargo install --path ../io-pimdir --features cli)");
+        .expect("spawn pimdir");
 
     assert!(
         output.status.success(),

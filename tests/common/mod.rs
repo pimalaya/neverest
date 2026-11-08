@@ -553,9 +553,9 @@ fn default_token_uri() -> String {
     String::from("https://oauth2.googleapis.com/token")
 }
 
-/// A Google access token for `scope`, traded for a JWT the service account
+/// A Google access token for `scopes`, traded for a JWT the service account
 /// signs on behalf of the delegated subject (RFC 7523 section 2.1).
-pub fn google_token(scope: &str) -> String {
+pub fn google_token(scopes: &[&str]) -> String {
     let key = match env::var("GOOGLE_SERVICE_ACCOUNT_KEY") {
         Ok(key) if !key.is_empty() => key,
         _ => {
@@ -579,7 +579,7 @@ pub fn google_token(scope: &str) -> String {
     let claims = Oauth20JwtBearerClaims {
         iss: key.client_email.as_str().into(),
         sub: Some(subject.into()),
-        scope: [Cow::from(scope.to_owned())].into_iter().collect(),
+        scope: scopes.iter().map(|s| Cow::from(s.to_string())).collect(),
         ..Default::default()
     };
     let assertion = client
@@ -686,4 +686,56 @@ pub fn message(tag: &str, to: &str) -> String {
 /// The flags of an item, empty when unknown.
 pub fn flags(item: &PimdirItem) -> BTreeSet<String> {
     item.flags.known().cloned().unwrap_or_default()
+}
+
+/// The `pimdir` operator CLI built from the io-pimdir Cargo.lock locks, which
+/// tests/pimdir.sh installs: one built from a checkout may read the store
+/// another way than the library neverest writes it with.
+pub fn pimdir_cli() -> Command {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
+    let mut package = lock
+        .lines()
+        .skip_while(|line| *line != "name = \"io-pimdir\"")
+        .skip(1);
+    let version = package
+        .next()
+        .and_then(|line| line.strip_prefix("version = \""))
+        .and_then(|line| line.strip_suffix('"'))
+        .expect("io-pimdir's locked version");
+    let pin = match package
+        .next()
+        .and_then(|line| line.strip_prefix("source = \"git+"))
+    {
+        Some(source) => source
+            .trim_end_matches('"')
+            .rsplit_once('#')
+            .map(|(_, commit)| commit)
+            .expect("io-pimdir's locked commit"),
+        None => version,
+    };
+
+    let bin = root.join("target/pimdir").join(pin).join("bin/pimdir");
+    assert!(
+        bin.is_file(),
+        "no pimdir CLI at io-pimdir {pin}: run ./tests/pimdir.sh"
+    );
+    Command::new(bin)
+}
+
+/// The result a `--json` run prints last, after the events it streams.
+pub fn json_result(stdout: &str) -> serde_json::Value {
+    serde_json::Deserializer::from_str(stdout)
+        .into_iter()
+        .last()
+        .expect("a JSON result")
+        .expect("a JSON result")
+}
+
+/// Whether the list `key` of the result a `--json` run printed is empty:
+/// every key is printed, so its presence says nothing.
+pub fn none(stdout: &str, key: &str) -> bool {
+    json_result(stdout)[key]
+        .as_array()
+        .is_some_and(Vec::is_empty)
 }

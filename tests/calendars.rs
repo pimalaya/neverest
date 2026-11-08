@@ -30,10 +30,15 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
+//! ./tests/pimdir.sh
 //! cargo test --features dav --test calendars -- --ignored --test-threads=1
 //! ```
 
+mod common;
+
 use std::{fs, path::Path, process::Command};
+
+use crate::common::pimdir_cli;
 
 const DAV: &str = "http://127.0.0.1:5232";
 /// The calendar the disjoint-merge test owns on both principals.
@@ -517,11 +522,11 @@ fn sync(config: &Path, state: &Path, calendar: &str, code: i32) -> String {
 /// The store's live items for a calendar, as the `pimdir` CLI renders them.
 fn store_items(state: &Path, calendar: &str) -> String {
     let store = state.join("neverest").join("cal");
-    let output = Command::new("pimdir")
+    let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
         .args(["item", "list", &format!("a/{calendar}"), "--json"])
         .output()
-        .expect("spawn pimdir (cargo install --path ../io-pimdir --features cli)");
+        .expect("spawn pimdir");
 
     assert!(
         output.status.success(),

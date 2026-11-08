@@ -17,13 +17,15 @@
 #
 # Host port mapping:
 #   5232 → HTTP (CalDAV + CardDAV)
+#
+# RADICALE_PORT moves it (see tests/pasta.sh).
 
 set -eu
 
 NAME="neverest-dav-tests"
 USER="test"
 PASS="test"
-PORT=5232
+PORT="${RADICALE_PORT:-5232}"
 IMAGE="tomsquest/docker-radicale:latest"
 
 CONFDIR=$(mktemp -d)

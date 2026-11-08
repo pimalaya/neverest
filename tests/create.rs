@@ -10,7 +10,6 @@
 //! Start the servers and run with:
 //! ```sh
 //! ./tests/stalwart2.sh
-//! cargo install --path ../io-pimdir --features cli
 //! cargo test --test create -- --ignored --test-threads=1
 //! ```
 
@@ -334,6 +333,9 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
         .find(|id| id.starts_with(&folder) && *id != folder)
         .expect("the child is listed");
     let delimiter = &child[folder.len()..folder.len() + 1];
+    // NOTE: a run narrowed to the parent lists no child, and the store
+    // follows a rename only for the collections it holds.
+    sync(&config, &state, &child);
 
     let message = tmp.path().join("message.eml");
     fs::write(

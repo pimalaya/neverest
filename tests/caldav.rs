@@ -21,10 +21,15 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
+//! ./tests/pimdir.sh
 //! cargo test --features dav --test caldav -- --ignored
 //! ```
 
+mod common;
+
 use std::{fs, path::Path, process::Command};
+
+use crate::common::pimdir_cli;
 
 const DAV: &str = "http://127.0.0.1:5232";
 const USER: &str = "test";
@@ -252,11 +257,11 @@ fn store_items(state: &Path, collection: &str) -> String {
 /// all, and it comes from the io-pimdir crate rather than from neverest.
 fn pimdir(state: &Path, args: &[&str]) -> String {
     let store = state.join("neverest").join("calendar");
-    let output = Command::new("pimdir")
+    let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
         .args(args)
         .output()
-        .expect("spawn pimdir (cargo install --path ../io-pimdir --features cli)");
+        .expect("spawn pimdir");
 
     assert!(
         output.status.success(),

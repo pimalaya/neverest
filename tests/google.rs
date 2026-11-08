@@ -8,7 +8,7 @@
 //!
 //! Every resource a run creates is named `neverest-live-<millis>` and deleted
 //! however the run ends. Run with a service account key holding domain-wide
-//! delegation for the three scopes below:
+//! delegation for the scopes below:
 //!
 //! ```sh
 //! GOOGLE_SERVICE_ACCOUNT_KEY_FILE=key.json \
@@ -41,11 +41,17 @@ use pimalaya_stream::{proxy::Proxy, tls::Tls};
 use crate::common::*;
 
 #[cfg(feature = "gmail")]
-const GMAIL_SCOPE: &str = "https://mail.google.com/";
+const GMAIL_SCOPES: &[&str] = &["https://mail.google.com/"];
 #[cfg(feature = "gpeople")]
-const CONTACTS_SCOPE: &str = "https://www.googleapis.com/auth/contacts";
+const CONTACTS_SCOPES: &[&str] = &["https://www.googleapis.com/auth/contacts"];
+/// The events and the calendar list the gcal source reads, as the Android
+/// app asks them, plus the throwaway calendars the tests create and delete.
 #[cfg(feature = "gcal")]
-const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
+const CALENDAR_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+    "https://www.googleapis.com/auth/calendar.calendars",
+];
 
 /// A message added to a label crosses, its flags cross back, a fresh replica
 /// reads both, and a removal archives it rather than deleting it.
@@ -53,7 +59,7 @@ const CALENDAR_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 #[ignore = "live: needs a Google service account key"]
 #[cfg(feature = "gmail")]
 fn a_gmail_label_syncs_both_ways() {
-    let token = google_token(GMAIL_SCOPE);
+    let token = google_token(GMAIL_SCOPES);
     let connect = || {
         GmailClientStd::connect(&token, GmailClientStdConnectOptions::default())
             .expect("connect to Gmail")
@@ -152,7 +158,7 @@ fn a_gmail_label_syncs_both_ways() {
 #[ignore = "live: needs a Google service account key"]
 #[cfg(feature = "gpeople")]
 fn google_contacts_sync_both_ways() {
-    let token = google_token(CONTACTS_SCOPE);
+    let token = google_token(CONTACTS_SCOPES);
 
     with_cleanup(
         || round_trip("gpeople", "", &token, "contacts", card),
@@ -191,7 +197,7 @@ fn google_contacts_sync_both_ways() {
 #[ignore = "live: needs a Google service account key"]
 #[cfg(feature = "gcal")]
 fn a_google_calendar_syncs_both_ways() {
-    let token = google_token(CALENDAR_SCOPE);
+    let token = google_token(CALENDAR_SCOPES);
     let connect =
         || GcalClientStd::connect(&token, GcalClientStdConnectOptions::default()).unwrap();
     let calendar = connect()
@@ -295,7 +301,7 @@ fn with_google_calendar(token: &str, uid: &str, body: impl FnOnce(&str)) {
 fn delete_mail_about(uid: &str) {
     use std::{thread, time::Duration};
 
-    let token = google_token(GMAIL_SCOPE);
+    let token = google_token(GMAIL_SCOPES);
     let mut client = GmailClientStd::connect(&token, GmailClientStdConnectOptions::default())
         .expect("connect to Gmail");
     for _ in 0..3 {
@@ -325,7 +331,7 @@ fn delete_mail_about(uid: &str) {
 fn a_google_meeting_is_invited_to_and_cancelled() {
     use io_gcal::v3::rest::events::list::GcalEventsListParams;
 
-    let token = google_token(CALENDAR_SCOPE);
+    let token = google_token(CALENDAR_SCOPES);
     let uid = tag();
     let subject = google_subject();
 
@@ -405,7 +411,7 @@ fn a_google_meeting_is_invited_to_and_cancelled() {
 fn a_google_meet_is_created_with_its_event() {
     use io_gcal::v3::rest::events::list::GcalEventsListParams;
 
-    let token = google_token(CALENDAR_SCOPE);
+    let token = google_token(CALENDAR_SCOPES);
     let uid = tag();
     let subject = google_subject();
 
@@ -457,7 +463,7 @@ fn a_google_meet_is_created_with_its_event() {
 fn a_google_invitation_is_answered() {
     use io_gcal::v3::rest::events::{GcalEvent, import::GcalEventImportParams};
 
-    let token = google_token(CALENDAR_SCOPE);
+    let token = google_token(CALENDAR_SCOPES);
     let uid = tag();
     let subject = google_subject();
 

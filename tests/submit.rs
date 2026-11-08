@@ -22,8 +22,11 @@
 //! Start the servers and run with:
 //! ```sh
 //! ./tests/stalwart2.sh
+//! ./tests/pimdir.sh
 //! cargo test --test submit -- --ignored
 //! ```
+
+mod common;
 
 use std::{
     fs,
@@ -41,6 +44,8 @@ use io_pimdir::{
     collection::PimdirCollectionId,
     intent::PimdirSubmit,
 };
+
+use crate::common::{json_result, pimdir_cli};
 
 const IMAP_ROOT: &str = "imap://127.0.0.1:143";
 const SMTP: &str = "smtp://127.0.0.1:2525";
@@ -132,8 +137,9 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
 
     // 3. The run performs it: sent, acknowledged, and no longer queued.
     let report = neverest(&["sync", "-a", "submit", "--json"], &config, &state);
+    let submitted = &json_result(&report)["submitted"];
     assert!(
-        report.contains("\"submitted\""),
+        submitted.as_array().is_some_and(|s| s.len() == 1) && submitted[0]["error"].is_null(),
         "the run reported the submission; report was:\n{report}",
     );
     assert!(
@@ -191,7 +197,11 @@ fn check_opens_the_smtp_channel_a_source_declares() {
 
     write(SMTP);
     let checked = neverest(&["--json", "check", "-a", "submit"], &config, &state);
-    assert!(checked.contains("\"smtp\":true"), "{checked}");
+    assert_eq!(
+        json_result(&checked)["sources"][0]["smtp"]["ok"],
+        true,
+        "{checked}"
+    );
 
     // NOTE: the sources still answer, so only the send channel fails.
     write("smtp://127.0.0.1:1");
@@ -393,11 +403,11 @@ fn wait_for_delivery(marker: &str) -> Option<String> {
 /// report does not print.
 fn pimdir(state: &Path, args: &[&str]) -> String {
     let store = state.join("neverest").join("submit");
-    let output = Command::new("pimdir")
+    let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
         .args(args)
         .output()
-        .expect("spawn pimdir (cargo install --path ../io-pimdir --features cli)");
+        .expect("spawn pimdir");
 
     assert!(
         output.status.success(),

@@ -175,7 +175,12 @@ impl Fixture {
             String::from_utf8_lossy(&output.stdout),
             stderr(&output),
         );
-        serde_json::from_slice(&output.stdout).expect("one JSON document")
+        // NOTE: the last document, after the events a sync prints.
+        serde_json::Deserializer::from_slice(&output.stdout)
+            .into_iter()
+            .last()
+            .expect("a JSON result")
+            .expect("a JSON result")
     }
 }
 

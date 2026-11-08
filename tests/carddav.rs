@@ -35,8 +35,11 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
+//! ./tests/pimdir.sh
 //! cargo test --features dav --test carddav -- --ignored --test-threads=1
 //! ```
+
+mod common;
 
 use std::{fs, path::Path, process::Command};
 
@@ -44,6 +47,8 @@ use io_pimdir::{
     client::{producer::PimdirProducer, reader::PimdirReader},
     codec::PimdirAction,
 };
+
+use crate::common::pimdir_cli;
 
 const DAV: &str = "http://127.0.0.1:5232";
 const USER: &str = "test";
@@ -606,11 +611,11 @@ fn store_dir(state: &Path, account: &str) -> std::path::PathBuf {
 /// all, and it comes from the io-pimdir crate rather than from neverest.
 fn pimdir(state: &Path, account: &str, args: &[&str]) -> String {
     let store = store_dir(state, account);
-    let output = Command::new("pimdir")
+    let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
         .args(args)
         .output()
-        .expect("spawn pimdir (cargo install --path ../io-pimdir --features cli)");
+        .expect("spawn pimdir");
 
     assert!(
         output.status.success(),

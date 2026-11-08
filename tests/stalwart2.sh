@@ -11,6 +11,9 @@
 #   plain IMAP         → container 993 (reconfigured to plain)
 #   plain SMTP         → container 25, the channel a queued `submit` intent
 #                        leaves through
+#
+# STALWART_{A,B}_{ADMIN,IMAP,SMTP}_PORT move them, for a rootless Docker
+# that binds no port under 1024 (see tests/pasta.sh).
 
 set -eu
 
@@ -96,6 +99,8 @@ provision() {
     echo "stalwart ${name} ready: imap://127.0.0.1:${imap_port}, smtp://127.0.0.1:${smtp_port}"
 }
 
-provision "neverest-relay-a" 8080 143 2525
-provision "neverest-relay-b" 8081 144 2526
-echo "both servers ready (A :143 imap, :2525 smtp; B :144 imap, :2526 smtp)"
+provision "neverest-relay-a" "${STALWART_A_ADMIN_PORT:-8080}" \
+    "${STALWART_A_IMAP_PORT:-143}" "${STALWART_A_SMTP_PORT:-2525}"
+provision "neverest-relay-b" "${STALWART_B_ADMIN_PORT:-8081}" \
+    "${STALWART_B_IMAP_PORT:-144}" "${STALWART_B_SMTP_PORT:-2526}"
+echo "both servers ready"

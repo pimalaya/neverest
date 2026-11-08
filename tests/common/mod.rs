@@ -46,6 +46,7 @@ use io_pimdir::{
     },
     codec::PimdirAction,
     collection::PimdirCollectionId,
+    intent::PimdirSubmit,
     placement::PimdirFlags,
 };
 use pimalaya_stream::tls::Tls;
@@ -55,7 +56,7 @@ use tempfile::TempDir;
 use url::Url;
 
 /// The Pimalaya Workspace user the service account acts as by default.
-const GOOGLE_SUBJECT: &str = "google@pimalaya.org";
+pub const GOOGLE_SUBJECT: &str = "google@pimalaya.org";
 
 /// The Pimalaya test mailbox an app-only Graph token acts on by default.
 const MSGRAPH_USER: &str = "microsoft@pimalaya.onmicrosoft.com";
@@ -67,7 +68,7 @@ const MSGRAPH_SCOPE: &str = "https://graph.microsoft.com/.default";
 const ACCOUNT: &str = "live";
 
 /// The environment variable the configured token command prints.
-const TOKEN_VAR: &str = "NEVEREST_LIVE_TOKEN";
+pub const TOKEN_VAR: &str = "NEVEREST_LIVE_TOKEN";
 
 /// How long a change may take to show on the other replica.
 const SETTLE: Duration = Duration::from_secs(90);
@@ -133,13 +134,16 @@ impl Replica {
     /// Writes an account holding one `backend` source, plus `extra` TOML
     /// lines, its token read from the environment of each run.
     pub fn open(backend: &str, extra: &str, token: &str) -> Self {
+        let lines = format!("{backend}.auth.token.command = \"printenv {TOKEN_VAR}\"\n{extra}");
+        Self::with_config(backend, &lines, token)
+    }
+
+    /// Writes an account of the TOML `lines` declaring one `backend` source,
+    /// whose token command prints [`TOKEN_VAR`].
+    pub fn with_config(backend: &str, lines: &str, token: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
 
-        let config = format!(
-            "[accounts.{ACCOUNT}]\n\
-             {backend}.auth.token.command = \"printenv {TOKEN_VAR}\"\n\
-             {extra}\n",
-        );
+        let config = format!("[accounts.{ACCOUNT}]\n{lines}\n");
         fs::write(dir.path().join("config.toml"), config).unwrap();
 
         let replica = Self {
@@ -349,6 +353,19 @@ impl Replica {
             object: Some(hash),
             supersedes: None,
         });
+    }
+
+    /// Queues a send of `body` from and to `user`, its copy filed in the
+    /// collection `copy` when given, as a frontend does.
+    pub fn send(&self, key: &str, body: &str, user: &str, copy: Option<&str>) {
+        let submit = PimdirSubmit {
+            source: self.source(),
+            from: user.to_owned(),
+            rcpts: vec![user.to_owned()],
+            subject: None,
+            copy: copy.map(|key| PimdirCollectionId(self.collection(key))),
+        };
+        self.enqueue_body(key, body, |hash| submit.to_action(hash).unwrap());
     }
 
     /// Stages a new body for an item.

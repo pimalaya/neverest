@@ -153,6 +153,121 @@ fn a_gmail_label_syncs_both_ways() {
     );
 }
 
+/// A message sent to oneself over Gmail's IMAP and SMTP, its copy asked in
+/// Sent, which Gmail's SMTP files itself: the inbox copy stays unread, and
+/// Sent holds the message once.
+#[test]
+#[ignore = "live: needs a Google service account key"]
+#[cfg(all(feature = "gmail", feature = "imap", feature = "smtp"))]
+fn a_message_sent_to_oneself_over_gmail_smtp_stays_unread() {
+    use io_gmail::v1::rest::messages::GmailMessageFormat;
+
+    const SENT: &str = "[Gmail]/Sent Mail";
+
+    let token = google_token(GMAIL_SCOPES);
+    let tag = tag();
+    let user = GOOGLE_SUBJECT;
+    let auth = |protocol: &str| {
+        format!(
+            "{protocol}.sasl.xoauth2.username = \"{user}\"\n\
+             {protocol}.sasl.xoauth2.token.command = \"printenv {TOKEN_VAR}\"\n"
+        )
+    };
+    let lines = format!(
+        "imap.server = \"imap.gmail.com\"\n{}\
+         imap.collection.filter.include = [\"INBOX\", \"{SENT}\"]\n\
+         item.filter.since = \"1d\"\n\
+         smtp.server = \"smtp.gmail.com\"\n{}",
+        auth("imap"),
+        auth("smtp"),
+    );
+    let body = format!(
+        "From: Neverest <{user}>\r\n\
+         To: {user}\r\n\
+         Subject: {tag}\r\n\
+         Date: {}\r\n\
+         Message-ID: <{tag}@pimalaya.org>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         Sent by the neverest live tests.\r\n",
+        chrono::Utc::now().to_rfc2822(),
+    );
+    let connect = || {
+        GmailClientStd::connect(&token, GmailClientStdConnectOptions::default())
+            .expect("connect to Gmail")
+    };
+    let messages = || {
+        let query = format!("rfc822msgid:{tag}@pimalaya.org");
+        let params = GmailMessagesListParams {
+            q: Some(&query),
+            include_spam_trash: true,
+            ..Default::default()
+        };
+        let mut client = connect();
+        let found = client
+            .messages_list(&params)
+            .expect("list the run's messages");
+        found
+            .response
+            .messages
+            .iter()
+            .map(|message| {
+                let headers = ["Date", "Message-ID"];
+                client
+                    .message_get(&message.id, GmailMessageFormat::Metadata, &headers)
+                    .expect("get the message")
+                    .response
+            })
+            .collect::<Vec<_>>()
+    };
+
+    with_cleanup(
+        || {
+            let a = Replica::with_config("imap", &lines, &token);
+            a.sync_keys(&["INBOX", SENT], &[0]);
+
+            a.send(SENT, &body, user, Some(SENT));
+            a.sync_keys(&["INBOX", SENT], &[0]);
+            a.sync_until("INBOX", "the message is delivered", |a| {
+                a.item("INBOX", &tag).is_some()
+            });
+            a.sync_keys(&["INBOX", SENT], &[0]);
+
+            let found = messages();
+            for message in &found {
+                eprintln!(
+                    "{} {:?} {:?}",
+                    message.id, message.label_ids, message.payload
+                );
+            }
+            let sent = found
+                .iter()
+                .filter(|message| message.label_ids.iter().any(|id| id == "SENT"))
+                .count();
+            assert_eq!(sent, 1, "Sent holds the message once");
+            let inbox = found
+                .iter()
+                .find(|message| message.label_ids.iter().any(|id| id == "INBOX"))
+                .expect("the inbox copy");
+            assert!(
+                inbox.label_ids.iter().any(|id| id == "UNREAD"),
+                "the inbox copy stays unread: {:?}",
+                inbox.label_ids,
+            );
+            assert_eq!(a.items(SENT, &tag).len(), 1, "the store binds one copy");
+        },
+        || {
+            let mut client = connect();
+            for message in messages() {
+                if let Err(err) = client.message_delete(&message.id) {
+                    eprintln!("WARNING: leftover message {}: {err:?}", message.id);
+                }
+            }
+        },
+    );
+}
+
 /// A card crosses both ways through the one People address book.
 #[test]
 #[ignore = "live: needs a Google service account key"]

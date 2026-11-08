@@ -301,6 +301,8 @@ Upgrading from 0.3.0:
 
 - Fixed an IMAP or Graph mail copy whose answer was lost being filed again under a date scope: the target is searched by `Message-ID` first, and a message found there is bound instead.
 
+- Fixed a message sent to oneself through Gmail's IMAP and SMTP, its copy asked in Sent, being marked read in the inbox: Gmail files that copy itself, so none is staged.
+
 - Fixed an IMAP `SELECT` answer without `EXISTS` read as an empty mailbox, which deleted every message: such a mailbox is searched.
 
 - Fixed a renumbered IMAP mailbox (a moved `UIDVALIDITY`) listed under its new UIDs before it was rekeyed, which pushed flags to the wrong messages and dropped every message as deleted.

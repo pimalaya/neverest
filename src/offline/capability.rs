@@ -20,7 +20,7 @@ use io_pimdir::capability::{
     PimdirCapability, PimdirSupport,
 };
 
-use crate::config::{SourceBackendConfig, SourceConfig};
+use crate::config::{SourceBackendConfig, SourceConfig, server_url};
 
 /// A backend's support of one capability, its rights aside.
 type Support = (PimdirSupport, Option<&'static str>);
@@ -255,13 +255,35 @@ pub fn supports(source: &SourceConfig, one_way: bool, paired: bool) -> Vec<Suppo
         .collect()
 }
 
+/// The IMAP and SMTP hosts of a provider whose SMTP server files what it sends
+/// in the Sent of the mailbox the IMAP server serves.
+const FILING_HOSTS: &[(&[&str], &[&str])] = &[(
+    &["imap.gmail.com", "imap.googlemail.com"],
+    &["smtp.gmail.com", "smtp.googlemail.com"],
+)];
+
 /// Whether the provider a source sends through files the sent message
 /// itself, so the copy a `submit` asks for needs no `add` of its own.
 pub fn files_sent_copy(source: &SourceConfig) -> bool {
-    matches!(
-        source.backend,
-        SourceBackendConfig::Gmail(_) | SourceBackendConfig::Msgraph(_)
-    )
+    let host = |server: &str, scheme: &str| {
+        let url = server_url(server, scheme).ok()?;
+        url.host_str().map(str::to_ascii_lowercase)
+    };
+
+    match &source.backend {
+        SourceBackendConfig::Gmail(_) | SourceBackendConfig::Msgraph(_) => true,
+        SourceBackendConfig::Imap(imap) => source.smtp.as_ref().is_some_and(|smtp| {
+            let (Some(imap), Some(smtp)) =
+                (host(&imap.server, "imaps"), host(&smtp.server, "smtps"))
+            else {
+                return false;
+            };
+            FILING_HOSTS.iter().any(|(imaps, smtps)| {
+                imaps.contains(&imap.as_str()) && smtps.contains(&smtp.as_str())
+            })
+        }),
+        _ => false,
+    }
 }
 
 fn imap(name: &str, smtp: bool) -> Support {
@@ -879,5 +901,26 @@ mod tests {
 
     fn declaration_of(source: &SourceConfig) -> Vec<PimdirCapability> {
         declaration(source, false, false, &[], &BTreeSet::new())
+    }
+
+    #[test]
+    fn an_imap_source_files_its_sent_copy_only_on_a_filing_pair() {
+        let imap = |imap: &str, smtp: Option<&str>| {
+            let smtp = smtp
+                .map(|smtp| format!("smtp.server = \"{smtp}\"\n"))
+                .unwrap_or_default();
+            source(&format!("imap.server = \"{imap}\"\n{smtp}"), "imap")
+        };
+
+        let filing = imap("imap.gmail.com", Some("smtps://SMTP.gmail.com:465"));
+        assert!(files_sent_copy(&filing));
+        let filing = imap("imaps://imap.googlemail.com:993", Some("smtp.gmail.com"));
+        assert!(files_sent_copy(&filing));
+
+        assert!(!files_sent_copy(&imap("imap.gmail.com", None)));
+        let relayed = imap("imap.gmail.com", Some("smtp.example.org"));
+        assert!(!files_sent_copy(&relayed), "another server files nothing");
+        let elsewhere = imap("imap.example.org", Some("smtp.gmail.com"));
+        assert!(!files_sent_copy(&elsewhere), "filed in another mailbox");
     }
 }

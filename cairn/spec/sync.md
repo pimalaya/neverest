@@ -1426,7 +1426,19 @@ At every run, before it drains an action, neverest SHALL declare each source it 
 A `submit` SHALL be sent by the source its payload names, and left pending for another run when it names a source this run does not perform.
 
 ### Requirement: A sent copy is filed once sent
-A `submit` asking for `copy` SHALL file the message in that collection only after the send succeeds: natively where the provider files sent mail itself (Gmail, Graph), otherwise by replacing the intent with an `add` of the message, `\Seen` set, drained in the same run (pimdir STORAGE §15.5, Annex B.2).
+A `submit` asking for `copy` SHALL file the message in that collection only after the send succeeds: natively where the provider files sent mail itself (the Gmail and Graph backends, and an IMAP source whose IMAP and SMTP hosts are a pair neverest knows to file what the SMTP server sends in that mailbox's Sent), otherwise by replacing the intent with an `add` of the message, `\Seen` set, drained in the same run (pimdir STORAGE §15.5, Annex B.2).
+
+A copy staged where the server files its own lands on that copy (pimdir SYNC §6) and pushes its staged `\Seen` onto it, which marks a message sent to oneself read where the provider keeps one message for both mailboxes; the provider's copy, listed by the next round, is the one the store binds.
+
+#### Scenario: A message sent to oneself through a filing pair
+- **GIVEN** an IMAP source whose SMTP server files what it sends, and a queued `submit` to the account's own address with `copy` set to its Sent
+- **WHEN** the account syncs until the message is delivered
+- **THEN** the inbox copy is unread, Sent holds the message once, and the store binds that one copy
+
+#### Scenario: A server that files no copy
+- **GIVEN** an IMAP account whose SMTP server files nothing in Sent
+- **WHEN** a `submit` with `copy` set to Sent is performed and the account syncs
+- **THEN** neverest uploads the message to Sent once, seen
 
 ### Requirement: A performed intent leaves a receipt
 Every intent neverest performs successfully (`submit`, `calendar-reply`, `calendar-cancel`, `collection-create`, `collection-rename`, `collection-delete`) SHALL be acknowledged with its receipt (io-pimdir `acknowledge_action`, or `replace_action` for a `submit` whose copy neverest files), so its producer reads it applied rather than withdrawn (pimdir STORAGE §15.4, §15.5). The receipt SHALL name no `seq`: a created, renamed or deleted collection and a provider-filed copy arrive with a later listing, a copy neverest files is an `add` followed by its own id, and an invitation leaves its event where the producer found it. A parked or pending intent keeps its row and gets no receipt.

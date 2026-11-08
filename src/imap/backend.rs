@@ -745,6 +745,22 @@ impl ImapClient {
             .ok_or_else(|| anyhow!("Fallback UID search returned no match"))
     }
 
+    /// The UID of a message of `mailbox` stating `message_id` (bare, without
+    /// its angle brackets), `None` when it holds none.
+    pub fn find_message(&mut self, mailbox: &str, message_id: &str) -> Result<Option<String>> {
+        self.select_cached(mailbox)?;
+
+        // NOTE: HEADER matches substrings: brackets keep `a@x` off `<a@x.y>`.
+        let field =
+            AString::try_from("Message-ID").map_err(|_| anyhow!("Invalid IMAP search header"))?;
+        let value = AString::try_from(format!("<{message_id}>"))
+            .map_err(|_| anyhow!("Invalid IMAP search Message-ID value"))?;
+        let criteria = Vec1::from(SearchKey::Header(field, value));
+        let uids = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
+
+        Ok(uids.into_iter().min().map(|uid| uid.to_string()))
+    }
+
     /// Copies a UID set from `from` to `to`.
     #[allow(dead_code)]
     pub fn copy_messages(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {

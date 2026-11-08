@@ -7260,6 +7260,83 @@ mod tests {
         );
     }
 
+    /// A staged copy the target holds out of scope is bound to it, not filed.
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_copy_the_target_holds_out_of_scope_is_bound_not_filed_again() {
+        use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+
+        const INBOX: &str = "imap/INBOX";
+
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 1,
+                highest_mod_seq: 9,
+                messages: vec![FakeMessage {
+                    uid: 7,
+                    flags: vec![String::from("\\Seen")],
+                    message_id: String::from("a@x"),
+                }],
+                states_exists: true,
+            },
+            true,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, mut store) = bound_imap_inbox(dir.path(), &server, true, None);
+        ctx.scope = PimdirScope::since("2026-11-01T00:00:00Z");
+        store
+            .ensure_collection("imap/Archive", "message/rfc822")
+            .unwrap();
+        let source = PimdirPlacement {
+            collection: PimdirCollectionId("imap/Archive".into()),
+            handle: PimdirHandle("3".into()),
+            link_id: Some(PimdirLinkId("a@x".into())),
+            object: None,
+            level: PimdirLevel::Meta,
+            summary: None,
+            sort_key: PimdirSortKey::default(),
+            flags: PimdirFlags::from_iter(["\\Seen"]),
+            status: PimdirStatus::Clean,
+            conflict_revision: None,
+            conflict_object: None,
+            base: Some(PimdirBase {
+                flags: PimdirFlags::from_iter(["\\Seen"]),
+                revision: None,
+                object: None,
+            }),
+            origin: None,
+        };
+        let staged = PimdirPlacement {
+            collection: PimdirCollectionId(INBOX.into()),
+            handle: PimdirLinkId("a@x".into()).provisional(),
+            status: PimdirStatus::Created,
+            base: None,
+            origin: Some(PimdirOrigin {
+                collection: source.collection.clone(),
+                handle: source.handle.clone(),
+            }),
+            ..source.clone()
+        };
+        store
+            .write(vec![
+                PimdirWriteOp::UpsertPlacement(source),
+                PimdirWriteOp::UpsertPlacement(staged),
+            ])
+            .unwrap();
+
+        let blobs = store.blob_stage();
+        sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None).expect("the sync");
+
+        let placements = load_side(&store, INBOX).unwrap();
+        let copy = placements
+            .iter()
+            .find(|placement| placement.link_id == Some(PimdirLinkId("a@x".into())))
+            .expect("the copy");
+        assert_eq!(copy.handle.0, "7", "bound to the message found");
+        assert_eq!(copy.status, PimdirStatus::Clean);
+        assert!(server.sent("APPEND").is_empty(), "nothing filed again");
+    }
+
     /// An IMAP side over `server`, accepting absences when `accept`, and a
     /// store binding 25 messages of its inbox under `UIDVALIDITY` 1, UIDs 1
     /// to 25, the checkpoint `checkpoint` when given.

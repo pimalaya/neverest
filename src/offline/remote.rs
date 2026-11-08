@@ -1434,6 +1434,24 @@ impl PimRemote<'_> {
         object: Option<PimdirHash>,
         link: LinkId<'_>,
     ) -> PimdirPushResult {
+        // NOTE: a scope can hide a copy made before its answer was lost.
+        if let Some(message_id) = link.hint.filter(|_| link.mint.is_none()) {
+            let found = match self.pool.primary().find_message(collection, message_id) {
+                Ok(found) => found,
+                Err(err) => return self.reject(collection, handle, "copy", format!("{err:#}")),
+            };
+            let held = |id: &str| {
+                self.held
+                    .0
+                    .get(collection)
+                    .is_some_and(|ids| ids.contains(id))
+            };
+            if let Some(found) = found.filter(|found| !held(&found.id)) {
+                debug!("{collection} holds {message_id} already, binding the copy to it");
+                return self.assign(collection, handle, "copy", found);
+            }
+        }
+
         let from = wire_name(&self.namespace, origin.collection.as_str()).to_string();
         let copied = self
             .pool

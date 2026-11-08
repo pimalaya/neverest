@@ -1594,6 +1594,21 @@ A connector MAY narrow a scoped listing by its provider's own filter to a supers
 
 The enumeration a narrowed round's last page hands SHALL be read after that page's listing, so a member arrived since is in it: IMAP's `UID SEARCH ALL` on the selected mailbox, one command a round; Gmail's ids of the label, listed with no query, 500 ids a request at 5 quota units each, once a round; Graph's ids of the folder's delta pass, the scoped round's last page, which reads them already and costs no request more.
 
+### Requirement: A copy is made once
+A mail create carrying an origin (pimdir SYNC §4) and a `Message-ID` SHALL be delivered only once its target is known not to hold that message: an IMAP source SHALL search the target by `UID SEARCH HEADER Message-ID "<id>"` before uploading it, and a Graph mail source SHALL list the target folder filtered on `internetMessageId` before `message_copy`. A message found there and bound by no item of this side SHALL be bound to the create, nothing filed; any other find delivers the create as before. A create whose identity was minted for a second copy of one `Message-ID` SHALL NOT search, its twin being the message the search would find. A failed search SHALL reject the create, which stays pending.
+
+A copy whose answer was lost stays staged, and a scope hides the server's copy from every listing (a message dated below the floor, a `Date` the server cannot read), so only a search tells the next run it was made. Outside a scope the listing lands the create by its `Message-ID` first (pimdir SYNC §6), and the search finds nothing more; one search a copy is cheap, copies being rare. A staged move whose answer was lost is made once already on IMAP, its source half moving the member server side; on Graph its target half may deliver it as a copy, which this search covers. A server that matches no `HEADER Message-ID` search files the copy again, as before.
+
+#### Scenario: A copy made before its answer was lost
+- **GIVEN** a message dated 2020 bound in `A`, a copy of it staged into `B`, and `B` already holding that message on the server, the answer to the copy having been lost
+- **WHEN** the account syncs under `item.filter.since = "30d"`
+- **THEN** `B` holds the message once and the store binds the staged copy to it
+
+#### Scenario: A move made before its answer was lost
+- **GIVEN** a message dated 2020 bound in `A`, a move of it staged into `B`, and the server having moved it already
+- **WHEN** the account syncs under `item.filter.since = "30d"`
+- **THEN** `B` holds the message once, `A` none, and the store binds it in `B`
+
 ### Requirement: A mail round lands page by page, newest first
 A mail round SHALL be answered in pages, newest first, each landing in its own write with its resume cursor: IMAP 500 UIDs by UID descending, its cursor `(UIDVALIDITY, lowest UID listed, highest UID found when the round opened)`; Graph 1,000 messages a page, from the message delta with no scope (`Prefer: odata.maxpagesize`, sent with every link) or from `/messages` by `sentDateTime` under one (`$top`), its cursor the second the page ended at, the next page listing below the second after it; Gmail 100 ids, its cursor the page token. The checkpoint SHALL be the one taken when the round began where the provider gives one (IMAP `HIGHESTMODSEQ` at the select, Gmail's profile `historyId` read before the listing), Graph's delta link on its last page. An interrupted round SHALL resume from its cursor, and a cursor the provider refuses (an expired Graph link, a Gmail page token) SHALL restart it, a moved `UIDVALIDITY` being a rekey (see "An IMAP handle-space change rebuilds the collection and bumps its generation").
 

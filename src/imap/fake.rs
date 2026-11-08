@@ -175,9 +175,16 @@ fn answer(command: &str, mailbox: &mut FakeMailbox) -> Vec<u8> {
             .as_bytes(),
         );
     } else if upper.starts_with("UID SEARCH") {
+        // NOTE: every criterion but a `Message-ID` one matches everything.
+        let header = upper
+            .find("HEADER MESSAGE-ID ")
+            .map(|at| command[at + 18..].trim_matches('"'));
         let uids: Vec<String> = mailbox
             .messages
             .iter()
+            .filter(|message| {
+                header.is_none_or(|id| format!("<{}>", message.message_id).contains(id))
+            })
             .map(|message| message.uid.to_string())
             .collect();
         out.extend_from_slice(format!("* SEARCH {}\r\n", uids.join(" ")).as_bytes());

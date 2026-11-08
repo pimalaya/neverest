@@ -995,6 +995,27 @@ impl Client {
         }
     }
 
+    /// The message of `collection` stating `message_id`, `None` when it holds
+    /// none or the backend cannot search for one.
+    #[allow(unused_variables)]
+    pub fn find_message(
+        &mut self,
+        collection: &str,
+        message_id: &str,
+    ) -> Result<Option<WrittenItem>> {
+        match self {
+            #[cfg(feature = "imap")]
+            Client::Imap(c) => Ok(c
+                .find_message(collection, message_id)?
+                .map(|id| WrittenItem { id, revision: None })),
+            #[cfg(feature = "msgraph")]
+            Client::Msgraph(c) if c.kind() == GraphKind::Mail => {
+                c.find_message(collection, message_id)
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Moves one item from `from` into `to` server side keeping its id,
     /// gated on `if_match`, returning where it went, or `None` for a backend
     /// or a server that cannot move it, the caller then uploading the body.

@@ -61,7 +61,9 @@ use io_msgraph::v1::{
             MsgraphMailFolder,
             list::{MsgraphMailFoldersListParams, MsgraphMailFoldersListResponse},
         },
-        messages::{MsgraphFlagStatus, MsgraphFollowupFlag, MsgraphMessage},
+        messages::{
+            MsgraphFlagStatus, MsgraphFollowupFlag, MsgraphMessage, list::MsgraphMessagesListParams,
+        },
     },
     send::{MSGRAPH_API_BASE, MsgraphSend, MsgraphSendError, MsgraphSendOutput, user_path},
 };
@@ -1058,6 +1060,27 @@ impl GraphClient {
             id: copy.id,
             revision: None,
         })
+    }
+
+    /// The message of the folder `to` stating `message_id` (bare), if any.
+    pub fn find_message(&mut self, to: &str, message_id: &str) -> Result<Option<WrittenItem>> {
+        let folder = self.folder_id(to)?;
+        let quoted = message_id.replace('\'', "''");
+        let filter = format!("internetMessageId eq '<{quoted}>'");
+        let params = MsgraphMessagesListParams {
+            top: Some(1),
+            select: Some("id"),
+            filter: Some(&filter),
+            ..Default::default()
+        };
+        let page = self
+            .op(|client| client.messages_list(Some(&folder), &params))
+            .with_context(|| format!("Search {to} for message {message_id} error"))?;
+
+        Ok(page.value.into_iter().next().map(|message| WrittenItem {
+            id: message.id,
+            revision: None,
+        }))
     }
 
     /// Deletes one message by id; one gone from the server already counts

@@ -34,7 +34,11 @@ use std::{
 };
 
 use chrono::{Duration as Days, Utc};
-use io_pimdir::client::reader::PimdirReader;
+use io_pimdir::{
+    client::{producer::PimdirProducer, reader::PimdirReader},
+    codec::PimdirAction,
+    collection::PimdirCollectionId,
+};
 
 const SERVER: &str = "imap://127.0.0.1:143";
 const CRED: &str = "test@pimalaya.org:P!malaya-test-2026";
@@ -68,7 +72,7 @@ fn a_scope_lists_by_date_widens_and_never_deletes_what_it_leaves() {
     );
     append(root, &mailbox, &marker("undated"), None);
 
-    write_config(&config, &store, "scope", &mailbox, Some("30d"));
+    write_config(&config, &store, "scope", &[&mailbox], Some("30d"));
     neverest(&["init", "-a", "scope"], &config);
 
     let collection = format!("scope/imap/{mailbox}");
@@ -157,7 +161,7 @@ fn an_interrupted_round_resumes_and_lands_every_message_once() {
         append(root, &mailbox, &format!("paged-{id}-{n}"), Some(&date));
     }
 
-    write_config(&config, &store, "paged", &mailbox, None);
+    write_config(&config, &store, "paged", &[&mailbox], None);
     neverest(&["init", "-a", "paged"], &config);
     let collection = format!("paged/imap/{mailbox}");
 
@@ -232,7 +236,7 @@ fn a_page_s_bodies_land_before_its_round_closes() {
         append(root, &mailbox, &format!("early-{id}-{n}"), Some(&date));
     }
 
-    write_config(&config, &store, "early", &mailbox, None);
+    write_config(&config, &store, "early", &[&mailbox], None);
     neverest(&["init", "-a", "early"], &config);
     let collection = format!("early/imap/{mailbox}");
 
@@ -299,6 +303,65 @@ fn a_page_s_bodies_land_before_its_round_closes() {
     imap(&format!("DELETE {mailbox}"));
 }
 
+/// A staged move of a message out of scope whose answer was lost is made once.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
+fn a_scoped_move_whose_answer_was_lost_is_made_once() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let root = tmp.path();
+    let store = root.join("store");
+    let config = root.join("config.toml");
+
+    let id = std::process::id();
+    let (from, to) = (format!("MoveA{id}"), format!("MoveB{id}"));
+    let marker = format!("move-{id}");
+
+    imap(&format!("CREATE {from}"));
+    imap(&format!("CREATE {to}"));
+    append(
+        root,
+        &from,
+        &marker,
+        Some("Wed, 01 Jan 2020 10:00:00 +0000"),
+    );
+
+    write_config(&config, &store, "move", &[&from, &to], Some("30d"));
+    neverest(&["init", "-a", "move"], &config);
+    sync(&config, "move", &["--since", "2019-01-01"]);
+
+    let source = format!("move/imap/{from}");
+    let target = format!("move/imap/{to}");
+    let items = PimdirReader::open(&store)
+        .unwrap()
+        .list_summaries(&source, None, 10)
+        .unwrap();
+    assert_eq!(items.len(), 1, "the store binds the message");
+    let to_target = PimdirAction::Move {
+        seq: items[0].seq,
+        to: PimdirCollectionId::from(target.as_str()),
+    };
+    PimdirProducer::open(&store, "neverest-tests")
+        .unwrap()
+        .enqueue(&source, &to_target, None)
+        .unwrap();
+    imap_in(&from, &format!("MOVE 1 {to}"));
+
+    sync(&config, "move", &[]);
+    sync(&config, "move", &[]);
+
+    assert_eq!(
+        server_seqs(&to, &marker).len(),
+        1,
+        "the target holds it once"
+    );
+    assert!(server_seqs(&from, &marker).is_empty());
+    assert_eq!(stored(&store, &target), [marker], "the store binds it");
+    assert!(stored(&store, &source).is_empty());
+
+    imap(&format!("DELETE {from}"));
+    imap(&format!("DELETE {to}"));
+}
+
 /// How many messages of `collection` the store holds a body for.
 fn bodies(store: &Path, collection: &str) -> usize {
     let Ok(reader) = PimdirReader::open(store) else {
@@ -310,7 +373,18 @@ fn bodies(store: &Path, collection: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn write_config(config: &Path, store: &Path, account: &str, mailbox: &str, since: Option<&str>) {
+fn write_config(
+    config: &Path,
+    store: &Path,
+    account: &str,
+    mailboxes: &[&str],
+    since: Option<&str>,
+) {
+    let include = mailboxes
+        .iter()
+        .map(|mailbox| format!("\"{mailbox}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     let since = since
         .map(|since| format!("item.filter.since = \"{since}\"\n"))
         .unwrap_or_default();
@@ -323,7 +397,7 @@ fn write_config(config: &Path, store: &Path, account: &str, mailbox: &str, since
              imap.starttls = false\n\
              imap.sasl.plain.username = \"test@pimalaya.org\"\n\
              imap.sasl.plain.password.raw = \"P!malaya-test-2026\"\n\
-             imap.collection.filter.include = [\"{mailbox}\"]\n\
+             imap.collection.filter.include = [{include}]\n\
              {since}",
             store.display(),
         ),

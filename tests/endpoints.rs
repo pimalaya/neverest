@@ -27,8 +27,9 @@
 //! `carddav/<name>` the direct-backend sugar of tests/carddav.rs uses.
 //!
 //! Each test owns an address book of its own on both principals and narrows the
-//! run to it, so the two run side by side and neither meets what the other
-//! seeded.
+//! run to it, so neither meets what another seeded. They still run one at a
+//! time: every run lists both principals' homes, and Radicale answers 500 to a
+//! listing a sibling's book delete cuts through.
 //!
 //! Start the server and run with:
 //! ```sh
@@ -39,7 +40,12 @@
 
 mod common;
 
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::Path,
+    process::Command,
+    sync::{Mutex, MutexGuard, PoisonError},
+};
 
 use crate::common::{none, pimdir_cli};
 
@@ -58,6 +64,14 @@ const AUTHORITY_BOOK: &str = "authority";
 const SOURCE: &str = "test";
 /// The target endpoint's principal.
 const TARGET: &str = "test2";
+
+/// Held by each test for its whole run.
+static SERVER: Mutex<()> = Mutex::new(());
+
+/// Waits for the server, whatever a sibling that panicked left.
+fn serialized() -> MutexGuard<'static, ()> {
+    SERVER.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// A card carrying one phone number, addressed on the server by `<uid>.vcf`.
 fn card(uid: &str, tel: &str) -> String {
@@ -88,6 +102,7 @@ fn noted_card(uid: &str, tel: &str, note: &str) -> String {
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
+    let _server = serialized();
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
     let state = root.join("state");
@@ -204,6 +219,7 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
+    let _server = serialized();
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
     let state = root.join("state");
@@ -303,6 +319,7 @@ fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_book_deleted_on_one_endpoint_is_deleted_on_the_other_not_recreated() {
+    let _server = serialized();
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
     let state = root.join("state");
@@ -354,6 +371,7 @@ fn a_book_deleted_on_one_endpoint_is_deleted_on_the_other_not_recreated() {
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
+    let _server = serialized();
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
     let state = root.join("state");
@@ -402,6 +420,7 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite() {
+    let _server = serialized();
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
     let state = root.join("state");

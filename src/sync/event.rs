@@ -23,6 +23,16 @@ use serde::Serialize;
     rename_all_fields = "camelCase"
 )]
 pub enum SyncEvent {
+    /// The run started on an account, the `position`th of the `total` it
+    /// covers: the events after it are that account's.
+    AccountStarted {
+        /// The account, as the configuration names it.
+        account: String,
+        /// The account's place in the run, from 1.
+        position: usize,
+        /// How many accounts the run covers.
+        total: usize,
+    },
     /// The run reached an endpoint: its first connection is open.
     Opened {
         /// The endpoint, as the account names it.
@@ -97,9 +107,38 @@ pub enum SyncEvent {
     },
 }
 
+impl SyncEvent {
+    /// Names its endpoints as `account`'s configuration does, rather than
+    /// by the source id the store keys them under, `<account>/<name>`.
+    pub fn name_endpoints(&mut self, account: &str) {
+        let prefix = format!("{account}/");
+        let endpoints = match self {
+            Self::AccountStarted { .. } => vec![],
+            Self::Opened { endpoint } | Self::Listed { endpoint, .. } => vec![endpoint],
+            Self::CollectionStarted { source, target, .. }
+            | Self::CollectionProgressed { source, target, .. }
+            | Self::CollectionFinished { source, target, .. } => vec![source, target],
+            Self::ScanProgressed { source, .. } | Self::DownloadProgressed { source, .. } => {
+                vec![source]
+            }
+        };
+
+        for endpoint in endpoints {
+            if let Some(name) = endpoint.strip_prefix(&prefix) {
+                *endpoint = name.to_owned();
+            }
+        }
+    }
+}
+
 impl fmt::Display for SyncEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::AccountStarted {
+                account,
+                position,
+                total,
+            } => writeln!(f, "[{position}/{total}] Syncing account {account}"),
             Self::Opened { endpoint } => writeln!(f, "Opened {endpoint}"),
             Self::Listed {
                 endpoint,

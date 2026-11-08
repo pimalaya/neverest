@@ -119,7 +119,7 @@ fn a_body_is_kept_as_it_arrives() {
     first.kill().unwrap();
     first.wait().unwrap();
 
-    let kept = bodies(&store, &folders);
+    let kept = bodies(&store, "hydrate", &folders);
     assert!(
         kept >= MESSAGES,
         "the first batch is readable before the account has downloaded ({kept} kept)"
@@ -130,8 +130,7 @@ fn a_body_is_kept_as_it_arrives() {
     );
 
     let report = neverest(&["--json", "sync", "-a", "hydrate"], &config);
-    let report: serde_json::Value =
-        serde_json::from_str(report.lines().last().unwrap_or_default()).expect("a JSON report");
+    let report = account_report(&report);
     let fetched = report["item"]["patch"]
         .as_array()
         .expect("item patch")
@@ -143,7 +142,11 @@ fn a_body_is_kept_as_it_arrives() {
         total - kept,
         "the second run fetches only what the first did not keep"
     );
-    assert_eq!(bodies(&store, &folders), total, "every body is stored");
+    assert_eq!(
+        bodies(&store, "hydrate", &folders),
+        total,
+        "every body is stored"
+    );
 
     for folder in &folders {
         imap(&format!("DELETE {folder}"));
@@ -234,7 +237,7 @@ fn recent_mail_downloads_first_on_request() {
         .expect("spawn neverest");
     let folders = [old.clone(), recent.clone()];
     let deadline = Instant::now() + Duration::from_secs(120);
-    while bodies(&store, &folders) < MESSAGES {
+    while bodies(&store, "newest", &folders) < MESSAGES {
         assert!(Instant::now() < deadline, "no batch was applied in time");
         assert!(
             run.try_wait().unwrap().is_none(),
@@ -246,12 +249,12 @@ fn recent_mail_downloads_first_on_request() {
     run.wait().unwrap();
 
     assert_eq!(
-        bodies(&store, std::slice::from_ref(&recent)),
+        bodies(&store, "newest", std::slice::from_ref(&recent)),
         MESSAGES,
         "the recent folder's batch came first"
     );
     assert!(
-        bodies(&store, std::slice::from_ref(&old)) < MESSAGES,
+        bodies(&store, "newest", std::slice::from_ref(&old)) < MESSAGES,
         "the old, larger folder came after"
     );
 
@@ -260,7 +263,7 @@ fn recent_mail_downloads_first_on_request() {
         &config,
     );
     assert_eq!(
-        bodies(&store, &folders),
+        bodies(&store, "newest", &folders),
         2 * MESSAGES,
         "every body is stored"
     );
@@ -343,13 +346,13 @@ fn append_all(folder: &str, messages: impl Iterator<Item = String>) {
     write!(writer, "z LOGOUT\r\n").unwrap();
 }
 
-/// The live items of `folder`, by link id.
-fn items(store: &Path, folder: &str) -> Vec<io_pimdir::client::reader::PimdirItem> {
+/// The live items of `folder` of `account`, by link id.
+fn items(store: &Path, account: &str, folder: &str) -> Vec<io_pimdir::client::reader::PimdirItem> {
     let Ok(reader) = PimdirReader::open(store) else {
         return Vec::new();
     };
     reader
-        .list_items(format!("imap/{folder}"), None, 10_000)
+        .list_items(format!("{account}/imap/{folder}"), None, 10_000)
         .unwrap_or_default()
 }
 
@@ -427,7 +430,7 @@ fn every_folder_is_readable_from_its_newest_mail_early() {
             run.try_wait().unwrap().is_none(),
             "the run ended before it could be stopped"
         );
-        let held: Vec<_> = folders.iter().map(|f| items(&store, f)).collect();
+        let held: Vec<_> = folders.iter().map(|f| items(&store, "prime", f)).collect();
         if first_pages.is_none() && !held[2].is_empty() {
             first_pages = Some([held[0].len(), held[1].len()]);
         }
@@ -450,8 +453,7 @@ fn every_folder_is_readable_from_its_newest_mail_early() {
     );
 
     let report = neverest(&["--json", "sync", "-a", "prime"], &config);
-    let report: serde_json::Value =
-        serde_json::from_str(report.lines().last().unwrap_or_default()).expect("a JSON report");
+    let report = account_report(&report);
     for coverage in report["coverage"].as_array().expect("coverage") {
         assert!(
             coverage["round"].is_null(),
@@ -459,7 +461,7 @@ fn every_folder_is_readable_from_its_newest_mail_early() {
         );
     }
     for folder in &folders {
-        let held = items(&store, folder);
+        let held = items(&store, "prime", folder);
         assert_eq!(held.len(), LARGE, "{folder} holds each message once");
         assert!(
             held.iter().all(|item| item.object.is_some()),
@@ -504,7 +506,7 @@ fn a_primed_run_reports_each_fetch_once() {
             .expect("spawn neverest");
         let (mut first_body, mut first_pages) = (None, None);
         while first_body.is_none() || first_pages.is_none() {
-            let held: Vec<_> = folders.iter().map(|f| items(&store, f)).collect();
+            let held: Vec<_> = folders.iter().map(|f| items(&store, &account, f)).collect();
             if first_body.is_none() && held.iter().flatten().any(|item| item.object.is_some()) {
                 first_body = Some(start.elapsed());
             }
@@ -523,13 +525,7 @@ fn a_primed_run_reports_each_fetch_once() {
             "-j {connections} --prime {prime}: first body {first_body:?}, every first page {first_pages:?}, whole run {whole:?}"
         );
 
-        let report: serde_json::Value = serde_json::from_str(
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .last()
-                .unwrap_or_default(),
-        )
-        .expect("a JSON report");
+        let report = account_report(&String::from_utf8_lossy(&output.stdout));
         let fetched: Vec<&str> = report["item"]["patch"]
             .as_array()
             .expect("item patch")
@@ -545,7 +541,7 @@ fn a_primed_run_reports_each_fetch_once() {
         );
         assert_eq!(distinct.len(), fetched.len(), "{account}: none twice");
         for folder in &folders {
-            let held = items(&store, folder);
+            let held = items(&store, &account, folder);
             assert_eq!(held.len(), LARGE, "{account}: {folder} once");
             assert!(held.iter().all(|item| item.object.is_some()));
         }
@@ -592,13 +588,13 @@ fn a_listed_run_leaves_the_backlog_owed() {
         .spawn()
         .expect("spawn neverest");
     let deadline = Instant::now() + Duration::from_secs(120);
-    while items(&store, &folder).len() < MESSAGES {
+    while items(&store, "listed", &folder).len() < MESSAGES {
         assert!(Instant::now() < deadline, "the page did not land in time");
         thread::sleep(Duration::from_millis(1));
     }
     first.kill().unwrap();
     first.wait().unwrap();
-    let kept = bodies(&store, &folders);
+    let kept = bodies(&store, "listed", &folders);
     assert!(kept < MESSAGES, "bodies were left owed ({kept})");
 
     append_all(&folder, std::iter::once(message(MESSAGES, "hello\r\n")));
@@ -607,14 +603,18 @@ fn a_listed_run_leaves_the_backlog_owed() {
         &config,
     );
 
-    let held = items(&store, &folder);
+    let held = items(&store, "listed", &folder);
     assert_eq!(held.len(), MESSAGES + 1);
     assert!(has_body_of(&held, id, MESSAGES), "the new mail is readable");
-    assert_eq!(bodies(&store, &folders), kept + 1, "the backlog stays owed");
+    assert_eq!(
+        bodies(&store, "listed", &folders),
+        kept + 1,
+        "the backlog stays owed"
+    );
 
     neverest(&["sync", "-a", "listed"], &config);
     assert_eq!(
-        bodies(&store, &folders),
+        bodies(&store, "listed", &folders),
         MESSAGES + 1,
         "a full run takes it"
     );
@@ -674,7 +674,7 @@ fn a_body_gone_mid_run_is_owed_nothing() {
         .spawn()
         .expect("spawn neverest");
     let deadline = Instant::now() + Duration::from_secs(120);
-    while items(&store, &folder).len() < HEADS + TAILS {
+    while items(&store, "gone", &folder).len() < HEADS + TAILS {
         assert!(
             Instant::now() < deadline,
             "the listing did not land in time"
@@ -693,7 +693,7 @@ fn a_body_gone_mid_run_is_owed_nothing() {
         fs::read_to_string(root.join("stderr")).unwrap_or_default()
     );
 
-    let held = items(&store, &folder);
+    let held = items(&store, "gone", &folder);
     assert_eq!(held.len(), HEADS + TAILS, "the gone members stay as listed");
     assert!(
         (0..HEADS).all(|n| has_body_of_tag(&held, "gone", id, n)),
@@ -705,8 +705,7 @@ fn a_body_gone_mid_run_is_owed_nothing() {
     );
 
     let report = neverest(&["--json", "sync", "-a", "gone"], &config);
-    let report: serde_json::Value =
-        serde_json::from_str(report.lines().last().unwrap_or_default()).expect("a JSON report");
+    let report = account_report(&report);
     let fetched = report["item"]["patch"]
         .as_array()
         .expect("item patch")
@@ -714,7 +713,7 @@ fn a_body_gone_mid_run_is_owed_nothing() {
         .filter(|entry| entry["hunk"]["kind"] == "fetch")
         .count();
     assert_eq!(fetched, 0, "nothing asked again: {report}");
-    let held = items(&store, &folder);
+    let held = items(&store, "gone", &folder);
     assert_eq!(held.len(), HEADS, "the listing took the gone members away");
     assert!(held.iter().all(|item| item.object.is_some()));
 
@@ -753,8 +752,17 @@ fn has_body_of(items: &[io_pimdir::client::reader::PimdirItem], id: u32, n: usiz
         .any(|item| item.link_id.0.contains(&suffix) && item.object.is_some())
 }
 
-/// How many messages of `folders` the store holds a body for.
-fn bodies(store: &Path, folders: &[String]) -> usize {
+/// The report of a sync over one account, from its result, the last line,
+/// after its events.
+fn account_report(stdout: &str) -> serde_json::Value {
+    let result: serde_json::Value =
+        serde_json::from_str(stdout.lines().last().unwrap_or_default()).expect("a JSON result");
+    result["accounts"][0]["report"].clone()
+}
+
+/// How many messages of the `folders` of `account` the store holds a body
+/// for.
+fn bodies(store: &Path, account: &str, folders: &[String]) -> usize {
     let Ok(reader) = PimdirReader::open(store) else {
         return 0;
     };
@@ -762,7 +770,7 @@ fn bodies(store: &Path, folders: &[String]) -> usize {
         .iter()
         .map(|folder| {
             reader
-                .list_items(format!("imap/{folder}"), None, 10_000)
+                .list_items(format!("{account}/imap/{folder}"), None, 10_000)
                 .map(|items| items.iter().filter(|item| item.object.is_some()).count())
                 .unwrap_or(0)
         })

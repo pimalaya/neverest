@@ -73,7 +73,8 @@ fn check(protocol: &str, server: &str) -> Value {
     .unwrap();
 
     let checked = neverest(&["--json", "check", "-a", "check"], &config, &state);
-    serde_json::from_str(&checked).expect("one JSON document")
+    let checked: Value = serde_json::from_str(&checked).expect("one JSON document");
+    checked["accounts"][0].clone()
 }
 
 /// The support a source declares for the capability `name`.
@@ -145,7 +146,10 @@ fn a_check_names_every_endpoint_that_did_not_answer() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(2), "{stdout}");
 
-    let report: Value = serde_json::from_str(&stdout).expect("one JSON document");
+    let checked: Value = serde_json::from_str(&stdout).expect("one JSON document");
+    assert_eq!(checked["orphans"], serde_json::json!([]), "{checked}");
+    let report = &checked["accounts"][0];
+    assert_eq!(report["account"], "check", "{checked}");
     assert_eq!(
         report["mode"],
         serde_json::json!({

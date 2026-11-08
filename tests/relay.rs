@@ -100,7 +100,7 @@ fn relay_streams_a_to_b_without_retaining() {
     );
 
     // 4. The relay account's store kept only the spine — no object blob at rest.
-    let objects = state.join("neverest").join("relay").join("objects");
+    let objects = state.join("neverest").join("objects");
     let blobs = count_files(&objects);
     assert_eq!(
         blobs,

@@ -8,9 +8,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 Upgrading from 0.3.0:
 
-- Every store an earlier neverest wrote, 0.3.0 or a git build, is refused (`store-version`), never migrated: sync it with the neverest that wrote it until nothing is queued, upgrade, then move it aside and sync a new one (MIGRATION.md).
+- Every store an earlier neverest wrote, 0.3.0 or a git build, is refused (`store-version`), never migrated: sync it with the neverest that wrote it until nothing is queued, upgrade, move it out of the neverest directory, then `neverest init` and sync (MIGRATION.md).
+- Every account shares one store, `neverest/` under the state directory itself: a neverest directory still holding the per-account stores 0.3.0 kept is refused (`store-layout`), naming each, until they are moved out.
+- `-a` is a filter: without it, `sync`, `check`, `drain` and `init` run over every account, and `default = true` is ignored. A script running one account names it with `-a`.
+- `sync`, `drain`, `init` and `check` print one result listing every account under `--json` (`.accounts[]`, a sync's report under `.accounts[].report`), and `index` one listing every store (`.stores[]`).
+- Store collection ids carry the account (`work/imap/INBOX`): a frontend naming a collection by its id names the new one, and reads one account through `pimdir.account`.
 - `collection.delete` now defaults to false: set `collection.delete = true` on each endpoint whose collection deletions should reach the other.
-- `sync --reset` refuses while the store holds work no server has, listing it; `--reset --force` moves the store aside instead of deleting it.
+- `sync --reset -a <account>` drops that account's collections and resyncs them, refusing while they hold work no server has, listing it; `--reset --force` drops the conflicts, unpushed changes and retained items too, a queued or parked action still refusing it.
 - `sync` exits 2 for a parked send, intent or queue action too, and 3 when the run could not do all its work: a script must tell 2 and 3 from 1.
 - A listing that leaves out more than half of at least 20 items a collection held, or names none while it held some, drops nothing and exits 2: `sync --accept-absences` confirms such absences, for one run.
 - A store another user can read is refused (`store-exposed`): `chmod 700` its directory and `chmod 600` its pimdir.db.
@@ -30,7 +34,15 @@ Upgrading from 0.3.0:
 
 - Added `sync --declare-only`: records every collection the sources hold, with its kind, name and role, syncing no item.
 
-- Added `sync --reset --force`: moves the store into a sibling `<dir>.reset-<instant>` directory, deleting nothing, and resyncs into a fresh one.
+- Added `sync --reset --force`: drops the account's conflicts, unpushed changes and retained items with its collections, then resyncs them.
+
+  A queued or parked action on the account's collections still refuses the reset, naming the row: `drain` applies a queued one, its frontend cancels a parked one.
+
+- Added the orphan report to `check`: an account the store holds that no configured account names, as renaming an account's key leaves it, is listed under `orphans`, its collections left where they are.
+
+- Added the `account-started` sync event, announcing each account of a run before its own events.
+
+- Added the `store-layout` error code: a store laid out as an earlier neverest kept it (a store per account under the neverest directory, a neverest.json of an earlier shape, or a database with none), refused and never migrated.
 
 - Added scoped mail syncs: `item.filter.since` in the account and `sync --since <WHEN>` bound a mail collection by its `Date` header.
 
@@ -130,6 +142,36 @@ Upgrading from 0.3.0:
 
 ### Changed
 
+- **BREAKING**: changed every account naming no `store.root` to share one store, `neverest/` under the state directory, where each had `neverest/<account>/`.
+
+  pimdir is multi-account by design: collections are grouped by account, a body two accounts hold is stored once, and a frontend reads every account from one store. Accounts naming one `store.root` share it too.
+
+- **BREAKING**: changed the store's source ids to `<account>/<source>` and its collection ids to `<account>/<source>/<name>`.
+
+  Source and collection ids are unique store-wide (pimdir STORAGE §4.3, §9.2): two accounts holding the wizard's `imap` source would have written into one collection and replaced each other's capabilities. Reports and events still name an endpoint as the configuration does. An account name holding `/` is refused.
+
+- **BREAKING**: changed `-a/--account` into a repeatable filter: without it, `sync`, `check`, `drain` and `init` run over every account, one after the other under the store's one lock, and `index` builds every store the accounts use.
+
+  `conflict show`, `conflict resolve` and `sync --reset` need exactly one account. An unknown name fails before anything runs, naming the configured accounts.
+
+- **BREAKING**: changed the `--json` results of `sync`, `drain`, `init` and `check` to list every account (`accounts`), and of `index` to list every store (`stores`).
+
+  An account that fails is reported with its error and code, the next one still runs, and the command exits 3.
+
+- **BREAKING**: changed the sidecar (neverest.json) to keep the mode, the looked-up roles and the taskless calendars per account; one of the previous shape is refused (`store-layout`).
+
+- **BREAKING**: changed `sync --reset` to start one account over inside the store it shares, dropping its collections rather than the store.
+
+- Changed `default = true` on an account to be read and ignored, with a warning, and the wizard to write none.
+
+- Changed the retention sweep to purge the account's own retained items alone, so one account's `store.purge-after` never empties another's trash.
+
+- Changed the store-wide lock to make a second run over a held store report its accounts `busy` and exit 3 after the bounded wait, where it failed.
+
+- Changed `init` to add an account to the store the accounts share, creating it when there is none, and to leave an initialized account as it is, saying so.
+
+- Changed `conflict list` to list the conflicts of every account it runs over, each row naming its account.
+
 - Changed `conflict resolve` and the merger to name the divergence they settle (pimdir STORAGE §15.3 `resolves`): a frontend's edit queued over a conflict now parks, naming it, where it settled the conflict and dropped the server's body silently. An item conflict between two sources, which `conflict list` does not show yet, parks a resolution rather than being settled unseen.
 - **BREAKING**: changed `collection.delete` to default to false: a collection an endpoint no longer lists is deleted on the other only where that endpoint sets `collection.delete = true`.
 
@@ -137,7 +179,7 @@ Upgrading from 0.3.0:
 
 - **BREAKING**: changed `sync --reset` to refuse while the store holds work no server has (queued or parked actions, conflicts, unpushed changes, retained items), listing it.
 
-  It is refused beside `--dry-run`, `-m`, `-x` and `-s`, and drops the search index too.
+  It is refused beside `--dry-run`, `-m`, `-x` and `-s`.
 
 - Changed the `submit` payload to be read by io-pimdir's `PimdirSubmit`: one without `source` or a recipient, or naming a body (`object`, the message being the queue row's body), parks instead of being sent.
 
@@ -205,9 +247,7 @@ Upgrading from 0.3.0:
 
 - Changed a body fetched to settle a divergence to settle it by the endpoint's policy: a one-way target's own edit is kept as a retained item and reported under `overruled`, a source's adopted, a two-way endpoint's left for the merge.
 
-- Changed the store a dry run copies, and the directory `sync --reset --force` moves a store into, to be their user's alone, as the store is.
-
-- Changed `init` on an initialized account to name `sync --reset`, where it advised deleting the store.
+- Changed the store a dry run copies to be its user's alone, as the store is.
 
 - Changed the search index to read floating times and all-day dates in the user's time zone, `TZ` else the system's, rather than in UTC.
 
@@ -244,6 +284,8 @@ Upgrading from 0.3.0:
 - Bumped vcard-rs to 0.6.
 
 ### Fixed
+
+- Fixed `sync --accept-mode` being refused like the run it answers: it lets that run through and records the new mode.
 
 - Fixed an IMAP `SELECT` answer without `EXISTS` read as an empty mailbox, which deleted every message: such a mailbox is searched.
 

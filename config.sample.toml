@@ -14,10 +14,16 @@
 # writes a one-account, one-source configuration in the flat spelling below.
 # Everything else on this page is written by hand.
 #
-# An account is one pimdir STORE, fed by one or more named SOURCES, each a
-# remote. A backend written directly under the account (`imap.server = …`) is
-# sugar for a source named after its protocol; the `sources` table at the bottom
-# is what you reach for when you need two of one protocol.
+# Every account shares ONE pimdir STORE, each fed by one or more named SOURCES,
+# each a remote. A backend written directly under the account
+# (`imap.server = …`) is sugar for a source named after its protocol; the
+# `sources` table at the bottom is what you reach for when you need two of one
+# protocol.
+#
+# Every command runs over EVERY ACCOUNT, one after the other, unless
+# `-a/--account` names some (repeatable). The store is locked for the whole
+# run, so two accounts of one store never sync at once: give an account that
+# needs its own schedule its own `store.root`.
 #
 # WHAT AN ACCOUNT DOES is its arity plus two flags, so there is no mode to name:
 #
@@ -39,8 +45,9 @@
 
 [accounts.example]
 
-# Use this account when `-a/--account` is not passed.
-default = true
+# `default` is read and ignored, with a warning: no account is the default, a
+# command running over every one unless `-a` names some.
+#default = true
 
 # Make the sources authoritative: their side wins and the other's change is
 # DISCARDED rather than merged, so nothing is reported as a conflict. Turning it
@@ -389,22 +396,28 @@ imap.item.delete = false
 # Store options
 # --------------------------------------------------------------------------------
 
-# Where pimdir.db and `objects/` live. Defaults to neverest/<account>/ under
-# the platform's state location: $XDG_STATE_HOME on Linux and the BSDs,
-# ~/Library/Application Support on macOS, %LOCALAPPDATA% on Windows.
-#store.root = "~/.local/state/neverest/example"
+# Where pimdir.db and `objects/` live. Defaults to neverest/ under the
+# platform's state location ( on Linux and the BSDs,
+# ~/Library/Application Support on macOS, %LOCALAPPDATA% on Windows), the one
+# store every account naming no root shares, each collection grouped under its
+# account. Accounts naming one root share that store; an account naming its
+# own syncs on a schedule of its own. A frontend reads one account of a shared
+# store through its own account key (`pimdir.account` in himalaya).
+#store.root = "~/.local/state/neverest-example"
 
 # What the store keeps is `retain`, at the top of this account. Dropping it from
 # true to false does NOT delete the bodies already stored: they stay,
 # unreferenced, until an explicit `pimdir gc` or `neverest sync --reset`.
 #
 # CAUTION: with `retain = true` and a target, the store is a backup rather than a
-# cache, and `neverest sync --reset` destroys it along with the rest.
+# cache, and `neverest sync --reset --force` drops the account's part of it
+# along with the rest of its collections.
 
 # The store never truly deletes: an item whose last binding vanishes is retained,
 # hidden but kept with its body. This is how long before a sync reclaims it: an
 # integer plus `s`, `m`, `h`, `d` or `w`. UNSET never purges, `"0"` purges at
-# once, `sync --no-purge` skips one run, `pimdir` restores retained items.
+# once, `sync --no-purge` skips one run, `pimdir` restores retained items. It
+# is this account's alone: another account of the store keeps its own delay.
 #store.purge-after = "90d"
 
 # The longest a sync refreshes the store's search index, which frontends query:

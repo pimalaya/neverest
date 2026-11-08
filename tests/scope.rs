@@ -71,7 +71,7 @@ fn a_scope_lists_by_date_widens_and_never_deletes_what_it_leaves() {
     write_config(&config, &store, "scope", &mailbox, Some("30d"));
     neverest(&["init", "-a", "scope"], &config);
 
-    let collection = format!("imap/{mailbox}");
+    let collection = format!("scope/imap/{mailbox}");
 
     let report = sync(&config, "scope", &[]);
     assert_eq!(
@@ -159,7 +159,7 @@ fn an_interrupted_round_resumes_and_lands_every_message_once() {
 
     write_config(&config, &store, "paged", &mailbox, None);
     neverest(&["init", "-a", "paged"], &config);
-    let collection = format!("imap/{mailbox}");
+    let collection = format!("paged/imap/{mailbox}");
 
     let mut first = Command::new(env!("CARGO_BIN_EXE_neverest"))
         .args(["-c", &config.to_string_lossy()])
@@ -234,7 +234,7 @@ fn a_page_s_bodies_land_before_its_round_closes() {
 
     write_config(&config, &store, "early", &mailbox, None);
     neverest(&["init", "-a", "early"], &config);
-    let collection = format!("imap/{mailbox}");
+    let collection = format!("early/imap/{mailbox}");
 
     let mut first = Command::new(env!("CARGO_BIN_EXE_neverest"))
         .args(["-c", &config.to_string_lossy()])
@@ -331,12 +331,14 @@ fn write_config(config: &Path, store: &Path, account: &str, mailbox: &str, since
     .unwrap();
 }
 
-/// Runs a sync, answering its JSON report.
+/// Runs a sync, answering the account's JSON report.
 fn sync(config: &Path, account: &str, extra: &[&str]) -> serde_json::Value {
     let mut args = vec!["--json", "sync", "-a", account];
     args.extend_from_slice(extra);
     let out = neverest(&args, config);
-    serde_json::from_str(out.lines().last().unwrap_or_default()).expect("a JSON report")
+    let result: serde_json::Value =
+        serde_json::from_str(out.lines().last().unwrap_or_default()).expect("a JSON result");
+    result["accounts"][0]["report"].clone()
 }
 
 /// The coverage the report states for `mailbox`.

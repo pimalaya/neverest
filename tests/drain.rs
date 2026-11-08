@@ -34,7 +34,9 @@ use io_pimdir::{
 use serde_json::Value;
 
 const ACCOUNT: &str = "drain";
-const COLLECTION: &str = "caldav/default";
+/// The account's CalDAV source, as the store keys it.
+const SOURCE: &str = "drain/caldav";
+const COLLECTION: &str = "drain/caldav/default";
 /// A port nothing listens on, so a run that connects fails.
 const CLOSED: &str = "http://127.0.0.1:1/";
 const DAV: &str = "http://127.0.0.1:8080/dav";
@@ -101,22 +103,21 @@ impl Fixture {
     }
 
     fn store(&self) -> PathBuf {
-        self.state.join("neverest").join(ACCOUNT)
+        self.state.join("neverest")
     }
 
-    /// A store holding the calendar, made without any server: the
-    /// database first, then a reset, which stamps it and fails to
-    /// connect, then the collection.
+    /// A store holding the calendar, made without any server: the store
+    /// and its sidecar naming the account, as `init` leaves them, then the
+    /// collection.
     fn offline_store(&self) {
-        fs::create_dir_all(self.store()).unwrap();
         drop(PimdirStore::open(self.store()).unwrap());
-        let reset = self.run(&["sync", "-a", ACCOUNT, "--reset", "--json"]);
-        assert_eq!(reset.status.code(), Some(3), "{}", stderr(&reset));
+        let sidecar = format!(r#"{{"layout":2,"accounts":{{"{ACCOUNT}":{{}}}}}}"#);
+        fs::write(self.store().join("neverest.json"), sidecar).unwrap();
 
         let store = PimdirStore::open(self.store())
             .unwrap()
             .for_account(ACCOUNT)
-            .for_source("caldav");
+            .for_source(SOURCE);
         store
             .ensure_collection(COLLECTION, "text/calendar")
             .unwrap();
@@ -182,6 +183,13 @@ impl Fixture {
             .expect("a JSON result")
             .expect("a JSON result")
     }
+
+    /// The report of the account's sync, the only account the run covers.
+    fn report(&self, args: &[&str], code: i32) -> Value {
+        let result = self.json(args, code);
+        assert_eq!(result["accounts"][0]["account"], ACCOUNT, "{result}");
+        result["accounts"][0]["report"].clone()
+    }
 }
 
 fn stderr(output: &Output) -> String {
@@ -209,8 +217,9 @@ fn a_drain_applies_a_queued_create_without_any_server() {
     let id = fixture.queue_event("drained-1");
     assert!(fixture.seqs_of("drained-1").is_empty());
 
-    let drained = fixture.json(&["--json", "drain", "-a", ACCOUNT], 0);
+    let drained = &fixture.json(&["--json", "drain", "-a", ACCOUNT], 0)["accounts"][0];
 
+    assert_eq!(drained["account"], ACCOUNT, "{drained}");
     assert_eq!(drained["busy"], false, "{drained}");
     let applied = &drained["applied"][0];
     assert_eq!(applied["id"], id, "{drained}");
@@ -227,7 +236,7 @@ fn a_sync_drains_before_it_connects() {
     fixture.offline_store();
     let id = fixture.queue_event("drained-2");
 
-    let report = fixture.json(&["--json", "sync", "-a", ACCOUNT], 3);
+    let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 3);
 
     assert_eq!(report["drained"][0]["collection"], COLLECTION, "{report}");
     let PimdirActionStatus::Applied { seq: Some(seq), .. } = fixture.status(id) else {
@@ -253,7 +262,7 @@ fn a_drain_leaves_a_busy_store_alone() {
         .unwrap();
     lock.lock().unwrap();
 
-    let drained = fixture.json(&["--json", "drain", "-a", ACCOUNT], 3);
+    let drained = &fixture.json(&["--json", "drain", "-a", ACCOUNT], 3)["accounts"][0];
     assert_eq!(drained["busy"], true, "{drained}");
     assert!(matches!(
         fixture.status(id),
@@ -296,8 +305,9 @@ fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
 
 /// A store an earlier neverest wrote is refused, never migrated (pimdir
 /// STORAGE §6): the message names the reinstall, syncing with that
-/// neverest first so no queued write is lost, then moving the store aside,
-/// and never says to delete it.
+/// neverest first so no queued write is lost, then moving the store
+/// directory away, every account's store being one, and never says to
+/// delete it.
 #[test]
 fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
     let fixture = Fixture::new(CLOSED, "user", "pass");
@@ -309,10 +319,8 @@ fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
     assert_eq!(failure["code"], "store-version", "{failure}");
     let error = failure["error"].as_str().unwrap_or_default();
     assert!(error.contains("until nothing is queued"), "{failure}");
-    assert!(
-        error.contains(&format!("neverest sync --reset --force -a {ACCOUNT}")),
-        "{failure}"
-    );
+    assert!(error.contains("move the store directory away"), "{failure}");
+    assert!(!error.contains("--reset"), "{failure}");
     assert!(!error.to_lowercase().contains("delete "), "{failure}");
 }
 
@@ -359,7 +367,7 @@ fn a_drained_event_keeps_its_id_across_the_push() {
 
     let uid = unique("drained");
     fixture.queue_event(&uid);
-    let drained = fixture.json(&["--json", "drain", "-a", ACCOUNT], 0);
+    let drained = &fixture.json(&["--json", "drain", "-a", ACCOUNT], 0)["accounts"][0];
     let seq = drained["applied"][0]["seq"]
         .as_i64()
         .expect("the created item's id");
@@ -393,7 +401,7 @@ fn an_unreachable_endpoint_is_named_in_the_report() {
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
 
-    let report = fixture.json(&["--json", "sync", "-a", ACCOUNT], 3);
+    let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 3);
 
     let unreached = report["unreached"].as_array().expect("unreached endpoints");
     assert_eq!(unreached.len(), 1, "{report}");
@@ -431,7 +439,7 @@ fn a_throttling_server_is_named_in_the_report() {
     fixture.offline_store();
     fixture.point_at(&format!("http://127.0.0.1:{port}/"), "user", "pass");
 
-    let report = fixture.json(&["--json", "sync", "-a", ACCOUNT], 3);
+    let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 3);
 
     let throttled = report["throttled"].as_array().expect("throttled sources");
     assert_eq!(throttled.len(), 1, "{report}");

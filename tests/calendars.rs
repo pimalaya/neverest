@@ -521,16 +521,16 @@ fn sync(config: &Path, state: &Path, calendar: &str, code: i32) -> String {
 
 /// The store's live items for a calendar, as the `pimdir` CLI renders them.
 fn store_items(state: &Path, calendar: &str) -> String {
-    let store = state.join("neverest").join("cal");
+    let store = state.join("neverest");
     let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
-        .args(["item", "list", &format!("a/{calendar}"), "--json"])
+        .args(["item", "list", &format!("cal/a/{calendar}"), "--json"])
         .output()
         .expect("spawn pimdir");
 
     assert!(
         output.status.success(),
-        "`pimdir item list a/{calendar}` failed:\n{}",
+        "`pimdir item list cal/a/{calendar}` failed:\n{}",
         String::from_utf8_lossy(&output.stderr),
     );
 

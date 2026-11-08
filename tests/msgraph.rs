@@ -778,7 +778,7 @@ fn a_graph_meeting_is_cancelled() {
             a.intent(
                 &calendar,
                 "calendar-reply",
-                serde_json::json!({ "v": 1, "source": "msgraph-calendar", "seq": seq, "partstat": "DECLINED" }),
+                serde_json::json!({ "v": 1, "source": a.source(), "seq": seq, "partstat": "DECLINED" }),
             );
             let intents = a.sync_parked_intents(&calendar);
             assert_eq!(intents.len(), 1, "{intents:?}");
@@ -792,7 +792,7 @@ fn a_graph_meeting_is_cancelled() {
                 "calendar-cancel",
                 serde_json::json!({
                     "v": 1,
-                    "source": "msgraph-calendar",
+                    "source": a.source(),
                     "seq": seq,
                     "comment": "Cancelled by the neverest live tests",
                 }),
@@ -886,7 +886,7 @@ fn a_graph_meeting_edited_right_after_creation_is_pushed_then_cancelled() {
                 "calendar-cancel",
                 serde_json::json!({
                     "v": 1,
-                    "source": "msgraph-calendar",
+                    "source": a.source(),
                     "seq": seq,
                     "comment": "Cancelled by the neverest live tests",
                 }),
@@ -980,7 +980,7 @@ fn a_graph_invitation_is_answered() {
                 "calendar-reply",
                 serde_json::json!({
                     "v": 1,
-                    "source": "msgraph-calendar",
+                    "source": a.source(),
                     "seq": seq,
                     "partstat": "ACCEPTED",
                     "comment": "Sent by the neverest live tests",

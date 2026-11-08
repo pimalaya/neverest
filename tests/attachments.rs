@@ -182,12 +182,18 @@ fn stand_ins(store: &Path, account: &str) -> BTreeMap<String, PimdirAccountAttac
         .collect()
 }
 
-/// The attachment mark of `name` in `folder`.
-fn mark(store: &Path, folder: &str, messages: &Messages, name: &str) -> Option<bool> {
+/// The attachment mark of `name` in `folder` of `account`.
+fn mark(
+    store: &Path,
+    account: &str,
+    folder: &str,
+    messages: &Messages,
+    name: &str,
+) -> Option<bool> {
     let reader = PimdirReader::open(store).expect("open the store");
     let entry = reader
         .get_mail_row(
-            format!("imap/{folder}"),
+            format!("{account}/imap/{folder}"),
             &PimdirLinkId(messages.message_id(name)),
         )
         .expect("read the mail row")
@@ -242,7 +248,11 @@ fn assert_stand_ins(store: &Path, account: &str, folder: &str, messages: &Messag
             entry.message.0, message,
             "{key} is referenced by its message"
         );
-        assert_eq!(entry.message_collection, format!("imap/{folder}"), "{key}");
+        assert_eq!(
+            entry.message_collection,
+            format!("{account}/imap/{folder}"),
+            "{key}"
+        );
 
         let (got_name, got_type, got_size, got_part) = described(&entry.summary);
         assert_eq!(got_name, file, "{key}");
@@ -283,7 +293,7 @@ fn assert_stand_ins(store: &Path, account: &str, folder: &str, messages: &Messag
         ("plain", false),
     ] {
         assert_eq!(
-            mark(store, folder, messages, name),
+            mark(store, account, folder, messages, name),
             Some(attaches),
             "{account}: the mark of {name} is its parts'",
         );
@@ -348,11 +358,11 @@ fn a_synced_body_stands_for_its_attachments() {
         // io-pimdir links a body the account holds without fetching it and
         // states the held row's size, mark and invitation (Annex A.1).
         assert_eq!(
-            held(&store, &copies),
+            held(&store, account, &copies),
             (4, 4),
             "{account}: the copies are held"
         );
-        assert_eq!(mark(&store, &copies, &messages, "two"), Some(true));
+        assert_eq!(mark(&store, account, &copies, &messages, "two"), Some(true));
         let reader = PimdirReader::open(&store).unwrap();
         let two = reader
             .list_attachments(Some(account), &PimdirLinkId(messages.message_id("two")))
@@ -401,7 +411,7 @@ fn a_body_landing_later_stands_for_its_attachments_then() {
         .spawn()
         .expect("spawn neverest");
     let deadline = Instant::now() + Duration::from_secs(120);
-    while held(&store, &folder).0 < total {
+    while held(&store, "later", &folder).0 < total {
         assert!(
             Instant::now() < deadline,
             "the listing did not land in time"
@@ -412,7 +422,7 @@ fn a_body_landing_later_stands_for_its_attachments_then() {
     first.kill().unwrap();
     first.wait().unwrap();
     assert_eq!(
-        held(&store, &folder).1,
+        held(&store, "later", &folder).1,
         0,
         "no body landed before the run was stopped (raise FILLER_BODY if it outran the kill)"
     );
@@ -432,10 +442,10 @@ fn a_body_landing_later_stands_for_its_attachments_then() {
         [&format!("part:{}#2", messages.message_id("late"))],
         "the arrival's body landed, the backlog's still owed",
     );
-    assert_eq!(held(&store, &folder).1, 1);
+    assert_eq!(held(&store, "later", &folder).1, 1);
 
     neverest(&["sync", "-a", "later"], &config);
-    assert_eq!(held(&store, &folder), (total + 1, total + 1));
+    assert_eq!(held(&store, "later", &folder), (total + 1, total + 1));
     assert_stand_ins(&store, "later", &folder, &messages, true);
 
     imap(&format!("DELETE {folder}"));
@@ -465,21 +475,25 @@ fn write_config(root: &Path, account: &str, folders: &[String]) -> PathBuf {
     config
 }
 
-/// How many messages `folder` holds, and how many with their body.
-fn held(store: &Path, folder: &str) -> (usize, usize) {
+/// How many messages `folder` of `account` holds, and how many with their
+/// body.
+fn held(store: &Path, account: &str, folder: &str) -> (usize, usize) {
     let Ok(reader) = PimdirReader::open(store) else {
         return (0, 0);
     };
     let items = reader
-        .list_items(format!("imap/{folder}"), None, 10_000)
+        .list_items(format!("{account}/imap/{folder}"), None, 10_000)
         .unwrap_or_default();
     let bodies = items.iter().filter(|item| item.object.is_some()).count();
     (items.len(), bodies)
 }
 
-/// The result of a sync, the last line, after its events.
+/// The report of a sync over one account, from its result, the last line,
+/// after its events.
 fn report(out: &str) -> serde_json::Value {
-    serde_json::from_str(out.lines().last().unwrap_or_default()).expect("a JSON report")
+    let result: serde_json::Value =
+        serde_json::from_str(out.lines().last().unwrap_or_default()).expect("a JSON result");
+    result["accounts"][0]["report"].clone()
 }
 
 /// The bodies a run's report says it fetched.

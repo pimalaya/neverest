@@ -41,7 +41,7 @@ use io_pimdir::{
     change::PimdirWriteOp,
     client::{
         PimdirError, PimdirRunError, PimdirSourceStore, PimdirStore, blobs::PimdirBlobStage, modes,
-        producer::PimdirProducer,
+        producer::PimdirProducer, reader::PimdirReader,
     },
     codec::PimdirAction,
     collection::{PimdirCollectionId, PimdirScope},
@@ -74,7 +74,7 @@ use crate::{
         AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceBackendConfig,
         SourceConfig, SourcePermissions,
     },
-    error::pimdir_error,
+    error::{layout_error, pimdir_error},
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId, merge::Merged},
     offline::{
@@ -90,7 +90,7 @@ use crate::{
             body_bytes, hydrate_batch, resolve_kind, stored_item, wire_name,
         },
         run_verb, run_verb_paged, source_id,
-        state::{LookedUpRoles, StoreState},
+        state::{AccountState, LookedUpRoles, StoreState},
         storage::{HydrationSide, hydration_targets, load_side, projection_view, register_syncing},
         submit,
     },
@@ -130,9 +130,95 @@ fn hub_id(namespace: &str, name: &str) -> String {
     format!("{namespace}/{name}")
 }
 
-/// Resolves `<state base>/neverest/<account>/`, the default replica root.
-pub fn replica_dir(account: &str) -> Result<PathBuf> {
-    Ok(state_base()?.join("neverest").join(account))
+/// Resolves `<state base>/neverest/`, the store every account naming no
+/// `store.root` shares.
+pub fn default_root() -> Result<PathBuf> {
+    Ok(state_base()?.join("neverest"))
+}
+
+/// The account's store directory: `store.root`, else [`default_root`].
+pub fn store_dir(config: &AccountConfig) -> Result<PathBuf> {
+    match &config.store.root {
+        Some(root) => Ok(root.clone()),
+        None => default_root(),
+    }
+}
+
+/// Refuses the neverest directory an earlier neverest kept one store per
+/// account in, before anything is created there.
+///
+/// Only while it holds no store of its own: a former store is synced by
+/// the neverest that wrote it, then moved out, which leaves the directory
+/// to the shared store; one left inside after that is not looked at.
+pub fn refuse_former_stores(dir: &Path) -> Result<()> {
+    if dir.join("pimdir.db").exists() || *dir != default_root()? {
+        return Ok(());
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Ok(());
+    };
+
+    let mut former: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join("pimdir.db").is_file())
+        .collect();
+    if former.is_empty() {
+        return Ok(());
+    }
+    former.sort();
+
+    let named: Vec<String> = former
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    Err(layout_error(format!(
+        "{} holds the stores an earlier neverest kept per account ({}), and this neverest \
+         keeps every account in one store there: sync each with the neverest that wrote it \
+         until nothing is queued, move it out of {}, then run `neverest init` again (see \
+         MIGRATION.md)",
+        dir.display(),
+        named.join(", "),
+        dir.display(),
+    )))
+}
+
+/// Refuses, as a whole and writing nothing, a store no account of this
+/// neverest can run over: laid out as an earlier neverest kept it, or at
+/// another format version. A store not created yet passes.
+pub fn check_store(dir: &Path) -> Result<()> {
+    refuse_former_stores(dir)?;
+
+    if !dir.join("pimdir.db").exists() {
+        return Ok(());
+    }
+
+    // NOTE: a reader takes no lock and writes nothing, so a dry run checks
+    // the store as a real run does.
+    if let Err(err) = PimdirReader::open(dir) {
+        return Err(store_refusal(dir, err));
+    }
+
+    StoreState::load(dir)?;
+    Ok(())
+}
+
+/// Creates the store at `dir`, its user's alone (pimdir STORAGE §18), with
+/// its sidecar holding no account yet and no send in flight: a mark left by
+/// a store moved away names nothing here.
+///
+/// The sidecar is written in the same act as the database, so a database
+/// with none only ever describes a store an earlier neverest wrote.
+pub fn create_store(dir: &Path) -> Result<()> {
+    PimdirStore::open(dir)
+        .map_err(|err| store_refusal(dir, err))
+        .with_context(|| format!("Create pimdir store {}", dir.display()))?;
+    StoreState::default()
+        .save(dir)
+        .with_context(|| format!("Stamp the store state of {}", dir.display()))?;
+    submit::InFlight::new(dir)
+        .end()
+        .with_context(|| format!("Clear the in-flight send of {}", dir.display()))
 }
 
 /// The platform directory the default replica root sits under.
@@ -163,14 +249,6 @@ fn state_base() -> Result<PathBuf> {
 #[cfg(target_os = "windows")]
 fn state_base() -> Result<PathBuf> {
     dirs::data_local_dir().context("Cannot resolve the local application data directory")
-}
-
-/// The account's store directory: `store.root`, else [`replica_dir`].
-pub fn store_dir(account: &str, config: &AccountConfig) -> Result<PathBuf> {
-    match &config.store.root {
-        Some(root) => Ok(root.clone()),
-        None => replica_dir(account),
-    }
 }
 
 /// The connections a Microsoft Graph source opens unless its `pool-size`
@@ -212,27 +290,38 @@ fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
 
 /// Opens one source handle over the account's store.
 ///
-/// Every collection it writes is grouped under `account` (pimdir STORAGE),
-/// so a store shared by two accounts tells whose is whose. A store opens
-/// under its own format version alone, never migrated (pimdir STORAGE §6):
-/// one an earlier neverest wrote is reinstalled, so the refusal names the
-/// order that keeps its queued writes (sync it with that neverest first,
-/// then the forced reset, which moves it aside); one a newer neverest wrote
-/// is good, so the refusal names the upgrade.
+/// Every collection it writes is grouped under `account` (pimdir STORAGE
+/// §9.2), so a store shared by several accounts tells whose is whose.
 pub(crate) fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
     match PimdirStore::open(dir) {
         Ok(store) => Ok(store.for_account(account).for_source(source)),
-        Err(err @ PimdirError::Version { .. }) if written_earlier(&err) => Err(pimdir_error(err)
-            .context(format!(
-                "The store was written by an earlier neverest and cannot be migrated: \
-                 sync it with the neverest that wrote it until nothing is queued, then \
-                 `neverest sync --reset --force -a {account}` moves it aside, deleting \
-                 nothing, and syncs a new one (see MIGRATION.md)"
-            ))),
-        Err(err @ PimdirError::Version { .. }) => Err(pimdir_error(err).context(
-            "The store was written by a newer neverest; upgrade neverest to sync this account",
-        )),
+        Err(err @ PimdirError::Version { .. }) => Err(store_refusal(dir, err)),
         Err(err) => Err(pimdir_error(err).context(format!("Open {source} store"))),
+    }
+}
+
+/// A store refused for what it is, with its remedy.
+///
+/// A store opens under its own format version alone, never migrated (pimdir
+/// STORAGE §6): one an earlier neverest wrote is reinstalled, so the refusal
+/// names the order that keeps its queued writes (sync it with that neverest
+/// first, then move it away, the store being every account's); one a newer
+/// neverest wrote is good, so the refusal names the upgrade.
+fn store_refusal(dir: &Path, err: PimdirError) -> anyhow::Error {
+    match err {
+        err @ PimdirError::Version { .. } if written_earlier(&err) => {
+            pimdir_error(err).context(format!(
+                "The store at {} was written by an earlier neverest and cannot be migrated: \
+                 sync it with the neverest that wrote it until nothing is queued, move the \
+                 store directory away, then run `neverest init` again (see MIGRATION.md)",
+                dir.display(),
+            ))
+        }
+        err @ PimdirError::Version { .. } => pimdir_error(err).context(format!(
+            "The store at {} was written by a newer neverest; upgrade neverest to sync it",
+            dir.display(),
+        )),
+        err => pimdir_error(err).context(format!("Open the store at {}", dir.display())),
     }
 }
 
@@ -502,6 +591,12 @@ fn push_rights(perms: &SourcePermissions, media_type: &str) -> PimdirPushRights 
 /// frontends queued (collection intents, sends, calendar intents), opening
 /// an endpoint only for an intent that needs it, then stops: it lists no
 /// collection, pushes no other write and fetches nothing.
+///
+/// `account_config` is the account as the store sees it
+/// ([`AccountConfig::namespaced`]). `drained` is what the store's drain
+/// applied on the account's collections when the caller ran it, after every
+/// account of its run was readied ([`prepare`]); without it, the run
+/// declares and drains by itself, on its replica under `dry_run`.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     account_name: impl Into<String>,
@@ -518,6 +613,7 @@ pub fn run(
     declare_only: bool,
     intents_only: bool,
     progress: Progress<'_>,
+    drained: Option<SyncOutput>,
 ) -> Result<SyncOutput> {
     let account_name = account_name.into();
     let endpoints = account_config.endpoints()?;
@@ -533,7 +629,7 @@ pub fn run(
         bail!("Performing the queued intents alone neither declares nor plans");
     }
 
-    let real_dir = store_dir(&account_name, account_config)?;
+    let real_dir = store_dir(account_config)?;
     // NOTE: held for the whole run: dropping it removes the replica, so an
     // early return cannot leave one behind.
     let dry_replica = dry_run.then(|| DryRunReplica::new(&real_dir)).transpose()?;
@@ -544,7 +640,8 @@ pub fn run(
     fs::create_dir_all(&work_dir)
         .with_context(|| format!("Create replica dir {} error", work_dir.display()))?;
 
-    let mut state = StoreState::load(&work_dir)?;
+    let mut sidecar = StoreState::load(&work_dir)?;
+    let mut state = sidecar.account(&account_name)?;
 
     let mut report = SyncOutput {
         account: account_name.clone(),
@@ -553,24 +650,31 @@ pub fn run(
     };
 
     // NOTE: before any endpoint is opened.
-    state.check_mode(&mode)?;
+    state.check_mode(&mode, accept_mode)?;
 
-    // NOTE: before any credential is read, a declaration coming from the
-    // configuration alone (pimdir STORAGE §15.6).
-    if !dry_run {
-        declare(&work_dir, &account_name, account_config, &mode, &state)?;
-    }
+    match drained {
+        Some(drained) => report.absorb(drained),
+        None => {
+            // NOTE: before any credential is read, a declaration coming from
+            // the configuration alone (pimdir STORAGE §15.6).
+            if !dry_run {
+                declare(&work_dir, &account_name, account_config, &mode, &state)?;
+            }
 
-    // NOTE: once, before any credential is read or any endpoint opened, so a
-    // run that cannot reach its servers still applies what frontends queued,
-    // which they then read back. A declaration moves no item, so it leaves
-    // the queue alone but for the collection intents, whose result it lists.
-    if !declare_only {
-        let first = running
-            .first()
-            .expect("a validated account has at least one source");
-        let mut store = open_store(&work_dir, first, &account_name)?;
-        drain_queues(&mut store, &mut report);
+            // NOTE: once, before any credential is read or any endpoint
+            // opened, so a run that cannot reach its servers still applies
+            // what frontends queued, which they then read back. A
+            // declaration moves no item, so it leaves the queue alone but
+            // for the collection intents, whose result it lists.
+            if !declare_only {
+                let first = running
+                    .first()
+                    .expect("a validated account has at least one source");
+                let mut store = open_store(&work_dir, first, &account_name)?;
+                let mut drained = drain_store(&mut store);
+                report.absorb(drained.remove(&account_name).unwrap_or_default());
+            }
+        }
     }
 
     // NOTE: every credential the run needs, read once rather than per
@@ -653,11 +757,11 @@ pub fn run(
     }
 
     // NOTE: once for the run: the parked rows and the outstanding conflicts
-    // belong to the store, and a per-source read would report each of them once
-    // a source.
+    // belong to the account's collections, and a per-source read would
+    // report each of them once a source.
     match PimdirStore::open(&work_dir) {
         Ok(store) => {
-            report_parked(&store, &mut report);
+            report_parked(&store, &account_name, &mut report);
             count_conflicts(&store, &account_name, &mut report);
         }
         Err(err) => warn!("cannot open the store to read what it left behind: {err}"),
@@ -697,11 +801,75 @@ pub fn run(
             &mut report.index,
         );
 
-        state.save(&work_dir)?;
+        // NOTE: the other accounts' entries as this run read them, the runs
+        // of one store following one another under its lock.
+        sidecar.accounts.insert(account_name, state);
+        sidecar.save(&work_dir)?;
     }
 
     crate::offline::prof::report();
     Ok(report)
+}
+
+/// Readies one account of a run before the store's drain: refused when
+/// `init` never stamped it or when its mode would discard what the last run
+/// kept, unless `accept_mode`, then declared (pimdir STORAGE §15.6) from the
+/// configuration and its sidecar entry alone, reading no credential and
+/// opening no endpoint.
+///
+/// `config` is the account as the store sees it
+/// ([`AccountConfig::namespaced`]).
+pub fn prepare(dir: &Path, account: &str, config: &AccountConfig, accept_mode: bool) -> Result<()> {
+    let mode = config.mode()?;
+    let state = StoreState::load(dir)?.account(account)?;
+    state.check_mode(&mode, accept_mode)?;
+    declare(dir, account, config, &mode, &state)
+}
+
+/// Drains the store's queue once, every account's (pimdir STORAGE §15.2),
+/// and shares out by account what it applied: the collections rows landed
+/// on, the bodies an action kept aside. A row on a collection grouped under
+/// no account is applied and reported nowhere.
+pub(crate) fn drain_store(store: &mut PimdirSourceStore) -> BTreeMap<String, SyncOutput> {
+    let mut drained = SyncOutput::default();
+    drain_queues(store, &mut drained);
+
+    let owners = collection_accounts(store);
+    let mut by_account: BTreeMap<String, SyncOutput> = BTreeMap::new();
+    for entry in drained.drained {
+        if let Some(account) = owners.get(&entry.collection) {
+            by_account
+                .entry(account.clone())
+                .or_default()
+                .drained
+                .push(entry);
+        }
+    }
+    for body in drained.overruled {
+        if let Some(account) = owners.get(&body.collection) {
+            by_account
+                .entry(account.clone())
+                .or_default()
+                .overruled
+                .push(body);
+        }
+    }
+
+    by_account
+}
+
+/// The account each collection of the store is grouped under, by id.
+pub(crate) fn collection_accounts(store: &PimdirStore) -> HashMap<String, String> {
+    match store.list_collections() {
+        Ok(collections) => collections
+            .into_iter()
+            .filter_map(|collection| Some((collection.id, collection.account?)))
+            .collect(),
+        Err(err) => {
+            warn!("cannot list whose collections the store holds: {err}");
+            HashMap::new()
+        }
+    }
 }
 
 /// Declares what every source of the account can do (pimdir STORAGE §15.6),
@@ -714,7 +882,7 @@ pub(crate) fn declare(
     account: &str,
     config: &AccountConfig,
     mode: &AccountMode,
-    state: &StoreState,
+    state: &AccountState,
 ) -> Result<()> {
     let sources = config.sources()?;
     let endpoints = config.endpoints()?;
@@ -818,7 +986,7 @@ fn run_targets(
     accept_absences: bool,
     connections: usize,
     progress: Progress<'_>,
-    state: &mut StoreState,
+    state: &mut AccountState,
     report: &mut SyncOutput,
 ) -> Result<()> {
     let relay = mode.streams(endpoints);
@@ -864,7 +1032,7 @@ struct PairTaskless {
 }
 
 impl PairTaskless {
-    fn new(state: &StoreState, source: &str) -> Self {
+    fn new(state: &AccountState, source: &str) -> Self {
         Self {
             previous: state.taskless.get(source).cloned().unwrap_or_default(),
             listed: BTreeSet::new(),
@@ -882,7 +1050,7 @@ impl PairTaskless {
 /// did not reach stated. A dry run registers and declares nothing.
 fn record_pair_listing(
     declaring: &Declaring<'_>,
-    state: &mut StoreState,
+    state: &mut AccountState,
     namespace: &str,
     taskless: &mut PairTaskless,
     listings: [&[Collection]; 2],
@@ -921,7 +1089,7 @@ fn run_pair(
     accept_absences: bool,
     connections: usize,
     progress: Progress<'_>,
-    state: &mut StoreState,
+    state: &mut AccountState,
     taskless: &mut PairTaskless,
     report: &mut SyncOutput,
 ) -> Result<()> {
@@ -1358,7 +1526,7 @@ fn run_local(
     pacing: Pacing,
     declare_only: bool,
     progress: Progress<'_>,
-    state: &mut StoreState,
+    state: &mut AccountState,
     report: &mut SyncOutput,
 ) -> Result<()> {
     let source = source_name.to_string();
@@ -1557,7 +1725,7 @@ struct Declaring<'a> {
 impl Declaring<'_> {
     /// Declares the account's sources again (see [`declare`]) from `state`,
     /// a failure logged: the declaration before the drain still stands.
-    fn again(&self, state: &StoreState) {
+    fn again(&self, state: &AccountState) {
         if let Err(err) = declare(self.dir, self.account, self.config, self.mode, state) {
             warn!("cannot declare what the sources hold after a listing: {err:#}");
         }
@@ -1599,7 +1767,7 @@ struct Listing<'a> {
 fn record_listing(
     store: &PimdirSourceStore,
     declaring: &Declaring<'_>,
-    state: &mut StoreState,
+    state: &mut AccountState,
     source: &str,
     media_type: &str,
     listing: &Listing<'_>,
@@ -4792,7 +4960,7 @@ fn stated_roles(
     lookup: impl FnOnce() -> Result<Option<BTreeMap<String, String>>>,
     source: &str,
     listed: &[Collection],
-    state: &mut StoreState,
+    state: &mut AccountState,
 ) -> Option<BTreeMap<String, String>> {
     let mut roles: BTreeMap<String, String> = listed
         .iter()
@@ -4839,7 +5007,7 @@ fn taskless_ids(namespace: &str, listed: &[Collection]) -> BTreeSet<String> {
 
 /// Records `taskless`, hub ids, as the calendars the source's listings
 /// stated take no tasks, in place of what its previous listings stated.
-fn record_taskless(state: &mut StoreState, source: &str, taskless: &BTreeSet<String>) {
+fn record_taskless(state: &mut AccountState, source: &str, taskless: &BTreeSet<String>) {
     if taskless.is_empty() {
         state.taskless.remove(source);
     } else {
@@ -5126,14 +5294,22 @@ fn report_coverage(
     }
 }
 
-/// Surfaces the store's parked queue actions, once for the run.
+/// Surfaces the parked queue actions of the account's collections, once for
+/// the run.
 ///
-/// A parked row belongs to the store, not to a source, so reading it where the
-/// drain runs reports it once per source: an account syncing mail, contacts and
-/// calendar showed the same row three times. Every run re-reports them.
-fn report_parked(store: &PimdirStore, report: &mut SyncOutput) {
+/// A parked row belongs to its collection, not to a source, so reading it
+/// where the drain runs reports it once per source: an account syncing mail,
+/// contacts and calendar showed the same row three times. Every run
+/// re-reports them; another account's rows are its own run's to report.
+fn report_parked(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
+    let owners = collection_accounts(store);
     match store.parked_actions() {
         Ok(parked) => {
+            let parked = parked.into_iter().filter(|action| {
+                owners
+                    .get(&action.collection)
+                    .is_some_and(|owner| owner == account)
+            });
             for action in parked {
                 report.parked.push(ParkedQueueAction {
                     id: action.id,
@@ -5961,12 +6137,13 @@ fn settle_intent(
     });
 }
 
-/// Reclaims the retained items older than `store.purge-after`, unset never.
+/// Reclaims the account's retained items older than `store.purge-after`,
+/// unset never.
 ///
 /// It runs after the sync, so an item this run retired starts its delay rather
 /// than going with it, and it warns instead of failing. A purge only releases a
 /// body (pimdir STORAGE §5), so the collector runs here too, after a purge
-/// only.
+/// only: what nothing references any more, whichever account it was.
 fn sweep_retained(
     account_config: &AccountConfig,
     store: &mut PimdirStore,
@@ -5976,12 +6153,9 @@ fn sweep_retained(
         return;
     };
 
-    let purged = match store.purge_retained_before(&cutoff) {
-        Ok(purged) => purged,
-        Err(err) => return warn!("retention sweep failed, nothing was purged: {err}"),
-    };
+    let items = purge_account(store, &cutoff);
 
-    let collected = match purged.items {
+    let collected = match items {
         0 => Default::default(),
         _ => match store.collect_garbage() {
             Ok(collected) => collected,
@@ -5992,18 +6166,71 @@ fn sweep_retained(
         },
     };
 
-    if purged.items > 0 {
+    if items > 0 {
         info!(
-            "purged {} retained item(s) older than {cutoff}, collected {} object(s), {} byte(s) reclaimed",
-            purged.items, collected.objects, collected.bytes
+            "purged {items} retained item(s) older than {cutoff}, collected {} object(s), {} byte(s) reclaimed",
+            collected.objects, collected.bytes
         );
     }
 
     report.purged = Some(PurgedItems {
-        items: purged.items,
+        items,
         objects: collected.objects,
         bytes: collected.bytes,
     });
+}
+
+/// Purges the retained items of the account `store` is opened for whose
+/// retirement precedes `cutoff`, one at a time, answering how many.
+///
+/// Never another account's: the store's own sweep (`purge_retained_before`)
+/// is store-wide, and one account's delay would decide for every account
+/// sharing the store. A failure is warned about and skipped.
+fn purge_account(store: &mut PimdirStore, cutoff: &str) -> usize {
+    const PAGE: usize = 512;
+
+    let account = store.account().map(str::to_owned);
+    let collections = match store.list_collections_by_account(account.as_deref()) {
+        Ok(collections) => collections,
+        Err(err) => {
+            warn!("cannot list the collections to sweep: {err}");
+            return 0;
+        }
+    };
+
+    let mut purged = 0;
+    for collection in collections {
+        let mut after = None;
+        loop {
+            let page = match store.list_retained(&collection.id, after, PAGE) {
+                Ok(page) => page,
+                Err(err) => {
+                    warn!("cannot list the retained items of {}: {err}", collection.id);
+                    break;
+                }
+            };
+            let full = page.len() == PAGE;
+            after = page.last().map(|item| item.seq);
+
+            for item in page {
+                let retired = item.retention.as_ref().and_then(|at| at.at.as_deref());
+                if !retired.is_some_and(|at| at < cutoff) {
+                    continue;
+                }
+                match store.purge(&collection.id, item.seq) {
+                    Ok(true) => purged += 1,
+                    Ok(false) => {}
+                    Err(err) => warn!("cannot purge item {} of {}: {err}", item.seq, collection.id),
+                }
+            }
+
+            if !full {
+                break;
+            }
+        }
+    }
+
+    purged
 }
 
 /// The source whose channel a run over `sides` sends through, found as
@@ -6331,6 +6558,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::conflict::merger::SPAWNS;
 
     /// What names a listed member by `link` alone, as a store binding does.
     fn named(link: &str) -> PimdirRemoteMeta {
@@ -6420,7 +6648,7 @@ mod tests {
     /// set holds, asked again when it moves.
     #[test]
     fn roles_a_listing_lacks_are_looked_up_once_per_collection_set() {
-        let mut state = StoreState::default();
+        let mut state = AccountState::default();
         let carried = listed(&[
             ("INBOX", Some("inbox")),
             ("Sent", Some("sent")),
@@ -6459,23 +6687,26 @@ mod tests {
         );
     }
 
-    /// The layout below the platform base is one shape everywhere, so a store
-    /// stays addressable by the same relative path whichever platform wrote
-    /// it, and `store.root` still overrides the whole thing.
+    /// Every account naming no root shares one store, `neverest/` under the
+    /// platform base, one shape everywhere so a store stays addressable by
+    /// the same relative path whichever platform wrote it, and `store.root`
+    /// still overrides the whole thing, for its account.
     #[test]
-    fn the_default_replica_root_is_the_account_under_a_platform_base() {
-        let dir = replica_dir("work").unwrap();
+    fn the_default_store_root_is_shared_under_a_platform_base() {
+        let dir = default_root().unwrap();
 
-        assert!(dir.ends_with("neverest/work"), "{}", dir.display());
+        assert!(dir.ends_with("neverest"), "{}", dir.display());
         assert!(dir.is_absolute(), "{}", dir.display());
+
+        let work: AccountConfig = toml::from_str("imap.server = \"w.org\"").unwrap();
+        let home: AccountConfig = toml::from_str("imap.server = \"h.org\"").unwrap();
+        assert_eq!(store_dir(&work).unwrap(), dir);
+        assert_eq!(store_dir(&home).unwrap(), dir);
 
         let mut config = AccountConfig::default();
         config.store.root = Some(PathBuf::from("/tmp/elsewhere"));
 
-        assert_eq!(
-            store_dir("work", &config).unwrap(),
-            PathBuf::from("/tmp/elsewhere"),
-        );
+        assert_eq!(store_dir(&config).unwrap(), PathBuf::from("/tmp/elsewhere"),);
     }
 
     /// A store with one body and the files a dry run writes to.
@@ -6661,7 +6892,10 @@ mod tests {
     #[test]
     fn a_parked_action_is_reported_once_however_many_drains_ran() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+        let mut store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account("a")
+            .for_source("imap");
         store
             .ensure_collection("imap/INBOX", "message/rfc822")
             .unwrap();
@@ -6681,16 +6915,24 @@ mod tests {
         let mut report = SyncOutput::default();
         drain_queues(&mut store, &mut report);
         drain_queues(&mut store, &mut report);
-        report_parked(&store, &mut report);
+        report_parked(&store, "a", &mut report);
 
         assert_eq!(report.parked.len(), 1);
         assert_eq!(report.parked[0].producer, "himalaya");
+
+        // NOTE: a parked row is its collection's account's to report.
+        let mut other = SyncOutput::default();
+        report_parked(&store, "b", &mut other);
+        assert!(other.parked.is_empty());
     }
 
     #[test]
     fn the_pre_sync_drain_applies_queued_actions_and_reports_parked_ones() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+        let mut store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account("a")
+            .for_source("left");
         store
             .ensure_collection("left/INBOX", "message/rfc822")
             .unwrap();
@@ -6730,7 +6972,7 @@ mod tests {
 
         let mut report = SyncOutput::default();
         drain_queues(&mut store, &mut report);
-        report_parked(&store, &mut report);
+        report_parked(&store, "a", &mut report);
 
         assert_eq!(report.drained.len(), 1);
         assert_eq!(report.drained[0].collection, "left/INBOX");
@@ -6752,7 +6994,7 @@ mod tests {
 
         let mut second = SyncOutput::default();
         drain_queues(&mut store, &mut second);
-        report_parked(&store, &mut second);
+        report_parked(&store, "a", &mut second);
         assert!(second.drained.is_empty());
         assert_eq!(second.parked.len(), 1);
     }
@@ -7568,11 +7810,16 @@ mod tests {
                 .collect()
         };
 
-        let mut state = StoreState::default();
+        let mut state = AccountState::default();
         let stated = taskless_ids("caldav", &listed([Some(false), Some(true), None]));
         record_taskless(&mut state, "caldav", &stated);
-        state.save(dir.path()).unwrap();
-        let state = StoreState::load(dir.path()).unwrap();
+        let mut sidecar = StoreState::default();
+        sidecar.accounts.insert("live".into(), state);
+        sidecar.save(dir.path()).unwrap();
+        let state = StoreState::load(dir.path())
+            .unwrap()
+            .account("live")
+            .unwrap();
         declare(dir.path(), "live", &config, &mode, &state).unwrap();
 
         let Err(PimdirError::Unsupported(refusal)) = queue_task(dir.path(), "caldav/events") else {
@@ -7660,7 +7907,7 @@ mod tests {
             synced(dir.path(), source, &[collection]);
             let config: AccountConfig = toml::from_str(toml).unwrap();
             let mode = config.mode().unwrap();
-            declare(dir.path(), "live", &config, &mode, &StoreState::default()).unwrap();
+            declare(dir.path(), "live", &config, &mode, &AccountState::default()).unwrap();
 
             let refusal = refused_task(dir.path(), collection);
             assert_eq!(
@@ -7696,7 +7943,7 @@ mod tests {
             mode: &mode,
         };
 
-        let mut state = StoreState::default();
+        let mut state = AccountState::default();
         let earlier = BTreeSet::from([String::from("caldav/gone")]);
         state.taskless.insert("caldav".into(), earlier);
         let mut taskless = PairTaskless::new(&state, "caldav");
@@ -7745,7 +7992,7 @@ mod tests {
         ))
         .unwrap();
         let mode = config.mode().unwrap();
-        declare(dir.path(), "live", &config, &mode, &StoreState::default()).unwrap();
+        declare(dir.path(), "live", &config, &mode, &AccountState::default()).unwrap();
 
         let refusal = refused_task(dir.path(), "caldav/events");
         assert_eq!(
@@ -7771,7 +8018,7 @@ mod tests {
         };
         // NOTE: the declaration before the drain, from a sidecar that never
         // met the calendar.
-        let mut state = StoreState::default();
+        let mut state = AccountState::default();
         declare(dir.path(), "live", &config, &mode, &state).unwrap();
 
         let store = open_store(dir.path(), "caldav", "live").unwrap();
@@ -7817,7 +8064,7 @@ mod tests {
 
     /// Records a local listing of `listed`, every collection kept, as
     /// `run_local` does.
-    fn record_local(dir: &Path, state: &mut StoreState, listed: &[Collection]) {
+    fn record_local(dir: &Path, state: &mut AccountState, listed: &[Collection]) {
         let config: AccountConfig = toml::from_str(CALDAV).unwrap();
         let mode = config.mode().unwrap();
         let declaring = Declaring {
@@ -7854,7 +8101,7 @@ mod tests {
     #[test]
     fn a_listed_calendar_refuses_a_task_before_its_first_sync() {
         let dir = tempfile::tempdir().unwrap();
-        let mut state = StoreState::default();
+        let mut state = AccountState::default();
         let listed = [
             calendar(GOOGLE_EVENTS, Some(false)),
             calendar("work", Some(true)),
@@ -7893,7 +8140,7 @@ mod tests {
             .unwrap();
         drop(store);
 
-        let mut state = StoreState::default();
+        let mut state = AccountState::default();
         let listed = [
             calendar("work", Some(true)),
             calendar("events", Some(false)),
@@ -7952,7 +8199,7 @@ mod tests {
             mode: &mode,
         };
 
-        let mut state = StoreState::default();
+        let mut state = AccountState::default();
         let mut taskless = PairTaskless::new(&state, "caldav");
         let source = [calendar("events", None), calendar("work", None)];
         let target = [calendar("events", Some(false)), calendar("work", None)];
@@ -8105,6 +8352,85 @@ mod tests {
         assert_eq!(purged.objects, 1);
         assert_eq!(purged.bytes, 3);
         assert!(!body.exists(), "the body is gone from the blob tree");
+    }
+
+    /// Files `body` into `collection` of `account`, then drops it from its
+    /// source, which retains it (pimdir STORAGE §11).
+    fn retire(dir: &Path, account: &str, collection: &str, body: &[u8]) {
+        let mut source = PimdirStore::open(dir)
+            .unwrap()
+            .for_account(account)
+            .for_source(format!("{account}/imap"));
+        source
+            .ensure_collection(collection, "message/rfc822")
+            .unwrap();
+        let hash = io_pimdir::hash::hash(body);
+        source
+            .write(vec![
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: hash.clone(),
+                        size: body.len(),
+                    },
+                    body: Some(body.to_vec()),
+                },
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId(collection.into()),
+                    handle: PimdirHandle("1".into()),
+                    link_id: Some(PimdirLinkId(format!("mid:{account}@x"))),
+                    object: Some(hash.clone()),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Clean,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
+                        revision: None,
+                        object: Some(hash),
+                    }),
+                    origin: None,
+                }),
+            ])
+            .unwrap();
+        source
+            .write(vec![PimdirWriteOp::DropPlacement {
+                collection: PimdirCollectionId(collection.into()),
+                handle: PimdirHandle("1".into()),
+                reason: PimdirDropReason::Deleted,
+            }])
+            .unwrap();
+    }
+
+    /// An account's `store.purge-after` decides for its own retained items
+    /// alone: the store's sweep is store-wide, and one account's `"0"` would
+    /// empty the trash of every account sharing the store.
+    #[test]
+    fn one_account_s_delay_purges_its_own_retained_items_alone() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        retire(dir.path(), "work", "work/imap/INBOX", b"work");
+        retire(dir.path(), "home", "home/imap/INBOX", b"home");
+        thread::sleep(std::time::Duration::from_millis(5));
+
+        let config: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            store.purge-after = "0s"
+            "#,
+        )
+        .unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_account("work");
+        let mut report = SyncOutput::default();
+        sweep_retained(&config, &mut store, &mut report);
+
+        assert_eq!(report.purged.expect("a retention section").items, 1);
+        let gone = store.list_retained("work/imap/INBOX", None, 10).unwrap();
+        assert!(gone.is_empty());
+        let kept = store.list_retained("home/imap/INBOX", None, 10).unwrap();
+        assert_eq!(kept.len(), 1, "the other account keeps its trash");
     }
 
     /// A mutable-content remote: every item carries an ETag.

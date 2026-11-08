@@ -42,10 +42,17 @@
 //!
 //! ## Namespaces
 //!
-//! An account is one hub but not one collection space: a hub collection id
-//! is `<namespace>/<name>`, and the namespace is the source's own name, so
-//! mail and contacts under one account, or two providers cached side by
-//! side, never meet. It is derived, never configured.
+//! Every account shares one store (`<state base>/neverest/`, or the
+//! `store.root` accounts name), each one hub within it, its collections
+//! grouped under its name. An account is not one collection space either: a
+//! pimdir source id is `<account>/<source>` and a hub collection id
+//! `<account>/<source>/<name>`, so two accounts holding a source of one
+//! name, mail and contacts under one account, or two providers cached side
+//! by side, never meet. It is derived, never configured, and stripped back
+//! off before any wire call and in what a report names.
+//!
+//! One run covers every account, or those `-a` names, one after the other
+//! under the store's one lock (pimdir allows one owner process a store).
 //!
 //! Which endpoints meet is the account's arity: a pairing binds both into
 //! the source's namespace, and an item there with no binding for the other
@@ -85,9 +92,9 @@
 //! a run, so nothing there is reachable from a sync.
 //!
 //! [`offline`] is the sync engine: `mod` maps sources onto pimdir source
-//! ids, `state` records what the last run derived, `storage` projects and
-//! hydrates one source, `remote` implements io-pimdir's remote seam,
-//! `submit` holds the queued send, and `driver` builds the report.
+//! ids, `state` records, per account, what the last run derived, `storage`
+//! projects and hydrates one source, `remote` implements io-pimdir's remote
+//! seam, `submit` holds the queued send, and `driver` builds the report.
 //!
 //! [`sync`] keeps the output types alone, the engine having moved to
 //! [`offline`], and [`wizard`] discovers an account from one prompt.
@@ -171,8 +178,8 @@ fn execute(printer: &mut StdoutPrinter, cli: Cli) -> Result<Exit> {
     let config_paths = cli.config_paths.as_ref();
 
     match cli.command {
-        Some(command) => command.execute(printer, config_paths, cli.account.name.as_deref()),
-        None => meet_bare_invocation(printer, config_paths, cli.account.name.is_some())
+        Some(command) => command.execute(printer, config_paths, &cli.accounts),
+        None => meet_bare_invocation(printer, config_paths, !cli.accounts.is_empty())
             .map(|()| Exit::Success),
     }
 }

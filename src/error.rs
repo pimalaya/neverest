@@ -18,6 +18,9 @@
 //! the store stamps; and `conflict-unread`, which the one-way overwrite
 //! answers by fetching the unread body, an item still unread after it
 //! staying parked.
+//!
+//! One store code is neverest's own, `store-layout`: a store laid out as
+//! an earlier neverest kept it, which no pimdir profile refuses.
 
 use io_pimdir::client::PimdirError;
 use pimalaya_cli::error::CodedError;
@@ -30,10 +33,15 @@ use serde::Serialize;
 pub enum ErrorCode {
     /// The store is of another format version than neverest's (pimdir
     /// STORAGE §4.2, §6), never migrated: one an earlier neverest wrote is
-    /// synced by that neverest until nothing is queued, then moved aside
-    /// (`sync --reset --force`); one a newer neverest wrote asks for an
-    /// upgrade.
+    /// synced by that neverest until nothing is queued, then its directory
+    /// moved away; one a newer neverest wrote asks for an upgrade.
     StoreVersion,
+    /// The store is laid out as an earlier neverest kept it, never
+    /// migrated: one store per account under the neverest directory, a
+    /// sidecar of an earlier shape, or a database with none. Each such
+    /// store is synced by that neverest until nothing is queued, then moved
+    /// away.
+    StoreLayout,
     /// The store has no schema yet: a sync creates it.
     StoreUncreated,
     /// The store's database is another program's, never written: the
@@ -46,7 +54,7 @@ pub enum ErrorCode {
     /// The store names its bodies with a hash neverest does not compute.
     StoreHashAlgo,
     /// Another engine version wrote the store's sync state (pimdir SYNC
-    /// §10): the store is moved aside and synced anew.
+    /// §10): the store is moved away and synced anew.
     SyncVersion,
     /// Another writer holds the store's write lock: retry.
     StoreBusy,
@@ -109,6 +117,11 @@ impl ErrorCode {
             .find(|(pimdir, _)| *pimdir == code)
             .map(|(_, ours)| *ours)
     }
+}
+
+/// A store laid out as an earlier neverest kept it, refused with `message`.
+pub fn layout_error(message: impl Into<String>) -> anyhow::Error {
+    CodedError::new(ErrorCode::StoreLayout, message.into()).into()
 }
 
 /// A store failure as an error carrying its code, when it has one.

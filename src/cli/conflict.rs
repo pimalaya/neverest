@@ -10,7 +10,6 @@ use clap::{ArgGroup, Parser, Subcommand};
 use io_pimdir::client::reader::PimdirReader;
 use log::warn;
 use pimalaya_cli::printer::Printer;
-use pimalaya_config::toml::TomlConfig;
 
 use crate::{
     cli::sync::{LOCK_TIMEOUT, acquire_store_lock},
@@ -21,7 +20,7 @@ use crate::{
         report::{ConflictListOutput, ConflictResolveOutput, ConflictShowOutput, ConflictSummary},
     },
     error::pimdir_error,
-    offline::driver,
+    offline::{driver, state::StoreState},
 };
 
 /// How many times a decision is recomputed against a moved remote before the
@@ -60,17 +59,18 @@ impl ConflictCommand {
         self,
         printer: &mut impl Printer,
         config_paths: &[PathBuf],
-        account_name: Option<&str>,
+        accounts: &[String],
     ) -> Result<()> {
         match self.command {
-            ConflictSubcommand::List(cmd) => cmd.execute(printer, config_paths, account_name),
-            ConflictSubcommand::Show(cmd) => cmd.execute(printer, config_paths, account_name),
-            ConflictSubcommand::Resolve(cmd) => cmd.execute(printer, config_paths, account_name),
+            ConflictSubcommand::List(cmd) => cmd.execute(printer, config_paths, accounts),
+            ConflictSubcommand::Show(cmd) => cmd.execute(printer, config_paths, accounts),
+            ConflictSubcommand::Resolve(cmd) => cmd.execute(printer, config_paths, accounts),
         }
     }
 }
 
-/// Lists the items waiting for a decision, whichever run parked them.
+/// Lists the items waiting for a decision, whichever run parked them, for
+/// every account or those `-a` names.
 ///
 /// An item whose diverging remote body no run has fetched yet is listed and
 /// is not resolvable until one has.
@@ -78,20 +78,25 @@ impl ConflictCommand {
 pub struct ConflictListCommand {}
 
 impl ConflictListCommand {
-    /// Reads the account's outstanding divergences and prints them.
+    /// Reads the outstanding divergences of every account the run covers
+    /// and prints them.
     pub fn execute(
         self,
         printer: &mut impl Printer,
         config_paths: &[PathBuf],
-        account_name: Option<&str>,
+        accounts: &[String],
     ) -> Result<()> {
-        let (name, account_config) = account(printer, config_paths, account_name)?;
-        let store = read(&name, &store_dir(&name, &account_config)?)?;
+        let config = Config::load_or_wizard(printer, config_paths)?;
+        let mut conflicts = Vec::new();
 
-        let conflicts = conflict::list(&store, &name)?
-            .iter()
-            .map(ConflictSummary::from)
-            .collect();
+        for (name, account_config) in config.select(accounts)? {
+            account_config
+                .validate()
+                .with_context(|| format!("Validate account {name}"))?;
+            let store = read(&name, &store_dir(&name, &account_config)?)?;
+            let listed = conflict::list(&store, &name)?;
+            conflicts.extend(listed.iter().map(ConflictSummary::from));
+        }
 
         printer.out(ConflictListOutput { conflicts })
     }
@@ -116,9 +121,10 @@ impl ConflictShowCommand {
         self,
         printer: &mut impl Printer,
         config_paths: &[PathBuf],
-        account_name: Option<&str>,
+        accounts: &[String],
     ) -> Result<()> {
-        let (name, account_config) = account(printer, config_paths, account_name)?;
+        let (name, account_config) =
+            account(printer, config_paths, accounts, "Showing a conflict")?;
         let store = read(&name, &store_dir(&name, &account_config)?)?;
 
         let conflicts = conflict::list(&store, &name)?;
@@ -164,9 +170,10 @@ impl ConflictResolveCommand {
         self,
         printer: &mut impl Printer,
         config_paths: &[PathBuf],
-        account_name: Option<&str>,
+        accounts: &[String],
     ) -> Result<()> {
-        let (name, account_config) = account(printer, config_paths, account_name)?;
+        let (name, account_config) =
+            account(printer, config_paths, accounts, "Resolving a conflict")?;
         let dir = store_dir(&name, &account_config)?;
 
         self.resolve(printer, &name, &account_config, &dir)
@@ -300,29 +307,32 @@ impl ConflictResolveCommand {
     }
 }
 
-/// Loads the configuration and takes the account the invocation names.
+/// Loads the configuration and takes the one account the invocation
+/// leaves: an item is one account's, and so is its decision.
 fn account(
     printer: &mut impl Printer,
     config_paths: &[PathBuf],
-    account_name: Option<&str>,
+    accounts: &[String],
+    what: &str,
 ) -> Result<(String, AccountConfig)> {
-    let mut config = Config::load_or_wizard(printer, config_paths)?;
+    let config = Config::load_or_wizard(printer, config_paths)?;
+    let (name, account_config) = config.select_one(accounts, what)?;
 
-    let Some((name, account_config)) = config.take_account(account_name)? else {
-        bail!("Cannot find account");
-    };
-
-    account_config.validate()?;
+    account_config
+        .validate()
+        .with_context(|| format!("Validate account {name}"))?;
 
     Ok((name, account_config))
 }
 
-/// The account's store directory, refusing one no `init` has created.
+/// The account's store directory, refusing a store no account of this
+/// neverest can read, and an account no `init` has initialized.
 fn store_dir(name: &str, account_config: &AccountConfig) -> Result<PathBuf> {
-    let dir = driver::store_dir(name, account_config)?;
+    let dir = driver::store_dir(account_config)?;
+    driver::check_store(&dir)?;
 
-    if !dir.join("pimdir.db").exists() {
-        bail!("Account {name} not initialized, run `init -a {name}` first");
+    if !dir.join("pimdir.db").exists() || !StoreState::load(&dir)?.initialized(name) {
+        bail!("Account {name} not initialized, run `neverest init -a {name}` first");
     }
 
     Ok(dir)

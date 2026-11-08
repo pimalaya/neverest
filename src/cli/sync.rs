@@ -1,38 +1,42 @@
 //! # Sync command
 //!
-//! Runs the io-pimdir reconcile and prints the resulting
-//! [`crate::sync::report::SyncOutput`].
+//! Runs the io-pimdir reconcile over every account the run covers, store by
+//! store under each store's lock, and prints the resulting
+//! [`crate::sync::report::SyncRunOutput`].
 
 use std::{
-    fs::{self, File, TryLockError},
+    collections::{BTreeMap, BTreeSet},
+    fs::{File, TryLockError},
     path::{Path, PathBuf},
     sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Error, Result, anyhow, bail};
 use chrono::Utc;
 use clap::{ArgAction, Parser};
 use io_pimdir::{
-    client::{PimdirStore, modes},
+    client::{PimdirStore, reader::PimdirCollection},
     object::PimdirHash,
     placement::{PimdirBase, PimdirFlags},
 };
-use log::{debug, info};
-use pimalaya_cli::printer::Printer;
-use pimalaya_config::toml::TomlConfig;
+use log::{debug, info, warn};
+use pimalaya_cli::{error::code_of, printer::Printer};
 
 use crate::{
     cli::exit::Exit,
-    config::{CollectionFilter, Config},
+    config::{AccountConfig, CollectionFilter, Config},
     error::pimdir_error,
     offline::{
         driver::{self, Bodies, DownloadOrder, Pacing},
         progress::Progress,
         state::StoreState,
     },
-    sync::event::SyncEvent,
+    sync::{
+        event::SyncEvent,
+        report::{AccountSync, SyncOutput, SyncRunOutput},
+    },
 };
 
 /// How long a run waits for another run's store lock before giving up.
@@ -44,12 +48,15 @@ pub const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the waiter retries the lock.
 const LOCK_POLL: Duration = Duration::from_millis(500);
 
-/// Synchronizes the account's collections and items through its pimdir store.
+/// Synchronizes the collections and items of every account, or of those `-a`
+/// names, through the pimdir store they share.
 ///
 /// Each source is reconciled against the store, then against every target the
 /// account names. Sources never meet: an item one holds crosses to the
 /// targets, never to another source, so a mail source and a contacts source
-/// under one account stay apart.
+/// under one account stay apart. Accounts run one after the other, the store
+/// locked once for the whole run; one that fails is reported and the next
+/// one runs.
 ///
 /// The three filter flags keep their pre-`generic-pim-sync` spellings
 /// (`--include-mailbox`, `--exclude-mailbox`, `--all-mailboxes`) as hidden
@@ -67,8 +74,9 @@ const LOCK_POLL: Duration = Duration::from_millis(500);
 /// would loop over a state no supervisor can fix. Exit code 3 means the run
 /// could not do all its work and a rerun picks it up: a source it could not
 /// reach (offline) or an SMTP channel it could not open, a hunk, a send or an
-/// intent that failed without parking, or a collection still moving when the
-/// run stopped. It wins over 2.
+/// intent that failed without parking, a collection still moving when the
+/// run stopped, an account that failed, or a store another run held past
+/// the wait. It wins over 2.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
     /// Print the patch that would be applied, without applying it.
@@ -98,11 +106,13 @@ pub struct SyncCommand {
         conflicts_with = "exclude_collection"
     )]
     pub all_collections: bool,
-    /// Drop the store before running, then resync it whole.
+    /// Drop the account's collections before running, then resync them
+    /// whole, every other account of the store left as it was.
     ///
-    /// Refused while the store holds work no server has (queued or parked
-    /// actions, conflicts, unpushed changes, retained items), which the
-    /// refusal lists; `--force` moves the store aside instead.
+    /// Needs exactly one account. Refused while its collections hold work no
+    /// server has, which the refusal lists: a queued or parked action, which
+    /// a drain applies or its frontend cancels first, and conflicts,
+    /// unpushed changes and retained items, which `--force` drops.
     #[arg(long, conflicts_with_all = [
         "dry_run",
         "include_collection",
@@ -110,9 +120,9 @@ pub struct SyncCommand {
         "source",
     ])]
     pub reset: bool,
-    /// With `--reset`, move the store into a sibling `<dir>.reset-<instant>`
-    /// directory rather than dropping it, whatever it holds: nothing is
-    /// deleted.
+    /// With `--reset`, drop the account's conflicts, unpushed changes and
+    /// retained items with its collections. A queued or parked action still
+    /// refuses the reset.
     #[arg(long, requires = "reset")]
     pub force: bool,
     /// Max connections per side for concurrent body fetches (default 4, or the
@@ -203,33 +213,202 @@ pub struct SyncCommand {
 }
 
 impl SyncCommand {
-    /// Reconciles the account, or plans the run under `--dry-run`.
+    /// Reconciles every account the run covers, or plans them under
+    /// `--dry-run`.
     pub fn execute(
         self,
         printer: &mut (impl Printer + Send),
         config_paths: &[PathBuf],
-        account_name: Option<&str>,
+        accounts: &[String],
     ) -> Result<Exit> {
-        let mut config = Config::load_or_wizard(printer, config_paths)?;
-
-        let Some((name, account_config)) = config.take_account(account_name)? else {
-            bail!("Cannot find account");
+        let config = Config::load_or_wizard(printer, config_paths)?;
+        let selected = match self.reset {
+            true => vec![config.select_one(accounts, "A reset")?],
+            false => config.select(accounts)?,
         };
 
-        account_config.validate()?;
-
-        let replica = driver::store_dir(&name, &account_config)?;
-        if !replica.join("pimdir.db").exists() {
-            bail!("Account {name} not initialized, run `init -a {name}` first");
+        // NOTE: the configuration is one document, so an account it does
+        // not validate fails the run before anything does.
+        let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
+        for (name, account_config) in selected {
+            account_config
+                .validate()
+                .with_context(|| format!("Validate account {name}"))?;
+            let dir = driver::store_dir(&account_config)?;
+            stores.entry(dir).or_default().push((name, account_config));
+        }
+        for dir in stores.keys() {
+            driver::refuse_former_stores(dir)?;
         }
 
-        let _sync_lock = acquire_store_lock(&replica, LOCK_TIMEOUT)
-            .with_context(|| format!("Acquire the store lock of account {name}"))?;
+        let order: Vec<String> = stores
+            .values()
+            .flatten()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut outcomes: Vec<AccountSync> = Vec::new();
 
-        if self.reset {
-            reset_replica(&replica, self.force)
-                .with_context(|| format!("Reset the store of account {name}"))?;
+        // NOTE: every store's lock before any account runs, in path order, so
+        // two runs over several stores never wait on each other crosswise.
+        let mut locks = Vec::new();
+        let mut runnable = Vec::new();
+        for (dir, accounts) in stores {
+            if !dir.join("pimdir.db").exists() {
+                for (name, _) in accounts {
+                    let err = anyhow!(
+                        "Account {name} not initialized, run `neverest init -a {name}` first"
+                    );
+                    outcomes.push(failed(name, err));
+                }
+                continue;
+            }
+
+            let lock = wait_store_lock(&dir, LOCK_TIMEOUT)
+                .with_context(|| format!("Acquire the lock of the store at {}", dir.display()))?;
+            match lock {
+                Some(lock) => {
+                    locks.push(lock);
+                    driver::check_store(&dir)?;
+                    runnable.push((dir, accounts));
+                }
+                None => {
+                    for (name, _) in accounts {
+                        outcomes.push(busy(name));
+                    }
+                }
+            }
         }
+
+        if self.reset
+            && let Some((dir, accounts)) = runnable.first()
+        {
+            let (name, account_config) = &accounts[0];
+            let namespaced = account_config.namespaced(name)?;
+            reset_account(dir, name, &namespaced, self.force)
+                .with_context(|| format!("Reset account {name}"))?;
+        }
+
+        // NOTE: the driver reports from its worker threads, which share the
+        // printer. A line that cannot be printed stops no sync.
+        let printer = Mutex::new(printer);
+        let json = printer.lock().unwrap().is_json();
+        let total = order.len();
+
+        for (dir, accounts) in runnable {
+            for (name, account_config, drained) in self.ready(&dir, accounts, &mut outcomes)? {
+                let sink = |mut event: SyncEvent| {
+                    event.name_endpoints(&name);
+                    if let Err(err) = printer.lock().unwrap().event(event) {
+                        debug!("cannot print sync event: {err:#}");
+                    }
+                };
+                let progress = match json {
+                    true => Progress::events(&sink),
+                    false => Progress::default(),
+                };
+
+                let position = order.iter().position(|n| *n == name).unwrap_or(0) + 1;
+                progress.emit(|| SyncEvent::AccountStarted {
+                    account: name.clone(),
+                    position,
+                    total,
+                });
+
+                let outcome = self.run_account(&name, &account_config, drained, progress);
+                outcomes.push(match outcome {
+                    Ok(report) => ran(name, report),
+                    Err(err) => {
+                        warn!("account {name} sync error: {err:#}");
+                        failed(name, err)
+                    }
+                });
+            }
+        }
+        drop(locks);
+
+        outcomes.sort_by_key(|outcome| order.iter().position(|name| *name == outcome.account));
+        let output = SyncRunOutput { accounts: outcomes };
+
+        // NOTE: read before printing, which consumes the output.
+        let exit = Exit::from(&output);
+        printer.into_inner().unwrap().out(output)?;
+
+        Ok(exit)
+    }
+
+    /// The accounts of the store at `dir` ready to run, each with what the
+    /// store's drain applied on its collections, `None` when the run drains
+    /// by itself (a dry run, on its replica). One that cannot be readied
+    /// lands in `outcomes`.
+    ///
+    /// The drain is the store's: it runs once, after every account was
+    /// readied, so it applies each account's queue under the capabilities
+    /// the account just declared (pimdir STORAGE §15.6).
+    fn ready(
+        &self,
+        dir: &Path,
+        accounts: Vec<(String, AccountConfig)>,
+        outcomes: &mut Vec<AccountSync>,
+    ) -> Result<Vec<(String, AccountConfig, Option<SyncOutput>)>> {
+        if self.dry_run {
+            let ready = accounts
+                .into_iter()
+                .map(|(name, config)| (name, config, None));
+            return Ok(ready.collect());
+        }
+
+        let mut ready = Vec::new();
+        for (name, account_config) in accounts {
+            let prepared = account_config
+                .namespaced(&name)
+                .and_then(|namespaced| driver::prepare(dir, &name, &namespaced, self.accept_mode));
+            match prepared {
+                Ok(()) => ready.push((name, account_config)),
+                Err(err) => outcomes.push(failed(name, err)),
+            }
+        }
+
+        let mut drained = BTreeMap::new();
+        if !self.declare_only
+            && let Some((name, account_config)) = ready.first()
+        {
+            let namespaced = account_config.namespaced(name)?;
+            let mode = namespaced.mode()?;
+            let first = mode
+                .sources
+                .first()
+                .expect("a validated account has at least one source");
+            let mut store = driver::open_store(dir, first, name)?;
+            drained = driver::drain_store(&mut store);
+        }
+
+        Ok(ready
+            .into_iter()
+            .map(|(name, config)| {
+                let mine = drained.remove(&name).unwrap_or_default();
+                (name, config, Some(mine))
+            })
+            .collect())
+    }
+
+    /// Runs one account and names its endpoints as its configuration does.
+    fn run_account(
+        &self,
+        name: &str,
+        account_config: &AccountConfig,
+        drained: Option<SyncOutput>,
+        progress: Progress<'_>,
+    ) -> Result<SyncOutput> {
+        let mode = account_config.mode()?;
+        if let Some(unknown) = self.source.iter().find(|s| !mode.sources.contains(s)) {
+            bail!(
+                "Account {name} has no source named {unknown}, it declares {}",
+                mode.sources.join(", "),
+            );
+        }
+        let only: Vec<String> = self.source.iter().map(|s| format!("{name}/{s}")).collect();
+
+        let scope = account_config.scope(self.since.as_deref(), &self.source, Utc::now())?;
 
         let cli_filter = if !self.include_collection.is_empty() {
             Some(CollectionFilter::Include(self.include_collection.clone()))
@@ -247,30 +426,15 @@ impl SyncCommand {
             .unwrap_or(4)
             .max(1);
 
-        let scope = account_config.scope(self.since.as_deref(), &self.source, Utc::now())?;
-
-        // NOTE: the driver reports from its worker threads, which share the
-        // printer. A line that cannot be printed stops no sync.
-        let printer = Mutex::new(printer);
-        let sink = |event: SyncEvent| {
-            if let Err(err) = printer.lock().unwrap().event(event) {
-                debug!("cannot print sync event: {err:#}");
-            }
-        };
-        let progress = match printer.lock().unwrap().is_json() {
-            true => Progress::events(&sink),
-            false => Progress::default(),
-        };
-
-        let report = driver::run(
-            &name,
-            &account_config,
+        let mut report = driver::run(
+            name,
+            &account_config.namespaced(name)?,
             cli_filter,
             &scope,
             self.dry_run,
             connections,
             self.no_purge,
-            &self.source,
+            &only,
             self.accept_mode,
             self.accept_absences,
             Pacing::new(
@@ -282,13 +446,11 @@ impl SyncCommand {
             self.declare_only,
             self.intents_only,
             progress,
+            drained,
         )?;
 
-        // NOTE: read before printing, which consumes the report.
-        let exit = Exit::from(&report);
-        printer.into_inner().unwrap().out(report)?;
-
-        Ok(exit)
+        report.name_endpoints();
+        Ok(report)
     }
 }
 
@@ -298,20 +460,29 @@ impl SyncCommand {
 /// serialize instead of failing, then errors out. The kernel releases the
 /// lock on FD close, so there is no PID file to clean up.
 pub fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
+    match wait_store_lock(store_dir, timeout)? {
+        Some(file) => Ok(file),
+        None => bail!(
+            "Another sync still holds {} after {}s",
+            store_dir.join("sync.lock").display(),
+            timeout.as_secs()
+        ),
+    }
+}
+
+/// Takes the store's sync.lock, waiting up to `timeout`: `None` while
+/// another run still holds it then.
+pub fn wait_store_lock(store_dir: &Path, timeout: Duration) -> Result<Option<File>> {
     let (lock_path, file) = open_store_lock(store_dir)?;
 
     let deadline = Instant::now() + timeout;
     let mut waiting = false;
     loop {
         match file.try_lock() {
-            Ok(()) => return Ok(file),
+            Ok(()) => return Ok(Some(file)),
             Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
-                    bail!(
-                        "Another sync still holds {} after {}s",
-                        lock_path.display(),
-                        timeout.as_secs()
-                    );
+                    return Ok(None);
                 }
                 if !waiting {
                     debug!("store is locked by another run, waiting");
@@ -354,58 +525,145 @@ fn open_store_lock(store_dir: &Path) -> Result<(PathBuf, File)> {
     Ok((lock_path, file))
 }
 
-/// Drops the pimdir store and its bodies so the next sync re-reconciles, or
-/// with `force` moves them aside.
+/// The outcome of an account that ran.
+fn ran(account: String, report: SyncOutput) -> AccountSync {
+    AccountSync {
+        account,
+        busy: false,
+        code: None,
+        error: None,
+        report: Some(report),
+    }
+}
+
+/// The outcome of an account that failed, keeping the failure's code.
+fn failed(account: String, err: Error) -> AccountSync {
+    AccountSync {
+        account,
+        busy: false,
+        code: code_of(&err),
+        error: Some(format!("{err:#}")),
+        report: None,
+    }
+}
+
+/// The outcome of an account whose store another run held.
+fn busy(account: String) -> AccountSync {
+    AccountSync {
+        account,
+        busy: true,
+        code: None,
+        error: None,
+        report: None,
+    }
+}
+
+/// Starts `account` over inside the store it shares: drops its collections
+/// with what the store records under them (items, bindings, checkpoints,
+/// coverage, capability rows), its sources' source-wide capability rows and
+/// its sidecar entry, then stamps a fresh entry. Every other account of the
+/// store is left as it was.
 ///
-/// A store holding work no server has is refused unless forced, the refusal
-/// naming that work, and so is a store that cannot be read, its work being
-/// unknown. A forced reset deletes nothing: every file of the store but its
-/// lock moves into a sibling `<dir>.reset-<instant>` directory.
-fn reset_replica(replica: &Path, force: bool) -> Result<()> {
-    if force {
-        let aside = move_aside(replica)?;
-        info!("reset: moved the store aside to {}", aside.display());
-    } else {
-        let pending = pending_work(replica).context(
-            "Cannot read the store to check its pending work; \
-             `sync --reset --force` moves it aside instead",
-        )?;
-        if !pending.is_empty() {
-            bail!(
-                "Cannot reset a store holding work no server has:\n{}\n\
-                 `sync --reset --force` moves the store aside instead",
-                pending.join("\n")
-            );
+/// `config` is the account as the store sees it
+/// ([`AccountConfig::namespaced`]). Refused while a collection of the
+/// account holds a queued or parked action, which the store refuses to drop
+/// with its collection (pimdir GUIDE "Removal"), naming each row and the way
+/// out; without `force`, also while they hold other work no server has,
+/// naming it and `--force`.
+fn reset_account(dir: &Path, account: &str, config: &AccountConfig, force: bool) -> Result<()> {
+    let mode = config.mode()?;
+    StoreState::load(dir)?.account(account)?;
+
+    let mut store = PimdirStore::open(dir)
+        .map_err(pimdir_error)
+        .with_context(|| format!("Open the store at {}", dir.display()))?
+        .for_account(account);
+    let collections = store
+        .list_collections_by_account(Some(account))
+        .context("List the collections of the account")?;
+    let ids: BTreeSet<&str> = collections.iter().map(|c| c.id.as_str()).collect();
+
+    let mut actions = Vec::new();
+    for row in store.list_pending_actions()? {
+        if ids.contains(row.collection.as_str()) {
+            let kind = row.action.kind();
+            actions.push(format!(
+                "- queued action #{} ({kind}) on {}",
+                row.id, row.collection
+            ));
         }
-        drop_store(replica)?;
-        info!("reset: dropped the store");
+    }
+    for row in store.parked_actions()? {
+        if ids.contains(row.collection.as_str()) {
+            actions.push(format!(
+                "- parked action #{} ({}) on {}: {}",
+                row.id, row.action, row.collection, row.error
+            ));
+        }
+    }
+    let work = match force {
+        true => Vec::new(),
+        false => pending_work(&store, &collections)?,
+    };
+
+    if !actions.is_empty() || !work.is_empty() {
+        let mut remedies = Vec::new();
+        if !actions.is_empty() {
+            remedies.push(format!(
+                "`neverest drain -a {account}` or a sync applies a queued action, and the \
+                 frontend that queued a parked one cancels it (`himalaya pimdir queue cancel \
+                 <ROW>`)"
+            ));
+        }
+        if !work.is_empty() {
+            remedies.push(format!(
+                "`neverest sync --reset --force -a {account}` drops the rest with the \
+                 account's collections"
+            ));
+        }
+        let listed: Vec<String> = actions.into_iter().chain(work).collect();
+        bail!(
+            "Cannot reset account {account} while its collections hold work no server has:\n\
+             {}\n{}",
+            listed.join("\n"),
+            remedies.join("; "),
+        );
     }
 
-    PimdirStore::open(replica)
-        .map_err(pimdir_error)
-        .context("Recreate pimdir store after reset")?;
-    StoreState::stamp(replica, None).context("Stamp store state after reset")?;
+    for collection in &collections {
+        store
+            .delete_collection(&collection.id)
+            .map_err(pimdir_error)
+            .with_context(|| format!("Drop collection {}", collection.id))?;
+    }
+    for source in config.endpoints()?.keys() {
+        store
+            .declare(source, &[])
+            .map_err(pimdir_error)
+            .with_context(|| format!("Drop the capabilities of source {source}"))?;
+    }
+    // NOTE: the bodies only the dropped collections held, whichever account
+    // referenced them last; a failure leaves them to the next collection.
+    if let Err(err) = store.collect_garbage() {
+        warn!("cannot collect what the reset of account {account} released: {err}");
+    }
+    drop(store);
+
+    StoreState::stamp(dir, account, &mode)?;
+    info!(
+        "reset: dropped {} collection(s) of account {account}",
+        collections.len()
+    );
     Ok(())
 }
 
-/// What the store holds that no server has, one line per kind of work: its
-/// queued and parked actions, then per collection its conflicts, its
-/// retained items (bound to no server), its pending deletes and the items
-/// whose state no binding's base holds.
-fn pending_work(replica: &Path) -> Result<Vec<String>> {
-    let store = PimdirStore::open(replica).map_err(pimdir_error)?;
+/// What `collections` hold that no server has, one line per collection: its
+/// conflicts, its retained items (bound to no server), its pending deletes
+/// and the items whose state no binding's base holds.
+fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result<Vec<String>> {
     let mut pending = Vec::new();
 
-    let queued = store.list_pending_actions()?.len();
-    if queued > 0 {
-        pending.push(format!("- {queued} queued action(s)"));
-    }
-    let parked = store.parked_actions()?.len();
-    if parked > 0 {
-        pending.push(format!("- {parked} parked action(s)"));
-    }
-
-    for collection in store.list_collections()? {
+    for collection in collections {
         let hub = store.load_hub(&collection.id)?;
         let (mut conflicts, mut retained, mut deletes, mut unpushed) = (0, 0, 0, 0);
 
@@ -461,71 +719,23 @@ fn holds(base: &PimdirBase, flags: &PimdirFlags, object: &Option<PimdirHash>) ->
     flags && object
 }
 
-/// Removes the store's database, its search index and its bodies.
-fn drop_store(replica: &Path) -> Result<()> {
-    for name in [
-        "pimdir.db",
-        "pimdir.db-wal",
-        "pimdir.db-shm",
-        "index.db",
-        "index.db-wal",
-        "index.db-shm",
-        "replica.json",
-        "index.json",
-        "links.json",
-    ] {
-        let path = replica.join(name);
-        if path.exists() {
-            fs::remove_file(&path)
-                .with_context(|| format!("Remove {} for reset", path.display()))?;
-        }
-    }
-    let objects = replica.join("objects");
-    if objects.exists() {
-        fs::remove_dir_all(&objects)
-            .with_context(|| format!("Remove {} for reset", objects.display()))?;
-    }
-    Ok(())
-}
-
-/// Moves every file of the store but its lock into a sibling directory named
-/// after it and the instant, answering where.
-fn move_aside(replica: &Path) -> Result<PathBuf> {
-    let name = replica
-        .file_name()
-        .with_context(|| format!("Name the store directory {}", replica.display()))?
-        .to_string_lossy();
-    let instant = Utc::now().format("%Y%m%dT%H%M%SZ");
-    let aside = replica.with_file_name(format!("{name}.reset-{instant}"));
-
-    // NOTE: the moved store stays its user's alone, as it was (pimdir STORAGE
-    // §18), so it opens again as a store.
-    modes::create_dir(&aside).with_context(|| format!("Create {}", aside.display()))?;
-    let entries = fs::read_dir(replica).with_context(|| format!("Read {}", replica.display()))?;
-    for entry in entries {
-        let entry = entry.with_context(|| format!("Read {}", replica.display()))?;
-        if entry.file_name() == "sync.lock" {
-            continue;
-        }
-        let to = aside.join(entry.file_name());
-        fs::rename(entry.path(), &to)
-            .with_context(|| format!("Move {} to {}", entry.path().display(), to.display()))?;
-    }
-
-    Ok(aside)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::PoisonError;
 
     use io_pimdir::{
+        change::PimdirWriteOp,
         client::{producer::PimdirProducer, reader::PimdirReader},
         codec::PimdirAction,
+        collection::PimdirCollectionId,
+        object::PimdirObject,
+        placement::{
+            PimdirHandle, PimdirLevel, PimdirLinkId, PimdirPlacement, PimdirSortKey, PimdirStatus,
+        },
+        summary,
     };
 
-    use super::*;
-    use crate::conflict::merger::SPAWNS;
+    use crate::{cli::sync::*, conflict::merger::SPAWNS};
 
     /// Ordering and pacing flags mean nothing to a run that lists nothing,
     /// so they are refused beside `--intents-only` and `--declare-only`;
@@ -554,6 +764,8 @@ mod tests {
         assert_eq!(sync.max_wait, 30);
     }
 
+    /// A second run waits for the lock up to its timeout, then answers
+    /// none, which the run reports as the store busy.
     #[test]
     fn a_second_run_waits_out_the_lock_then_gives_up() {
         let dir = tempfile::tempdir().unwrap();
@@ -561,30 +773,19 @@ mod tests {
         let held = acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap();
 
         let start = Instant::now();
-        let err = acquire_store_lock(dir.path(), Duration::from_millis(50)).unwrap_err();
+        let waited = wait_store_lock(dir.path(), Duration::from_millis(50)).unwrap();
+        assert!(waited.is_none());
         assert!(start.elapsed() >= Duration::from_millis(50));
+        let err = acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap_err();
         assert!(format!("{err:#}").contains("Another sync still holds"));
 
         drop(held);
         acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap();
     }
 
-    /// The refusal a sidecar-less store raises names `--reset` as its
-    /// remedy, so a reset leaving it sidecar-less would raise it again.
-    #[test]
-    fn a_reset_leaves_a_store_the_next_run_can_read() {
-        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
-        let dir = tempfile::tempdir().unwrap();
-
-        reset_replica(dir.path(), false).unwrap();
-
-        assert!(dir.path().join("pimdir.db").exists());
-        StoreState::load(dir.path()).unwrap();
-    }
-
-    /// A reset is the whole store's: beside a dry run it would drop the
-    /// real store before planning, and beside a filter it would reset more
-    /// than it names. `--force` means nothing without it.
+    /// A reset is the whole account's: beside a dry run it would drop the
+    /// real collections before planning, and beside a filter it would
+    /// reset more than it names. `--force` means nothing without it.
     #[test]
     fn a_reset_is_refused_beside_a_dry_run_or_a_filter() {
         let parse = |args: &[&str]| {
@@ -604,107 +805,187 @@ mod tests {
         assert!(parse(&["--reset", "--force"]).is_ok());
     }
 
-    /// A store holding a queued action, as a frontend leaves one.
-    fn store_with_queued_action(dir: &Path) {
-        PimdirStore::open(dir)
-            .unwrap()
-            .for_account("a")
-            .for_source("imap")
-            .ensure_collection("imap/INBOX", "message/rfc822")
-            .unwrap();
-        StoreState::stamp(dir, None).unwrap();
-        PimdirProducer::open(dir, "tests")
-            .unwrap()
-            .enqueue("imap/INBOX", &PimdirAction::Remove { seq: 1 }, None)
-            .unwrap();
+    /// `account` syncing one IMAP source, as the store sees it.
+    fn namespaced(account: &str) -> AccountConfig {
+        let config: AccountConfig = toml::from_str("imap.server = \"imap.example.org\"").unwrap();
+        config.namespaced(account).unwrap()
     }
 
-    /// A reset never drops work no server has: it refuses, names what is
-    /// pending and `--force`, and leaves the store as it was.
+    /// The inbox of `account`, as the store keys it.
+    fn inbox(account: &str) -> String {
+        format!("{account}/imap/INBOX")
+    }
+
+    /// Initializes `account` in the store at `dir` and files a message
+    /// into its inbox, as a sync lands one: bound to its source with the
+    /// body as its base, so it is no work a server lacks, unless `based`
+    /// is false, a create staged and never pushed.
+    fn land(dir: &Path, account: &str, id: &str, based: bool) {
+        let config = namespaced(account);
+        if !StoreState::load(dir).unwrap().initialized(account) {
+            StoreState::stamp(dir, account, &config.mode().unwrap()).unwrap();
+        }
+
+        let body = format!("Message-ID: <{id}>\r\nSubject: {id}\r\n\r\nHello\r\n").into_bytes();
+        let mut store = PimdirStore::open(dir)
+            .unwrap()
+            .for_account(account)
+            .for_source(format!("{account}/imap"));
+        store
+            .ensure_collection(inbox(account), "message/rfc822")
+            .unwrap();
+        let derived = summary::derive("message/rfc822", &body).unwrap();
+        let hash = store.hash(&body);
+        let base = based.then(|| PimdirBase {
+            flags: PimdirFlags::default(),
+            revision: None,
+            object: Some(hash.clone()),
+        });
+        store
+            .write(vec![
+                PimdirWriteOp::StoreObject {
+                    object: PimdirObject {
+                        hash: hash.clone(),
+                        size: body.len(),
+                    },
+                    body: Some(body),
+                },
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId(inbox(account)),
+                    handle: PimdirHandle(id.into()),
+                    link_id: Some(PimdirLinkId(derived.link_id.0.clone())),
+                    object: Some(hash),
+                    level: PimdirLevel::Full,
+                    summary: derived.summary,
+                    sort_key: PimdirSortKey(derived.sort_key.0),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Clean,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base,
+                    origin: None,
+                }),
+            ])
+            .unwrap();
+        drop(store);
+
+        driver::prepare(dir, account, &config, false).unwrap();
+    }
+
+    /// How many capability rows `source` declares in the store at `dir`.
+    fn declared(dir: &Path, source: &str) -> i64 {
+        rusqlite::Connection::open(dir.join("pimdir.db"))
+            .unwrap()
+            .query_row(
+                "SELECT count(*) FROM capabilities WHERE source = ?1",
+                [source],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// A reset starts one account over inside the store it shares: its
+    /// collections, items and capabilities go and its sidecar entry starts
+    /// again, while the other account keeps every one of its own.
     #[test]
-    fn a_reset_refuses_while_work_is_pending() {
+    fn a_reset_drops_one_account_and_leaves_the_other() {
         let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
-        store_with_queued_action(dir.path());
+        land(dir.path(), "work", "w1@x", true);
+        land(dir.path(), "home", "h1@x", true);
+        let mut sidecar = StoreState::load(dir.path()).unwrap();
+        for state in sidecar.accounts.values_mut() {
+            state.mode_accepted = true;
+        }
+        sidecar.save(dir.path()).unwrap();
 
-        let err = reset_replica(dir.path(), false).unwrap_err();
+        reset_account(dir.path(), "work", &namespaced("work"), false).unwrap();
 
-        let err = format!("{err:#}");
-        assert!(err.contains("1 queued action"), "{err}");
-        assert!(err.contains("--force"), "{err}");
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert!(
+            reader
+                .list_collections_by_account(Some("work"))
+                .unwrap()
+                .is_empty()
+        );
+        let home = reader.list_collections_by_account(Some("home")).unwrap();
+        assert_eq!(home.len(), 1);
+        assert_eq!(reader.list_items(inbox("home"), None, 10).unwrap().len(), 1);
+        assert_eq!(declared(dir.path(), "work/imap"), 0);
+        assert!(declared(dir.path(), "home/imap") > 0);
+
+        let sidecar = StoreState::load(dir.path()).unwrap();
+        assert!(!sidecar.account("work").unwrap().mode_accepted);
+        assert!(sidecar.account("home").unwrap().mode_accepted);
+    }
+
+    /// A queued or parked action on the account's collections refuses the
+    /// reset, forced or not, naming the row and the way out: the store
+    /// would drop the row with its collection, and its producer never
+    /// learn why.
+    #[test]
+    fn a_reset_refuses_while_an_action_is_queued() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        land(dir.path(), "work", "w1@x", true);
+        PimdirProducer::open(dir.path(), "tests")
+            .unwrap()
+            .enqueue(&inbox("work"), &PimdirAction::Remove { seq: 1 }, None)
+            .unwrap();
+
+        for force in [false, true] {
+            let err = reset_account(dir.path(), "work", &namespaced("work"), force).unwrap_err();
+
+            let err = format!("{err:#}");
+            assert!(err.contains("queued action #1 (remove)"), "{err}");
+            assert!(err.contains("neverest drain -a work"), "{err}");
+        }
         let reader = PimdirReader::open(dir.path()).unwrap();
         assert_eq!(reader.list_pending_actions().unwrap().len(), 1);
+        assert_eq!(reader.list_collections().unwrap().len(), 1);
     }
 
-    /// A forced reset moves the store aside, whole, and starts a new one.
+    /// Work no server has refuses a plain reset, naming `--force`, which
+    /// drops it with the account's collections.
     #[test]
-    fn a_forced_reset_moves_the_store_aside() {
+    fn a_forced_reset_drops_staged_work() {
         let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
-        let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("account");
-        fs::create_dir_all(&dir).unwrap();
-        store_with_queued_action(&dir);
+        let dir = tempfile::tempdir().unwrap();
+        land(dir.path(), "work", "w1@x", false);
 
-        reset_replica(&dir, true).unwrap();
-
-        let aside: Vec<PathBuf> = fs::read_dir(root.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path != &dir)
-            .collect();
-        assert_eq!(aside.len(), 1, "{aside:?}");
-        let name = aside[0].file_name().unwrap().to_string_lossy().into_owned();
-        assert!(name.starts_with("account.reset-"), "{name}");
-        let kept = PimdirReader::open(&aside[0]).unwrap();
-        assert_eq!(kept.list_pending_actions().unwrap().len(), 1);
-
-        let fresh = PimdirReader::open(&dir).unwrap();
-        assert!(fresh.list_pending_actions().unwrap().is_empty());
-        StoreState::load(&dir).unwrap();
-    }
-
-    /// The search index goes the way of the store it was built from: a
-    /// reset drops it with an idle store, a forced one moves it aside with
-    /// the store, so no index outlives the store its stamps count in.
-    #[cfg(feature = "search")]
-    #[test]
-    fn a_reset_takes_the_search_index_with_the_store() {
-        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
-        use io_pimdir::client::search::{PimdirIndex, PimdirIndexRefreshOptions};
-
-        let index = |dir: &Path| {
-            PimdirIndex::open(dir)
+        let err = reset_account(dir.path(), "work", &namespaced("work"), false).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("1 unpushed change"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+        assert_eq!(
+            PimdirReader::open(dir.path())
                 .unwrap()
-                .refresh(&PimdirIndexRefreshOptions::default())
-                .unwrap();
-        };
-
-        let root = tempfile::tempdir().unwrap();
-        let idle = root.path().join("idle");
-        fs::create_dir_all(&idle).unwrap();
-        reset_replica(&idle, false).unwrap();
-        index(&idle);
-        reset_replica(&idle, false).unwrap();
-        assert!(!idle.join("index.db").exists(), "dropped with the store");
-
-        let busy = root.path().join("busy");
-        fs::create_dir_all(&busy).unwrap();
-        store_with_queued_action(&busy);
-        index(&busy);
-        reset_replica(&busy, true).unwrap();
-        assert!(
-            !busy.join("index.db").exists(),
-            "not left beside a new store"
+                .list_collections()
+                .unwrap()
+                .len(),
+            1
         );
-        let aside: Vec<PathBuf> = fs::read_dir(root.path())
+
+        reset_account(dir.path(), "work", &namespaced("work"), true).unwrap();
+
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert!(reader.list_collections().unwrap().is_empty());
+        StoreState::load(dir.path())
             .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .filter(|path| path.to_string_lossy().contains("busy.reset-"))
-            .collect();
-        assert_eq!(aside.len(), 1, "{aside:?}");
-        assert!(
-            aside[0].join("index.db").exists(),
-            "moved aside, not deleted"
-        );
+            .account("work")
+            .unwrap();
+    }
+
+    /// A reset starts over an account `init` initialized, never one it did
+    /// not: that is `init`'s, which opens every endpoint first.
+    #[test]
+    fn a_reset_needs_an_initialized_account() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        land(dir.path(), "work", "w1@x", true);
+
+        let err = reset_account(dir.path(), "home", &namespaced("home"), true).unwrap_err();
+
+        assert!(format!("{err:#}").contains("neverest init -a home"));
     }
 }

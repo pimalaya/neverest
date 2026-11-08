@@ -24,23 +24,38 @@ This page lists the changes most likely to bite when upgrading. The full configu
 ## Suggested steps
 
 1. Copy [config.sample.toml](./config.sample.toml) next to the old config.toml and port your accounts.
-2. Run `neverest check -a <account>` to validate every endpoint and read back what the account does, in words.
-3. Run `neverest init -a <account>` to create the store.
-4. Run `neverest sync -a <account> --dry-run` to inspect the first patch.
+2. Run `neverest check` to validate every endpoint and read back what each account does, in words.
+3. Run `neverest init` to create the store every account shares.
+4. Run `neverest sync --dry-run` to inspect the first patch.
 5. Drop `--dry-run`, replace the old config, done.
 
 ## From v0.3.0, or any earlier build, to the next release
 
-The store follows pimdir storage-draft-09, sync-draft-08 and search-draft-09 (io-pimdir 0.9). A store any earlier neverest wrote, v0.3.0 or a git build, is refused by every profile as `store-version`, never migrated: neverest, and every frontend reading the store, reinstall it. What only the old store holds is the work it queued (a send, an edit or a create staged by a frontend) and its retained items, so reinstall in this order:
+Two things change at once, and neither is migrated:
 
-1. With the neverest that wrote the store, run `neverest sync -a <account>` until nothing is queued: the run exits 0, its report lists no `parked` action, no `submitted` entry left parked and no conflict, and `neverest drain -a <account>` applies nothing more. Settle or cancel what stays parked.
+- The store follows pimdir storage-draft-09, sync-draft-08 and search-draft-09 (io-pimdir 0.9). A store any earlier neverest wrote, v0.3.0 or a git build, is refused by every profile as `store-version`.
+- **Every account shares one store**: `neverest/` under the state directory itself (`$XDG_STATE_HOME/neverest` on Linux, `~/Library/Application Support/neverest` on macOS, `%LOCALAPPDATA%\neverest` on Windows), no longer one directory per account under it. A neverest directory still holding the per-account stores an earlier neverest kept is refused as `store-layout`, naming each, and so is a `store.root` store whose neverest.json an earlier neverest wrote.
+
+What only an old store holds is the work it queued (a send, an edit or a create staged by a frontend) and its retained items, so reinstall in this order:
+
+1. With the neverest that wrote the stores, run `neverest sync -a <account>` for each account until nothing is queued: the run exits 0, its report lists no `parked` action, no `submitted` entry left parked and no conflict, and `neverest drain -a <account>` applies nothing more. Settle or cancel what stays parked.
 2. Upgrade neverest.
-3. Move the store aside, deleting nothing: `mv` its directory (the path `neverest init` printed: `store.root`, else `$XDG_STATE_HOME/neverest/<account>` on Linux) to a sibling name.
-4. Run `neverest init -a <account>` to create the new store, then `neverest sync -a <account>`, which lists every collection again and downloads its bodies.
+3. Move every old store out of the neverest directory, deleting nothing: `mv $XDG_STATE_HOME/neverest $XDG_STATE_HOME/neverest-v0.3` on Linux moves them all at once. Move a `store.root` directory away too, or point `store.root` at a new path.
+4. Run `neverest init`, which adds every account to the new shared store, then `neverest sync`, which lists every collection again and downloads its bodies.
 
-`neverest sync --reset --force -a <account>` does steps 3 and 4 in one command, moving the store into a sibling `<dir>.reset-<instant>` directory before syncing into a new one. Keep the moved store until the new one holds what you expect: its retained items are only there.
+Keep the moved stores until the new one holds what you expect: their retained items are only there.
 
 A store another user can read is refused too, as `store-exposed`: one `neverest init` creates is its user's alone, and an older one moved back in place needs `chmod 700` on its directory and `chmod 600` on its pimdir.db.
+
+What else changes:
+
+- **`-a/--account` is a filter**, and repeatable. Without it, `sync`, `check`, `drain` and `init` run over every account, one after the other; `index` builds every store the accounts use. `conflict show`, `conflict resolve` and `sync --reset` act on one account, so `-a` names it when there are several. `default = true` is read and ignored, with a warning; drop it at your convenience.
+- **One run, one lock.** The store is locked for the whole run, so two accounts of one store never sync at once, and a second run waits up to a minute then reports the store busy (exit 3). An account that needs its own schedule (a cron of its own, a frontend-triggered run that must not wait) names its own `store.root`.
+- **An account's failure is its own.** A run goes on with the next account and exits 3 when one failed. Under `--json`, `sync`, `drain`, `init` and `check` print one result listing every account (`{"accounts": [...]}`, a sync's report under `accounts[].report`), and `index` one listing every store (`{"stores": [...]}`); `sync` announces each account with an `account-started` event.
+- **Store ids carry the account.** A source id is `<account>/<source>` and a collection id `<account>/<source>/<name>` (`work/imap/INBOX`, where it was `imap/INBOX`), so two accounts with an `imap` source never share a collection. A report still names an endpoint as the configuration does (`imap`). An account name holding `/` is refused.
+- **`sync --reset` starts one account over**: it drops that account's collections and syncs them again, every other account untouched. `--force` drops the conflicts, unpushed edits and retained items they hold rather than moving a store aside; a queued or parked action still refuses the reset until a drain applies it or its frontend cancels it.
+- **Frontends** (himalaya, calendula, cardamum): point `pimdir.root` at the neverest directory and name the account with `pimdir.account`. A collection named by its id gains the account (`himalaya -f work/imap/INBOX`); a role (`inbox`, `sent`) keeps working.
+- `neverest check` names, under `orphans`, an account the store holds that no configured account names: renaming an account's TOML key leaves its collections under the old name until the key is renamed back.
 
 ## From a git master build
 

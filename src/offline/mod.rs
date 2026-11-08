@@ -9,8 +9,10 @@
 //! deletions needs no hand-rolled cross-merge.
 //!
 //! Sources meet only inside a namespace: a hub collection id is
-//! `<namespace>/<name>`, so a mail source and a contacts source under one
-//! account, or two providers cached side by side, never share a collection.
+//! `<namespace>/<name>`, the namespace being the source id
+//! (`<account>/<source>`), so two accounts of one store, a mail source and a
+//! contacts source under one account, or two providers cached side by side,
+//! never share a collection.
 
 use std::time::Instant;
 
@@ -38,11 +40,13 @@ pub mod state;
 pub mod storage;
 pub mod submit;
 
-/// The pimdir source id of a configured source: its name, verbatim.
+/// The pimdir source id of an endpoint as the store sees it, verbatim: its
+/// configured name behind its account's, `<account>/<name>`
+/// ([`crate::config::AccountConfig::namespaced`]).
 ///
-/// The axis that distinguishes each source's bindings of one shared item. It is
-/// the configured name and nothing derived, so renaming a source orphans its
-/// bindings rather than quietly rebinding them.
+/// The axis that distinguishes each source's bindings of one shared item. It
+/// is the configured names and nothing derived, so renaming a source or an
+/// account orphans its bindings rather than quietly rebinding them.
 pub fn source_id(name: &str) -> PimdirSourceId {
     PimdirSourceId(name.to_string())
 }

@@ -151,32 +151,41 @@ impl Replica {
         replica
     }
 
-    /// Checks the account, answering its JSON report.
+    /// Checks the account, answering its entry of the JSON report.
     pub fn check(&self) -> serde_json::Value {
         let (_, out) = self.run(&["--json", "check", "-a", ACCOUNT], &[0]);
-        serde_json::from_str(&out).expect("one JSON document")
+        let checked: serde_json::Value = serde_json::from_str(&out).expect("one JSON document");
+        checked["accounts"][0].clone()
     }
 
-    /// The store collection id of the backend's collection `key`.
+    /// The pimdir source id of the backend's source, which a frontend
+    /// names in the payload of an intent it queues.
+    pub fn source(&self) -> String {
+        format!("{ACCOUNT}/{}", self.backend)
+    }
+
+    /// The store collection id of the backend's collection `key`, under
+    /// the account's source id.
     pub fn collection(&self, key: &str) -> String {
-        format!("{}/{key}", self.backend)
+        format!("{ACCOUNT}/{}/{key}", self.backend)
     }
 
     /// Syncs the account narrowed to the collection `key`, which must
-    /// succeed with nothing left to decide.
+    /// succeed with nothing left to decide, and answers its report.
     pub fn sync(&self, key: &str) -> String {
-        self.run(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[0])
-            .1
+        let (_, result) = self.run(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[0]);
+        json_report(&result).to_string()
     }
 
     /// Syncs the collection `key` under the scope from `since` (a date),
-    /// which must succeed with nothing left to decide.
+    /// which must succeed with nothing left to decide, and answers its
+    /// report.
     pub fn sync_since(&self, key: &str, since: &str) -> String {
-        self.run(
+        let (_, result) = self.run(
             &["sync", "-a", ACCOUNT, "-m", key, "--since", since, "--json"],
             &[0],
-        )
-        .1
+        );
+        json_report(&result).to_string()
     }
 
     /// Syncs the account narrowed to the collections `keys` in one run,
@@ -294,7 +303,7 @@ impl Replica {
 
     /// The store directory.
     pub fn store(&self) -> PathBuf {
-        self.dir.path().join("neverest").join(ACCOUNT)
+        self.dir.path().join("neverest")
     }
 
     /// The live item of `key` whose link id contains `tag`.
@@ -408,7 +417,7 @@ impl Replica {
             "--json",
         ];
         let (_, stdout) = self.run(&args, &[0]);
-        let report: serde_json::Value = serde_json::from_str(&stdout).expect("the report is JSON");
+        let report = json_report(&stdout);
         report["intents"].as_array().cloned().unwrap_or_default()
     }
 
@@ -418,7 +427,7 @@ impl Replica {
     /// the next run has nothing left to decide.
     pub fn sync_parked_intents(&self, key: &str) -> Vec<serde_json::Value> {
         let (_, stdout) = self.run(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[2]);
-        let report: serde_json::Value = serde_json::from_str(&stdout).expect("the report is JSON");
+        let report = json_report(&stdout);
         let parked = PimdirReader::open(self.store())
             .expect("open the store")
             .parked_actions()
@@ -732,10 +741,16 @@ pub fn json_result(stdout: &str) -> serde_json::Value {
         .expect("a JSON result")
 }
 
-/// Whether the list `key` of the result a `--json` run printed is empty:
+/// The report of the first account of the result a `--json` sync printed,
+/// the only one a run over one account covers.
+pub fn json_report(stdout: &str) -> serde_json::Value {
+    json_result(stdout)["accounts"][0]["report"].clone()
+}
+
+/// Whether the list `key` of the report a `--json` sync printed is empty:
 /// every key is printed, so its presence says nothing.
 pub fn none(stdout: &str, key: &str) -> bool {
-    json_result(stdout)[key]
+    json_report(stdout)[key]
         .as_array()
         .is_some_and(Vec::is_empty)
 }

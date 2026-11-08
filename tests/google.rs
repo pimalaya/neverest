@@ -377,7 +377,7 @@ fn a_google_meeting_is_invited_to_and_cancelled() {
         a.intent(
             calendar,
             "calendar-reply",
-            serde_json::json!({ "v": 1, "source": "gcal", "seq": seq, "partstat": "ACCEPTED" }),
+            serde_json::json!({ "v": 1, "source": a.source(), "seq": seq, "partstat": "ACCEPTED" }),
         );
         let intents = a.sync_parked_intents(calendar);
         assert_eq!(intents.len(), 1, "{intents:?}");
@@ -389,7 +389,7 @@ fn a_google_meeting_is_invited_to_and_cancelled() {
         a.intent(
             calendar,
             "calendar-cancel",
-            serde_json::json!({ "v": 1, "source": "gcal", "seq": seq, "comment": "Cancelled by the neverest live tests" }),
+            serde_json::json!({ "v": 1, "source": a.source(), "seq": seq, "comment": "Cancelled by the neverest live tests" }),
         );
         let intents = a.sync_intents(calendar);
         assert_eq!(intents.len(), 1, "{intents:?}");
@@ -488,7 +488,7 @@ fn a_google_invitation_is_answered() {
             "calendar-reply",
             serde_json::json!({
                 "v": 1,
-                "source": "gcal",
+                "source": a.source(),
                 "seq": seq,
                 "partstat": "TENTATIVE",
                 "comment": "Sent by the neverest live tests",

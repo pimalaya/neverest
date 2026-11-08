@@ -45,7 +45,7 @@ use io_pimdir::{
     intent::PimdirSubmit,
 };
 
-use crate::common::{json_result, pimdir_cli};
+use crate::common::{json_report, json_result, pimdir_cli};
 
 const IMAP_ROOT: &str = "imap://127.0.0.1:143";
 const SMTP: &str = "smtp://127.0.0.1:2525";
@@ -110,12 +110,12 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     // 2. What a frontend does: the body durably in the blob tree first, then
     //    the queue row naming it, so the body is never unreferenced with the
     //    intent already queued.
-    let store = state.join("neverest").join("submit");
+    let store = state.join("neverest");
     let marker = marker();
     let body = message(&marker);
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
     let submit = PimdirSubmit {
-        source: String::from("imap"),
+        source: String::from("submit/imap"),
         from: String::from(USER),
         rcpts: vec![String::from(USER)],
         subject: Some(format!("neverest submission {marker}")),
@@ -123,7 +123,7 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     };
 
     let id = producer
-        .enqueue_with_body("imap/INBOX", &body, |object| {
+        .enqueue_with_body("submit/imap/INBOX", &body, |object| {
             submit.to_action(object).unwrap()
         })
         .expect("enqueue the intent");
@@ -137,7 +137,7 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
 
     // 3. The run performs it: sent, acknowledged, and no longer queued.
     let report = neverest(&["sync", "-a", "submit", "--json"], &config, &state);
-    let submitted = &json_result(&report)["submitted"];
+    let submitted = &json_report(&report)["submitted"];
     assert!(
         submitted.as_array().is_some_and(|s| s.len() == 1) && submitted[0]["error"].is_null(),
         "the run reported the submission; report was:\n{report}",
@@ -198,7 +198,7 @@ fn check_opens_the_smtp_channel_a_source_declares() {
     write(SMTP);
     let checked = neverest(&["--json", "check", "-a", "submit"], &config, &state);
     assert_eq!(
-        json_result(&checked)["sources"][0]["smtp"]["ok"],
+        json_result(&checked)["accounts"][0]["sources"][0]["smtp"]["ok"],
         true,
         "{checked}"
     );
@@ -240,7 +240,8 @@ fn check_lists_collections_with_the_roles_the_server_states() {
     .unwrap();
 
     let checked = neverest(&["--json", "check", "-a", "roles"], &config, &state);
-    let report: serde_json::Value = serde_json::from_str(&checked).expect("one JSON document");
+    let checked_all: serde_json::Value = serde_json::from_str(&checked).expect("one JSON document");
+    let report = &checked_all["accounts"][0];
     let collections = report["sources"][0]["collections"]
         .as_array()
         .unwrap_or_else(|| panic!("collections listed: {checked}"));
@@ -296,7 +297,7 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     neverest(&["init", "-a", "submit"], &config, &state);
     neverest(&["sync", "-a", "submit"], &config, &state);
 
-    let store = state.join("neverest").join("submit");
+    let store = state.join("neverest");
     let sent = PimdirReader::open(&store)
         .expect("open reader")
         .list_collections()
@@ -310,7 +311,7 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     let body = message(&marker);
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
     let submit = PimdirSubmit {
-        source: String::from("imap"),
+        source: String::from("submit/imap"),
         from: String::from(USER),
         rcpts: vec![String::from(USER)],
         subject: Some(marker.clone()),
@@ -326,7 +327,7 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
         &config,
         &state,
     );
-    let report: serde_json::Value = serde_json::from_str(&report).expect("one JSON document");
+    let report = json_report(&report);
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["id"], id, "{report}");
     assert_eq!(submitted["error"], serde_json::Value::Null, "{report}");
@@ -342,7 +343,7 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     wait_for_delivery(&marker).expect("the submitted message reached the server");
 
     // NOTE: the copy waits in the store until a sync pushes it.
-    let folder = sent.trim_start_matches("imap/").replace(' ', "%20");
+    let folder = sent.trim_start_matches("submit/imap/").replace(' ', "%20");
     assert!(
         !search(&folder, &marker),
         "the copy is not on the server yet"
@@ -375,7 +376,8 @@ fn search(mailbox: &str, marker: &str) -> bool {
 /// verdict changes where the message is, never whether it arrives.
 ///
 /// The name it answers with is the one the store keys the collection under,
-/// which pimdir groups by the id of the source that synced it.
+/// which pimdir groups by the id of the source that synced it, the account
+/// then the source name.
 fn wait_for_delivery(marker: &str) -> Option<String> {
     for _ in 0..30 {
         for (mailbox, path) in [("INBOX", "INBOX"), ("Junk Mail", "Junk%20Mail")] {
@@ -388,7 +390,7 @@ fn wait_for_delivery(marker: &str) -> Option<String> {
 
             let hits = String::from_utf8_lossy(&search.stdout);
             if hits.split_whitespace().any(|t| t.parse::<u32>().is_ok()) {
-                return Some(format!("imap/{mailbox}"));
+                return Some(format!("submit/imap/{mailbox}"));
             }
         }
 
@@ -402,7 +404,7 @@ fn wait_for_delivery(marker: &str) -> Option<String> {
 /// CardDAV test does: the queue and the retained rows are what the sync
 /// report does not print.
 fn pimdir(state: &Path, args: &[&str]) -> String {
-    let store = state.join("neverest").join("submit");
+    let store = state.join("neverest");
     let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
         .args(args)

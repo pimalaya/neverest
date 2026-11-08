@@ -19,6 +19,7 @@ use io_sasl::{
     rfc4616::plain::SaslPlainCreds, rfc5801::SaslGs2ChannelBinding, rfc5802::SaslScramCreds,
     rfc7628::oauthbearer::SaslOauthbearerCreds, xoauth2::SaslXoauth2Creds,
 };
+use log::warn;
 use pimalaya_cli::printer::Printer;
 #[cfg(any(feature = "wizard", test))]
 use pimalaya_config::toml as config_toml;
@@ -201,17 +202,95 @@ impl Config {
             ),
         }
     }
+
+    /// The accounts a command runs over, each with its configuration:
+    /// those `names` names, else every one, in name order.
+    ///
+    /// A name the configuration does not declare fails before anything
+    /// runs, and so does one holding `/`, which separates the account from
+    /// the rest of a store-wide id (pimdir STORAGE §9.2). `default` is
+    /// read and ignored, with one warning.
+    pub fn select(&self, names: &[String]) -> Result<Vec<(String, AccountConfig)>> {
+        let mut configured: Vec<&String> = self.accounts.keys().collect();
+        configured.sort();
+
+        if configured.is_empty() {
+            bail!("The configuration declares no account, {NO_CONFIG_HINT}");
+        }
+
+        if let Some(unknown) = names.iter().find(|name| !self.accounts.contains_key(*name)) {
+            bail!(
+                "Cannot find account {unknown}, the configuration declares {}",
+                join(&configured),
+            );
+        }
+
+        if let Some(name) = configured.iter().find(|name| name.contains('/')) {
+            bail!(
+                "Account name {name} holds a `/`, which separates the account from the source \
+                 in the store's ids: rename its `[accounts.<name>]` key"
+            );
+        }
+
+        let defaults: Vec<&String> = configured
+            .iter()
+            .copied()
+            .filter(|name| self.accounts[*name].default)
+            .collect();
+        if !defaults.is_empty() {
+            warn!(
+                "the `default` key is ignored (set on {}): a command runs over every account \
+                 unless `-a` names some",
+                join(&defaults),
+            );
+        }
+
+        Ok(configured
+            .into_iter()
+            .filter(|name| names.is_empty() || names.contains(name))
+            .map(|name| (name.clone(), self.accounts[name].clone()))
+            .collect())
+    }
+
+    /// The one account a command addressing one item, or starting one
+    /// account over, runs on: what `names` leaves must be exactly one.
+    pub fn select_one(&self, names: &[String], what: &str) -> Result<(String, AccountConfig)> {
+        let mut selected = self.select(names)?;
+
+        if selected.len() != 1 {
+            let names: Vec<&String> = selected.iter().map(|(name, _)| name).collect();
+            bail!(
+                "{what} acts on one account, and the run covers {}: name one with `-a`",
+                join(&names),
+            );
+        }
+
+        Ok(selected.remove(0))
+    }
+}
+
+/// Names joined for a message, comma-separated.
+fn join(names: &[&String]) -> String {
+    names
+        .iter()
+        .map(|name| name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Per-account configuration: named sources over one pimdir store.
 ///
-/// An account is the hub: one store, one blob directory. A source's name
-/// is its pimdir source id, so renaming one orphans its bindings, and a
-/// backend written under the account is sugar for a source named after it.
+/// An account is one hub of a store it may share with others, its
+/// collections grouped under its name. A source's name makes its pimdir
+/// source id, `<account>/<name>`, so renaming one orphans its bindings, and
+/// a backend written under the account is sugar for a source named after
+/// it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct AccountConfig {
-    /// Whether a command with no `-a` resolves to this account.
+    /// Read and ignored, with a warning: a command runs over every
+    /// account unless `-a` names some, so none is the default. Kept so a
+    /// configuration an earlier neverest wrote still loads.
     #[serde(default, skip_serializing_if = "is_default")]
     pub default: bool,
     /// Named sources, the map key being the pimdir source id.
@@ -278,8 +357,9 @@ pub struct AccountConfig {
     pub smtp: Option<SmtpConfig>,
     /// The local pimdir store this account syncs through.
     ///
-    /// Optional: the store is implicit, a per-account state directory, and
-    /// is customised only here, never declared as a source.
+    /// Optional: the store is implicit, the one every account naming no
+    /// root shares, and is customised only here, never declared as a
+    /// source.
     #[serde(default)]
     pub store: StoreConfig,
     /// How a run announces a content conflict it could not merge away.
@@ -539,6 +619,36 @@ impl AccountConfig {
         Ok(endpoints)
     }
 
+    /// This account as the store sees it: every endpoint keyed by its
+    /// pimdir source id, `<account>/<name>`, the sugar folded into
+    /// `sources`.
+    ///
+    /// A store shared by several accounts holds their source ids and
+    /// collection ids side by side, each unique store-wide (pimdir STORAGE
+    /// §4.3, §9.2), so two accounts holding the wizard's `imap` source must
+    /// not both bind `imap`. Every collection id derives from a source id,
+    /// so namespacing the source namespaces the collection too.
+    pub fn namespaced(&self, account: &str) -> Result<Self> {
+        let id = |(name, source): (String, SourceConfig)| (format!("{account}/{name}"), source);
+
+        Ok(Self {
+            sources: self.sources()?.into_iter().map(id).collect(),
+            targets: self.targets.clone().into_iter().map(id).collect(),
+            imap: None,
+            carddav: None,
+            caldav: None,
+            jmap: None,
+            gmail: None,
+            msgraph: None,
+            msgraph_contacts: None,
+            msgraph_calendar: None,
+            gpeople: None,
+            gcal: None,
+            smtp: None,
+            ..self.clone()
+        })
+    }
+
     /// The account's mode: which endpoints, which way, whether bodies stay.
     ///
     /// Both `check` and the sync go through it, so what a run reports and
@@ -771,15 +881,17 @@ pub struct ConflictConfig {
 }
 
 /// The local pimdir store an account syncs through, the cache a frontend
-/// reads. Implicit per account; this table only customises it.
+/// reads. Implicit, and shared by every account naming no root; this table
+/// only customises it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct StoreConfig {
     /// The store directory, holding `pimdir.db` and `objects/`.
     ///
-    /// Defaults to a per-account directory under the platform's state
-    /// location: XDG on Linux and the BSDs, Application Support on macOS,
-    /// `%LOCALAPPDATA%` on Windows.
+    /// Defaults to `neverest/` under the platform's state location (XDG on
+    /// Linux and the BSDs, Application Support on macOS, `%LOCALAPPDATA%` on
+    /// Windows), one store for every account naming no root. Accounts
+    /// naming one root share that store.
     #[serde(default, deserialize_with = "shell_expanded_path_opt")]
     pub root: Option<PathBuf>,
     /// How long a retained item survives: `store.purge-after = "90d"`.
@@ -1948,6 +2060,111 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    /// Two accounts, `home` declared after `work`, one of them still
+    /// claiming the `default` an earlier neverest read.
+    fn two_accounts() -> Config {
+        toml::from_str(
+            r#"
+            [accounts.work]
+            default = true
+            imap.server = "imaps://w.example.org:993"
+
+            [accounts.home]
+            imap.server = "imaps://h.example.org:993"
+            "#,
+        )
+        .unwrap()
+    }
+
+    fn names(selected: &[(String, AccountConfig)]) -> Vec<&str> {
+        selected.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
+    /// With no `-a`, a command runs over every account in name order, the
+    /// `default` key making none of them special; `-a` filters them.
+    #[test]
+    fn every_account_runs_unless_named() {
+        let config = two_accounts();
+
+        assert_eq!(names(&config.select(&[]).unwrap()), ["home", "work"]);
+        let work = config.select(&[String::from("work")]).unwrap();
+        assert_eq!(names(&work), ["work"]);
+        let both = [String::from("work"), String::from("home")];
+        assert_eq!(names(&config.select(&both).unwrap()), ["home", "work"]);
+    }
+
+    /// A name the configuration does not declare fails before anything
+    /// runs, naming the ones it does.
+    #[test]
+    fn an_unknown_account_names_the_configured_ones() {
+        let err = two_accounts()
+            .select(&[String::from("perso")])
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("perso"), "{err}");
+        assert!(err.contains("home, work"), "{err}");
+    }
+
+    /// A command addressing one item, or starting one account over, needs
+    /// the filter to leave exactly one account.
+    #[test]
+    fn one_account_is_needed_where_one_is_acted_on() {
+        let config = two_accounts();
+
+        let err = config.select_one(&[], "A reset").unwrap_err().to_string();
+        assert!(err.contains("A reset acts on one account"), "{err}");
+        assert!(err.contains("home, work"), "{err}");
+
+        let (name, _) = config
+            .select_one(&[String::from("home")], "A reset")
+            .unwrap();
+        assert_eq!(name, "home");
+    }
+
+    /// The account prefixes every store-wide id, `/` separating it from
+    /// the source, so a name holding one is refused.
+    #[test]
+    fn an_account_name_holding_a_slash_is_refused() {
+        let config: Config = toml::from_str(
+            r#"
+            [accounts."me/work"]
+            imap.server = "imaps://w.example.org:993"
+            "#,
+        )
+        .unwrap();
+
+        let err = config.select(&[]).unwrap_err().to_string();
+        assert!(err.contains("me/work"), "{err}");
+    }
+
+    /// The store sees an account's endpoints by their source ids,
+    /// `<account>/<name>`, the sugar and its send channel folded in.
+    #[test]
+    fn a_namespaced_account_keys_its_endpoints_by_source_id() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            imap.server = "imaps://imap.example.org:993"
+            smtp.server = "smtps://smtp.example.org:465"
+            targets.backup.imap.server = "imaps://backup.example.org:993"
+            one-way = true
+            "#,
+        )
+        .unwrap();
+
+        let namespaced = account.namespaced("work").unwrap();
+
+        let mode = namespaced.mode().unwrap();
+        assert_eq!(mode.sources, ["work/imap"]);
+        assert_eq!(mode.targets, ["work/backup"]);
+        assert!(namespaced.imap.is_none());
+        let sources = namespaced.sources().unwrap();
+        assert!(
+            sources["work/imap"].smtp.is_some(),
+            "the send channel follows"
+        );
+    }
 
     #[test]
     fn a_generated_config_renders_as_dotted_keys_under_one_header() {

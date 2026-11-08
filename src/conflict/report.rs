@@ -10,12 +10,12 @@ use serde::Serialize;
 
 use crate::conflict::{Conflict, Sides};
 
-/// What `neverest conflict list` reports: every divergence the account's
-/// store is holding, or the fact that it is holding none.
+/// What `neverest conflict list` reports: every divergence the store holds
+/// for the accounts the run covers, or the fact that it is holding none.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConflictListOutput {
-    /// The divergences, by collection then item then source.
+    /// The divergences, by account then collection then item then source.
     pub conflicts: Vec<ConflictSummary>,
 }
 
@@ -47,9 +47,12 @@ impl fmt::Display for ConflictListOutput {
 pub struct ConflictSummary {
     /// The item's public id, which is what the show and resolve verbs take.
     pub id: i64,
+    /// The account whose collection holds the item.
+    pub account: String,
     /// The store collection the item sits in.
     pub collection: String,
-    /// The source whose own sync is stuck on the divergence.
+    /// The source whose own sync is stuck on the divergence, as the
+    /// account's configuration names it.
     pub source: String,
     /// The item's handle on that source.
     pub handle: String,
@@ -66,8 +69,9 @@ impl From<&Conflict> for ConflictSummary {
     fn from(conflict: &Conflict) -> Self {
         Self {
             id: conflict.id,
+            account: conflict.account.clone(),
             collection: conflict.collection.clone(),
-            source: conflict.source.clone(),
+            source: conflict.endpoint().to_owned(),
             handle: conflict.handle.clone(),
             revision: conflict.revision.clone(),
             resolvable: conflict.resolvable(),

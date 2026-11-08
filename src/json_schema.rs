@@ -15,10 +15,10 @@
 use pimalaya_cli::{clap::commands::JsonSchemaRegistry, error::ErrorReport};
 
 use crate::{
-    cli::{check::CheckOutput, drain::DrainOutput, init::InitOutput},
+    cli::{check::CheckRunOutput, drain::DrainRunOutput, init::InitRunOutput},
     conflict::report::{ConflictListOutput, ConflictResolveOutput, ConflictShowOutput},
     error::ErrorCode,
-    sync::{event::SyncEvent, report::SyncOutput},
+    sync::{event::SyncEvent, report::SyncRunOutput},
 };
 
 /// Builds the command-to-schema registry consumed by `json-schema <DIR>`.
@@ -30,14 +30,14 @@ use crate::{
 pub fn registry() -> JsonSchemaRegistry {
     let mut registry = JsonSchemaRegistry::new("neverest", env!("CARGO_PKG_VERSION"));
 
-    registry.insert::<CheckOutput>("neverest-check");
-    registry.insert::<DrainOutput>("neverest-drain");
+    registry.insert::<CheckRunOutput>("neverest-check");
+    registry.insert::<DrainRunOutput>("neverest-drain");
     #[cfg(feature = "search")]
-    registry.insert::<crate::cli::index::IndexOutput>("neverest-index");
+    registry.insert::<crate::cli::index::IndexRunOutput>("neverest-index");
     #[cfg(feature = "wizard")]
     registry.insert::<crate::cli::configure::ConfigureOutput>("neverest-configure");
-    registry.insert::<InitOutput>("neverest-init");
-    registry.insert::<SyncOutput>("neverest-sync");
+    registry.insert::<InitRunOutput>("neverest-init");
+    registry.insert::<SyncRunOutput>("neverest-sync");
     registry.insert_events::<SyncEvent>("neverest-sync");
     registry.insert::<ConflictListOutput>("neverest-conflict-list");
     registry.insert::<ConflictShowOutput>("neverest-conflict-show");

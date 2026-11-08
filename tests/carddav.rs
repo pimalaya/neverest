@@ -41,7 +41,11 @@
 
 mod common;
 
-use std::{fs, path::Path, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use io_pimdir::{
     client::{producer::PimdirProducer, reader::PimdirReader},
@@ -176,8 +180,13 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
     );
     let retained = pimdir(
         &state,
-        ACCOUNT,
-        &["item", "list", &collection(BOOK), "--retained", "--json"],
+        &[
+            "item",
+            "list",
+            &collection(ACCOUNT, BOOK),
+            "--retained",
+            "--json",
+        ],
     );
     assert!(
         retained.contains(r#""linkId":"card-2""#),
@@ -428,11 +437,11 @@ fn account(name: &str) -> String {
     )
 }
 
-/// The address book as the store keys it: pimdir groups a collection under the
-/// id of the source that syncs it, which for the direct-backend sugar is the
-/// protocol name.
-fn collection(book: &str) -> String {
-    format!("carddav/{book}")
+/// The address book of `account` as the store keys it: pimdir groups a
+/// collection under the id of the source that syncs it, the account then the
+/// source name, which for the direct-backend sugar is the protocol name.
+fn collection(account: &str, book: &str) -> String {
+    format!("{account}/carddav/{book}")
 }
 
 /// Stages an edit of one card into the store's action queue, the way a
@@ -443,8 +452,8 @@ fn collection(book: &str) -> String {
 /// io-pimdir is neverest's own dependency, so the test writes it directly
 /// rather than pretending a second endpoint is a frontend.
 fn queue_update(state: &Path, account: &str, book: &str, link_id: &str, body: &str) {
-    let dir = store_dir(state, account);
-    let collection = collection(book);
+    let dir = store_dir(state);
+    let collection = collection(account, book);
 
     let reader = PimdirReader::open(&dir).expect("open the store to read");
     let seq = reader
@@ -596,21 +605,21 @@ fn sync(config: &Path, state: &Path, account: &str, book: &str, code: i32) -> St
 fn store_items(state: &Path, account: &str, book: &str) -> String {
     pimdir(
         state,
-        account,
-        &["item", "list", &collection(book), "--json"],
+        &["item", "list", &collection(account, book), "--json"],
     )
 }
 
-/// Where the account's pimdir store lives under the run's state directory.
-fn store_dir(state: &Path, account: &str) -> std::path::PathBuf {
-    state.join("neverest").join(account)
+/// Where the account's pimdir store lives under the run's state directory,
+/// the one every account naming no root shares.
+fn store_dir(state: &Path) -> PathBuf {
+    state.join("neverest")
 }
 
-/// Runs the `pimdir` operator CLI against the account's store. It is the
+/// Runs the `pimdir` operator CLI against the run's store. It is the
 /// observation tool for everything the sync did not print, retention above
 /// all, and it comes from the io-pimdir crate rather than from neverest.
-fn pimdir(state: &Path, account: &str, args: &[&str]) -> String {
-    let store = store_dir(state, account);
+fn pimdir(state: &Path, args: &[&str]) -> String {
+    let store = store_dir(state);
     let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
         .args(args)

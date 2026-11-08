@@ -34,22 +34,30 @@ fn a_declaration_records_every_folder_and_its_role_and_fetches_nothing() {
     neverest(&["init", "-a", "roles"], &config, &state);
 
     neverest(&["sync", "-a", "roles", "--declare-only"], &config, &state);
-    let store = state.join("neverest").join("roles");
+    let store = state.join("neverest");
     let roles = roles(&store);
-    assert_eq!(roles["imap/INBOX"].as_deref(), Some("inbox"), "{roles:?}");
     assert_eq!(
-        roles["imap/Sent Items"].as_deref(),
+        roles["roles/imap/INBOX"].as_deref(),
+        Some("inbox"),
+        "{roles:?}"
+    );
+    assert_eq!(
+        roles["roles/imap/Sent Items"].as_deref(),
         Some("sent"),
         "{roles:?}"
     );
-    assert_eq!(roles["imap/Drafts"].as_deref(), Some("drafts"), "{roles:?}");
     assert_eq!(
-        roles["imap/Deleted Items"].as_deref(),
+        roles["roles/imap/Drafts"].as_deref(),
+        Some("drafts"),
+        "{roles:?}"
+    );
+    assert_eq!(
+        roles["roles/imap/Deleted Items"].as_deref(),
         Some("trash"),
         "{roles:?}"
     );
     assert_eq!(
-        roles["imap/Junk Mail"].as_deref(),
+        roles["roles/imap/Junk Mail"].as_deref(),
         Some("junk"),
         "{roles:?}"
     );
@@ -78,14 +86,14 @@ fn a_declaration_records_the_default_calendar_the_server_states() {
     neverest(&["init", "-a", "roles"], &config, &state);
     neverest(&["sync", "-a", "roles", "--declare-only"], &config, &state);
 
-    let store = state.join("neverest").join("roles");
+    let store = state.join("neverest");
     let roles = roles(&store);
     let defaults: Vec<&String> = roles
         .iter()
         .filter(|(_, role)| role.as_deref() == Some("default"))
         .map(|(id, _)| id)
         .collect();
-    assert_eq!(defaults, ["caldav/default"], "{roles:?}");
+    assert_eq!(defaults, ["roles/caldav/default"], "{roles:?}");
 
     // The second run reuses the looked-up default rather than asking again,
     // and keeps it.

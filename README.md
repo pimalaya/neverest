@@ -123,7 +123,7 @@ Run `neverest` with no configuration file on disk and a minimal wizard discovers
 
 Declining the prompt prints the account on stdout, and `--json` or a redirected stdout skips the prompts entirely, so `neverest configure > config.toml` writes the file itself.
 
-An account is one pimdir store fed by one or more named **sources**, each a remote, and it may hold several kinds at once. What it does is its arity plus two flags: with no `targets` every source syncs into the local store, the offline replica; with them the source is copied to each target.
+Every account shares **one pimdir store**, at `neverest/` under your state directory (`` on Linux, `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows) unless it names its own `store.root`. Each account is fed by one or more named **sources**, each a remote, and it may hold several kinds at once; its collections are grouped under its name, so a frontend reads one account of the store through its own account key (`pimdir.account` in himalaya, calendula and cardamum). What an account does is its arity plus two flags: with no `targets` every source syncs into the local store, the offline replica; with them the source is copied to each target.
 
 `one-way` makes the sources authoritative, so the other side's changes are overwritten rather than merged, and `retain` says whether the store keeps bodies or is only the ledger it has to be anyway. Sources never meet, so several cache side by side for a frontend to union at display time.
 
@@ -134,36 +134,38 @@ A collection one endpoint no longer lists is deleted on the other only where tha
 Every command carries its own `--help`, the source of truth for its flags and syntax.
 
 ```sh
-neverest init  -a <account>
-neverest sync  -a <account> --dry-run
-neverest sync  -a <account> --include-collection INBOX
-neverest check -a <account>
-neverest drain -a <account>
-neverest index -a <account>
-neverest conflict list -a <account>
+neverest init
+neverest sync --dry-run
+neverest sync -a <account> --include-collection INBOX
+neverest check
+neverest drain
+neverest index
+neverest conflict list
 neverest conflict resolve <id> -a <account> --interactive
 ```
 
-An account is initialized once, which opens every source so credential and network errors surface up front, then creates the empty store. `sync` refuses to run without it, and `init` refuses to run over it. `--reset` drops the store before a run, rebuilding it as a first sync would. It refuses while the store holds work no server has (queued sends and edits, conflicts, mail a replica keeps after the server expunged it) and lists that work; `--reset --force` moves the store into a sibling `<dir>.reset-<instant>` directory instead, deleting nothing. A reset is the whole store's, so it is refused beside `--dry-run`, `-m`, `-x` and `-s`.
+Every command runs over every account, one after the other, unless `-a` names some (it is repeatable). Each account's outcome is its own: one that fails is reported, the next one still runs, and the command exits 3. The store is locked for the whole run, so two accounts of one store never sync at once; give an account that needs its own schedule its own `store.root`. `conflict show`, `conflict resolve` and `sync --reset` act on one account, which `-a` names when there are several. `index` builds the store of the accounts it runs over, each store once. `default = true` on an account is ignored, with a warning.
+
+An account is initialized once, which opens every source so credential and network errors surface up front, then adds the account to the store, creating the store when there is none. `sync` refuses to run an account without it, and `init` leaves an initialized account as it is. `sync --reset -a <account>` drops that account's collections before a run, rebuilding them as a first sync would, every other account of the store left as it was. It refuses while they hold a queued or parked action, which `drain` applies or its frontend cancels first, and while they hold other work no server has (conflicts, unpushed edits, mail a replica keeps after the server expunged it), listing that work; `--reset --force` drops that other work with the collections. A reset is the whole account's, so it is refused beside `--dry-run`, `-m`, `-x` and `-s`.
 
 What himalaya, calendula and cardamum write is queued in the store, and only neverest applies it. A sync does so first, before reaching any server; `drain` does it alone, offline, so a frontend reads a created item back at once, the next sync pushing it.
 
-neverest also keeps the store's search index (index.db), which the frontends query and only the store's owner builds. A sync refreshes it last, for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), and a drain for 2 seconds; a large first build spreads over several runs, each going on where the last stopped, or `index` builds it whole at once. The report says how far it got under `index`; an index failure is a warning and never changes the exit code. A reset drops the index with the store, or moves it aside with it. The index reads floating times and all-day dates in your time zone, `TZ` else the system's, UTC when it has no IANA name; changing it re-expands every calendar item at the next refresh.
+neverest also keeps the store's search index (index.db), which the frontends query and only the store's owner builds. A sync refreshes it last, for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), and a drain for 2 seconds; a large first build spreads over several runs, each going on where the last stopped, or `index` builds it whole at once. The report says how far it got under `index`; an index failure is a warning and never changes the exit code. After a reset, the next refresh drops what the account's collections held. The index reads floating times and all-day dates in your time zone, `TZ` else the system's, UTC when it has no IANA name; changing it re-expands every calendar item at the next refresh.
 
 ### Conflicts
 
 A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What no merge settles is both sides setting one field two ways: the item parks, everything else keeps syncing, and the run exits 2. A run that could not reach a source, or apply part of its work, exits 3, and the next run picks it up.
 
-Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries the two numbers a notifier needs: `conflicts` is what this run marked, `outstandingConflicts` what the store holds waiting. Testing the first notifies on entry, once, with no state of its own to keep:
+Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries, in each account's report, the two numbers a notifier needs: `conflicts` is what this run marked, `outstandingConflicts` what the store holds waiting for that account. Testing the first notifies on entry, once, with no state of its own to keep:
 
 ```sh
-neverest sync --json | jq -e 'select(has("event") | not) | .conflicts | length > 0' >/dev/null \
+neverest sync --json | jq -e 'select(has("event") | not) | [.accounts[].report.conflicts // [] | length] | add > 0' >/dev/null \
   && notify-send "neverest" "an item needs a decision"
 ```
 
 A wrapper reading that report can name the item, its collection and its side, which a fixed summary and body could not.
 
-Before its report, `sync --json` prints its progress, one line per event, each carrying `event` (`neverest json-schema neverest-sync.events` describes them), so a frontend can show how far a long run got; the report is the last line.
+Before its result, `sync --json` prints its progress, one line per event, each carrying `event` (`neverest json-schema neverest-sync.events` describes them), `account-started` announcing each account, so a frontend can show how far a long run got; the result is the last line, listing each account's report under `accounts`.
 
 Deciding is a command and never a run. `conflict list` names what is waiting, `conflict show <id>` prints the three bodies, and `conflict resolve <id>` settles one, either by taking a side with `--prefer-local` or `--prefer-remote` or by handing the bodies to the merger `conflict.merger` names.
 

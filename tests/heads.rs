@@ -141,7 +141,7 @@ impl Opened {
 
         write_config(&config, &store, account, &mailbox);
         neverest(&["init", "-a", account], &config, &env);
-        let collection = format!("imap/{mailbox}");
+        let collection = format!("{account}/imap/{mailbox}");
 
         let listed = run_until(&config, account, &env, || {
             round_state(&store, &collection).is_some_and(|(count, open)| open && count > 0)
@@ -250,12 +250,14 @@ fn write_config(config: &Path, store: &Path, account: &str, mailbox: &str) {
     .unwrap();
 }
 
-/// Runs a sync, answering its JSON report.
+/// Runs a sync, answering the account's JSON report.
 fn sync(config: &Path, account: &str, env: &[(&str, &str)], extra: &[&str]) -> serde_json::Value {
     let mut args = vec!["--json", "sync", "-a", account];
     args.extend_from_slice(extra);
     let out = neverest(&args, config, env);
-    serde_json::from_str(out.lines().last().unwrap_or_default()).expect("a JSON report")
+    let result: serde_json::Value =
+        serde_json::from_str(out.lines().last().unwrap_or_default()).expect("a JSON result");
+    result["accounts"][0]["report"].clone()
 }
 
 /// How many bodies a report fetched.

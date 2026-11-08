@@ -8,9 +8,65 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::sync::hunk::{CollectionHunk, ItemHunk};
+use crate::{
+    error::ErrorCode,
+    sync::hunk::{CollectionHunk, ItemHunk},
+};
 
-/// What `neverest sync` reports: the changes applied, plus what it left.
+/// What `neverest sync` reports: the outcome of every account the run
+/// covered, in the order it took them.
+#[derive(Debug, Default, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncRunOutput {
+    /// One entry per account the run covered.
+    pub accounts: Vec<AccountSync>,
+}
+
+impl fmt::Display for SyncRunOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for account in &self.accounts {
+            write!(f, "{account}")?;
+        }
+        Ok(())
+    }
+}
+
+/// One account's outcome in a sync run: what it reported, or why it did
+/// not run.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSync {
+    /// The account.
+    pub account: String,
+    /// Whether another run held the account's store past the bounded wait,
+    /// so the account did not run.
+    pub busy: bool,
+    /// The stable code of the failure that stopped the account, `null` when
+    /// it ran or the failure carries none.
+    pub code: Option<ErrorCode>,
+    /// Why the account stopped short of a report, `null` when it ran.
+    pub error: Option<String>,
+    /// What the run did and left on the account, `null` when it did not
+    /// run.
+    pub report: Option<SyncOutput>,
+}
+
+impl fmt::Display for AccountSync {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let account = &self.account;
+        match (&self.report, &self.error) {
+            (Some(report), _) => write!(f, "{report}"),
+            (None, Some(error)) => writeln!(f, "\nAccount {account} failed: {error}"),
+            (None, None) => writeln!(
+                f,
+                "\nAccount {account} did not run: another run holds its store"
+            ),
+        }
+    }
+}
+
+/// What `neverest sync` reports of one account: the changes applied, plus
+/// what it left.
 ///
 /// The exit code reads off it rather than off the process: a run that
 /// reconciled its collections and still parked something is neither a
@@ -179,6 +235,40 @@ impl SyncOutput {
         self.unreadable.extend(unreadable);
         self.overruled.extend(overruled);
         self.unanswered.extend(unanswered);
+    }
+
+    /// Names every endpoint as the account's configuration does, rather than
+    /// by the source id the store keys it under, `<account>/<name>`: the
+    /// report already names its account.
+    pub fn name_endpoints(&mut self) {
+        let prefix = format!("{}/", self.account);
+        let mut endpoints: Vec<&mut String> = Vec::new();
+
+        for entry in &mut self.collection.patch {
+            endpoints.extend(entry.hunk.endpoints_mut());
+        }
+        for entry in &mut self.item.patch {
+            endpoints.extend(entry.hunk.endpoints_mut());
+        }
+        endpoints.extend(self.collisions.iter_mut().map(|c| &mut c.side));
+        endpoints.extend(self.intents.iter_mut().map(|i| &mut i.source));
+        endpoints.extend(self.conflicts.iter_mut().map(|c| &mut c.side));
+        endpoints.extend(self.refused.iter_mut().map(|r| &mut r.side));
+        endpoints.extend(self.rejected.iter_mut().map(|r| &mut r.side));
+        endpoints.extend(self.unreached.iter_mut().map(|u| &mut u.endpoint));
+        endpoints.extend(self.throttled.iter_mut().map(|t| &mut t.source));
+        endpoints.extend(self.coverage.iter_mut().map(|c| &mut c.source));
+        endpoints.extend(self.downloaded.iter_mut().map(|d| &mut d.source));
+        endpoints.extend(self.absences.iter_mut().map(|a| &mut a.side));
+        endpoints.extend(self.unreadable.iter_mut().map(|u| &mut u.side));
+        endpoints.extend(self.overruled.iter_mut().filter_map(|o| o.side.as_mut()));
+        endpoints.extend(self.unanswered.iter_mut().map(|u| &mut u.side));
+
+        for endpoint in endpoints {
+            if let Some(name) = endpoint.strip_prefix(&prefix) {
+                *endpoint = name.to_owned();
+            }
+        }
     }
 
     /// Records a divergence this run parked, unless the run named it already.
@@ -401,7 +491,7 @@ impl fmt::Display for UnansweredPushes {
 /// The index folds the store's change feed in batches until it is current
 /// or a deadline passes; a refresh the deadline cut leaves it `behind`, and
 /// the next refresh goes on from there.
-#[derive(Debug, Default, PartialEq, Serialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IndexRefresh {
     /// Changes of the store folded in.

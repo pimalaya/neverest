@@ -37,14 +37,18 @@ pub struct Conflict {
     /// Store-global and shared by the item's placements, so it names the card
     /// rather than one source's binding of it.
     pub id: i64,
-    /// The store collection the item sits in, spelled `<namespace>/<name>`.
+    /// The account whose collection holds the item.
+    pub account: String,
+    /// The store collection the item sits in, spelled
+    /// `<account>/<namespace>/<name>`.
     pub collection: String,
     /// The IANA media type that collection is declared with.
     ///
     /// It picks the parse a settled body is summarized through, and the
     /// extension an export is written under.
     pub media_type: String,
-    /// The source whose own sync is stuck on the divergence.
+    /// The source whose own sync is stuck on the divergence, by its pimdir
+    /// source id (`<account>/<name>`).
     ///
     /// One source may be conflicted while another holding the same item is in
     /// sync, which is why a decision names this as well as the item.
@@ -102,6 +106,12 @@ pub struct Sides {
 }
 
 impl Conflict {
+    /// The source as the account's configuration names it.
+    pub fn endpoint(&self) -> &str {
+        let prefix = format!("{}/", self.account);
+        self.source.strip_prefix(&prefix).unwrap_or(&self.source)
+    }
+
     /// Whether a decision can be made about this divergence at all.
     ///
     /// A conflict is marked with the diverging remote body wanted rather than
@@ -263,6 +273,7 @@ pub fn list(store: &PimdirReader, account: &str) -> Result<Vec<Conflict>> {
 
         conflicts.push(Conflict {
             id,
+            account: account.to_owned(),
             media_type,
             collection: conflict.collection,
             source: conflict.source.0,
@@ -278,7 +289,8 @@ pub fn list(store: &PimdirReader, account: &str) -> Result<Vec<Conflict>> {
     Ok(conflicts)
 }
 
-/// The one conflict `id` names, narrowed by `source` when several diverged.
+/// The one conflict `id` names, narrowed by `source`, as the account's
+/// configuration names it, when several diverged.
 ///
 /// An id names an item and a divergence is one source's, so the two are not
 /// the same arity. They coincide for every account with one source of a kind,
@@ -287,15 +299,12 @@ pub fn find(conflicts: Vec<Conflict>, id: i64, source: Option<&str>) -> Result<C
     let mut found: Vec<Conflict> = conflicts
         .into_iter()
         .filter(|conflict| {
-            conflict.id == id && source.is_none_or(|source| conflict.source == source)
+            conflict.id == id && source.is_none_or(|source| conflict.endpoint() == source)
         })
         .collect();
 
     if found.len() > 1 {
-        let sources: Vec<&str> = found
-            .iter()
-            .map(|conflict| conflict.source.as_str())
-            .collect();
+        let sources: Vec<&str> = found.iter().map(Conflict::endpoint).collect();
         bail!(
             "Item {id} diverged on several sources ({}), name one with --source",
             sources.join(", ")

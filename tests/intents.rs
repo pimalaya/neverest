@@ -36,7 +36,9 @@ use io_pimdir::{
 use serde_json::Value;
 
 const ACCOUNT: &str = "send";
-const SENT: &str = "imap/Sent";
+/// The account's IMAP source, as the store keys it.
+const SOURCE: &str = "send/imap";
+const SENT: &str = "send/imap/Sent";
 const SUBJECT: &str = "intents-only";
 
 /// A local port nothing listens on.
@@ -167,16 +169,15 @@ impl Fixture {
             state,
         };
 
-        // NOTE: the database, then a reset, which stamps it and fails to
-        // connect, then the collection.
-        fs::create_dir_all(fixture.store()).unwrap();
+        // NOTE: the store and its sidecar naming the account, as `init`
+        // leaves them, then the collection.
         drop(PimdirStore::open(fixture.store()).unwrap());
-        let reset = fixture.run(&["sync", "-a", ACCOUNT, "--reset", "--json"]);
-        assert_eq!(reset.status.code(), Some(3), "{}", stderr(&reset));
+        let sidecar = format!(r#"{{"layout":2,"accounts":{{"{ACCOUNT}":{{}}}}}}"#);
+        fs::write(fixture.store().join("neverest.json"), sidecar).unwrap();
         PimdirStore::open(fixture.store())
             .unwrap()
             .for_account(ACCOUNT)
-            .for_source("imap")
+            .for_source(SOURCE)
             .ensure_collection(SENT, "message/rfc822")
             .unwrap();
 
@@ -184,14 +185,14 @@ impl Fixture {
     }
 
     fn store(&self) -> PathBuf {
-        self.state.join("neverest").join(ACCOUNT)
+        self.state.join("neverest")
     }
 
     /// Queues a send of `body`, as `himalaya pimdir message send` does,
     /// its copy filed in Sent when `copy` says so; returns the queue row.
     fn queue_send(&self, body: &[u8], copy: bool) -> i64 {
         let submit = PimdirSubmit {
-            source: String::from("imap"),
+            source: String::from(SOURCE),
             from: String::from("a@example.org"),
             rcpts: vec![String::from("b@example.org")],
             subject: Some(String::from(SUBJECT)),
@@ -219,7 +220,7 @@ impl Fixture {
             .expect("spawn neverest")
     }
 
-    /// `sync --intents-only --json`, exiting `code`.
+    /// The report of `sync --intents-only --json`, exiting `code`.
     fn intents_only(&self, code: i32) -> Value {
         let output = self.run(&["--json", "sync", "-a", ACCOUNT, "--intents-only"]);
         assert_eq!(
@@ -229,7 +230,12 @@ impl Fixture {
             String::from_utf8_lossy(&output.stdout),
             stderr(&output),
         );
-        serde_json::from_slice(&output.stdout).expect("one JSON document")
+        // NOTE: the last line, after the events a sync prints.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result: Value =
+            serde_json::from_str(stdout.lines().last().unwrap_or_default()).expect("a JSON result");
+        assert_eq!(result["accounts"][0]["account"], ACCOUNT, "{result}");
+        result["accounts"][0]["report"].clone()
     }
 }
 

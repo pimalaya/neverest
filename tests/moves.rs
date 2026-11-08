@@ -80,8 +80,8 @@ fn a_move_is_delivered_once() {
 
     let (mut from, mut to) = (left.clone(), right.clone());
     for bounce in 1..=BOUNCES {
-        let source = format!("imap/{from}");
-        let target = format!("imap/{to}");
+        let source = format!("moves/imap/{from}");
+        let target = format!("moves/imap/{to}");
 
         let mut producer = PimdirProducer::open(&store, "moves-test").unwrap();
         let items = producer_items(&store, &source);
@@ -186,8 +186,8 @@ fn a_move_is_delivered_once_by_runs_naming_one_collection() {
     let mut from_first = true;
     let (mut from, mut to) = (left.clone(), right.clone());
     for bounce in 1..=4 {
-        let source = format!("imap/{from}");
-        let target = format!("imap/{to}");
+        let source = format!("halves/imap/{from}");
+        let target = format!("halves/imap/{to}");
 
         let mut producer = PimdirProducer::open(&store, "moves-test").unwrap();
         let items = producer_items(&store, &source);

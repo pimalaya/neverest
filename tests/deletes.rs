@@ -59,7 +59,7 @@ fn a_delete_expunges_its_message_alone() {
         &format!("STORE {} +FLAGS (\\Deleted)", kept_seq[0]),
     );
 
-    let collection = format!("imap/{mailbox}");
+    let collection = format!("deletes/imap/{mailbox}");
     let reader = io_pimdir::client::reader::PimdirReader::open(&store).unwrap();
     let items = reader.list_summaries(&collection, None, 100).unwrap();
     drop(reader);

@@ -53,6 +53,17 @@ pub enum CollectionHunk {
     },
 }
 
+impl CollectionHunk {
+    /// The endpoint the hunk names, to name it otherwise.
+    pub fn endpoints_mut(&mut self) -> Vec<&mut String> {
+        match self {
+            Self::Create { side, .. } | Self::Delete { side, .. } | Self::Scan { side, .. } => {
+                vec![side]
+            }
+        }
+    }
+}
+
 impl fmt::Display for CollectionHunk {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -179,6 +190,25 @@ pub enum ItemHunk {
         #[serde(skip)]
         content_key: u64,
     },
+}
+
+impl ItemHunk {
+    /// The endpoints the hunk names, to name them otherwise.
+    pub fn endpoints_mut(&mut self) -> Vec<&mut String> {
+        match self {
+            Self::Copy {
+                source_side,
+                target_side,
+                ..
+            } => vec![source_side, target_side],
+            Self::Add { side, .. }
+            | Self::AddFlags { side, .. }
+            | Self::RemoveFlags { side, .. }
+            | Self::Delete { side, .. }
+            | Self::Fetch { side, .. }
+            | Self::Update { side, .. } => vec![side],
+        }
+    }
 }
 
 impl fmt::Display for ItemHunk {

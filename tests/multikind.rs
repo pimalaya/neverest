@@ -48,16 +48,18 @@ const IMAP_PASS: &str = "P!malaya-test-2026";
 const DAV: &str = "http://127.0.0.1:5232";
 /// The Radicale principal, whose password is its own name.
 const DAV_USER: &str = "test";
-/// The account declaring both kinds, whose name also keys its store.
+/// The account declaring both kinds, whose name also keys its collections in
+/// the store.
 const ACCOUNT: &str = "multikind";
 /// The mailbox this account owns on the IMAP server.
 const MAILBOX: &str = "multikindmail";
 /// The address book this account owns on the CardDAV server.
 const BOOK: &str = "multikindcards";
-/// The mailbox as the store keys it, under the id of the source syncing it.
-const MAIL_COLLECTION: &str = "imap/multikindmail";
+/// The mailbox as the store keys it, under the id of the source syncing it,
+/// the account then the source name.
+const MAIL_COLLECTION: &str = "multikind/imap/multikindmail";
 /// The address book as the store keys it, under its own source.
-const CARD_COLLECTION: &str = "carddav/multikindcards";
+const CARD_COLLECTION: &str = "multikind/carddav/multikindcards";
 /// The card this account diverges, addressed on the server by `<uid>.vcf`.
 const CARD: &str = "multikind-card";
 /// The marker of the message whose flags move on the server.
@@ -114,7 +116,7 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
     neverest(&["init", "-a", ACCOUNT], &config, &state, 0);
     sync(&config, &state, 0);
 
-    let store = state.join("neverest").join(ACCOUNT);
+    let store = state.join("neverest");
     assert_eq!(links(&store, MAIL_COLLECTION).len(), 2, "both messages");
     assert_eq!(links(&store, CARD_COLLECTION).len(), 1, "the card");
 

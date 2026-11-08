@@ -1,39 +1,40 @@
 //! # Check command
 //!
-//! Reports what the store keeps, then opens every source and lists its
+//! Reports what each account does, then opens every source and lists its
 //! collections, and opens the send channel a source declares, surfacing
-//! credential, network or config errors before a real sync.
+//! credential, network or config errors before a real sync; then names the
+//! accounts a store holds that no configuration names.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     path::PathBuf,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result};
 use clap::Parser;
-use log::info;
+use io_pimdir::client::reader::PimdirReader;
+use log::{info, warn};
 use pimalaya_cli::{
     error::{PartialOutcome, code_of},
     printer::Printer,
     spinner::Spinner,
 };
-use pimalaya_config::toml::TomlConfig;
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
     account::{Account, SourceAccount},
     client,
-    config::{AccountMode, Config, SourceConfig},
+    config::{AccountConfig, AccountMode, Config, SourceConfig},
     error::ErrorCode,
     item::collection::Collection,
-    offline::capability,
+    offline::{capability, driver},
 };
 
 /// Probes every configured source before a real sync.
 ///
-/// Reports the account's mode, then opens each endpoint and lists its
+/// Reports each account's mode, then opens each endpoint and lists its
 /// collections, and opens and authenticates the SMTP channel an endpoint
 /// declares, surfacing credential, network or config errors before a real
 /// sync or a first send.
@@ -46,53 +47,41 @@ use crate::{
 /// Every endpoint is checked, whatever the others answer, and the report
 /// names each one's outcome. An endpoint or a channel that did not answer
 /// exits 2, the report being the output rather than a failure object.
+///
+/// It also names the accounts a store holds that no configured account
+/// names: renaming an account's key leaves its collections behind, under the
+/// old name, until the key is renamed back. Nothing is deleted.
 #[derive(Debug, Parser)]
 pub struct CheckCommand {}
 
 impl CheckCommand {
-    /// Opens every endpoint the account declares and reports what answered.
+    /// Opens every endpoint of every account the run covers and reports what
+    /// answered, then the accounts its stores hold that no configuration
+    /// names.
     pub fn execute(
         self,
         printer: &mut impl Printer,
         config_paths: &[PathBuf],
-        account_name: Option<&str>,
+        accounts: &[String],
     ) -> Result<()> {
-        let mut config = Config::load_or_wizard(printer, config_paths)?;
+        let config = Config::load_or_wizard(printer, config_paths)?;
+        let selected = config.select(accounts)?;
 
-        let Some((name, account_config)) = config.take_account(account_name)? else {
-            bail!("Cannot find account");
+        let mut checked = Vec::new();
+        for (name, account_config) in &selected {
+            account_config
+                .validate()
+                .with_context(|| format!("Validate account {name}"))?;
+        }
+        for (name, account_config) in &selected {
+            checked.push(check_account(name, account_config)?);
+        }
+
+        let report = CheckRunOutput {
+            accounts: checked,
+            orphans: orphans(&config, &selected),
         };
-
-        account_config.validate()?;
-
-        info!("checking account {name}");
-
-        let mode = account_config.mode()?;
-
-        // NOTE: every credential at once, so a check costs one unlock per
-        // password command rather than one per endpoint. One that fails
-        // fails its endpoint's row alone.
-        let account = Account::resolve(&account_config)?;
-
-        let endpoints = account_config.endpoints()?;
-        let mut names: Vec<&String> = endpoints.keys().collect();
-        names.sort();
-
-        let sources: Vec<SourceCheck> = names
-            .into_iter()
-            .map(|endpoint| {
-                let config = &endpoints[endpoint];
-                let capabilities = declared(endpoint, config, &mode, &endpoints);
-                check_source(endpoint, config, &account, capabilities)
-            })
-            .collect();
-
-        let report = CheckOutput {
-            account: name,
-            mode,
-            sources,
-        };
-        let failed = report.failed();
+        let failed = report.accounts.iter().any(CheckOutput::failed);
         printer.out(report)?;
 
         // NOTE: the report names every endpoint's outcome, so a failed one
@@ -104,6 +93,84 @@ impl CheckCommand {
 
         Ok(())
     }
+}
+
+/// Opens every endpoint `account_config` declares and reports what answered.
+fn check_account(name: &str, account_config: &AccountConfig) -> Result<CheckOutput> {
+    info!("checking account {name}");
+
+    let mode = account_config.mode()?;
+
+    // NOTE: every credential at once, so a check costs one unlock per
+    // password command rather than one per endpoint. One that fails fails
+    // its endpoint's row alone.
+    let account = Account::resolve(account_config)?;
+
+    let endpoints = account_config.endpoints()?;
+    let mut names: Vec<&String> = endpoints.keys().collect();
+    names.sort();
+
+    let sources: Vec<SourceCheck> = names
+        .into_iter()
+        .map(|endpoint| {
+            let config = &endpoints[endpoint];
+            let capabilities = declared(endpoint, config, &mode, &endpoints);
+            check_source(endpoint, config, &account, capabilities)
+        })
+        .collect();
+
+    Ok(CheckOutput {
+        account: name.to_owned(),
+        mode,
+        sources,
+    })
+}
+
+/// The accounts the stores `selected` uses hold collections of and no
+/// configured account sharing that store names, by store: what renaming an
+/// account's key leaves behind. Read without a lock and never written; a
+/// store that does not read is skipped with a warning.
+fn orphans(config: &Config, selected: &[(String, AccountConfig)]) -> Vec<OrphanAccount> {
+    let stores: BTreeSet<PathBuf> = selected
+        .iter()
+        .filter_map(|(_, account_config)| driver::store_dir(account_config).ok())
+        .collect();
+
+    let mut orphans = Vec::new();
+    for store in stores {
+        if !store.join("pimdir.db").exists() {
+            continue;
+        }
+
+        let held = PimdirReader::open(&store).and_then(|reader| reader.list_accounts());
+        let held = match held {
+            Ok(held) => held,
+            Err(err) => {
+                warn!("cannot read the accounts {} holds: {err}", store.display());
+                continue;
+            }
+        };
+
+        let configured: BTreeSet<&String> = config
+            .accounts
+            .iter()
+            .filter(|(_, account_config)| {
+                driver::store_dir(account_config).ok() == Some(store.clone())
+            })
+            .map(|(name, _)| name)
+            .collect();
+
+        for account in held {
+            if !configured.contains(&account) {
+                orphans.push(OrphanAccount {
+                    store: store.clone(),
+                    account,
+                });
+            }
+        }
+    }
+
+    orphans
 }
 
 /// What a sync declares `endpoint` can do, from the configuration alone:
@@ -240,8 +307,63 @@ fn checked(
     }
 }
 
-/// What `neverest check` reports: the account's declared mode, and the
-/// outcome of every endpoint, whether it answered or not.
+/// What `neverest check` reports: every account it covered, and the
+/// accounts its stores hold that no configuration names.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckRunOutput {
+    /// One entry per account the run covered.
+    pub accounts: Vec<CheckOutput>,
+    /// The accounts a store the run reads holds collections of, and no
+    /// configured account sharing that store names.
+    pub orphans: Vec<OrphanAccount>,
+}
+
+impl fmt::Display for CheckRunOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, account) in self.accounts.iter().enumerate() {
+            if index > 0 {
+                writeln!(f)?;
+            }
+            write!(f, "{account}")?;
+        }
+
+        if !self.orphans.is_empty() {
+            writeln!(f)?;
+            for orphan in &self.orphans {
+                writeln!(f, "{orphan}")?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// An account a store holds collections of that no configured account
+/// sharing the store names: what renaming an account's key leaves behind.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanAccount {
+    /// The store directory holding it.
+    pub store: PathBuf,
+    /// The account name its collections are grouped under.
+    pub account: String,
+}
+
+impl fmt::Display for OrphanAccount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self { store, account } = self;
+        write!(
+            f,
+            "Store {} holds account {account}, which no configured account names: rename an \
+             account's key back to `{account}` to reach its collections",
+            store.display(),
+        )
+    }
+}
+
+/// What `neverest check` reports of one account: its declared mode, and
+/// the outcome of every endpoint, whether it answered or not.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckOutput {
@@ -426,9 +548,45 @@ impl From<capability::SupportRow> for CheckedCapability {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::AccountConfig;
+    use std::sync::PoisonError;
 
-    use super::*;
+    use io_pimdir::client::PimdirStore;
+
+    use crate::{cli::check::*, conflict::merger::SPAWNS};
+
+    /// A store holding the collections of an account no configured account
+    /// sharing it names is reported, its collections left where they are:
+    /// renaming an account's key is all it takes to leave them behind.
+    #[test]
+    fn a_check_names_the_accounts_a_store_holds_and_no_configuration_names() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        for account in ["old", "new"] {
+            PimdirStore::open(dir.path())
+                .unwrap()
+                .for_account(account)
+                .ensure_collection(format!("{account}/imap/INBOX"), "message/rfc822")
+                .unwrap();
+        }
+        let config: Config = toml::from_str(&format!(
+            "[accounts.new]\n\
+             imap.server = \"imaps://imap.example.org:993\"\n\
+             store.root = \"{}\"\n",
+            dir.path().display(),
+        ))
+        .unwrap();
+
+        let selected = config.select(&[]).unwrap();
+        let orphans = orphans(&config, &selected);
+
+        assert_eq!(orphans.len(), 1, "{orphans:?}");
+        assert_eq!(orphans[0].account, "old");
+        assert_eq!(orphans[0].store, dir.path());
+        assert!(orphans[0].to_string().contains("rename"));
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        let old = reader.list_collections_by_account(Some("old")).unwrap();
+        assert_eq!(old.len(), 1, "nothing is deleted");
+    }
 
     /// What a check reports each endpoint of `toml`'s account declares, by
     /// endpoint.

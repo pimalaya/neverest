@@ -4,7 +4,7 @@
 
 use std::process::ExitCode;
 
-use crate::sync::report::SyncOutput;
+use crate::sync::report::{SyncOutput, SyncRunOutput};
 
 /// How a command ended, beyond the success or failure its `Result` carries.
 ///
@@ -13,7 +13,10 @@ use crate::sync::report::SyncOutput;
 /// work, a rerun picking it up. Failing instead would stop the other ten
 /// thousand items over one duplicated phone number, and would loop forever
 /// under a supervisor restarting on failure.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+///
+/// Ordered by how far from success: a run over several accounts ends the
+/// way its furthest one did.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Exit {
     /// The command did what it was asked and left nothing waiting.
     #[default]
@@ -42,6 +45,22 @@ impl From<&SyncOutput> for Exit {
         } else {
             Self::Success
         }
+    }
+}
+
+impl From<&SyncRunOutput> for Exit {
+    /// A run over several accounts ends the way its furthest account did, an
+    /// account that failed or found its store busy leaving the run
+    /// incomplete.
+    fn from(run: &SyncRunOutput) -> Self {
+        run.accounts
+            .iter()
+            .map(|account| match &account.report {
+                Some(report) => Self::from(report),
+                None => Self::Incomplete,
+            })
+            .max()
+            .unwrap_or_default()
     }
 }
 

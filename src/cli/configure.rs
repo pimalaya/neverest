@@ -18,9 +18,9 @@
 //! Appending is a plain text append rather than a re-serialization, so
 //! comments, ordering and hand-written formatting come out untouched.
 //!
-//! Two rules guard it: the account name has to be free, two tables of one
-//! name making the document fail to parse, and the generated account claims
-//! the default only when no other one does.
+//! One rule guards it: the account name has to be free, two tables of one
+//! name making the document fail to parse. The account writes no `default`:
+//! every command runs over every account unless `-a` names some.
 
 use std::{
     fmt,
@@ -71,18 +71,13 @@ impl ConfigureCommand {
         let path = Config::target_path(config_paths)?;
         let existing = ExistingConfig::read(&path)?;
 
-        let (base_name, mut account) = discover::run()?;
+        let (base_name, account) = discover::run()?;
         let name = account_name(&base_name, existing.as_ref());
-
-        // NOTE: two `default = true` would make the account every command
-        // picks depend on map ordering.
-        let default = !existing.as_ref().is_some_and(|config| config.has_default);
-        account.default = default;
 
         let config = ConfigureOutput {
             document: account.render(&name)?,
             name,
-            default,
+            default: false,
         };
 
         if printer.is_json() || !stdout().is_terminal() {
@@ -99,7 +94,6 @@ impl ConfigureCommand {
 /// What a configuration already on disk constrains in the new account.
 struct ExistingConfig {
     names: Vec<String>,
-    has_default: bool,
 }
 
 impl ExistingConfig {
@@ -118,7 +112,6 @@ impl ExistingConfig {
 
         Ok(Some(Self {
             names: config.accounts.keys().cloned().collect(),
-            has_default: config.accounts.values().any(|account| account.default),
         }))
     }
 }
@@ -129,7 +122,9 @@ impl ExistingConfig {
 pub struct ConfigureOutput {
     /// The account name, which is the `[accounts.<name>]` table key.
     name: String,
-    /// Whether the account claims the default.
+    /// Always false: a command runs over every account unless `-a` names
+    /// some, so the generated account claims no default. Kept for the
+    /// shape every pimalaya wizard prints.
     default: bool,
     /// The rendered TOML document.
     document: String,
@@ -157,7 +152,7 @@ pub fn offer_configuration(
 ) -> Result<bool> {
     print_welcome(path);
 
-    if !prompt::bool("Create a configuration with a default account?", true)? {
+    if !prompt::bool("Create a configuration with an account?", true)? {
         return Ok(false);
     }
 
@@ -274,19 +269,14 @@ fn append_or_print(printer: &mut impl Printer, path: &Path, config: ConfigureOut
 
 /// Tells where the account landed, under which name, and what to run next.
 ///
-/// The name matters because it was never asked for: an account that did
-/// not claim the default is only reachable through `-a`.
+/// The name matters because it was never asked for, and `-a` takes it to
+/// run one account alone; without it every command runs over every one.
 fn print_saved(path: &Path, config: &ConfigureOutput) {
     let name = &config.name;
 
     eprintln!();
     eprintln!("Account `{name}` saved to {}.", path.display());
-
-    if !config.default {
-        eprintln!("Another account holds the default, so name this one with `-a {name}`.");
-    }
-
-    eprintln!("Run `neverest init` to prepare the store, then `neverest sync`.");
+    eprintln!("Run `neverest init` to prepare it, then `neverest sync`.");
 }
 
 #[cfg(test)]
@@ -296,8 +286,10 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use super::*;
-    use crate::config::{AccountConfig, ImapConfig, SourceBackendConfig, SourceConfig};
+    use crate::{
+        cli::configure::*,
+        config::{AccountConfig, ImapConfig, SourceBackendConfig, SourceConfig},
+    };
 
     static NEXT_CONFIG: AtomicUsize = AtomicUsize::new(0);
 
@@ -309,31 +301,31 @@ mod tests {
 
     /// A minimal account naming one IMAP source, the shape the wizard
     /// writes.
-    fn account(default: bool) -> AccountConfig {
-        let mut account =
-            AccountConfig::with_source(SourceConfig::new(SourceBackendConfig::Imap(ImapConfig {
-                server: String::from("imaps://imap.example.org:993"),
-                tls: Default::default(),
-                starttls: false,
-                alpn: None,
-                sasl: None,
-                collection: Default::default(),
-                flag: Default::default(),
-                item: Default::default(),
-                pool_size: None,
-            })));
-        account.default = default;
-        account
+    fn account() -> AccountConfig {
+        AccountConfig::with_source(SourceConfig::new(SourceBackendConfig::Imap(ImapConfig {
+            server: String::from("imaps://imap.example.org:993"),
+            tls: Default::default(),
+            starttls: false,
+            alpn: None,
+            sasl: None,
+            collection: Default::default(),
+            flag: Default::default(),
+            item: Default::default(),
+            pool_size: None,
+        })))
     }
 
+    /// A generated account claims no default: every command runs over
+    /// every account unless `-a` names some.
     #[test]
     fn a_generated_account_parses_back() {
-        let document = account(true).render("perso").expect("render the account");
+        let document = account().render("perso").expect("render the account");
         let config: Config = toml::from_str(&document).expect("parse the generated config");
         let account = &config.accounts["perso"];
 
         assert_eq!(config.accounts.len(), 1);
-        assert!(account.default);
+        assert!(!account.default);
+        assert!(!document.contains("default"), "{document}");
         assert_eq!(
             account.imap.as_ref().map(|config| config.server.as_str()),
             Some("imaps://imap.example.org:993")
@@ -346,8 +338,7 @@ mod tests {
 
         let lines: Vec<&str> = document.lines().collect();
         assert_eq!(lines[0], "[accounts.perso]");
-        assert_eq!(lines[1], "default = true");
-        assert_eq!(lines[3], "imap.server = \"imaps://imap.example.org:993\"");
+        assert_eq!(lines[1], "imap.server = \"imaps://imap.example.org:993\"");
     }
 
     /// A hand-written account naming several sources still renders as
@@ -391,11 +382,8 @@ mod tests {
             .expect("an existing config");
 
         assert_eq!(existing.names, ["work"]);
-        assert!(existing.has_default);
 
-        let document = account(!existing.has_default)
-            .render("perso")
-            .expect("render the account");
+        let document = account().render("perso").expect("render the account");
         let mut file = OpenOptions::new().append(true).open(&path).expect("open");
         write!(file, "\n{document}").expect("append the generated account");
         drop(file);
@@ -421,7 +409,6 @@ mod tests {
     fn a_taken_name_gets_a_suffix() {
         let existing = ExistingConfig {
             names: vec![String::from("posteo"), String::from("posteo-2")],
-            has_default: true,
         };
 
         assert_eq!(account_name("posteo", None), "posteo");

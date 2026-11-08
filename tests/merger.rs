@@ -39,7 +39,8 @@ use std::{
 };
 
 const DAV: &str = "http://127.0.0.1:5232";
-/// The account every test declares, whose name also keys its store.
+/// The account every test declares, whose name also keys its collections in
+/// the store.
 const ACCOUNT: &str = "merger";
 /// The source endpoint's principal, whose password is its own name.
 const SOURCE: &str = "test";

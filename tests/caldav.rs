@@ -36,9 +36,9 @@ const USER: &str = "test";
 const PASS: &str = "test";
 const CALENDAR: &str = "agenda";
 /// The calendar as the store keys it: pimdir groups a collection under the id
-/// of the source that syncs it, which for the direct-backend sugar is the
-/// protocol name.
-const COLLECTION: &str = "caldav/agenda";
+/// of the source that syncs it, the account then the source name, which for
+/// the direct-backend sugar is the protocol name.
+const COLLECTION: &str = "calendar/caldav/agenda";
 
 /// An event, addressed on the server by `<uid>.ics` (the same resource name
 /// the DAV adapter derives from a `UID`).
@@ -256,7 +256,7 @@ fn store_items(state: &Path, collection: &str) -> String {
 /// observation tool for everything the sync did not print, retention above
 /// all, and it comes from the io-pimdir crate rather than from neverest.
 fn pimdir(state: &Path, args: &[&str]) -> String {
-    let store = state.join("neverest").join("calendar");
+    let store = state.join("neverest");
     let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
         .args(args)

@@ -663,16 +663,16 @@ fn sync(config: &Path, state: &Path, book: &str, code: i32) -> String {
 /// The store's live items for an address book, as the `pimdir` CLI renders
 /// them.
 fn store_items(state: &Path, book: &str) -> String {
-    let store = state.join("neverest").join("div");
+    let store = state.join("neverest");
     let output = pimdir_cli()
         .args(["--store", &store.to_string_lossy()])
-        .args(["item", "list", &format!("a/{book}"), "--json"])
+        .args(["item", "list", &format!("div/a/{book}"), "--json"])
         .output()
         .expect("spawn pimdir");
 
     assert!(
         output.status.success(),
-        "`pimdir item list a/{book}` failed:\n{}",
+        "`pimdir item list div/a/{book}` failed:\n{}",
         String::from_utf8_lossy(&output.stderr),
     );
 

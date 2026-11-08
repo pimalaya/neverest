@@ -167,14 +167,14 @@ fn config_toml() -> String {
 /// absent checkpoint and answers with a full enumeration: the shape a
 /// UIDVALIDITY bump, a server without QRESYNC or a reset leaves behind.
 fn drop_checkpoint(state: &Path, source: &str) {
-    let dir = state.join("neverest").join(ACCOUNT);
+    let dir = state.join("neverest");
     let mut store = PimdirStore::open(&dir)
-        .expect("open the account store")
+        .expect("open the store")
         .for_account(ACCOUNT)
-        .for_source(source);
+        .for_source(format!("{ACCOUNT}/{source}"));
     store
         .write(vec![PimdirWriteOp::SetCheckpoint {
-            collection: PimdirCollectionId("left/INBOX".into()),
+            collection: PimdirCollectionId(format!("{ACCOUNT}/left/INBOX")),
             checkpoint: PimdirCheckpoint(Vec::new()),
         }])
         .expect("drop the checkpoint");
@@ -240,10 +240,13 @@ fn expunge(url: &str, uid: &str) {
     }
 }
 
-/// Syncs the account and returns the parsed `--json` report.
+/// Syncs the account and returns its report, parsed from the `--json`
+/// result.
 fn sync(config: &Path, state: &Path) -> serde_json::Value {
     let stdout = neverest(&["--json", "sync", "-a", ACCOUNT], config, state);
-    serde_json::from_str(stdout.lines().last().unwrap_or_default()).expect("the report is JSON")
+    let result: serde_json::Value = serde_json::from_str(stdout.lines().last().unwrap_or_default())
+        .expect("the result is JSON");
+    result["accounts"][0]["report"].clone()
 }
 
 fn neverest(args: &[&str], config: &Path, state: &Path) -> String {

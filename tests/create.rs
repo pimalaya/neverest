@@ -66,10 +66,10 @@ fn a_queued_folder_and_its_child_are_created_on_the_imap_server() {
     sync(&config, &state, "INBOX");
 
     let folder = unique("Archives");
-    let store = state.join("neverest").join("create");
+    let store = state.join("neverest");
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
     let id = producer
-        .enqueue_collection_create("imap/INBOX", &folder, None, None)
+        .enqueue_collection_create("create/imap/INBOX", &folder, None, None)
         .expect("queue the folder");
 
     let report = sync(&config, &state, &folder);
@@ -87,7 +87,12 @@ fn a_queued_folder_and_its_child_are_created_on_the_imap_server() {
     // The folder now in the store, a child goes under it, joined by the
     // server's hierarchy delimiter.
     producer
-        .enqueue_collection_create("imap/INBOX", "2026", Some(&format!("imap/{folder}")), None)
+        .enqueue_collection_create(
+            "create/imap/INBOX",
+            "2026",
+            Some(&format!("create/imap/{folder}")),
+            None,
+        )
         .expect("queue the child");
     let report = sync(&config, &state, &folder);
     assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
@@ -101,7 +106,7 @@ fn a_queued_folder_and_its_child_are_created_on_the_imap_server() {
 
     // Asked again, a folder the server lists already is success.
     producer
-        .enqueue_collection_create("imap/INBOX", &folder, None, None)
+        .enqueue_collection_create("create/imap/INBOX", &folder, None, None)
         .expect("queue the folder again");
     let report = sync(&config, &state, &folder);
     assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
@@ -137,10 +142,10 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
     sync(&config, &state, "default");
 
     let name = format!("Team {}", unique(""));
-    let store = state.join("neverest").join("create");
+    let store = state.join("neverest");
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
     producer
-        .enqueue_collection_create("caldav/default", &name, None, None)
+        .enqueue_collection_create("create/caldav/default", &name, None, None)
         .expect("queue the calendar");
 
     let report = sync(&config, &state, "default");
@@ -160,7 +165,12 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
     // NOTE: a calendar does not nest, so a parent parks the row, and a
     // parked intent waits for a person (exit 2).
     producer
-        .enqueue_collection_create("caldav/default", "Sub", Some("caldav/default"), None)
+        .enqueue_collection_create(
+            "create/caldav/default",
+            "Sub",
+            Some("create/caldav/default"),
+            None,
+        )
         .expect("queue a child calendar");
     let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
         .args(["-c", &config.to_string_lossy()])
@@ -170,7 +180,7 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
         .expect("spawn neverest");
     let report = String::from_utf8_lossy(&output.stdout).into_owned();
     assert_eq!(output.status.code(), Some(2), "{report}");
-    let intents: Value = serde_json::from_str(report.lines().last().unwrap_or_default()).unwrap();
+    let intents = account_report(&report);
     assert_eq!(intents["intents"][0]["parked"], true, "{report}");
 
     let _ = Command::new("curl")
@@ -205,10 +215,10 @@ fn a_queued_folder_is_created_by_a_run_performing_intents_alone() {
     sync(&config, &state, "INBOX");
 
     let folder = unique("Intents");
-    let store = state.join("neverest").join("create");
+    let store = state.join("neverest");
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
     producer
-        .enqueue_collection_create("imap/INBOX", &folder, None, None)
+        .enqueue_collection_create("create/imap/INBOX", &folder, None, None)
         .expect("queue the folder");
 
     let report = neverest(
@@ -217,7 +227,7 @@ fn a_queued_folder_is_created_by_a_run_performing_intents_alone() {
         &state,
     );
     assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
-    let parsed: Value = serde_json::from_str(report.lines().last().unwrap_or_default()).unwrap();
+    let parsed = account_report(&report);
     assert_eq!(
         parsed["collection"]["patch"],
         serde_json::json!([]),
@@ -242,10 +252,17 @@ fn sync(config: &Path, state: &Path, collection: &str) -> String {
     )
 }
 
+/// The report of a sync over the account, from its result, the last line,
+/// after its events.
+fn account_report(stdout: &str) -> Value {
+    let result: Value =
+        serde_json::from_str(stdout.lines().last().unwrap_or_default()).expect("a JSON result");
+    result["accounts"][0]["report"].clone()
+}
+
 /// The error of each intent the report names, `null` for one performed.
 fn intent_errors(report: &str) -> Vec<Value> {
-    let report: Value =
-        serde_json::from_str(report.lines().last().unwrap_or_default()).expect("one JSON document");
+    let report = account_report(report);
     report["intents"]
         .as_array()
         .map(|intents| {
@@ -257,9 +274,11 @@ fn intent_errors(report: &str) -> Vec<Value> {
         .unwrap_or_default()
 }
 
+/// The account's entry of a check.
 fn check(config: &Path, state: &Path) -> Value {
     let checked = neverest(&["--json", "check", "-a", "create"], config, state);
-    serde_json::from_str(&checked).expect("one JSON document")
+    let checked: Value = serde_json::from_str(&checked).expect("one JSON document");
+    checked["accounts"][0].clone()
 }
 
 /// The collection ids the server lists.
@@ -318,14 +337,19 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
     sync(&config, &state, "INBOX");
 
     let folder = unique("Renamed");
-    let store = state.join("neverest").join("create");
+    let store = state.join("neverest");
     let mut producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
     producer
-        .enqueue_collection_create("imap/INBOX", &folder, None, None)
+        .enqueue_collection_create("create/imap/INBOX", &folder, None, None)
         .expect("queue the folder");
     sync(&config, &state, &folder);
     producer
-        .enqueue_collection_create("imap/INBOX", "2026", Some(&format!("imap/{folder}")), None)
+        .enqueue_collection_create(
+            "create/imap/INBOX",
+            "2026",
+            Some(&format!("create/imap/{folder}")),
+            None,
+        )
         .expect("queue the child");
     sync(&config, &state, &folder);
     let child = listed(&config, &state)
@@ -358,7 +382,7 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
 
     let renamed = unique("Kept");
     producer
-        .enqueue_collection_rename(&format!("imap/{folder}"), &renamed, None)
+        .enqueue_collection_rename(&format!("create/imap/{folder}"), &renamed, None)
         .expect("queue the rename");
     let report = sync(&config, &state, &renamed);
     assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
@@ -373,20 +397,25 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
         .into_iter()
         .map(|collection| collection.id)
         .collect();
-    let moved_child = format!("imap/{renamed}{delimiter}2026");
-    assert!(ids.contains(&format!("imap/{renamed}")), "{ids:?}");
+    let moved_child = format!("create/imap/{renamed}{delimiter}2026");
+    assert!(ids.contains(&format!("create/imap/{renamed}")), "{ids:?}");
     assert!(ids.contains(&moved_child), "{ids:?}");
     assert!(
         !ids.iter()
-            .any(|id| id.starts_with(&format!("imap/{folder}"))),
+            .any(|id| id.starts_with(&format!("create/imap/{folder}"))),
         "{ids:?}"
     );
-    assert_eq!(reader.count_items(format!("imap/{renamed}")).unwrap(), 1);
+    assert_eq!(
+        reader
+            .count_items(format!("create/imap/{renamed}"))
+            .unwrap(),
+        1
+    );
     drop(reader);
 
     // NOTE: a mailbox holding another parks, deleting nothing.
     let id = producer
-        .enqueue_collection_delete(&format!("imap/{renamed}"), None)
+        .enqueue_collection_delete(&format!("create/imap/{renamed}"), None)
         .expect("queue the delete");
     let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
         .args(["-c", &config.to_string_lossy()])
@@ -396,7 +425,7 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
         .expect("spawn neverest");
     let report = String::from_utf8_lossy(&output.stdout).into_owned();
     assert_eq!(output.status.code(), Some(2), "{report}");
-    let parsed: Value = serde_json::from_str(report.lines().last().unwrap_or_default()).unwrap();
+    let parsed = account_report(&report);
     assert_eq!(parsed["intents"][0]["parked"], true, "{report}");
     assert!(listed(&config, &state).contains(&renamed));
     assert!(PimdirStore::cancel_action(&store, id).expect("cancel the parked delete"));
@@ -405,7 +434,7 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
         .enqueue_collection_delete(&moved_child, None)
         .expect("queue the child's delete");
     producer
-        .enqueue_collection_delete(&format!("imap/{renamed}"), None)
+        .enqueue_collection_delete(&format!("create/imap/{renamed}"), None)
         .expect("queue the delete again");
     let report = sync(&config, &state, "INBOX");
     assert_eq!(
@@ -427,7 +456,7 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
         .collect();
     assert!(
         !ids.iter()
-            .any(|id| id.starts_with(&format!("imap/{renamed}"))),
+            .any(|id| id.starts_with(&format!("create/imap/{renamed}"))),
         "{ids:?}"
     );
 }

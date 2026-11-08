@@ -3,22 +3,26 @@
 //! Applies what frontends queued in the store, opening no endpoint, so
 //! they read their own writes back without waiting for a sync.
 
-use std::{fmt, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    path::{Path, PathBuf},
+};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Error, Result, anyhow};
 use clap::Parser;
 use io_pimdir::client::producer::PimdirActionStatus;
-use log::{info, warn};
-use pimalaya_cli::printer::Printer;
-use pimalaya_config::toml::TomlConfig;
+use log::info;
+use pimalaya_cli::{error::code_of, printer::Printer};
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
     cli::{exit::Exit, sync::try_store_lock},
-    config::Config,
+    config::{AccountConfig, Config},
+    error::ErrorCode,
     offline::{driver, state::StoreState},
-    sync::report::{IndexRefresh, OverruledBody, SyncOutput},
+    sync::report::{IndexRefresh, OverruledBody},
 };
 
 /// Applies the store changes frontends queued, without syncing.
@@ -29,95 +33,167 @@ use crate::{
 /// does first, reading no credential and opening no endpoint, so it
 /// works offline. The next sync pushes them.
 ///
+/// The queue is the store's: a drain applies every account's, and
+/// reports each account the rows of its own collections.
+///
 /// Intents, a send or an invitation reply among them, need their server
 /// and stay queued for the sync. A sync holding the store answers
-/// `busy` with exit code 3: that run, or the next, applies them.
+/// `busy` with exit code 3: that run, or the next, applies them. An
+/// account that could not be drained exits 3 too.
 #[derive(Debug, Parser)]
 pub struct DrainCommand {}
 
 impl DrainCommand {
-    /// Drains the account's store, or reports it busy.
+    /// Drains the store of every account the run covers, or reports it busy.
     pub fn execute(
         self,
         printer: &mut impl Printer,
         config_paths: &[PathBuf],
-        account_name: Option<&str>,
+        accounts: &[String],
     ) -> Result<Exit> {
-        let mut config = Config::load_or_wizard(printer, config_paths)?;
+        let config = Config::load_or_wizard(printer, config_paths)?;
 
-        let Some((name, account_config)) = config.take_account(account_name)? else {
-            bail!("Cannot find account");
-        };
-
-        account_config.validate()?;
-
-        let dir = driver::store_dir(&name, &account_config)?;
-        if !dir.join("pimdir.db").exists() {
-            bail!("Account {name} not initialized, run `init -a {name}` first");
+        let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
+        for (name, account_config) in config.select(accounts)? {
+            account_config
+                .validate()
+                .with_context(|| format!("Validate account {name}"))?;
+            let dir = driver::store_dir(&account_config)?;
+            stores.entry(dir).or_default().push((name, account_config));
+        }
+        for dir in stores.keys() {
+            driver::refuse_former_stores(dir)?;
         }
 
-        // NOTE: never waits: a sync holding the store drains it itself, at
-        // its start or at the next run.
-        let Some(_lock) = try_store_lock(&dir)
-            .with_context(|| format!("Acquire the store lock of account {name}"))?
-        else {
-            printer.out(DrainOutput::busy(name))?;
-            return Ok(Exit::Incomplete);
-        };
+        let order: Vec<String> = stores
+            .values()
+            .flatten()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut outputs = Vec::new();
 
-        let mode = account_config.mode()?;
-        let first = mode
-            .sources
-            .first()
-            .expect("a validated account has at least one source");
-
-        // NOTE: as a sync does before its drain, from the configuration and
-        // the calendars the last listing stated take no tasks (pimdir
-        // STORAGE §15.6). A sidecar that does not read declares none of
-        // those, as a store never listed does, rather than refusing a drain
-        // that never needed it.
-        let state = StoreState::load(&dir).unwrap_or_else(|err| {
-            warn!("cannot read the sidecar of account {name}: {err:#}");
-            StoreState::default()
-        });
-        driver::declare(&dir, &name, &account_config, &mode, &state)?;
-
-        let mut store = driver::open_store(&dir, first, &name)?;
-        let queued = store
-            .list_pending_actions()
-            .context("List the queued actions")?;
-
-        let mut report = SyncOutput::default();
-        driver::drain_queues(&mut store, &mut report);
-
-        let mut output = DrainOutput::new(name);
-        output.overruled = report.overruled;
-        // NOTE: briefly, a frontend waiting on the drain.
-        #[cfg(feature = "search")]
-        crate::offline::index::after_run(&dir, &account_config.store, true, &mut output.index);
-        for row in queued {
-            let status = store
-                .action_status(row.id)
-                .with_context(|| format!("Read where queued action {} stands", row.id))?;
-            let kind = row.action.kind().to_owned();
-            match status {
-                PimdirActionStatus::Applied { seq, .. } => output.applied.push(DrainedAction {
-                    id: row.id,
-                    collection: row.collection,
-                    kind,
-                    seq,
-                }),
-                PimdirActionStatus::Parked { error, .. } => output.parked.push(ParkedAction {
-                    id: row.id,
-                    collection: row.collection,
-                    kind,
-                    error,
-                }),
-                PimdirActionStatus::Pending { .. } => output.waiting += 1,
-                PimdirActionStatus::Unknown => {}
+        for (dir, accounts) in stores {
+            if !dir.join("pimdir.db").exists() {
+                for (name, _) in accounts {
+                    let err = anyhow!(
+                        "Account {name} not initialized, run `neverest init -a {name}` first"
+                    );
+                    outputs.push(DrainOutput::failed(name, err));
+                }
+                continue;
             }
+
+            // NOTE: never waits: a sync holding the store drains it itself,
+            // at its start or at the next run.
+            let lock = try_store_lock(&dir)
+                .with_context(|| format!("Acquire the lock of the store at {}", dir.display()))?;
+            let Some(_lock) = lock else {
+                outputs.extend(
+                    accounts
+                        .into_iter()
+                        .map(|(name, _)| DrainOutput::busy(name)),
+                );
+                continue;
+            };
+            driver::check_store(&dir)?;
+
+            outputs.extend(drain(&dir, accounts)?);
         }
 
+        outputs.sort_by_key(|output| order.iter().position(|name| *name == output.account));
+        let exit = match outputs.iter().any(|o| o.busy || o.error.is_some()) {
+            true => Exit::Incomplete,
+            false => Exit::Success,
+        };
+
+        printer.out(DrainRunOutput { accounts: outputs })?;
+        Ok(exit)
+    }
+}
+
+/// Declares the sources of `accounts` as a sync does before its drain, then
+/// drains the store at `dir` once, telling each account the rows of its own
+/// collections. An account that cannot be declared fails alone.
+fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<DrainOutput>> {
+    let mut outputs = Vec::new();
+    let mut ready = Vec::new();
+
+    // NOTE: from the configuration and the calendars the last listing
+    // stated take no tasks (pimdir STORAGE §15.6), as a sync does.
+    for (name, account_config) in accounts {
+        let declared = account_config.namespaced(&name).and_then(|namespaced| {
+            let mode = namespaced.mode()?;
+            let state = StoreState::load(dir)?.account(&name)?;
+            driver::declare(dir, &name, &namespaced, &mode, &state)?;
+            Ok(namespaced)
+        });
+        match declared {
+            Ok(namespaced) => ready.push((name, namespaced)),
+            Err(err) => outputs.push(DrainOutput::failed(name, err)),
+        }
+    }
+
+    let Some((first_name, first_config)) = ready.first() else {
+        return Ok(outputs);
+    };
+    let mode = first_config.mode()?;
+    let first = mode
+        .sources
+        .first()
+        .expect("a validated account has at least one source");
+    let mut store = driver::open_store(dir, first, first_name)?;
+    let queued = store
+        .list_pending_actions()
+        .context("List the queued actions")?;
+
+    let mut drained = driver::drain_store(&mut store);
+
+    // NOTE: briefly, a frontend waiting on the drain; once, the index
+    // being the store's.
+    #[cfg_attr(not(feature = "search"), allow(unused_mut))]
+    let mut index = None;
+    #[cfg(feature = "search")]
+    crate::offline::index::after_run(dir, &first_config.store, true, &mut index);
+
+    let mut mine: BTreeMap<String, DrainOutput> = ready
+        .iter()
+        .map(|(name, _)| {
+            let mut output = DrainOutput::new(name.clone());
+            let report = drained.remove(name).unwrap_or_default();
+            output.overruled = report.overruled;
+            output.index = index.clone();
+            (name.clone(), output)
+        })
+        .collect();
+
+    let owners = driver::collection_accounts(&store);
+    for row in queued {
+        let Some(output) = owners.get(&row.collection).and_then(|o| mine.get_mut(o)) else {
+            continue;
+        };
+        let status = store
+            .action_status(row.id)
+            .with_context(|| format!("Read where queued action {} stands", row.id))?;
+        let kind = row.action.kind().to_owned();
+        match status {
+            PimdirActionStatus::Applied { seq, .. } => output.applied.push(DrainedAction {
+                id: row.id,
+                collection: row.collection,
+                kind,
+                seq,
+            }),
+            PimdirActionStatus::Parked { error, .. } => output.parked.push(ParkedAction {
+                id: row.id,
+                collection: row.collection,
+                kind,
+                error,
+            }),
+            PimdirActionStatus::Pending { .. } => output.waiting += 1,
+            PimdirActionStatus::Unknown => {}
+        }
+    }
+
+    for output in mine.values() {
         info!(
             "drained {} queued action(s) of {} ({} parked, {} waiting)",
             output.applied.len(),
@@ -125,13 +201,30 @@ impl DrainCommand {
             output.parked.len(),
             output.waiting,
         );
+    }
 
-        printer.out(output)?;
-        Ok(Exit::Success)
+    outputs.extend(mine.into_values());
+    Ok(outputs)
+}
+
+/// What `neverest drain` did with the queue of every account it covered.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DrainRunOutput {
+    /// One entry per account the run covered.
+    pub accounts: Vec<DrainOutput>,
+}
+
+impl fmt::Display for DrainRunOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for account in &self.accounts {
+            write!(f, "{account}")?;
+        }
+        Ok(())
     }
 }
 
-/// What `neverest drain` did with the account's queue.
+/// What `neverest drain` did with one account's queue.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct DrainOutput {
@@ -139,7 +232,12 @@ pub struct DrainOutput {
     pub account: String,
     /// A sync held the store, so nothing was drained.
     pub busy: bool,
-    /// The actions applied to the store, in queue order.
+    /// The stable code of the failure that stopped the account, `null`
+    /// when it was drained or the failure carries none.
+    pub code: Option<ErrorCode>,
+    /// Why the account was not drained, `null` when it was.
+    pub error: Option<String>,
+    /// The actions applied to the account's collections, in queue order.
     pub applied: Vec<DrainedAction>,
     /// The actions refused for good this time, kept for an operator.
     pub parked: Vec<ParkedAction>,
@@ -151,7 +249,8 @@ pub struct DrainOutput {
     pub overruled: Vec<OverruledBody>,
     /// What the drain did to the store's search index, `null` in a
     /// build without the `search` feature: a failure is reported here and
-    /// never fails the drain.
+    /// never fails the drain. The index is the store's, so every account
+    /// of one store reports the same refresh.
     pub index: Option<IndexRefresh>,
 }
 
@@ -160,6 +259,8 @@ impl DrainOutput {
         Self {
             account,
             busy: false,
+            code: None,
+            error: None,
             applied: Vec::new(),
             parked: Vec::new(),
             waiting: 0,
@@ -174,6 +275,14 @@ impl DrainOutput {
             ..Self::new(account)
         }
     }
+
+    fn failed(account: String, err: Error) -> Self {
+        Self {
+            code: code_of(&err),
+            error: Some(format!("{err:#}")),
+            ..Self::new(account)
+        }
+    }
 }
 
 impl fmt::Display for DrainOutput {
@@ -184,6 +293,10 @@ impl fmt::Display for DrainOutput {
                 "A sync holds the store of account {}: it applies the queue itself",
                 self.account
             );
+        }
+
+        if let Some(error) = &self.error {
+            return writeln!(f, "Account {} was not drained: {error}", self.account);
         }
 
         writeln!(

@@ -1,0 +1,4 @@
+# The mail fixtures are pimdir's vectors byte for byte: their bodies are CRLF
+# and the tests read each header block up to its empty line. Without this git
+# normalises them under core.autocrlf and a clone holds LF bodies.
+tests/vectors/fixtures/** -text

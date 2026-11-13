@@ -50,7 +50,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD, URL_SAFE, URL_SAFE_NO_PAD},
 };
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, SecondsFormat};
 use io_msgraph::v1::{
     client::{
         MsgraphClientStd, MsgraphClientStdConnectOptions, MsgraphClientStdError, MsgraphStream,
@@ -62,12 +62,19 @@ use io_msgraph::v1::{
             list::{MsgraphMailFoldersListParams, MsgraphMailFoldersListResponse},
         },
         messages::{
-            MsgraphFlagStatus, MsgraphFollowupFlag, MsgraphMessage, list::MsgraphMessagesListParams,
+            MsgraphFlagStatus, MsgraphFollowupFlag, MsgraphMessage, MsgraphRecipient,
+            list::MsgraphMessagesListParams,
         },
     },
     send::{MSGRAPH_API_BASE, MsgraphSend, MsgraphSendError, MsgraphSendOutput, user_path},
 };
-use io_pimdir::remote::PimdirEnumerate;
+use io_pimdir::{
+    remote::PimdirEnumerate,
+    summary::{
+        PimdirAddress, PimdirDerivation,
+        mail::{PimdirMailSummary, message_id},
+    },
+};
 use log::{debug, trace, warn};
 use pimalaya_stream::{
     proxy::Proxy,
@@ -83,7 +90,6 @@ use crate::{
     item::{
         collection::Collection,
         flag::{Flag, IanaFlag},
-        summary::{ItemSummary, normalize_message_id},
     },
     throttle::{self, Request, Throttle},
 };
@@ -414,10 +420,14 @@ impl GraphClient {
         }
     }
 
-    /// Fetches summaries for an id set; contacts resolve at `Full` instead.
-    pub fn fetch_summaries(&mut self, collection: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
+    /// What names each of an id set; contacts resolve at `Full` instead.
+    pub fn fetch_summaries(
+        &mut self,
+        collection: &str,
+        ids: &[&str],
+    ) -> Result<Vec<(String, PimdirDerivation)>> {
         match self.kind {
-            GraphKind::Mail => self.fetch_envelopes(collection, ids),
+            GraphKind::Mail => self.fetch_metas(collection, ids),
             GraphKind::Contacts => {
                 bail!("Graph contacts have no summary tier (they resolve at Full)")
             }
@@ -623,12 +633,16 @@ impl GraphClient {
         lookup_folder(&self.folders, name).with_context(|| format!("Unknown Graph folder {name}"))
     }
 
-    /// Fetches envelopes for a message-id set, one summary get a message,
-    /// its size expanded. The `Meta` tier is an upgrade a frontend asks for
+    /// What names each of a message-id set, one summary get a message, its
+    /// size expanded. The `Meta` tier is an upgrade a frontend asks for
     /// now and then, every listed member arriving named.
-    fn fetch_envelopes(&mut self, _mailbox: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
+    fn fetch_metas(
+        &mut self,
+        _mailbox: &str,
+        ids: &[&str],
+    ) -> Result<Vec<(String, PimdirDerivation)>> {
         let user = user_path(&self.inner.user_id);
-        let mut envelopes = Vec::with_capacity(ids.len());
+        let mut metas = Vec::with_capacity(ids.len());
         for id in ids {
             let url = Url::parse(MSGRAPH_API_BASE)
                 .and_then(|base| base.join(&format!("{user}/messages/{id}")))
@@ -645,9 +659,9 @@ impl GraphClient {
                     client.run(coroutine)
                 })
                 .with_context(|| format!("Get message {id} error"))?;
-            envelopes.push(message_envelope(id, &message));
+            metas.push((id.to_string(), message_meta(&message)));
         }
-        Ok(envelopes)
+        Ok(metas)
     }
 
     /// Streams the bodies of a message-id set, each committed as soon as it
@@ -1613,35 +1627,41 @@ fn message_date(message: &MsgraphMessage) -> Option<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(raw).ok()
 }
 
-/// Folds a delta row into a shared [`ItemSummary`] for the `Meta` tier.
-fn message_envelope(id: &str, message: &MsgraphMessage) -> ItemSummary {
-    let address = |recipient: &io_msgraph::v1::rest::users::messages::MsgraphRecipient| {
-        crate::item::address::Address {
-            name: recipient.email_address.name.clone(),
-            email: recipient.email_address.address.clone().unwrap_or_default(),
-        }
+/// What names a delta row at the `Meta` tier (pimdir STORAGE Annex A.1).
+///
+/// `internetMessageId` is read as a `Message-ID` field is, by io-pimdir's
+/// own reading. The subject, the date and the addresses are values Graph
+/// decodes itself, which stand as it states them until the body is read.
+fn message_meta(message: &MsgraphMessage) -> PimdirDerivation {
+    let address = |recipient: &MsgraphRecipient| PimdirAddress {
+        address: PimdirAddress::canonical(recipient.email_address.address.as_deref().unwrap_or("")),
+        name: recipient.email_address.name.clone(),
     };
-    ItemSummary {
-        id: id.to_owned(),
-        message_id: message
-            .internet_message_id
-            .as_deref()
-            .and_then(normalize_message_id),
+    let from: Vec<PimdirAddress> = message.from.iter().map(address).collect();
+    let first = from.first();
+
+    PimdirMailSummary {
+        message_id: message.internet_message_id.as_deref().and_then(message_id),
         in_reply_to: Vec::new(),
-        flags: message_flags(message),
         subject: message.subject.clone().unwrap_or_default(),
-        from: message.from.as_ref().map(address).into_iter().collect(),
+        sender: first.map(|address| address.address.clone()),
+        sender_name: first.and_then(|address| address.name.clone()),
+        date: message_date(message)
+            .map(|date| date.to_utc().to_rfc3339_opts(SecondsFormat::Secs, true)),
+        // NOTE: the MAPI size, when the read expanded it; else none, filled
+        // from the blob length at the `Full` tier.
+        size: message_size(message).filter(|size| *size > 0),
+        // NOTE: Graph states the mark itself (pimdir STORAGE Annex A.1),
+        // which the walk of the parts replaces once the body is in.
+        attachment: message.has_attachments,
+        // NOTE: read with the body alone, never off a row.
+        invitation: None,
         to: message.to_recipients.iter().map(address).collect(),
         cc: message.cc_recipients.iter().map(address).collect(),
         bcc: Vec::new(),
-        date: message_date(message),
-        // NOTE: the MAPI size, when the read expanded it; else 0, filled
-        // from the blob length at the `Full` tier.
-        size: message_size(message).unwrap_or(0),
-        // NOTE: Graph states the mark itself (pimdir STORAGE Annex A.1),
-        // which the walk of the parts replaces once the body is in.
-        has_attachment: message.has_attachments,
+        from,
     }
+    .derivation()
 }
 
 /// Encodes the delta link into checkpoint bytes (plain UTF-8).
@@ -1659,8 +1679,10 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use io_msgraph::v1::send::MsgraphSendError;
+    use io_pimdir::summary::PimdirSummary;
 
     use super::*;
+    use crate::kind::mail::{parse_body, vectors::VECTORS};
 
     #[test]
     fn a_listed_folder_takes_the_role_its_well_known_id_states() {
@@ -1732,23 +1754,99 @@ mod tests {
         assert!(!flags.contains(&Flag::from_iana(IanaFlag::Flagged)));
     }
 
+    /// The mail summary of what names `message`.
+    fn named(message: &MsgraphMessage) -> PimdirMailSummary {
+        match message_meta(message).summary {
+            Some(PimdirSummary::Mail(summary)) => summary,
+            other => panic!("expected a mail summary, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn a_delta_row_folds_into_an_envelope() {
+    fn a_delta_row_folds_into_a_summary() {
         let message = fixture_row();
-        let env = message_envelope("AAMkAD-abc", &message);
-        assert_eq!(env.id, "AAMkAD-abc");
-        assert_eq!(env.message_id.as_deref(), Some("m1@example.org"));
-        assert_eq!(env.subject, "Hello");
-        assert_eq!(env.from[0].email, "alice@example.org");
-        assert_eq!(env.to[0].email, "bob@example.org");
+        let summary = named(&message);
+        assert_eq!(summary.message_id.as_deref(), Some("m1@example.org"));
+        assert_eq!(summary.subject, "Hello");
+        assert_eq!(summary.from[0].address, "alice@example.org");
+        assert_eq!(summary.to[0].address, "bob@example.org");
         assert_eq!(
-            env.date
-                .unwrap()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "2026-07-06T12:00:00Z",
+            summary.date.as_deref(),
+            Some("2026-07-06T12:00:00Z"),
             "the date is sentDateTime, never receivedDateTime"
         );
-        assert_eq!(env.size, 0, "Graph exposes no RFC 5322 size");
+        assert_eq!(summary.size, None, "Graph exposes no RFC 5322 size");
+    }
+
+    /// `internetMessageId` is read as a `Message-ID` field is (pimdir
+    /// STORAGE Annex A.1, vectors/summaries.json): a comment around the id
+    /// is no part of the key, and an id stated without brackets is one.
+    #[test]
+    fn a_row_is_keyed_by_its_message_id_as_the_vectors_state() {
+        for vector in VECTORS.iter().filter(|vector| vector.message_id.is_some()) {
+            let stated = vector
+                .fields()
+                .into_iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("Message-ID"))
+                .map(|(_, value)| value);
+            let message: MsgraphMessage = serde_json::from_value(
+                serde_json::json!({ "id": "m1", "internetMessageId": stated }),
+            )
+            .unwrap();
+
+            let derivation = message_meta(&message);
+            assert_eq!(
+                derivation.link_id.as_str(),
+                vector.link_id,
+                "{}",
+                vector.name
+            );
+        }
+    }
+
+    /// A row stating no `internetMessageId` is keyed as its body is: the
+    /// `alt:` key embeds the date, spelled as the UTC instant on both tiers.
+    #[test]
+    fn a_row_and_its_body_derive_one_key() {
+        let raw = b"Subject: Stand-up notes\r\n\
+                    From: Alice@example.org\r\n\
+                    To: bob@example.org\r\n\
+                    Date: Sat, 1 Aug 2026 12:00:00 +0200\r\n\r\nbody";
+        let message: MsgraphMessage = serde_json::from_value(serde_json::json!({
+            "id": "m1",
+            "subject": "Stand-up notes",
+            "from": {"emailAddress": {"address": "Alice@example.org"}},
+            "toRecipients": [{"emailAddress": {"address": "bob@example.org"}}],
+            "sentDateTime": "2026-08-01T12:00:00+02:00",
+        }))
+        .unwrap();
+
+        let body = parse_body(raw, 0);
+        let row = message_meta(&message);
+
+        assert!(
+            body.link_id.as_str().starts_with("alt:"),
+            "{:?}",
+            body.link_id
+        );
+        assert_eq!(body.link_id, row.link_id);
+        assert_eq!(body.sort_key.as_str(), "2026-08-01T10:00:00Z");
+        assert_eq!(body.sort_key, row.sort_key);
+        assert_eq!(body.summary, row.summary);
+    }
+
+    /// A row with no parseable date omits it rather than guessing, the
+    /// empty key landing it last in a descending listing.
+    #[test]
+    fn a_row_without_a_date_sorts_last() {
+        let message: MsgraphMessage = serde_json::from_value(serde_json::json!({
+            "id": "m1",
+            "internetMessageId": "<nodate-1@example.org>",
+        }))
+        .unwrap();
+
+        assert_eq!(named(&message).date, None);
+        assert!(message_meta(&message).sort_key.is_unknown());
     }
 
     #[test]
@@ -1974,13 +2072,13 @@ mod tests {
     fn the_attachment_mark_is_the_one_graph_states() {
         let mut with = fixture_row();
         with.has_attachments = Some(true);
-        assert_eq!(message_envelope("a", &with).has_attachment, Some(true));
+        assert_eq!(named(&with).attachment, Some(true));
 
         let mut without = fixture_row();
         without.has_attachments = Some(false);
-        assert_eq!(message_envelope("b", &without).has_attachment, Some(false));
+        assert_eq!(named(&without).attachment, Some(false));
 
-        assert_eq!(message_envelope("c", &fixture_row()).has_attachment, None);
+        assert_eq!(named(&fixture_row()).attachment, None);
     }
 
     /// A body Graph failed to serve (500, 502, 504) is sent again, but only
@@ -2712,13 +2810,13 @@ mod tests {
         assert_eq!(answer.held, 2 * encoded.len());
     }
 
-    /// A summary read by id expands the MAPI size, which the envelope
+    /// A summary read by id expands the MAPI size, which the summary
     /// carries.
     #[test]
-    fn the_envelope_carries_the_expanded_size() {
+    fn the_summary_carries_the_expanded_size() {
         let message: MsgraphMessage = serde_json::from_value(size_row("m1", 48_213)).unwrap();
-        assert_eq!(message_envelope("m1", &message).size, 48_213);
-        assert_eq!(message_envelope("m1", &fixture_row()).size, 0);
+        assert_eq!(named(&message).size, Some(48_213));
+        assert_eq!(named(&fixture_row()).size, None);
 
         assert_eq!(
             batch_url(

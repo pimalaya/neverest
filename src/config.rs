@@ -1217,6 +1217,14 @@ pub struct CollectionSourceConfig {
     /// therefore asymmetric: a collection may sync on one source only.
     #[serde(default, alias = "filters", skip_serializing_if = "is_default")]
     pub filter: CollectionFilter,
+    /// Whether this source lists at most a number of the items a collection
+    /// holds, whatever it holds: a folder size limit set on the server.
+    ///
+    /// Every round of its collections then says so (pimdir SYNC §4, §5):
+    /// an item it leaves unlisted is kept, and only a removal the source
+    /// states deletes.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub capped: bool,
 }
 
 impl CollectionSourceConfig {
@@ -1236,6 +1244,7 @@ impl Default for CollectionSourceConfig {
             delete: false,
             namespace: None,
             filter: CollectionFilter::default(),
+            capped: false,
         }
     }
 }

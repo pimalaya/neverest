@@ -1,0 +1,8 @@
+Subject: =?iso-8859-1?Q?Co=FBt_10_=80?=
+From: Alice Example <alice@example.org>
+To: bob@example.org
+Date: Sat, 01 Aug 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+The label iso-8859-1 names windows-1252, where the byte 80 is the euro sign.

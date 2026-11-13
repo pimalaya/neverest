@@ -10,9 +10,10 @@
 //! §9.3), and the merge the three-way reconciliation in [`merge`].
 //!
 //! The first three are io-pimdir's derivations, reached through
-//! [`Kind::parse_body`]. A kind with a cheap server-side summary tier (mail's
-//! IMAP `ENVELOPE`) also implements [`Kind::parse_summary`], and **a kind
-//! implementing both MUST make them agree byte-for-byte**: see [`mail`].
+//! [`Kind::parse_body`]. A kind with a cheap server-side summary tier (mail)
+//! is named there by its connector, through the same derivation where the
+//! source serves the header fields raw, and **the two tiers MUST agree
+//! byte-for-byte** there: see [`mail`].
 //!
 //! An enum rather than a trait: the set of kinds is closed and small, there
 //! is one dispatch point, and a trait would buy dispatch nobody needs.
@@ -29,8 +30,6 @@ use anyhow::{Result, bail};
 ))]
 use io_pimdir::summary::{calendar, contact};
 use io_pimdir::{placement::PimdirLinkId, summary::PimdirDerivation};
-
-use crate::item::summary::ItemSummary;
 
 /// The prefix a minted link id carries, followed by the identity hint
 /// (pimdir STORAGE §9).
@@ -281,24 +280,6 @@ impl Kind {
 
         (!key.is_empty() && !key.starts_with(fallback))
             .then(|| key.strip_prefix(ESCAPE).unwrap_or(key))
-    }
-
-    /// The derivations from a server-side summary, for a kind with `Meta`.
-    ///
-    /// `None` for a kind with no such tier: a DAV `sync-collection` report
-    /// returns hrefs and ETags but no `UID`, so a DAV item goes straight to
-    /// `Full`.
-    pub fn parse_summary(self, summary: &ItemSummary) -> Option<PimdirDerivation> {
-        match self {
-            Self::Mail => Some(mail::parse_summary(summary)),
-            #[cfg(any(
-                feature = "dav",
-                feature = "msgraph",
-                feature = "gpeople",
-                feature = "gcal"
-            ))]
-            Self::Vcard | Self::Ical => None,
-        }
     }
 }
 

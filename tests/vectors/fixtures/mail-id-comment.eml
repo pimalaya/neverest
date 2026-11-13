@@ -1,0 +1,8 @@
+Message-ID: (via <relay@example.net>) <comment-1@example.org> (trailing)
+In-Reply-To: <p-1@example.org> (first parent) <p-2@example.org>
+Subject: Commented ids
+From: Night Ops (pager) <OPS@Example.org>
+To: bob@example.org
+Date: Sat, 01 Aug 2026 10:00:00 +0000
+
+Comments around the ids are skipped, the one before the id included.

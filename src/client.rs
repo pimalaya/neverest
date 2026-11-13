@@ -40,7 +40,7 @@ use crate::imap::client::ImapClient;
 use crate::msgraph::client::{GraphClient, GraphKind};
 use crate::{
     account::{SourceAccount, SourceAccountBackend},
-    item::{collection::Collection, flag::Flag, summary::ItemSummary},
+    item::{collection::Collection, flag::Flag},
     kind::LinkId,
     offline::invitation::Refusal,
 };
@@ -748,12 +748,16 @@ impl Client {
         }
     }
 
-    /// Fetches the summaries of an id set, for `Meta`-tier link id and
-    /// summary resolution, rather than listing the whole collection.
-    pub fn fetch_summaries(&mut self, collection: &str, ids: &[&str]) -> Result<Vec<ItemSummary>> {
+    /// What names each of an id set, by its handle, for `Meta`-tier link id
+    /// and summary resolution, rather than listing the whole collection.
+    pub fn fetch_summaries(
+        &mut self,
+        collection: &str,
+        ids: &[&str],
+    ) -> Result<Vec<(String, PimdirDerivation)>> {
         match self {
             #[cfg(feature = "imap")]
-            Client::Imap(c) => c.fetch_envelopes(collection, ids),
+            Client::Imap(c) => c.fetch_summaries(collection, ids),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.fetch_summaries(collection, ids),
             #[cfg(feature = "dav")]
@@ -1018,6 +1022,14 @@ impl Client {
             Client::Msgraph(c) if c.kind() == GraphKind::Mail => {
                 c.find_message(collection, message_id)
             }
+            #[cfg(any(
+                not(feature = "imap"),
+                feature = "msgraph",
+                feature = "dav",
+                feature = "gpeople",
+                feature = "gcal",
+                feature = "gmail"
+            ))]
             _ => Ok(None),
         }
     }

@@ -7,6 +7,7 @@
 //! credential, and records every command line it reads.
 
 use std::{
+    collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
@@ -47,6 +48,8 @@ pub struct FakeImap {
     pub commands: Arc<Mutex<Vec<String>>>,
     /// The mailbox it serves, which a `STORE` changes.
     served: Arc<Mutex<FakeMailbox>>,
+    /// The header block a message states in place of the fake's own, by UID.
+    headers: Arc<Mutex<BTreeMap<u32, Vec<u8>>>>,
 }
 
 impl FakeImap {
@@ -56,15 +59,18 @@ impl FakeImap {
         let port = listener.local_addr().unwrap().port();
         let served = Arc::new(Mutex::new(mailbox));
         let commands = Arc::new(Mutex::new(Vec::new()));
+        let headers = Arc::new(Mutex::new(BTreeMap::new()));
 
         let logged = Arc::clone(&commands);
         let shared = Arc::clone(&served);
+        let stated = Arc::clone(&headers);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let mailbox = Arc::clone(&shared);
                 let commands = Arc::clone(&logged);
-                thread::spawn(move || serve(stream, qresync, &mailbox, &commands));
+                let headers = Arc::clone(&stated);
+                thread::spawn(move || serve(stream, qresync, &mailbox, &headers, &commands));
             }
         });
 
@@ -72,7 +78,14 @@ impl FakeImap {
             url: Url::parse(&format!("imap://127.0.0.1:{port}")).unwrap(),
             commands,
             served,
+            headers,
         }
+    }
+
+    /// Has the message `uid` state `header`, a whole header block, where a
+    /// `FETCH` asks for header fields.
+    pub fn set_header(&self, uid: u32, header: &[u8]) {
+        self.headers.lock().unwrap().insert(uid, header.to_vec());
     }
 
     /// The flags the message `uid` holds now.
@@ -113,6 +126,7 @@ fn serve(
     stream: TcpStream,
     qresync: bool,
     mailbox: &Mutex<FakeMailbox>,
+    headers: &Mutex<BTreeMap<u32, Vec<u8>>>,
     commands: &Mutex<Vec<String>>,
 ) {
     let mut writer = stream.try_clone().unwrap();
@@ -155,7 +169,11 @@ fn serve(
             }
         }
 
-        let reply = answer(command, &mut mailbox.lock().unwrap());
+        let reply = answer(
+            command,
+            &mut mailbox.lock().unwrap(),
+            &headers.lock().unwrap(),
+        );
         let done = format!("{tag} OK done\r\n");
         if writer.write_all(&reply).is_err() || writer.write_all(done.as_bytes()).is_err() {
             return;
@@ -173,7 +191,7 @@ fn literal_of(command: &str) -> Option<usize> {
 }
 
 /// The untagged lines answering `command`.
-fn answer(command: &str, mailbox: &mut FakeMailbox) -> Vec<u8> {
+fn answer(command: &str, mailbox: &mut FakeMailbox, headers: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
     let upper = command.to_ascii_uppercase();
     let mut out = Vec::new();
 
@@ -218,20 +236,22 @@ fn answer(command: &str, mailbox: &mut FakeMailbox) -> Vec<u8> {
                 continue;
             }
             let flags = message.flags.join(" ");
-            let mut row = format!("* {} FETCH (UID {} FLAGS ({flags})", index + 1, message.uid);
-            if let Some(section) = &section {
-                let header = format!(
-                    "Message-ID: <{}>\r\nDate: Thu, 29 Oct 2026 10:00:00 +0000\r\n\
-                     Subject: fake\r\n\r\n",
-                    message.message_id,
-                );
-                row.push_str(&format!(
-                    " RFC822.SIZE 100 BODY[{section}] {{{}}}\r\n{header}",
-                    header.len(),
-                ));
-            }
-            row.push_str(")\r\n");
+            let row = format!("* {} FETCH (UID {} FLAGS ({flags})", index + 1, message.uid);
             out.extend_from_slice(row.as_bytes());
+            if let Some(section) = &section {
+                let header = headers.get(&message.uid).cloned().unwrap_or_else(|| {
+                    format!(
+                        "Message-ID: <{}>\r\nDate: Thu, 29 Oct 2026 10:00:00 +0000\r\n\
+                         Subject: fake\r\n\r\n",
+                        message.message_id,
+                    )
+                    .into_bytes()
+                });
+                let item = format!(" RFC822.SIZE 100 BODY[{section}] {{{}}}\r\n", header.len());
+                out.extend_from_slice(item.as_bytes());
+                out.extend_from_slice(&header);
+            }
+            out.extend_from_slice(b")\r\n");
         }
     }
 

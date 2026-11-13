@@ -61,7 +61,10 @@ use io_gmail::v1::{
 use io_pimdir::{
     collection::{PimdirCheckpoint, PimdirScope},
     remote::{PimdirEnumerate, PimdirHead, PimdirListing},
-    summary::mail::{addresses, decode, instant, message_ids, meta_attachment},
+    summary::{
+        PimdirDerivation,
+        mail::{derive_meta, message_id},
+    },
 };
 use log::{debug, trace, warn};
 use pimalaya_stream::{
@@ -80,12 +83,9 @@ use crate::{
     account::GmailAccount,
     client::{EnumEntry, Enumeration, Gone, Held, Listed, Renamed, StoredSize, WrittenItem},
     item::{
-        address::Address,
         collection::Collection,
         flag::{Flag, FlagOp, IanaFlag},
-        summary::{ItemSummary, normalize_message_id},
     },
-    kind::mail,
     offline::invitation::Refusal,
     throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, rfc3339},
 };
@@ -1070,9 +1070,9 @@ impl GmailClient {
         Ok(delta)
     }
 
-    /// Fetches the summaries of an id set, by batches of metadata reads; a
+    /// What names each of an id set, by batches of metadata reads; a
     /// message gone is left out.
-    pub fn fetch_summaries(&mut self, ids: &[&str]) -> Result<Vec<ItemSummary>> {
+    pub fn fetch_summaries(&mut self, ids: &[&str]) -> Result<Vec<(String, PimdirDerivation)>> {
         let ids: Vec<String> = ids.iter().map(|id| id.to_string()).collect();
         let run = Arc::clone(&self.run);
         let shared = self.collection_ids();
@@ -1081,7 +1081,8 @@ impl GmailClient {
         self.read_messages(ReadAs::Metadata, &ids, &|_| 0, |id, message| {
             if let Some(message) = message {
                 keep(&run, &shared, &id, &message, true, at);
-                summaries.push(message_summary(&id, &message));
+                let meta = message_meta(&message);
+                summaries.push((id, meta));
             }
             Ok(())
         })
@@ -1251,7 +1252,8 @@ impl GmailClient {
             }
         }
 
-        let Some(hint) = hint.and_then(normalize_message_id) else {
+        // NOTE: the hint is a derived id already, compared as it stands.
+        let Some(hint) = hint.filter(|hint| !hint.is_empty()) else {
             bail!(
                 "Gmail answered import id {answered}, which does not exist, and the message has no Message-ID to find it by"
             );
@@ -1268,12 +1270,12 @@ impl GmailClient {
                         client.message_get(&id, GmailMessageFormat::Metadata, &["Message-ID"])
                     })
                     .with_context(|| format!("Get message {id} metadata error"))?;
-                let message_id = message
+                let stated = message
                     .payload
                     .as_ref()
                     .and_then(|payload| payload.header("Message-ID"))
-                    .and_then(normalize_message_id);
-                if message_id.as_deref() == Some(hint.as_str()) {
+                    .and_then(message_id);
+                if stated.as_deref() == Some(hint) {
                     return Ok(WrittenItem { id, revision: None });
                 }
             }
@@ -1607,7 +1609,7 @@ fn named_entry(id: &str, message: &GmailMessage) -> EnumEntry {
         id: id.to_owned(),
         flags: flags_from_labels(&message.label_ids),
         revision: None,
-        meta: Some(mail::parse_summary(&message_summary(id, message))),
+        meta: Some(message_meta(message)),
     }
 }
 
@@ -1799,48 +1801,26 @@ fn label_of(flag: &Flag) -> Option<(&'static str, bool)> {
     }
 }
 
-/// Folds a metadata get into a shared [`ItemSummary`] for the `Meta` tier.
+/// What names a message read as metadata (pimdir STORAGE Annex A.1).
 ///
-/// The headers go through io-pimdir's own decoders, the ones the `Full`
-/// derivation reads a body with, so both tiers agree byte-for-byte. The
-/// size is Gmail's estimate, restated from the body at the `Full` tier.
-fn message_summary(id: &str, message: &GmailMessage) -> ItemSummary {
-    let header = |name: &str| {
-        message
-            .payload
-            .as_ref()
-            .and_then(|payload| payload.header(name))
-    };
-    let list = |name: &str| {
-        header(name)
-            .map(addresses)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|address| Address {
-                name: address.name,
-                email: address.address,
-            })
-            .collect()
-    };
-
-    ItemSummary {
-        id: id.to_owned(),
-        message_id: header("Message-ID").and_then(normalize_message_id),
-        in_reply_to: header("In-Reply-To").map(message_ids).unwrap_or_default(),
-        flags: flags_from_labels(&message.label_ids),
-        subject: header("Subject").map(decode).unwrap_or_default(),
-        from: list("From"),
-        to: list("To"),
-        cc: list("Cc"),
-        bcc: list("Bcc"),
-        date: header("Date")
-            .and_then(instant)
-            .and_then(|date| DateTime::parse_from_rfc3339(&date).ok()),
-        size: message.size_estimate.unwrap_or(0),
-        // NOTE: read without the body (pimdir STORAGE Annex A.1), which the
-        // walk of the parts replaces once the body is in.
-        has_attachment: Some(meta_attachment(header("Content-Type"))),
+/// The headers a summary reads are laid out as the header block they came
+/// from, each from its first entry, a folded value unfolded there, and
+/// read by io-pimdir's own derivation, the one a body is read with, so
+/// both tiers agree byte-for-byte. The size is Gmail's estimate and the
+/// attachment mark the top-level `Content-Type`'s, both restated from the
+/// body at the `Full` tier.
+fn message_meta(message: &GmailMessage) -> PimdirDerivation {
+    let mut header = String::new();
+    for name in batch::SUMMARY_HEADERS {
+        let stated = message.payload.as_ref().and_then(|p| p.header(name));
+        if let Some(value) = stated {
+            header.push_str(&format!("{name}: {value}\r\n"));
+        }
     }
+    header.push_str("\r\n");
+
+    let size = message.size_estimate.filter(|size| *size > 0);
+    derive_meta(header.as_bytes(), size, None)
 }
 
 /// Decodes checkpoint bytes back into a history id; `None` for an absent,
@@ -1982,9 +1962,11 @@ pub(crate) mod scripted {
 #[cfg(test)]
 mod tests {
     use io_gmail::v1::send::{GmailApiError, GmailSendError};
+    use io_pimdir::summary::PimdirSummary;
 
     use super::scripted::*;
     use super::*;
+    use crate::kind::mail::vectors::VECTORS;
 
     #[test]
     fn a_created_label_nests_under_its_parent_by_name() {
@@ -2126,22 +2108,43 @@ mod tests {
         )
         .unwrap();
 
-        let summary = message_summary("18c", &message);
+        let entry = named_entry("18c", &message);
+        let Some(PimdirSummary::Mail(summary)) = entry.meta.and_then(|meta| meta.summary) else {
+            panic!("expected a mail summary");
+        };
         assert_eq!(summary.message_id.as_deref(), Some("m1@example.org"));
         assert_eq!(summary.in_reply_to, ["m0@example.org"]);
         assert_eq!(summary.subject, "Café");
         assert_eq!(summary.from[0].name.as_deref(), Some("Alice"));
-        assert_eq!(summary.from[0].email, "alice@example.org");
+        assert_eq!(summary.from[0].address, "alice@example.org");
         assert_eq!(summary.to.len(), 2);
-        assert_eq!(
-            summary
-                .date
-                .unwrap()
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "2026-07-06T12:00:00Z"
-        );
-        assert!(summary.flags.is_empty());
-        assert_eq!(summary.size, 2048);
+        assert_eq!(summary.date.as_deref(), Some("2026-07-06T12:00:00Z"));
+        assert!(entry.flags.is_empty());
+        assert_eq!(summary.size, Some(2048));
+    }
+
+    /// A message is named off its metadata headers as its body would name
+    /// it (pimdir STORAGE Annex A.1, vectors/summaries.json): a commented
+    /// `Message-ID`, a folded `Subject` and a field stated twice among them.
+    #[test]
+    fn a_metadata_get_is_keyed_as_the_vectors_state() {
+        for vector in &VECTORS {
+            let headers: Vec<serde_json::Value> = vector
+                .fields()
+                .into_iter()
+                .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+                .collect();
+            let message: GmailMessage = serde_json::from_value(serde_json::json!({
+                "id": "18c",
+                "labelIds": ["INBOX"],
+                "sizeEstimate": vector.body.len(),
+                "payload": { "headers": headers },
+            }))
+            .unwrap();
+
+            let entry = named_entry("18c", &message);
+            vector.assert_named(&entry.meta.unwrap());
+        }
     }
 
     #[test]

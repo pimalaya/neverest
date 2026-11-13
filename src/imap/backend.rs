@@ -9,11 +9,10 @@ use std::{
     io::{Read, Write},
     num::NonZeroU32,
     ops::RangeInclusive,
-    str::from_utf8,
 };
 
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{DateTime, FixedOffset};
+use chrono::DateTime;
 use io_imap::{
     client::ImapClient as _,
     rfc3501::{
@@ -23,10 +22,8 @@ use io_imap::{
     },
     rfc6851::r#move::ImapMessageMoveOptions,
     types::{
-        body::BodyStructure,
         core::{AString, Atom, QuotedChar, Vec1},
         datetime::NaiveDate as ImapDate,
-        envelope::Address as ImapAddress,
         fetch::{MacroOrMessageDataItemNames, MessageDataItem, MessageDataItemName, Section},
         flag::{Flag as ImapFlag, FlagFetch, FlagNameAttribute, StoreType},
         mailbox::{ListMailbox, Mailbox as ImapMailbox},
@@ -41,16 +38,13 @@ use io_pimdir::{
     summary::{PimdirDerivation, mail},
 };
 use log::debug;
-use rfc2047_decoder::{Decoder, RecoverStrategy};
 
 use crate::{
     client::{EnumEntry, Enumeration, Gone, Held, Listed, Renamed},
     imap::client::{ImapClient, RoundUids},
     item::{
-        address::Address,
         collection::Collection,
         flag::{Flag, FlagOp, IanaFlag},
-        summary::{ItemSummary, normalize_message_id, parse_message_ids},
     },
     offline::invitation::Refusal,
 };
@@ -574,27 +568,33 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Fetches envelopes for a specific UID set, as `UID FETCH <set> (UID FLAGS
-    /// ENVELOPE RFC822.SIZE)`: targeted, never a whole-mailbox `1:*` sweep.
-    pub fn fetch_envelopes(&mut self, mailbox: &str, uids: &[&str]) -> Result<Vec<ItemSummary>> {
+    /// What names each of a UID set, read off the header fields a listing
+    /// reads ([`meta_names`]), never off an `ENVELOPE`, the server's own
+    /// parse: a member is named one way whichever request reads it (pimdir
+    /// STORAGE Annex A.1). Targeted, never a whole-mailbox `1:*` sweep.
+    pub fn fetch_summaries(
+        &mut self,
+        mailbox: &str,
+        uids: &[&str],
+    ) -> Result<Vec<(String, PimdirDerivation)>> {
         if uids.is_empty() {
             return Ok(Vec::new());
         }
-        let sequence_set = parse_uids(uids)?;
+        let uids = uids
+            .iter()
+            .map(|uid| {
+                uid.parse::<NonZeroU32>()
+                    .map(NonZeroU32::get)
+                    .map_err(|_| anyhow!("Invalid message UID {uid}"))
+            })
+            .collect::<Result<Vec<u32>>>()?;
 
         self.select_cached(mailbox)?;
-        let data = self.fetch(
-            sequence_set,
-            build_item_names(false),
-            ImapMessageFetchOptions {
-                uid: true,
-                ..Default::default()
-            },
-        )?;
+        let (metas, _) = self.fetch_metas(&uids)?;
 
-        Ok(data
+        Ok(metas
             .into_iter()
-            .map(|(seq, items)| envelope_from(seq.get(), items.into_inner()))
+            .map(|(uid, meta)| (uid.to_string(), meta.derivation))
             .collect())
     }
 
@@ -1050,21 +1050,6 @@ fn apply_status(mailbox: &mut Collection, items: Vec<StatusDataItem>) {
     }
 }
 
-/// FETCH item-name list: UID, FLAGS, ENVELOPE and RFC822.SIZE, plus
-/// BODYSTRUCTURE when `with_attachment` is set.
-fn build_item_names(with_attachment: bool) -> MacroOrMessageDataItemNames<'static> {
-    let mut names = vec![
-        MessageDataItemName::Uid,
-        MessageDataItemName::Flags,
-        MessageDataItemName::Envelope,
-        MessageDataItemName::Rfc822Size,
-    ];
-    if with_attachment {
-        names.push(MessageDataItemName::BodyStructure);
-    }
-    MacroOrMessageDataItemNames::MessageDataItemNames(names)
-}
-
 /// How many UIDs one page of a round lists (pimdir SYNC §4): the flags,
 /// the size and a few header fields are under a kilobyte a message, half a
 /// megabyte a response, short enough to resume cheaply.
@@ -1304,124 +1289,11 @@ fn renumbered(held: &Held<'_>, uid_validity: u32) -> bool {
         .is_some_and(|validity| validity != uid_validity)
 }
 
-/// Folds one FETCH row into a shared [`ItemSummary`].
-fn envelope_from(seq: u32, items: Vec<MessageDataItem<'static>>) -> ItemSummary {
-    let mut id = String::new();
-    let mut message_id: Option<String> = None;
-    let mut in_reply_to = Vec::new();
-    let mut flags = BTreeSet::new();
-    let mut subject = String::new();
-    let mut from = Vec::new();
-    let mut to = Vec::new();
-    let mut cc = Vec::new();
-    let mut bcc = Vec::new();
-    let mut date: Option<DateTime<FixedOffset>> = None;
-    let mut size: u64 = 0;
-    let mut has_attachment: Option<bool> = None;
-
-    for item in items {
-        match item {
-            MessageDataItem::Uid(uid) => id = uid.get().to_string(),
-            MessageDataItem::Flags(fs) => {
-                flags = fs.into_iter().filter_map(flag_from_fetch).collect();
-            }
-            MessageDataItem::Envelope(env) => {
-                if let Some(s) = env.subject.into_option() {
-                    subject = decode_mime_bytes(s.as_ref());
-                }
-                if let Some(d) = env.date.into_option() {
-                    date = parse_rfc2822_date(&bytes_to_string(d.as_ref()));
-                }
-                if let Some(m) = env.message_id.into_option() {
-                    message_id = normalize_message_id(&bytes_to_string(m.as_ref()));
-                }
-                if let Some(m) = env.in_reply_to.into_option() {
-                    in_reply_to = parse_message_ids(&bytes_to_string(m.as_ref()));
-                }
-                from = env.from.iter().map(address_from).collect();
-                to = env.to.iter().map(address_from).collect();
-                cc = env.cc.iter().map(address_from).collect();
-                bcc = env.bcc.iter().map(address_from).collect();
-            }
-            MessageDataItem::Rfc822Size(n) => size = u64::from(n),
-            MessageDataItem::BodyStructure(structure) => {
-                has_attachment = Some(body_structure_has_attachment(&structure));
-            }
-            _ => {}
-        }
-    }
-
-    if id.is_empty() {
-        id = seq.to_string();
-    }
-
-    ItemSummary {
-        id,
-        message_id,
-        in_reply_to,
-        flags,
-        subject,
-        from,
-        to,
-        cc,
-        bcc,
-        date,
-        size,
-        has_attachment,
-    }
-}
-
 fn flag_from_fetch(fetch: FlagFetch<'_>) -> Option<Flag> {
     let FlagFetch::Flag(flag) = fetch else {
         return None;
     };
     Some(Flag::from_raw(flag.to_string()))
-}
-
-fn address_from(addr: &ImapAddress<'_>) -> Address {
-    let name = addr
-        .name
-        .0
-        .as_ref()
-        .map(|s| decode_mime_bytes(s.as_ref()))
-        .filter(|s| !s.is_empty());
-
-    let mailbox = addr
-        .mailbox
-        .0
-        .as_ref()
-        .map(|s| bytes_to_string(s.as_ref()))
-        .unwrap_or_default();
-    let host = addr
-        .host
-        .0
-        .as_ref()
-        .map(|s| bytes_to_string(s.as_ref()))
-        .unwrap_or_default();
-
-    let email = if mailbox.is_empty() {
-        host
-    } else if host.is_empty() {
-        mailbox
-    } else {
-        format!("{mailbox}@{host}")
-    };
-
-    Address { name, email }
-}
-
-fn body_structure_has_attachment(structure: &BodyStructure<'_>) -> bool {
-    match structure {
-        BodyStructure::Single { extension_data, .. } => extension_data
-            .as_ref()
-            .and_then(|ext| ext.tail.as_ref())
-            .and_then(|disposition| disposition.disposition.as_ref())
-            .map(|(kind, _)| kind.as_ref().eq_ignore_ascii_case(b"attachment"))
-            .unwrap_or(false),
-        BodyStructure::Multi { bodies, .. } => {
-            bodies.as_ref().iter().any(body_structure_has_attachment)
-        }
-    }
 }
 
 /// Maps a shared [`Flag`] to its IMAP wire counterpart: IANA flags become the
@@ -1509,33 +1381,6 @@ fn parse_uids(ids: &[&str]) -> Result<SequenceSet> {
     SequenceSet::try_from(uids).map_err(|_| anyhow!("Invalid UID set"))
 }
 
-fn parse_rfc2822_date(raw: &str) -> Option<DateTime<FixedOffset>> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    DateTime::parse_from_rfc2822(trimmed).ok()
-}
-
-fn bytes_to_string(bytes: &[u8]) -> String {
-    from_utf8(bytes).map(str::to_string).unwrap_or_else(|_| {
-        let mut out = String::with_capacity(bytes.len());
-        for b in bytes {
-            out.push(*b as char);
-        }
-        out
-    })
-}
-
-/// Decodes RFC 2047 MIME-encoded words from IMAP ENVELOPE strings;
-/// falls back to [`bytes_to_string`] on malformed input.
-fn decode_mime_bytes(bytes: &[u8]) -> String {
-    let decoder = Decoder::new().too_long_encoded_word_strategy(RecoverStrategy::Decode);
-    decoder
-        .decode(bytes)
-        .unwrap_or_else(|_| bytes_to_string(bytes))
-}
-
 /// Encodes an IMAP sync cursor `(UIDVALIDITY, HIGHESTMODSEQ)` into checkpoint
 /// bytes: little-endian, a 4-byte uidvalidity then an 8-byte modseq.
 pub(crate) fn encode_checkpoint(uid_validity: u32, highest_mod_seq: u64) -> Vec<u8> {
@@ -1572,7 +1417,10 @@ mod tests {
     use io_pimdir::collection::{PimdirCheckpoint, PimdirCursor};
     use pimalaya_stream::tls::Tls;
 
-    use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+    use crate::{
+        imap::fake::{FakeImap, FakeMailbox, FakeMessage},
+        kind::mail::vectors::VECTORS,
+    };
 
     use super::*;
 
@@ -1926,6 +1774,50 @@ mod tests {
         let named = summary(&meta.derivation);
         assert_eq!(named.attachment, Some(false));
         assert_eq!(named.date, None, "no Date header, no date");
+    }
+
+    /// A message fetched at the `Meta` tier is named as its body would name
+    /// it (pimdir STORAGE Annex A.1, vectors/summaries.json): off its header
+    /// fields, a commented `Message-ID`, a folded `Subject` and a word in a
+    /// charset that decodes nothing among them, never off an `ENVELOPE`.
+    #[test]
+    fn a_message_fetched_alone_is_keyed_as_the_vectors_state() {
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 1,
+                highest_mod_seq: 1,
+                messages: (1..=VECTORS.len() as u32)
+                    .map(|uid| FakeMessage {
+                        uid,
+                        flags: Vec::new(),
+                        message_id: String::new(),
+                    })
+                    .collect(),
+                states_exists: true,
+            },
+            false,
+        );
+        for (uid, vector) in (1..).zip(&VECTORS) {
+            server.set_header(uid, vector.header());
+        }
+        let mut client = ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+        let uids: Vec<String> = (1..=VECTORS.len()).map(|uid| uid.to_string()).collect();
+        let uids: Vec<&str> = uids.iter().map(String::as_str).collect();
+
+        let named = client.fetch_summaries("INBOX", &uids).unwrap();
+
+        assert_eq!(named.len(), VECTORS.len());
+        for (uid, derivation) in &named {
+            VECTORS[uid.parse::<usize>().unwrap() - 1].assert_named(derivation);
+        }
+        assert!(
+            server
+                .sent("UID FETCH")
+                .iter()
+                .all(|line| !line.contains("ENVELOPE")),
+            "{:?}",
+            server.sent("UID FETCH")
+        );
     }
 
     /// A row the server answered without a UID names nothing.

@@ -1,0 +1,9 @@
+Message-ID: <charset-latin2@example.org>
+Subject: =?ISO-8859-2?Q?Za=BF=F3=B3=E6_g=EA=B6l=B1_ja=BC=F1?=
+From: =?iso-8859-2?B?o3VrYXN6IK9haw==?= <lukasz@example.org>
+To: bob@example.org
+Date: Sat, 01 Aug 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+A single-byte table: every octet above 7F is read through the index of ISO-8859-2.

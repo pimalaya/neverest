@@ -1,0 +1,9 @@
+Message-ID: <charset-jis@example.org>
+Subject: =?ISO-2022-JP?B?GyRCJDMkcyRLJEEkTxsoQg==?=
+From: Alice Example <alice@example.org>
+To: bob@example.org
+Date: Sat, 01 Aug 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+A stateful encoding: an escape sequence switches to JIS X 0208 and another back to ASCII.

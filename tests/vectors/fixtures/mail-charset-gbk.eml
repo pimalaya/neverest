@@ -1,0 +1,9 @@
+Message-ID: <charset-gbk@example.org>
+Subject: =?gbk?B?xOO6w8rAvec=?=
+From: Alice Example <alice@example.org>
+To: bob@example.org
+Date: Sat, 01 Aug 2026 10:00:00 +0000
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+A double-byte table: four characters of GB 2312's first level, two octets each.

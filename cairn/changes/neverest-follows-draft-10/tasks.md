@@ -15,6 +15,6 @@ change: neverest-follows-draft-10
 - [x] An intent of an unknown version stays pending
 - [x] Spec, MIGRATION.md and CHANGELOG.md
 - [x] `cargo fmt`, `cargo clippy --all-features --all-targets -- -D warnings`, `cargo test --all-features --bin neverest`, `cargo check --all-features --tests`
-- [ ] The Graph pass states only what Graph marks removed (Y1): left, the owner's decision (see the log)
+- [x] The Graph pass states only what Graph marks removed (Y1): landed by the change a-graph-pass-states-no-guessed-removal
 - [ ] ./tests/pimdir.sh, then the Stalwart, Radicale and live suites on io-pimdir 0.11 (the owner, after migrating)
 - [ ] One server test per case of Y2 (a remove into a target holding the identity, an append without UIDPLUS)

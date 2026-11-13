@@ -8,45 +8,17 @@
 //! must agree byte-for-byte. The `alt:` link id embeds the date: spell it
 //! differently across tiers and a message with no `Message-ID` splits in
 //! two, re-fetched every sync and stored twice.
+//!
+//! The `Meta` tier is each connector's own: one whose source serves the
+//! header fields raw hands them to io-pimdir's `derive_meta`, the reading
+//! a body gets, and this crate parses no field itself. A source serving a
+//! field decoded alone names its member from that value, which stands
+//! until the body is read (Annex A.1).
 
-use chrono::{DateTime, FixedOffset, SecondsFormat, Utc};
-use io_pimdir::summary::{
-    PimdirAddress, PimdirDerivation,
-    mail::{self, PimdirMailSummary},
-};
+use io_pimdir::summary::{PimdirDerivation, mail};
 
-use crate::item::{address::Address, summary::ItemSummary};
-
-/// The `Meta`-tier derivation: link id, summary and sort key from an
-/// IMAP/Graph envelope, with no body fetched.
-///
-/// The envelope walks no MIME part, so `attachment` stays unknown unless the
-/// backend read it off the body structure.
-pub fn parse_summary(env: &ItemSummary) -> PimdirDerivation {
-    let from: Vec<PimdirAddress> = env.from.iter().map(address).collect();
-    let first = from.first();
-
-    PimdirMailSummary {
-        message_id: env.message_id.clone().filter(|id| !id.is_empty()),
-        in_reply_to: env.in_reply_to.clone(),
-        subject: env.subject.clone(),
-        sender: first.map(|address| address.address.clone()),
-        sender_name: first.and_then(|address| address.name.clone()),
-        date: env.date.map(utc),
-        size: (env.size > 0).then_some(env.size),
-        attachment: env.has_attachment,
-        // NOTE: read with the body alone, never off an envelope.
-        invitation: None,
-        from,
-        to: env.to.iter().map(address).collect(),
-        cc: env.cc.iter().map(address).collect(),
-        bcc: env.bcc.iter().map(address).collect(),
-    }
-    .derivation()
-}
-
-/// The `Full`-tier derivation: the same summary, read off a raw message's
-/// headers.
+/// The `Full`-tier derivation: the summary a listing names, read off a raw
+/// message's headers.
 ///
 /// `raw` is only the header prefix the stream captured, so the octet count is
 /// restated from `size` and the attachment mark is left unknown: no part is
@@ -64,51 +36,207 @@ pub fn parse_body(raw: &[u8], size: u64) -> PimdirDerivation {
     derivation
 }
 
-/// The `Date:` as Annex A.1 spells it: the UTC instant, RFC 3339 at seconds
-/// precision, never the local reading the sender wrote.
-fn utc(date: DateTime<FixedOffset>) -> String {
-    date.with_timezone(&Utc)
-        .to_rfc3339_opts(SecondsFormat::Secs, true)
-}
+/// The pimdir summary vectors a connector's reading is held to (pimdir
+/// vectors/summaries.json, STORAGE Annex A.1): the fixtures another parser
+/// reads another way, copied under tests/vectors/fixtures with what the
+/// vectors state for each.
+#[cfg(all(test, any(feature = "imap", feature = "gmail", feature = "msgraph")))]
+#[cfg_attr(
+    not(all(feature = "imap", feature = "gmail", feature = "msgraph")),
+    allow(dead_code)
+)]
+pub(crate) mod vectors {
+    use io_pimdir::summary::{PimdirDerivation, PimdirSummary};
 
-/// An envelope address as Annex A.6 records it: the addr-spec canonical, the
-/// display name as the backend decoded it.
-fn address(address: &Address) -> PimdirAddress {
-    PimdirAddress {
-        address: PimdirAddress::canonical(&address.email),
-        name: address.name.clone(),
+    /// The `date` every vector below states.
+    const DATE: &str = "2026-08-01T10:00:00Z";
+
+    /// One fixture and the columns the vectors state for it.
+    pub(crate) struct Vector {
+        /// The fixture's name under tests/vectors/fixtures.
+        pub(crate) name: &'static str,
+        /// The whole message.
+        pub(crate) body: &'static [u8],
+        pub(crate) link_id: &'static str,
+        pub(crate) message_id: Option<&'static str>,
+        pub(crate) in_reply_to: &'static [&'static str],
+        pub(crate) subject: &'static str,
+        pub(crate) sender: &'static str,
+        pub(crate) sender_name: &'static str,
+    }
+
+    macro_rules! fixture {
+        ($name:literal) => {
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/vectors/fixtures/",
+                $name,
+                ".eml"
+            ))
+        };
+    }
+
+    pub(crate) const VECTORS: [Vector; 10] = [
+        Vector {
+            name: "mail-id-comment",
+            body: fixture!("mail-id-comment"),
+            link_id: "comment-1@example.org",
+            message_id: Some("comment-1@example.org"),
+            in_reply_to: &["p-1@example.org", "p-2@example.org"],
+            subject: "Commented ids",
+            sender: "ops@example.org",
+            sender_name: "Night Ops",
+        },
+        Vector {
+            name: "mail-bracketless-id",
+            body: fixture!("mail-bracketless-id"),
+            link_id: "bare-2@example.org",
+            message_id: Some("bare-2@example.org"),
+            in_reply_to: &[],
+            subject: "No brackets",
+            sender: "alice@example.org",
+            sender_name: "Alice Example",
+        },
+        Vector {
+            name: "mail-repeated-fields",
+            body: fixture!("mail-repeated-fields"),
+            link_id: "repeated-1@example.org",
+            message_id: Some("repeated-1@example.org"),
+            in_reply_to: &[],
+            subject: "First subject",
+            sender: "first@example.org",
+            sender_name: "First Sender",
+        },
+        Vector {
+            name: "mail-folded-subject",
+            body: fixture!("mail-folded-subject"),
+            link_id: "alt:Café crème and\t  notes|2026-08-01T10:00:00Z|alice@example.org",
+            message_id: None,
+            in_reply_to: &[],
+            subject: "Café crème and\t  notes",
+            sender: "alice@example.org",
+            sender_name: "Alice Example",
+        },
+        Vector {
+            name: "mail-military-zone",
+            body: fixture!("mail-military-zone"),
+            link_id: "alt:Military zone|2026-08-01T10:00:00Z|alice@example.org",
+            message_id: None,
+            in_reply_to: &[],
+            subject: "Military zone",
+            sender: "alice@example.org",
+            sender_name: "Alice Example",
+        },
+        Vector {
+            name: "mail-charset-gbk",
+            body: fixture!("mail-charset-gbk"),
+            link_id: "charset-gbk@example.org",
+            message_id: Some("charset-gbk@example.org"),
+            in_reply_to: &[],
+            subject: "你好世界",
+            sender: "alice@example.org",
+            sender_name: "Alice Example",
+        },
+        Vector {
+            name: "mail-charset-iso-2022-jp",
+            body: fixture!("mail-charset-iso-2022-jp"),
+            link_id: "charset-jis@example.org",
+            message_id: Some("charset-jis@example.org"),
+            in_reply_to: &[],
+            subject: "こんにちは",
+            sender: "alice@example.org",
+            sender_name: "Alice Example",
+        },
+        Vector {
+            name: "mail-charset-iso-8859-2",
+            body: fixture!("mail-charset-iso-8859-2"),
+            link_id: "charset-latin2@example.org",
+            message_id: Some("charset-latin2@example.org"),
+            in_reply_to: &[],
+            subject: "Zażółć gęślą jaźń",
+            sender: "lukasz@example.org",
+            sender_name: "Łukasz Żak",
+        },
+        Vector {
+            name: "mail-charset-replacement",
+            body: fixture!("mail-charset-replacement"),
+            link_id: "charset-replacement@example.org",
+            message_id: Some("charset-replacement@example.org"),
+            in_reply_to: &[],
+            subject: "=?ISO-2022-KR?B?GyQpQw5HUQ8=?= kept",
+            sender: "alice@example.org",
+            sender_name: "Alice Example",
+        },
+        Vector {
+            name: "mail-charset-windows-1252",
+            body: fixture!("mail-charset-windows-1252"),
+            link_id: "alt:Coût 10 €|2026-08-01T10:00:00Z|alice@example.org",
+            message_id: None,
+            in_reply_to: &[],
+            subject: "Coût 10 €",
+            sender: "alice@example.org",
+            sender_name: "Alice Example",
+        },
+    ];
+
+    impl Vector {
+        /// The header block, its closing empty line included.
+        pub(crate) fn header(&self) -> &'static [u8] {
+            let end = self.body.windows(4).position(|at| at == b"\r\n\r\n");
+            &self.body[..end.expect("a fixture holds a header block") + 4]
+        }
+
+        /// Each field's name and value in document order, as a source
+        /// listing header fields in JSON serves them: the value trimmed
+        /// at both ends, the line breaks of a folded one kept.
+        pub(crate) fn fields(&self) -> Vec<(String, String)> {
+            let header = str::from_utf8(self.header()).expect("an ASCII header block");
+            let mut fields: Vec<(String, String)> = Vec::new();
+            for line in header.split_inclusive("\r\n") {
+                match fields.last_mut() {
+                    Some((_, value)) if line.starts_with([' ', '\t']) => value.push_str(line),
+                    _ => {
+                        if let Some((name, value)) = line.split_once(':') {
+                            fields.push((name.to_owned(), value.to_owned()));
+                        }
+                    }
+                }
+            }
+            for (_, value) in &mut fields {
+                *value = value.trim().to_owned();
+            }
+            fields
+        }
+
+        /// Asserts `derivation` names the fixture as the vectors state.
+        pub(crate) fn assert_named(&self, derivation: &PimdirDerivation) {
+            let name = self.name;
+            let Some(PimdirSummary::Mail(summary)) = &derivation.summary else {
+                panic!("{name}: expected a mail summary, got {derivation:?}");
+            };
+
+            assert_eq!(derivation.link_id.as_str(), self.link_id, "{name}");
+            assert_eq!(summary.message_id.as_deref(), self.message_id, "{name}");
+            assert_eq!(summary.in_reply_to, self.in_reply_to, "{name}");
+            assert_eq!(summary.subject, self.subject, "{name}");
+            assert_eq!(summary.sender.as_deref(), Some(self.sender), "{name}");
+            assert_eq!(
+                summary.sender_name.as_deref(),
+                Some(self.sender_name),
+                "{name}"
+            );
+            assert_eq!(summary.date.as_deref(), Some(DATE), "{name}");
+            assert_eq!(derivation.sort_key.as_str(), DATE, "{name}");
+            assert_eq!(summary.attachment, Some(false), "{name}");
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use io_pimdir::summary::PimdirSummary;
+    use io_pimdir::summary::{PimdirSummary, mail::PimdirMailSummary};
 
     use super::*;
-
-    fn addr(email: &str) -> Address {
-        Address {
-            name: None,
-            email: email.to_string(),
-        }
-    }
-
-    fn summary(message_id: Option<&str>, date: Option<&str>) -> ItemSummary {
-        ItemSummary {
-            id: "1".into(),
-            message_id: message_id.map(str::to_string),
-            in_reply_to: Vec::new(),
-            flags: Default::default(),
-            subject: "Stand-up notes".into(),
-            from: vec![addr("Alice@example.org")],
-            to: vec![addr("bob@example.org")],
-            cc: Vec::new(),
-            bcc: Vec::new(),
-            date: date.map(|d| DateTime::parse_from_rfc3339(d).unwrap()),
-            size: 299,
-            has_attachment: None,
-        }
-    }
 
     fn mail(derivation: &PimdirDerivation) -> &PimdirMailSummary {
         match derivation.summary.as_ref() {
@@ -127,58 +255,5 @@ mod tests {
         assert_eq!(derivation.link_id.as_str(), "x@y");
         assert_eq!(mail(&derivation).size, Some(168_320));
         assert_eq!(mail(&derivation).attachment, None, "no part was walked");
-    }
-
-    /// The two tiers derive one message one way. The `alt:` link id embeds
-    /// the date, so a date the tiers spell differently splits the message in
-    /// two: re-fetched every sync, its body stored twice.
-    #[test]
-    fn meta_and_full_derivations_agree() {
-        let raw = b"Subject: Stand-up notes\r\n\
-                    From: Alice@example.org\r\n\
-                    To: bob@example.org\r\n\
-                    Date: Sat, 1 Aug 2026 12:00:00 +0200\r\n\r\nbody";
-
-        let body = parse_body(raw, 299);
-        let envelope = parse_summary(&summary(None, Some("2026-08-01T12:00:00+02:00")));
-
-        assert!(
-            body.link_id.as_str().starts_with("alt:"),
-            "{:?}",
-            body.link_id
-        );
-        assert_eq!(body.link_id, envelope.link_id);
-        assert_eq!(body.sort_key.as_str(), "2026-08-01T10:00:00Z");
-        assert_eq!(body.sort_key, envelope.sort_key);
-        assert_eq!(mail(&body), mail(&envelope));
-    }
-
-    /// The same message, whichever tier resolved it, is one item.
-    #[test]
-    fn both_tiers_link_a_message_by_its_bare_id() {
-        let raw = b"Message-ID: <basic-1@example.org>\r\n\
-                    Subject: Stand-up notes\r\n\
-                    From: alice@example.org\r\n\
-                    To: bob@example.org\r\n\
-                    Date: Sat, 1 Aug 2026 12:00:00 +0200\r\n\r\nbody";
-
-        let body = parse_body(raw, 299);
-        let envelope = parse_summary(&summary(
-            Some("basic-1@example.org"),
-            Some("2026-08-01T12:00:00+02:00"),
-        ));
-
-        assert_eq!(body.link_id.as_str(), "basic-1@example.org");
-        assert_eq!(body.link_id, envelope.link_id);
-    }
-
-    /// A message with no parseable date omits it rather than guessing, the
-    /// empty key landing it last in a descending listing.
-    #[test]
-    fn a_message_without_a_date_sorts_last_and_omits_the_field() {
-        let derivation = parse_summary(&summary(Some("nodate-1@example.org"), None));
-
-        assert_eq!(mail(&derivation).date, None);
-        assert!(derivation.sort_key.is_unknown());
     }
 }

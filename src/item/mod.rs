@@ -1,15 +1,13 @@
 //! # Item vocabulary
 //!
 //! The kind-neutral shapes above the client seam: a
-//! [`collection::Collection`] of items, each summarised by an
-//! [`summary::ItemSummary`] and carrying a set of [`flag::Flag`]s.
+//! [`collection::Collection`] of items, each carrying a set of
+//! [`flag::Flag`]s. What summarises an item is io-pimdir's own row
+//! (pimdir STORAGE Annex A), which each adapter derives at its edge.
 //!
 //! Strict least-common-denominator: each adapter keeps its own protocol
 //! vocabulary behind the seam (an IMAP mailbox stays a mailbox) and
-//! converts at the edge. The summary and [`address::Address`] are still
-//! mail-shaped, and move under the `message/rfc822` kind in phase 2.
+//! converts at the edge.
 
-pub mod address;
 pub mod collection;
 pub mod flag;
-pub mod summary;

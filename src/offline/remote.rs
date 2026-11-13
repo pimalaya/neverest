@@ -49,7 +49,7 @@ use log::{debug, warn};
 use crate::dav::client::is_duplicate_uid;
 use crate::{
     client::{Client, EnumEntry, Gone, Held, Listed, Pool, StoredSize, WrittenItem},
-    item::{flag::Flag, summary::ItemSummary},
+    item::flag::Flag,
     kind::{Kind, LinkId},
 };
 
@@ -113,6 +113,9 @@ pub struct PimRemote<'a> {
     /// Whether a listing found the source renumbered (an IMAP
     /// `UIDVALIDITY` bump), failing its enumeration so the driver rekeys.
     rekey: bool,
+    /// Whether the source caps what it lists of a collection, as its
+    /// configuration says (pimdir SYNC §4, §5).
+    capped: bool,
 }
 
 /// What the store binds of a collection for one source.
@@ -342,6 +345,7 @@ impl<'a> PimRemote<'a> {
             scope_bound,
             heads,
             rekey: false,
+            capped: false,
         }
     }
 
@@ -374,6 +378,7 @@ impl<'a> PimRemote<'a> {
             scope_bound,
             heads,
             rekey: false,
+            capped: false,
         }
     }
 
@@ -389,6 +394,14 @@ impl<'a> PimRemote<'a> {
     /// nothing, and its replica is thrown away.
     pub fn with_bodies(mut self, bodies: bool) -> Self {
         self.bodies = bodies;
+        self
+    }
+
+    /// States every page of a round capped when `capped`: the source lists
+    /// at most a number of what a collection holds, so a member it leaves
+    /// unlisted is no absence (pimdir SYNC §4, §5).
+    pub fn with_capped(mut self, capped: bool) -> Self {
+        self.capped = capped;
         self
     }
 
@@ -584,14 +597,17 @@ impl PimdirRemote for PimRemote<'_> {
             narrowed: page.narrowed,
             enumerated: page.enumerated,
         };
-        Ok(PimdirEnumerated::Page(snapshot(
+        let mut answer = snapshot(
             page.complete,
             page.cursor,
             page.checkpoint,
             items,
             vanished,
             narrowing,
-        )))
+        );
+        // NOTE: stated on every page of a round and on no other page.
+        answer.capped = self.capped && answer.complete;
+        Ok(PimdirEnumerated::Page(answer))
     }
 
     fn scope_bound(&self) -> bool {
@@ -875,24 +891,21 @@ impl PimRemote<'_> {
         handles: Vec<PimdirHandle>,
     ) -> Result<Vec<PimdirFetchedItem>> {
         let ids: Vec<&str> = handles.iter().map(|h| h.as_str()).collect();
-        let envelopes = self
+        let mut named: HashMap<String, PimdirDerivation> = self
             .pool
             .primary()
             .fetch_summaries(collection, &ids)
-            .with_context(|| format!("Fetch envelopes {collection} error"))?;
-        let by_id: HashMap<&str, &ItemSummary> =
-            envelopes.iter().map(|e| (e.id.as_str(), e)).collect();
+            .with_context(|| format!("Fetch summaries {collection} error"))?
+            .into_iter()
+            .collect();
 
         let mut items = Vec::with_capacity(handles.len());
         for handle in handles {
-            let Some(env) = by_id.get(handle.as_str()) else {
-                continue;
-            };
             let Some(PimdirDerivation {
                 link_id,
                 summary,
                 sort_key,
-            }) = self.kind.parse_summary(env)
+            }) = named.remove(handle.as_str())
             else {
                 continue;
             };

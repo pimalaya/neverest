@@ -1,0 +1,13 @@
+Message-ID: <repeated-1@example.org>
+Message-ID: <repeated-2@example.org>
+Subject: First subject
+Subject: Second subject
+From: First Sender <first@example.org>
+From: Second Sender <second@example.org>
+To: bob@example.org
+Date: Sat, 01 Aug 2026 12:00:00 +0200
+Date: Sun, 02 Aug 2026 12:00:00 +0200
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Four fields stated twice: each is read from its first occurrence.

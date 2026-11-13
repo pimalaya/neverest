@@ -181,6 +181,11 @@ pub struct SyncOutput {
     /// `Message-ID`, or the create's own, read otherwise by its server,
     /// which the item then holds twice.
     pub disagreed: Vec<DisagreedMember>,
+    /// The members a source configured as capped did not list in a round
+    /// that closed, counted per collection and kept (pimdir SYNC §5). They
+    /// are no warning and change no exit code: a capped source lists the
+    /// same part of a collection at every round.
+    pub unlisted: Vec<UnlistedMembers>,
     /// What the run did to the store's search index (pimdir SEARCH), `null`
     /// in a dry run and in a build without the `search` feature.
     ///
@@ -226,6 +231,7 @@ impl SyncOutput {
             unanswered,
             waiting,
             disagreed,
+            unlisted,
             index: _,
         } = other;
 
@@ -250,6 +256,7 @@ impl SyncOutput {
         self.unanswered.extend(unanswered);
         self.waiting.extend(waiting);
         self.disagreed.extend(disagreed);
+        self.unlisted.extend(unlisted);
     }
 
     /// Names every endpoint as the account's configuration does, rather than
@@ -280,6 +287,7 @@ impl SyncOutput {
         endpoints.extend(self.unanswered.iter_mut().map(|u| &mut u.side));
         endpoints.extend(self.waiting.iter_mut().map(|w| &mut w.side));
         endpoints.extend(self.disagreed.iter_mut().map(|d| &mut d.side));
+        endpoints.extend(self.unlisted.iter_mut().map(|u| &mut u.side));
 
         for endpoint in endpoints {
             if let Some(name) = endpoint.strip_prefix(&prefix) {
@@ -499,6 +507,33 @@ impl fmt::Display for UnansweredPushes {
         write!(
             f,
             "{count} change(s) to {collection} on {side} got no answer from the server, pushed again by the next run"
+        )
+    }
+}
+
+/// The members a capped source left unlisted in a round that closed, each
+/// kept (pimdir SYNC §5).
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct UnlistedMembers {
+    /// The side configured as capped.
+    pub side: String,
+    /// The collection, as the side names it.
+    pub collection: String,
+    /// How many members the store binds there that the round did not list.
+    pub count: usize,
+}
+
+impl fmt::Display for UnlistedMembers {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            count,
+        } = self;
+        write!(
+            f,
+            "{count} item(s) of {collection} not listed by {side}, which is capped: kept"
         )
     }
 }
@@ -1186,6 +1221,14 @@ impl fmt::Display for SyncOutput {
             writeln!(f, "Waiting ({n}):", n = self.waiting.len())?;
             for waiting in &self.waiting {
                 writeln!(f, " - {waiting}")?;
+            }
+            writeln!(f)?;
+        }
+
+        if !self.unlisted.is_empty() {
+            writeln!(f, "Unlisted ({n}):", n = self.unlisted.len())?;
+            for unlisted in &self.unlisted {
+                writeln!(f, " - {unlisted}")?;
             }
             writeln!(f)?;
         }

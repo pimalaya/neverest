@@ -78,6 +78,8 @@
 #     longer lists is deleted on the other only when this is true, and a
 #     frontend may ask to delete one (a `collection-delete` intent) only
 #     then
+#   - `collection.capped`: default false; true when the server lists at most
+#     a number of what a collection holds, so what it leaves out is kept
 #   - `item.{create,delete}`: both required when the block is declared
 #   - `pool-size`: read by Microsoft Graph alone for now (default 3, never
 #     above the account's `connections`); IMAP opens `connections`
@@ -153,6 +155,15 @@ imap.collection.create = false
 imap.collection.delete = false
 imap.item.create = true
 imap.item.delete = false
+
+# Say so when the server lists at most a number of the messages a folder holds,
+# whatever it holds (Gmail over IMAP with "Limit IMAP folders to contain no
+# more than this many messages" set). A message such a listing leaves out is
+# then kept, and counted in the report under `Unlisted`, where it would be read
+# as deleted. Only a removal the server states itself then deletes: an IMAP
+# server states one with QRESYNC alone, which Gmail lacks, so a message deleted
+# there stays in the store while this is set. Every backend takes the key.
+#imap.collection.capped = true
 
 # Narrow the pool when the server's `LIMIT` advertises less than 8.
 #imap.pool-size = 8

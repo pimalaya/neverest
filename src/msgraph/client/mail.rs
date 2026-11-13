@@ -16,13 +16,16 @@
 //!   and resuming below the second the page before ended at, never at an
 //!   offset a delete would shift; once the band is listed, one pass of the
 //!   folder's delta with ids, dates and flags only makes the link, lands as
-//!   the round's last page, and corrects what changed or went while the
-//!   band was listed. A round over the band a coverage lacks lists that
-//!   band alone and keeps the link. Every page of a round under a scope
-//!   states it narrowed by its `sentDateTime` filter, which lists no
-//!   undated message, and the pass hands every id of the folder (pimdir
-//!   SYNC §4, §5); a band round hands none, the engine finding absent there
-//!   only a member dated in the band.
+//!   the round's last page, and lists what changed or arrived while the
+//!   band was listed. It states gone only a row Graph marks removed: what
+//!   it does not list is the engine's to find absent, so a message a band
+//!   page listed and Graph dropped before the pass stays until a later
+//!   round. A round over the band a coverage lacks lists that band alone
+//!   and keeps the link. Every page of a round under a scope states it
+//!   narrowed by its `sentDateTime` filter, which lists no undated
+//!   message, and the pass hands every id of the folder (pimdir SYNC §4,
+//!   §5); a band round hands none, the engine finding absent there only a
+//!   member dated in the band.
 //! - **A delta** follows the stored link: a change outside the scope is
 //!   dropped, by `sentDateTime`; a changed member in scope the store does
 //!   not bind is named by its summary, read in JSON batches when the link
@@ -66,11 +69,13 @@ use io_pimdir::{
 use log::{debug, trace, warn};
 use url::Url;
 
-use super::{GraphClient, SIZE_EXPAND, batch_url, is_expired_link, message_date, message_envelope};
+use super::{
+    GraphClient, SIZE_EXPAND, batch_url, is_expired_link, message_date, message_flags,
+    message_meta, message_size,
+};
 use crate::{
     client::{EnumEntry, Enumeration, Held, Listed},
     item::flag::{Flag, IanaFlag},
-    kind::mail::parse_summary,
 };
 
 /// The summary `$select`: what names a message (pimdir STORAGE Annex A.1)
@@ -617,8 +622,14 @@ enum Seen {
 /// whole folder with ids, dates and flags, whose delta link becomes the
 /// checkpoint. A member in scope is listed by its binding, by one read in
 /// batches when nothing names it, and not again when the band listed it
-/// this run with the marks it still has; a member the store binds or the
-/// band listed that the pass does not list is gone.
+/// this run with the marks it still has.
+///
+/// Only a row the pass marks removed is stated gone (pimdir SYNC §4). A
+/// member the pass does not list is no removal Graph stated: the engine
+/// finds it absent from the ids the pass hands, in scope and under its
+/// guards. One a band page of the round listed, which that page stamped,
+/// is so never found absent, and stays until a later round of its scope:
+/// a fresh delta reports no removal older than itself.
 ///
 /// A member a band head named that the store did not bind when the run
 /// began is not held: the pass reads its summary, as it does any member
@@ -627,9 +638,9 @@ enum Seen {
 /// with the marks it still has, is left out: that page stamped it.
 ///
 /// The pass runs within one request of the engine: resumed, it starts
-/// again, since what it did not list is what went. Its rows are read down
-/// to an id and a [`Seen`] as each page comes, so a folder of any size
-/// costs that much a message, never its rows.
+/// again, its link being the one a whole fresh delta ends on. Its rows are
+/// read down to an id and a [`Seen`] as each page comes, so a folder of
+/// any size costs that much a message, never its rows.
 fn pass(
     wire: &mut impl MailWire,
     folder: &mut Folder,
@@ -656,9 +667,13 @@ fn pass(
     };
     let mut present = HashSet::new();
     let mut unread = Vec::new();
+    let mut gone = Vec::new();
     for (id, seen) in &listed {
         let marks = match seen {
-            Seen::Removed => continue,
+            Seen::Removed => {
+                gone.push(id.clone());
+                continue;
+            }
             Seen::Out => {
                 present.insert(id.as_str());
                 continue;
@@ -673,19 +688,9 @@ fn pass(
         }
     }
 
-    // NOTE: what the pass removes and what it no longer lists are both
-    // gone, each stated once.
-    let mut gone: Vec<String> = held
-        .handles
-        .iter()
-        .chain(folder.banded.keys())
-        .filter(|id| !present.contains(id.as_str()))
-        .cloned()
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    gone.sort_unstable();
-
+    // NOTE: only a row the pass marks removed is stated gone (pimdir SYNC
+    // §4). A member it does not list is the engine's to find absent, from
+    // the ids handed below, in scope and under its guards.
     folder.banded.clear();
     folder.head = None;
     listing.read_metas(wire, folder, &unread, scope)?;
@@ -900,15 +905,14 @@ impl Listing {
     /// Lists `message` named by its summary, noting the size Graph states.
     fn named(&mut self, folder: &mut Folder, message: MsgraphMessage) {
         self.bytes += serde_json::to_vec(&message).map_or(0, |json| json.len() as u64);
-        let summary = message_envelope(&message.id, &message);
-        if summary.size > 0 {
-            folder.sizes.push((message.id.clone(), summary.size));
+        if let Some(size) = message_size(&message).filter(|size| *size > 0) {
+            folder.sizes.push((message.id.clone(), size));
         }
         self.items.push(EnumEntry {
-            id: message.id,
-            flags: summary.flags.clone(),
+            flags: message_flags(&message),
             revision: None,
-            meta: Some(parse_summary(&summary)),
+            meta: Some(message_meta(&message)),
+            id: message.id,
         });
     }
 
@@ -1278,6 +1282,9 @@ mod tests {
         log: Vec<String>,
         /// The versions whose links Graph no longer serves.
         expired: HashSet<usize>,
+        /// The messages a fresh delta fails to list while the folder holds
+        /// them, as one ending early would.
+        unlisted: HashSet<String>,
         counts: Counts,
     }
 
@@ -1288,6 +1295,7 @@ mod tests {
                 messages: BTreeMap::new(),
                 log: Vec::new(),
                 expired: HashSet::new(),
+                unlisted: HashSet::new(),
                 counts: Counts::default(),
             }
         }
@@ -1433,6 +1441,12 @@ mod tests {
             }
         }
 
+        /// The ids a fresh delta lists: every message but the unlisted.
+        fn passed(&self) -> Vec<String> {
+            let listed = |id: &&String| !self.unlisted.contains(*id);
+            self.messages.keys().filter(listed).cloned().collect()
+        }
+
         /// The ids changed since `version`, each once, in change order.
         fn changed(&self, version: usize) -> Vec<String> {
             let mut seen = HashSet::new();
@@ -1483,7 +1497,7 @@ mod tests {
         ) -> Result<MsgraphMessagesDeltaResponse> {
             self.counts.passes.push(select.to_owned());
             let summary = select == SUMMARY_SELECT;
-            let ids: Vec<String> = self.messages.keys().cloned().collect();
+            let ids = self.passed();
             Ok(self.delta_page(&ids, 0, summary, |end| format!("pass|{summary}|{end}")))
         }
 
@@ -1493,7 +1507,7 @@ mod tests {
             match parts[0] {
                 "pass" => {
                     let summary = parts[1] == "true";
-                    let ids: Vec<String> = self.messages.keys().cloned().collect();
+                    let ids = self.passed();
                     Ok(Some(self.delta_page(
                         &ids,
                         parts[2].parse()?,
@@ -1926,9 +1940,11 @@ mod tests {
     }
 
     /// A round broken in its band resumes below where its band ended; broken
-    /// in its pass, it passes again, the band left alone; a member deleted
-    /// while the band was listed vanishes with the pass, and one added then
-    /// is named by it.
+    /// in its pass, it passes again, the band left alone; a member added
+    /// while the band was listed is named by the pass. One a band page
+    /// listed and Graph dropped before the pass stays: that page stamped
+    /// it, no row of the fresh delta marks it removed, and the pass states
+    /// no removal Graph does not (pimdir SYNC §4).
     #[test]
     fn an_interrupted_round_resumes_its_band_and_passes_again() {
         let dir = tempfile::tempdir().unwrap();
@@ -1981,13 +1997,70 @@ mod tests {
         assert_eq!(remote.graph.counts.passes.len(), 1);
         assert_eq!(remote.graph.counts.bands, 10);
 
+        // NOTE: `2026-09-10` stays until a later round of its scope.
         let mut expected = months(&["2026-07", "2026-09"]);
-        expected.remove("2026-09-10");
         expected.insert("late".into());
-        assert_eq!(stored(&store), expected, "the pass corrects the band");
+        assert_eq!(stored(&store), expected, "the pass adds to the band");
 
         let coverage = store.list_coverage(COLLECTION).unwrap();
         assert!(coverage[0].round.is_none(), "the round closed");
+    }
+
+    /// A pass states gone only what its rows mark removed (pimdir SYNC §4):
+    /// a fresh delta failing to list members the folder holds, as one
+    /// ending early does, drops none of them, neither the one out of the
+    /// round's scope nor the one a band page of the round listed.
+    #[test]
+    fn a_pass_failing_to_list_a_member_states_no_removal() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut remote = Remote::new(folder());
+        sync(&mut store, &mut remote, since("2026-06-01")).unwrap();
+        let held = stored(&store);
+        assert_eq!(held, months(&["2026-06", "2026-07", "2026-09"]));
+
+        // NOTE: the link expired, so the run opens a round, which passes.
+        let link = String::from_utf8(checkpoint(&store).unwrap()).unwrap();
+        let version: usize = link.rsplit('|').next().unwrap().parse().unwrap();
+        remote.graph.expired.insert(version);
+        remote.graph.unlisted = HashSet::from(["2026-06-03".into(), "2026-07-04".into()]);
+        sync(&mut store, &mut remote, since("2026-07-01")).unwrap();
+
+        assert_eq!(remote.graph.counts.passes.len(), 2, "the round passed");
+        assert!(store.list_coverage(COLLECTION).unwrap()[0].round.is_none());
+        assert_eq!(stored(&store), held, "a member not listed is not removed");
+    }
+
+    /// A message a band page listed and Graph dropped before the round's
+    /// pass stays when the round closes, no row stating it removed, and
+    /// goes with the next round over its scope, which finds it absent.
+    #[test]
+    fn a_message_dropped_before_the_pass_goes_with_a_later_round() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut remote = Remote::new(folder());
+        remote.fail_at = Some(2);
+        sync(&mut store, &mut remote, since("2026-09-01")).unwrap_err();
+        assert!(
+            stored(&store).contains("2026-09-10"),
+            "a band page listed it"
+        );
+
+        remote.graph.delete("2026-09-10");
+        sync(&mut store, &mut remote, since("2026-09-01")).unwrap();
+        assert!(store.list_coverage(COLLECTION).unwrap()[0].round.is_none());
+        assert!(
+            stored(&store).contains("2026-09-10"),
+            "stamped, never absent"
+        );
+
+        let link = String::from_utf8(checkpoint(&store).unwrap()).unwrap();
+        let version: usize = link.rsplit('|').next().unwrap().parse().unwrap();
+        remote.graph.expired.insert(version);
+        sync(&mut store, &mut remote, since("2026-09-01")).unwrap();
+        let mut expected = months(&["2026-09"]);
+        expected.remove("2026-09-10");
+        assert_eq!(stored(&store), expected, "the next round finds it absent");
     }
 
     /// A band round broken after its first page resumes below the date

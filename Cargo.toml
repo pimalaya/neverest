@@ -64,7 +64,6 @@ percent-encoding = "2"
 pimalaya-cli = { version = "0.4", default-features = false, features = ["terminal", "spinner"] }
 pimalaya-config = { version = "0.3", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.3", default-features = false }
-rfc2047-decoder = "1"
 rusqlite = { version = "0.41", default-features = false }
 schemars = "1"
 secrecy = { version = "0.10", features = ["serde"] }

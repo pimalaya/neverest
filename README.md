@@ -167,6 +167,8 @@ Exit 3 is wider than conflicts: the run reconciled its collections but left some
 
 A listing that leaves out more than half of at least 20 items a collection held drops nothing: it reads as a server answering short, and the report names it under `absences`. Once the server is known to hold no more, `sync --accept-absences` drops them, for that run only.
 
+A server that lists at most a number of the messages a folder holds (Gmail over IMAP with "Limit IMAP folders to contain no more than this many messages" set) leaves the same messages out of every listing, often fewer than half. Set `collection.capped = true` on that source: what its listings leave out is then kept and counted in the report under `unlisted`, and only a removal the server states itself deletes. Gmail's IMAP states none, so a message deleted there stays in the store while the key is set; the `gmail` backend, which lists every message, has no such limit.
+
 ### Retention and backup
 
 The store never truly deletes an item: when its last binding vanishes the row is retained, hidden from the sync and from listings but kept with its body. After each sync neverest purges every retained item older than `store.purge-after`. Unset means never purge, `"0"` reproduces a terminal delete, and `sync --no-purge` skips one run.

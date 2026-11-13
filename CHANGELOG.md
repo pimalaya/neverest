@@ -145,6 +145,10 @@ Upgrading from 0.3.0:
 
 - Added the `lock-replaced` error code: a lock file of the store was removed or replaced under a run, which wrote nothing more.
 
+- Added `collection.capped` to every source: set it to true when the server lists at most a number of the items a collection holds, whatever it holds (Gmail over IMAP with its folder size limit set).
+
+  A message such a listing leaves out is then kept rather than read as deleted, and the sync report counts them per collection under `unlisted`, printed under `Unlisted`, no warning and no exit code. Only a removal the server states itself deletes, so on an IMAP server without QRESYNC (Gmail's) a message deleted on the server stays in the store while the key is set.
+
 ### Changed
 
 - **BREAKING**: changed the exit statuses to the Pimalaya exit contract: 2 is a command line neverest refused, and the partial outcomes start at 3. A run that waits for a person (a parked conflict, a refused duplicate `UID`, a rejected write, a parked send, intent or queue action, withheld absences or bodies) exits 3, where it exited 2; a run, a `drain`, an `init` or an `index` that could not do all its work exits 4, where it exited 3; `check` with an endpoint down exits 3, where it exited 2.
@@ -311,6 +315,16 @@ Upgrading from 0.3.0:
   pimalaya-cli 0.4 dropped the wizards of every Pimalaya CLI. A configuration is written by hand from config.sample.toml; a command finding none fails naming the path it looked for, and a bare `neverest` prints the help.
 
 ### Fixed
+
+- Fixed a message being keyed otherwise by its listing than by its body, so stored twice or never matched with the copy another client keyed: a `Message-ID` wrapped in comments (IMAP, Gmail, Graph), a header value Gmail serves folded, and on a targeted IMAP summary read a padded subject or an encoded word in a charset that decodes nothing.
+
+  IMAP reads the header fields it lists by on that read too, no `ENVELOPE`, and every field is read by pimdir's own rules (STORAGE Annex A.1). A message keyed by an earlier build keeps its key.
+
+- Fixed a Graph mail folder synced under `--since` dropping every message its closing delta pass did not list, whatever its date and with no guard: a pass answered short emptied the folder's replica, and a two-endpoint account pushed the deletes.
+
+  The pass now states removed only what Graph marks removed, and a message it does not list is dropped only in the scope and under the guard on a mass absence. A message listed early in a round and deleted on the server before the round ends stays in the store until a later full listing of its scope.
+
+- Fixed the build with `imap` as its only backend failing clippy on an unreachable match arm.
 
 - Fixed a create no listing named yet being planned for a body download under a handle no server knows.
 

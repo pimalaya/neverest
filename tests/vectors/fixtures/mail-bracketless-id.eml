@@ -1,0 +1,7 @@
+Message-ID: bare-2@example.org
+Subject: No brackets
+From: Alice Example <alice@example.org>
+To: bob@example.org
+Date: Sat, 01 Aug 2026 10:00:00 +0000
+
+A Message-ID without its angle brackets is read as the id it spells.

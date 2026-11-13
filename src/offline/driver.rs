@@ -101,8 +101,8 @@ use crate::{
             CollectionCoverage, DisagreedMember, DrainedQueue, IntentEntry, ItemConflict,
             OpenRound, OverruledBody, ParkedAbsence, ParkedQueueAction, PatchEntry, PurgedItems,
             RefusedDuplicate, RejectedWrite, SourceDownload, SubmitEntry, SyncOutput,
-            ThrottledSource, UnansweredPushes, UnreachedEndpoint, UnreadableBodies, WaitReason,
-            WaitingCreate,
+            ThrottledSource, UnansweredPushes, UnlistedMembers, UnreachedEndpoint,
+            UnreadableBodies, WaitReason, WaitingCreate,
         },
     },
     throttle,
@@ -514,6 +514,10 @@ struct SourceCtx {
     /// listing leaving most of a collection out drops it rather than parks
     /// (pimdir SYNC §5, §8).
     accept_absences: bool,
+    /// Whether the source caps what it lists of a collection, by its
+    /// configuration, which every page of its rounds then states (pimdir
+    /// SYNC §4, §5).
+    capped: bool,
     /// What its syncs reported beyond their events, drained by
     /// [`itemize_noted`].
     noted: Noted,
@@ -1131,6 +1135,7 @@ fn run_pair(
         scope: scope.clone(),
         dry_run,
         accept_absences,
+        capped: left_config.collection().capped,
         noted: Noted::default(),
     };
     let mut right = SourceCtx {
@@ -1145,6 +1150,7 @@ fn run_pair(
         scope: scope.clone(),
         dry_run,
         accept_absences,
+        capped: right_config.collection().capped,
         noted: Noted::default(),
     };
     s.success("Opened endpoints");
@@ -1988,6 +1994,7 @@ fn open_source_contexts(
     accept_absences: bool,
 ) -> Result<Vec<SourceCtx>> {
     let perms = config.permissions();
+    let capped = config.collection().capped;
     let opened: Vec<Result<Pool>> = thread::scope(|scope| {
         let handles: Vec<_> = (0..count)
             .map(|_| {
@@ -2013,6 +2020,7 @@ fn open_source_contexts(
             scope: scope.clone(),
             dry_run,
             accept_absences,
+            capped,
             noted: Noted::default(),
         });
     }
@@ -4056,6 +4064,9 @@ struct Noted {
     /// identity (pimdir SYNC §5, §6): the member's handle and the create's
     /// key.
     disagreed: Vec<(String, PimdirHandle, PimdirLinkId)>,
+    /// The members a capped round did not list, and so kept (pimdir SYNC
+    /// §5): the most one pass counted.
+    unlisted: BTreeMap<String, usize>,
 }
 
 impl Noted {
@@ -4080,6 +4091,14 @@ impl Noted {
         }
         self.unanswered
             .insert(collection.to_string(), report.unanswered);
+        if report.unlisted > 0 {
+            debug!(
+                "{} items of {collection} unlisted by its capped source, kept",
+                report.unlisted
+            );
+            let kept = self.unlisted.entry(collection.to_string()).or_default();
+            *kept = (*kept).max(report.unlisted);
+        }
         for waiting in &report.waiting {
             debug!(
                 "create {} of {collection} waits: {:?}",
@@ -4136,6 +4155,7 @@ fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
         unanswered,
         waiting,
         disagreed,
+        unlisted,
     } = mem::take(&mut ctx.noted);
     let display = |collection: &str| display_name(&ctx.namespace, collection).to_string();
 
@@ -4205,6 +4225,13 @@ fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
             create: create.0,
         });
     }
+    for (collection, count) in unlisted {
+        report.unlisted.push(UnlistedMembers {
+            side: ctx.name.clone(),
+            collection: display(&collection),
+            count,
+        });
+    }
 }
 
 /// Marks a sync whose listing found the source renumbered every member, which
@@ -4232,7 +4259,8 @@ fn rebuild_collection(
     blobs: &PimdirBlobStage,
 ) -> Result<PimdirRekeyReport> {
     let rekey = PimdirRekey::new(collection.to_string()).accept_absences(ctx.accept_absences);
-    let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
+    let mut remote =
+        PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone()).with_capped(ctx.capped);
     run_verb(store, &mut remote, rekey).with_context(|| format!("Rebuild {collection}"))
 }
 
@@ -4293,7 +4321,8 @@ fn sync_side(
     .heads(ctx.pool.primary().heads());
     let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone())
         .with_bound(collection, bound)
-        .with_bodies(!ctx.dry_run);
+        .with_bodies(!ctx.dry_run)
+        .with_capped(ctx.capped);
     let report = run_verb_paged(store, &mut remote, verb, pager);
     let renumbered = remote.rekey_asked();
     // NOTE: kept whether the pass succeeded or not: a later failure does not
@@ -7369,6 +7398,7 @@ mod tests {
             scope: PimdirScope::unbounded(),
             dry_run: false,
             accept_absences: false,
+            capped: false,
             noted: Noted::default(),
         };
 
@@ -7619,6 +7649,72 @@ mod tests {
         assert!(text.contains("kept apart"), "{text}");
     }
 
+    /// A source configured as capped states it on every page of a round
+    /// (pimdir SYNC §4, §5): the ten bound messages its listing leaves out,
+    /// under the half that parks, are kept and counted in the report, where
+    /// the same listing of a source not capped drops them.
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_capped_source_keeps_what_its_listing_leaves_out() {
+        use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+
+        const INBOX: &str = "imap/INBOX";
+
+        let newest = || {
+            FakeImap::start(
+                FakeMailbox {
+                    uid_validity: 1,
+                    highest_mod_seq: 9,
+                    messages: (11..=25)
+                        .map(|uid| FakeMessage {
+                            uid,
+                            flags: Vec::new(),
+                            message_id: format!("m{uid}@x"),
+                        })
+                        .collect(),
+                    states_exists: true,
+                },
+                false,
+            )
+        };
+        let held = |store: &PimdirSourceStore| load_side(store, INBOX).unwrap().len();
+
+        let server = newest();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, mut store) = bound_imap_inbox(dir.path(), &server, false, None);
+        let blobs = store.blob_stage();
+        sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None).expect("the sync");
+        assert_eq!(held(&store), 15, "a listing not capped proves its absences");
+        let mut report = SyncOutput::default();
+        itemize_noted(&mut ctx, &mut report);
+        assert!(report.unlisted.is_empty(), "{:?}", report.unlisted);
+
+        let server = newest();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, mut store) = bound_imap_inbox(dir.path(), &server, false, None);
+        let config: AccountConfig =
+            toml::from_str("imap.server = \"imap://127.0.0.1:1\"\nimap.collection.capped = true")
+                .unwrap();
+        ctx.capped = config.sources().unwrap()["imap"].collection().capped;
+        let blobs = store.blob_stage();
+        let (synced, _) = sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None)
+            .expect("the sync");
+
+        assert_eq!(synced.unlisted, 10);
+        assert_eq!(synced.parked, None, "the round closes as any other");
+        assert_eq!(held(&store), 25, "a capped listing proves no absence");
+        let mut report = SyncOutput::default();
+        itemize_noted(&mut ctx, &mut report);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["unlisted"],
+            serde_json::json!([{ "side": "imap", "collection": "INBOX", "count": 10 }])
+        );
+        let text = report.to_string();
+        assert!(text.contains("Unlisted (1):"), "{text}");
+        assert!(text.contains("10 item(s) of INBOX"), "{text}");
+        assert!(!text.contains("Warnings"), "unlisted is no warning: {text}");
+    }
+
     /// A remove carrying a target is a relocation, and its outcome says so,
     /// which is what delivers the target's create (pimdir SYNC §4).
     #[test]
@@ -7834,6 +7930,7 @@ mod tests {
             scope: PimdirScope::unbounded(),
             dry_run: false,
             accept_absences: accept,
+            capped: false,
             noted: Noted::default(),
         };
         (ctx, store)
@@ -13421,6 +13518,7 @@ mod gmail_bodies {
             scope: PimdirScope::unbounded(),
             dry_run: false,
             accept_absences: false,
+            capped: false,
             noted: Noted::default(),
         };
         (ctx, api, batch)
@@ -14142,6 +14240,7 @@ mod graph_heads {
             scope: PimdirScope::unbounded(),
             dry_run: false,
             accept_absences: false,
+            capped: false,
             noted: Noted::default(),
         }
     }

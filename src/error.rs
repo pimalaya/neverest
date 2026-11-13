@@ -15,7 +15,11 @@
 //! `index-query-only`, which answer a query client, which neverest never
 //! is; `index-zone-unknown`, neverest stating only a zone its time zone
 //! database named; `cutoff-invalid`, neverest writing its purge cutoff as
-//! the store stamps; and `conflict-unread`, which the one-way overwrite
+//! the store stamps; `scope-invalid`, neverest writing a scope bound in the
+//! one shape the store holds; `store-reset`, neverest naming a queue row by
+//! its bare id, never by a handle another store answered; `action-not-intent`,
+//! neverest parking unconfirmed a `submit` alone; `backup-occupied`, neverest
+//! taking no backup; and `conflict-unread`, which the one-way overwrite
 //! answers by fetching the unread body, an item still unread after it
 //! staying parked.
 //!
@@ -67,6 +71,10 @@ pub enum ErrorCode {
     /// Another user can read or write the store, or a link stands where a
     /// lock file belongs (pimdir STORAGE §18): restrict it to its user.
     StoreExposed,
+    /// A lock file of the store was removed or replaced while neverest
+    /// held it (pimdir STORAGE §8), so another process may own the store:
+    /// nothing more was written, and the next run takes the lock anew.
+    LockReplaced,
     /// A queued action's payload is malformed (pimdir STORAGE §15.3): its
     /// producer wrote what no schema reads.
     ActionMalformed,
@@ -100,6 +108,7 @@ const PIMDIR_CODES: &[(&str, ErrorCode)] = &[
     ("store-staging", ErrorCode::StoreStaging),
     ("store-in-flight", ErrorCode::StoreInFlight),
     ("store-exposed", ErrorCode::StoreExposed),
+    ("lock-replaced", ErrorCode::LockReplaced),
     ("action-malformed", ErrorCode::ActionMalformed),
     ("flag-invalid", ErrorCode::FlagInvalid),
     ("unsupported", ErrorCode::Unsupported),
@@ -154,5 +163,17 @@ mod tests {
             Some(ErrorCode::StoreBusy)
         );
         assert!(format!("{err:#}").contains("write lock"), "{err:#}");
+    }
+
+    /// A lock file replaced under a run is a failure its caller can act
+    /// on, by running again: it carries io-pimdir's code.
+    #[test]
+    fn a_replaced_lock_carries_its_code() {
+        let err = pimdir_error(PimdirError::LockReplaced("owner.lock".into()));
+
+        assert_eq!(
+            pimalaya_cli::error::code_of::<ErrorCode>(&err),
+            Some(ErrorCode::LockReplaced)
+        );
     }
 }

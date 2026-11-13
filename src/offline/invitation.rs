@@ -26,6 +26,8 @@ use anyhow::anyhow;
 use io_pimdir::{client::PimdirStore, codec::PimdirAction};
 use serde::Deserialize;
 
+use crate::offline::states_unknown_version;
+
 /// The queue action kind of an invitation reply.
 pub const REPLY: &str = "calendar-reply";
 
@@ -295,6 +297,8 @@ fn http_status(err: &anyhow::Error) -> Option<u16> {
 ///
 /// The drain leaves the kinds pimdir does not apply itself (they read back
 /// as [`PimdirAction::Unknown`]), so this reads exactly what it skipped.
+/// One stating a version this neverest does not know is left out, so it
+/// stays pending and untouched (pimdir STORAGE §15.3).
 pub fn pending(store: &PimdirStore) -> anyhow::Result<Vec<InvitationIntent>> {
     let rows = store
         .list_pending_actions()
@@ -304,7 +308,7 @@ pub fn pending(store: &PimdirStore) -> anyhow::Result<Vec<InvitationIntent>> {
         .into_iter()
         .filter_map(|row| match row.action {
             PimdirAction::Unknown { kind, payload, .. } if kind == REPLY || kind == CANCEL => {
-                Some(InvitationIntent {
+                (!states_unknown_version(&kind, &payload)).then_some(InvitationIntent {
                     id: row.id,
                     collection: row.collection,
                     kind,

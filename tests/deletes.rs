@@ -76,9 +76,12 @@ fn a_delete_expunges_its_message_alone() {
         .seq;
 
     let mut producer = PimdirProducer::open(&store, "deletes-test").unwrap();
-    producer
-        .enqueue(&collection, &PimdirAction::Remove { seq: doomed_seq }, None)
-        .unwrap();
+    let remove = PimdirAction::Remove {
+        seq: doomed_seq,
+        if_match: None,
+        resolves: None,
+    };
+    producer.enqueue(&collection, &remove, None).unwrap();
     drop(producer);
     neverest(&["sync", "-a", "deletes"], &config);
 

@@ -59,7 +59,7 @@ use io_pimdir::{
     summary::PimdirSummary,
     sync::{
         PimdirConflictPolicy, PimdirParked, PimdirPushRights, PimdirSync, PimdirSyncEvent,
-        PimdirSyncOptions, PimdirSyncReport,
+        PimdirSyncOptions, PimdirSyncReport, PimdirWaitReason, PimdirWaiting,
     },
     upgrade::{PimdirUpgrade, PimdirUpgradeOptions, PimdirUpgradeReport},
 };
@@ -98,10 +98,11 @@ use crate::{
         event::SyncEvent,
         hunk::{CollectionHunk, ItemHunk},
         report::{
-            CollectionCoverage, DrainedQueue, IntentEntry, ItemConflict, OpenRound, OverruledBody,
-            ParkedAbsence, ParkedQueueAction, PatchEntry, PurgedItems, RefusedDuplicate,
-            RejectedWrite, SourceDownload, SubmitEntry, SyncOutput, ThrottledSource,
-            UnansweredPushes, UnreachedEndpoint, UnreadableBodies,
+            CollectionCoverage, DisagreedMember, DrainedQueue, IntentEntry, ItemConflict,
+            OpenRound, OverruledBody, ParkedAbsence, ParkedQueueAction, PatchEntry, PurgedItems,
+            RefusedDuplicate, RejectedWrite, SourceDownload, SubmitEntry, SyncOutput,
+            ThrottledSource, UnansweredPushes, UnreachedEndpoint, UnreadableBodies, WaitReason,
+            WaitingCreate,
         },
     },
     throttle,
@@ -2578,11 +2579,16 @@ impl Pager for PageFeed<'_> {
 
 /// The placements still owed a body, or a base body under an edit (pimdir
 /// SYNC §5), with what orders their download.
+///
+/// A create, pending or delivered, is owed none: its provisional handle
+/// names no member a server could answer for (pimdir SYNC §2), and the page
+/// that lands it brings the handle its body is read under.
 fn bodiless(placements: impl IntoIterator<Item = PimdirPlacement>) -> Vec<HydrateTarget> {
     placements
         .into_iter()
         .filter(|placement| {
             placement.status != PimdirStatus::Tombstone
+                && !placement.handle.is_provisional()
                 && (placement.object.is_none() || placement.awaits_base())
         })
         .map(|placement| HydrateTarget {
@@ -2936,7 +2942,7 @@ impl Landing<'_> {
             let options = ctx.upgrade_options();
             let fallback = PimRemote::new(&mut ctx.pool, self.blobs.clone(), ctx.namespace.clone());
             match apply_batch(store, fallback, &place, landed, options) {
-                Ok(upgraded) => ctx.noted.overrule(&place, &upgraded.events),
+                Ok(upgraded) => ctx.noted.note_events(&place, &upgraded.events),
                 Err(err) => warn!("{place} write error: {err:#}"),
             }
         }
@@ -3883,7 +3889,12 @@ fn relay_one(
         (fetch.join().unwrap(), append)
     });
     fetch.context("relay fetch")?;
-    append.context("relay append")
+    // NOTE: the relay binds the copy itself, around the engine, so it has
+    // no create a listing could land: a copy the server does not name
+    // fails here, as it did.
+    append
+        .context("relay append")?
+        .ok_or_else(|| anyhow!("Cannot resolve appended UID: the server names no appended message"))
 }
 
 /// One reconcile round over both sides, answering whether either moved.
@@ -4038,6 +4049,13 @@ struct Noted {
     /// The pushes the last pass left unanswered, which the next run pushes
     /// again: an earlier pass's are pushed again by the later ones.
     unanswered: BTreeMap<String, usize>,
+    /// The creates the last pass left waiting (pimdir SYNC §5): one an
+    /// earlier pass left waiting may have landed since.
+    waiting: BTreeMap<String, Vec<PimdirWaiting>>,
+    /// The members named apart from a create of this side holding their
+    /// identity (pimdir SYNC §5, §6): the member's handle and the create's
+    /// key.
+    disagreed: Vec<(String, PimdirHandle, PimdirLinkId)>,
 }
 
 impl Noted {
@@ -4062,19 +4080,48 @@ impl Noted {
         }
         self.unanswered
             .insert(collection.to_string(), report.unanswered);
-        self.overrule(collection, &report.events);
+        for waiting in &report.waiting {
+            debug!(
+                "create {} of {collection} waits: {:?}",
+                waiting.handle.as_str().trim_start_matches('\u{1}'),
+                waiting.reason
+            );
+        }
+        self.waiting
+            .insert(collection.to_string(), report.waiting.clone());
+        self.note_events(collection, &report.events);
     }
 
     /// Notes the bodies `events` say a policy did not adopt in `collection`,
-    /// from a sync or an upgrade, each once.
-    fn overrule(&mut self, collection: &str, events: &[PimdirSyncEvent]) {
+    /// from a sync or an upgrade, and the members they say were named apart
+    /// from a create holding their identity, each once.
+    fn note_events(&mut self, collection: &str, events: &[PimdirSyncEvent]) {
         for event in events {
-            let PimdirSyncEvent::Overruled { handle, link_id } = event else {
-                continue;
-            };
-            let kept = (collection.to_string(), handle.clone(), link_id.clone());
-            if !self.overruled.contains(&kept) {
-                self.overruled.push(kept);
+            match event {
+                PimdirSyncEvent::Overruled { handle, link_id } => {
+                    let kept = (collection.to_string(), handle.clone(), link_id.clone());
+                    if !self.overruled.contains(&kept) {
+                        self.overruled.push(kept);
+                    }
+                }
+                PimdirSyncEvent::Disagreed { handle, link_id } => {
+                    warn!(
+                        "{} of {collection} disagrees with the create {}, kept apart from it",
+                        handle.as_str(),
+                        link_id.as_str()
+                    );
+                    let apart = (collection.to_string(), handle.clone(), link_id.clone());
+                    if !self.disagreed.contains(&apart) {
+                        self.disagreed.push(apart);
+                    }
+                }
+                // NOTE: reported by an `Abandon` alone, which no neverest
+                // command stages yet (pimdir SYNC §7).
+                PimdirSyncEvent::Abandoned(handle) => {
+                    let key = handle.as_str().trim_start_matches('\u{1}');
+                    info!("the delivered create {key} of {collection} was given up");
+                }
+                _ => {}
             }
         }
     }
@@ -4087,6 +4134,8 @@ fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
         unreadable,
         overruled,
         unanswered,
+        waiting,
+        disagreed,
     } = mem::take(&mut ctx.noted);
     let display = |collection: &str| display_name(&ctx.namespace, collection).to_string();
 
@@ -4123,6 +4172,37 @@ fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
             side: ctx.name.clone(),
             collection: display(&collection),
             count,
+        });
+    }
+    for (collection, creates) in waiting {
+        // NOTE: the last pass of a collection says what still waits.
+        let named = display(&collection);
+        report
+            .waiting
+            .retain(|create| create.side != ctx.name || create.collection != named);
+        for create in creates {
+            // NOTE: a provisional handle is U+0001 then the create's key
+            // (pimdir SYNC §2), and the key is what a person can read.
+            let key = create.handle.as_str().trim_start_matches('\u{1}');
+            report.waiting.push(WaitingCreate {
+                side: ctx.name.clone(),
+                collection: named.clone(),
+                id: key.to_owned(),
+                reason: match create.reason {
+                    PimdirWaitReason::OutOfScope => WaitReason::OutOfScope,
+                    PimdirWaitReason::Delivered => WaitReason::Delivered,
+                    PimdirWaitReason::Undeliverable => WaitReason::Undeliverable,
+                    _ => WaitReason::Other,
+                },
+            });
+        }
+    }
+    for (collection, handle, create) in disagreed {
+        report.disagreed.push(DisagreedMember {
+            side: ctx.name.clone(),
+            collection: display(&collection),
+            id: handle.0,
+            create: create.0,
         });
     }
 }
@@ -4338,7 +4418,7 @@ fn resolve_conflicts(
             PimdirUpgrade::new(collection.to_string(), wanted, PimdirTier::Full).options(options);
         let upgraded = run_verb(store, &mut remote, upgrade)
             .with_context(|| format!("Fetch the diverging bodies of {} {collection}", ctx.name))?;
-        ctx.noted.overrule(collection, &upgraded.events);
+        ctx.noted.note_events(collection, &upgraded.events);
     }
 
     let kind = resolve_kind(&mut ctx.pool);
@@ -4663,7 +4743,7 @@ fn hydrate_copies(
             PimdirUpgrade::new(collection.to_string(), handles, PimdirTier::Full).options(options);
         let upgraded = run_verb(store, &mut remote, upgrade)
             .with_context(|| format!("Hydrate bodies for {} {collection}", ctx.name))?;
-        ctx.noted.overrule(collection, &upgraded.events);
+        ctx.noted.note_events(collection, &upgraded.events);
     }
     Ok(total)
 }
@@ -5379,15 +5459,15 @@ impl<'a> SendSide<'a> {
 ///
 /// A sent intent is acknowledged with a receipt, releasing its body's pin, so a
 /// producer reads it applied rather than withdrawn; a permanent failure parks
-/// the row with its error, an uncertain one parks it under
-/// [`submit::UNCERTAIN`], never to be sent again, and a transient one leaves
-/// it pending. With no channel they stay pending, never parked, another build
-/// being able to send.
+/// the row with its error, one whose outcome is unknown parks it unconfirmed
+/// (pimdir STORAGE §15.2, io-pimdir `unconfirm_action`), never to be sent
+/// again, and a transient one leaves it pending. With no channel they stay
+/// pending, never parked, another build being able to send.
 ///
 /// Each attempt is counted, and the intent marked in flight
 /// ([`submit::InFlight`]), before its first byte leaves: a producer reading
 /// the row mid-send sees the attempt, and a run killed mid-send leaves the
-/// mark, so the next one parks that intent as uncertain instead of sending
+/// mark, so the next one parks that intent as unconfirmed instead of sending
 /// it again. The mark is cleared once the outcome is in the store.
 fn drain_submits(
     account_config: &AccountConfig,
@@ -5438,15 +5518,16 @@ fn drain_submits(
 
     #[cfg(any(feature = "smtp", feature = "msgraph"))]
     {
-        let entry =
-            |intent: &submit::SubmitIntent, error: Option<String>, parked, uncertain| SubmitEntry {
+        let entry = |intent: &submit::SubmitIntent, error: Option<String>, parked, unconfirmed| {
+            SubmitEntry {
                 id: intent.id,
                 collection: intent.collection.clone(),
                 subject: intent.subject(),
                 error,
                 parked,
-                uncertain,
-            };
+                unconfirmed,
+            }
+        };
 
         let mut channel = match open_send_channel(account_config, account, sides, intents.len()) {
             Ok(channel) => channel,
@@ -5551,7 +5632,7 @@ fn drain_submits(
                         }
                         Err(err) => {
                             warn!(
-                                "submit intent #{} was sent but could not be acknowledged, the next run parks it as uncertain: {err}",
+                                "submit intent #{} was sent but could not be acknowledged, the next run parks it as unconfirmed: {err}",
                                 intent.id
                             );
                             false
@@ -5561,22 +5642,22 @@ fn drain_submits(
                 }
                 Err(failure) => {
                     let reason = failure.reason();
-                    let (parked, uncertain) = (failure.parks(), failure.uncertain());
+                    let (parked, unconfirmed) = (failure.parks(), failure.unconfirmed());
                     warn!("submit intent #{} failed: {reason}", intent.id);
                     // NOTE: the attempt is counted already, so a transient
                     // failure records nothing more.
                     let recorded = !parked
-                        || match store.fail_action(intent.id, Some(&reason)) {
+                        || match park_submit(store, intent.id, &failure) {
                             Ok(()) => true,
                             Err(err) => {
                                 warn!("cannot park submit intent #{}: {err}", intent.id);
                                 // NOTE: a refused message may be sent again
-                                // and refused again; an uncertain one must
+                                // and refused again; an unconfirmed one must
                                 // not be, which the mark sees to.
-                                !uncertain
+                                !unconfirmed
                             }
                         };
-                    (recorded, entry(intent, Some(reason), parked, uncertain))
+                    (recorded, entry(intent, Some(reason), parked, unconfirmed))
                 }
             };
             report.submitted.push(outcome);
@@ -5623,7 +5704,36 @@ fn drain_submits(
     }
 }
 
-/// Parks the intent an earlier run left in flight as uncertain, and returns
+/// Parks the `submit` intent `id` for `failure`: unconfirmed when its
+/// outcome is unknown, under the prefix the store reserves and writes
+/// itself (pimdir STORAGE §13, §15.2), with its error otherwise.
+#[cfg(any(feature = "smtp", feature = "msgraph"))]
+fn park_submit(
+    store: &mut PimdirSourceStore,
+    id: i64,
+    failure: &submit::SubmitFailure,
+) -> Result<(), PimdirError> {
+    if !failure.unconfirmed() {
+        return store.fail_action(id, Some(&failure.detail()));
+    }
+
+    unconfirm_submit(store, id, &failure.detail())
+}
+
+/// Parks the `submit` intent `id` as unconfirmed, `detail` saying why. A
+/// row gone since has nothing left to send again.
+fn unconfirm_submit(
+    store: &mut PimdirSourceStore,
+    id: i64,
+    detail: &str,
+) -> Result<(), PimdirError> {
+    if !store.unconfirm_action(id, detail)? {
+        warn!("submit intent #{id} vanished from the queue before it was parked");
+    }
+    Ok(())
+}
+
+/// Parks the intent an earlier run left in flight as unconfirmed, and returns
 /// the others, still to send.
 ///
 /// That run was stopped between counting the attempt and recording its
@@ -5649,9 +5759,10 @@ fn park_interrupted(
     // the run stopped, its outcome recorded.
     if let Some(index) = intents.iter().position(|intent| intent.id == left) {
         let intent = intents.remove(index);
-        let error = submit::uncertain_reason("a run stopped while handing it over");
+        let detail = submit::unconfirmed_detail("a run stopped while handing it over");
+        let error = submit::unconfirmed_reason(&detail);
         warn!("submit intent #{} parked: {error}", intent.id);
-        if let Err(err) = store.fail_action(intent.id, Some(&error)) {
+        if let Err(err) = unconfirm_submit(store, intent.id, &detail) {
             warn!(
                 "cannot park submit intent #{}, nothing is sent this run: {err}",
                 intent.id
@@ -5664,7 +5775,7 @@ fn park_interrupted(
             subject: intent.subject(),
             error: Some(error),
             parked: true,
-            uncertain: true,
+            unconfirmed: true,
         });
     }
 
@@ -6404,7 +6515,7 @@ fn hydrate_full_collection(
             PimdirUpgrade::new(collection.to_string(), targets, PimdirTier::Full).options(options);
         let upgraded = run_verb(store, &mut remote, upgrade)
             .with_context(|| format!("Hydrate all bodies {} {collection}", ctx.name))?;
-        ctx.noted.overrule(collection, &upgraded.events);
+        ctx.noted.note_events(collection, &upgraded.events);
         raised += total;
     }
     Ok(raised)
@@ -6544,7 +6655,7 @@ fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> 
 mod tests {
     use io_pimdir::{
         change::{PimdirChange, PimdirChangeKind, PimdirDropReason},
-        client::reader::PimdirReader,
+        client::{producer::PimdirEnqueued, reader::PimdirReader},
         collection::{PimdirCheckpoint, PimdirCursor},
         hub::PimdirHubConflict,
         object::PimdirObject,
@@ -6558,7 +6669,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::conflict::merger::SPAWNS;
+    use crate::{conflict::merger::SPAWNS, offline::local};
 
     /// What names a listed member by `link` alone, as a store binding does.
     fn named(link: &str) -> PimdirRemoteMeta {
@@ -6605,7 +6716,8 @@ mod tests {
         assert!(written_earlier(&refused(None)));
         assert!(written_earlier(&refused(Some("storage-draft-07"))));
         assert!(written_earlier(&refused(Some("storage-draft-08"))));
-        assert!(!written_earlier(&refused(Some("storage-draft-10"))));
+        assert!(written_earlier(&refused(Some("storage-draft-09"))));
+        assert!(!written_earlier(&refused(Some("storage-draft-11"))));
         assert!(!written_earlier(&refused(Some("storage-v1"))));
         assert!(!written_earlier(&PimdirError::Busy));
     }
@@ -6715,7 +6827,8 @@ mod tests {
         fs::create_dir_all(&body).unwrap();
         fs::write(body.join("abcd"), b"body").unwrap();
         fs::write(dir.join("pimdir.db"), b"index").unwrap();
-        fs::write(dir.join("neverest.json"), b"{}").unwrap();
+        let local = local::ensure(dir).unwrap();
+        fs::write(local.join("neverest.json"), b"{}").unwrap();
     }
 
     /// The rule the replica rests on.
@@ -6760,6 +6873,25 @@ mod tests {
 
         let replica = DryRunReplica::new(&store).unwrap();
 
+        PimdirStore::open(&replica.dir).expect("the replica opens");
+    }
+
+    /// A dry run's replica carries the store's local/, neverest's own state
+    /// (pimdir STORAGE §3): the account reads initialized there, and the
+    /// replica still opens as a store, its local/ its user's alone, which
+    /// io-pimdir asks of one before its owner opens it.
+    #[test]
+    fn a_dry_run_replica_carries_the_owners_state() {
+        let root = tempfile::tempdir().unwrap();
+        let store = root.path().join("account");
+        create_store(&store).unwrap();
+        let mode: AccountConfig = toml::from_str("imap.server = \"imap://127.0.0.1:1\"").unwrap();
+        StoreState::stamp(&store, "a", &mode.mode().unwrap()).unwrap();
+
+        let replica = DryRunReplica::new(&store).unwrap();
+
+        assert!(local::path(&replica.dir).join("neverest.json").is_file());
+        assert!(StoreState::load(&replica.dir).unwrap().initialized("a"));
         PimdirStore::open(&replica.dir).expect("the replica opens");
     }
 
@@ -6907,6 +7039,7 @@ mod tests {
                 &PimdirAction::SetFlags {
                     seq: 6951,
                     flags: PimdirFlags::from_iter(["\\Seen"]),
+                    base: None,
                 },
                 None,
             )
@@ -6956,15 +7089,19 @@ mod tests {
                 Some(&object),
             )
             .unwrap();
-        producer
-            .enqueue("left/INBOX", &PimdirAction::Remove { seq: 424242 }, None)
-            .unwrap();
+        let remove = PimdirAction::Remove {
+            seq: 424242,
+            if_match: None,
+            resolves: None,
+        };
+        producer.enqueue("left/INBOX", &remove, None).unwrap();
         producer
             .enqueue(
                 "left/INBOX",
                 &PimdirAction::SetFlags {
                     seq: 424243,
                     flags: PimdirFlags::from_iter(["\\Seen"]),
+                    base: None,
                 },
                 None,
             )
@@ -7335,6 +7472,287 @@ mod tests {
         assert_eq!(copy.handle.0, "7", "bound to the message found");
         assert_eq!(copy.status, PimdirStatus::Clean);
         assert!(server.sent("APPEND").is_empty(), "nothing filed again");
+    }
+
+    /// The fake server's inbox holding `a@x` under UID 7, an IMAP side over
+    /// it, and the outcome of pushing `kind` to that inbox.
+    #[cfg(feature = "imap")]
+    fn pushed_to_imap(
+        kind: impl FnOnce(&PimdirBlobStage) -> PimdirChangeKind,
+    ) -> (crate::imap::fake::FakeImap, PimdirPushResult) {
+        use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 1,
+                highest_mod_seq: 9,
+                messages: vec![FakeMessage {
+                    uid: 7,
+                    flags: Vec::new(),
+                    message_id: String::from("a@x"),
+                }],
+                states_exists: true,
+            },
+            true,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, store) = bound_imap_inbox(dir.path(), &server, true, None);
+        let blobs = store.blob_stage();
+        let collection = PimdirCollectionId("imap/INBOX".into());
+        let change = PimdirChange::new(&collection, kind(&blobs));
+
+        let mut remote = PimRemote::new(&mut ctx.pool, blobs, "imap");
+        let mut results = remote.push(&collection, vec![change]).unwrap();
+        (server, results.remove(0))
+    }
+
+    /// A create its server took without naming the message is delivered:
+    /// the run reports it waiting for the listing that names it, and the
+    /// next run appends nothing again, where a rejected append was sent
+    /// again by every run (pimdir SYNC §4, §5).
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_create_appended_without_a_uid_waits_and_is_not_appended_again() {
+        use crate::imap::fake::{FakeImap, FakeMailbox};
+
+        const INBOX: &str = "imap/INBOX";
+        const BODY: &str = "From: a@x\r\nSubject: undated\r\n\r\nbody\r\n";
+
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 1,
+                highest_mod_seq: 9,
+                messages: Vec::new(),
+                states_exists: true,
+            },
+            true,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, mut store) = bound_imap_inbox(dir.path(), &server, true, None);
+        let blobs = store.blob_stage();
+        let object = blobs.stage_body(BODY.as_bytes()).unwrap();
+        let key = PimdirLinkId("alt:undated".into());
+        store
+            .write(vec![
+                PimdirWriteOp::StoreObject {
+                    object: object.clone(),
+                    body: None,
+                },
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId(INBOX.into()),
+                    handle: key.provisional(),
+                    link_id: Some(key),
+                    object: Some(object.hash),
+                    level: PimdirLevel::Full,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Created,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: None,
+                    origin: None,
+                }),
+            ])
+            .unwrap();
+
+        sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None).expect("the sync");
+        assert_eq!(server.sent("APPEND").len(), 1, "appended");
+
+        sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None).expect("the sync");
+        assert_eq!(server.sent("APPEND").len(), 1, "and never again");
+
+        let mut report = SyncOutput::default();
+        itemize_noted(&mut ctx, &mut report);
+        assert!(report.rejected.is_empty() && ctx.rejected.is_empty());
+        assert_eq!(report.waiting.len(), 1, "{:?}", report.waiting);
+        let waiting = &report.waiting[0];
+        assert_eq!(waiting.side, "imap");
+        assert_eq!(waiting.collection, "INBOX");
+        assert_eq!(waiting.id, "alt:undated", "the key, no control character");
+        assert_eq!(waiting.reason, WaitReason::Delivered);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["waiting"],
+            serde_json::json!([{
+                "side": "imap",
+                "collection": "INBOX",
+                "id": "alt:undated",
+                "reason": "delivered",
+            }])
+        );
+        let text = report.to_string();
+        assert!(text.contains("Waiting (1):"), "{text}");
+        assert!(!text.contains("Warnings"), "waiting is no warning: {text}");
+    }
+
+    /// A member named apart from a create of its side holding its identity
+    /// is reported once, as a warning, whatever the passes that met it
+    /// (pimdir SYNC §5, §6).
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_member_named_apart_from_its_create_is_reported_once() {
+        let server = one_message(1, 7);
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, _store) = bound_imap_inbox(dir.path(), &server, true, None);
+        let apart = PimdirSyncEvent::Disagreed {
+            handle: PimdirHandle("7".into()),
+            link_id: PimdirLinkId("m1@x".into()),
+        };
+
+        let events = [apart];
+        ctx.noted.note_events("imap/INBOX", &events);
+        ctx.noted.note_events("imap/INBOX", &events);
+        let mut report = SyncOutput::default();
+        itemize_noted(&mut ctx, &mut report);
+
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["disagreed"],
+            serde_json::json!([{
+                "side": "imap",
+                "collection": "INBOX",
+                "id": "7",
+                "create": "m1@x",
+            }])
+        );
+        let text = report.to_string();
+        assert!(text.contains("1 warnings"), "{text}");
+        assert!(text.contains("kept apart"), "{text}");
+    }
+
+    /// A remove carrying a target is a relocation, and its outcome says so,
+    /// which is what delivers the target's create (pimdir SYNC §4).
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_remove_relocating_its_member_says_so() {
+        let (server, result) = pushed_to_imap(|_| PimdirChangeKind::Remove {
+            handle: PimdirHandle("7".into()),
+            to: Some(PimdirCollectionId("imap/Archive".into())),
+            link_id: Some(PimdirLinkId("b@x".into())),
+            if_match: None,
+        });
+
+        assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+        assert!(result.relocated, "the member went into the target");
+        assert_eq!(server.sent("UID MOVE"), ["UID MOVE 7 Archive"]);
+        assert!(server.sent("UID EXPUNGE").is_empty());
+    }
+
+    /// A remove whose target already holds the identity deletes the member
+    /// rather than filing it there a second time, and states no relocation,
+    /// so the target's create stays pending (pimdir SYNC §4, §5).
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_remove_into_a_target_holding_the_identity_deletes() {
+        let (server, result) = pushed_to_imap(|_| PimdirChangeKind::Remove {
+            handle: PimdirHandle("7".into()),
+            to: Some(PimdirCollectionId("imap/Archive".into())),
+            link_id: Some(PimdirLinkId("a@x".into())),
+            if_match: None,
+        });
+
+        assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+        assert!(!result.relocated, "the target held it: nothing relocated");
+        assert!(server.sent("UID MOVE").is_empty(), "filed no second time");
+        assert_eq!(server.sent("UID EXPUNGE"), ["UID EXPUNGE 7"]);
+    }
+
+    /// A remove under a minted key never asks its target: the target held
+    /// the identity before the move, which proves no delivery (pimdir SYNC
+    /// §4).
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_remove_under_a_minted_key_relocates_unasked() {
+        let (server, result) = pushed_to_imap(|_| PimdirChangeKind::Remove {
+            handle: PimdirHandle("7".into()),
+            to: Some(PimdirCollectionId("imap/Archive".into())),
+            link_id: Some(PimdirLinkId("dup:a@x#7".into())),
+            if_match: None,
+        });
+
+        assert!(result.relocated);
+        assert!(server.sent("UID SEARCH").is_empty());
+        assert_eq!(server.sent("UID MOVE"), ["UID MOVE 7 Archive"]);
+    }
+
+    /// An append the server takes without naming the message, which no
+    /// search finds either, is accepted with no handle: the engine records
+    /// the create delivered and the next listing lands it, where a rejection
+    /// had it appended again (pimdir SYNC §4).
+    #[test]
+    #[cfg(feature = "imap")]
+    fn an_append_answered_no_uid_is_accepted_with_no_handle() {
+        const BODY: &str = "From: a@x\r\nSubject: undated\r\n\r\nbody\r\n";
+
+        let (server, result) = pushed_to_imap(|blobs| PimdirChangeKind::Add {
+            handle: PimdirLinkId("alt:undated".into()).provisional(),
+            link_id: Some(PimdirLinkId("alt:undated".into())),
+            flags: PimdirFlags::default(),
+            origin: None,
+            supersedes: None,
+            object: Some(blobs.stage_body(BODY.as_bytes()).unwrap().hash),
+        });
+
+        assert_eq!(server.sent("APPEND").len(), 1, "appended once");
+        assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+        assert_eq!(result.assigned, None);
+        assert!(!result.relocated);
+    }
+
+    /// A create holding no body, pending or delivered, names no member of
+    /// its server yet (pimdir SYNC §2): its provisional handle is owed no
+    /// body fetch, which no server could answer.
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_create_naming_no_member_is_owed_no_body_fetch() {
+        const INBOX: &str = "imap/INBOX";
+
+        let server = one_message(1, 7);
+        let dir = tempfile::tempdir().unwrap();
+        let (_ctx, mut store) = bound_imap_inbox(dir.path(), &server, true, None);
+        let create = |key: &str| PimdirPlacement {
+            collection: PimdirCollectionId(INBOX.into()),
+            handle: PimdirLinkId(key.into()).provisional(),
+            link_id: Some(PimdirLinkId(key.into())),
+            object: None,
+            level: PimdirLevel::Meta,
+            summary: None,
+            sort_key: PimdirSortKey::default(),
+            flags: PimdirFlags::default(),
+            status: PimdirStatus::Created,
+            conflict_revision: None,
+            conflict_object: None,
+            base: None,
+            origin: None,
+        };
+        store
+            .write(vec![
+                PimdirWriteOp::UpsertPlacement(create("pending@x")),
+                PimdirWriteOp::UpsertPlacement(create("delivered@x")),
+                PimdirWriteOp::DeliverPlacement {
+                    collection: PimdirCollectionId(INBOX.into()),
+                    handle: PimdirLinkId("delivered@x".into()).provisional(),
+                },
+            ])
+            .unwrap();
+        let delivered = load_side(&store, INBOX)
+            .unwrap()
+            .into_iter()
+            .filter(PimdirPlacement::delivered)
+            .count();
+        assert_eq!(delivered, 1, "the store holds the delivered create");
+
+        let collections = vec![String::from(INBOX)];
+        let plans =
+            hydrate_plans(&store, "imap", &collections, None, &GoneBodies::default()).unwrap();
+
+        let provisional: Vec<&str> = plans[0]
+            .1
+            .iter()
+            .filter(|target| target.handle.is_provisional())
+            .map(|target| target.handle.as_str())
+            .collect();
+        assert!(provisional.is_empty(), "{provisional:?}");
+        assert_eq!(plans[0].1.len(), 25, "the bound members are still owed");
     }
 
     /// An IMAP side over `server`, accepting absences when `accept`, and a
@@ -7802,7 +8220,7 @@ mod tests {
         else {
             panic!("a performed intent leaves its receipt");
         };
-        assert_eq!(collection, "gcal/primary");
+        assert_eq!(collection.as_deref(), Some("gcal/primary"));
         assert_eq!(seq, None);
     }
 
@@ -7840,7 +8258,7 @@ mod tests {
     }
 
     /// Queues the add of a new task into `collection`, as a frontend does.
-    fn queue_task(dir: &Path, collection: &str) -> Result<i64, PimdirError> {
+    fn queue_task(dir: &Path, collection: &str) -> Result<PimdirEnqueued, PimdirError> {
         let mut producer = PimdirProducer::open(dir, "test-frontend").unwrap();
         producer.enqueue_with_body(collection, TODO.as_bytes(), |hash| PimdirAction::Add {
             link_id: None,
@@ -8604,6 +9022,7 @@ mod tests {
                                 outcome: PimdirPushOutcome::Accepted,
                                 assigned: None,
                                 revision: Some(revision),
+                                relocated: false,
                             }
                         } else {
                             PimdirPushResult {
@@ -8611,6 +9030,7 @@ mod tests {
                                 outcome: PimdirPushOutcome::Rejected,
                                 assigned: None,
                                 revision: None,
+                                relocated: false,
                             }
                         }
                     }
@@ -10688,6 +11108,96 @@ mod tests {
             .unwrap();
     }
 
+    /// An intent stating a version this neverest does not know is read no
+    /// further: no performer lists it, so it is neither performed nor
+    /// parked as malformed, and it stays pending and untouched for a
+    /// neverest that knows it (pimdir STORAGE §15.3). One stating no
+    /// version names none to wait for, and is still listed, to be parked.
+    #[test]
+    fn an_intent_of_an_unknown_version_stays_pending() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+        store
+            .ensure_collection("imap/Sent", "message/rfc822")
+            .unwrap();
+        let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
+        let mut queue = |kind: &str, payload: &str| {
+            let action = PimdirAction::Unknown {
+                kind: kind.into(),
+                payload: payload.into(),
+                object_hash: None,
+            };
+            producer.enqueue("imap/Sent", &action, None).unwrap();
+        };
+        queue(
+            submit::SUBMIT,
+            r#"{"v":2,"source":"imap","to":["b@y.org"]}"#,
+        );
+        queue(invitation::REPLY, r#"{"v":2,"source":"imap"}"#);
+        queue(
+            "collection-create",
+            r#"{"v":2,"source":"imap","title":"A"}"#,
+        );
+
+        assert!(submit::pending(&store).unwrap().is_empty());
+        assert!(invitation::pending(&store).unwrap().is_empty());
+        assert!(collection::pending(&store).unwrap().is_empty());
+        assert_eq!(store.list_pending_actions().unwrap().len(), 3, "untouched");
+        assert!(store.parked_actions().unwrap().is_empty());
+
+        // NOTE: a producer enqueues no such payload, so it is read here as
+        // a row another writer left.
+        for payload in [r#"{"source":"imap"}"#, r#"{"v":"2","source":"imap"}"#] {
+            assert!(
+                !crate::offline::states_unknown_version(submit::SUBMIT, payload),
+                "{payload} names no version to wait for: it parks"
+            );
+        }
+    }
+
+    /// A send an earlier run left in flight is parked unconfirmed, the
+    /// state pimdir reserves for an intent whose outcome is unknown
+    /// (pimdir STORAGE §15.2): its producer reads `Unconfirmed` with what
+    /// neverest recorded, where a prefix of neverest's own read as any
+    /// parked row; the report states it under the reserved prefix, and the
+    /// mark is cleared.
+    #[test]
+    fn an_interrupted_send_is_parked_unconfirmed() {
+        use io_pimdir::client::producer::PimdirActionStatus;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+        store
+            .ensure_collection("imap/Sent", "message/rfc822")
+            .unwrap();
+        queue_submit(dir.path(), "imap/Sent", "imap");
+        let intents = submit::pending(&store).unwrap();
+        let id = intents[0].id;
+        let in_flight = submit::InFlight::new(dir.path());
+        in_flight.begin(id).unwrap();
+
+        let mut report = SyncOutput::default();
+        let left = park_interrupted(&mut store, &in_flight, intents, &mut report);
+
+        assert_eq!(left.map(|intents| intents.len()), Some(0), "not sent again");
+        assert_eq!(in_flight.left(), None);
+        let entry = &report.submitted[0];
+        assert!(entry.parked && entry.unconfirmed);
+        let error = entry.error.as_deref().unwrap();
+        assert!(error.starts_with("unconfirmed: "), "{error}");
+
+        let producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
+        let PimdirActionStatus::Unconfirmed { detail, .. } = producer.action_status(id).unwrap()
+        else {
+            panic!("the row reads as an intent whose outcome is unknown");
+        };
+        assert_eq!(error, format!("unconfirmed: {detail}"));
+        assert!(
+            submit::pending(&store).unwrap().is_empty(),
+            "no run lists it"
+        );
+    }
+
     /// A run performing intents alone opens an endpoint for a send only
     /// when the endpoint sends it natively: an `smtp` table opens alone.
     #[test]
@@ -12358,7 +12868,7 @@ mod tests {
             .collect();
         assert_eq!(report.overruled.len(), 1, "{:?}", report.overruled);
         let overruled = &report.overruled[0];
-        assert_eq!(overruled.action, Some(row));
+        assert_eq!(overruled.action, Some(row.handle.id));
         assert_eq!(overruled.collection, "contacts");
         assert!(kept.contains(&overruled.kept), "{kept:?}");
     }

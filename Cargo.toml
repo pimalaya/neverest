@@ -56,7 +56,7 @@ io-http = { version = "0.6", default-features = false, optional = true }
 io-imap = { version = "0.8", default-features = false, optional = true }
 io-msgraph = { version = "0.7", default-features = false, optional = true }
 io-pim-discovery = { version = "0.11", default-features = false, features = ["pacc", "autoconfig", "rfc6186", "stream"], optional = true }
-io-pimdir = { version = "0.9", default-features = false, features = ["client"] }
+io-pimdir = { version = "0.11", default-features = false, features = ["client"] }
 io-sasl = { version = "0.1", default-features = false, features = ["saslprep", "scram"] }
 io-smtp = { version = "0.6", default-features = false, optional = true }
 io-webdav = { version = "0.7", default-features = false, optional = true }
@@ -83,5 +83,4 @@ io-oauth = { version = "0.3", default-features = false, features = ["jwt-bearer"
 
 [patch.crates-io]
 io-http = { git = "https://github.com/pimalaya/io-http", rev = "e1815307771c1ec65a86b77256d46c33241d3038" }
-io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "5c18a026b9c85b470984192452c2aa66e060a3fe" }
 pimalaya-cli = { git = "https://github.com/pimalaya/cli", rev = "f976e40cb609194e21cd8df8a089f86a1cd510fd" }

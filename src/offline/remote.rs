@@ -14,7 +14,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     io::{self, Write},
     mem,
@@ -623,8 +623,9 @@ impl PimdirRemote for PimRemote<'_> {
     ) -> Result<Vec<PimdirPushResult>, Self::Error> {
         let collection = self.wire_name(collection.as_str()).to_string();
         let mut results = Vec::with_capacity(changes.len());
+        let mut holding = self.targets_holding(&changes);
 
-        for change in changes {
+        for (at, change) in changes.into_iter().enumerate() {
             let result = match change.kind {
                 PimdirChangeKind::SetFlags {
                     handle,
@@ -655,8 +656,22 @@ impl PimdirRemote for PimRemote<'_> {
                     to,
                     link_id: _,
                     if_match,
-                } => match to {
-                    Some(target) => {
+                } => match (to, holding.remove(&at)) {
+                    (Some(_), Some(Err(reason))) => {
+                        self.reject(&collection, handle, "move", reason)
+                    }
+                    // NOTE: the target holds the identity already, so the
+                    // member is deleted, on its own precondition, and the
+                    // outcome states no relocation (pimdir SYNC §4).
+                    (Some(target), Some(Ok(()))) => {
+                        debug!(
+                            "{} holds the identity of {} already, deleting it from {collection}",
+                            target.as_str(),
+                            handle.as_str(),
+                        );
+                        self.delete(&collection, handle, if_match.as_deref())
+                    }
+                    (Some(target), None) => {
                         let dest = wire_name(&self.namespace, target.as_str()).to_string();
                         let moved =
                             self.pool
@@ -664,26 +679,13 @@ impl PimdirRemote for PimRemote<'_> {
                                 .move_items(&collection, &dest, &[handle.as_str()]);
 
                         match moved {
-                            Ok(()) => accepted(handle, None),
+                            Ok(()) => relocated(handle),
                             Err(err) => {
                                 self.reject(&collection, handle, "move", format!("{err:#}"))
                             }
                         }
                     }
-                    None => {
-                        let deleted = self.pool.primary().delete_item(
-                            &collection,
-                            handle.as_str(),
-                            if_match.as_deref(),
-                        );
-
-                        match deleted {
-                            Ok(()) => accepted(handle, None),
-                            Err(err) => {
-                                self.reject(&collection, handle, "delete", format!("{err:#}"))
-                            }
-                        }
-                    }
+                    (None, _) => self.delete(&collection, handle, if_match.as_deref()),
                 },
                 PimdirChangeKind::Add {
                     handle,
@@ -1288,7 +1290,17 @@ impl PimRemote<'_> {
                 .add_item_stream(collection, &item_flags, reader, len, link);
 
         let written = match written {
-            Ok(written) => written,
+            Ok(Some(written)) => written,
+            // NOTE: taken by a server that names no appended member:
+            // accepted with no handle, which the engine records delivered,
+            // the next listing landing it (pimdir SYNC §4).
+            Ok(None) => {
+                debug!(
+                    "append of {} to {collection} accepted with no handle",
+                    handle.as_str()
+                );
+                return accepted(handle, None);
+            }
             Err(err) => {
                 // NOTE: a duplicate `UID` gets its own report entry, naming the
                 // identity and the remedy a generic rejection cannot state.
@@ -1488,7 +1500,72 @@ impl PimRemote<'_> {
             outcome: PimdirPushOutcome::Accepted,
             assigned: Some(assigned),
             revision: written.revision,
+            relocated: false,
         }
+    }
+
+    /// Deletes a member from `collection`, gated on `if_match` where the
+    /// backend holds a precondition.
+    fn delete(
+        &mut self,
+        collection: &str,
+        handle: PimdirHandle,
+        if_match: Option<&str>,
+    ) -> PimdirPushResult {
+        let deleted = self
+            .pool
+            .primary()
+            .delete_item(collection, handle.as_str(), if_match);
+
+        match deleted {
+            Ok(()) => accepted(handle, None),
+            Err(err) => self.reject(collection, handle, "delete", format!("{err:#}")),
+        }
+    }
+
+    /// The removes of `changes` carrying a target that already holds their
+    /// identity, by position: such a member is deleted rather than relocated
+    /// (pimdir SYNC §4, §5), or the target would hold the identity twice. A
+    /// target that could not be asked answers why, which rejects the change.
+    ///
+    /// Only an identity the backend can search for is asked (a `Message-ID`
+    /// on IMAP and Graph mail); a key minted on a handle is never, its
+    /// target holding the identity before the move. The targets are asked
+    /// one after another, so a session selects each once.
+    fn targets_holding(&mut self, changes: &[PimdirChange]) -> HashMap<usize, Result<(), String>> {
+        let mut asked: BTreeMap<String, Vec<(usize, &str)>> = BTreeMap::new();
+        for (at, change) in changes.iter().enumerate() {
+            let PimdirChangeKind::Remove {
+                to: Some(target),
+                link_id: Some(link_id),
+                ..
+            } = &change.kind
+            else {
+                continue;
+            };
+            let link = self.kind.split_link_id(link_id);
+            let Some(hint) = link.hint.filter(|_| link.mint.is_none()) else {
+                continue;
+            };
+            let dest = wire_name(&self.namespace, target.as_str()).to_string();
+            asked.entry(dest).or_default().push((at, hint));
+        }
+
+        let mut holding = HashMap::new();
+        for (dest, removes) in asked {
+            for (at, hint) in removes {
+                match self.pool.primary().find_message(&dest, hint) {
+                    Ok(Some(_)) => {
+                        holding.insert(at, Ok(()));
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        holding.insert(at, Err(format!("{err:#}")));
+                    }
+                }
+            }
+        }
+        holding
     }
 
     /// Replaces an item's body in place, conditional on the synced revision.
@@ -1534,6 +1611,7 @@ impl PimRemote<'_> {
                 outcome: PimdirPushOutcome::Accepted,
                 assigned: None,
                 revision,
+                relocated: false,
             },
             Err(err) => self.reject(collection, handle, "update", format!("{err:#}")),
         }
@@ -1558,6 +1636,16 @@ fn accepted(handle: PimdirHandle, assigned: Option<PimdirHandle>) -> PimdirPushR
         outcome: PimdirPushOutcome::Accepted,
         assigned,
         revision: None,
+        relocated: false,
+    }
+}
+
+/// An accepted remove that relocated its member into its target (pimdir
+/// SYNC §4): only this outcome delivers the create the target holds.
+fn relocated(handle: PimdirHandle) -> PimdirPushResult {
+    PimdirPushResult {
+        relocated: true,
+        ..accepted(handle, None)
     }
 }
 
@@ -1567,6 +1655,7 @@ fn rejected_bare(handle: PimdirHandle) -> PimdirPushResult {
         outcome: PimdirPushOutcome::Rejected,
         assigned: None,
         revision: None,
+        relocated: false,
     }
 }
 

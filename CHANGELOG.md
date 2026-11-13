@@ -100,7 +100,7 @@ Upgrading from 0.3.0:
 
   A server without `MOVE` (405, 501, 404) gets a create then a delete; CardDAV and the other backends upload as before.
 
-- Added `coverage`, `downloaded`, `unreached`, `unsettled` and `throttled` to the sync report, and `uncertain` to each `submitted` entry.
+- Added `coverage`, `downloaded`, `unreached`, `unsettled` and `throttled` to the sync report, and `unconfirmed` to each `submitted` entry.
 
 - Added the `wizard` cargo feature, on by default, gating `configure` and the offer a first run makes.
 
@@ -139,6 +139,12 @@ Upgrading from 0.3.0:
 - Added the enumeration of a scoped mail round: every page of a round a date filter narrowed says so, and its last page hands every handle the collection holds, read with no date filter (IMAP `UID SEARCH ALL`, the Gmail label's ids, the Graph folder's ids from the pass closing the round).
 
   An undated draft received before the window, or a message whose `Date` runs ahead of its arrival, is no longer dropped from the store by a scoped round that did not list it.
+
+- Added `waiting` to the sync report: the creates a run left waiting rather than pushing, each with its `side`, `collection`, `id` and `reason` (`out-of-scope`, `delivered`, `undeliverable`, `other`), printed under `Waiting`. They are no warning and change no exit code.
+
+- Added `disagreed` to the sync report: the members a listing named apart from a create of their own side holding their identity, counted as warnings.
+
+- Added the `lock-replaced` error code: a lock file of the store was removed or replaced under a run, which wrote nothing more.
 
 ### Changed
 
@@ -205,7 +211,7 @@ Upgrading from 0.3.0:
 
 - Changed a divergence between two endpoints to be recorded by the store, which keeps the body they agreed on until both reconciled, where neverest read it from a snapshot held in memory for the run.
 
-- Changed submission to at-most-once: a send that may have been delivered despite failing is parked as uncertain and never sent again, a run killed mid-send included.
+- Changed submission to at-most-once: a send that may have been delivered despite failing is parked as unconfirmed, under the `unconfirmed: ` prefix pimdir reserves (io-pimdir `unconfirm_action`), and never sent again, a run killed mid-send included.
 
 - Changed `sync` to drain the queue once, at its start, before reading any credential or opening any endpoint.
 
@@ -263,7 +269,17 @@ Upgrading from 0.3.0:
 
   Discovery falls back to the autoconfig of the provider a domain's MX records name, and resolves the CalDAV and CardDAV roots a provider advertises (RFC 6764).
 
-- Bumped io-pimdir to 0.9 (pimdir storage-draft-09, sync-draft-08, search-draft-09): a store any earlier neverest wrote is refused, never migrated.
+- **BREAKING**: bumped io-pimdir to 0.11 (pimdir storage-draft-10, sync-draft-10, search-draft-10), from crates.io: a store any earlier neverest wrote is refused, never migrated, and the search index is built again by the first refresh.
+
+- **BREAKING**: changed where neverest keeps its own files of a store: neverest.json, sync.lock and the `submitting` mark are under the store's local/, the directory pimdir reserves for an owner, created `0700`, each file `0600`.
+
+  A store holding a neverest.json beside its database is refused as an earlier neverest's (`store-layout`).
+
+- Changed a move whose target already holds the message to delete it from its source rather than file it there a second time, on IMAP and Microsoft Graph mail.
+
+- Changed an IMAP append the server does not name (no UIDPLUS, and no `Message-ID` a search finds) to be accepted and wait for the listing that names it: it was rejected, and appended again by every run.
+
+- Changed a queued `submit`, `calendar-reply`, `calendar-cancel` or `collection-*` whose payload states a version neverest does not know to stay queued, untouched, for a neverest that knows it: it was parked as malformed.
 
 - Changed a local edit over a body the store never read to wait for it: the run reads that body first, so a server edit made meanwhile conflicts instead of being overwritten (io-pimdir 0c70144).
 
@@ -294,6 +310,10 @@ Upgrading from 0.3.0:
 - Bumped vcard-rs to 0.6.
 
 ### Fixed
+
+- Fixed a create no listing named yet being planned for a body download under a handle no server knows.
+
+- Fixed `sync --reset` dropping, without `--force`, a create its server took that no listing named yet.
 
 - Fixed `sync --accept-mode` being refused like the run it answers: it lets that run through and records the new mode.
 

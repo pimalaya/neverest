@@ -7,7 +7,7 @@
 //! credential, and records every command line it reads.
 
 use std::{
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
     thread,
@@ -141,6 +141,20 @@ fn serve(
         };
         commands.lock().unwrap().push(command.to_owned());
 
+        // NOTE: a synchronising literal (an `APPEND`'s message) is asked
+        // for, read and dropped: the fake files nothing and answers no
+        // `APPENDUID`, as a server without UIDPLUS does.
+        if let Some(octets) = literal_of(command) {
+            let mut literal = vec![0; octets];
+            let mut rest = String::new();
+            if writer.write_all(b"+ go ahead\r\n").is_err()
+                || reader.read_exact(&mut literal).is_err()
+                || reader.read_line(&mut rest).is_err()
+            {
+                return;
+            }
+        }
+
         let reply = answer(command, &mut mailbox.lock().unwrap());
         let done = format!("{tag} OK done\r\n");
         if writer.write_all(&reply).is_err() || writer.write_all(done.as_bytes()).is_err() {
@@ -150,6 +164,12 @@ fn serve(
             return;
         }
     }
+}
+
+/// The octets of the synchronising literal `command` ends on (`{12}`).
+fn literal_of(command: &str) -> Option<usize> {
+    let (_, octets) = command.strip_suffix('}')?.rsplit_once('{')?;
+    octets.parse().ok()
 }
 
 /// The untagged lines answering `command`.

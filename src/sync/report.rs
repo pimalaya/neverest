@@ -170,6 +170,17 @@ pub struct SyncOutput {
     /// The pushes a side's server gave no outcome for, left pending: a
     /// rerun pushes them again, so the run is incomplete (exit 3).
     pub unanswered: Vec<UnansweredPushes>,
+    /// The creates the last pass of each collection left waiting rather
+    /// than pushing them, each with its reason (pimdir SYNC §5). They are
+    /// no warning and change no exit code: a later listing, a wider scope
+    /// or its body lands each.
+    pub waiting: Vec<WaitingCreate>,
+    /// The members a listing named apart from a create of their own side
+    /// holding their identity, their summaries disagreeing (pimdir SYNC
+    /// §5, §6; counted as warnings): another message under the same
+    /// `Message-ID`, or the create's own, read otherwise by its server,
+    /// which the item then holds twice.
+    pub disagreed: Vec<DisagreedMember>,
     /// What the run did to the store's search index (pimdir SEARCH), `null`
     /// in a dry run and in a build without the `search` feature.
     ///
@@ -213,6 +224,8 @@ impl SyncOutput {
             unreadable,
             overruled,
             unanswered,
+            waiting,
+            disagreed,
             index: _,
         } = other;
 
@@ -235,6 +248,8 @@ impl SyncOutput {
         self.unreadable.extend(unreadable);
         self.overruled.extend(overruled);
         self.unanswered.extend(unanswered);
+        self.waiting.extend(waiting);
+        self.disagreed.extend(disagreed);
     }
 
     /// Names every endpoint as the account's configuration does, rather than
@@ -263,6 +278,8 @@ impl SyncOutput {
         endpoints.extend(self.unreadable.iter_mut().map(|u| &mut u.side));
         endpoints.extend(self.overruled.iter_mut().filter_map(|o| o.side.as_mut()));
         endpoints.extend(self.unanswered.iter_mut().map(|u| &mut u.side));
+        endpoints.extend(self.waiting.iter_mut().map(|w| &mut w.side));
+        endpoints.extend(self.disagreed.iter_mut().map(|d| &mut d.side));
 
         for endpoint in endpoints {
             if let Some(name) = endpoint.strip_prefix(&prefix) {
@@ -482,6 +499,92 @@ impl fmt::Display for UnansweredPushes {
         write!(
             f,
             "{count} change(s) to {collection} on {side} got no answer from the server, pushed again by the next run"
+        )
+    }
+}
+
+/// A create a side's sync left waiting rather than pushing it (pimdir SYNC
+/// §5).
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WaitingCreate {
+    /// The side the create is for.
+    pub side: String,
+    /// The collection, as the side names it.
+    pub collection: String,
+    /// The create's key, its link id: the side names no member for it yet.
+    pub id: String,
+    /// Why no add was pushed for it.
+    pub reason: WaitReason,
+}
+
+impl fmt::Display for WaitingCreate {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            id,
+            reason,
+        } = self;
+        write!(f, "{id} waits to reach {collection} on {side}: {reason}")
+    }
+}
+
+/// Why a create waits (pimdir SYNC §2, §5).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum WaitReason {
+    /// Its date lies outside the run's scope, and it may be its own
+    /// arrival, which no page of that scope lists: it waits for a round
+    /// over a scope holding it.
+    OutOfScope,
+    /// The server took it already, without a listing naming the member
+    /// yet: it waits for the page that names it.
+    Delivered,
+    /// The store holds neither a body to upload nor a member to copy it
+    /// from: it waits for its body.
+    Undeliverable,
+    /// A reason this neverest does not name.
+    Other,
+}
+
+impl fmt::Display for WaitReason {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::OutOfScope => "its date is outside the scope of this run",
+            Self::Delivered => "the server took it, and no listing names it yet",
+            Self::Undeliverable => "the store holds no body to upload for it",
+            Self::Other => "it is not pushed yet",
+        })
+    }
+}
+
+/// A member a listing named apart from a create of its own side holding
+/// its identity (pimdir SYNC §5, §6).
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DisagreedMember {
+    /// The side whose listing named the member.
+    pub side: String,
+    /// The collection, as the side names it.
+    pub collection: String,
+    /// The member, by the handle the side lists it under.
+    pub id: String,
+    /// The key of the create it was named apart from.
+    pub create: String,
+}
+
+impl fmt::Display for DisagreedMember {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            id,
+            create,
+        } = self;
+        write!(
+            f,
+            "{id} in {collection} on {side} states the identity of the create {create} under another subject, date or sender, so it was kept apart from it and the item may now be held twice"
         )
     }
 }
@@ -781,9 +884,10 @@ impl fmt::Display for ParkedQueueAction {
 /// One submit intent attempted this run.
 ///
 /// Acknowledged when `error` is `None`, its queue row dropped and the body's
-/// pin released; parked when the failure is permanent or uncertain, pending
-/// otherwise. A parked uncertain one carries an `error` beginning
-/// `uncertain: `, as its parked row does.
+/// pin released; parked when the failure is permanent or its outcome
+/// unknown, pending otherwise. A parked unconfirmed one carries an `error`
+/// beginning `unconfirmed: `, the prefix pimdir reserves for it (STORAGE
+/// §13), as its parked row does.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitEntry {
@@ -800,9 +904,10 @@ pub struct SubmitEntry {
     /// Whether the message may have been delivered despite the failure:
     /// handed over whole with no verdict back, or answered by a gateway
     /// error, or left mid-send by a run that stopped. Such a row is parked
-    /// and never sent again on its own. False on success and on a failure
-    /// that certainly delivered nothing.
-    pub uncertain: bool,
+    /// unconfirmed (pimdir STORAGE §15.2) and never sent again on its own:
+    /// its producer reads that state, and a person retries or withdraws it.
+    /// False on success and on a failure that certainly delivered nothing.
+    pub unconfirmed: bool,
 }
 
 impl fmt::Display for SubmitEntry {
@@ -810,7 +915,7 @@ impl fmt::Display for SubmitEntry {
         let subject = self.subject.as_deref().unwrap_or("<no subject>");
         match (&self.error, self.parked) {
             (None, _) => write!(f, "submitted {subject}"),
-            (Some(err), true) if self.uncertain => {
+            (Some(err), true) if self.unconfirmed => {
                 write!(
                     f,
                     "{subject} may have been sent, parked and never sent again: {err}"
@@ -993,6 +1098,7 @@ impl fmt::Display for SyncOutput {
             + self.unreadable.len()
             + self.overruled.len()
             + self.unanswered.len()
+            + self.disagreed.len()
             + self
                 .index
                 .as_ref()
@@ -1076,6 +1182,14 @@ impl fmt::Display for SyncOutput {
             writeln!(f)?;
         }
 
+        if !self.waiting.is_empty() {
+            writeln!(f, "Waiting ({n}):", n = self.waiting.len())?;
+            for waiting in &self.waiting {
+                writeln!(f, " - {waiting}")?;
+            }
+            writeln!(f)?;
+        }
+
         if warnings > 0 {
             writeln!(f, "Warnings ({warnings}):")?;
             for c in &self.collisions {
@@ -1104,6 +1218,9 @@ impl fmt::Display for SyncOutput {
             }
             for u in &self.unanswered {
                 writeln!(f, " - {u}")?;
+            }
+            for d in &self.disagreed {
+                writeln!(f, " - {d}")?;
             }
             if let Some(index) = &self.index
                 && index.error.is_some()

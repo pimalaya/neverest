@@ -30,6 +30,7 @@ use crate::{
     error::pimdir_error,
     offline::{
         driver::{self, Bodies, DownloadOrder, Pacing},
+        local,
         progress::Progress,
         state::StoreState,
     },
@@ -47,6 +48,9 @@ pub const LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often the waiter retries the lock.
 const LOCK_POLL: Duration = Duration::from_millis(500);
+
+/// The file of the store's local/ a run holds its advisory lock on.
+const SYNC_LOCK: &str = "sync.lock";
 
 /// Synchronizes the collections and items of every account, or of those `-a`
 /// names, through the pimdir store they share.
@@ -464,7 +468,7 @@ pub fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
         Some(file) => Ok(file),
         None => bail!(
             "Another sync still holds {} after {}s",
-            store_dir.join("sync.lock").display(),
+            local::path(store_dir).join(SYNC_LOCK).display(),
             timeout.as_secs()
         ),
     }
@@ -512,10 +516,14 @@ pub fn try_store_lock(store_dir: &Path) -> Result<Option<File>> {
     }
 }
 
-/// Opens, creating it if needed, the file the sync.lock is taken on.
+/// Opens, creating it if needed, the file the sync.lock is taken on: a
+/// file of the store's local/, neverest's own state there (pimdir STORAGE
+/// §3), which is created with it.
 fn open_store_lock(store_dir: &Path) -> Result<(PathBuf, File)> {
-    let lock_path = store_dir.join("sync.lock");
-    let file = File::options()
+    let local = local::ensure(store_dir)
+        .with_context(|| format!("Create {}", local::path(store_dir).display()))?;
+    let lock_path = local.join(SYNC_LOCK);
+    let file = local::options()
         .read(true)
         .write(true)
         .create(true)
@@ -668,11 +676,15 @@ fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result
         let (mut conflicts, mut retained, mut deletes, mut unpushed) = (0, 0, 0, 0);
 
         for item in hub.items.values() {
+            // NOTE: a delivered create is based under its provisional
+            // handle, on a base naming nothing (pimdir SYNC §2): it holds
+            // nothing a listing confirmed, so it is a staged create still.
             let held = item.sources.values().any(|binding| {
-                binding
-                    .base
-                    .as_ref()
-                    .is_some_and(|base| holds(base, &item.flags, &item.object))
+                !binding.handle.is_provisional()
+                    && binding
+                        .base
+                        .as_ref()
+                        .is_some_and(|base| holds(base, &item.flags, &item.object))
             });
             if item.conflicted || item.sources.values().any(|binding| binding.conflicted) {
                 conflicts += 1;
@@ -781,6 +793,19 @@ mod tests {
 
         drop(held);
         acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap();
+    }
+
+    /// The lock is neverest's own state: a file of the store's local/, the
+    /// one place pimdir leaves an owner in a store directory (pimdir
+    /// STORAGE §3), and nothing of it beside the store's files.
+    #[test]
+    fn the_sync_lock_is_kept_under_local() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let _held = acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap();
+
+        assert!(dir.path().join("local").join("sync.lock").is_file());
+        assert!(!dir.path().join("sync.lock").exists());
     }
 
     /// A reset is the whole account's: beside a dry run it would drop the
@@ -928,9 +953,14 @@ mod tests {
         let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
         let dir = tempfile::tempdir().unwrap();
         land(dir.path(), "work", "w1@x", true);
+        let remove = PimdirAction::Remove {
+            seq: 1,
+            if_match: None,
+            resolves: None,
+        };
         PimdirProducer::open(dir.path(), "tests")
             .unwrap()
-            .enqueue(&inbox("work"), &PimdirAction::Remove { seq: 1 }, None)
+            .enqueue(&inbox("work"), &remove, None)
             .unwrap();
 
         for force in [false, true] {
@@ -974,6 +1004,51 @@ mod tests {
             .unwrap()
             .account("work")
             .unwrap();
+    }
+
+    /// A delivered create is a staged create still: its server took it and
+    /// no listing named it yet (pimdir SYNC §2), so its base names nothing
+    /// and what is staged on it is in the store alone. A plain reset
+    /// refuses over it as over a pending one.
+    #[test]
+    fn a_reset_refuses_while_a_delivered_create_waits() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        land(dir.path(), "work", "w1@x", true);
+
+        let key = PimdirLinkId("w2@x".into());
+        let mut store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account("work")
+            .for_source("work/imap");
+        store
+            .write(vec![
+                PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId(inbox("work")),
+                    handle: key.provisional(),
+                    link_id: Some(key.clone()),
+                    object: None,
+                    level: PimdirLevel::Meta,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::from_iter(["\\Seen"]),
+                    status: PimdirStatus::Created,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: None,
+                    origin: None,
+                }),
+                PimdirWriteOp::DeliverPlacement {
+                    collection: PimdirCollectionId(inbox("work")),
+                    handle: key.provisional(),
+                },
+            ])
+            .unwrap();
+        drop(store);
+
+        let err = reset_account(dir.path(), "work", &namespaced("work"), false).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("1 unpushed change"), "{err}");
     }
 
     /// A reset starts over an account `init` initialized, never one it did

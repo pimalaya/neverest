@@ -175,9 +175,12 @@ impl Fixture {
 
         // NOTE: the store and its sidecar naming the account, as `init`
         // leaves them, then the collection.
-        drop(PimdirStore::open(fixture.store()).unwrap());
+        let local = PimdirStore::open(fixture.store())
+            .unwrap()
+            .local_dir()
+            .unwrap();
         let sidecar = format!(r#"{{"layout":2,"accounts":{{"{ACCOUNT}":{{}}}}}}"#);
-        fs::write(fixture.store().join("neverest.json"), sidecar).unwrap();
+        fs::write(local.join("neverest.json"), sidecar).unwrap();
         PimdirStore::open(fixture.store())
             .unwrap()
             .for_account(ACCOUNT)
@@ -190,6 +193,11 @@ impl Fixture {
 
     fn store(&self) -> PathBuf {
         self.state.join("neverest")
+    }
+
+    /// The store's local/, where neverest keeps its own state.
+    fn local(&self) -> PathBuf {
+        self.store().join("local")
     }
 
     /// Queues a send of `body`, as `himalaya pimdir message send` does,
@@ -206,6 +214,8 @@ impl Fixture {
             .unwrap()
             .enqueue_with_body(SENT, body, |object| submit.to_action(object).unwrap())
             .unwrap()
+            .handle
+            .id
     }
 
     fn status(&self, id: i64) -> PimdirActionStatus {
@@ -265,7 +275,7 @@ fn intents_only_sends_through_smtp_without_opening_the_source() {
     assert_eq!(submitted["id"], id, "{report}");
     assert_eq!(submitted["error"], Value::Null, "{report}");
     assert_eq!(submitted["parked"], false, "{report}");
-    assert_eq!(submitted["uncertain"], false, "{report}");
+    assert_eq!(submitted["unconfirmed"], false, "{report}");
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     assert_eq!(
         report["collection"]["patch"],
@@ -286,9 +296,10 @@ fn intents_only_sends_through_smtp_without_opening_the_source() {
 }
 
 /// A message read whole by a server that hung up before its verdict may
-/// have been delivered: parked under `uncertain: `, never sent again.
+/// have been delivered: parked unconfirmed, under `unconfirmed: `, never
+/// sent again.
 #[test]
-fn a_send_without_a_verdict_is_parked_as_uncertain() {
+fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
     let (port, data) = spawn_smtp(Smtp::HangUpAfterData);
     let fixture = Fixture::new(port, false);
     let id = fixture.queue_send(BODY, false);
@@ -298,13 +309,13 @@ fn a_send_without_a_verdict_is_parked_as_uncertain() {
     assert_eq!(data.recv().unwrap(), BODY);
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["parked"], true, "{report}");
-    assert_eq!(submitted["uncertain"], true, "{report}");
+    assert_eq!(submitted["unconfirmed"], true, "{report}");
     let error = submitted["error"].as_str().unwrap();
-    assert!(error.starts_with("uncertain: "), "{report}");
-    let PimdirActionStatus::Parked { error, .. } = fixture.status(id) else {
-        panic!("the send is parked: {report}");
+    assert!(error.starts_with("unconfirmed: "), "{report}");
+    let PimdirActionStatus::Unconfirmed { detail, .. } = fixture.status(id) else {
+        panic!("the send is parked unconfirmed: {report}");
     };
-    assert!(error.starts_with("uncertain: "), "{error}");
+    assert_eq!(error, format!("unconfirmed: {detail}"));
 
     // NOTE: the next run has nothing to send, the server being gone, and
     // still exits 2 over the parked send waiting for a person.
@@ -315,26 +326,26 @@ fn a_send_without_a_verdict_is_parked_as_uncertain() {
 }
 
 /// A run stopped mid-send leaves its mark: the next one parks that send
-/// as uncertain rather than sending it again.
+/// as unconfirmed rather than sending it again.
 #[test]
 fn a_send_a_stopped_run_was_handing_over_is_never_sent_again() {
     // NOTE: nothing listens: a run trying to send would name it unreached.
     let fixture = Fixture::new(closed_port(), false);
     let id = fixture.queue_send(BODY, false);
-    fs::write(fixture.store().join("submitting"), format!("{id}\n")).unwrap();
+    fs::write(fixture.local().join("submitting"), format!("{id}\n")).unwrap();
 
     let report = fixture.intents_only(2);
 
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["id"], id, "{report}");
     assert_eq!(submitted["parked"], true, "{report}");
-    assert_eq!(submitted["uncertain"], true, "{report}");
+    assert_eq!(submitted["unconfirmed"], true, "{report}");
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     assert!(matches!(
         fixture.status(id),
-        PimdirActionStatus::Parked { ref error, .. } if error.starts_with("uncertain: ")
+        PimdirActionStatus::Unconfirmed { .. }
     ));
-    assert!(!fixture.store().join("submitting").exists());
+    assert!(!fixture.local().join("submitting").exists());
 }
 
 /// An SMTP server that cannot be reached is named, and the send waits,
@@ -373,7 +384,7 @@ fn refused_credentials_fail_the_send_without_parking_it() {
         "{report}"
     );
     assert_eq!(submitted["parked"], false, "{report}");
-    assert_eq!(submitted["uncertain"], false, "{report}");
+    assert_eq!(submitted["unconfirmed"], false, "{report}");
     assert!(matches!(
         fixture.status(id),
         PimdirActionStatus::Pending { attempts: 0, .. }
@@ -446,7 +457,7 @@ fn the_attempt_is_counted_and_marked_before_the_message_leaves() {
         .unwrap();
 
     read_rx.recv().unwrap();
-    let in_flight = fs::read_to_string(fixture.store().join("submitting")).unwrap();
+    let in_flight = fs::read_to_string(fixture.local().join("submitting")).unwrap();
     assert_eq!(in_flight.trim(), id.to_string());
     assert!(matches!(
         fixture.status(id),
@@ -456,7 +467,7 @@ fn the_attempt_is_counted_and_marked_before_the_message_leaves() {
 
     let output = run.wait_with_output().unwrap();
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(!fixture.store().join("submitting").exists());
+    assert!(!fixture.local().join("submitting").exists());
     assert!(matches!(
         fixture.status(id),
         PimdirActionStatus::Applied { .. }
@@ -465,7 +476,7 @@ fn the_attempt_is_counted_and_marked_before_the_message_leaves() {
 
 /// A run killed while the server holds its verdict, as a caller does at
 /// its deadline, leaves the row attempted and marked: the next run parks
-/// it as uncertain and sends nothing.
+/// it as unconfirmed and sends nothing.
 #[test]
 fn a_run_killed_mid_send_never_sends_the_message_again() {
     let (read_tx, read_rx) = mpsc::channel();
@@ -495,10 +506,10 @@ fn a_run_killed_mid_send_never_sends_the_message_again() {
     let report = fixture.intents_only(2);
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["id"], id, "{report}");
-    assert_eq!(submitted["uncertain"], true, "{report}");
+    assert_eq!(submitted["unconfirmed"], true, "{report}");
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     assert!(matches!(
         fixture.status(id),
-        PimdirActionStatus::Parked { ref error, .. } if error.starts_with("uncertain: ")
+        PimdirActionStatus::Unconfirmed { .. }
     ));
 }

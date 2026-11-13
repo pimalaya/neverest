@@ -8,7 +8,7 @@ status: current
 
 `neverest sync` reconciles the named sources of every account, or of those `-a` names, through the io-pimdir engine over the pimdir store the accounts share. It is sync-on-demand: one reconcile per invocation, no daemon.
 
-The store and the engine follow pimdir storage-draft-09, sync-draft-08 and search-draft-09 (io-pimdir 0.9 at 5c18a02): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
+The store and the engine follow pimdir storage-draft-10, sync-draft-10 and search-draft-10 (io-pimdir 0.11, pimdir ae8b231): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
 
 ### Requirement: An account holds named sources
 An account SHALL hold a map of named sources (`sources.<name>`), each declaring exactly one remote backend, and SHALL require at least one. It MAY additionally hold a map of named targets (`targets.<name>`) on the same terms. Both map keys SHALL be the names its pimdir source ids are made from, so a name is what every binding it owns in the store is recorded against, and a rename SHALL be treated as a new source. One name SHALL NOT be both a source and a target.
@@ -19,7 +19,7 @@ An account SHALL NOT constrain its sources to one kind: mail, contacts and calen
 
 `collection.namespace` SHALL likewise be refused by name, naming `targets` and `one-way`. It expressed which sources met, which is now the arity, and never expressed which way, which is now `one-way`.
 
-A store written before collection ids carried their namespace SHALL NOT be read. Neverest keeps its own state beside the store (neverest.json, see "The sidecar holds each account"), and a store directory holding a database but no such file SHALL be refused as "A store laid out by an earlier neverest is refused" says.
+A store written before collection ids carried their namespace SHALL NOT be read. Neverest keeps its own state under the store's local/ (neverest.json, see "The sidecar holds each account" and "The owner's files live under local/"), and a store directory holding a database but no such file SHALL be refused as "A store laid out by an earlier neverest is refused" says.
 
 Whatever materializes the database SHALL write the sidecar in the same act, so that pair only ever describes a store an older neverest wrote. `init` SHALL stamp the account it initializes, and `sync --reset` SHALL stamp the account it starts over.
 
@@ -423,7 +423,7 @@ The store-wide ids SHALL carry the account (pimdir STORAGE §4.3, §9.2): a pimd
 A store opens under its own format version alone (pimdir STORAGE §4.2, §6): one any earlier neverest wrote, naming no `store_meta.format_version` or an earlier draft, is refused as `store-version` and never migrated. The refusal is the store's, so it SHALL fail the command before any account runs, naming the reinstall in the order that keeps its queued writes, which live only in that store: sync it with the neverest that wrote it until nothing is queued, move the store directory away, then run again (`neverest init`, then a sync), rather than surfacing the raw refusal alone. The message SHALL never say to delete the store. What the old store held that no server holds (retained items, whatever was still queued) stays in the store moved away. MIGRATION.md SHALL give the same order.
 
 #### Scenario: A store an earlier neverest wrote
-- **GIVEN** a store whose `store_meta.format_version` names `storage-draft-08`
+- **GIVEN** a store whose `store_meta.format_version` names `storage-draft-09`
 - **WHEN** neverest runs `--json drain` on the account
 - **THEN** it exits 1 with `code` `store-version`, the message naming the sync with the previous neverest until nothing is queued and the move of the store directory, and no delete
 
@@ -511,7 +511,7 @@ The subsequent sync of a drained collection pushes the resulting dirty state. An
 `neverest drain` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 3, the queue untouched.
 
 ### Requirement: A run holds the store lock, waiting bounded
-A run SHALL hold an advisory sync.lock in the **actual** store directory (honouring `store.root`) for its whole length, whatever accounts it covers, taken once for each store it covers, in path order, before any account runs. A second run SHALL wait for the holder up to a bounded timeout (60 s) and then report every account of that store `busy` and exit 3, so cron ticks and connector-triggered scoped runs serialize instead of failing or corrupting.
+A run SHALL hold an advisory sync.lock under local/ of the **actual** store directory (honouring `store.root`) for its whole length, whatever accounts it covers, taken once for each store it covers, in path order, before any account runs. A second run SHALL wait for the holder up to a bounded timeout (60 s) and then report every account of that store `busy` and exit 3, so cron ticks and connector-triggered scoped runs serialize instead of failing or corrupting.
 
 The lock is the store's, as pimdir's owner lock is (STORAGE §8: one owner process per store), so two accounts of one store never sync at once. Accounts needing independent schedules SHALL give themselves their own `store.root`.
 
@@ -580,9 +580,9 @@ Two copies of a projection drift silently and lose data at the seam between them
 ### Requirement: A queued submission is a `submit` queue intent
 Neverest SHALL NOT reserve a collection for queued sends. Submission is a **mail** capability: a `submit` intent belongs to a `message/rfc822` account, and an `smtp` channel declared on a source of any other kind SHALL be refused before any connection is made, rather than silently ignored. A submission SHALL be a **queue action** whose kind (`submit`) pimdir defines (STORAGE Annex B.2) and io-pimdir types (`PimdirSubmit`), carrying a versioned JSON payload; which kinds an owner can perform is the owner's business. An owner that does not recognise a kind, or recognises it but lacks the capability, SHALL **skip** the row, leaving it pending, never parking it (parking means permanently unappliable) and never blocking later actions of that collection.
 
-The intent's payload SHALL be `v: 1` JSON, read by io-pimdir's `PimdirSubmit` whatever the order of its keys, carrying `object` (the body hash, required, and the hash the row pins), `from` (empty means the null reverse path), `rcpts` (at least one), and an optional `subject`, `source` and `copy`. A payload `PimdirSubmit` refuses, or one naming another body than the row pins, SHALL park as undecodable. The body SHALL be written durably before the enqueue, so the queue row pins it (queued bodies are pinned, and no GC can sweep it between the enqueue and the send); it belongs to no collection. The intent SHALL anchor on whatever collection the producer chose: neverest scans every collection's pending actions, so there is no anchor rule.
+The intent's payload SHALL be `v: 1` JSON, read by io-pimdir's `PimdirSubmit` whatever the order of its keys, carrying `object` (the body hash, required, and the hash the row pins), `from` (empty means the null reverse path), `rcpts` (at least one), and an optional `subject`, `source` and `copy`. A payload `PimdirSubmit` refuses, or one naming another body than the row pins, SHALL park as undecodable, but one stating a version neverest does not know, which stays pending ("An intent stating an unknown version stays pending"). The body SHALL be written durably before the enqueue, so the queue row pins it (queued bodies are pinned, and no GC can sweep it between the enqueue and the send); it belongs to no collection. The intent SHALL anchor on whatever collection the producer chose: neverest scans every collection's pending actions, so there is no anchor rule.
 
-Neverest SHALL perform each pending intent through the one source offering a send channel: its own `smtp` table, else its native send (the Graph `sendMail` action, which files the message in Sent itself), sources walked in the order the account declares them. At most one source may declare an `smtp` table, so the only pick that order decides is between a declared channel and a natively-sending source. On success the row SHALL be acknowledged with its receipt, releasing the body's pin. A **transient** failure, which certainly delivered nothing (an SMTP 4xx, an SMTP 5xx refusing for a sending rate or quota as "A quota refusal keeps the send queued" says, a Graph 401, 408 or 429, a transport error before the message went whole), SHALL leave the row pending; a **permanent** one (any other SMTP 5xx, a Graph 400, 403, 404, 413, 422 or other 4xx, an undecodable payload, a missing body) SHALL park it with its error; an **uncertain** one SHALL park it as "A send that may have been delivered is never sent again" says. A refusal SHALL reset the SMTP transaction before the next message; a refusal for a sending rate or quota, or a failure with no reply or status, SHALL leave the rest of the run's intents unattempted, pending. A build with no send channel (neither `smtp` nor `msgraph`) SHALL skip submit intents and warn, never park them. Message content is never logged.
+Neverest SHALL perform each pending intent through the one source offering a send channel: its own `smtp` table, else its native send (the Graph `sendMail` action, which files the message in Sent itself), sources walked in the order the account declares them. At most one source may declare an `smtp` table, so the only pick that order decides is between a declared channel and a natively-sending source. On success the row SHALL be acknowledged with its receipt, releasing the body's pin. A **transient** failure, which certainly delivered nothing (an SMTP 4xx, an SMTP 5xx refusing for a sending rate or quota as "A quota refusal keeps the send queued" says, a Graph 401, 408 or 429, a transport error before the message went whole), SHALL leave the row pending; a **permanent** one (any other SMTP 5xx, a Graph 400, 403, 404, 413, 422 or other 4xx, an undecodable payload, a missing body) SHALL park it with its error; an **unconfirmed** one SHALL park it as "A send that may have been delivered is never sent again" says. A refusal SHALL reset the SMTP transaction before the next message; a refusal for a sending rate or quota, or a failure with no reply or status, SHALL leave the rest of the run's intents unattempted, pending. A build with no send channel (neither `smtp` nor `msgraph`) SHALL skip submit intents and warn, never park them. Message content is never logged.
 
 The SMTP channel SHALL remove the body's `Bcc` field before `DATA` (RFC 5322 §3.6.3): a producer may stage the body with it, the payload's `rcpts` alone carrying those recipients to the server. The Graph channel hands the field to `sendMail`, which derives the recipients from it and does not deliver it.
 
@@ -738,7 +738,7 @@ A calendar's stamps SHALL NOT collide. `DTSTAMP`, `LAST-MODIFIED`, `CREATED` and
 ### Requirement: A conflicted run succeeds, with its own exit code
 A run that reconciled its collections and left work behind SHALL exit with a code distinct from both success and failure, and SHALL report the outstanding conflict count read from the store rather than the count the run itself marked.
 
-These states are that code, and they are one class: a divergence waiting for a decision, a duplicate `UID` a side refuses, a write a side would not take, a send or an intent this run parked (refused for good, or uncertain), a queued action the store holds parked, a listing that parked a mass absence, and a change withheld over a body the store cannot serve. Each leaves something a person has to settle, and a rerun on its own changes none of them. Conflicts, refusals and parked queue actions are re-reported on every run until a person acts; a parked send or intent is reported by the run that parked it; a parked absence and a withheld change are reported by every run meeting them.
+These states are that code, and they are one class: a divergence waiting for a decision, a duplicate `UID` a side refuses, a write a side would not take, a send or an intent this run parked (refused for good, or unconfirmed), a queued action the store holds parked, a listing that parked a mass absence, and a change withheld over a body the store cannot serve. Each leaves something a person has to settle, and a rerun on its own changes none of them. Conflicts, refusals and parked queue actions are re-reported on every run until a person acts; a parked send or intent is reported by the run that parked it; a parked absence and a withheld change are reported by every run meeting them.
 
 A conflict is one item wide, and so is a refusal. Failing the run would stop every other item over one divergence, and under a supervisor restarting on failure it would loop over a state no supervisor can resolve. The distinct code says the same thing without pretending the run broke.
 
@@ -1547,21 +1547,21 @@ A sent copy neverest files (pimdir STORAGE Annex B.2) is in the store when the r
 - **THEN** the message leaves through the SMTP channel, the run exits 0, and the report names nothing unreached and no collection
 
 ### Requirement: A send that may have been delivered is never sent again
-A `submit` that fails after the whole message was handed over and before a verdict came back SHALL be uncertain: over SMTP once the data's final `.` was written and flushed and no reply read; over Graph `sendMail` once the request was written whole and flushed and no answer read whole (none, one cut short, one that does not parse), or when 500, 502, 503 or 504 answered. A `sendMail` SHALL never be sent again on a dead connection; only a 429, which Graph answers before acting, SHALL send it again. An uncertain `submit` SHALL be parked with an error beginning `uncertain: `, SHALL be reported in `submitted` with `uncertain: true`, SHALL make the run that parked it exit 2, and SHALL never be sent again by any run.
+A `submit` that fails after the whole message was handed over and before a verdict came back SHALL be unconfirmed: over SMTP once the data's final `.` was written and flushed and no reply read; over Graph `sendMail` once the request was written whole and flushed and no answer read whole (none, one cut short, one that does not parse), or when 500, 502, 503 or 504 answered. A `sendMail` SHALL never be sent again on a dead connection; only a 429, which Graph answers before acting, SHALL send it again. An unconfirmed `submit` SHALL be parked as an intent whose outcome is unknown (pimdir STORAGE §13, §15.2, io-pimdir `unconfirm_action`), its error beginning with the reserved prefix `unconfirmed: `, which the store writes, so its producer reads it unconfirmed rather than refused; it SHALL be reported in `submitted` with `unconfirmed: true` and an `error` beginning `unconfirmed: `, SHALL make the run that parked it exit 2, and SHALL never be sent again by any run.
 
-Before the first byte of a message leaves, the run SHALL count the attempt in the store and SHALL write the intent's id to `submitting` beside `pimdir.db`, durably, clearing it once the outcome is recorded; a run finding the mark with that intent still pending SHALL park it as uncertain before sending anything, whichever account it belongs to. A store created SHALL start with no mark; a reset of one account SHALL leave it, the mark naming a row of the store.
+Before the first byte of a message leaves, the run SHALL count the attempt in the store and SHALL write the intent's id to `submitting` under the store's local/, durably, clearing it once the outcome is recorded; a run finding the mark with that intent still pending SHALL park it as unconfirmed before sending anything, whichever account it belongs to. A store created SHALL start with no mark; a reset of one account SHALL leave it, the mark naming a row of the store.
 
 A run that cannot record an outcome SHALL keep the mark and send nothing more.
 
 #### Scenario: A server hanging up after the data
 - **GIVEN** a queued `submit` and an SMTP server that reads the data and closes the connection unanswered
 - **WHEN** the account syncs
-- **THEN** the run exits 2, the row is parked under `uncertain: `, and the next run sends nothing
+- **THEN** the run exits 2, the row is parked unconfirmed, its error beginning `unconfirmed: `, and the next run sends nothing
 
 #### Scenario: A run killed while the server holds its verdict
 - **GIVEN** a run handing over a queued `submit`
 - **WHEN** it is killed before the server answers
-- **THEN** the row reads pending with one attempt, and the next run parks it under `uncertain: ` without sending it
+- **THEN** the row reads pending with one attempt, and the next run parks it unconfirmed without sending it
 
 ### Requirement: Graph mail bodies are fetched in JSON batches
 A Graph mail source SHALL fetch the `Full` tier of an id set through JSON batches (`POST /$batch`) of raw MIME gets (`/messages/{id}/$value`), each body answered base64-encoded, matched to its message by request id whatever order Graph answers in, and written to the blob store as soon as it is decoded, before the next is read. A batch SHALL hold at most 20 gets and 4 MiB of the sizes stated for them (the MAPI message size, `$expand=singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')`, which the band listing, the summaries read by id and the whole-folder delta ask for, the delta asking without it once Graph refused it, else the size the store records for the body it owes); a message stated over 1 MiB, or stating no size, SHALL be read alone by a plain get. When more than one message of a fetch states no size to the session nor to the store, their sizes SHALL be read first, 20 a batch, by id alone. A get Graph throttles (429 or a common 5xx), alone or with its whole batch, SHALL be sent again in a later batch once its own `Retry-After` is over (seconds or an HTTP date), else after a back-off doubling from a second, at most four times; one still throttled, or stating a wait over `sync --max-wait` (two minutes by default), SHALL be left unanswered, a throttle (429, 503) giving the source up until its wait is over. A get answered 404, for the size or the body, alone or in a batch, SHALL be answered gone. A get refused otherwise SHALL be left unanswered, so the per-item fallback fetches it and surfaces its error.
@@ -1872,7 +1872,7 @@ Opening a store refused as `store-version` whose `store_meta.format_version` nam
 - **THEN** the run fails asking for a newer neverest, and the store is untouched
 
 ### Requirement: The sidecar is replaced whole
-neverest.json SHALL be written to a temporary file in the store directory, synced, and renamed over the previous one, so a run killed while saving it leaves the previous sidecar or the new one, never a torn file the next run refuses.
+neverest.json SHALL be written to a temporary file beside it, under the store's local/, synced, and renamed over the previous one, so a run killed while saving it leaves the previous sidecar or the new one, never a torn file the next run refuses.
 
 ### Requirement: A relay appends only where the target's listing is closed
 A message SHALL be relayed to a target only when the target has closed a round over the collection, has none open, and that round's scope holds the message's date (an undated message being in every scope), as pimdir SYNC §5 guards an add: the store then knows what the target holds there, so a message it already holds is bound to it rather than appended twice. A message held back waits for a later pass.
@@ -1883,7 +1883,7 @@ A message SHALL be relayed to a target only when the target has closed a round o
 - **THEN** nothing is relayed into that inbox until the round closes
 
 ### Requirement: A store error carries its code
-A store failure that ends a command SHALL carry, in its JSON failure object, the code io-pimdir gives it (`PimdirError::code`), spelled the same: `store-version`, `store-uncreated`, `store-foreign`, `store-corrupt`, `store-not-current`, `store-hash-algo`, `sync-version`, `store-busy`, `store-owned`, `store-staging`, `store-in-flight`, `store-exposed`, `action-malformed`, `flag-invalid`, `unsupported`, `index-fts5-missing`, `index-version`. A store neverest's own layout refuses SHALL carry `store-layout`. A failure a caller cannot act on (an SQL or I/O error) SHALL carry none, nor SHALL a code neverest cannot meet (`index-busy`, which `index` answers as `busy`; `index-missing`, `index-outdated` and `index-query-only`, a query client's; `index-zone-unknown`, neverest stating only a zone its time zone database named; `cutoff-invalid`, neverest writing its cutoff as the store stamps; `conflict-unread`, which the one-way overwrite answers by fetching the unread body). A failure folded into one account's outcome SHALL keep its code. No message SHALL advise deleting the store: the remedies are an upgrade, the reinstall of "A store the format outgrew is refused with its remedy", which moves the store directory away, and `sync --reset`, which drops one account's collections.
+A store failure that ends a command SHALL carry, in its JSON failure object, the code io-pimdir gives it (`PimdirError::code`), spelled the same: `store-version`, `store-uncreated`, `store-foreign`, `store-corrupt`, `store-not-current`, `store-hash-algo`, `sync-version`, `store-busy`, `store-owned`, `store-staging`, `store-in-flight`, `store-exposed`, `lock-replaced`, `action-malformed`, `flag-invalid`, `unsupported`, `index-fts5-missing`, `index-version`. A store neverest's own layout refuses SHALL carry `store-layout`. A failure a caller cannot act on (an SQL or I/O error) SHALL carry none, nor SHALL a code neverest cannot meet (`index-busy`, which `index` answers as `busy`; `index-missing`, `index-outdated` and `index-query-only`, a query client's; `index-zone-unknown`, neverest stating only a zone its time zone database named; `cutoff-invalid`, neverest writing its cutoff as the store stamps; `scope-invalid`, neverest writing a scope bound in the one shape the store holds; `store-reset`, neverest naming a queue row by its bare id; `action-not-intent`, neverest parking unconfirmed a `submit` alone; `backup-occupied`, neverest taking no backup; `conflict-unread`, which the one-way overwrite answers by fetching the unread body). A failure folded into one account's outcome SHALL keep its code. No message SHALL advise deleting the store: the remedies are an upgrade, the reinstall of "A store the format outgrew is refused with its remedy", which moves the store directory away, and `sync --reset`, which drops one account's collections.
 
 #### Scenario: A downgrade under `--json`
 - **GIVEN** a store whose `store_meta.format_version` names a later draft
@@ -2021,7 +2021,7 @@ An index of the canonical shape at an earlier search draft SHALL be rebuilt by t
 ### Requirement: A store laid out by an earlier neverest is refused
 When the default root holds no pimdir.db yet but one of its immediate subdirectories does, a store an earlier neverest kept per account, neverest SHALL refuse before creating anything, as `store-layout`, naming each such store and the order to follow: sync it with the neverest that wrote it until nothing is queued, move it out of the neverest directory, then run again. It SHALL NOT say to delete it, the store holding what no server has (its queued writes, its retained items). Once the default root holds a pimdir.db, its subdirectories are not looked at.
 
-A store whose sidecar is of an earlier shape, or a store directory holding a database and no sidecar, SHALL be refused the same way, as `store-layout`, naming the same order for that store. Neither is migrated: pimdir stores are reinstalled (pimdir STORAGE §6), and so is neverest's state beside them.
+A store whose sidecar is of an earlier shape, a store directory holding a sidecar beside its database, where an earlier neverest kept it, or one holding a database and no sidecar under its local/, SHALL be refused the same way, as `store-layout`, naming the same order for that store. None is migrated: pimdir stores are reinstalled (pimdir STORAGE §6), and so is neverest's state in them.
 
 #### Scenario: Stores kept per account
 - **GIVEN** a neverest directory holding `work/pimdir.db` and `home/pimdir.db` and no pimdir.db of its own
@@ -2029,7 +2029,7 @@ A store whose sidecar is of an earlier shape, or a store directory holding a dat
 - **THEN** it exits 1 with `code` `store-layout`, naming both stores, the sync with the previous neverest until nothing is queued and the move out of the directory, no delete, and the directory holds nothing new
 
 ### Requirement: The sidecar holds each account
-neverest.json SHALL record the collection-id layout once for the store, and, under each account it initialized, the mode it last synced under, whether a mode change was accepted, the roles a listing does not carry and the calendars a listing states take no tasks. An account SHALL be initialized when it has an entry: a run over an account with none SHALL fail that account, naming `neverest init -a <account>`.
+neverest.json, under the store's local/, SHALL record the collection-id layout once for the store, and, under each account it initialized, the mode it last synced under, whether a mode change was accepted, the roles a listing does not carry and the calendars a listing states take no tasks. An account SHALL be initialized when it has an entry: a run over an account with none SHALL fail that account, naming `neverest init -a <account>`.
 
 `init` SHALL add the account's entry, creating the store and its sidecar in one act when there is none, and SHALL leave an account that has one as it is, reporting it initialized already rather than failing: its store may hold work no server has. `sync --reset` SHALL replace the entry; a run SHALL save its account's entry and leave every other as it read it.
 
@@ -2070,3 +2070,44 @@ An account's `default` key SHALL be read and ignored, with one warning a run nam
 - **GIVEN** a store holding the collections of an account `old`, and a configuration naming the same store under `new`
 - **WHEN** `neverest check --json` runs
 - **THEN** `orphans` names `old` with its store, and the collections of `old` are still there
+
+### Requirement: The owner's files live under local/
+Neverest SHALL keep every file of its own that follows a store under the store's local/, the subdirectory pimdir reserves for an owner's state (pimdir STORAGE §3, §6): the sidecar neverest.json, the sync.lock and the `submitting` mark, and no file of its own beside the store's. It SHALL create local/ `0700` and each file in it `0600` (pimdir STORAGE §18), never through a link or a file standing under the name, and SHALL NOT create the store directory on the way. A dry run's replica SHALL carry local/ with the rest of the store, its account reading initialized there, and still open as a store.
+
+#### Scenario: A store after its first sync
+- **GIVEN** an account initialized and synced once
+- **WHEN** its store directory is listed
+- **THEN** neverest.json and sync.lock are under local/, a directory of its user alone, and nothing of neverest's stands beside pimdir.db
+
+### Requirement: A remove relocates or deletes, and says which
+A `Remove` carrying a target SHALL relocate its member into the target and answer the engine that it did (`relocated`, pimdir SYNC §4), which is what delivers the create the target holds. When the target already holds the member's identity it SHALL delete the member from its own collection instead, on the precondition the change carries, and answer no relocation, so the target never holds the identity twice and its create stays pending (pimdir SYNC §4, §5). The target is asked only for an identity its backend can search for, a `Message-ID` on IMAP and on Graph mail, and never under a minted key, whose target held the identity before the move. A target that cannot be asked SHALL reject the change. Every other backend relocates as before and says so.
+
+#### Scenario: A message moved into a folder that holds it
+- **GIVEN** an IMAP inbox and an archive both holding the message `a@x`, the store binding the inbox one alone
+- **WHEN** the message is moved to the archive and the account syncs
+- **THEN** the inbox copy is expunged, no `MOVE` is sent, and the archive holds the message once
+
+### Requirement: An add its server does not name is accepted with no handle
+An append the server takes without naming the member it made (an IMAP `APPEND` answering no `APPENDUID`, whose message a search by `Message-ID` does not name either, or states none) SHALL be answered accepted with no assigned handle (pimdir SYNC §4), never rejected: the engine records the create delivered, and the page naming the member lands it. It SHALL NOT be appended again by that run or a later one. The relay, which binds its copy around the engine, SHALL still fail on such an append, having no create a listing could land.
+
+#### Scenario: An append on a server without UIDPLUS
+- **GIVEN** a staged message stating no `Message-ID` and an IMAP server answering its `APPEND` with no `APPENDUID`
+- **WHEN** the account syncs twice
+- **THEN** the message is appended once, the run reports it waiting as `delivered`, and nothing is reported rejected
+
+### Requirement: A create left waiting is reported
+The report SHALL list under `waiting`, for every collection a run synced on an endpoint, the creates its last pass left waiting rather than pushing (pimdir SYNC §5), each with its `side`, its `collection`, its key as `id` (the link id, never the provisional handle) and its `reason`: `out-of-scope`, its date lying outside the run's scope; `delivered`, its server having taken it with no listing naming it yet; `undeliverable`, the store holding neither a body nor a member to copy it from; `other`, a reason a later io-pimdir states. The text output SHALL print them under `Waiting`. A waiting create SHALL NOT count as a warning nor change the exit code.
+
+### Requirement: A member named apart from its create is reported
+The report SHALL list under `disagreed` every member a listing named apart from a create of its own side holding its identity, their summaries disagreeing (pimdir SYNC §5, §6, the engine's `Disagreed`), once whatever the passes that met it, with its `side`, its `collection`, the member's handle as `id` and the create's key as `create`. It SHALL count as a warning and SHALL NOT change the exit code.
+
+### Requirement: A create naming no member is owed no body fetch
+A create, pending or delivered, holds a provisional handle that names no member of its server (pimdir SYNC §2). Neverest SHALL NOT plan a body fetch under such a handle: the page that lands the create brings the handle its body is read under. A reset SHALL count a delivered create among the work no server is known to hold as the store holds it, as it counts a pending one, and refuse over it without `--force`.
+
+### Requirement: An intent stating an unknown version stays pending
+A `submit`, `calendar-reply`, `calendar-cancel`, `collection-create`, `collection-rename` or `collection-delete` row whose payload states an integer `v` other than the one neverest reads SHALL be left pending and untouched (pimdir STORAGE §15.3): read no further, performed by no run, counted no attempt and never parked, for a neverest that knows the version. A payload stating no `v`, or one that is no integer, names no version to wait for and SHALL park as malformed.
+
+#### Scenario: A send queued by a newer frontend
+- **GIVEN** a queued `submit` whose payload states `v` 2
+- **WHEN** the account syncs
+- **THEN** nothing is sent, the row reads pending with no attempt, and the report names no failed send

@@ -383,13 +383,19 @@ impl Replica {
         let action = PimdirAction::SetFlags {
             seq,
             flags: known(flags),
+            base: None,
         };
         self.enqueue(key, action);
     }
 
     /// Stages the removal of an item.
     pub fn remove(&self, key: &str, seq: i64) {
-        self.enqueue(key, PimdirAction::Remove { seq });
+        let action = PimdirAction::Remove {
+            seq,
+            if_match: None,
+            resolves: None,
+        };
+        self.enqueue(key, action);
     }
 
     /// Stages the move of an item from `key` into `to`.

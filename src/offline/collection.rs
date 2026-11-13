@@ -28,7 +28,7 @@ use io_pimdir::{
     },
 };
 
-use crate::offline::invitation::Failure;
+use crate::offline::{invitation::Failure, states_unknown_version};
 
 /// What a collection intent asks for, decoded.
 #[derive(Clone, Debug)]
@@ -108,6 +108,8 @@ fn collection_kind(kind: &str) -> Option<&'static str> {
 ///
 /// The drain leaves the kinds pimdir does not apply itself (they read back
 /// as [`PimdirAction::Unknown`]), so this reads exactly what it skipped.
+/// One stating a version this neverest does not know is left out, so it
+/// stays pending and untouched (pimdir STORAGE §15.3).
 pub fn pending(store: &PimdirStore) -> anyhow::Result<Vec<CollectionIntent>> {
     let rows = store
         .list_pending_actions()
@@ -116,12 +118,15 @@ pub fn pending(store: &PimdirStore) -> anyhow::Result<Vec<CollectionIntent>> {
     Ok(rows
         .into_iter()
         .filter_map(|row| match row.action {
-            PimdirAction::Unknown { kind, payload, .. } => Some(CollectionIntent {
-                id: row.id,
-                collection: row.collection,
-                kind: collection_kind(&kind)?,
-                payload,
-            }),
+            PimdirAction::Unknown { kind, payload, .. } => {
+                let kind = collection_kind(&kind)?;
+                (!states_unknown_version(kind, &payload)).then_some(CollectionIntent {
+                    id: row.id,
+                    collection: row.collection,
+                    kind,
+                    payload,
+                })
+            }
             _ => None,
         })
         .collect())
@@ -177,7 +182,7 @@ mod tests {
         let parks = |kind, payload: &str| intent(kind, payload).request().unwrap_err().parks();
 
         assert!(parks(COLLECTION_CREATE, "{"));
-        assert!(parks(COLLECTION_CREATE, r#"{"v":2,"name":"Archives"}"#));
+        assert!(parks(COLLECTION_CREATE, r#"{"name":"Archives"}"#));
         assert!(parks(COLLECTION_CREATE, r#"{"v":1}"#));
         assert!(parks(COLLECTION_CREATE, r#"{"v":1,"name":"  "}"#));
         assert!(parks(COLLECTION_RENAME, r#"{"v":1,"source":"imap"}"#));

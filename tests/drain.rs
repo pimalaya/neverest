@@ -110,9 +110,12 @@ impl Fixture {
     /// and its sidecar naming the account, as `init` leaves them, then the
     /// collection.
     fn offline_store(&self) {
-        drop(PimdirStore::open(self.store()).unwrap());
+        let local = PimdirStore::open(self.store())
+            .unwrap()
+            .local_dir()
+            .unwrap();
         let sidecar = format!(r#"{{"layout":2,"accounts":{{"{ACCOUNT}":{{}}}}}}"#);
-        fs::write(self.store().join("neverest.json"), sidecar).unwrap();
+        fs::write(local.join("neverest.json"), sidecar).unwrap();
 
         let store = PimdirStore::open(self.store())
             .unwrap()
@@ -136,6 +139,8 @@ impl Fixture {
                 supersedes: None,
             })
             .unwrap()
+            .handle
+            .id
     }
 
     fn status(&self, id: i64) -> PimdirActionStatus {
@@ -258,7 +263,7 @@ fn a_drain_leaves_a_busy_store_alone() {
         .write(true)
         .create(true)
         .truncate(false)
-        .open(fixture.store().join("sync.lock"))
+        .open(fixture.store().join("local").join("sync.lock"))
         .unwrap();
     lock.lock().unwrap();
 
@@ -312,7 +317,7 @@ fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
 fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
-    restamp_store(&fixture, "storage-draft-08");
+    restamp_store(&fixture, "storage-draft-09");
 
     let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
 

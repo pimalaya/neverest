@@ -97,7 +97,7 @@ fn a_declaration_records_the_default_calendar_the_server_states() {
 
     // The second run reuses the looked-up default rather than asking again,
     // and keeps it.
-    let sidecar = fs::read_to_string(store.join("neverest.json")).unwrap();
+    let sidecar = fs::read_to_string(store.join("local").join("neverest.json")).unwrap();
     assert!(sidecar.contains("looked_up_roles"), "{sidecar}");
     neverest(&["sync", "-a", "roles", "-m", "default"], &config, &state);
     assert_eq!(self::roles(&store), roles);

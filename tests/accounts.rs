@@ -106,16 +106,24 @@ impl Fixture {
         self.state.join("neverest")
     }
 
+    /// The sidecar, under the store's local/, where neverest keeps its own
+    /// state.
+    fn sidecar(&self) -> PathBuf {
+        self.store().join("local").join("neverest.json")
+    }
+
     /// The store holding `initialized` as `init` leaves them, without
     /// opening any endpoint: the database and the sidecar naming them.
     fn initialized(&self, initialized: &[&str]) {
-        drop(PimdirStore::open(self.store()).unwrap());
+        let store = PimdirStore::open(self.store()).unwrap();
+        store.local_dir().unwrap();
+        drop(store);
         let entries: Vec<String> = initialized
             .iter()
             .map(|account| format!("\"{account}\":{{}}"))
             .collect();
         let sidecar = format!(r#"{{"layout":2,"accounts":{{{}}}}}"#, entries.join(","));
-        fs::write(self.store().join("neverest.json"), sidecar).unwrap();
+        fs::write(self.sidecar(), sidecar).unwrap();
     }
 
     fn run(&self, args: &[&str]) -> Output {
@@ -179,8 +187,7 @@ fn every_account_is_initialized_into_one_store() {
     assert!(fixture.store().join("pimdir.db").is_file());
     assert!(!fixture.store().join("work").exists());
     let sidecar: Value =
-        serde_json::from_str(&fs::read_to_string(fixture.store().join("neverest.json")).unwrap())
-            .unwrap();
+        serde_json::from_str(&fs::read_to_string(fixture.sidecar()).unwrap()).unwrap();
     assert!(sidecar["accounts"]["home"].is_object(), "{sidecar}");
     assert!(sidecar["accounts"]["work"].is_object(), "{sidecar}");
 
@@ -255,7 +262,7 @@ fn stores_kept_per_account_are_refused_before_anything_is_created() {
         assert!(!error.to_lowercase().contains("delete"), "{failure}");
     }
     assert!(!fixture.store().join("pimdir.db").exists());
-    assert!(!fixture.store().join("sync.lock").exists());
+    assert!(!fixture.store().join("local").exists());
 }
 
 /// A name the configuration does not declare fails before anything runs,
@@ -336,9 +343,11 @@ fn turning_one_way_on_is_refused_until_accepted() {
         ),
     )
     .unwrap();
-    drop(PimdirStore::open(fixture.store()).unwrap());
+    let store = PimdirStore::open(fixture.store()).unwrap();
+    store.local_dir().unwrap();
+    drop(store);
     let sidecar = r#"{"layout":2,"accounts":{"work":{"mode":{"sources":1,"targets":1,"one_way":false,"retain":false}}}}"#;
-    fs::write(fixture.store().join("neverest.json"), sidecar).unwrap();
+    fs::write(fixture.sidecar(), sidecar).unwrap();
 
     let refused = fixture.json(&["--json", "sync"], 3);
     let error = refused["accounts"][0]["error"].as_str().unwrap_or_default();
@@ -347,8 +356,7 @@ fn turning_one_way_on_is_refused_until_accepted() {
     let accepted = fixture.json(&["--json", "sync", "--accept-mode"], 3);
     assert!(accepted["accounts"][0]["report"].is_object(), "{accepted}");
     let sidecar: Value =
-        serde_json::from_str(&fs::read_to_string(fixture.store().join("neverest.json")).unwrap())
-            .unwrap();
+        serde_json::from_str(&fs::read_to_string(fixture.sidecar()).unwrap()).unwrap();
     assert_eq!(
         sidecar["accounts"]["work"]["mode_accepted"], true,
         "{sidecar}"

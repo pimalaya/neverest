@@ -19,6 +19,7 @@ use std::time::Instant;
 use anyhow::{Result, anyhow};
 use io_pimdir::{
     client::PimdirSourceStore,
+    codec::{self, PimdirPayloadOutcome},
     collection::PimdirCollectionId,
     coroutine::*,
     hub::PimdirSourceId,
@@ -32,6 +33,7 @@ pub mod driver;
 #[cfg(feature = "search")]
 pub mod index;
 pub mod invitation;
+pub mod local;
 pub mod pipe;
 pub mod prof;
 pub mod progress;
@@ -49,6 +51,18 @@ pub mod submit;
 /// account orphans its bindings rather than quietly rebinding them.
 pub fn source_id(name: &str) -> PimdirSourceId {
     PimdirSourceId(name.to_string())
+}
+
+/// Whether the payload of the queued intent `kind` states a version this
+/// neverest holds no schema for (pimdir STORAGE §15.3): an integer `v` other
+/// than the one it reads.
+///
+/// Such a row is left pending and untouched, for a neverest that knows the
+/// version: it is read no further, never performed and never parked. A
+/// payload stating no `v`, or one that is no integer, names no version to
+/// wait for and is malformed instead.
+pub fn states_unknown_version(kind: &str, payload: &str) -> bool {
+    codec::payload_outcome(kind, payload) == PimdirPayloadOutcome::Unknown
 }
 
 /// Runs an io-pimdir coroutine to completion over borrowed seams.

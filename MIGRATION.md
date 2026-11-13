@@ -33,8 +33,8 @@ This page lists the changes most likely to bite when upgrading. The full configu
 
 Two things change at once, and neither is migrated:
 
-- The store follows pimdir storage-draft-09, sync-draft-08 and search-draft-09 (io-pimdir 0.9). A store any earlier neverest wrote, v0.3.0 or a git build, is refused by every profile as `store-version`.
-- **Every account shares one store**: `neverest/` under the state directory itself (`$XDG_STATE_HOME/neverest` on Linux, `~/Library/Application Support/neverest` on macOS, `%LOCALAPPDATA%\neverest` on Windows), no longer one directory per account under it. A neverest directory still holding the per-account stores an earlier neverest kept is refused as `store-layout`, naming each, and so is a `store.root` store whose neverest.json an earlier neverest wrote.
+- The store follows pimdir storage-draft-10, sync-draft-10 and search-draft-10 (io-pimdir 0.11). A store any earlier neverest wrote, v0.3.0 or a git build, is refused by every profile as `store-version`.
+- **Every account shares one store**: `neverest/` under the state directory itself (`$XDG_STATE_HOME/neverest` on Linux, `~/Library/Application Support/neverest` on macOS, `%LOCALAPPDATA%\neverest` on Windows), no longer one directory per account under it. A neverest directory still holding the per-account stores an earlier neverest kept is refused as `store-layout`, naming each, and so is a `store.root` store whose neverest.json an earlier neverest wrote, or kept beside its pimdir.db.
 
 What only an old store holds is the work it queued (a send, an edit or a create staged by a frontend) and its retained items, so reinstall in this order:
 
@@ -55,6 +55,8 @@ What else changes:
 - **Store ids carry the account.** A source id is `<account>/<source>` and a collection id `<account>/<source>/<name>` (`work/imap/INBOX`, where it was `imap/INBOX`), so two accounts with an `imap` source never share a collection. A report still names an endpoint as the configuration does (`imap`). An account name holding `/` is refused.
 - **`sync --reset` starts one account over**: it drops that account's collections and syncs them again, every other account untouched. `--force` drops the conflicts, unpushed edits and retained items they hold rather than moving a store aside; a queued or parked action still refuses the reset until a drain applies it or its frontend cancels it.
 - **Frontends** (himalaya, calendula, cardamum): point `pimdir.root` at the neverest directory and name the account with `pimdir.account`. A collection named by its id gains the account (`himalaya -f work/imap/INBOX`); a role (`inbox`, `sent`) keeps working.
+- **neverest keeps its own files under the store's local/**: neverest.json, sync.lock and the mark of a send being handed over, where they stood beside pimdir.db. A script reading or locking one names it there (`local/sync.lock`).
+- **A send that may have been delivered is `unconfirmed`**: its report entry carries `unconfirmed: true` and an `error` beginning `unconfirmed: `, the state every pimdir frontend reads, where a git build wrote `uncertain`.
 - `neverest check` names, under `orphans`, an account the store holds that no configured account names: renaming an account's TOML key leaves its collections under the old name until the key is renamed back.
 
 ## From a git master build

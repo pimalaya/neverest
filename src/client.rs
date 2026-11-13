@@ -874,6 +874,10 @@ impl Client {
     /// is the `UID` a DAV href is built from, while its mint keeps a second
     /// copy off the href its twin holds. Graph assigns its own ids, and takes
     /// a message into Drafts only, creating every MIME message as a draft.
+    ///
+    /// `None` when the server took the item without saying which it is (an
+    /// IMAP `APPEND` without UIDPLUS whose message no search names): it is
+    /// added all the same, and the next listing names it (pimdir SYNC §4).
     pub fn add_item_stream(
         &mut self,
         collection: &str,
@@ -881,22 +885,24 @@ impl Client {
         source: impl Read,
         len: usize,
         link: LinkId<'_>,
-    ) -> Result<WrittenItem> {
+    ) -> Result<Option<WrittenItem>> {
         match self {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c
                 .add_message_stream(collection, flags, source, len, link.hint)
-                .map(|id| WrittenItem { id, revision: None }),
+                .map(|id| id.map(|id| WrittenItem { id, revision: None })),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.add_item_stream(collection, flags, source),
+            Client::Msgraph(c) => c.add_item_stream(collection, flags, source).map(Some),
             #[cfg(feature = "dav")]
-            Client::Dav(c) => c.add_item_stream(collection, source, link),
+            Client::Dav(c) => c.add_item_stream(collection, source, link).map(Some),
             #[cfg(feature = "gpeople")]
-            Client::Gpeople(c) => c.add_item_stream(collection, source),
+            Client::Gpeople(c) => c.add_item_stream(collection, source).map(Some),
             #[cfg(feature = "gcal")]
-            Client::Gcal(c) => c.add_item_stream(collection, source),
+            Client::Gcal(c) => c.add_item_stream(collection, source).map(Some),
             #[cfg(feature = "gmail")]
-            Client::Gmail(c) => c.add_item_stream(collection, flags, source, link.hint),
+            Client::Gmail(c) => c
+                .add_item_stream(collection, flags, source, link.hint)
+                .map(Some),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",

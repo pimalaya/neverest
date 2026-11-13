@@ -697,6 +697,9 @@ impl ImapClient {
     ///
     /// Returns the appended UID from the UIDPLUS APPENDUID response, falling
     /// back to a UID SEARCH on `message_id` where the server lacks UIDPLUS.
+    /// `None` when the server took the message without saying which it is
+    /// and the search names none: the append is accepted all the same
+    /// (pimdir SYNC §4), and the next listing names the member.
     pub fn add_message_stream(
         &mut self,
         mailbox: &str,
@@ -704,7 +707,7 @@ impl ImapClient {
         source: impl Read,
         len: usize,
         message_id: Option<&str>,
-    ) -> Result<String> {
+    ) -> Result<Option<String>> {
         let mbox = parse_mailbox(mailbox)?;
         let imap_flags: Vec<ImapFlag<'static>> = flags.iter().map(flag_from).collect();
 
@@ -720,14 +723,13 @@ impl ImapClient {
         )?;
 
         if let Some((_, uid)) = appenduid {
-            return Ok(uid.to_string());
+            return Ok(Some(uid.to_string()));
         }
 
         let message_id = message_id.map(str::trim).filter(|id| !id.is_empty());
         let Some(message_id) = message_id else {
-            bail!(
-                "Cannot resolve appended UID: server lacks UIDPLUS and no Message-ID was provided"
-            );
+            debug!("append to {mailbox} answered no UID and states no Message-ID");
+            return Ok(None);
         };
 
         self.select_cached(mailbox)?;
@@ -739,10 +741,11 @@ impl ImapClient {
         let criteria = Vec1::from(SearchKey::Header(field, value));
         let uids = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
 
-        uids.into_iter()
-            .max()
-            .map(|uid| uid.to_string())
-            .ok_or_else(|| anyhow!("Fallback UID search returned no match"))
+        let uid = uids.into_iter().max().map(|uid| uid.to_string());
+        if uid.is_none() {
+            debug!("append to {mailbox} answered no UID and a search finds none");
+        }
+        Ok(uid)
     }
 
     /// The UID of a message of `mailbox` stating `message_id` (bare, without

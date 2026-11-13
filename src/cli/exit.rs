@@ -123,7 +123,7 @@ mod tests {
             subject: None,
             error: Some(String::from("550 rejected")),
             parked: true,
-            uncertain: false,
+            unconfirmed: false,
         });
         assert_eq!(Exit::from(&report), Exit::Conflicted);
 
@@ -169,15 +169,15 @@ mod tests {
     /// A send that may have been delivered is parked for a person to
     /// decide, never resent: the run left something waiting.
     #[test]
-    fn an_uncertain_send_waits_for_a_person() {
+    fn an_unconfirmed_send_waits_for_a_person() {
         let mut report = SyncOutput::default();
         report.submitted.push(SubmitEntry {
             id: 7,
             collection: String::from("imap/Sent"),
             subject: Some(String::from("hi")),
-            error: Some(String::from("uncertain: Reached unexpected EOF")),
+            error: Some(String::from("unconfirmed: Reached unexpected EOF")),
             parked: true,
-            uncertain: true,
+            unconfirmed: true,
         });
         assert_eq!(Exit::from(&report), Exit::Conflicted);
         assert_eq!(ExitCode::from(Exit::Conflicted), ExitCode::from(2));
@@ -189,9 +189,9 @@ mod tests {
                 "id": 7,
                 "collection": "imap/Sent",
                 "subject": "hi",
-                "error": "uncertain: Reached unexpected EOF",
+                "error": "unconfirmed: Reached unexpected EOF",
                 "parked": true,
-                "uncertain": true,
+                "unconfirmed": true,
             }])
         );
     }

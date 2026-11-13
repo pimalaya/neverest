@@ -8,8 +8,9 @@
 //! collections instead of being refused, and a run that would discard what
 //! the previous mode kept is refused before it opens anything.
 //!
-//! It lives in neverest.json beside pimdir.db, deliberately outside the store:
-//! it is this crate's bookkeeping, not part of the pimdir format.
+//! It lives in neverest.json under the store's local/, the directory pimdir
+//! reserves for its owner (pimdir STORAGE §3): it is this crate's
+//! bookkeeping, not part of the pimdir format.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -22,7 +23,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use log::warn;
 use serde::{Deserialize, Serialize};
 
-use crate::{config::AccountMode, error::layout_error};
+use crate::{config::AccountMode, error::layout_error, offline::local};
 
 /// The current layout: source ids `<account>/<source>`, collection ids
 /// `<account>/<source>/<name>`, kind on the row, one sidecar entry per
@@ -32,7 +33,7 @@ use crate::{config::AccountMode, error::layout_error};
 /// neverest kept per account; neither is read.
 const LAYOUT: u32 = 2;
 
-/// The sidecar file name, beside `pimdir.db` in the store directory.
+/// The sidecar file name, under the store's local/.
 const FILE: &str = "neverest.json";
 
 /// The account mode a store was last synced under.
@@ -67,7 +68,7 @@ impl From<&AccountMode> for ModeStamp {
     }
 }
 
-/// The sidecar neverest keeps beside a store, naming what wrote it.
+/// The sidecar neverest keeps under a store's local/, naming what wrote it.
 ///
 /// It is what tells a store this build can read from one an earlier neverest
 /// laid out, and it carries, per account, the mode every run is compared
@@ -117,16 +118,20 @@ pub struct LookedUpRoles {
 impl StoreState {
     /// Reads the sidecar, refusing a store this version cannot read.
     ///
-    /// A store directory holding a pimdir.db but no sidecar, or a sidecar of
-    /// an earlier layout, was written by an earlier neverest: every
-    /// collection would be looked up under a key nothing wrote to, and the
-    /// sync would report a healthy run over an empty replica.
+    /// A store directory holding a pimdir.db but no sidecar, a sidecar
+    /// beside its database, where an earlier neverest kept it, or one of an
+    /// earlier layout, was written by an earlier neverest: every collection
+    /// would be looked up under a key nothing wrote to, and the sync would
+    /// report a healthy run over an empty replica.
     pub fn load(dir: &Path) -> Result<Self> {
         let path = Self::path(dir);
 
         if !path.exists() {
+            if dir.join(FILE).exists() {
+                return Err(earlier(dir, "a neverest.json beside its database"));
+            }
             if dir.join("pimdir.db").exists() {
-                return Err(earlier(dir, "a database and no neverest.json"));
+                return Err(earlier(dir, "a database and no local/neverest.json"));
             }
 
             return Ok(Self {
@@ -194,9 +199,10 @@ impl StoreState {
         let path = Self::path(dir);
         let raw = serde_json::to_string_pretty(self).context("Serialize store state error")?;
 
+        local::ensure(dir).with_context(|| format!("Create {}", local::path(dir).display()))?;
         let staged = path.with_extension("json.new");
         let mut file =
-            fs::File::create(&staged).with_context(|| format!("Create {}", staged.display()))?;
+            local::create(&staged).with_context(|| format!("Create {}", staged.display()))?;
         file.write_all(raw.as_bytes())
             .and_then(|()| file.sync_all())
             .with_context(|| format!("Write {} error", staged.display()))?;
@@ -204,7 +210,7 @@ impl StoreState {
     }
 
     fn path(dir: &Path) -> PathBuf {
-        dir.join(FILE)
+        local::path(dir).join(FILE)
     }
 }
 
@@ -306,12 +312,51 @@ mod tests {
 
         let after = fs::metadata(StoreState::path(dir.path())).unwrap().ino();
         assert_ne!(before, after);
-        let names: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(names, [FILE]);
+        assert_eq!(names(&local::path(dir.path())), [FILE]);
         StoreState::load(dir.path()).unwrap();
+    }
+
+    /// The file names `dir` holds.
+    fn names(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect()
+    }
+
+    /// The sidecar is the owner's own state: it is kept under the store's
+    /// local/, the one place pimdir leaves an owner in a store directory
+    /// (pimdir STORAGE §3), its user's alone, and nothing of neverest's
+    /// stands beside the store's files.
+    #[test]
+    #[cfg(unix)]
+    fn the_sidecar_is_kept_under_local() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        StoreState::stamp(dir.path(), "a", &mode(1, 0, false, true)).unwrap();
+
+        assert_eq!(names(dir.path()), ["local"]);
+        let sidecar = dir.path().join("local").join("neverest.json");
+        let mode = fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    /// A sidecar beside the database is where an earlier neverest kept it:
+    /// the store is refused as that neverest's, never read as one holding
+    /// no account.
+    #[test]
+    fn a_sidecar_beside_the_database_is_refused_as_an_earlier_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("pimdir.db"), b"").unwrap();
+        fs::write(dir.path().join(FILE), r#"{"layout":2}"#).unwrap();
+
+        let err = StoreState::load(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("beside its database"),
+            "{err:#}"
+        );
+        assert_refused_as_earlier(err);
     }
 
     fn mode(sources: usize, targets: usize, one_way: bool, retain: bool) -> AccountMode {
@@ -349,6 +394,7 @@ mod tests {
         fs::write(dir.path().join("pimdir.db"), b"").unwrap();
         let previous =
             r#"{"layout":1,"mode":{"sources":1,"targets":0,"one_way":false,"retain":true}}"#;
+        local::ensure(dir.path()).unwrap();
         fs::write(StoreState::path(dir.path()), previous).unwrap();
 
         assert_refused_as_earlier(StoreState::load(dir.path()).unwrap_err());

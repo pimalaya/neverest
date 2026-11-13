@@ -193,7 +193,7 @@ impl Conflict {
         // resolves the divergence it was shown, the remote side, and no other
         // (pimdir STORAGE §15.3): a conflict the person never saw parks it.
         let enqueued = producer
-            .enqueue_with_body_checked(&self.collection, body, |object| PimdirAction::Update {
+            .enqueue_with_body(&self.collection, body, |object| PimdirAction::Update {
                 seq: self.id,
                 object,
                 if_match: self.local.clone(),

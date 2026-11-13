@@ -18,12 +18,13 @@
 //! ```
 //!
 //! Submission is at-most-once on its own: a message handed over whole with no
-//! verdict back is *uncertain*, parked under [`UNCERTAIN`] and never sent
-//! again by any run, since a second send may deliver it twice. The run marks
-//! the intent it is handing over ([`InFlight`]) before the first byte leaves,
-//! so a run killed mid-send leaves the mark, and the next run parks that
-//! intent as uncertain instead of sending it again. Only a person, through
-//! the producer, sends an uncertain message again.
+//! verdict back is *unconfirmed*, parked under the prefix pimdir reserves for
+//! an intent whose outcome is unknown ([`UNCONFIRMED`], pimdir STORAGE §15.2)
+//! and never sent again by any run, since a second send may deliver it twice.
+//! The run marks the intent it is handing over ([`InFlight`]) before the first
+//! byte leaves, so a run killed mid-send leaves the mark, and the next run
+//! parks that intent as unconfirmed instead of sending it again. Only a
+//! person, through the producer, sends an unconfirmed message again.
 //!
 //! A build with no send channel skips the intents, leaving them pending rather
 //! than parked, since another build can perform them.
@@ -41,7 +42,10 @@ use anyhow::{Result, anyhow};
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 use io_pimdir::client::blobs::PimdirBlobs;
 use io_pimdir::{
-    client::PimdirStore, codec::PimdirAction, intent::PimdirSubmit, object::PimdirHash,
+    client::PimdirStore,
+    codec::{PimdirAction, UNCONFIRMED},
+    intent::PimdirSubmit,
+    object::PimdirHash,
 };
 #[cfg(feature = "smtp")]
 use io_smtp::{
@@ -62,6 +66,7 @@ use pimalaya_stream::proxy::Proxy;
 use crate::account::SmtpAccount;
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::{GraphClient, SendMimeFailure};
+use crate::offline::{local, states_unknown_version};
 
 /// The queue action kind neverest defines for a submission.
 ///
@@ -69,15 +74,7 @@ use crate::msgraph::client::{GraphClient, SendMimeFailure};
 /// owner that cannot perform it skips the row.
 pub const SUBMIT: &str = "submit";
 
-/// How the error of a parked uncertain submission begins, the rest being
-/// for a person.
-///
-/// A producer reading the row alone (`himalaya pimdir queue show`) tells it
-/// from a refusal by this prefix: a refused message was not delivered, an
-/// uncertain one may have been.
-pub const UNCERTAIN: &str = "uncertain: ";
-
-/// The file beside `pimdir.db` naming the intent a run is handing over.
+/// The file of the store's local/ naming the intent a run is handing over.
 const IN_FLIGHT: &str = "submitting";
 
 /// One pending `submit` row, as read from the queue.
@@ -141,7 +138,7 @@ impl SubmitIntent {
 ///
 /// The distinction is the whole point of putting submission in the queue: a
 /// transient failure keeps the intent, a permanent one stops re-sending
-/// forever while keeping the row queryable, and an uncertain one stops it
+/// forever while keeping the row queryable, and an unconfirmed one stops it
 /// too, the message having perhaps left.
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
 #[derive(Debug)]
@@ -154,7 +151,7 @@ pub enum SubmitFailure {
     /// Park, never resend: the message went whole and no verdict came back,
     /// or the provider answered with an error a gateway gives after the
     /// work was done. It may have been delivered.
-    Uncertain(anyhow::Error),
+    Unconfirmed(anyhow::Error),
 }
 
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
@@ -166,36 +163,51 @@ impl SubmitFailure {
 
     /// Whether this failure parks the row.
     pub fn parks(&self) -> bool {
-        matches!(self, Self::Permanent(_) | Self::Uncertain(_))
+        matches!(self, Self::Permanent(_) | Self::Unconfirmed(_))
     }
 
     /// Whether the message may have been delivered despite the failure.
-    pub fn uncertain(&self) -> bool {
-        matches!(self, Self::Uncertain(_))
+    pub fn unconfirmed(&self) -> bool {
+        matches!(self, Self::Unconfirmed(_))
     }
 
     /// The underlying error, for the log.
     pub fn error(&self) -> &anyhow::Error {
         match self {
-            Self::Transient(err) | Self::Permanent(err) | Self::Uncertain(err) => err,
+            Self::Transient(err) | Self::Permanent(err) | Self::Unconfirmed(err) => err,
         }
     }
 
-    /// The error the row is parked with and the report shows: an uncertain
-    /// one begins with [`UNCERTAIN`].
+    /// What the store records of the failure: its error, behind
+    /// [`unconfirmed_detail`]'s words for an unconfirmed one, which the
+    /// store parks under [`UNCONFIRMED`] itself.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::Unconfirmed(err) => unconfirmed_detail(&format!("{err:#}")),
+            Self::Transient(err) | Self::Permanent(err) => format!("{err:#}"),
+        }
+    }
+
+    /// The error the report shows, as the row reads once parked: an
+    /// unconfirmed one begins with [`UNCONFIRMED`].
     pub fn reason(&self) -> String {
         match self {
-            Self::Uncertain(err) => uncertain_reason(&format!("{err:#}")),
-            Self::Transient(err) | Self::Permanent(err) => format!("{err:#}"),
+            Self::Unconfirmed(_) => unconfirmed_reason(&self.detail()),
+            Self::Transient(_) | Self::Permanent(_) => self.detail(),
         }
     }
 }
 
-/// The parked error of an uncertain submission, `detail` saying why.
-pub fn uncertain_reason(detail: &str) -> String {
-    format!(
-        "{UNCERTAIN}the message may have been delivered, so it is never sent again on its own: {detail}"
-    )
+/// What an unconfirmed submission records after the reserved prefix, `why`
+/// saying what left its outcome unknown.
+pub fn unconfirmed_detail(why: &str) -> String {
+    format!("the message may have been delivered, so it is never sent again on its own: {why}")
+}
+
+/// The error of a row parked unconfirmed with `detail`, as a producer
+/// reads it: the reserved prefix, which the store writes, then the detail.
+pub fn unconfirmed_reason(detail: &str) -> String {
+    format!("{UNCONFIRMED}{detail}")
 }
 
 /// What a failure tells about the message, before it is wrapped with its
@@ -210,7 +222,7 @@ pub enum Disposition {
     /// Refused for good.
     Permanent,
     /// Maybe delivered.
-    Uncertain,
+    Unconfirmed,
 }
 
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
@@ -219,7 +231,7 @@ impl Disposition {
         match self {
             Self::Transient | Self::Limited => SubmitFailure::Transient(err),
             Self::Permanent => SubmitFailure::Permanent(err),
-            Self::Uncertain => SubmitFailure::Uncertain(err),
+            Self::Unconfirmed => SubmitFailure::Unconfirmed(err),
         }
     }
 }
@@ -240,7 +252,7 @@ pub fn smtp_disposition(reply: Option<(u16, &str)>, handed_over: bool) -> Dispos
         }
         Some((code, _)) if (500..600).contains(&code) => Disposition::Permanent,
         Some(_) => Disposition::Transient,
-        None if handed_over => Disposition::Uncertain,
+        None if handed_over => Disposition::Unconfirmed,
         None => Disposition::Transient,
     }
 }
@@ -279,10 +291,10 @@ pub fn graph_disposition(status: Option<u16>, unanswered: bool) -> Disposition {
     match status {
         Some(401 | 408 | 429) => Disposition::Transient,
         Some(400 | 403 | 404 | 413 | 422) => Disposition::Permanent,
-        Some(500 | 502 | 503 | 504) => Disposition::Uncertain,
+        Some(500 | 502 | 503 | 504) => Disposition::Unconfirmed,
         Some(status) if (400..500).contains(&status) => Disposition::Permanent,
         Some(_) => Disposition::Transient,
-        None if unanswered => Disposition::Uncertain,
+        None if unanswered => Disposition::Unconfirmed,
         None => Disposition::Transient,
     }
 }
@@ -291,6 +303,8 @@ pub fn graph_disposition(status: Option<u16>, unanswered: bool) -> Disposition {
 ///
 /// The drain skips the kinds pimdir does not define (they read back as
 /// [`PimdirAction::Unknown`]), so this reads exactly what it left behind.
+/// One stating a version this neverest does not know is left out, so it
+/// stays pending and untouched (pimdir STORAGE §15.3).
 pub fn pending(store: &PimdirStore) -> Result<Vec<SubmitIntent>> {
     let rows = store
         .list_pending_actions()
@@ -309,6 +323,9 @@ pub fn pending(store: &PimdirStore) -> Result<Vec<SubmitIntent>> {
         if kind != SUBMIT {
             continue;
         }
+        if states_unknown_version(&kind, &payload) {
+            continue;
+        }
         intents.push(SubmitIntent {
             id: row.id,
             collection: row.collection,
@@ -319,15 +336,19 @@ pub fn pending(store: &PimdirStore) -> Result<Vec<SubmitIntent>> {
     Ok(intents)
 }
 
-/// The mark of the intent a run is handing over, a file beside the store.
+/// The mark of the intent a run is handing over, a file of the store's
+/// local/ (pimdir STORAGE §3).
 ///
 /// Written durably before the first byte of a message leaves and removed
 /// once its outcome is in the store, so a run killed in between (a caller's
 /// deadline) leaves it behind: the next run reads it and parks that intent
-/// as uncertain rather than sending it again. It is neverest's bookkeeping,
-/// not part of the pimdir format, and one intent at a time is handed over.
+/// as unconfirmed rather than sending it again. It is neverest's
+/// bookkeeping, not part of the pimdir format, and one intent at a time is
+/// handed over.
 #[derive(Clone, Debug)]
 pub struct InFlight {
+    /// The store directory, whose local/ holds the mark.
+    dir: PathBuf,
     path: PathBuf,
 }
 
@@ -335,7 +356,8 @@ impl InFlight {
     /// The mark of the store at `dir`.
     pub fn new(dir: &Path) -> Self {
         Self {
-            path: dir.join(IN_FLIGHT),
+            dir: dir.to_path_buf(),
+            path: local::path(dir).join(IN_FLIGHT),
         }
     }
 
@@ -350,8 +372,9 @@ impl InFlight {
     /// then renamed into place, so a mark is either whole or absent.
     #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
     pub fn begin(&self, id: i64) -> io::Result<()> {
+        local::ensure(&self.dir)?;
         let staged = self.path.with_extension("new");
-        let mut file = fs::File::create(&staged)?;
+        let mut file = local::create(&staged)?;
         io::Write::write_all(&mut file, format!("{id}\n").as_bytes())?;
         file.sync_all()?;
         fs::rename(&staged, &self.path)
@@ -715,7 +738,7 @@ mod dispositions {
     use super::*;
 
     #[test]
-    fn an_smtp_reply_decides_and_only_silence_after_the_dot_is_uncertain() {
+    fn an_smtp_reply_decides_and_only_silence_after_the_dot_is_unconfirmed() {
         let refused = Some((554, "rejected"));
         assert_eq!(smtp_disposition(refused, false), Disposition::Permanent);
         let refused = Some((550, "5.1.1 User unknown"));
@@ -728,7 +751,7 @@ mod dispositions {
             "a 4yz after the data is a verdict: not taken"
         );
         assert_eq!(smtp_disposition(None, false), Disposition::Transient);
-        assert_eq!(smtp_disposition(None, true), Disposition::Uncertain);
+        assert_eq!(smtp_disposition(None, true), Disposition::Unconfirmed);
     }
 
     #[test]
@@ -767,7 +790,7 @@ mod dispositions {
     }
 
     #[test]
-    fn a_graph_status_decides_and_silence_after_the_request_is_uncertain() {
+    fn a_graph_status_decides_and_silence_after_the_request_is_unconfirmed() {
         for status in [400, 403, 404, 413, 422, 409] {
             assert_eq!(
                 graph_disposition(Some(status), true),
@@ -785,31 +808,36 @@ mod dispositions {
         for status in [500, 502, 503, 504] {
             assert_eq!(
                 graph_disposition(Some(status), false),
-                Disposition::Uncertain,
+                Disposition::Unconfirmed,
                 "{status}"
             );
         }
         assert_eq!(graph_disposition(Some(507), false), Disposition::Transient);
-        assert_eq!(graph_disposition(None, true), Disposition::Uncertain);
+        assert_eq!(graph_disposition(None, true), Disposition::Unconfirmed);
         assert_eq!(graph_disposition(None, false), Disposition::Transient);
     }
 
     #[test]
-    fn an_uncertain_failure_parks_under_its_prefix() {
-        let failure = Disposition::Uncertain.with(anyhow!("Reached unexpected EOF"));
+    fn an_unconfirmed_failure_reads_under_the_reserved_prefix() {
+        let failure = Disposition::Unconfirmed.with(anyhow!("Reached unexpected EOF"));
         assert!(failure.parks());
-        assert!(failure.uncertain());
+        assert!(failure.unconfirmed());
         let reason = failure.reason();
-        assert!(reason.starts_with(UNCERTAIN), "{reason}");
+        assert!(reason.starts_with("unconfirmed: "), "{reason}");
         assert!(reason.ends_with("Reached unexpected EOF"), "{reason}");
+        // NOTE: the store writes the prefix, so what it is handed has none.
+        assert_eq!(unconfirmed_reason(&failure.detail()), reason);
+        assert!(!failure.detail().starts_with(UNCONFIRMED));
 
         let refused = Disposition::Permanent.with(anyhow!("554 no"));
-        assert!(refused.parks() && !refused.uncertain());
+        assert!(refused.parks() && !refused.unconfirmed());
         assert_eq!(refused.reason(), "554 no");
         let later = Disposition::Transient.with(anyhow!("451 later"));
-        assert!(!later.parks() && !later.uncertain());
+        assert!(!later.parks() && !later.unconfirmed());
     }
 
+    /// The mark is the owner's own state: a file of the store's local/,
+    /// nothing of it beside the store's files (pimdir STORAGE §3).
     #[test]
     fn the_in_flight_mark_survives_until_cleared() {
         let dir = tempfile::tempdir().unwrap();
@@ -818,6 +846,11 @@ mod dispositions {
 
         mark.begin(42).unwrap();
         assert_eq!(mark.left(), Some(42));
+        assert_eq!(
+            fs::read_to_string(dir.path().join("local").join("submitting")).unwrap(),
+            "42\n"
+        );
+        assert!(!dir.path().join("submitting").exists());
         mark.begin(43).unwrap();
         assert_eq!(InFlight::new(dir.path()).left(), Some(43));
 
@@ -1047,7 +1080,7 @@ mod tests {
         let mut channel = channel_to(port);
         let failure = send_one(&mut channel, blobs, &intent).expect_err("rejected");
         assert!(failure.parks(), "5xx must park: {}", failure.error());
-        assert!(!failure.uncertain());
+        assert!(!failure.unconfirmed());
         assert!(
             channel.stopped().is_none(),
             "a reply leaves the session usable"
@@ -1058,7 +1091,7 @@ mod tests {
         let mut channel = channel_to(port);
         let failure = send_one(&mut channel, blobs, &intent).expect_err("deferred");
         assert!(!failure.parks(), "4xx must retry: {}", failure.error());
-        assert!(!failure.uncertain());
+        assert!(!failure.unconfirmed());
     }
 
     #[test]
@@ -1086,7 +1119,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_to_the_data_is_a_verdict_not_an_uncertainty() {
+    fn a_reply_to_the_data_is_a_verdict_not_an_unknown_outcome() {
         let dir = tempfile::tempdir().unwrap();
         let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
         let blobs = stage.blobs();
@@ -1111,7 +1144,7 @@ mod tests {
     }
 
     #[test]
-    fn a_hang_up_after_the_dot_is_uncertain_and_before_it_is_not() {
+    fn a_hang_up_after_the_dot_is_unconfirmed_and_before_it_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
         let blobs = stage.blobs();
@@ -1120,7 +1153,7 @@ mod tests {
         let (port, captured) = spawn_smtp_sink(Sink::HangUpAfterData);
         let mut channel = channel_to(port);
         let failure = send_one(&mut channel, blobs, &intent).expect_err("no verdict");
-        assert!(failure.uncertain(), "{failure:?}");
+        assert!(failure.unconfirmed(), "{failure:?}");
         assert!(failure.parks());
         assert!(channel.stopped().is_some(), "the session is gone");
         assert_eq!(captured.recv().unwrap().data, b"body\r\n");
@@ -1183,7 +1216,7 @@ mod tests {
             ..stage_intent(&stage, 3, &["b@y.org"], b"body")
         };
         let failure = prepare(blobs, &bodyless).err().expect("no body to send");
-        assert!(failure.parks() && !failure.uncertain());
+        assert!(failure.parks() && !failure.unconfirmed());
     }
 
     /// The payload himalaya wrote before io-pimdir typed it, its keys in
@@ -1248,7 +1281,7 @@ mod tests {
             ..intent
         };
         let failure = prepare(stage.blobs(), &intent).err().expect("no send");
-        assert!(failure.parks() && !failure.uncertain(), "{failure:?}");
+        assert!(failure.parks() && !failure.unconfirmed(), "{failure:?}");
     }
 
     #[test]

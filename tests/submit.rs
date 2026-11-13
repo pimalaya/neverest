@@ -126,7 +126,9 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
         .enqueue_with_body("submit/imap/INBOX", &body, |object| {
             submit.to_action(object).unwrap()
         })
-        .expect("enqueue the intent");
+        .expect("enqueue the intent")
+        .handle
+        .id;
     drop(producer);
 
     let queued = pimdir(&state, &["queue", "list", "--json"]);
@@ -319,7 +321,9 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     };
     let id = producer
         .enqueue_with_body(&sent, &body, |object| submit.to_action(object).unwrap())
-        .expect("enqueue the intent");
+        .expect("enqueue the intent")
+        .handle
+        .id;
     drop(producer);
 
     let report = neverest(
@@ -331,7 +335,7 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["id"], id, "{report}");
     assert_eq!(submitted["error"], serde_json::Value::Null, "{report}");
-    assert_eq!(submitted["uncertain"], false, "{report}");
+    assert_eq!(submitted["unconfirmed"], false, "{report}");
     assert_eq!(
         report["collection"]["patch"],
         serde_json::json!([]),

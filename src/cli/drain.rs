@@ -189,7 +189,11 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Drain
                 error,
             }),
             PimdirActionStatus::Pending { .. } => output.waiting += 1,
-            PimdirActionStatus::Unknown => {}
+            // NOTE: a drain performs no intent, so it leaves none
+            // unconfirmed, and a bare id names no other store.
+            PimdirActionStatus::Unconfirmed { .. }
+            | PimdirActionStatus::Reset
+            | PimdirActionStatus::Unknown => {}
         }
     }
 

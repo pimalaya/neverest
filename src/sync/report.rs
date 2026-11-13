@@ -120,18 +120,18 @@ pub struct SyncOutput {
     /// one refusing the connection or its credentials.
     ///
     /// Each also reads as a failed `*` scan in the collection patch, the run
-    /// exiting 3; this names it for a program. A collection that failed to
+    /// exiting 4; this names it for a program. A collection that failed to
     /// read on an endpoint that opened never lands here.
     ///
     /// A source's SMTP channel is named `<source>.smtp`, and only when the
     /// server could not be reached: one refusing the credentials fails each
     /// queued `submit` under `submitted` instead, not parked. It has no `*`
-    /// scan, but still makes the run exit 3.
+    /// scan, but still makes the run exit 4.
     pub unreached: Vec<UnreachedEndpoint>,
     /// The sources that gave up after their provider throttled them (HTTP
     /// 429, 503, a Google rate limit) past the waits neverest takes.
     ///
-    /// What landed before stays; the run is incomplete (exit 3) and a rerun
+    /// What landed before stays; the run is incomplete (exit 4) and a rerun
     /// after `until` picks up the rest.
     pub throttled: Vec<ThrottledSource>,
     /// What each source's collections are known to hold once the run ends
@@ -139,14 +139,14 @@ pub struct SyncOutput {
     /// and the round still open, if one is.
     ///
     /// A round left open was interrupted (a failure, a throttled provider,
-    /// a stopped run): the run is incomplete (exit 3), and the next one
+    /// a stopped run): the run is incomplete (exit 4), and the next one
     /// resumes it.
     pub coverage: Vec<CollectionCoverage>,
     /// The octets each source received this run: the bodies and the meta
     /// of its listings, not the protocol around them.
     pub downloaded: Vec<SourceDownload>,
     /// The collections whose last convergence pass still moved something:
-    /// the run stopped before they settled, so it is incomplete (exit 3)
+    /// the run stopped before they settled, so it is incomplete (exit 4)
     /// and a rerun goes on.
     pub unsettled: Vec<String>,
     /// The listings that found most of what a collection held gone, or that
@@ -155,20 +155,20 @@ pub struct SyncOutput {
     ///
     /// Read as a truncated or emptied answer until a person confirms it
     /// with `sync --accept-absences`: a rerun alone parks again, so the run
-    /// waits for a person (exit 2), its round left open not counting as
+    /// waits for a person (exit 3), its round left open not counting as
     /// incomplete.
     pub absences: Vec<ParkedAbsence>,
     /// The changes withheld because the body they upload was missing from
     /// the store or did not match its name (pimdir STORAGE §7; counted as
     /// warnings). The store needs a repair a rerun does not make, so the
-    /// run waits for a person (exit 2).
+    /// run waits for a person (exit 3).
     pub unreadable: Vec<UnreadableBodies>,
     /// The bodies a policy did not adopt, each kept as a retained item
     /// (pimdir SYNC §9; counted as warnings): settling a side's write, or
     /// applying a queued action.
     pub overruled: Vec<OverruledBody>,
     /// The pushes a side's server gave no outcome for, left pending: a
-    /// rerun pushes them again, so the run is incomplete (exit 3).
+    /// rerun pushes them again, so the run is incomplete (exit 4).
     pub unanswered: Vec<UnansweredPushes>,
     /// The creates the last pass of each collection left waiting rather
     /// than pushing them, each with its reason (pimdir SYNC §5). They are

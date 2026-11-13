@@ -204,7 +204,7 @@ fn a_run_covers_every_account_and_reports_each_apart() {
     let fixture = Fixture::new(&["work", "home"], closed_port());
     fixture.initialized(&["work"]);
 
-    let (lines, stderr) = fixture.lines(&["--json", "--log-level", "warn", "sync"], 3);
+    let (lines, stderr) = fixture.lines(&["--json", "--log-level", "warn", "sync"], 4);
     let result = lines.last().unwrap();
 
     let home = &result["accounts"][0];
@@ -305,7 +305,7 @@ fn a_check_names_an_account_no_configuration_names() {
         .ensure_collection("old/caldav/default", "text/calendar")
         .unwrap();
 
-    let check = fixture.json(&["--json", "check"], 2);
+    let check = fixture.json(&["--json", "check"], 3);
 
     assert_eq!(check["orphans"][0]["account"], "old", "{check}");
     assert_eq!(
@@ -349,11 +349,11 @@ fn turning_one_way_on_is_refused_until_accepted() {
     let sidecar = r#"{"layout":2,"accounts":{"work":{"mode":{"sources":1,"targets":1,"one_way":false,"retain":false}}}}"#;
     fs::write(fixture.sidecar(), sidecar).unwrap();
 
-    let refused = fixture.json(&["--json", "sync"], 3);
+    let refused = fixture.json(&["--json", "sync"], 4);
     let error = refused["accounts"][0]["error"].as_str().unwrap_or_default();
     assert!(error.contains("--accept-mode"), "{refused}");
 
-    let accepted = fixture.json(&["--json", "sync", "--accept-mode"], 3);
+    let accepted = fixture.json(&["--json", "sync", "--accept-mode"], 4);
     assert!(accepted["accounts"][0]["report"].is_object(), "{accepted}");
     let sidecar: Value =
         serde_json::from_str(&fs::read_to_string(fixture.sidecar()).unwrap()).unwrap();
@@ -362,6 +362,6 @@ fn turning_one_way_on_is_refused_until_accepted() {
         "{sidecar}"
     );
 
-    let again = fixture.json(&["--json", "sync"], 3);
+    let again = fixture.json(&["--json", "sync"], 4);
     assert!(again["accounts"][0]["report"].is_object(), "{again}");
 }

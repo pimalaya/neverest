@@ -163,7 +163,7 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
     assert_eq!(id, name.replace(' ', "-"), "{checked}");
 
     // NOTE: a calendar does not nest, so a parent parks the row, and a
-    // parked intent waits for a person (exit 2).
+    // parked intent waits for a person (exit 3).
     producer
         .enqueue_collection_create(
             "create/caldav/default",
@@ -179,7 +179,7 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
         .output()
         .expect("spawn neverest");
     let report = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert_eq!(output.status.code(), Some(2), "{report}");
+    assert_eq!(output.status.code(), Some(3), "{report}");
     let intents = account_report(&report);
     assert_eq!(intents["intents"][0]["parked"], true, "{report}");
 
@@ -424,7 +424,7 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
         .output()
         .expect("spawn neverest");
     let report = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert_eq!(output.status.code(), Some(2), "{report}");
+    assert_eq!(output.status.code(), Some(3), "{report}");
     let parsed = account_report(&report);
     assert_eq!(parsed["intents"][0]["parked"], true, "{report}");
     assert!(listed(&config, &state).contains(&renamed));

@@ -34,7 +34,7 @@ use crate::{
 /// front, then adds the account to the store, creating the store when there
 /// is none. An account already initialized is left as it is and said so; one
 /// that could not be initialized is reported, the others still are, and the
-/// command exits 3.
+/// command exits 4.
 #[derive(Debug, Parser)]
 pub struct InitCommand {}
 
@@ -46,7 +46,7 @@ impl InitCommand {
         config_paths: &[PathBuf],
         accounts: &[String],
     ) -> Result<Exit> {
-        let config = Config::load_or_wizard(printer, config_paths)?;
+        let config = Config::load(config_paths)?;
 
         let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
         for (name, account_config) in config.select(accounts)? {

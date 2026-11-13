@@ -46,7 +46,7 @@ use crate::{
 ///
 /// Every endpoint is checked, whatever the others answer, and the report
 /// names each one's outcome. An endpoint or a channel that did not answer
-/// exits 2, the report being the output rather than a failure object.
+/// exits 3, the report being the output rather than a failure object.
 ///
 /// It also names the accounts a store holds that no configured account
 /// names: renaming an account's key leaves its collections behind, under the
@@ -64,7 +64,7 @@ impl CheckCommand {
         config_paths: &[PathBuf],
         accounts: &[String],
     ) -> Result<()> {
-        let config = Config::load_or_wizard(printer, config_paths)?;
+        let config = Config::load(config_paths)?;
         let selected = config.select(accounts)?;
 
         let mut checked = Vec::new();
@@ -278,8 +278,7 @@ fn check_source(
 }
 
 /// Opens one connection to `source` and lists its collections, with the
-/// role and the default mark the server states: the per-endpoint test the
-/// wizard signs a source in with too.
+/// role and the default mark the server states: the per-endpoint test.
 pub fn list(source: &SourceAccount) -> Result<Vec<CheckedCollection>> {
     let mut client = client::open(source)?;
     let mut roles = client.collection_roles()?;

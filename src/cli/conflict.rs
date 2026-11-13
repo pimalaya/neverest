@@ -86,7 +86,7 @@ impl ConflictListCommand {
         config_paths: &[PathBuf],
         accounts: &[String],
     ) -> Result<()> {
-        let config = Config::load_or_wizard(printer, config_paths)?;
+        let config = Config::load(config_paths)?;
         let mut conflicts = Vec::new();
 
         for (name, account_config) in config.select(accounts)? {
@@ -123,8 +123,7 @@ impl ConflictShowCommand {
         config_paths: &[PathBuf],
         accounts: &[String],
     ) -> Result<()> {
-        let (name, account_config) =
-            account(printer, config_paths, accounts, "Showing a conflict")?;
+        let (name, account_config) = account(config_paths, accounts, "Showing a conflict")?;
         let store = read(&name, &store_dir(&name, &account_config)?)?;
 
         let conflicts = conflict::list(&store, &name)?;
@@ -172,8 +171,7 @@ impl ConflictResolveCommand {
         config_paths: &[PathBuf],
         accounts: &[String],
     ) -> Result<()> {
-        let (name, account_config) =
-            account(printer, config_paths, accounts, "Resolving a conflict")?;
+        let (name, account_config) = account(config_paths, accounts, "Resolving a conflict")?;
         let dir = store_dir(&name, &account_config)?;
 
         self.resolve(printer, &name, &account_config, &dir)
@@ -310,12 +308,11 @@ impl ConflictResolveCommand {
 /// Loads the configuration and takes the one account the invocation
 /// leaves: an item is one account's, and so is its decision.
 fn account(
-    printer: &mut impl Printer,
     config_paths: &[PathBuf],
     accounts: &[String],
     what: &str,
 ) -> Result<(String, AccountConfig)> {
-    let config = Config::load_or_wizard(printer, config_paths)?;
+    let config = Config::load(config_paths)?;
     let (name, account_config) = config.select_one(accounts, what)?;
 
     account_config

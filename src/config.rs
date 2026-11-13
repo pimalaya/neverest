@@ -3,13 +3,7 @@
 //! The TOML schema: each account holds named [`SourceConfig`]s over one
 //! pimdir store, plus that store's settings.
 
-use std::{
-    collections::HashMap,
-    fmt,
-    io::{IsTerminal, stdin},
-    path::PathBuf,
-    time::Duration,
-};
+use std::{collections::HashMap, fmt, path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Days, Months, NaiveDate, NaiveTime, SecondsFormat, Utc};
@@ -20,9 +14,6 @@ use io_sasl::{
     rfc7628::oauthbearer::SaslOauthbearerCreds, xoauth2::SaslXoauth2Creds,
 };
 use log::warn;
-use pimalaya_cli::printer::Printer;
-#[cfg(any(feature = "wizard", test))]
-use pimalaya_config::toml as config_toml;
 use pimalaya_config::{
     command::CommandConfig,
     secret::{Secret, SecretResolver},
@@ -33,29 +24,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-#[cfg(feature = "wizard")]
-use crate::cli::configure::offer_configuration;
-#[cfg(not(feature = "wizard"))]
-use crate::cli::offer_configuration;
-
-/// The documented sample configuration, shown in the welcome banner and
-/// pointed at when no configuration is found.
-#[cfg(feature = "wizard")]
-pub const CONFIG_SAMPLE_URL: &str =
-    "https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
-
 /// How to get a configuration, for the errors meeting none.
-#[cfg(feature = "wizard")]
-pub const NO_CONFIG_HINT: &str = "run `neverest configure` to generate one, or write it by hand: \
-     https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
-
-/// How to get a configuration, for the errors meeting none.
-#[cfg(not(feature = "wizard"))]
 pub const NO_CONFIG_HINT: &str = "write one by hand: \
      https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
 
-/// `skip_serializing_if` predicate omitting a defaulted field, so what the
-/// wizard writes carries only what the user chose.
+/// `skip_serializing_if` predicate omitting a defaulted field, so a serialized
+/// configuration carries only what differs from the defaults.
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
     *value == T::default()
 }
@@ -179,31 +153,14 @@ impl TomlConfig for Config {
 }
 
 impl Config {
-    /// Loads `Config` from `config_paths`, offering the wizard when none is.
-    ///
-    /// A missing configuration is met with the wizard rather than an error:
-    /// the command carries on either way, accepting giving it a chance to
-    /// work and declining leaving it to fail on what it has not got.
-    pub fn load_or_wizard(printer: &mut impl Printer, config_paths: &[PathBuf]) -> Result<Config> {
-        if let Some(config) = Config::from_paths_or_default(config_paths)? {
-            return Ok(config);
-        }
-
-        let target = Config::target_path(config_paths)?;
-
-        // NOTE: a script and a JSON consumer cannot answer a prompt, so both
-        // skip the offer and fail below.
-        if !printer.is_json() && stdin().is_terminal() {
-            offer_configuration(printer, config_paths, &target)?;
-        }
-
-        // NOTE: the wizard may print the account instead of writing it, so
-        // having run it proves nothing and the lookup runs again.
+    /// Loads `Config` from `config_paths`, failing when none exists with
+    /// the path looked for and how to write one.
+    pub fn load(config_paths: &[PathBuf]) -> Result<Config> {
         match Config::from_paths_or_default(config_paths)? {
             Some(config) => Ok(config),
             None => bail!(
                 "No configuration found at {}, {NO_CONFIG_HINT}",
-                target.display(),
+                Config::target_path(config_paths)?.display(),
             ),
         }
     }
@@ -390,133 +347,7 @@ pub struct AccountConfig {
     collection: Option<RemovedKey>,
 }
 
-/// The account groups in reading order: the backends the wizard writes
-/// first, mail then its send channel, contacts, then calendar, the sync
-/// options it never writes last.
-///
-/// Serialized alphabetically a generated account would open on
-/// `connections` and bury its backend under `conflict`.
-#[cfg(feature = "wizard")]
-const RENDER_ORDER: [&str; 20] = [
-    "default",
-    "imap",
-    "jmap",
-    "gmail",
-    "msgraph",
-    "smtp",
-    "carddav",
-    "gpeople",
-    "msgraph-contacts",
-    "caldav",
-    "gcal",
-    "msgraph-calendar",
-    "sources",
-    "targets",
-    "one-way",
-    "retain",
-    "store",
-    "conflict",
-    "item",
-    "connections",
-];
-
-/// The keys naming what a backend group points at, lifted to the top of
-/// their group.
-///
-/// Serialized alphabetically, `imap.server` would read under the
-/// `imap.sasl` credential authenticating against it.
-#[cfg(feature = "wizard")]
-const ENDPOINT_KEYS: [&str; 2] = ["server", "user-id"];
-
 impl AccountConfig {
-    /// Renders this account as an `[accounts.<name>]` block, ready to write.
-    ///
-    /// What it adds to the serializer is reading order, dotted keys coming
-    /// out alphabetically: groups are reordered ([`RENDER_ORDER`]), each
-    /// endpoint is lifted to the top of its own ([`ENDPOINT_KEYS`]).
-    #[cfg(feature = "wizard")]
-    pub fn render(&self, name: &str) -> Result<String> {
-        // NOTE: borrowed rather than built into a `Config`, which would
-        // mean cloning the account to render it. The emitter only looks
-        // for an `accounts` table, so any shape carrying one will do.
-        #[derive(Serialize)]
-        struct AccountDocument<'a> {
-            accounts: HashMap<&'a str, &'a AccountConfig>,
-        }
-
-        let document = AccountDocument {
-            accounts: HashMap::from([(name, self)]),
-        };
-        let rendered = config_toml::to_string(&document)?;
-
-        let (header, body) = match rendered.split_once('\n') {
-            Some((header, body)) => (header, body),
-            None => return Ok(rendered),
-        };
-
-        let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
-
-        for line in body.lines().filter(|line| !line.trim().is_empty()) {
-            let key = line.split(['.', ' ']).next().unwrap_or(line).to_string();
-
-            match groups.iter_mut().find(|(name, _)| *name == key) {
-                Some((_, lines)) => lines.push(line),
-                None => groups.push((key, vec![line])),
-            }
-        }
-
-        groups.sort_by_key(|(key, _)| {
-            RENDER_ORDER
-                .iter()
-                .position(|known| known == key)
-                .unwrap_or(RENDER_ORDER.len())
-        });
-
-        let mut document = format!("{header}\n");
-
-        for (index, (_, mut lines)) in groups.into_iter().enumerate() {
-            if index > 0 {
-                document.push('\n');
-            }
-
-            // NOTE: the endpoint is what the group is about, so it reads
-            // first; the credentials and the quirks qualify it.
-            lines.sort_by_key(|line| {
-                let field = line.split(['.', ' ']).nth(1).unwrap_or_default();
-
-                ENDPOINT_KEYS
-                    .iter()
-                    .position(|known| *known == field)
-                    .unwrap_or(ENDPOINT_KEYS.len())
-            });
-
-            for line in lines {
-                document.push_str(line);
-                document.push('\n');
-            }
-        }
-
-        Ok(document)
-    }
-
-    /// Writes `backend` as the direct-backend sugar, a source named after
-    /// its protocol, replacing the backend of that protocol.
-    #[cfg(feature = "wizard")]
-    pub fn set_direct_backend(&mut self, backend: SourceBackendConfig) {
-        match backend {
-            SourceBackendConfig::Imap(config) => self.imap = Some(config),
-            SourceBackendConfig::Carddav(config) => self.carddav = Some(config),
-            SourceBackendConfig::Caldav(config) => self.caldav = Some(config),
-            SourceBackendConfig::Jmap(config) => self.jmap = Some(config),
-            SourceBackendConfig::Gmail(config) => self.gmail = Some(config),
-            SourceBackendConfig::Msgraph(config) => self.msgraph = Some(config),
-            SourceBackendConfig::MsgraphContacts(config) => self.msgraph_contacts = Some(config),
-            SourceBackendConfig::MsgraphCalendar(config) => self.msgraph_calendar = Some(config),
-            SourceBackendConfig::Gpeople(config) => self.gpeople = Some(config),
-            SourceBackendConfig::Gcal(config) => self.gcal = Some(config),
-        }
-    }
-
     /// Every configured source keyed by its id, the sugar folded into the
     /// explicit `sources` table.
     ///
@@ -615,8 +446,8 @@ impl AccountConfig {
     ///
     /// A store shared by several accounts holds their source ids and
     /// collection ids side by side, each unique store-wide (pimdir STORAGE
-    /// §4.3, §9.2), so two accounts holding the wizard's `imap` source must
-    /// not both bind `imap`. Every collection id derives from a source id,
+    /// §4.3, §9.2), so two accounts each holding the `imap` sugar must not
+    /// both bind `imap`. Every collection id derives from a source id,
     /// so namespacing the source namespaces the collection too.
     pub fn namespaced(&self, account: &str) -> Result<Self> {
         let id = |(name, source): (String, SourceConfig)| (format!("{account}/{name}"), source);
@@ -1172,22 +1003,6 @@ impl SourceBackendConfig {
             Self::MsgraphCalendar(_) => "msgraph-calendar",
             Self::Gpeople(_) => "gpeople",
             Self::Gcal(_) => "gcal",
-        }
-    }
-
-    /// The backend's collection table, to set its filter.
-    #[cfg(feature = "wizard")]
-    pub fn collection_mut(&mut self) -> &mut CollectionSourceConfig {
-        match self {
-            Self::Imap(c) => &mut c.collection,
-            Self::Carddav(c) => &mut c.collection,
-            Self::Caldav(c) => &mut c.collection,
-            Self::Jmap(c) => &mut c.collection,
-            Self::Gmail(c) => &mut c.collection,
-            Self::Msgraph(c) | Self::MsgraphContacts(c) | Self::MsgraphCalendar(c) => {
-                &mut c.collection
-            }
-            Self::Gpeople(c) | Self::Gcal(c) => &mut c.collection,
         }
     }
 }
@@ -2169,31 +1984,6 @@ mod tests {
         assert!(
             sources["work/imap"].smtp.is_some(),
             "the send channel follows"
-        );
-    }
-
-    #[test]
-    fn a_generated_config_renders_as_dotted_keys_under_one_header() {
-        let account: AccountConfig = toml::from_str(
-            r#"
-            default = true
-            msgraph.user-id = "me"
-            msgraph.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
-            "#,
-        )
-        .unwrap();
-
-        let config = Config {
-            accounts: HashMap::from([(String::from("outlook"), account)]),
-        };
-
-        assert_eq!(
-            config_toml::to_string(&config).unwrap(),
-            r#"[accounts.outlook]
-default = true
-msgraph.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
-msgraph.user-id = "me"
-"#
         );
     }
 

@@ -133,8 +133,8 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
     put(root, &card("+3"));
 
     // 4. One run, both kinds. It reconciled what it could and left one item
-    //    waiting, which is exactly what exit code 2 says.
-    let report = sync(&config, &state, 2);
+    //    waiting, which is exactly what exit code 3 says.
+    let report = sync(&config, &state, 3);
     assert!(
         report.contains(r#""outstandingConflicts":1"#),
         "one item is waiting for a decision, no more; report was:\n{report}",

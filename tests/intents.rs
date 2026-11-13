@@ -304,7 +304,7 @@ fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
     let fixture = Fixture::new(port, false);
     let id = fixture.queue_send(BODY, false);
 
-    let report = fixture.intents_only(2);
+    let report = fixture.intents_only(3);
 
     assert_eq!(data.recv().unwrap(), BODY);
     let submitted = &report["submitted"][0];
@@ -318,8 +318,8 @@ fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
     assert_eq!(error, format!("unconfirmed: {detail}"));
 
     // NOTE: the next run has nothing to send, the server being gone, and
-    // still exits 2 over the parked send waiting for a person.
-    let report = fixture.intents_only(2);
+    // still exits 3 over the parked send waiting for a person.
+    let report = fixture.intents_only(3);
     assert_eq!(report["submitted"], serde_json::json!([]), "{report}");
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     assert_eq!(report["parked"][0]["id"], id, "{report}");
@@ -334,7 +334,7 @@ fn a_send_a_stopped_run_was_handing_over_is_never_sent_again() {
     let id = fixture.queue_send(BODY, false);
     fs::write(fixture.local().join("submitting"), format!("{id}\n")).unwrap();
 
-    let report = fixture.intents_only(2);
+    let report = fixture.intents_only(3);
 
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["id"], id, "{report}");
@@ -355,7 +355,7 @@ fn an_unreached_smtp_server_is_named_and_the_send_waits() {
     let fixture = Fixture::new(closed_port(), false);
     let id = fixture.queue_send(BODY, false);
 
-    let report = fixture.intents_only(3);
+    let report = fixture.intents_only(4);
 
     let unreached = report["unreached"].as_array().expect("unreached");
     assert_eq!(unreached.len(), 1, "{report}");
@@ -375,7 +375,7 @@ fn refused_credentials_fail_the_send_without_parking_it() {
     let fixture = Fixture::new(port, true);
     let id = fixture.queue_send(BODY, false);
 
-    let report = fixture.intents_only(3);
+    let report = fixture.intents_only(4);
 
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     let submitted = &report["submitted"][0];
@@ -401,7 +401,7 @@ fn a_send_refused_for_a_quota_stays_queued() {
     let first = fixture.queue_send(BODY, false);
     let second = fixture.queue_send(BODY, false);
 
-    let report = fixture.intents_only(3);
+    let report = fixture.intents_only(4);
 
     assert_eq!(data.recv().unwrap(), BODY, "{report}");
     let submitted = &report["submitted"];
@@ -503,7 +503,7 @@ fn a_run_killed_mid_send_never_sends_the_message_again() {
         PimdirActionStatus::Pending { attempts: 1, .. }
     ));
 
-    let report = fixture.intents_only(2);
+    let report = fixture.intents_only(3);
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["id"], id, "{report}");
     assert_eq!(submitted["unconfirmed"], true, "{report}");

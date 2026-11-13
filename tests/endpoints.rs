@@ -154,7 +154,7 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
 
     // A run leaving the two endpoints divergent is not a success: it ends
     // conflicted and names the item it parked.
-    let report = sync(&config, &state, MERGE_BOOK, 2);
+    let report = sync(&config, &state, MERGE_BOOK, 3);
     assert!(
         report.contains(r#""outstandingConflicts":1"#),
         "the divergence is parked and counted, not resolved; report was:\n{report}",
@@ -186,7 +186,7 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
 
     // Rerunning settles nothing on its own and overwrites nothing either: a
     // parked divergence waits for a person, however many runs go by.
-    let report = sync(&config, &state, MERGE_BOOK, 2);
+    let report = sync(&config, &state, MERGE_BOOK, 3);
     assert!(
         !report.contains(r#""kind":"update""#),
         "a rerun pushes neither body over the other; report was:\n{report}",
@@ -443,7 +443,7 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
 
     // The first run must leave both servers exactly as it found them, and say
     // so: a divergence nobody chose to lose is not an update.
-    let report = sync(&config, &state, SEED_BOOK, 2);
+    let report = sync(&config, &state, SEED_BOOK, 3);
     assert!(
         report.contains(r#""outstandingConflicts":2"#),
         "both divergences are parked and counted; report was:\n{report}",
@@ -471,7 +471,7 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
 
     // Rerunning settles nothing and overwrites nothing either, and names the
     // divergence once rather than once per run.
-    let report = sync(&config, &state, SEED_BOOK, 2);
+    let report = sync(&config, &state, SEED_BOOK, 3);
     assert!(
         !report.contains(r#""kind":"update""#) && none(&report, "conflicts"),
         "a rerun pushes nothing and re-announces nothing; report was:\n{report}",

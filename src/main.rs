@@ -21,7 +21,7 @@
 //! The protocols are io-imap, io-webdav and io-msgraph, behind the lean
 //! adapters in [`imap`], [`dav`] and [`msgraph`]. Around them, pimalaya-cli,
 //! pimalaya-config and pimalaya-stream supply the CLI, the TOML loading and
-//! the blocking runtime; the wizard discovers through [io-pim-discovery].
+//! the blocking runtime.
 //!
 //! ## The topology mismatch
 //!
@@ -97,11 +97,7 @@
 //! seam, `submit` holds the queued send, and `driver` builds the report.
 //!
 //! [`sync`] keeps the output types alone, the engine having moved to
-//! [`offline`], and [`wizard`] discovers an account from one prompt.
-//!
-//! What becomes of that account belongs to `cli::configure`, which generates
-//! and never edits: it appends the rendered table rather than re-serializing
-//! the document, so a hand-written configuration keeps its comments.
+//! [`offline`].
 //!
 //! [`json_schema`] is the registry behind `neverest json-schema`: one entry
 //! per data command, mapping its invocation path to the schema of what it
@@ -109,7 +105,6 @@
 //! store failure by the code io-pimdir gives it.
 //!
 //! [io-pimdir]: https://github.com/pimalaya/io-pimdir
-//! [io-pim-discovery]: https://github.com/pimalaya/io-pim-discovery
 
 mod account;
 mod cli;
@@ -135,36 +130,20 @@ mod msgraph;
 mod offline;
 mod sync;
 mod throttle;
-#[cfg(feature = "wizard")]
-mod wizard;
 
-use std::{
-    io::{IsTerminal, stdin},
-    path::PathBuf,
-    process::ExitCode,
-};
+use std::process::ExitCode;
 
 use anyhow::Result;
-use clap::{CommandFactory, Parser};
-use pimalaya_cli::{
-    error::ErrorReport,
-    log::Logger,
-    printer::{Printer, StdoutPrinter},
-};
-use pimalaya_config::toml::TomlConfig;
+use clap::CommandFactory;
+use pimalaya_cli::{clap::parse, error::ErrorReport, log::Logger, printer::StdoutPrinter};
 
-#[cfg(feature = "wizard")]
-use crate::cli::configure::offer_configuration;
-#[cfg(not(feature = "wizard"))]
-use crate::cli::offer_configuration;
 use crate::{
     cli::{exit::Exit, main::Cli},
-    config::Config,
     error::ErrorCode,
 };
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = parse::<Cli>();
     let mut printer = StdoutPrinter::new(&cli.json);
     let result = execute(&mut printer, cli);
 
@@ -179,35 +158,9 @@ fn execute(printer: &mut StdoutPrinter, cli: Cli) -> Result<Exit> {
 
     match cli.command {
         Some(command) => command.execute(printer, config_paths, &cli.accounts),
-        None => meet_bare_invocation(printer, config_paths, !cli.accounts.is_empty())
-            .map(|()| Exit::Success),
-    }
-}
-
-/// Meets a bare `neverest`, which is where a newcomer lands.
-///
-/// A missing configuration raises the offer; anything else gets the help.
-/// A broken file counts as a configuration, so the offer never writes over
-/// one, and `--account` alone is a half-typed command, not a first run.
-fn meet_bare_invocation(
-    printer: &mut StdoutPrinter,
-    config_paths: &[PathBuf],
-    named_account: bool,
-) -> Result<()> {
-    let configured = Config::from_paths_or_default(config_paths)
-        .ok()
-        .flatten()
-        .is_some();
-
-    if !configured && !named_account && !printer.is_json() && stdin().is_terminal() {
-        let target = Config::target_path(config_paths)?;
-
-        if offer_configuration(printer, config_paths, &target)? {
-            return Ok(());
+        None => {
+            Cli::command().print_help()?;
+            Ok(Exit::Success)
         }
     }
-
-    Cli::command().print_help()?;
-
-    Ok(())
 }

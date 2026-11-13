@@ -213,7 +213,7 @@ impl Replica {
     /// waited.
     ///
     /// A run a provider throttled past what it waits itself ends incomplete
-    /// (3), naming the source and when it may send again, and a rerun picks
+    /// (4), naming the source and when it may send again, and a rerun picks
     /// it up, as a supervisor's would: the test waits until then and runs
     /// it again, [`THROTTLED_RUNS`] times at most, rather than failing on
     /// Google's per-minute quotas. Any other incomplete run fails.
@@ -236,8 +236,8 @@ impl Replica {
             // NOTE: the last line, after the events a sync prints.
             let result = stdout.lines().last().unwrap_or_default().to_owned();
 
-            if code == 3
-                && !codes.contains(&3)
+            if code == 4
+                && !codes.contains(&4)
                 && reruns < THROTTLED_RUNS
                 && let Some(wait) = throttled_wait(&result)
             {
@@ -293,7 +293,7 @@ impl Replica {
         args.extend(extra);
 
         loop {
-            let (code, report, waited) = self.run_waiting(&args, &[0, 2]);
+            let (code, report, waited) = self.run_waiting(&args, &[0, 3]);
             deadline += waited;
             if code == 0 && check(self) {
                 return;
@@ -445,11 +445,11 @@ impl Replica {
     }
 
     /// Syncs once, expecting an intent to park, a run that then waits for
-    /// a person (exit 2), and returns the report's `intents` entries. The
+    /// a person (exit 3), and returns the report's `intents` entries. The
     /// parked rows are then cancelled, as the person settling them does, so
     /// the next run has nothing left to decide.
     pub fn sync_parked_intents(&self, key: &str) -> Vec<serde_json::Value> {
-        let (_, stdout) = self.run(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[2]);
+        let (_, stdout) = self.run(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[3]);
         let report = json_report(&stdout);
         let parked = PimdirReader::open(self.store())
             .expect("open the store")

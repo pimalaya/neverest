@@ -19,7 +19,7 @@ This page lists the changes most likely to bite when upgrading. The full configu
 - **Notmuch** is removed.
 - **Keyring** and **OAuth** are out of the binary: source secrets from a command instead, such as `pass` or `secret-tool`, and [ortie](https://github.com/pimalaya/ortie) for OAuth access tokens.
 - The sync vocabulary is kind-neutral: **collections** and **items** rather than mailboxes and messages. The `mailbox`, `message` and `filters` spellings keep working as config aliases for one release; the v0.1 `folder` ones do not, and no alias survives in the `--json` report.
-- **A sync can exit 2.** A run that reconciled every collection and still left something waiting for a person (a parked conflict, a refused duplicate `UID`, a rejected write) exits 2 rather than 0 or 1. A script treating any non-zero code as failure needs to tell 2 from 1.
+- **A sync can exit 3 or 4.** A run that reconciled every collection and still left something waiting for a person (a parked conflict, a refused duplicate `UID`, a rejected write) exits 3 rather than 0 or 1, and one that could not do all its work exits 4. A script treating any non-zero code as failure needs to tell 3 and 4 from 1. Exit 2 is a command line neverest refused.
 
 ## Suggested steps
 
@@ -50,14 +50,16 @@ A store another user can read is refused too, as `store-exposed`: one `neverest 
 What else changes:
 
 - **`-a/--account` is a filter**, and repeatable. Without it, `sync`, `check`, `drain` and `init` run over every account, one after the other; `index` builds every store the accounts use. `conflict show`, `conflict resolve` and `sync --reset` act on one account, so `-a` names it when there are several. `default = true` is read and ignored, with a warning; drop it at your convenience.
-- **One run, one lock.** The store is locked for the whole run, so two accounts of one store never sync at once, and a second run waits up to a minute then reports the store busy (exit 3). An account that needs its own schedule (a cron of its own, a frontend-triggered run that must not wait) names its own `store.root`.
-- **An account's failure is its own.** A run goes on with the next account and exits 3 when one failed. Under `--json`, `sync`, `drain`, `init` and `check` print one result listing every account (`{"accounts": [...]}`, a sync's report under `accounts[].report`), and `index` one listing every store (`{"stores": [...]}`); `sync` announces each account with an `account-started` event.
+- **One run, one lock.** The store is locked for the whole run, so two accounts of one store never sync at once, and a second run waits up to a minute then reports the store busy (exit 4). An account that needs its own schedule (a cron of its own, a frontend-triggered run that must not wait) names its own `store.root`.
+- **An account's failure is its own.** A run goes on with the next account and exits 4 when one failed. Under `--json`, `sync`, `drain`, `init` and `check` print one result listing every account (`{"accounts": [...]}`, a sync's report under `accounts[].report`), and `index` one listing every store (`{"stores": [...]}`); `sync` announces each account with an `account-started` event.
 - **Store ids carry the account.** A source id is `<account>/<source>` and a collection id `<account>/<source>/<name>` (`work/imap/INBOX`, where it was `imap/INBOX`), so two accounts with an `imap` source never share a collection. A report still names an endpoint as the configuration does (`imap`). An account name holding `/` is refused.
 - **`sync --reset` starts one account over**: it drops that account's collections and syncs them again, every other account untouched. `--force` drops the conflicts, unpushed edits and retained items they hold rather than moving a store aside; a queued or parked action still refuses the reset until a drain applies it or its frontend cancels it.
 - **Frontends** (himalaya, calendula, cardamum): point `pimdir.root` at the neverest directory and name the account with `pimdir.account`. A collection named by its id gains the account (`himalaya -f work/imap/INBOX`); a role (`inbox`, `sent`) keeps working.
 - **neverest keeps its own files under the store's local/**: neverest.json, sync.lock and the mark of a send being handed over, where they stood beside pimdir.db. A script reading or locking one names it there (`local/sync.lock`).
 - **A send that may have been delivered is `unconfirmed`**: its report entry carries `unconfirmed: true` and an `error` beginning `unconfirmed: `, the state every pimdir frontend reads, where a git build wrote `uncertain`.
 - `neverest check` names, under `orphans`, an account the store holds that no configured account names: renaming an account's TOML key leaves its collections under the old name until the key is renamed back.
+- **Exit statuses follow the Pimalaya exit contract.** A sync that waits for a person exits 3, where v0.3.0 exited 2, and one that could not do all its work 4, where it exited 3; `check` with an endpoint down exits 3. Exit 2 is now a command line neverest refused, printed under `--json` as a failure object coded `usage-invalid`.
+- **The configuration wizard is gone**: `neverest configure`, the offer a bare `neverest` made without a configuration, and the `wizard` cargo feature. Write the configuration by hand from [config.sample.toml](./config.sample.toml); a command finding none fails naming the path it looked for.
 
 ## From a git master build
 

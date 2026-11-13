@@ -42,7 +42,7 @@ const SLICE: Duration = Duration::from_secs(1);
 /// accounts it names, and each is built once and whole, every account of
 /// it included.
 ///
-/// Another indexer holding an index answers `busy` with exit code 3: it
+/// Another indexer holding an index answers `busy` with exit code 4: it
 /// is building it already.
 #[derive(Debug, Parser)]
 pub struct IndexCommand {}
@@ -56,7 +56,7 @@ impl IndexCommand {
         config_paths: &[PathBuf],
         accounts: &[String],
     ) -> Result<Exit> {
-        let config = Config::load_or_wizard(printer, config_paths)?;
+        let config = Config::load(config_paths)?;
 
         let mut stores: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
         for (name, account_config) in config.select(accounts)? {

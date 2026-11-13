@@ -10,9 +10,9 @@
 //! output shapes are not, so a build with no backend describes the same
 //! payloads as one with all of them.
 //!
-//! [`JsonSchemaCommand`]: pimalaya_cli::clap::commands::JsonSchemaCommand
+//! [`JsonSchemaCommand`]: pimalaya_cli::clap::commands::json_schema::JsonSchemaCommand
 
-use pimalaya_cli::{clap::commands::JsonSchemaRegistry, error::ErrorReport};
+use pimalaya_cli::{clap::commands::json_schema::JsonSchemaRegistry, error::ErrorReport};
 
 use crate::{
     cli::{check::CheckRunOutput, drain::DrainRunOutput, init::InitRunOutput},
@@ -34,8 +34,6 @@ pub fn registry() -> JsonSchemaRegistry {
     registry.insert::<DrainRunOutput>("neverest-drain");
     #[cfg(feature = "search")]
     registry.insert::<crate::cli::index::IndexRunOutput>("neverest-index");
-    #[cfg(feature = "wizard")]
-    registry.insert::<crate::cli::configure::ConfigureOutput>("neverest-configure");
     registry.insert::<InitRunOutput>("neverest-init");
     registry.insert::<SyncRunOutput>("neverest-sync");
     registry.insert_events::<SyncEvent>("neverest-sync");
@@ -56,7 +54,7 @@ mod tests {
     use crate::cli::main::Cli;
 
     /// The commands printing nothing a schema could describe: a bare
-    /// `neverest` shows the help, or runs the wizard `configure` describes.
+    /// `neverest` shows the help.
     const SILENT: &[&str] = &["neverest"];
 
     /// Every runnable command is described, and every key names one: a

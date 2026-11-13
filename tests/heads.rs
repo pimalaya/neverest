@@ -395,7 +395,7 @@ fn neverest(args: &[&str], config: &Path, env: &[(&str, &str)]) -> String {
         .output()
         .expect("spawn neverest");
     assert!(
-        output.status.success() || output.status.code() == Some(3),
+        output.status.success() || output.status.code() == Some(4),
         "`neverest {}` failed:\n--- stdout ---\n{}\n--- stderr ---\n{}",
         args.join(" "),
         String::from_utf8_lossy(&output.stdout),

@@ -10,12 +10,6 @@
 # can be passed at once, separated by `:`; the first one is the base and the
 # rest are deep-merged on top of it.
 #
-# Bare `neverest` with no configuration file on disk offers the wizard, which
-# writes one account with one source per domain it found (mail, contacts,
-# calendar) and the mail source's `smtp` channel, in the flat spelling below,
-# a `collection.filter.exclude` on a source whose collections you unpicked.
-# Everything else on this page is written by hand.
-#
 # Every account shares ONE pimdir STORE, each fed by one or more named SOURCES,
 # each a remote. A backend written directly under the account
 # (`imap.server = …`) is sugar for a source named after its protocol; the
@@ -369,7 +363,7 @@ imap.item.delete = false
 
 # Every run three-way merges a conflicted card or event against the base the
 # last sync agreed on, and clears the conflict when nothing collided. Both
-# sides setting one field two ways parks the item, and the run exits 2.
+# sides setting one field two ways parks the item, and the run exits 3.
 #
 # Neverest raises no notification of its own: `--json` carries `conflicts`,
 # what this run marked, and `outstandingConflicts`, what the store holds.

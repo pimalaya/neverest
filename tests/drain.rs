@@ -241,7 +241,7 @@ fn a_sync_drains_before_it_connects() {
     fixture.offline_store();
     let id = fixture.queue_event("drained-2");
 
-    let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 3);
+    let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 4);
 
     assert_eq!(report["drained"][0]["collection"], COLLECTION, "{report}");
     let PimdirActionStatus::Applied { seq: Some(seq), .. } = fixture.status(id) else {
@@ -267,7 +267,7 @@ fn a_drain_leaves_a_busy_store_alone() {
         .unwrap();
     lock.lock().unwrap();
 
-    let drained = &fixture.json(&["--json", "drain", "-a", ACCOUNT], 3)["accounts"][0];
+    let drained = &fixture.json(&["--json", "drain", "-a", ACCOUNT], 4)["accounts"][0];
     assert_eq!(drained["busy"], true, "{drained}");
     assert!(matches!(
         fixture.status(id),
@@ -406,7 +406,7 @@ fn an_unreachable_endpoint_is_named_in_the_report() {
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
 
-    let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 3);
+    let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 4);
 
     let unreached = report["unreached"].as_array().expect("unreached endpoints");
     assert_eq!(unreached.len(), 1, "{report}");
@@ -422,7 +422,7 @@ fn an_unreachable_endpoint_is_named_in_the_report() {
 
 /// A server answering every request 503 is waited out a bounded number of
 /// times, then the source gives up: the report names it under `throttled`
-/// with until when, and the run exits 3. About half a minute of back-off.
+/// with until when, and the run exits 4. About half a minute of back-off.
 #[test]
 fn a_throttling_server_is_named_in_the_report() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -444,7 +444,7 @@ fn a_throttling_server_is_named_in_the_report() {
     fixture.offline_store();
     fixture.point_at(&format!("http://127.0.0.1:{port}/"), "user", "pass");
 
-    let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 3);
+    let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 4);
 
     let throttled = report["throttled"].as_array().expect("throttled sources");
     assert_eq!(throttled.len(), 1, "{report}");

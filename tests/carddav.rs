@@ -299,7 +299,7 @@ fn a_queued_edit_and_a_server_edit_of_the_same_field_park_until_a_person_decides
     );
 
     // A run that leaves a decision waiting is neither a success nor a failure.
-    let report = sync(&config, &state, REPLICA, COLLIDE_BOOK, 2);
+    let report = sync(&config, &state, REPLICA, COLLIDE_BOOK, 3);
     assert!(
         report.contains(r#""outstandingConflicts":1"#),
         "the divergence is parked and counted; report was:\n{report}",
@@ -326,7 +326,7 @@ fn a_queued_edit_and_a_server_edit_of_the_same_field_park_until_a_person_decides
     );
 
     // A parked divergence waits for a person, however many runs go by.
-    let report = sync(&config, &state, REPLICA, COLLIDE_BOOK, 2);
+    let report = sync(&config, &state, REPLICA, COLLIDE_BOOK, 3);
     assert!(
         !report.contains(r#""kind":"update""#),
         "a rerun pushes neither body over the other; report was:\n{report}",
@@ -404,7 +404,7 @@ fn a_body_no_parser_reads_is_reported_unmergeable_rather_than_collided() {
         ],
         &config,
         &state,
-        2,
+        3,
     );
 
     assert!(

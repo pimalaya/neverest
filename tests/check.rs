@@ -114,7 +114,7 @@ fn closed_port() -> u16 {
 }
 
 /// An endpoint that does not answer fails its row, not the check: every
-/// endpoint is still checked and printed, and the command exits 2 rather
+/// endpoint is still checked and printed, and the command exits 3 rather
 /// than printing a failure object. Runs without any server.
 #[test]
 fn a_check_names_every_endpoint_that_did_not_answer() {
@@ -144,7 +144,7 @@ fn a_check_names_every_endpoint_that_did_not_answer() {
         .output()
         .expect("spawn neverest");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(2), "{stdout}");
+    assert_eq!(output.status.code(), Some(3), "{stdout}");
 
     let checked: Value = serde_json::from_str(&stdout).expect("one JSON document");
     assert_eq!(checked["orphans"], serde_json::json!([]), "{checked}");

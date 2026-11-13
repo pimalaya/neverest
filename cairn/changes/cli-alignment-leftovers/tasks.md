@@ -9,6 +9,6 @@ change: cli-alignment-leftovers
 - [ ] F7: add `footer!` from pimalaya-cli to the clap command
 - [ ] H3: bump pimalaya-config to 0.2.1 and use `opt_shell_expanded_path`, dropping src/config.rs:982-992
 - [ ] A2: once released, drop the git pins for ical @caa1422, io-pimdir @3b4bed8 and io-webdav @62fad89 (Cargo.toml:85, :89, :90)
-- [ ] H1: once pimalaya-cli ships the save layer, drop src/cli/configure.rs:100, :253, :279
+- [x] H1: moot, src/cli/configure.rs went with the wizard (wizard-removed, 2026-11-13) and pimalaya-cli abandoned wizard-save-layer
 - [ ] CHANGELOG under [Unreleased]
 - [ ] Fold into the spec; log; land

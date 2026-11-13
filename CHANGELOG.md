@@ -15,18 +15,19 @@ Upgrading from 0.3.0:
 - Store collection ids carry the account (`work/imap/INBOX`): a frontend naming a collection by its id names the new one, and reads one account through `pimdir.account`.
 - `collection.delete` now defaults to false: set `collection.delete = true` on each endpoint whose collection deletions should reach the other.
 - `sync --reset -a <account>` drops that account's collections and resyncs them, refusing while they hold work no server has, listing it; `--reset --force` drops the conflicts, unpushed changes and retained items too, a queued or parked action still refusing it.
-- `sync` exits 2 for a parked send, intent or queue action too, and 3 when the run could not do all its work: a script must tell 2 and 3 from 1.
-- A listing that leaves out more than half of at least 20 items a collection held, or names none while it held some, drops nothing and exits 2: `sync --accept-absences` confirms such absences, for one run.
+- `sync` exits 3 when something waits for a person (a parked conflict, send, intent or queue action), where 0.3.0 exited 2, and 4 when the run could not do all its work: a script must tell 3 and 4 from 1. Exit 2 is now a command line neverest refused, printed under `--json` as a failure object coded `usage-invalid`.
+- A listing that leaves out more than half of at least 20 items a collection held, or names none while it held some, drops nothing and exits 3: `sync --accept-absences` confirms such absences, for one run.
 - A store another user can read is refused (`store-exposed`): `chmod 700` its directory and `chmod 600` its pimdir.db.
 - `sync --json` prints progress events before its report: read the last line, or skip the lines carrying `event`.
 - Every `--json` output prints every key: an empty list as `[]`, an absent value as `null`, a bool as `false`. Test `.conflicts | length`, not whether `conflicts` is there.
-- `check` checks every endpoint and exits 2, printing its report, when one does not answer; it exited 1 with the failure object of the first.
+- `check` checks every endpoint and exits 3, printing its report, when one does not answer; it exited 1 with the failure object of the first.
+- `configure` and the first-run offer are gone: write the configuration by hand from config.sample.toml. A build naming the `wizard` feature fails until it drops it.
 
 ### Added
 
 - Added `drain`: applies what frontends queued in the store without reading a credential or opening an endpoint, so a queued create gets its id at once, offline included.
 
-  A store a sync holds answers `busy`, exit 3.
+  A store a sync holds answers `busy`, exit 4.
 
 - Added `sync --intents-only`: performs what frontends queued (collection creations, sends, invitation replies and cancellations) and stops, listing no collection.
 
@@ -102,8 +103,6 @@ Upgrading from 0.3.0:
 
 - Added `coverage`, `downloaded`, `unreached`, `unsettled` and `throttled` to the sync report, and `unconfirmed` to each `submitted` entry.
 
-- Added the `wizard` cargo feature, on by default, gating `configure` and the offer a first run makes.
-
 - Added `sync --accept-absences`: a listing leaving out more than half of at least 20 items a collection held, or naming none while it held some (a round, or the rebuild of a renumbered IMAP mailbox), drops what it left out, for this run.
 
   Without it such a listing drops nothing and is reported under `absences`.
@@ -112,7 +111,7 @@ Upgrading from 0.3.0:
 
   A body the drain kept aside applying a queued action is named by its queue row (`action`), in the sync report and the `drain` output.
 
-- Added `unanswered` to the sync report: the pushes a server gave no outcome for, pushed again by the next run, the run exiting 3.
+- Added `unanswered` to the sync report: the pushes a server gave no outcome for, pushed again by the next run, the run exiting 4.
 
 - Added the `search` cargo feature, on by default: neverest builds the store's search index (index.db), which frontends query.
 
@@ -120,7 +119,7 @@ Upgrading from 0.3.0:
 
 - Added `index`: builds the store's search index whole, reading no credential and opening no endpoint.
 
-  An index another indexer holds answers `busy`, exit 3.
+  An index another indexer holds answers `busy`, exit 4.
 
 - Added `store.index-timeout`, the longest a sync refreshes the search index.
 
@@ -148,13 +147,17 @@ Upgrading from 0.3.0:
 
 ### Changed
 
+- **BREAKING**: changed the exit statuses to the Pimalaya exit contract: 2 is a command line neverest refused, and the partial outcomes start at 3. A run that waits for a person (a parked conflict, a refused duplicate `UID`, a rejected write, a parked send, intent or queue action, withheld absences or bodies) exits 3, where it exited 2; a run, a `drain`, an `init` or an `index` that could not do all its work exits 4, where it exited 3; `check` with an endpoint down exits 3, where it exited 2.
+
+  Under `--json`, a refused command line prints the failure object coded `usage-invalid` on stdout; without it, clap's message goes to stderr as before.
+
 - **BREAKING**: changed every account naming no `store.root` to share one store, `neverest/` under the state directory, where each had `neverest/<account>/`.
 
   pimdir is multi-account by design: collections are grouped by account, a body two accounts hold is stored once, and a frontend reads every account from one store. Accounts naming one `store.root` share it too.
 
 - **BREAKING**: changed the store's source ids to `<account>/<source>` and its collection ids to `<account>/<source>/<name>`.
 
-  Source and collection ids are unique store-wide (pimdir STORAGE §4.3, §9.2): two accounts holding the wizard's `imap` source would have written into one collection and replaced each other's capabilities. Reports and events still name an endpoint as the configuration does. An account name holding `/` is refused.
+  Source and collection ids are unique store-wide (pimdir STORAGE §4.3, §9.2): two accounts each holding an `imap` source would have written into one collection and replaced each other's capabilities. Reports and events still name an endpoint as the configuration does. An account name holding `/` is refused.
 
 - **BREAKING**: changed `-a/--account` into a repeatable filter: without it, `sync`, `check`, `drain` and `init` run over every account, one after the other under the store's one lock, and `index` builds every store the accounts use.
 
@@ -162,23 +165,17 @@ Upgrading from 0.3.0:
 
 - **BREAKING**: changed the `--json` results of `sync`, `drain`, `init` and `check` to list every account (`accounts`), and of `index` to list every store (`stores`).
 
-  An account that fails is reported with its error and code, the next one still runs, and the command exits 3.
+  An account that fails is reported with its error and code, the next one still runs, and the command exits 4.
 
 - **BREAKING**: changed the sidecar (neverest.json) to keep the mode, the looked-up roles and the taskless calendars per account; one of the previous shape is refused (`store-layout`).
 
 - **BREAKING**: changed `sync --reset` to start one account over inside the store it shares, dropping its collections rather than the store.
 
-- Changed `default = true` on an account to be read and ignored, with a warning, and the wizard to write none.
-
-- Changed the wizard to write one account covering every domain discovery found: one source per domain set up, mail, contacts and calendar, through the direct-backend sugar, and the mail source's `smtp` channel.
-
-  It picks the best option per domain without a question and reviews the picks in plain words before any sign-in, signs each identity in once (one Ortie hand-off per authorization server, one password per group of servers of one name), tests it at once and stores a typed password in a keyring under `neverest-<account>-<source>`, then asks which collections each source syncs, mail starting without junk and trash. Nothing discovered asks for a server URL. No SASL mechanism, HTTP scheme or user id is asked any more.
-
-- Changed a rendered account to read mail, its `smtp` channel, contacts then calendar, and to omit `collection.create` and `collection.delete` beside a collection filter when they hold their defaults.
+- Changed `default = true` on an account to be read and ignored, with a warning.
 
 - Changed the retention sweep to purge the account's own retained items alone, so one account's `store.purge-after` never empties another's trash.
 
-- Changed the store-wide lock to make a second run over a held store report its accounts `busy` and exit 3 after the bounded wait, where it failed.
+- Changed the store-wide lock to make a second run over a held store report its accounts `busy` and exit 4 after the bounded wait, where it failed.
 
 - Changed `init` to add an account to the store the accounts share, creating it when there is none, and to leave an initialized account as it is, saying so.
 
@@ -195,11 +192,11 @@ Upgrading from 0.3.0:
 
 - Changed the `submit` payload to be read by io-pimdir's `PimdirSubmit`: one without `source` or a recipient, or naming a body (`object`, the message being the queue row's body), parks instead of being sent.
 
-- **BREAKING**: changed `sync` to exit 2 when a send or an intent parked, or while the store holds a parked queue action, where it exited 0.
+- **BREAKING**: changed `sync` to exit 3 when a send or an intent parked, or while the store holds a parked queue action, where it exited 0.
 
-- **BREAKING**: changed `sync` to exit 2 when a listing left out more than half of at least 20 items a collection held, or named none while it held some, or a change was withheld over a body the store cannot serve, where the listing dropped them and the run exited 0.
+- **BREAKING**: changed `sync` to exit 3 when a listing left out more than half of at least 20 items a collection held, or named none while it held some, or a change was withheld over a body the store cannot serve, where the listing dropped them and the run exited 0.
 
-- **BREAKING**: changed `sync` to exit 3 when the run could not do all its work, where it exited 0: an unreached endpoint (an SMTP channel included), a hunk, a send or an intent failed without parking, a throttled source, a round left open, or a collection still moving after the last convergence pass.
+- **BREAKING**: changed `sync` to exit 4 when the run could not do all its work, where it exited 0: an unreached endpoint (an SMTP channel included), a hunk, a send or an intent failed without parking, a throttled source, a round left open, or a collection still moving after the last convergence pass.
 
   Exit 3 wins over 2.
 
@@ -251,7 +248,7 @@ Upgrading from 0.3.0:
 
 - **BREAKING**: changed `mode` in the `check` and `init` output from a sentence to an object, `{sources, targets, oneWay, retain}`.
 
-- **BREAKING**: changed `check` to check every endpoint whatever the others answer: each row carries `backend`, `ok`, `code` and `error`, a failed one listing no collection, and a failed endpoint or SMTP channel exits 2 with the report.
+- **BREAKING**: changed `check` to check every endpoint whatever the others answer: each row carries `backend`, `ok`, `code` and `error`, a failed one listing no collection, and a failed endpoint or SMTP channel exits 3 with the report.
 
   `smtp` is the channel's own row, `{backend, ok, code, error}`, or `null` when the endpoint declares none; it was a bool. Rows are sorted by name.
 
@@ -264,10 +261,6 @@ Upgrading from 0.3.0:
 - Changed the search index to read floating times and all-day dates in the user's time zone, `TZ` else the system's, rather than in UTC.
 
   A zone with no IANA name reads as UTC, with a warning. The first refresh in another zone re-expands every calendar item.
-
-- Bumped io-pim-discovery to 0.11.
-
-  Discovery falls back to the autoconfig of the provider a domain's MX records name, and resolves the CalDAV and CardDAV roots a provider advertises (RFC 6764).
 
 - **BREAKING**: bumped io-pimdir to 0.11 (pimdir storage-draft-10, sync-draft-10, search-draft-10), from crates.io: a store any earlier neverest wrote is refused, never migrated, and the search index is built again by the first refresh.
 
@@ -301,6 +294,8 @@ Upgrading from 0.3.0:
 
 - Bumped io-msgraph to 0.7.
 
+- Bumped pimalaya-cli to 0.4.
+
 - Bumped io-smtp to 0.6.
 
 - Bumped io-webdav to 0.7.
@@ -308,6 +303,12 @@ Upgrading from 0.3.0:
   A CalDAV or CardDAV multistatus is parsed 3.4 to 9 times faster.
 
 - Bumped vcard-rs to 0.6.
+
+### Removed
+
+- **BREAKING**: removed the configuration wizard: the `configure` command (alias `cfg`), the offer a bare `neverest` made without a configuration file, and the `wizard` cargo feature, with its io-pim-discovery dependency.
+
+  pimalaya-cli 0.4 dropped the wizards of every Pimalaya CLI. A configuration is written by hand from config.sample.toml; a command finding none fails naming the path it looked for, and a bare `neverest` prints the help.
 
 ### Fixed
 

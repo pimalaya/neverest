@@ -180,23 +180,6 @@ The mechanism SHALL resolve through the same conversion the IMAP side uses, the 
 
 A build declaring the `smtp` feature SHALL enable io-smtp's `scram` feature, so a configured SCRAM-SHA-256 reaches the wire instead of being reported as an unsupported mechanism.
 
-### Requirement: The wizard configures one channel from the account's credentials
-The send channel SHALL be the sending domain of the review: through the mail source when it sends by itself (Microsoft Graph mail, through `sendMail`), with no other choice offered since an account-level `smtp` table cannot complete such a source; otherwise over the best discovered SMTP server, implicit TLS before STARTTLS, signing in as mail does when that server offers it, written as the account-level `smtp` table completing the mail source; and nowhere when no SMTP server was discovered, the account being saved without a channel rather than with a guessed `smtp.<domain>`. A mail source that does not send by itself, the Gmail API included, SHALL take the SMTP channel.
-
-The channel SHALL share mail's secret by the rules of "Sign-ins are grouped by identity": one OAuth sign-in when both sign in through one authorization server, one password or API token when their hosts are servers of one name, a question before reusing it for another host. A password SHALL sign SMTP in with PLAIN and a token with XOAUTH2, never through a mechanism menu; the mechanism stays editable in the file. A typed secret SHALL be stored under the keyring entry of the first source it signs in, so a channel sharing mail's password reads mail's entry and one with its own reads `neverest-<account>-smtp`.
-
-Sending needs a mail source: with mail not set up or left out, sending SHALL be not set up and the account written without a channel.
-
-#### Scenario: Mail and sending of one domain
-- GIVEN mail IMAP at imap.example.org and sending SMTP at smtp.example.org, both with a password
-- WHEN they sign in
-- THEN one password prompt lists both servers, and `imap.sasl` and `smtp.sasl` read the one keyring entry `neverest-<account>-imap`
-
-#### Scenario: Mail over the Gmail API
-- GIVEN an address whose provider rule offers the Gmail API and SMTP, both through one authorization server
-- WHEN the plan is made
-- THEN mail is the Gmail API and sending SMTP through the same sign-in, never "through mail"
-
 ### Requirement: A collection filter belongs to the source
 `collection.filter` SHALL be declared per source rather than per account, because an account may hold sources of several kinds and a mailbox include list means nothing to a contacts source. An account-level `collection` table SHALL be refused, naming its replacement.
 
@@ -216,168 +199,15 @@ The sync SHALL write a `sort_key` beside the summary of every item it summarises
 ### Requirement: Sources are remote backends only
 A sync source SHALL be a remote backend: IMAP, Microsoft Graph and Gmail for `message/rfc822`, CardDAV, Microsoft Graph and Google People for `text/vcard`, CalDAV, Microsoft Graph and Google Calendar for `text/calendar` (JMAP as its backend lands). Local file backends (m2dir, maildir, vdir) SHALL NOT be sync sources: the pimdir store is the local replica, so a local file store is redundant as a source and belongs on the import/export path, which neverest documents rather than syncing directly.
 
-### Requirement: The wizard discovers in parallel and proposes what it found
-The discovery fan-out SHALL ask for every service neverest has a backend for: IMAP and submission, CardDAV and CalDAV, and the provider APIs a provider rule carries (`gmail`, `gpeople`, `gcal`, Microsoft Graph mail, contacts and calendars), within its deadline. The OAuth metadata resolutions (RFC 8414, RFC 9728) SHALL stay off, their fetches running past the deadline. The wizard SHALL offer only what the running build compiles, and no JMAP option, JMAP having no backend yet.
+### Requirement: A bare invocation prints the help
+Running `neverest` with no subcommand SHALL print the help and exit 0, with a configuration file or without one: neverest writes no configuration, so a first run has nothing to offer but the commands. A configuration is written by hand against the documented sample, config.sample.toml.
 
-The wizard SHALL write one account holding one source per domain the review set up (mail, contacts, calendar), each through the direct-backend sugar and so named after its protocol, plus the mail source's `smtp` channel when sending goes over SMTP. Each domain's options map to keys of their own (`imap`, `gmail`, `msgraph` for mail; `carddav`, `gpeople`, `msgraph-contacts` for contacts; `caldav`, `gcal`, `msgraph-calendar` for calendar), so two sources the wizard writes never need one name. An account with no target retains every body and reads offline with no further setting: the wizard SHALL NOT write `one-way`, `retain` or a `targets` table, their defaults being the offline replica it exists to produce. A mirror, a fan-in and a second source of one kind are configured by hand against config.sample.toml.
+A command that finds no configuration file SHALL fail, exit 1, naming the path it looked at (the first `--config` path when given, else the default one) and the documented sample; it SHALL NOT exit reporting success. A configuration file that fails to parse SHALL be an error rather than read as absent.
 
-#### Scenario: A provider carrying every domain
-- GIVEN an address a provider rule matches, offering its mail, contacts and calendar APIs through one authorization server
-- WHEN the wizard saves the account
-- THEN the account holds the `gmail`, `gpeople` and `gcal` sources and an `smtp` channel under one `[accounts.<name>]` header, and no `default`
-
-### Requirement: Each domain gets its best option without a question
-For each domain of the account, mail, sending, contacts and calendar, the wizard SHALL list the options discovery found that the build compiles, each a protocol, a server and a sign-in method (a password, an API token or OAuth 2.0). A discovered IMAP or SMTP server offering neither implicit TLS nor STARTTLS SHALL be dropped, and so SHALL a discovered HTTP server that is not `https`. Two options reading the same, protocol, server and sign-in method, SHALL be one, so a server offering OAuth through several grants is one OAuth option. A provider API SHALL take OAuth alone.
-
-Options SHALL be ranked the provider's own API first where a provider rule matched (`gmail`, `gpeople`, `gcal`, Microsoft Graph), then IMAP, SMTP, CardDAV and CalDAV; the servers of one protocol implicit TLS before STARTTLS; and within one server OAuth, an API token, then a password when `ortie` is on the `PATH`, and a password, an API token, then OAuth otherwise. The first ranked option of each domain, Auto, SHALL be picked without a question. Sending follows "The wizard configures one channel from the account's credentials".
-
-#### Scenario: A provider rule matched
-- GIVEN an address a provider rule matches, offering its mail, contacts and calendar APIs beside IMAP, SMTP, CardDAV and CalDAV
-- WHEN the plan is made
-- THEN mail, contacts and calendar are the provider's APIs, with or without `ortie` on the `PATH`
-
-#### Scenario: OAuth ranks first only with Ortie
-- GIVEN a CardDAV server offering OAuth and a password
-- WHEN the plan is made with `ortie` on the `PATH`, then without
-- THEN contacts sign in through OAuth, then with a password
-
-### Requirement: The review lists each pick in plain words
-Before any sign-in, the wizard SHALL show one row per domain the build can set up, mail, sending, contacts and calendar, through pimalaya-cli's `review::prompt`, worded without jargon beyond the protocol name: `<Protocol> at <host>, with your password`, `, with an API token`, `, through your browser` (OAuth through Ortie) or `, with a token from a broker` (OAuth without Ortie); a provider API by its name, as `Gmail API, through your browser`; a domain sharing mail's secret `, with mail's password`; sending over mail's session `Through mail`; sending without a channel and a domain left out `Not set up`; a domain discovery missed `Nothing found`.
-
-Continue SHALL be the default and SHALL need at least one domain set up. Changing a domain SHALL list `Auto (<what Auto is>)` when discovery found an option for it, every option found as `<Protocol> · <Sign-in method>`, the server URL appended only where two entries would otherwise read the same, `Custom server URL`, then `No sending` for sending and `Leave out` for every other domain; a pick SHALL return to the review. Sending through a mail source that sends by itself offers no change, and sending with mail not set up asks for mail first.
-
-#### Scenario: One provider over the open protocols
-- GIVEN mail IMAP at imap.example.org, sending SMTP at smtp.example.org, contacts CardDAV at dav.example.org, all with a password, and no calendar found
-- WHEN the review shows
-- THEN it reads `Mail      IMAP at imap.example.org, with your password`, `Sending   SMTP at smtp.example.org, with mail's password`, `Contacts  CardDAV at dav.example.org, with mail's password` and `Calendar  Nothing found`
-
-### Requirement: Nothing discovered asks for a server URL
-When discovery yields no option for any domain (an empty result, the deadline elapsing with nothing completed, or a resolver that does not answer), the wizard SHALL say that nothing could be discovered for the domain and ask `Server URL:`, whose scheme decides the domain: `imaps://` and `imap://` mail, `carddavs://` and `carddav://` contacts, `caldavs://` and `caldav://` calendar, `https://` both contacts and calendar, a DAV entry point serving both, each signed in and tested on its own. A sending URL SHALL be refused there, sending needing mail. An empty answer SHALL stop the wizard with a message stating it could not automatically discover a configuration for the input and inviting the user to write the account by hand from the documented sample configuration (linked), nothing being written.
-
-When discovery found something, a domain it missed SHALL read `Nothing found` in the review, its change offering `Custom server URL` and `Leave out`. `Custom server URL` SHALL ask `Server URL:` for that domain (`Sending server URL:` for sending), an empty answer returning to the review.
-
-#### Scenario: An unknown domain
-- GIVEN an address whose domain discovery knows nothing of
-- WHEN the lookup ends
-- THEN the wizard says nothing could be discovered for the domain and asks `Server URL:`
-- AND an empty answer stops it naming the documented sample, with no file written
-
-#### Scenario: A DAV entry point
-- GIVEN the answer `https://dav.example.org` to that prompt
-- WHEN it is read
-- THEN contacts is CardDAV and calendar CalDAV at `https://dav.example.org/`, and the review shows both
-
-### Requirement: A typed server URL names its protocol by its scheme
-A server URL typed for a domain SHALL name its protocol by its scheme: for mail, `imaps://host[:port]` is IMAP over implicit TLS (993 by default) and `imap://` IMAP over STARTTLS (143); for sending, `smtps://` is SMTP over implicit TLS (465) and `smtp://` SMTP over STARTTLS (587); for contacts, `https://`, `carddavs://` and `carddav://` are CardDAV over https; for calendar, `https://`, `caldavs://` and `caldav://` are CalDAV over https. Encrypted servers only: an `http://` URL SHALL be refused naming it, and asked again, unless its host is this machine (`localhost` or a loopback address), where it is CardDAV or CalDAV over http. A URL without a scheme, a scheme the domain does not take and a URL carrying a password SHALL be refused and asked again too. A user name in the URL is the login. The sign-in method SHALL then be picked from Password (the default) and API token.
-
-#### Scenario: A cleartext server
-- GIVEN the answer `http://dav.example.org` for contacts
-- WHEN it is read
-- THEN the wizard refuses it naming `http://dav.example.org`, saying only encrypted servers are accepted, and asks again
-
-#### Scenario: A cleartext server on this machine
-- GIVEN the answer `http://localhost:5232/` for calendar
-- WHEN it is read
-- THEN calendar is CalDAV at `http://localhost:5232/`
-
-### Requirement: The sign-in mechanism is picked, not asked
-The wizard SHALL NOT prompt for a SASL mechanism, an HTTP authentication scheme, the user id of the Gmail API or Microsoft Graph (`me`), or a login it knows. A password SHALL sign IMAP in with the best mechanism the unauthenticated CAPABILITY probe advertises, SCRAM-SHA-256, then PLAIN, then the LOGIN command, and PLAIN when the probe fails or advertises none of them; a token with OAUTHBEARER when advertised, else XOAUTH2. SMTP SHALL take PLAIN for a password and XOAUTH2 for a token, and CardDAV and CalDAV Basic for a password and Bearer for a token. The login SHALL be the user name of a typed URL, else the advertised user name when it is an address, else the typed address, and SHALL be asked only when none of them is known. The mechanism stays editable in the configuration.
-
-#### Scenario: A server advertising PLAIN and LOGIN
-- GIVEN an IMAP server whose unauthenticated CAPABILITY advertises `AUTH=PLAIN` and no `LOGINDISABLED`
-- WHEN it is signed in with a password
-- THEN the account's IMAP SASL is PLAIN, and no mechanism was asked
-
-### Requirement: Sign-ins are grouped by identity
-After the review, the domains set up SHALL be signed in once per identity, in domain order: one OAuth sign-in per authorization server, covering every domain that picked it, and one password or API token per group of servers of one name, servers whose hosts are equal, or equal once their first label is dropped (`imap.example.org`, `smtp.example.org` and `dav.example.org`), an IP address or a two-label host never losing one. A later group signing in with the same kind of secret on another host SHALL be asked `Use the same password for <host>?` (`API token` for a token), no by default, before its own prompt. A domain already signed in during the run SHALL NOT be asked again after a return to the review unless its pick changed.
-
-#### Scenario: Every domain of one name
-- GIVEN mail at imap.example.org, sending at smtp.example.org, contacts and calendar at dav.example.org, all with a password
-- WHEN they sign in
-- THEN one password prompt lists the four servers
-
-#### Scenario: Contacts elsewhere
-- GIVEN mail at imap.example.org and contacts at dav.example.net, both with a password
-- WHEN mail signed in
-- THEN the wizard asks `Use the same password for dav.example.net?`, no by default, before a second prompt
-
-### Requirement: A password is typed once, tested, then stored
-A password or an API token SHALL be asked once, masked and without confirmation, through pimalaya-cli's `keyring::prompt_password`, which names every server it goes to and flags one off the address's domain. Each group SHALL be tested as soon as it is typed, each source by `check`'s per-endpoint test (open it, then list its collections with their roles, see "A check lists collections with their roles") and the send channel by `check`'s channel test, under their spinners. Once a test passed, the wizard SHALL offer to store the secret once through pimalaya-cli's `keyring::prompt_store`, under the entry `neverest-<account name>-<source>` (`imap`, `smtp`, `carddav`, `caldav`) of the first source it signs in, the account name being the one the account is saved under, and the sources sharing the secret sharing the entry. The configuration SHALL hold the stored secret's read command, never the typed value unless raw storage was picked.
-
-#### Scenario: A password stored in a keyring
-- GIVEN mail, sending and contacts signed in with one password the tests accepted
-- WHEN the user stores it in an installed keyring
-- THEN the entry `neverest-<account name>-imap` holds it, and `imap.sasl`, `smtp.sasl` and `carddav.auth` read it with the keyring's command
-
-### Requirement: OAuth hands off to Ortie
-Neverest runs no OAuth 2.0 grant itself. With `ortie` on the `PATH`, an OAuth sign-in SHALL run pimalaya-cli's `ortie::sign_in` with the typed address (the domain when none was typed), the Ortie account `neverest-<account name>` (suffixed with its first service when the account needs several OAuth sign-ins) and the services it covers, in domain order, by their discovery wire names (`imap`, `smtp`, `carddav`, `caldav`, `gmail`, `gpeople`, `gcal`, `msgraph`, `msgraphContacts`, `msgraphCalendar`), every source it covers reading the token with the command it answers. Without it, the wizard SHALL say in one line that a token broker issues the token and that Ortie can sign in for it, then offer the token brokers through pimalaya-cli's token picker.
-
-#### Scenario: A provider account
-- GIVEN mail over the Gmail API, sending over SMTP, contacts and calendar over the provider's APIs, all through one authorization server, and `ortie` on the `PATH`
-- WHEN they sign in for the account `perso`
-- THEN `ortie configure --name neverest-perso --service gmail --service smtp --service gpeople --service gcal -- <address>` runs once, then `ortie auth get -a neverest-perso`
-- AND every source and the channel read the token with `ortie token show -a neverest-perso`
-
-### Requirement: A refusal offers a way on
-A failed sign-in or connection test SHALL be reported for its domain, the domains that passed being kept, and SHALL offer `Try again` (retype the secret, or sign in again), `Change the login` (ask the login, then retype; where the sign-in uses a login), `Leave <domain> out` (only when another domain is set up or still to come) and `Back to the review`. Leaving mail out SHALL leave sending out too.
-
-#### Scenario: Calendar refuses the password
-- GIVEN mail and calendar sharing one password, which IMAP accepts and CalDAV refuses
-- WHEN the refusal shows
-- THEN mail stays signed in, and `Leave calendar out` saves an account without a calendar source
-
-### Requirement: The collections to sync are picked last
-Once every domain is signed in, the wizard SHALL offer, for each source in domain order (mail, contacts, calendar), the collections its sign-in test listed, in a multi-select through pimalaya-cli's `prompt::items`, every one picked except, for mail, those whose stated role is `junk` or `trash`. All picked SHALL write nothing; otherwise the source SHALL write the unpicked ones as `collection.filter.exclude`, by the id the listing names them by, so a collection created later still syncs. A source that listed no collection SHALL be asked nothing.
-
-#### Scenario: Junk and trash left out
-- GIVEN an IMAP source listing `INBOX`, `Sent`, `Junk` (role `junk`) and `Trash` (role `trash`)
-- WHEN the folders show
-- THEN `INBOX` and `Sent` are picked, and confirming writes `imap.collection.filter.exclude = ["Junk", "Trash"]`
-
-#### Scenario: Everything picked
-- GIVEN a CardDAV source listing two address books, both kept
-- WHEN the address books are confirmed
-- THEN the source writes no `collection` key
-
-### Requirement: The wizard generates an account and never edits one
-`neverest configure` SHALL generate a new account. It SHALL NOT read an account back, seed the prompts with its values, or write it out again: editing an account, adding a second by hand, and everything the prompts do not cover belong to the file and the user's editor, against the documented sample.
-
-`configure` SHALL take no account: `-a` names an account to run against, and there is nothing to name when the wizard generates. The dispatcher SHALL NOT hand it one.
-
-The account name SHALL be derived and never prompted, being only the table key, and it SHALL be free: the wizard SHALL suffix the name discovery proposes (`posteo`, `posteo-2`, …) until the configuration does not already hold it. A second `[accounts.<name>]` table makes the whole document fail to parse, taking the accounts that used to work down with it.
-
-The generated account SHALL NOT write `default`: every command runs over every account unless `-a` names some.
-
-A configuration file that fails to parse SHALL be an error rather than read as absent: appending to a broken document buries the real problem under a second one.
-
-### Requirement: A bare invocation offers the wizard only on a first run
-Running `neverest` with no subcommand SHALL print the help, except on a machine with no configuration, where it SHALL offer the wizard first, as a bare `himalaya` does. The wizard targets the first `--config` path when given, else the default one. A configuration that fails to parse counts as present, so the offer never proposes to write over a broken file; the parse error surfaces when a real command reads it. A declined offer SHALL fall back to the help, a bare invocation having nothing else to run.
-
-The offer SHALL be skipped, and the help printed, in JSON mode and when stdin is not a terminal, neither being able to answer a prompt. It SHALL also be skipped when `--account` names an account: with no subcommand that is a half-typed command rather than a first run, and the help is what points at the commands.
-
-`neverest configure` itself SHALL refuse to run when stdin is not a terminal, naming the documented sample as the way out: a wizard cannot prompt a cron job.
-
-The wizard SHALL NOT write a configuration file unconditionally: it SHALL ask for confirmation before saving to a path holding no file, SHALL ask before appending to one that does ("Append account `<name>` to `<path>`?"), and SHALL print the generated TOML document on stdout when either confirmation is declined, so a generated account is never lost. In JSON mode or when stdout is not a terminal, the wizard SHALL emit the document on stdout and touch no file, so `neverest configure > config.toml` and scripted runs keep working.
-
-Appending SHALL be a plain text append of `"\n<document>"` to the file opened in append mode. The wizard SHALL NOT parse a configuration file and serialize it back: comments, ordering and hand-written formatting are not in the parsed model, and re-serializing destroys every one of them.
-
-A saved account SHALL be reported on stderr, naming the file it landed in and the name it landed under, since that name was never asked for, and SHALL point at `neverest init` and `neverest sync`, which run over every account.
-
-A command that finds no configuration file SHALL propose the wizard, under the same two guards, and SHALL then read the configuration again rather than trust the wizard's result, which is only printed when the save is declined. A command still finding none SHALL fail naming the path it looked at and the documented sample; it SHALL NOT exit reporting success.
-
-### Requirement: The generated configuration is a dotted document
-A configuration neverest writes or prints SHALL render as Himalaya's does: one `[accounts.<name>]` table header per account, the only header in the document, with every field below it written as a dotted key. An empty table SHALL write nothing. The saved file and the document printed on stdout SHALL be identical.
-
-A rendered account SHALL be readable in that order rather than the serializer's: the groups SHALL be ordered with the backends the wizard wrote first, mail then its `smtp` channel, contacts, then calendar, before the sync options it never writes; each group SHALL be separated by a blank line, and the key naming what a group points at (`server`, `user-id`) SHALL be lifted to the top of its own, ahead of the credential authenticating against it.
-
-An account naming several sources SHALL render under that same single header, its sources being dotted keys like every other field, so appending a table after it never opens a header a later account would fall into.
-
-The document SHALL hold only what was actually decided: every field equal to its default SHALL be omitted (`default`, which the wizard never sets, the per-source collection / flag / item permissions, `collection.create` and `collection.delete` beside a written filter included, the per-source pool size, the collection filter, the HTTP-backend ALPN list, `starttls`). Omitting a field SHALL be lossless: every skipped field keeps a deserialization default equal to the value that was skipped.
-
-#### Scenario: A source with an excluded folder
-- GIVEN a generated IMAP source excluding `Junk`
-- WHEN the account renders
-- THEN it reads `imap.collection.filter.exclude = ["Junk"]` and no `imap.collection.create` nor `imap.collection.delete`
+#### Scenario: A first run
+- GIVEN no configuration file
+- WHEN `neverest sync` runs
+- THEN it exits 1 naming the path it looked at and the sample, and writes nothing
 
 ### Requirement: Every remote backend is a cargo feature
 Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backends, `dav` for the CardDAV and CalDAV backends, `gpeople` for the Google People backend, `gcal` for the Google Calendar backend, `gmail` for the Gmail backend, `smtp` for the SMTP submission channel.
@@ -389,13 +219,13 @@ All of them SHALL ship in the default feature set, `msgraph` included again: it 
 A missing backend SHALL surface at runtime, never at build time: every feature combination compiles, the configuration surface stays whole (every source config still parses), and an unavailable backend fails when the source is *opened*, as the JMAP source already does. A build with neither `smtp` nor `msgraph` has no send channel and SHALL warn rather than perform a submit intent. Each optional backend crate SHALL take its TLS provider from neverest's own `native-tls` / `rustls-aws` / `rustls-ring` / `vendored` features rather than pinning one.
 
 ### Requirement: A backend owns its ALPN default
-The `alpn` field of a source or channel config that has a backend crate SHALL be optional, and unset SHALL mean that crate's own default (io-imap's `["imap"]`, io-smtp's `["smtp"]`), resolved where the connection is opened. An explicit `[]` SHALL skip ALPN. Neverest SHALL NOT restate a backend's default, in the config schema or in the values the wizard writes, so the default lives in exactly one place.
+The `alpn` field of a source or channel config that has a backend crate SHALL be optional, and unset SHALL mean that crate's own default (io-imap's `["imap"]`, io-smtp's `["smtp"]`), resolved where the connection is opened. An explicit `[]` SHALL skip ALPN. Neverest SHALL NOT restate a backend's default in the config schema, so the default lives in exactly one place.
 
 ### Requirement: The pimdir store is the sole local copy
 A message body SHALL be held locally exactly once: content-addressed in the pimdir blob store (where the derivation keeps bodies), deduped across sources, collections and accounts, and Neverest SHALL keep no parallel local copy in another format. Sync sources are remote backends only; an existing on-disk store (maildir/m2dir) is brought in through io-pimdir's conversion tooling, not synced as a source. The store is pimdir.db plus an `objects/` blob directory, shared by every account naming its root.
 
 ### Requirement: The default store root resolves on every supported platform
-An account whose configuration names no `store.root` SHALL resolve its store under a per-platform base: the XDG state directory on Linux and the BSDs, `~/Library/Application Support` on macOS and iOS, `%LOCALAPPDATA%` on Windows. A platform SHALL NOT be left resolving through a mechanism it does not implement, since every account-touching verb reaches this and the wizard does not, so the failure lands after a configuration was successfully written.
+An account whose configuration names no `store.root` SHALL resolve its store under a per-platform base: the XDG state directory on Linux and the BSDs, `~/Library/Application Support` on macOS and iOS, `%LOCALAPPDATA%` on Windows. A platform SHALL NOT be left resolving through a mechanism it does not implement, since every account-touching verb reaches this.
 
 Only the base SHALL vary. The store SHALL be `neverest/` under it on every platform, a directory rather than a file and one for every account naming no root, so one relative path addresses a store whoever wrote it. `store.root` SHALL override the whole resolution, for that account.
 
@@ -412,7 +242,7 @@ Each synced collection's media type SHALL be declared on the store from the back
 ### Requirement: A collection records the account that syncs it
 Every store handle SHALL be opened for the account being synced, so each collection it writes is grouped under that account (pimdir STORAGE §9.2), and a reader reads one account through it (`pimdir.account` in himalaya, calendula and cardamum). Within the account, a collection is further keyed by its source's namespace, which is its name, so two sources of one kind are told apart without inferring it from the collection naming.
 
-The store-wide ids SHALL carry the account (pimdir STORAGE §4.3, §9.2): a pimdir source id is `<account>/<source>` and a collection id `<account>/<source>/<name>`, so two accounts holding a source of one name, the wizard's `imap` among them, neither write into one collection nor replace each other's declarations. An account name holding `/` SHALL be refused, naming it: `a` with `b/c` and `a/b` with `c` would spell one id. A report and an event SHALL name an endpoint as the configuration does, the account being named beside it.
+The store-wide ids SHALL carry the account (pimdir STORAGE §4.3, §9.2): a pimdir source id is `<account>/<source>` and a collection id `<account>/<source>/<name>`, so two accounts holding a source of one name, such as the `imap` sugar, neither write into one collection nor replace each other's declarations. An account name holding `/` SHALL be refused, naming it: `a` with `b/c` and `a/b` with `c` would spell one id. A report and an event SHALL name an endpoint as the configuration does, the account being named beside it.
 
 #### Scenario: Two accounts with one source name
 - **GIVEN** two accounts `work` and `home` sharing the store, each with an `imap` source
@@ -504,21 +334,21 @@ The subsequent sync of a drained collection pushes the resulting dirty state. An
 
 #### Scenario: A sync that cannot connect
 - **GIVEN** an event queued on a calendar whose server is unreachable
-- **WHEN** the account syncs and exits 3
+- **WHEN** the account syncs and exits 4
 - **THEN** the event is in the store, with its `seq`
 
 ### Requirement: A drain applies the queue without syncing
-`neverest drain` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 3, the queue untouched.
+`neverest drain` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 4, the queue untouched.
 
 ### Requirement: A run holds the store lock, waiting bounded
-A run SHALL hold an advisory sync.lock under local/ of the **actual** store directory (honouring `store.root`) for its whole length, whatever accounts it covers, taken once for each store it covers, in path order, before any account runs. A second run SHALL wait for the holder up to a bounded timeout (60 s) and then report every account of that store `busy` and exit 3, so cron ticks and connector-triggered scoped runs serialize instead of failing or corrupting.
+A run SHALL hold an advisory sync.lock under local/ of the **actual** store directory (honouring `store.root`) for its whole length, whatever accounts it covers, taken once for each store it covers, in path order, before any account runs. A second run SHALL wait for the holder up to a bounded timeout (60 s) and then report every account of that store `busy` and exit 4, so cron ticks and connector-triggered scoped runs serialize instead of failing or corrupting.
 
 The lock is the store's, as pimdir's owner lock is (STORAGE §8: one owner process per store), so two accounts of one store never sync at once. Accounts needing independent schedules SHALL give themselves their own `store.root`.
 
 #### Scenario: Another account of a busy store
 - **GIVEN** a run holding the store's lock
 - **WHEN** `neverest sync --json -a <another account of it>` runs
-- **THEN** it waits the bounded time, then prints that account `busy` and exits 3, its store untouched
+- **THEN** it waits the bounded time, then prints that account `busy` and exits 4, its store untouched
 
 ### Requirement: An IMAP handle-space change rebuilds the collection and bumps its generation
 An IMAP listing SHALL compare the `UIDVALIDITY` its `SELECT` answers with the one the store's handles were bound under: the stored checkpoint's, else, while no round has closed, the open round's. On a mismatch it SHALL fail the enumeration and name a rekey (pimdir SYNC §4, §8), whatever it was asked for (a delta, a head, a round's first page or a resumed page), never answering a round of the new UIDs: a sync reads such a round as every member gone and every new one arrived, merges flags onto whatever an old UID now names, and tombstones every message on another endpoint.
@@ -538,7 +368,7 @@ For **calendars** (`msgraph-calendar`): the user's calendars keyed by id and nam
 
 For **mail**: folders listed two levels deep (`Parent/Child` naming), enumeration through the messages delta query carrying the `@odata.deltaLink` as the engine's opaque checkpoint (HTTP 410 = expired link, restarting a fresh full round; any other failure surfaces), the `Meta` tier read by one summary get a message (`mid:`/`alt:` link ids, meta v1), the `Full` tier from the raw MIME content streamed into the blob store. Flags map to the IANA wire spellings (`isRead` = `\Seen`, a flagged follow-up = `\Flagged`, `isDraft` = `\Draft`). Push scope is honest: flag changes push through `message_update`, deletes through `message_delete`, moves and copies as the requirement "Graph mail moves, copies and adds drafts" says; an append lands in Drafts only, and content updates are rejected and documented.
 
-Auth SHALL be a bearer access token only, resolved through the standard secret-command idiom (`auth.token.raw` / `auth.token.command`) once per run with every other credential; neverest SHALL NOT run any OAuth flow itself (no device sign-in, no client credentials, no token persistence): acquiring and refreshing the token is delegated to an external command, typically ortie. The token SHALL carry the scopes the declared domains need, and the wizard SHALL name them per domain rather than let the first run fail on a bare 403. No token is ever logged.
+Auth SHALL be a bearer access token only, resolved through the standard secret-command idiom (`auth.token.raw` / `auth.token.command`) once per run with every other credential; neverest SHALL NOT run any OAuth flow itself (no device sign-in, no client credentials, no token persistence): acquiring and refreshing the token is delegated to an external command, typically ortie. The token SHALL carry the scopes the declared domains need, which config.sample.toml names per domain so the first run does not fail on a bare 403. No token is ever logged.
 
 ### Requirement: A Graph contacts source syncs the address book
 A source MAY declare an `msgraph-contacts` backend, whose items are `text/vcard` cards and whose collections are the user's contact folders, listed two levels deep, keyed by folder id and named by display name. The default Contacts folder, which the folders endpoint does not list, SHALL be the collection `contacts`, addressed by omitting the folder segment.
@@ -593,7 +423,7 @@ An SMTP channel that does not open SHALL be reported: a server that cannot be re
 ### Requirement: A quota refusal keeps the send queued
 An SMTP rejection SHALL be classified by its reply code and its reply text. A 5xx refusing for a sending rate or quota SHALL be transient: the row SHALL stay pending, reported under `submitted` with its error and `parked: false`, and the run's remaining sends SHALL stay pending, unattempted, each reported as not attempted. Such a refusal is a 5xx whose text opens with an enhanced status code (RFC 3463) meaning nothing else, `5.4.5` (congestion, which RFC 3463 calls a persistent transient error), `5.1.90`, `5.7.232`, `5.7.233` or `5.7.236` (codes outside the registry naming a daily sending limit), or one whose text says so under a code of other meanings, matched without case: `SubmissionQuotaExceeded`, `submission quota`, `sending limit exceeded`, `rate limited`, `daily limit for message recipients`. Any other 5xx SHALL stay permanent, a sender blocked until a person releases it (`5.1.8`, `5.7.501` to `5.7.503`, `5.7.70x`) and a sender's own full mailbox (`5.2.2` with `QuotaExceededException`) among them.
 
-A provider refusing a send for its daily limit has not refused the message: the next day's run sends it, and parking it would leave it to a person for nothing. The set stays narrow because a misread refusal holds the whole queue, each run reporting it (exit 3) until a person acts.
+A provider refusing a send for its daily limit has not refused the message: the next day's run sends it, and parking it would leave it to a person for nothing. The set stays narrow because a misread refusal holds the whole queue, each run reporting it (exit 4) until a person acts.
 
 #### Scenario: A daily limit holds the send
 - **GIVEN** two queued `submit` intents and an SMTP server answering the first one's data with `550 5.4.5 Daily user sending limit exceeded`
@@ -736,7 +566,7 @@ A calendar's stamps SHALL NOT collide. `DTSTAMP`, `LAST-MODIFIED`, `CREATED` and
 - THEN the conflict stays parked and the run reports it
 
 ### Requirement: A conflicted run succeeds, with its own exit code
-A run that reconciled its collections and left work behind SHALL exit with a code distinct from both success and failure, and SHALL report the outstanding conflict count read from the store rather than the count the run itself marked.
+A run that reconciled its collections and left work behind SHALL exit with a code distinct from both success and failure, 3 (the first partial-outcome status of the Pimalaya exit contract, pimalaya-cli's `EXIT_PARTIAL`), and SHALL report the outstanding conflict count read from the store rather than the count the run itself marked.
 
 These states are that code, and they are one class: a divergence waiting for a decision, a duplicate `UID` a side refuses, a write a side would not take, a send or an intent this run parked (refused for good, or unconfirmed), a queued action the store holds parked, a listing that parked a mass absence, and a change withheld over a body the store cannot serve. Each leaves something a person has to settle, and a rerun on its own changes none of them. Conflicts, refusals and parked queue actions are re-reported on every run until a person acts; a parked send or intent is reported by the run that parked it; a parked absence and a withheld change are reported by every run meeting them.
 
@@ -760,7 +590,7 @@ The two conflict counts differ and the difference matters: the engine emits noth
 - THEN the send is parked and the run exits with the conflict code
 
 ### Requirement: An incomplete run has its own exit code
-A run that could not do all its work SHALL exit with a code of its own, distinct from success, failure and the conflict code: a source it could not scan, an endpoint or a send channel it could not open, a hunk it could not apply, a push its server answered nothing for, a send or an intent that failed without parking, a source that gave up throttled, a round left open on a collection it synced (but one its listing parked over a mass absence), or convergence passes that ended still moving. It SHALL win over the conflict code, the report still counting what waits for a person.
+A run that could not do all its work SHALL exit with a code of its own, distinct from success, failure and the conflict code, 4: a source it could not scan, an endpoint or a send channel it could not open, a hunk it could not apply, a push its server answered nothing for, a send or an intent that failed without parking, a source that gave up throttled, a round left open on a collection it synced (but one its listing parked over a mass absence), or convergence passes that ended still moving. It SHALL win over the conflict code, the report still counting what waits for a person.
 
 An unreachable server is the common case. The run stops nothing else over it, so it is no failure, yet a run with nothing to do and a run that could not reach its server both exited 0, and a caller told offline from idle by parsing error strings. A rerun clears this state on its own, which is what sets it apart from the conflict code: that one waits for a person, this one for the network.
 
@@ -771,22 +601,32 @@ A send or an intent that parked is not this: it waits for a person, and its row 
 - WHEN it is synced
 - THEN the scan error is reported and the run exits with the incomplete code
 
+### Requirement: A refused command line exits 2
+A command line the grammar refuses (an unknown flag or subcommand, a missing or malformed argument) SHALL exit 2, clap's own status, through pimalaya-cli's `clap::parse`. With a `--json` word before any `--`, it SHALL print on stdout the failure object coded `usage-invalid`, its `error` clap's message without the `error: ` prefix and without styles, `sources` empty and `backtrace` null; without it, clap's rendering SHALL go to stderr. Help and version SHALL print and exit 0 as clap does.
+
+1 stays a failure and the partial outcomes start at 3, so a script tells a mistyped invocation from a run that failed or did part of its work. The JSON schema of `neverest-error` SHALL admit `usage-invalid` beside neverest's own codes.
+
+#### Scenario: An unknown flag under JSON
+- GIVEN `neverest --json sync --no-such-flag`
+- WHEN it runs
+- THEN it prints one failure object coded `usage-invalid`, its `error` naming `--no-such-flag`, on stdout and exits 2
+
 ### Requirement: An unreached endpoint is named in the report
-A run SHALL list in its report, under `unreached`, every endpoint whose connections it could not open, with the error: a server it could not reach, or one refusing the connection or its credentials. The failure SHALL still read as a failed `*` scan in the collection patch and make the run incomplete (exit 3). A collection that failed to read on an endpoint that opened SHALL NOT be listed: that is a server answering, not an endpoint unreached.
+A run SHALL list in its report, under `unreached`, every endpoint whose connections it could not open, with the error: a server it could not reach, or one refusing the connection or its credentials. The failure SHALL still read as a failed `*` scan in the collection patch and make the run incomplete (exit 4). A collection that failed to read on an endpoint that opened SHALL NOT be listed: that is a server answering, not an endpoint unreached.
 
 A source's SMTP channel SHALL be listed as `<source>.smtp` when its server could not be reached, with no `*` scan, a send channel holding no collection; it SHALL still make the run incomplete. Credentials it refused SHALL NOT list it: the sends report the refusal.
 
-An exit 3 says the run did not do everything, and the patch says which collection failed; neither said whether the server was reached, so a caller told "offline" from "one folder unreadable" by matching the scan of `*`. Reported by MOA, whose "provider unreachable" read the first scan error of an exit-3 report.
+An exit 4 says the run did not do everything, and the patch says which collection failed; neither said whether the server was reached, so a caller told "offline" from "one folder unreadable" by matching the scan of `*`. Reported by MOA, whose "provider unreachable" read the first scan error of an exit-4 report.
 
 #### Scenario: A closed port
 - **GIVEN** an account whose CalDAV source points at a port nothing listens on
 - **WHEN** it is synced
-- **THEN** the run exits 3 and `unreached` names `caldav` with an error beginning `Open connection`
+- **THEN** the run exits 4 and `unreached` names `caldav` with an error beginning `Open connection`
 
 #### Scenario: A closed submission port
 - **GIVEN** an IMAP account whose `smtp` table points at a port nothing listens on, and a queued `submit`
 - **WHEN** it runs `sync --intents-only`
-- **THEN** the run exits 3, `unreached` names `imap.smtp`, and the row reads pending with no attempt
+- **THEN** the run exits 4, `unreached` names `imap.smtp`, and the row reads pending with no attempt
 
 ### Requirement: A Graph mail is dated by its `Date`
 The Graph mail source SHALL fill a message's summary `date` from `sentDateTime`, Graph's reading of the `Date` header, which pimdir's mail `date` column and sort key hold (STORAGE Annex A.1). A message without one SHALL have no date, never its `receivedDateTime`.
@@ -805,12 +645,12 @@ An IMAP delete SHALL mark the UID `\Deleted` and expunge it by `UID EXPUNGE` on 
 - **THEN** the deleted one is gone from the server and the one the other client marked is still there
 
 ### Requirement: A throttled provider is waited out, then named
-A request Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV or CardDAV answers with 429, or with 502, 503 or 504 for a request that creates nothing, or Google with a 403 rate limit, SHALL be sent again after the wait the provider states, else after a bounded exponential back-off with jitter. Google's refusals SHALL be read by their reasons and wording: a burst (a concurrency 429, a per-second rate, a 502, 503 or 504) SHALL wait one to two seconds; a per-minute quota, whose answer names the minute (`Units per minute per user`) whatever its reason, two, three, four then five seconds, then the next minute; a daily quota SHALL give the source up until the next midnight in America/Los_Angeles. Past the bound, or on a single wait longer than `sync --max-wait <SECONDS>` (120 by default), the source SHALL give up: no connection opened from it sends anything until the wait is over, what the run already wrote stays, the report lists the source under `throttled` with `until` (RFC 3339 UTC), and the run is incomplete (exit 3). Graph's body batches and Gmail's batch pauses SHALL wait no longer than that bound.
+A request Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV or CardDAV answers with 429, or with 502, 503 or 504 for a request that creates nothing, or Google with a 403 rate limit, SHALL be sent again after the wait the provider states, else after a bounded exponential back-off with jitter. Google's refusals SHALL be read by their reasons and wording: a burst (a concurrency 429, a per-second rate, a 502, 503 or 504) SHALL wait one to two seconds; a per-minute quota, whose answer names the minute (`Units per minute per user`) whatever its reason, two, three, four then five seconds, then the next minute; a daily quota SHALL give the source up until the next midnight in America/Los_Angeles. Past the bound, or on a single wait longer than `sync --max-wait <SECONDS>` (120 by default), the source SHALL give up: no connection opened from it sends anything until the wait is over, what the run already wrote stays, the report lists the source under `throttled` with `until` (RFC 3339 UTC), and the run is incomplete (exit 4). Graph's body batches and Gmail's batch pauses SHALL wait no longer than that bound.
 
 #### Scenario: A server answering 503
 - **GIVEN** an account whose CalDAV source answers every request 503
 - **WHEN** it is synced
-- **THEN** the run exits 3 and `throttled` names `caldav` with an `until`
+- **THEN** the run exits 4 and `throttled` names `caldav` with an `until`
 
 #### Scenario: A gateway error on a listing
 - **GIVEN** a Google People connections listing answered `502` "Error 502 (Server Error)!!1"
@@ -1050,7 +890,7 @@ Under `one-way` nothing parks: the source decides by declaration. A dry run stag
 #### Scenario: Two endpoints holding one identity under two bodies
 - GIVEN the same identity under two different bodies on two endpoints, before the store has read either
 - WHEN the account is synced
-- THEN the divergence is parked and counted, the run exits 2, and each endpoint still holds its own body
+- THEN the divergence is parked and counted, the run exits 3, and each endpoint still holds its own body
 
 #### Scenario: A parked divergence settles either way round
 - GIVEN a parked divergence between two endpoints that never agreed
@@ -1205,9 +1045,7 @@ An absent optional key SHALL stay absent rather than expanding an empty path, wh
 ### Requirement: A data command describes what it prints
 A command returning data SHALL hand the printer one named `*Output` type deriving `Display` for the terminal, `Serialize` for `--json` and `JsonSchema` for the registry, and SHALL print it once. It SHALL NOT report data as a message: a message serialises as one prose string, so `--json` over one yields nothing a consumer can read, and several messages in one run yield several documents where a consumer expects one value.
 
-`configure` returns data: the account it generated, under the name it derived, claiming no default (`default` stays in the shape every pimalaya wizard prints, always `false`). Its `Display` is the TOML document alone, which is what makes a redirected stdout a usable configuration file.
-
-Every such output type SHALL be registered in the schema registry under its invocation path, the command path joined with hyphens and prefixed `neverest-`, as printed (the serialize contract, so a key always printed is required, `null` or not), and `neverest json-schema` SHALL print one schema to the standard output or write one file per command into a directory. A test SHALL run pimalaya-cli's registry check over the command tree: every runnable command described, bare `neverest` aside (it shows the help or runs the wizard `configure` describes), and every key naming a command, `neverest-error` aside, so a renamed subcommand cannot leave a schema nobody can ask for.
+Every such output type SHALL be registered in the schema registry under its invocation path, the command path joined with hyphens and prefixed `neverest-`, as printed (the serialize contract, so a key always printed is required, `null` or not), and `neverest json-schema` SHALL print one schema to the standard output or write one file per command into a directory. A test SHALL run pimalaya-cli's registry check over the command tree: every runnable command described, bare `neverest` aside (it shows the help), and every key naming a command, `neverest-error` aside, so a renamed subcommand cannot leave a schema nobody can ask for.
 
 #### Scenario: A notifier reads the sync payload from its schema
 - GIVEN a build of neverest
@@ -1243,14 +1081,14 @@ Text mode SHALL print no event, the spinner on stderr being their text form; und
 - THEN the last line is the result, listing each account's report, without an `event` key, and every line before it carries one
 
 ### Requirement: A check opens the send channel too
-`neverest check` SHALL open the SMTP channel an endpoint declares, upgrade it and authenticate, then quit without sending. Each endpoint's row SHALL carry the channel's own check row as `smtp`, `{backend: "smtp", ok, code, error}`, `null` when the endpoint declares no channel, when its credentials did not resolve, or in a build without SMTP. A channel that does not open SHALL fail its row and make the check exit 2, the other endpoints still checked.
+`neverest check` SHALL open the SMTP channel an endpoint declares, upgrade it and authenticate, then quit without sending. Each endpoint's row SHALL carry the channel's own check row as `smtp`, `{backend: "smtp", ok, code, error}`, `null` when the endpoint declares no channel, when its credentials did not resolve, or in a build without SMTP. A channel that does not open SHALL fail its row and make the check exit 3, the other endpoints still checked.
 
 A send channel holds its own server and often its own credential. Checking the sources alone left a wrong SMTP password to surface at the first send, a queued submission parked for a reason the check had said nothing about.
 
 #### Scenario: A wrong submission server fails the check
 - GIVEN an account whose IMAP source answers and whose SMTP channel does not
 - WHEN `neverest check --json` runs
-- THEN the source's row is `ok: true` with its collections, its `smtp` row `ok: false` naming why, and the check exits 2
+- THEN the source's row is `ok: true` with its collections, its `smtp` row `ok: false` naming why, and the check exits 3
 
 ### Requirement: A check lists collections with their roles
 `neverest check` SHALL list, for each endpoint, every collection it answered with: its id, its name and its role among `inbox`, `sent`, `drafts`, `trash`, `junk`, `all`, `archive`, `flagged` and `important`, `null` when the server states none. A role SHALL come from the server alone, never from a collection's name: on IMAP the SPECIAL-USE attributes of the `LIST` rows (RFC 6154) and `INBOX` (RFC 3501 §5.1); on Graph mail the well-known folders, one lookup per role, a well-known folder the mailbox does not have being skipped; on the Gmail API the system labels. Other backends state no role. The check SHALL write nothing to the store. It is a doctor: what it prints is for a person, and a program reads roles from the store a sync fills.
@@ -1286,14 +1124,14 @@ A caller choosing one calendar and one address book for an account takes the mar
 - **THEN** `events` is listed with `takesTasks: false`, and the source's capabilities hold `calendar.component.vtodo` `none` naming the target
 
 ### Requirement: A check reports every endpoint
-`neverest check` SHALL check every endpoint of every account it runs over whatever the others answer, and SHALL print, under each account, one row per endpoint, sorted by name: `source`, `backend` (its protocol table), `ok`, `code` and `error` (`null` when it answered), then `collections` (empty when it did not answer), `capabilities` and `smtp`. A credential that does not resolve SHALL fail its endpoint's row alone. When an endpoint or its send channel did not answer, the command SHALL print the report and exit 2, never the failure object.
+`neverest check` SHALL check every endpoint of every account it runs over whatever the others answer, and SHALL print, under each account, one row per endpoint, sorted by name: `source`, `backend` (its protocol table), `ok`, `code` and `error` (`null` when it answered), then `collections` (empty when it did not answer), `capabilities` and `smtp`. A credential that does not resolve SHALL fail its endpoint's row alone. When an endpoint or its send channel did not answer, the command SHALL print the report and exit 3, never the failure object.
 
 A frontend adding an account shows what works and what does not in one run, rather than one failure per attempt.
 
 #### Scenario: Two endpoints that do not answer
 - GIVEN an account whose source and target both point at a closed port
 - WHEN `neverest check --json` runs
-- THEN it prints both rows under the account, each with `ok: false`, its `error` and no collection, and exits 2
+- THEN it prints both rows under the account, each with `ok: false`, its `error` and no collection, and exits 3
 
 ### Requirement: JSON keys are camelCase
 Every output type neverest prints SHALL serialize its keys as camelCase, matching the wire formats the endpoints speak (JMAP per RFC 8620, Microsoft Graph, the Google APIs) and keeping every key reachable by dot access in jq and JavaScript, which is how the README's notifier reads a report.
@@ -1350,7 +1188,7 @@ The hunk the refused write was derived from SHALL be taken back whatever its kin
 #### Scenario: A read-only collection refuses every append
 - GIVEN a target collection the server serves read-only
 - WHEN a run tries to copy items into it
-- THEN each refusal names its item plainly, the item patch is empty, and the run exits 2
+- THEN each refusal names its item plainly, the item patch is empty, and the run exits 3
 
 ### Requirement: The summary is the format's typed row
 The summary written for an item SHALL be io-pimdir's `PimdirSummary`, the row of the kind's summary table with the addresses it names (pimdir STORAGE Annex A): `mail_summary` for `message/rfc822`, `contact_summary` for `text/vcard`, `event_summary`, `task_summary` or `journal_summary` for `text/calendar`, plus `item_address`. A reader renders a list from those rows and never parses a blob. Flags are not in the summary. Both the envelope (`Meta`) and the streamed (`Full`) paths of mail SHALL emit the same row, the streamed path carrying the message's known octet length as `size` rather than the header prefix it read.
@@ -1547,7 +1385,7 @@ A sent copy neverest files (pimdir STORAGE Annex B.2) is in the store when the r
 - **THEN** the message leaves through the SMTP channel, the run exits 0, and the report names nothing unreached and no collection
 
 ### Requirement: A send that may have been delivered is never sent again
-A `submit` that fails after the whole message was handed over and before a verdict came back SHALL be unconfirmed: over SMTP once the data's final `.` was written and flushed and no reply read; over Graph `sendMail` once the request was written whole and flushed and no answer read whole (none, one cut short, one that does not parse), or when 500, 502, 503 or 504 answered. A `sendMail` SHALL never be sent again on a dead connection; only a 429, which Graph answers before acting, SHALL send it again. An unconfirmed `submit` SHALL be parked as an intent whose outcome is unknown (pimdir STORAGE §13, §15.2, io-pimdir `unconfirm_action`), its error beginning with the reserved prefix `unconfirmed: `, which the store writes, so its producer reads it unconfirmed rather than refused; it SHALL be reported in `submitted` with `unconfirmed: true` and an `error` beginning `unconfirmed: `, SHALL make the run that parked it exit 2, and SHALL never be sent again by any run.
+A `submit` that fails after the whole message was handed over and before a verdict came back SHALL be unconfirmed: over SMTP once the data's final `.` was written and flushed and no reply read; over Graph `sendMail` once the request was written whole and flushed and no answer read whole (none, one cut short, one that does not parse), or when 500, 502, 503 or 504 answered. A `sendMail` SHALL never be sent again on a dead connection; only a 429, which Graph answers before acting, SHALL send it again. An unconfirmed `submit` SHALL be parked as an intent whose outcome is unknown (pimdir STORAGE §13, §15.2, io-pimdir `unconfirm_action`), its error beginning with the reserved prefix `unconfirmed: `, which the store writes, so its producer reads it unconfirmed rather than refused; it SHALL be reported in `submitted` with `unconfirmed: true` and an `error` beginning `unconfirmed: `, SHALL make the run that parked it exit 3, and SHALL never be sent again by any run.
 
 Before the first byte of a message leaves, the run SHALL count the attempt in the store and SHALL write the intent's id to `submitting` under the store's local/, durably, clearing it once the outcome is recorded; a run finding the mark with that intent still pending SHALL park it as unconfirmed before sending anything, whichever account it belongs to. A store created SHALL start with no mark; a reset of one account SHALL leave it, the mark naming a row of the store.
 
@@ -1556,7 +1394,7 @@ A run that cannot record an outcome SHALL keep the mark and send nothing more.
 #### Scenario: A server hanging up after the data
 - **GIVEN** a queued `submit` and an SMTP server that reads the data and closes the connection unanswered
 - **WHEN** the account syncs
-- **THEN** the run exits 2, the row is parked unconfirmed, its error beginning `unconfirmed: `, and the next run sends nothing
+- **THEN** the run exits 3, the row is parked unconfirmed, its error beginning `unconfirmed: `, and the next run sends nothing
 
 #### Scenario: A run killed while the server holds its verdict
 - **GIVEN** a run handing over a queued `submit`
@@ -1918,14 +1756,14 @@ A flag change SHALL reach a server as the flags it adds and the flags it removes
 - **THEN** the message holds `\Seen` and `\Answered` on the server
 
 ### Requirement: A listing missing most of a collection waits for a person
-A round of a sync whose listing leaves out more than half of at least 20 bound items in its scope, or names no member, none of its pages nor heads listing one, while any bound item is absent, and the rebuild of a renumbered collection whose listing leaves out more than half of at least 20 bound items or names none, SHALL drop nothing (pimdir SYNC §5, §8): such a listing reads as a truncated or emptied answer, an emptied collection and a failing server answering alike. The run SHALL report each under `absences`, with the side, the collection, the items left out and the items counted, and whether it was a rebuild, and SHALL exit 2: a rerun alone meets the same listing and parks again. The round a park leaves open SHALL NOT make the run incomplete. A parked rebuild SHALL keep the collection's handles and checkpoint, and the collection SHALL NOT be listed again that run.
+A round of a sync whose listing leaves out more than half of at least 20 bound items in its scope, or names no member, none of its pages nor heads listing one, while any bound item is absent, and the rebuild of a renumbered collection whose listing leaves out more than half of at least 20 bound items or names none, SHALL drop nothing (pimdir SYNC §5, §8): such a listing reads as a truncated or emptied answer, an emptied collection and a failing server answering alike. The run SHALL report each under `absences`, with the side, the collection, the items left out and the items counted, and whether it was a rebuild, and SHALL exit 3: a rerun alone meets the same listing and parks again. The round a park leaves open SHALL NOT make the run incomplete. A parked rebuild SHALL keep the collection's handles and checkpoint, and the collection SHALL NOT be listed again that run.
 
 `sync --accept-absences` SHALL confirm the absences for that run only, never stored: its rounds and rebuilds drop what they find absent.
 
 #### Scenario: A mailbox listed nearly empty
 - **GIVEN** an inbox bound to 25 messages, whose server lists one
 - **WHEN** the account is synced
-- **THEN** nothing is dropped, `absences` names 24 of 25, and the run exits 2
+- **THEN** nothing is dropped, `absences` names 24 of 25, and the run exits 3
 
 #### Scenario: The absences confirmed
 - **GIVEN** the same inbox
@@ -1935,13 +1773,13 @@ A round of a sync whose listing leaves out more than half of at least 20 bound i
 #### Scenario: An address book listed empty
 - **GIVEN** an address book bound to one card, whose server lists none
 - **WHEN** the account is synced
-- **THEN** the card stays, `absences` names 1 of 1, and the run exits 2; synced with `--accept-absences`, the card is dropped
+- **THEN** the card stays, `absences` names 1 of 1, and the run exits 3; synced with `--accept-absences`, the card is dropped
 
 ### Requirement: An edit names the body it was made over
 A conflict resolution, a merge and a one-way overwrite SHALL state the body they were made over (the queued `update`'s `if_match`, the `Edit` mutation's, pimdir STORAGE §15.3, SYNC §7): an edit another write replaced since SHALL park rather than drop that write unmerged. A body staged with its action SHALL be staged in one step with it, so a refused action leaves no body in the tree.
 
 ### Requirement: A change over an unreadable body is withheld and reported
-A change whose body is missing from the store or does not hash to its name SHALL be withheld, the placement staying as it was (pimdir STORAGE §7, SYNC §5), and the run SHALL report it under `unreadable` with the side, the collection and the count, and SHALL exit 2: the store needs a repair a rerun does not make.
+A change whose body is missing from the store or does not hash to its name SHALL be withheld, the placement staying as it was (pimdir STORAGE §7, SYNC §5), and the run SHALL report it under `unreadable` with the side, the collection and the count, and SHALL exit 3: the store needs a repair a rerun does not make.
 
 ### Requirement: A body a policy overruled is kept and reported
 A body a policy did not adopt, kept by the store as a retained item (pimdir SYNC §9), SHALL be reported under `overruled` with the collection and the retained item's key, and either the side and the item's handle on it, for a body a side's write or a mutation settled, or the queue row (`action`), for one the drain kept aside applying a queued action, in a sync and in `drain`. It SHALL be a warning and SHALL NOT change the exit code: the policy decided as configured.
@@ -1984,7 +1822,7 @@ A store another user can read or write is refused by every profile as `store-exp
 A stated identity the store filed with a leading `esc:` (pimdir STORAGE §9), because it begins like a derived key, SHALL be named to a server without it, alone or inside a minted key; a derived key SHALL name none.
 
 ### Requirement: A push no server answered is pushed again
-A push the connector gave no outcome for SHALL stay pending (pimdir SYNC §5), and the run SHALL report the count the last pass of each collection left under `unanswered`, with the side and the collection, and SHALL exit 3: the next run pushes them again.
+A push the connector gave no outcome for SHALL stay pending (pimdir SYNC §5), and the run SHALL report the count the last pass of each collection left under `unanswered`, with the side and the collection, and SHALL exit 4: the next run pushes them again.
 
 ### Requirement: A rejected create is reported once
 A create the engine reports its server rejected (`rejected_creates`) SHALL be reported under `rejected`: with the reason the connector recorded, or under `refused` for a duplicate `UID`, else as a `create` whose server gave no reason. It SHALL be reported once whichever records it.
@@ -1997,7 +1835,7 @@ A build with the `search` feature (on by default) SHALL refresh the store's sear
 
 The run SHALL report the refresh under `index`: the changes folded, the bodies newly indexed, the stamps still `behind`, whether another indexer held it (`busy`), and the error of a failed one. An index failure SHALL be a warning and SHALL NOT fail the run or change its exit code: the index is derived from the store.
 
-`neverest index` SHALL build the index of each store the accounts it runs over use, once a store and whole, every account of the store included, until it holds every change the store has, reading no credential and opening no endpoint, and SHALL exit 3 answering `busy` while another indexer holds one.
+`neverest index` SHALL build the index of each store the accounts it runs over use, once a store and whole, every account of the store included, until it holds every change the store has, reading no credential and opening no endpoint, and SHALL exit 4 answering `busy` while another indexer holds one.
 
 A reset SHALL leave the index to its next refresh, which folds the removal of every item the dropped collections held, the store counting each (pimdir STORAGE §4.5).
 
@@ -2041,14 +1879,14 @@ neverest.json, under the store's local/, SHALL record the collection-id layout o
 ### Requirement: `-a` filters the accounts a command runs over
 `-a/--account` SHALL be repeatable and SHALL filter the configured accounts. Without it, `sync`, `check`, `drain` and `init` SHALL run over every configured account, store by store and in name order within a store, one after the other inside one run holding each store's lock once; with it, over the named ones. The configuration is merged into a sorted table before neverest reads it, so name order is the only order it can keep. A name the configuration does not declare SHALL fail the command before anything runs, naming the configured accounts, and so SHALL an account whose configuration does not validate, the configuration being one document.
 
-Each account's failure SHALL be its own: the run SHALL go on with the next account and SHALL end with one result listing every account's outcome, a failed one carrying its error and its `code`. The command SHALL exit 0 when every account succeeded, otherwise with the partial-outcome code its own outcomes give (2 for a sync that left work waiting for a person), a failed or a busy account making it 3, the code of a run that could not do all its work. A failure common to the run (no configuration, a store refused as a whole) SHALL fail the command with the failure object, exit 1.
+Each account's failure SHALL be its own: the run SHALL go on with the next account and SHALL end with one result listing every account's outcome, a failed one carrying its error and its `code`. The command SHALL exit 0 when every account succeeded, otherwise with the partial-outcome code its own outcomes give (3 for a sync that left work waiting for a person), a failed or a busy account making it 4, the code of a run that could not do all its work. A failure common to the run (no configuration, a store refused as a whole) SHALL fail the command with the failure object, exit 1.
 
 `index` is store-wide: it SHALL build the stores of the accounts the filter keeps, each once and whole, every account of a store included. `conflict show`, `conflict resolve` and `sync --reset` address one item or start one account over, so they SHALL need exactly one account: a filter leaving none or several SHALL fail, naming the accounts. `conflict list` SHALL list the conflicts of every account it runs over, each row naming its account. `configure` SHALL take no account.
 
 #### Scenario: Two accounts, one of them failing
 - **GIVEN** two accounts, the first initialized and the second not
 - **WHEN** `neverest sync --json` runs
-- **THEN** the first is synced, the result lists both, the second with its error naming `neverest init -a <account>`, and the run exits 3
+- **THEN** the first is synced, the result lists both, the second with its error naming `neverest init -a <account>`, and the run exits 4
 
 #### Scenario: An unknown account
 - **GIVEN** a configuration declaring `work` and `home`

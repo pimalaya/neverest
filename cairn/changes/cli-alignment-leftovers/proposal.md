@@ -16,7 +16,7 @@ The cross-repo alignment audit of 2026-10-18 (CLI_ALIGNMENT_PLAN.md, which kept 
 - **H3**: src/config.rs:982-992 hand-rolls `shell_expanded_path_opt`, and its own TODO waits for the shared twin. pimalaya-config 0.2.1 ships it as `opt_shell_expanded_path`; Cargo.lock is still on 0.2.0.
 - **A2**: the `[patch.crates-io]` git pins wait for releases.
 
-pimalaya-cli will take over a local copy once its wizard-save-layer change lands: `ExistingConfig`, `append_or_print` and `print_saved` (src/cli/configure.rs:100, :253, :279). Its shared-account-resolution change is the natural home for the F2 wording, so F2 may land as adopting it rather than as five local fixes.
+The local copy of pimalaya-cli's save layer went with the wizard on 2026-11-13 (wizard-removed). Its shared-account-resolution change is the natural home for the F2 wording, so F2 may land as adopting it rather than as five local fixes.
 
 ## What
 

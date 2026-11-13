@@ -168,17 +168,6 @@ pub struct SourceAccount {
 }
 
 impl SourceAccount {
-    /// Resolves one endpoint on its own, for the wizard's sign-in tests.
-    #[cfg(feature = "wizard")]
-    pub fn resolve(name: &str, config: &SourceConfig) -> Result<Self> {
-        Self::resolve_with(
-            name,
-            config,
-            &mut SecretResolver::new(),
-            crate::throttle::MAX_WAIT,
-        )
-    }
-
     /// Resolves one endpoint, so endpoints naming one command spawn it once,
     /// its throttle waiting at most `max_wait` at once.
     fn resolve_with(
@@ -452,9 +441,8 @@ pub struct SmtpAccount {
 
 #[cfg(feature = "smtp")]
 impl SmtpAccount {
-    /// Resolves a send channel on its own, for the wizard's check and
-    /// the submission tests.
-    #[cfg(any(test, feature = "wizard"))]
+    /// Resolves a send channel on its own, for the submission tests.
+    #[cfg(test)]
     pub fn resolve(config: &SmtpConfig) -> Result<Self> {
         Self::resolve_with(config, &mut SecretResolver::new())
     }

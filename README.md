@@ -35,14 +35,10 @@
 - **Search index**: the store's full-text index <sup>[specs](https://github.com/pimalaya/pimdir)</sup>, kept current at every sync for the frontends to query
 - **Auth** support: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256 for IMAP; basic and bearer for CardDAV and CalDAV; bearer for Microsoft Graph, Google People and Google Calendar
 - **TLS** support: [Rustls](https://crates.io/crates/rustls) with ring or aws crypto (`rustls-aws` feature), [Native TLS](https://crates.io/crates/native-tls) (`native-tls` feature)
-- **Discovery** support: known provider rules, PACC, Thunderbird Autoconfiguration, SRV <sup>[rfc6186](https://datatracker.ietf.org/doc/html/rfc6186)</sup> and DAV <sup>[rfc6764](https://datatracker.ietf.org/doc/html/rfc6764)</sup>, all run in parallel
-- **Interactive wizard** turning an email address into one tested account covering mail, sending, contacts and calendar
 - **TOML configuration** with multi-account support, and **JSON** output via `--json`, described by `neverest json-schema`
 
 > [!TIP]
 > Neverest is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support: CardDAV and CalDAV need `dav`, Microsoft Graph mail, contacts and calendars need `msgraph`, Google contacts `gpeople`, Google calendars `gcal` and Gmail `gmail`. The default feature set is declared in [Cargo.toml](./Cargo.toml). JMAP sources configure but have no backend yet.
->
-> The default `wizard` feature brings the interactive `configure`; leave it out of a scripted or embedded build that never prompts.
 >
 > The default `vendored` feature builds SQLite from source; leave it out (`--no-default-features --features …`) to link the system one.
 >
@@ -117,13 +113,7 @@ A configuration is loaded from the first valid path among:
 
 Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths can be passed at once, separated by `:`. The first one is the base and the rest are deep-merged on top. The full field reference lives in [config.sample.toml](./config.sample.toml).
 
-Run `neverest` with no configuration file on disk and a wizard discovers your servers from an email address, then offers to write the result. It sets up **one account with one source per domain** it found, mail (IMAP, the Gmail API or Microsoft Graph), contacts (CardDAV, the People API or Graph) and calendar (CalDAV, the Calendar API or Graph), plus an SMTP channel for sending, the offline replica most setups want; a mirror, a fan-in and anything else are written by hand against [config.sample.toml](./config.sample.toml).
-
-Each domain gets the best option found without a question, and a review shows the picks in plain words, each one a change away (another option, a server URL, or leaving the domain out). Each identity then signs in once: one password for the servers of one name (imap.example.org, smtp.example.org and dav.example.org share one), typed once, tested at once, then stored in a keyring you pick under `neverest-<account>-<source>`, or one browser sign-in through [Ortie](https://github.com/pimalaya/ortie) per authorization server. Last, each source lists its collections to pick from, mail starting without junk and trash. Finding nothing asks for a server URL (`imaps://`, `https://`, `carddavs://`, `caldavs://`).
-
-`neverest configure` runs the same flow to add another account. It generates and never edits: the account it produces is appended to the file already there as plain text, so your comments and formatting survive, and changing an account is a job for your editor.
-
-Declining the prompt prints the account on stdout, and `--json` or a redirected stdout skips the prompts entirely, so `neverest configure > config.toml` writes the file itself.
+Neverest writes no configuration for you: copy [config.sample.toml](./config.sample.toml) to one of the paths above and uncomment what you need. A command finding no configuration file fails naming the path it looked for, and a bare `neverest` prints the help.
 
 Every account shares **one pimdir store**, at `neverest/` under your state directory (`` on Linux, `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows) unless it names its own `store.root`. Each account is fed by one or more named **sources**, each a remote, and it may hold several kinds at once; its collections are grouped under its name, so a frontend reads one account of the store through its own account key (`pimdir.account` in himalaya, calendula and cardamum). What an account does is its arity plus two flags: with no `targets` every source syncs into the local store, the offline replica; with them the source is copied to each target.
 
@@ -146,7 +136,7 @@ neverest conflict list
 neverest conflict resolve <id> -a <account> --interactive
 ```
 
-Every command runs over every account, one after the other, unless `-a` names some (it is repeatable). Each account's outcome is its own: one that fails is reported, the next one still runs, and the command exits 3. The store is locked for the whole run, so two accounts of one store never sync at once; give an account that needs its own schedule its own `store.root`. `conflict show`, `conflict resolve` and `sync --reset` act on one account, which `-a` names when there are several. `index` builds the store of the accounts it runs over, each store once. `default = true` on an account is ignored, with a warning.
+Every command runs over every account, one after the other, unless `-a` names some (it is repeatable). Each account's outcome is its own: one that fails is reported, the next one still runs, and the command exits 4. The store is locked for the whole run, so two accounts of one store never sync at once; give an account that needs its own schedule its own `store.root`. `conflict show`, `conflict resolve` and `sync --reset` act on one account, which `-a` names when there are several. `index` builds the store of the accounts it runs over, each store once. `default = true` on an account is ignored, with a warning.
 
 An account is initialized once, which opens every source so credential and network errors surface up front, then adds the account to the store, creating the store when there is none. `sync` refuses to run an account without it, and `init` leaves an initialized account as it is. `sync --reset -a <account>` drops that account's collections before a run, rebuilding them as a first sync would, every other account of the store left as it was. It refuses while they hold a queued or parked action, which `drain` applies or its frontend cancels first, and while they hold other work no server has (conflicts, unpushed edits, mail a replica keeps after the server expunged it), listing that work; `--reset --force` drops that other work with the collections. A reset is the whole account's, so it is refused beside `--dry-run`, `-m`, `-x` and `-s`.
 
@@ -156,7 +146,7 @@ neverest also keeps the store's search index (index.db), which the frontends que
 
 ### Conflicts
 
-A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What no merge settles is both sides setting one field two ways: the item parks, everything else keeps syncing, and the run exits 2. A run that could not reach a source, or apply part of its work, exits 3, and the next run picks it up.
+A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What no merge settles is both sides setting one field two ways: the item parks, everything else keeps syncing, and the run exits 3. A run that could not reach a source, or apply part of its work, exits 4, and the next run picks it up. Exit 1 is a failure, which `--json` prints as a failure object, and exit 2 a command line neverest refused, which `--json` prints as a failure object coded `usage-invalid`.
 
 Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries, in each account's report, the two numbers a notifier needs: `conflicts` is what this run marked, `outstandingConflicts` what the store holds waiting for that account. Testing the first notifies on entry, once, with no state of its own to keep:
 
@@ -173,7 +163,7 @@ Deciding is a command and never a run. `conflict list` names what is waiting, `c
 
 A settled body has to be a body of that item, so one no parser reads and one stating another `UID` are both refused. A decision is refused when the remote moved while it was being made, and nothing here holds the store, so a sync stays free to run while a merger is open.
 
-Exit 2 is wider than conflicts: the run reconciled its collections but left something waiting for a person, be it a parked conflict, a duplicate `UID` the other side refuses, a write it would not take, a send the server refused for good, a queued action that could not be applied, a listing that left out most of a collection, or a change withheld over a body the store cannot serve. The report names which. A write that did not land is never counted, so `already in sync` means the run wrote nothing.
+Exit 3 is wider than conflicts: the run reconciled its collections but left something waiting for a person, be it a parked conflict, a duplicate `UID` the other side refuses, a write it would not take, a send the server refused for good, a queued action that could not be applied, a listing that left out most of a collection, or a change withheld over a body the store cannot serve. The report names which. A write that did not land is never counted, so `already in sync` means the run wrote nothing.
 
 A listing that leaves out more than half of at least 20 items a collection held drops nothing: it reads as a server answering short, and the report names it under `absences`. Once the server is known to hold no more, `sync --accept-absences` drops them, for that run only.
 

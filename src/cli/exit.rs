@@ -4,15 +4,17 @@
 
 use std::process::ExitCode;
 
+use pimalaya_cli::error::EXIT_PARTIAL;
+
 use crate::sync::report::{SyncOutput, SyncRunOutput};
 
 /// How a command ended, beyond the success or failure its `Result` carries.
 ///
-/// Two codes beyond success exist: one for a run that reconciled and left
-/// something behind for a person, one for a run that could not do all its
-/// work, a rerun picking it up. Failing instead would stop the other ten
-/// thousand items over one duplicated phone number, and would loop forever
-/// under a supervisor restarting on failure.
+/// Two partial outcomes exist beyond success: 3 for a run that reconciled
+/// and left something behind for a person, 4 for a run that could not do
+/// all its work, a rerun picking it up. Failing instead would stop the
+/// other ten thousand items over one duplicated phone number, and would
+/// loop forever under a supervisor restarting on failure.
 ///
 /// Ordered by how far from success: a run over several accounts ends the
 /// way its furthest one did.
@@ -69,9 +71,10 @@ impl From<Exit> for ExitCode {
         match exit {
             Exit::Success => ExitCode::SUCCESS,
             // NOTE: 1 belongs to a failed command, which exits through
-            // `ErrorReport::eval` before this conversion runs.
-            Exit::Conflicted => ExitCode::from(2),
-            Exit::Incomplete => ExitCode::from(3),
+            // `ErrorReport::eval` before this conversion runs, and 2 to a
+            // refused command line, which never reaches it.
+            Exit::Conflicted => ExitCode::from(EXIT_PARTIAL as u8),
+            Exit::Incomplete => ExitCode::from(EXIT_PARTIAL as u8 + 1),
         }
     }
 }
@@ -106,7 +109,7 @@ mod tests {
 
         report.collection.patch.push(unreachable());
         assert_eq!(Exit::from(&report), Exit::Incomplete);
-        assert_eq!(ExitCode::from(Exit::Incomplete), ExitCode::from(3));
+        assert_eq!(ExitCode::from(Exit::Incomplete), ExitCode::from(4));
 
         report.outstanding_conflicts = 1;
         assert_eq!(Exit::from(&report), Exit::Incomplete);
@@ -180,7 +183,7 @@ mod tests {
             unconfirmed: true,
         });
         assert_eq!(Exit::from(&report), Exit::Conflicted);
-        assert_eq!(ExitCode::from(Exit::Conflicted), ExitCode::from(2));
+        assert_eq!(ExitCode::from(Exit::Conflicted), ExitCode::from(3));
 
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(

@@ -67,7 +67,8 @@ const SYNC_LOCK: &str = "sync.lock";
 /// aliases, so existing scripts keep working.
 ///
 /// Exit code 0 means the run reconciled everything and left nothing waiting,
-/// 1 that it failed, and 2 that it reconciled its collections and left
+/// 1 that it failed, 2 that the command line was refused, and 3 that it
+/// reconciled its collections and left
 /// something waiting: a parked conflict, a duplicate `UID` the other side
 /// refuses, a write it would not take, a send or an intent parked (refused
 /// for good, or possibly delivered and never sent again on its own), a
@@ -75,12 +76,12 @@ const SYNC_LOCK: &str = "sync.lock";
 /// collection (see `--accept-absences`) or a change withheld over a body the
 /// store cannot serve. None is a failure: each is one item
 /// wide and halts nothing, and under a supervisor restarting on failure they
-/// would loop over a state no supervisor can fix. Exit code 3 means the run
+/// would loop over a state no supervisor can fix. Exit code 4 means the run
 /// could not do all its work and a rerun picks it up: a source it could not
 /// reach (offline) or an SMTP channel it could not open, a hunk, a send or an
 /// intent that failed without parking, a collection still moving when the
 /// run stopped, an account that failed, or a store another run held past
-/// the wait. It wins over 2.
+/// the wait. It wins over 3.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
     /// Print the patch that would be applied, without applying it.
@@ -153,7 +154,7 @@ pub struct SyncCommand {
     ///
     /// A listing leaving out more than half of at least 20 items, or naming
     /// none while the collection held some, is read as a truncated or
-    /// emptied answer: nothing is dropped, the run reports it and exits 2.
+    /// emptied answer: nothing is dropped, the run reports it and exits 3.
     /// Once the server is known to hold no more, this confirms the
     /// absences, also for the rebuild of a renumbered IMAP mailbox.
     #[arg(long)]
@@ -176,7 +177,7 @@ pub struct SyncCommand {
     pub bodies: Bodies,
     /// The longest a source waits at once on a provider throttling it, in
     /// seconds. A provider asking for more makes the source give up for
-    /// the run, which is then incomplete (exit 3).
+    /// the run, which is then incomplete (exit 4).
     #[arg(long, value_name = "SECONDS", default_value_t = 120)]
     pub max_wait: u64,
     /// List every collection the sources hold and record its kind, name
@@ -225,7 +226,7 @@ impl SyncCommand {
         config_paths: &[PathBuf],
         accounts: &[String],
     ) -> Result<Exit> {
-        let config = Config::load_or_wizard(printer, config_paths)?;
+        let config = Config::load(config_paths)?;
         let selected = match self.reset {
             true => vec![config.select_one(accounts, "A reset")?],
             false => config.select(accounts)?,

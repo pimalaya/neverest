@@ -220,7 +220,7 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
         &event("event-1", "Stand-up pm", "Room A"),
     );
 
-    let report = sync(&config, &state, CLASH_CAL, 2);
+    let report = sync(&config, &state, CLASH_CAL, 3);
     assert!(
         report.contains(r#""outstandingConflicts":1"#),
         "the divergence is parked and counted, not resolved; report was:\n{report}",
@@ -242,7 +242,7 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
 
     // Rerunning settles nothing on its own and overwrites nothing either: a
     // parked divergence waits for a person, however many runs go by.
-    let report = sync(&config, &state, CLASH_CAL, 2);
+    let report = sync(&config, &state, CLASH_CAL, 3);
     assert!(
         !report.contains(r#""kind":"update""#),
         "a rerun pushes neither body over the other; report was:\n{report}",

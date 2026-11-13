@@ -410,7 +410,7 @@ fn a_graph_add_lands_in_drafts_only() {
 
             a.sync_keys(&[&draft], &[0]);
             a.add(&draft, &message(&elsewhere, &msgraph_user()), &[]);
-            a.sync_keys(&[&draft], &[2]);
+            a.sync_keys(&[&draft], &[3]);
             assert!(
                 messages(&token, &folder_id, &elsewhere).is_empty(),
                 "nothing is filed outside Drafts"
@@ -486,7 +486,7 @@ fn a_graph_calendar_syncs_both_ways() {
 /// Every calendar of the mailbox syncs, the ones Graph makes itself
 /// (Birthdays, holidays) among them: their series have no end, which Graph
 /// writes as `0001-01-01`, and a window ending there was refused on every
-/// run. A run that cannot read a calendar now exits 3.
+/// run. A run that cannot read a calendar now exits 4.
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn every_graph_calendar_of_the_mailbox_syncs() {

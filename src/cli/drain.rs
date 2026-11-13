@@ -38,8 +38,8 @@ use crate::{
 ///
 /// Intents, a send or an invitation reply among them, need their server
 /// and stay queued for the sync. A sync holding the store answers
-/// `busy` with exit code 3: that run, or the next, applies them. An
-/// account that could not be drained exits 3 too.
+/// `busy` with exit code 4: that run, or the next, applies them. An
+/// account that could not be drained exits 4 too.
 #[derive(Debug, Parser)]
 pub struct DrainCommand {}
 
@@ -51,7 +51,7 @@ impl DrainCommand {
         config_paths: &[PathBuf],
         accounts: &[String],
     ) -> Result<Exit> {
-        let config = Config::load_or_wizard(printer, config_paths)?;
+        let config = Config::load(config_paths)?;
 
         let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
         for (name, account_config) in config.select(accounts)? {

@@ -322,7 +322,7 @@ fn park(root: &Path, book: &str, merger: &str) -> Parked {
         &["sync", "-a", ACCOUNT, "-m", book, "--json"],
         &config,
         &state,
-        2,
+        3,
     );
     assert!(
         report.contains(r#""outstandingConflicts":1"#),
@@ -386,7 +386,7 @@ fn assert_untouched(parked: &Parked, book: &str) {
 
     // And a run over it is still a run that left something waiting, which is
     // what a supervisor reads: an abandoned merger changes no exit code.
-    sync(parked, book, 2);
+    sync(parked, book, 3);
 }
 
 /// The account every test runs: one source and one target, each a principal

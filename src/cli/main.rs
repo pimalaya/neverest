@@ -9,15 +9,15 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use pimalaya_cli::{
     clap::{
         args::{JsonFlag, LogFlags},
-        commands::{CompletionCommand, JsonSchemaCommand, ManualCommand},
+        commands::{
+            completion::CompletionCommand, json_schema::JsonSchemaCommand, manual::ManualCommand,
+        },
         parsers::path_parser,
     },
     long_version,
     printer::Printer,
 };
 
-#[cfg(feature = "wizard")]
-use crate::cli::configure::ConfigureCommand;
 #[cfg(feature = "search")]
 use crate::cli::index::IndexCommand;
 use crate::{
@@ -35,15 +35,13 @@ use crate::{
 #[command(long_version = long_version!())]
 #[command(propagate_version = true, infer_subcommands = true)]
 pub struct Cli {
-    /// The command to run; a bare `neverest` prints the help, or offers the
-    /// configuration wizard when no configuration file is found.
+    /// The command to run; a bare `neverest` prints the help.
     #[command(subcommand)]
     pub command: Option<Command>,
     /// Override the default configuration file path.
     ///
     /// Paths are shell-expanded then canonicalized; multiple paths may be
-    /// delimited by `:` and are merged left-to-right. When none resolves to
-    /// an existing file, the wizard runs against the first.
+    /// delimited by `:` and are merged left-to-right.
     #[arg(short, long = "config", global = true, env = "NEVEREST_CONFIG")]
     #[arg(value_name = "PATH", value_parser = path_parser, value_delimiter = ':')]
     pub config_paths: Vec<PathBuf>,
@@ -75,9 +73,6 @@ pub enum Command {
     #[command(arg_required_else_help = true)]
     #[command(alias = "conflicts")]
     Conflict(ConflictCommand),
-    #[cfg(feature = "wizard")]
-    #[command(alias = "cfg")]
-    Configure(ConfigureCommand),
     #[command(arg_required_else_help = true)]
     #[command(alias = "manuals")]
     Manual(ManualCommand),
@@ -109,8 +104,6 @@ impl Command {
             Self::Init(cmd) => return cmd.execute(printer, config_paths, accounts),
             Self::Check(cmd) => cmd.execute(printer, config_paths, accounts),
             Self::Conflict(cmd) => cmd.execute(printer, config_paths, accounts),
-            #[cfg(feature = "wizard")]
-            Self::Configure(cmd) => cmd.execute(printer, config_paths),
             Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
             Self::Completion(cmd) => cmd.execute(printer, Cli::command()),
             Self::JsonSchema(cmd) => cmd.execute(printer, json_schema::registry()),

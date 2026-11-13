@@ -715,7 +715,7 @@ fn graph(
     let mut client = connect(token);
     let url = Url::parse(MSGRAPH_API_BASE)
         .unwrap()
-        .join(&format!("{}/{path}", user_path(&msgraph_user())))
+        .join(&format!("{}/{path}", user_path(&msgraph_user()).unwrap()))
         .unwrap();
     let body = body
         .map(|body| body.to_string().into_bytes())

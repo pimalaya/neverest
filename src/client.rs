@@ -834,6 +834,19 @@ impl Client {
         }
     }
 
+    /// Leaves the connection fit for a read of one item after
+    /// [`fetch_bodies`](Self::fetch_bodies) failed with `err`. IMAP alone
+    /// may hold the rest of an answer; an HTTP backend reopens its own.
+    #[cfg_attr(not(feature = "imap"), allow(unused_variables))]
+    pub fn recover(&mut self, err: &anyhow::Error) -> Result<()> {
+        match self {
+            #[cfg(feature = "imap")]
+            Client::Imap(c) => c.recover(err),
+            #[allow(unreachable_patterns)]
+            _ => Ok(()),
+        }
+    }
+
     /// Streams one item's raw body into `sink`, returning the revision it
     /// corresponds to when the backend reports one.
     ///

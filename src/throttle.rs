@@ -285,8 +285,7 @@ pub enum GoogleRefusal {
 }
 
 /// A Google error, as the io-gmail, io-gpeople and io-gcal envelopes keep
-/// it: io-gcal keeps the status and message alone, so the reason is also
-/// read from the text.
+/// it; the reason is also read from the text.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct GoogleAnswer<'a> {
     /// The effective HTTP status.

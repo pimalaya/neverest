@@ -1162,7 +1162,8 @@ pub(crate) fn stored_item(
 ///
 /// The handle the server echoes keys each body back, so out-of-order responses
 /// still route. A batch error, or a batch answering for fewer members than it
-/// was asked, falls back to per-item fetches, idempotent by content address.
+/// was asked, falls back to per-item fetches, idempotent by content address,
+/// on a connection [`Client::recover`] left fit for them.
 /// A handle the server answers gone, in the batch or alone, is answered under
 /// [`Hydrated::gone`] and never fails the batch. `sizes` is what the store
 /// records of each body.
@@ -1234,6 +1235,9 @@ pub(crate) fn hydrate_batch(
         }
         Err(err) => {
             warn!("batched fetch {collection} failed ({err:#}); falling back to per-item");
+            client
+                .recover(&err)
+                .with_context(|| format!("Batched fetch {collection} failed ({err:#})"))?;
             items.clear();
             (handles.to_vec(), Vec::new())
         }
@@ -2342,5 +2346,107 @@ mod hydrate_tests {
         assert_eq!(wire.lines().len(), 2, "{:?}", wire.lines());
         assert!(hydrated.items.is_empty());
         assert_eq!(hydrated.gone, handles);
+    }
+}
+
+#[cfg(all(test, feature = "imap"))]
+mod imap_hydrate_tests {
+    use std::sync::atomic::Ordering;
+
+    use io_pimdir::client::PimdirStore;
+    use pimalaya_stream::tls::Tls;
+
+    use super::*;
+    use crate::imap::{
+        client::ImapClient,
+        fake::{FakeFault, FakeImap, FakeMailbox, FakeMessage},
+    };
+
+    /// A server holding the messages 1 and 2, its next fetch of whole
+    /// bodies meeting `fault`.
+    fn server(fault: Option<FakeFault>) -> FakeImap {
+        let message = |uid, id: &str| FakeMessage {
+            uid,
+            flags: Vec::new(),
+            message_id: id.to_owned(),
+        };
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 1,
+                highest_mod_seq: 1,
+                messages: vec![message(1, "a@x"), message(2, "b@x")],
+                states_exists: true,
+            },
+            false,
+        );
+        if let Some(fault) = fault {
+            server.break_next_body_fetch(fault);
+        }
+        server
+    }
+
+    /// The bodies of the messages 1 and 2 as `server` hands them over, by
+    /// handle, each named by the identity its body states.
+    fn hydrated(server: &FakeImap) -> Vec<(String, String)> {
+        let client = ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+        let mut client = Client::Imap(Box::new(client));
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let handles = [PimdirHandle("1".into()), PimdirHandle("2".into())];
+
+        let hydrated = hydrate_batch(
+            Kind::Mail,
+            &mut client,
+            "INBOX",
+            &handles,
+            &|_| None,
+            &blobs,
+            None,
+        )
+        .unwrap();
+        assert!(hydrated.gone.is_empty(), "{:?}", hydrated.gone);
+
+        let mut bodies: Vec<(String, String)> = hydrated
+            .items
+            .into_iter()
+            .map(|item| (item.handle.0, item.link_id.0))
+            .collect();
+        bodies.sort();
+        bodies
+    }
+
+    /// A batch failing in the middle of its answer leaves the rest of it
+    /// unread: read one by one on that connection, the bodies would be the
+    /// leftovers, each under another message's handle.
+    #[test]
+    fn a_batch_failing_mid_answer_is_read_again_on_a_new_connection() {
+        let expected = hydrated(&server(None));
+        assert_eq!(expected.len(), 2);
+
+        let broken = server(Some(FakeFault::RepeatBody));
+        assert_eq!(hydrated(&broken), expected);
+        assert_eq!(broken.connections.load(Ordering::SeqCst), 2);
+    }
+
+    /// A connection lost under a batch is opened again for its bodies.
+    #[test]
+    fn a_batch_losing_its_connection_is_read_again_on_a_new_one() {
+        let expected = hydrated(&server(None));
+
+        let broken = server(Some(FakeFault::HangUp));
+        assert_eq!(hydrated(&broken), expected);
+        assert_eq!(broken.connections.load(Ordering::SeqCst), 2);
+    }
+
+    /// A batch the server refuses was answered whole: its bodies are read
+    /// one by one on the connection it stands on.
+    #[test]
+    fn a_refused_batch_is_read_one_by_one_on_its_connection() {
+        let expected = hydrated(&server(None));
+
+        let refusing = server(Some(FakeFault::Refuse));
+        assert_eq!(hydrated(&refusing), expected);
+        assert_eq!(refusing.connections.load(Ordering::SeqCst), 1);
+        assert_eq!(refusing.sent("UID FETCH").len(), 3);
     }
 }

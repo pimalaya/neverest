@@ -1108,7 +1108,7 @@ impl MailWire for GraphClient {
     }
 
     fn metas(&mut self, ids: &[&str]) -> Result<Vec<MsgraphMessage>> {
-        let user = user_path(&self.inner.user_id);
+        let user = user_path(&self.inner.user_id)?;
         let mut metas = Vec::with_capacity(ids.len());
 
         for chunk in ids.chunks(MSGRAPH_BATCH_MAX_REQUESTS) {
@@ -1474,6 +1474,7 @@ mod tests {
                 value,
                 next_link,
                 delta_link,
+                count: None,
             }
         }
 

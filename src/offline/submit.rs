@@ -30,7 +30,7 @@
 //! than parked, since another build can perform them.
 
 #[cfg(feature = "smtp")]
-use std::{borrow::Cow, net::Ipv4Addr};
+use std::net::Ipv4Addr;
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -53,8 +53,8 @@ use io_smtp::{
     coroutine::{SmtpCoroutine, SmtpCoroutineState, SmtpYield},
     message::{SmtpMessageSend, SmtpMessageSendError, SmtpMessageSendOptions},
     rfc5321::{
-        SmtpDomain, SmtpEhloDomain, SmtpForwardPath, SmtpLocalPart, SmtpMailbox, SmtpReversePath,
-        data::SmtpDataError, mail::SmtpMailError, rcpt::SmtpRcptError,
+        SmtpEhloDomain, SmtpForwardPath, SmtpMailbox, SmtpReversePath, data::SmtpDataError,
+        mail::SmtpMailError, rcpt::SmtpRcptError,
     },
     send::SmtpCommandSendError,
     session::{SmtpSessionOpenError, SmtpSessionOpenOptions},
@@ -511,6 +511,7 @@ pub fn connect_smtp(account: &SmtpAccount) -> Result<SmtpClientStd> {
         sasl: account.sasl.clone(),
         session: SmtpSessionOpenOptions {
             starttls: account.starttls,
+            ..Default::default()
         },
     };
 
@@ -582,21 +583,19 @@ pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), 
                 .collect::<Result<Vec<_>>>()
                 .map_err(SubmitFailure::permanent)?;
 
-            let Err(failed) = hand_over_smtp(client, reverse, forwards, bytes) else {
+            let Err(failed) = hand_over_smtp(&mut client.stream, reverse, forwards, bytes) else {
                 return Ok(());
             };
             let reply = reply_of(&failed.error);
-            let replied = reply.is_some();
+            // NOTE: a reply leaves the session usable, io-smtp resetting the
+            // transaction, but a 421, which closes it (RFC 5321 §4.2.2).
+            let usable = reply.is_some_and(|(code, _)| code != 421);
             let disposition = smtp_disposition(reply, failed.handed_over);
             let error = anyhow!(failed.error).context("SMTP submission error");
             let failure = disposition.with(error);
             let error = format!("{:#}", failure.error());
-            // NOTE: a reply leaves the session usable once the transaction
-            // is reset; a failure without one leaves it in no known state.
-            if !replied {
+            if !usable {
                 channel.lost = Some(format!("the send channel broke: {error}"));
-            } else if let Err(err) = client.rset() {
-                channel.lost = Some(format!("RSET after a refusal failed: {err}"));
             } else if disposition == Disposition::Limited {
                 channel.held = Some(format!("a sending limit holds the channel: {error}"));
             }
@@ -631,25 +630,24 @@ struct SmtpHandOverError {
     handed_over: bool,
 }
 
-/// Runs the `MAIL FROM`, `RCPT TO` and `DATA` exchange over the session,
-/// noting when the data's final `.` is written whole.
+/// Runs the `MAIL FROM`, `RCPT TO` and `DATA` exchange over the session's
+/// stream, noting when the data's final `.` is written whole.
 ///
 /// io-smtp's own driver cannot say where a failure fell, which is what
 /// tells a message never handed over from one perhaps taken. Every command
 /// is one write: `MAIL FROM`, one `RCPT TO` a recipient, `DATA`, then the
 /// dot-stuffed data ending with its `.` line, so the data is the write
-/// numbered `rcpts + 2` from zero. The default options remove the `Bcc`
+/// numbered `rcpts + 2` from zero, unless `DATA` was refused, which io-smtp
+/// follows with an `RSET` there. The default options remove the `Bcc`
 /// field before `DATA`, the envelope alone carrying its recipients
 /// (RFC 5322 §3.6.3).
 #[cfg(feature = "smtp")]
 fn hand_over_smtp(
-    client: &mut SmtpClientStd,
-    reverse: SmtpReversePath<'static>,
-    forwards: Vec<SmtpForwardPath<'static>>,
+    stream: &mut (impl io::Read + io::Write),
+    reverse: SmtpReversePath<'_>,
+    forwards: Vec<SmtpForwardPath<'_>>,
     message: Vec<u8>,
 ) -> Result<(), SmtpHandOverError> {
-    use std::io::{Read as _, Write as _};
-
     let data_write = forwards.len() + 2;
     let opts = SmtpMessageSendOptions::default();
     let mut send = SmtpMessageSend::new(reverse, forwards, message, opts);
@@ -661,11 +659,11 @@ fn hand_over_smtp(
 
     loop {
         match send.resume(arg.take()) {
-            SmtpCoroutineState::Complete(Ok(())) => return Ok(()),
+            // NOTE: no recipient is skipped, so none comes back refused.
+            SmtpCoroutineState::Complete(Ok(_)) => return Ok(()),
             SmtpCoroutineState::Complete(Err(err)) => return Err(failed(err.into(), handed_over)),
             SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
-                let n = client
-                    .stream
+                let n = stream
                     .read(&mut buf)
                     .map_err(|err| failed(err.into(), handed_over))?;
                 arg = Some(&buf[..n]);
@@ -675,12 +673,12 @@ fn hand_over_smtp(
                 // its failure here: a write or a flush that fails leaves
                 // the final `.` unsent, and the server drops a transaction
                 // whose data never ended (RFC 5321 §4.1.1.4).
-                client
-                    .stream
+                stream
                     .write_all(&bytes)
-                    .and_then(|()| client.stream.flush())
+                    .and_then(|()| stream.flush())
                     .map_err(|err| failed(err.into(), handed_over))?;
-                handed_over |= writes == data_write;
+                // NOTE: the `RSET` of a refused `DATA` is written at this place.
+                handed_over |= writes == data_write && bytes.ends_with(b".\r\n");
                 writes += 1;
             }
         }
@@ -703,7 +701,10 @@ fn reply_of(err: &SmtpClientError) -> Option<(u16, &str)> {
     };
     match send {
         SmtpMessageSendError::MailFrom(SmtpMailError::Rejected { code, message })
-        | SmtpMessageSendError::RcptTo(SmtpRcptError::Rejected { code, message })
+        | SmtpMessageSendError::RcptTo {
+            error: SmtpRcptError::Rejected { code, message },
+            ..
+        }
         | SmtpMessageSendError::Data(
             SmtpDataError::CommandRejected { code, message }
             | SmtpDataError::BodyRejected { code, message },
@@ -714,23 +715,17 @@ fn reply_of(err: &SmtpClientError) -> Option<(u16, &str)> {
 
 /// The MAIL FROM reverse path, the null path for an empty sender (bounces).
 #[cfg(feature = "smtp")]
-fn reverse_path(from: &str) -> Result<SmtpReversePath<'static>> {
+fn reverse_path(from: &str) -> Result<SmtpReversePath<'_>> {
     if from.is_empty() {
         return Ok(SmtpReversePath::Null);
     }
     Ok(SmtpReversePath::SmtpMailbox(smtp_mailbox(from)?))
 }
 
-/// Splits an address into the io-smtp mailbox shape at its last `@`.
+/// Reads an envelope address as the mailbox a command line takes.
 #[cfg(feature = "smtp")]
-fn smtp_mailbox(addr: &str) -> Result<SmtpMailbox<'static>> {
-    let (local, domain) = addr
-        .rsplit_once('@')
-        .with_context(|| format!("Envelope address {addr} misses a domain"))?;
-    Ok(SmtpMailbox {
-        local_part: SmtpLocalPart(Cow::Owned(local.to_owned())),
-        domain: SmtpEhloDomain::SmtpDomain(SmtpDomain(Cow::Owned(domain.to_owned()))),
-    })
+fn smtp_mailbox(addr: &str) -> Result<SmtpMailbox<'_>> {
+    SmtpMailbox::try_from(addr).with_context(|| format!("Invalid envelope address {addr}"))
 }
 
 #[cfg(test)]
@@ -1115,7 +1110,11 @@ mod tests {
 
         let captured = captured.recv().unwrap();
         assert_eq!(captured.data, b"body\r\n", "the second never left");
-        assert_eq!(captured.commands.last().map(String::as_str), Some("RSET"));
+        // NOTE: a refused body ends its transaction, nothing is left to reset.
+        assert_eq!(
+            captured.commands,
+            ["MAIL FROM:<a@x.org>", "RCPT TO:<b@y.org>"]
+        );
     }
 
     #[test]
@@ -1192,6 +1191,86 @@ mod tests {
 
         let captured = captured.recv().unwrap();
         assert_eq!(captured.commands.last().map(String::as_str), Some("RSET"));
+        let resets = captured.commands.iter().filter(|line| *line == "RSET");
+        assert_eq!(resets.count(), 1, "{:?}", captured.commands);
+    }
+
+    /// A 421 says the server closes the connection (RFC 5321 §4.2.2): no
+    /// further message is attempted on it.
+    #[test]
+    fn a_server_closing_on_a_refusal_loses_the_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let blobs = stage.blobs();
+
+        let intent = stage_intent(&stage, 1, &["b@y.org"], b"body");
+        let (port, captured) = spawn_smtp_sink(Sink::RejectData("421 shutting down\r\n"));
+        let mut channel = channel_to(port);
+        let failure = send_one(&mut channel, blobs, &intent).expect_err("closing");
+        assert!(
+            matches!(failure, SubmitFailure::Transient(_)),
+            "{failure:?}"
+        );
+        assert!(channel.stopped().is_some(), "the session is closing");
+        drop(channel);
+
+        let captured = captured.recv().unwrap();
+        assert!(!captured.commands.iter().any(|line| line == "RSET"));
+    }
+
+    /// A stream answering each write with the next scripted reply, a read
+    /// with none left failing as a connection reset.
+    struct Scripted {
+        replies: std::collections::VecDeque<&'static str>,
+        answer: Option<&'static str>,
+    }
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let Some(answer) = self.answer.take() else {
+                return Err(io::ErrorKind::ConnectionReset.into());
+            };
+            buf[..answer.len()].copy_from_slice(answer.as_bytes());
+            Ok(answer.len())
+        }
+    }
+
+    impl io::Write for Scripted {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.answer = self.replies.pop_front();
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Whether the exchange answered `replies`, then reset, had handed its
+    /// message over when it failed.
+    fn handed_over(replies: &[&'static str]) -> bool {
+        let mut stream = Scripted {
+            replies: replies.iter().copied().collect(),
+            answer: None,
+        };
+        let reverse = reverse_path("a@x.org").unwrap();
+        let forwards = vec![SmtpForwardPath(smtp_mailbox("b@y.org").unwrap())];
+
+        hand_over_smtp(&mut stream, reverse, forwards, b"body".to_vec())
+            .expect_err("the connection is reset")
+            .handed_over
+    }
+
+    /// The transaction reset after a refused `DATA` command is written
+    /// where the data would be: a connection lost under it handed nothing
+    /// over, and parking the message as perhaps delivered would lose it.
+    #[test]
+    fn a_reset_cut_short_after_a_refused_data_command_handed_nothing_over() {
+        let accepted = ["250 ok\r\n", "250 ok\r\n", "354 go\r\n"];
+        assert!(handed_over(&accepted), "the data left whole");
+
+        let refused = ["250 ok\r\n", "250 ok\r\n", "554 no\r\n"];
+        assert!(!handed_over(&refused), "only the reset left");
     }
 
     #[test]
@@ -1293,6 +1372,8 @@ mod tests {
         };
         assert_eq!(mailbox.local_part.as_ref(), "a");
         assert!(smtp_mailbox("no-domain").is_err());
+        // NOTE: a line break in an address would add a command to the session.
+        assert!(smtp_mailbox("a@x.org>\r\nRCPT TO:<c@z.org").is_err());
     }
 
     #[test]

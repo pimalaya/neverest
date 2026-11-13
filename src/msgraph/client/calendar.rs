@@ -422,7 +422,8 @@ impl GraphClient {
 
     /// Posts one of an event's actions, which answer 202 with no body.
     fn event_action(&mut self, id: &str, verb: &str, body: &serde_json::Value) -> Result<()> {
-        let path = format!("{}/events/{id}/{verb}", user_path(&self.inner.user_id));
+        let user = user_path(&self.inner.user_id)?;
+        let path = format!("{user}/events/{id}/{verb}");
         let url = Url::parse(MSGRAPH_API_BASE)
             .and_then(|base| base.join(&path))
             .context("Cannot build the event action URL")?;

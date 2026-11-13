@@ -187,6 +187,7 @@ impl GraphClient {
                 value,
                 next_link,
                 delta_link,
+                count: _,
             } = page;
             rows.extend(value);
 

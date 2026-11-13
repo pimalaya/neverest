@@ -290,23 +290,31 @@ Upgrading from 0.3.0:
 
 - Bumped ical-rs to 0.7.
 
-- Bumped io-gcal to 0.3.
+- Bumped io-gcal to 0.4.
 
-  An event giving its end as a `DURATION` is pushed to Google Calendar, no longer refused.
+  An event giving its end as a `DURATION` is pushed to Google Calendar, no longer refused. A calendar whose id holds `#`, `?` or `/`, a subscribed holiday calendar among them, is read as itself.
 
-- Bumped io-gmail to 0.5.
+- Bumped io-gmail to 0.7.
 
-- Bumped io-gpeople to 0.6.
+- Bumped io-gpeople to 0.7.
 
-- Bumped io-http to 0.6.
+- Bumped io-http to 0.7.
 
-- Bumped io-msgraph to 0.7 at 92c28d5, pinned by git until a release carries a message's header fields.
+- Bumped io-imap to 0.9.
+
+- Bumped io-msgraph to 0.8.
 
 - Bumped pimalaya-cli to 0.4.
 
-- Bumped io-smtp to 0.6.
+- Bumped io-sasl to 0.2.
 
-- Bumped io-webdav to 0.7.
+  A SCRAM-SHA-256 server announcing fewer than 4096 iterations, or more than five million, is refused.
+
+- Bumped io-smtp to 0.8.
+
+  An envelope address that is no mailbox, or holds a line break, fails its send before anything is written.
+
+- Bumped io-webdav to 0.8.
 
   A CalDAV or CardDAV multistatus is parsed 3.4 to 9 times faster.
 
@@ -319,6 +327,24 @@ Upgrading from 0.3.0:
   pimalaya-cli 0.4 dropped the wizards of every Pimalaya CLI. A configuration is written by hand from config.sample.toml; a command finding none fails naming the path it looked for, and a bare `neverest` prints the help.
 
 ### Fixed
+
+- Fixed an IMAP body download reading what a failed batch left on its connection as the answers of the reads that followed, which could store a message under another's handle.
+
+  After a batch that fails otherwise than refused by the server, the connection is opened again before its messages are read one by one.
+
+- Fixed an IMAP listing leaving out a message whose row does not decode, which a complete listing read as removed.
+
+  The listing fails, naming the answer. A server alert is shown as a warning.
+
+- Fixed a CalDAV or CardDAV answer that is no whole multistatus (a gateway's page, a cut document, an empty body) being read as a listing of what parsed.
+
+  The listing fails, and no member is read as removed.
+
+- Fixed a CalDAV or CardDAV delete or move answered 207 with a failed member being read as done.
+
+- Fixed a Google contact update erasing what a vCard cannot show: an organization after the first, a relation other than spouse or child, a custom type.
+
+- Fixed a send whose `DATA` command was refused being parked as perhaps delivered when the connection failed right after.
 
 - Fixed a message being keyed otherwise by its listing than by its body, so stored twice or never matched with the copy another client keyed: a `Message-ID` wrapped in comments (IMAP, Gmail, Graph), a header value Gmail serves folded, a subject, a date or a sender Graph decodes otherwise than the message states it, and on a targeted IMAP summary read a padded subject or an encoded word in a charset that decodes nothing.
 
@@ -424,7 +450,7 @@ Upgrading from 0.3.0:
 
 ### Security
 
-- Bumped crypto-bigint to 0.7.10, ctutils to 0.4.6, rustls-webpki to 0.103.16 and webpki-root-certs to 1.0.11, fixing RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387.
+- Bumped crypto-bigint to 0.7.11, ctutils to 0.4.6, rustls-webpki to 0.103.16 and webpki-root-certs to 1.0.11, fixing RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387.
 
 ## [0.3.0] - 2026-10-02
 

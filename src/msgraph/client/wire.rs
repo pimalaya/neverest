@@ -155,7 +155,7 @@ pub(super) fn answered(err: &MsgraphClientStdError) -> bool {
     matches!(
         err,
         MsgraphClientStdError::Send(
-            MsgraphSendError::Api { .. }
+            MsgraphSendError::Api(_)
                 | MsgraphSendError::ParseResponse(_)
                 | MsgraphSendError::UnexpectedRedirect
         )

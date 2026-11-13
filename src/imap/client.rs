@@ -14,6 +14,7 @@ use anyhow::Result;
 use io_imap::{
     client::{ImapClient as _, ImapClientStd as Inner, ImapClientStdConnectOptions},
     rfc3501::select::ImapMailboxSelectData,
+    send::ImapOutput,
     session::ImapSessionOpenOptions,
     types::{
         core::{Atom, Vec1},
@@ -43,6 +44,16 @@ pub struct ImapClient {
     /// The UIDs a round still has to list, kept from the search its first
     /// page made so a later page of this run searches nothing.
     pub(crate) round: Option<RoundUids>,
+    /// What the connection opened from, kept to open it again.
+    opening: Opening,
+}
+
+/// The arguments of [`ImapClient::connect`].
+struct Opening {
+    server: Url,
+    tls: Tls,
+    starttls: bool,
+    sasl: Option<Sasl>,
 }
 
 /// The UIDs left to list in a round of one mailbox, newest first.
@@ -62,6 +73,12 @@ impl ImapClient {
     /// Opens the IMAP connection (TCP/TLS/STARTTLS, greeting, SASL), the ALPN
     /// identifiers riding the passed [`Tls`].
     pub fn connect(server: &Url, tls: &Tls, starttls: bool, sasl: Option<Sasl>) -> Result<Self> {
+        let opening = Opening {
+            server: server.clone(),
+            tls: tls.clone(),
+            starttls,
+            sasl: sasl.clone(),
+        };
         let opts = ImapClientStdConnectOptions {
             tls: tls.clone(),
             proxy: Proxy::None,
@@ -83,6 +100,7 @@ impl ImapClient {
             capabilities,
             selected: None,
             round: None,
+            opening,
         };
         if client.supports_qresync() {
             let condstore = CapabilityEnable::CondStore;
@@ -93,6 +111,23 @@ impl ImapClient {
             client.inner.enable(caps)?;
         }
         Ok(client)
+    }
+
+    /// Drops the connection and opens it again as it first opened, nothing
+    /// selected; the UIDs a round has left are kept.
+    pub fn reconnect(&mut self) -> Result<()> {
+        let Opening {
+            server,
+            tls,
+            starttls,
+            sasl,
+        } = &self.opening;
+
+        let mut fresh = Self::connect(server, tls, *starttls, sasl.clone())?;
+        fresh.round = self.round.take();
+        *self = fresh;
+
+        Ok(())
     }
 
     /// Whether the server advertises QRESYNC (RFC 7162).
@@ -113,7 +148,7 @@ impl ImapClient {
         mailbox: Mailbox<'static>,
         uid_validity: NonZeroU32,
         highest_mod_seq: u64,
-    ) -> Result<ImapMailboxSelectData> {
+    ) -> Result<ImapOutput<ImapMailboxSelectData>> {
         Ok(self
             .inner
             .select_qresync(mailbox, uid_validity, highest_mod_seq, &self.capabilities)?)

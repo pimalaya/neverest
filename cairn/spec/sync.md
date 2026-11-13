@@ -419,7 +419,7 @@ Neverest SHALL NOT reserve a collection for queued sends. Submission is a **mail
 
 The intent's payload SHALL be `v: 1` JSON, read by io-pimdir's `PimdirSubmit` whatever the order of its keys, carrying `object` (the body hash, required, and the hash the row pins), `from` (empty means the null reverse path), `rcpts` (at least one), and an optional `subject`, `source` and `copy`. A payload `PimdirSubmit` refuses, or one naming another body than the row pins, SHALL park as undecodable, but one stating a version neverest does not know, which stays pending ("An intent stating an unknown version stays pending"). The body SHALL be written durably before the enqueue, so the queue row pins it (queued bodies are pinned, and no GC can sweep it between the enqueue and the send); it belongs to no collection. The intent SHALL anchor on whatever collection the producer chose: neverest scans every collection's pending actions, so there is no anchor rule.
 
-Neverest SHALL perform each pending intent through the one source offering a send channel: its own `smtp` table, else its native send (the Graph `sendMail` action, which files the message in Sent itself), sources walked in the order the account declares them. At most one source may declare an `smtp` table, so the only pick that order decides is between a declared channel and a natively-sending source. On success the row SHALL be acknowledged with its receipt, releasing the body's pin. A **transient** failure, which certainly delivered nothing (an SMTP 4xx, an SMTP 5xx refusing for a sending rate or quota as "A quota refusal keeps the send queued" says, a Graph 401, 408 or 429, a transport error before the message went whole), SHALL leave the row pending; a **permanent** one (any other SMTP 5xx, a Graph 400, 403, 404, 413, 422 or other 4xx, an undecodable payload, a missing body) SHALL park it with its error; an **unconfirmed** one SHALL park it as "A send that may have been delivered is never sent again" says. A refusal SHALL reset the SMTP transaction before the next message; a refusal for a sending rate or quota, or a failure with no reply or status, SHALL leave the rest of the run's intents unattempted, pending. A build with no send channel (neither `smtp` nor `msgraph`) SHALL skip submit intents and warn, never park them. Message content is never logged.
+Neverest SHALL perform each pending intent through the one source offering a send channel: its own `smtp` table, else its native send (the Graph `sendMail` action, which files the message in Sent itself), sources walked in the order the account declares them. At most one source may declare an `smtp` table, so the only pick that order decides is between a declared channel and a natively-sending source. On success the row SHALL be acknowledged with its receipt, releasing the body's pin. A **transient** failure, which certainly delivered nothing (an SMTP 4xx, an SMTP 5xx refusing for a sending rate or quota as "A quota refusal keeps the send queued" says, a Graph 401, 408 or 429, a transport error before the message went whole), SHALL leave the row pending; a **permanent** one (any other SMTP 5xx, a Graph 400, 403, 404, 413, 422 or other 4xx, an undecodable payload, a missing body) SHALL park it with its error; an **unconfirmed** one SHALL park it as "A send that may have been delivered is never sent again" says. A refused recipient or a refused `DATA` command SHALL leave the SMTP transaction reset before the next message, one `RSET` sent by io-smtp; a refused `MAIL FROM` opens no transaction and a refused body ends its own, so neither is followed by a reset. A refusal for a sending rate or quota, a `421` reply, by which the server closes the session (RFC 5321 §4.2.2), or a failure with no reply or status, SHALL leave the rest of the run's intents unattempted, pending. An envelope address io-smtp refuses, one that is no mailbox or holds a line break, SHALL fail its intent as permanent before anything is sent. A build with no send channel (neither `smtp` nor `msgraph`) SHALL skip submit intents and warn, never park them. Message content is never logged.
 
 The SMTP channel SHALL remove the body's `Bcc` field before `DATA` (RFC 5322 §3.6.3): a producer may stage the body with it, the payload's `rcpts` alone carrying those recipients to the server. The Graph channel hands the field to `sendMail`, which derives the recipients from it and does not deliver it.
 
@@ -999,10 +999,22 @@ A batched body fetch SHALL be treated as complete only when it answers for every
 
 A backend that answers for a subset is not a backend that failed, so nothing surfaces as an error; but the engine cannot tell an unanswered handle from an unasked one, so an unanswered handle is recorded nowhere and re-requested on every later run. That is a run that fetches a whole collection, stores nothing and reports itself in sync.
 
+A batch that errors SHALL be read item by item on a connection fit for it. An IMAP batch the server refused with a tagged `NO` or `BAD` was answered whole, and its items SHALL be read on the connection it failed on. After any other failure (the connection lost, a body that could not be written, an answer the client stopped reading), what is left of the answer may still be on the connection, where the next command would read it as its own: the connection SHALL be dropped and opened again before any item is read, and one that does not open again SHALL fail the batch.
+
 #### Scenario: A server answers for two cards out of sixty-four
 - GIVEN a batched fetch of 64 handles that returns 2 bodies
 - WHEN the run continues
 - THEN the other 62 are fetched one by one and the shortfall is reported
+
+#### Scenario: An IMAP batch failing in the middle of its answer
+- GIVEN a batched fetch of two messages whose answer the client stops reading at its second row
+- WHEN the run continues
+- THEN a new connection is opened, the two messages are read one by one on it, and each handle holds the body of its own message
+
+#### Scenario: An IMAP batch the server refuses
+- GIVEN a batched fetch the server answers with a tagged `NO`
+- WHEN the run continues
+- THEN its messages are read one by one on the same connection
 
 ### Requirement: An empty body is refused, never stored
 A body of zero bytes SHALL fail the fetch, naming the item and its collection. No kind neverest syncs has an empty body: a message carries headers and a card carries at least its `BEGIN` and `END` lines. An IMAP UID a lone fetch answers with no message at all is no empty body: the message is gone.
@@ -1266,7 +1278,7 @@ A `gpeople` source SHALL have one collection, `contacts`, holding every connecti
 
 Enumeration SHALL be the API's sync-token listing, the token as the engine's opaque checkpoint: a resumed listing reports what changed and names removals, a full one reports removals by absence, and an expired token (HTTP 410) restarts a full listing.
 
-A `gpeople` item SHALL be one person, its `etag` the revision, projected through io-gpeople's `vcard` feature. Its vCard `UID` rides the projection's `clientData` stash, so it keeps the identity it arrived with; a create whose stash People did not keep SHALL be deleted again and refused. An update SHALL carry the etag, which People enforces, and SHALL merge back the `clientData` entries other clients own.
+A `gpeople` item SHALL be one person, its `etag` the revision, projected through io-gpeople's `vcard` feature. Its vCard `UID` rides the projection's `clientData` stash, so it keeps the identity it arrived with; a create whose stash People did not keep SHALL be deleted again and refused. An update SHALL carry the etag, which People enforces, and SHALL merge back, in each field of its mask, what People holds there and a vCard cannot show (io-gpeople's `merge_unprojected`: an organization or occupation after the first, a relation other than spouse or child, a custom type, a sub-field without a vCard slot, the `clientData` entries other clients own), a masked update replacing the field whole. A property too long for the stash, which the projection leaves out, SHALL be named in a warning.
 
 A `gcal` item SHALL be one recurring series with its modified instances, or one lone event, keyed by the series' event id, its revision joining the etags of the series and of its instances so an edit to any of them moves it, projected through io-gcal's `ical` feature. A create SHALL import an object carrying a UID, so the UID survives as the event's `iCalUID`. An update or delete SHALL be refused when the joined revision moved, then be guarded by the series event's own etag. Only the series event SHALL be written: an instance modified locally does not push yet.
 
@@ -1426,7 +1438,7 @@ A sent copy neverest files (pimdir STORAGE Annex B.2) is in the store when the r
 - **THEN** the message leaves through the SMTP channel, the run exits 0, and the report names nothing unreached and no collection
 
 ### Requirement: A send that may have been delivered is never sent again
-A `submit` that fails after the whole message was handed over and before a verdict came back SHALL be unconfirmed: over SMTP once the data's final `.` was written and flushed and no reply read; over Graph `sendMail` once the request was written whole and flushed and no answer read whole (none, one cut short, one that does not parse), or when 500, 502, 503 or 504 answered. A `sendMail` SHALL never be sent again on a dead connection; only a 429, which Graph answers before acting, SHALL send it again. An unconfirmed `submit` SHALL be parked as an intent whose outcome is unknown (pimdir STORAGE §13, §15.2, io-pimdir `unconfirm_action`), its error beginning with the reserved prefix `unconfirmed: `, which the store's `unconfirm_action` statement alone writes, so its producer reads it unconfirmed rather than refused; it SHALL be reported in `submitted` with `unconfirmed: true` and an `error` beginning `unconfirmed: `, SHALL make the run that parked it exit 3, and SHALL never be sent again by any run.
+A `submit` that fails after the whole message was handed over and before a verdict came back SHALL be unconfirmed: over SMTP once the data's final `.` was written and flushed and no reply read, the `RSET` following a refused `DATA` command being no data; over Graph `sendMail` once the request was written whole and flushed and no answer read whole (none, one cut short, one that does not parse), or when 500, 502, 503 or 504 answered. A `sendMail` SHALL never be sent again on a dead connection; only a 429, which Graph answers before acting, SHALL send it again. An unconfirmed `submit` SHALL be parked as an intent whose outcome is unknown (pimdir STORAGE §13, §15.2, io-pimdir `unconfirm_action`), its error beginning with the reserved prefix `unconfirmed: `, which the store's `unconfirm_action` statement alone writes, so its producer reads it unconfirmed rather than refused; it SHALL be reported in `submitted` with `unconfirmed: true` and an `error` beginning `unconfirmed: `, SHALL make the run that parked it exit 3, and SHALL never be sent again by any run.
 
 Before the first byte of a message leaves, the run SHALL count the attempt in the store and SHALL write the intent's id to `submitting` under the store's local/, durably, clearing it once the outcome is recorded; a run finding the mark with that intent still pending SHALL park it as unconfirmed before sending anything, whichever account it belongs to. A store created SHALL start with no mark; a reset of one account SHALL leave it, the mark naming a row of the store.
 
@@ -1731,6 +1743,16 @@ A `sync-collection` answer the server truncates (RFC 6578 §3.6, a `507` row) SH
 - **WHEN** the account is synced
 - **THEN** the cards it listed reach the store, and no card is inferred deleted on either endpoint
 
+### Requirement: A DAV answer that is no whole multistatus fails
+A `207` answer whose body is not one whole `multistatus` document (a gateway's page, a document cut short or malformed, an empty body) SHALL fail the request reading it, as io-webdav refuses it: a `sync-collection` report, the `PROPFIND` listing standing in for it, a collection listing, a multiget. It SHALL NOT be read as a listing of what parsed, which a complete listing turns into the removal of every member left out. A failed listing is reported as "A collection that failed to scan is reported, never only logged" says, and a failed multiget falls back as "A body fetch answers for every handle it was asked about" says.
+
+A `DELETE` or a `MOVE` answered `207` naming a member with a status other than 2xx (RFC 4918 §9.6.1) SHALL fail, the member being still there.
+
+#### Scenario: A gateway answers a listing with its own page
+- GIVEN a CardDAV server whose `sync-collection` report is answered `207` with an HTML page
+- WHEN the account is synced
+- THEN the address book fails to list, and no card is stated removed
+
 ### Requirement: A collection listing names every collection the source holds
 A source's collection listing SHALL name every collection it holds, whatever the provider leaves out by default: hidden Google calendars, every page and every depth of Graph contact folders. A collection left out of a listing reads as deleted where the store knows both endpoints held it.
 
@@ -1793,6 +1815,16 @@ A body neverest writes SHALL go through the write side io-pimdir hands a lock ho
 
 ### Requirement: An IMAP mailbox is never read as smaller than it stated
 A mailbox whose `SELECT` answer states no `EXISTS` SHALL be searched as any other, never read as empty: a listing read short is a delete of everything left out.
+
+### Requirement: An IMAP listing is read whole or fails
+An answer a listing is read from (a `UID SEARCH`, and the `UID FETCH` of a page's flags or header fields) holding a line io-imap could not decode SHALL fail the listing, naming the command and the count of such lines. The line may be a row, and a UID a page leaves out is a message the mailbox no longer holds: read without it, the page states the message removed. The search looking for a message by its `Message-ID` before a copy or a removal SHALL fail the same way.
+
+The search naming the message an `APPEND` just delivered is no listing: the append is accepted whatever it answers. It, and a `SELECT`, `LIST` or `STATUS` answer holding such a line, SHALL be read with a warning naming the count. The text of an `ALERT` response code SHALL be shown as a warning.
+
+#### Scenario: A row that does not decode
+- GIVEN a mailbox one of whose messages carries a flag that is no IMAP atom
+- WHEN its page is listed
+- THEN the listing fails, naming the `FETCH` answer, and no message is stated removed
 
 ### Requirement: A Graph band page resumes below a date
 A Graph band page SHALL resume below the second the page before it ended at, that second included, never at the offset Graph's next link carries: a member deleted between two pages, in one run or across two, would shift a later one out of the round, and a band round has no pass to list it again. A page whose messages were all sent within one second SHALL follow Graph's next link within the same request until a page leaves that second. A band next link a round stored before SHALL be refused, which opens the round again.

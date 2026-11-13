@@ -10,7 +10,10 @@ use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
 };
 
@@ -40,16 +43,31 @@ pub struct FakeMailbox {
     pub states_exists: bool,
 }
 
+/// How the fake breaks its next `UID FETCH` of whole bodies.
+#[derive(Clone, Copy, Debug)]
+pub enum FakeFault {
+    /// Refuses the command with a tagged `NO`.
+    Refuse,
+    /// Answers the first body twice, the rest of the answer following.
+    RepeatBody,
+    /// Answers the first body, then closes the connection.
+    HangUp,
+}
+
 /// A fake server running in the background, for as long as the test.
 pub struct FakeImap {
     /// The `imap://` URL it listens on.
     pub url: Url,
     /// Every command line it read, tag stripped, in order.
     pub commands: Arc<Mutex<Vec<String>>>,
+    /// How many connections it accepted.
+    pub connections: Arc<AtomicUsize>,
     /// The mailbox it serves, which a `STORE` changes.
     served: Arc<Mutex<FakeMailbox>>,
     /// The header block a message states in place of the fake's own, by UID.
     headers: Arc<Mutex<BTreeMap<u32, Vec<u8>>>>,
+    /// The fault its next `UID FETCH` of whole bodies meets.
+    fault: Arc<Mutex<Option<FakeFault>>>,
 }
 
 impl FakeImap {
@@ -60,26 +78,41 @@ impl FakeImap {
         let served = Arc::new(Mutex::new(mailbox));
         let commands = Arc::new(Mutex::new(Vec::new()));
         let headers = Arc::new(Mutex::new(BTreeMap::new()));
+        let connections = Arc::new(AtomicUsize::new(0));
+        let fault = Arc::new(Mutex::new(None));
 
         let logged = Arc::clone(&commands);
         let shared = Arc::clone(&served);
         let stated = Arc::clone(&headers);
+        let accepted = Arc::clone(&connections);
+        let broken = Arc::clone(&fault);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
+                accepted.fetch_add(1, Ordering::SeqCst);
                 let mailbox = Arc::clone(&shared);
                 let commands = Arc::clone(&logged);
                 let headers = Arc::clone(&stated);
-                thread::spawn(move || serve(stream, qresync, &mailbox, &headers, &commands));
+                let fault = Arc::clone(&broken);
+                thread::spawn(move || {
+                    serve(stream, qresync, &mailbox, &headers, &commands, &fault)
+                });
             }
         });
 
         Self {
             url: Url::parse(&format!("imap://127.0.0.1:{port}")).unwrap(),
             commands,
+            connections,
             served,
             headers,
+            fault,
         }
+    }
+
+    /// Has the next `UID FETCH` of whole bodies meet `fault`, once.
+    pub fn break_next_body_fetch(&self, fault: FakeFault) {
+        *self.fault.lock().unwrap() = Some(fault);
     }
 
     /// Has the message `uid` state `header`, a whole header block, where a
@@ -128,6 +161,7 @@ fn serve(
     mailbox: &Mutex<FakeMailbox>,
     headers: &Mutex<BTreeMap<u32, Vec<u8>>>,
     commands: &Mutex<Vec<String>>,
+    fault: &Mutex<Option<FakeFault>>,
 ) {
     let mut writer = stream.try_clone().unwrap();
     let mut reader = BufReader::new(stream);
@@ -169,11 +203,41 @@ fn serve(
             }
         }
 
-        let reply = answer(
+        let mut reply = answer(
             command,
             &mut mailbox.lock().unwrap(),
             &headers.lock().unwrap(),
         );
+
+        let whole_bodies = section_of(command).is_some_and(|section| section.is_empty());
+        let fault = match whole_bodies {
+            true => fault.lock().unwrap().take(),
+            false => None,
+        };
+        // NOTE: a row ends on its closing `)`, no fake body ending a line so.
+        let first = reply
+            .windows(3)
+            .position(|window| window == b")\r\n")
+            .map(|at| at + 3);
+        match (fault, first) {
+            (Some(FakeFault::Refuse), _) => {
+                let refused = format!("{tag} NO refused\r\n");
+                if writer.write_all(refused.as_bytes()).is_err() {
+                    return;
+                }
+                continue;
+            }
+            (Some(FakeFault::RepeatBody), Some(first)) => {
+                let row = reply[..first].to_vec();
+                reply.splice(..0, row);
+            }
+            (Some(FakeFault::HangUp), Some(first)) => {
+                let _ = writer.write_all(&reply[..first]);
+                return;
+            }
+            _ => {}
+        }
+
         let done = format!("{tag} OK done\r\n");
         if writer.write_all(&reply).is_err() || writer.write_all(done.as_bytes()).is_err() {
             return;

@@ -1557,6 +1557,20 @@ mod tests {
         assert!(dav.delete_item("tasks", "t1.ics", Some("\"e1\"")).is_err());
     }
 
+    /// A delete answered 207 naming a member it could not delete (RFC 4918
+    /// §9.6.1) is no delete done: the member is still there.
+    #[test]
+    fn a_delete_answered_with_a_failed_member_is_not_done() {
+        let locked = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+                      <d:multistatus xmlns:d=\"DAV:\"><d:response>\
+                      <d:href>/dav/cal/tasks/t1.ics</d:href>\
+                      <d:status>HTTP/1.1 423 Locked</d:status>\
+                      </d:response></d:multistatus>";
+        let (mut dav, _) = calendars(vec![answer("207 Multi-Status", &[], locked)]);
+
+        assert!(dav.delete_item("tasks", "t1.ics", Some("\"e1\"")).is_err());
+    }
+
     /// A calendar outside the home set is addressed by its path, the id
     /// io-webdav lists it under.
     #[test]
@@ -1703,5 +1717,32 @@ mod tests {
         assert_eq!(listed.items.len(), 2);
         assert!(listed.complete);
         assert_eq!(listed.checkpoint.as_deref(), Some(&b"t1"[..]));
+    }
+
+    /// An answer that is not one whole multistatus (a gateway's page, a cut
+    /// document, an empty body) fails the listing: read as a listing of
+    /// nothing, it would state every member removed.
+    #[test]
+    fn an_answer_that_is_no_whole_multistatus_fails_the_listing() {
+        let page = "<html><body>Sign in</body></html>";
+        let cut = "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\">\
+                   <d:response><d:href>/dav/books/default/c0.vcf</d:href>";
+
+        for body in [page, cut, ""] {
+            let answers = || {
+                let answer = format!(
+                    "HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                vec![answer.into_bytes()]
+            };
+
+            let report = replayed(answers()).enumerate("default", None);
+            assert!(report.is_err(), "{body:?}: {report:?}");
+            let listing = replayed(answers()).list("default");
+            assert!(listing.is_err(), "{body:?}: {listing:?}");
+            let collections = replayed(answers()).list_collections(false);
+            assert!(collections.is_err(), "{body:?}: {collections:?}");
+        }
     }
 }

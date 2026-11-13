@@ -66,7 +66,10 @@ use io_msgraph::v1::{
             list::MsgraphMessagesListParams,
         },
     },
-    send::{MSGRAPH_API_BASE, MsgraphSend, MsgraphSendError, MsgraphSendOutput, user_path},
+    send::{
+        MSGRAPH_API_BASE, MsgraphApiError, MsgraphSend, MsgraphSendError, MsgraphSendOutput,
+        user_path,
+    },
 };
 use io_pimdir::{
     remote::PimdirEnumerate,
@@ -293,11 +296,12 @@ impl GraphClient {
                 _ => None,
             },
             |message| {
-                MsgraphClientStdError::Send(MsgraphSendError::Api {
+                MsgraphClientStdError::Send(MsgraphSendError::Api(Box::new(MsgraphApiError {
                     status: 429,
                     code: String::from("throttled"),
                     message,
-                })
+                    ..Default::default()
+                })))
             },
         )
     }
@@ -674,7 +678,7 @@ impl GraphClient {
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
     ) -> Result<Vec<String>> {
-        let user = user_path(&self.inner.user_id);
+        let user = user_path(&self.inner.user_id)?;
 
         // NOTE: the session's own size first, which also takes it out of
         // the shared hints, then the store's, a resumed hydration's.
@@ -695,7 +699,7 @@ impl GraphClient {
             .collect();
         let mut gone: Vec<String> = Vec::new();
         if unstated.len() > 1 {
-            sizes.extend(self.stated_sizes(&unstated, &mut gone));
+            sizes.extend(self.stated_sizes(&user, &unstated, &mut gone));
         }
 
         let mut commit = |id: &str, raw: &[u8]| -> Result<()> {
@@ -754,10 +758,10 @@ impl GraphClient {
     /// left out (read alone), and one Graph answers 404 is added to `gone`.
     fn stated_sizes<'a>(
         &mut self,
+        user: &str,
         ids: &[&'a str],
         gone: &mut Vec<String>,
     ) -> HashMap<&'a str, u64> {
-        let user = user_path(&self.inner.user_id);
         let mut sizes = HashMap::with_capacity(ids.len());
 
         for chunk in ids.chunks(MSGRAPH_BATCH_MAX_REQUESTS) {
@@ -1025,7 +1029,7 @@ impl GraphClient {
     /// Whether Graph answers that message `id` is gone (404), read by its
     /// id alone.
     fn message_gone(&mut self, id: &str) -> Result<bool> {
-        let user = user_path(&self.inner.user_id);
+        let user = user_path(&self.inner.user_id)?;
         let mut url = Url::parse(MSGRAPH_API_BASE)
             .and_then(|base| base.join(&format!("{user}/messages/{id}")))
             .with_context(|| format!("Cannot build the URL of message {id}"))?;
@@ -1121,7 +1125,7 @@ impl GraphClient {
         let verdict = matches!(
             &error,
             MsgraphClientStdError::Send(
-                MsgraphSendError::Api { .. } | MsgraphSendError::UnexpectedRedirect
+                MsgraphSendError::Api(_) | MsgraphSendError::UnexpectedRedirect
             )
         );
         let unanswered = !verdict && wire::read(&self.exchange, Exchange::written);
@@ -1663,6 +1667,8 @@ fn message_meta(message: &MsgraphMessage) -> PimdirDerivation {
     };
     let from: Vec<PimdirAddress> = message.from.iter().map(address).collect();
     let first = from.first();
+    let to = message.to_recipients.as_option();
+    let cc = message.cc_recipients.as_option();
 
     PimdirMailSummary {
         message_id: message.internet_message_id.as_deref().and_then(message_id),
@@ -1678,8 +1684,8 @@ fn message_meta(message: &MsgraphMessage) -> PimdirDerivation {
         attachment: message.has_attachments,
         // NOTE: read with the body alone, never off a row.
         invitation: None,
-        to: message.to_recipients.iter().map(address).collect(),
-        cc: message.cc_recipients.iter().map(address).collect(),
+        to: to.into_iter().flatten().map(address).collect(),
+        cc: cc.into_iter().flatten().map(address).collect(),
         bcc: Vec::new(),
         from,
     }
@@ -1966,18 +1972,18 @@ mod tests {
 
     #[test]
     fn only_a_410_counts_as_an_expired_link() {
-        let expired = MsgraphClientStdError::Send(MsgraphSendError::Api {
-            status: 410,
-            code: "syncStateNotFound".into(),
-            message: "gone".into(),
-        });
+        let api = |status, code: &str| {
+            MsgraphClientStdError::Send(MsgraphSendError::Api(Box::new(MsgraphApiError {
+                status,
+                code: code.into(),
+                ..Default::default()
+            })))
+        };
+
+        let expired = api(410, "syncStateNotFound");
         assert!(is_expired_link(&expired));
 
-        let denied = MsgraphClientStdError::Send(MsgraphSendError::Api {
-            status: 403,
-            code: "accessDenied".into(),
-            message: "no".into(),
-        });
+        let denied = api(403, "accessDenied");
         assert!(!is_expired_link(&denied));
         let io = MsgraphClientStdError::Io(std::io::Error::other("reset"));
         assert!(!is_expired_link(&io));
@@ -2132,16 +2138,15 @@ mod tests {
 
     #[test]
     fn a_batch_throttled_as_a_whole_is_sent_again() {
-        let throttled = MsgraphClientStdError::Send(MsgraphSendError::Api {
-            status: 429,
-            code: String::from("TooManyRequests"),
-            message: String::new(),
-        });
-        let refused = MsgraphClientStdError::Send(MsgraphSendError::Api {
-            status: 403,
-            code: String::from("ErrorAccessDenied"),
-            message: String::new(),
-        });
+        let api = |status, code: &str| {
+            MsgraphClientStdError::Send(MsgraphSendError::Api(Box::new(MsgraphApiError {
+                status,
+                code: code.into(),
+                ..Default::default()
+            })))
+        };
+        let throttled = api(429, "TooManyRequests");
+        let refused = api(403, "ErrorAccessDenied");
 
         assert!(is_throttled(&throttled));
         assert!(!is_throttled(&refused));

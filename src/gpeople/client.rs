@@ -26,7 +26,7 @@ use io_gpeople::v1::{
     rest::people::{
         GpeoplePerson, GpeoplePersonField,
         connections::list::GpeopleConnectionsListParams,
-        vcard::{GPEOPLE_PERSON_STASH_KEY, GPEOPLE_PERSON_VCARD_FIELDS},
+        vcard::{GPEOPLE_PERSON_VCARD_FIELDS, GpeoplePersonVcard},
     },
     send::{GPEOPLE_API_BASE, GpeopleApiError, GpeopleSendError, GpeopleSendOutput},
 };
@@ -340,7 +340,10 @@ impl GpeopleClient {
         ensure_contacts(collection)?;
 
         let vcard = read_vcard(source)?;
-        let person = GpeoplePerson::from_vcard(&vcard)?;
+        let GpeoplePersonVcard { person, dropped } = GpeoplePerson::from_vcard(&vcard)?;
+        if !dropped.is_empty() {
+            warn!("people cannot hold the properties {dropped:?} of a new contact, too long");
+        }
         let uid = person.stashed_uid();
 
         let created = self
@@ -366,8 +369,8 @@ impl GpeopleClient {
     /// Replaces a person from a vCard, the update mask shrunk to what
     /// differs from the server copy and the etag guarding the write.
     ///
-    /// A masked update replaces the whole `clientData` list, so the
-    /// entries other clients own there are merged back first.
+    /// A masked update replaces each masked field whole, so what People
+    /// holds there and a vCard cannot show is merged back first.
     pub fn update_item_stream(
         &mut self,
         id: &str,
@@ -377,10 +380,16 @@ impl GpeopleClient {
         let vcard = read_vcard(source)?;
         let current = self.person(id)?;
 
-        let mut person = GpeoplePerson::from_vcard(&vcard)?;
+        let GpeoplePersonVcard {
+            mut person,
+            dropped,
+        } = GpeoplePerson::from_vcard(&vcard)?;
+        if !dropped.is_empty() {
+            warn!("people cannot hold the properties {dropped:?} of {id}, too long");
+        }
         person.resource_name = current.resource_name.clone();
 
-        let base = GpeoplePerson::from_vcard(&current.to_vcard())?;
+        let base = GpeoplePerson::from_vcard(&current.to_vcard())?.person;
         let lost = person.unremovable_properties(&base);
         if !lost.is_empty() {
             warn!("people keeps stashed properties {lost:?} of {id} the edit dropped");
@@ -391,16 +400,7 @@ impl GpeopleClient {
             return Ok(Some(current.etag));
         }
 
-        if fields.contains(&GpeoplePersonField::ClientData) {
-            let mut merged: Vec<_> = current
-                .client_data
-                .iter()
-                .filter(|entry| entry.key.as_deref() != Some(GPEOPLE_PERSON_STASH_KEY))
-                .cloned()
-                .collect();
-            merged.append(&mut person.client_data);
-            person.client_data = merged;
-        }
+        person.merge_unprojected(&current, &fields);
 
         person.etag = if_match.map_or(current.etag, str::to_owned);
 
@@ -484,6 +484,8 @@ fn read_vcard(mut source: impl Read) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::VecDeque, sync::Mutex};
+
     use super::*;
 
     /// People answers an expired sync token with a 400 as often as a 410
@@ -553,5 +555,116 @@ mod tests {
 
             assert!(Gone::is(&err), "{status}: {err:#}");
         }
+    }
+
+    /// A stream answering each request with the next scripted answer, and
+    /// keeping each request written to it.
+    struct Scripted {
+        answers: VecDeque<Vec<u8>>,
+        out: Vec<u8>,
+        writing: bool,
+        requests: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.writing {
+                self.writing = false;
+                self.out = self.answers.pop_front().unwrap_or_default();
+            }
+            let n = self.out.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.out[..n]);
+            self.out.drain(..n);
+            Ok(n)
+        }
+    }
+
+    impl Write for Scripted {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut requests = self.requests.lock().unwrap();
+            if !self.writing {
+                self.writing = true;
+                requests.push(Vec::new());
+            }
+            requests.last_mut().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// An update replaces each masked field whole: built from the vCard
+    /// alone, it would erase the second organization and the data of
+    /// another client, neither of which a vCard shows.
+    #[test]
+    fn an_update_keeps_what_the_vcard_cannot_show() {
+        let held = r#"{"resourceName":"people/c1","etag":"e1",
+            "names":[{"givenName":"John","familyName":"Doe","unstructuredName":"John Doe"}],
+            "organizations":[{"name":"Acme","title":"Engineer"},{"name":"Initech","title":"Advisor"}],
+            "clientData":[{"key":"other-client","value":"kept"}]}"#;
+        let answer = |body: &str| {
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes()
+        };
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let stream = Scripted {
+            answers: VecDeque::from([answer(held), answer(&held.replace("e1", "e2"))]),
+            out: Vec::new(),
+            writing: false,
+            requests: Arc::clone(&requests),
+        };
+        let mut client = GpeopleClient {
+            inner: GpeopleClientStd::new(stream, "token"),
+            tls: Tls::default(),
+            alive: true,
+            throttle: Arc::new(Throttle::new("gpeople")),
+        };
+
+        let current: GpeoplePerson = serde_json::from_str(held).unwrap();
+        let vcard = current.to_vcard();
+        assert!(
+            vcard.contains("Engineer") && !vcard.contains("Initech"),
+            "{vcard}"
+        );
+        // NOTE: a line People has no field for is stashed in `clientData`.
+        let edited = vcard
+            .replace("Engineer", "Director")
+            .replace("END:VCARD", "X-PET:Rex\r\nEND:VCARD");
+
+        let etag = client
+            .update_item_stream("c1", edited.as_bytes(), Some("e1"))
+            .unwrap();
+        assert_eq!(etag.as_deref(), Some("e2"));
+
+        let requests = requests.lock().unwrap();
+        let patch = String::from_utf8_lossy(&requests[1]);
+        let (head, body) = patch.split_once("\r\n\r\n").unwrap();
+        assert!(head.starts_with("PATCH "), "{head}");
+        let sent: GpeoplePerson = serde_json::from_str(body).unwrap();
+
+        let organizations: Vec<_> = sent
+            .organizations
+            .iter()
+            .map(|org| (org.name.as_deref(), org.title.as_deref()))
+            .collect();
+        assert_eq!(
+            organizations,
+            [
+                (Some("Acme"), Some("Director")),
+                (Some("Initech"), Some("Advisor"))
+            ]
+        );
+        assert!(
+            sent.client_data
+                .iter()
+                .any(|entry| entry.key.as_deref() == Some("other-client")),
+            "{:?}",
+            sent.client_data
+        );
     }
 }

@@ -46,7 +46,7 @@ use io_gcal::v3::{
             patch::GcalEventPatchParams, update::GcalEventUpdateParams,
         },
     },
-    send::{GCAL_API_BASE, GcalSendError, GcalSendOutput},
+    send::{GCAL_API_BASE, GcalApiError, GcalSendError, GcalSendOutput},
 };
 use io_pimdir::summary::calendar;
 use log::{debug, trace, warn};
@@ -164,8 +164,6 @@ impl GcalClient {
         mut run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
     ) -> Result<T, GcalClientStdError> {
         let throttle = Arc::clone(&self.throttle);
-        // NOTE: io-gcal keeps the status and message alone, so the reason
-        // is read from the message.
         let waits = GoogleWaits::new();
         throttle.call(
             1,
@@ -181,22 +179,24 @@ impl GcalClient {
                 Ok(out.response)
             },
             |err| match err {
-                GcalClientStdError::Send(GcalSendError::Api { status, message }) => waits
-                    .throttled(
-                        request,
-                        &GoogleAnswer {
-                            status: *status,
-                            message,
-                            ..Default::default()
-                        },
-                    ),
+                GcalClientStdError::Send(GcalSendError::Api(err)) => waits.throttled(
+                    request,
+                    &GoogleAnswer {
+                        status: err.status,
+                        message: &err.message,
+                        reasons: &err.reasons,
+                        detail_reasons: &err.detail_reasons,
+                        google_status: err.google_status.as_deref(),
+                    },
+                ),
                 _ => None,
             },
             |message| {
-                GcalClientStdError::Send(GcalSendError::Api {
+                GcalClientStdError::Send(GcalSendError::Api(GcalApiError {
                     status: 429,
                     message,
-                })
+                    ..Default::default()
+                }))
             },
         )
     }

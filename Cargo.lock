@@ -481,9 +481,9 @@ dependencies = [
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.10"
+version = "0.7.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c035cb64cba03dad2fb921f3e218785e8cf9a41790da5eb3a1400f62fa2be11"
+checksum = "914c195c4d7fbc5ed7f88d14cbf85914d5c664967658d43404b263913a477e82"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -500,6 +500,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce6e4c961d6cd6c9a86db418387425e8bdeaf05b3c8bc1411e6dca4c252f1453"
 dependencies = [
  "hybrid-array",
+ "rand_core",
 ]
 
 [[package]]
@@ -1133,13 +1134,13 @@ dependencies = [
 
 [[package]]
 name = "io-gcal"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0d23bf4c6cc8c4adfc657e2438698084128350787761dac5d2e7da66e664cc1"
+checksum = "541db6c96e9823a4b968a0ec6432f42a483725ca703d6b81d5b9784746eacffe"
 dependencies = [
  "anyhow",
  "ical-rs",
- "io-http 0.6.0",
+ "io-http",
  "jiff",
  "log",
  "pimalaya-stream",
@@ -1151,13 +1152,13 @@ dependencies = [
 
 [[package]]
 name = "io-gmail"
-version = "0.5.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9395ae6abe2e10289147290316e62226bedbd20a6b29fd6d9ae903d1483344c0"
+checksum = "c8c2d27c3b132ce9ebe31494ae0996a59ab89d704b0d015e451716fae7d35fa9"
 dependencies = [
  "anyhow",
- "base64",
- "io-http 0.5.0",
+ "base64-codec",
+ "io-http",
  "log",
  "pimalaya-stream",
  "serde",
@@ -1168,13 +1169,13 @@ dependencies = [
 
 [[package]]
 name = "io-gpeople"
-version = "0.6.0"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41b759c1a47fc928782416f373b41ce04204c3506c5a69cc9ad5e05419b8342d"
+checksum = "ee81fd1de9af948d5d86d5ab9d423c12f2888e051c97380841932aed055d462c"
 dependencies = [
  "anyhow",
  "base64-codec",
- "io-http 0.6.0",
+ "io-http",
  "log",
  "pimalaya-stream",
  "serde",
@@ -1186,14 +1187,14 @@ dependencies = [
 
 [[package]]
 name = "io-http"
-version = "0.5.0"
-source = "git+https://github.com/pimalaya/io-http?rev=e1815307771c1ec65a86b77256d46c33241d3038#e1815307771c1ec65a86b77256d46c33241d3038"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d195f9fce7b6202be9ec43c8f93e057006ddd5c9223258789606839aea62182"
 dependencies = [
  "anyhow",
- "base64",
+ "base64-codec",
  "httparse",
  "log",
- "memchr",
  "pimalaya-stream",
  "secrecy",
  "thiserror",
@@ -1201,31 +1202,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "io-http"
-version = "0.6.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9086cd840a757b9dd4105caad54a59fdb440c49be33882491a07274ca32e06"
-dependencies = [
- "base64-codec",
- "httparse",
- "log",
- "secrecy",
- "thiserror",
- "url",
-]
-
-[[package]]
 name = "io-imap"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dda12297289e689f40fc2dd288dfb6be078bac9ded42cc2a9e854e0d8e84e2b"
+checksum = "e2af503005e34f9fc93243f97964eb250fb8f611073fef360ef96cbd643410a4"
 dependencies = [
  "anyhow",
- "base64",
+ "base64-codec",
  "chrono",
  "imap-codec",
  "io-sasl",
  "log",
+ "mime-rs",
  "pimalaya-stream",
  "rand",
  "secrecy",
@@ -1235,13 +1223,14 @@ dependencies = [
 
 [[package]]
 name = "io-msgraph"
-version = "0.7.1"
-source = "git+https://github.com/pimalaya/io-msgraph?rev=92c28d5d8b44963a66eb1cb15017945f080f8ca1#92c28d5d8b44963a66eb1cb15017945f080f8ca1"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74a21fc14a05e97355874bf7c7a87955c433b1b84a1eaca9b828cf0edd43e052"
 dependencies = [
  "anyhow",
  "base64-codec",
  "ical-rs",
- "io-http 0.6.0",
+ "io-http",
  "jiff",
  "log",
  "pimalaya-stream",
@@ -1253,16 +1242,16 @@ dependencies = [
 
 [[package]]
 name = "io-oauth"
-version = "0.3.1"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ada4f4b661b47b6e6d69e15ff342653f40446866762e1744270d721eb3a92276"
+checksum = "84b1c9414c0d8b0349553c891962d54aa88b2287555d0893fdae95a0729b0dcf"
 dependencies = [
  "anyhow",
- "base64",
- "io-http 0.5.0",
+ "base64-codec",
+ "getrandom 0.4.3",
+ "io-http",
  "log",
  "pimalaya-stream",
- "rand",
  "rsa",
  "secrecy",
  "serde",
@@ -1307,11 +1296,11 @@ dependencies = [
 
 [[package]]
 name = "io-sasl"
-version = "0.1.0"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68c646c1b97cc26d3ffbffac5db3a242f5aa58f77d0cfe4df986df68c926949d"
+checksum = "41b6725f5378a27ba94468ff1663ead20f612fa16b70839af132dca27dabfe3f"
 dependencies = [
- "base64",
+ "base64-codec",
  "hmac",
  "log",
  "pbkdf2",
@@ -1323,12 +1312,12 @@ dependencies = [
 
 [[package]]
 name = "io-smtp"
-version = "0.6.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "54db4f8a0730a0f604c35b4c620310715823b01fa3d561ab5b830ddd453d95b7"
+checksum = "09a8e02db7429c3b70b01ca53c62cc1790a9777575b5d5d597fb837a2c435798"
 dependencies = [
  "anyhow",
- "base64",
+ "base64-codec",
  "bounded-static",
  "bounded-static-derive",
  "chumsky",
@@ -1343,12 +1332,12 @@ dependencies = [
 
 [[package]]
 name = "io-webdav"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8fe0634d06f91a00dd0a36431c072ebd3482b6731bf7cc2f9e7e8b645bdf3f84"
+checksum = "57ee0c0d0cf32f762d1a9b6cb704f36ea970acefa0c95b8adeeaaf182bc450f6"
 dependencies = [
  "anyhow",
- "io-http 0.6.0",
+ "io-http",
  "log",
  "memchr",
  "pimalaya-stream",
@@ -1651,7 +1640,7 @@ dependencies = [
  "io-gcal",
  "io-gmail",
  "io-gpeople",
- "io-http 0.6.0",
+ "io-http",
  "io-imap",
  "io-msgraph",
  "io-oauth",
@@ -2150,12 +2139,13 @@ checksum = "323c417e1d9665a65b263ec744ba09030cfb277e9daa0b018a4ab62e57bc8189"
 
 [[package]]
 name = "rsa"
-version = "0.10.0-rc.20"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2389407c34c6039d7c8740520ec758090883c5b92df93a5edada2779256bf2e0"
+checksum = "23e77fd77e0dea28b3011fd62d15445b7de7959333b0276d930e03be0f755699"
 dependencies = [
  "const-oid",
  "crypto-bigint",
+ "crypto-common",
  "crypto-primes",
  "digest",
  "hmac",

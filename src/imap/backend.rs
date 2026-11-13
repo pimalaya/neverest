@@ -14,13 +14,14 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::DateTime;
 use io_imap::{
-    client::ImapClient as _,
+    client::{ImapClient as _, ImapClientError},
     rfc3501::{
         append::ImapMessageAppendOptions, copy::ImapMessageCopyOptions,
         fetch::ImapMessageFetchOptions, search::ImapMessageSearchOptions,
         select::ImapMailboxSelectOptions, store::ImapMessageStoreOptions,
     },
     rfc6851::r#move::ImapMessageMoveOptions,
+    send::ImapOutput,
     types::{
         core::{AString, Atom, QuotedChar, Vec1},
         datetime::NaiveDate as ImapDate,
@@ -37,7 +38,7 @@ use io_pimdir::{
     remote::{PimdirEnumerate, PimdirHead, PimdirListing},
     summary::{PimdirDerivation, mail},
 };
-use log::debug;
+use log::{debug, warn};
 
 use crate::{
     client::{EnumEntry, Enumeration, Gone, Held, Listed, Renamed},
@@ -60,7 +61,7 @@ impl ImapClient {
             .try_into()
             .map_err(|_| anyhow!("Invalid IMAP list pattern"))?;
 
-        let rows = self.list(reference, pattern)?;
+        let rows = data_of("LIST", self.list(reference, pattern)?);
 
         let mut mailboxes: Vec<Collection> = rows
             .into_iter()
@@ -75,7 +76,7 @@ impl ImapClient {
                     mbox,
                     [StatusDataItemName::Messages, StatusDataItemName::Unseen][..].into(),
                 )?;
-                apply_status(mailbox, items);
+                apply_status(mailbox, data_of("STATUS", items));
             }
         }
 
@@ -94,8 +95,7 @@ impl ImapClient {
             .try_into()
             .map_err(|_| anyhow!("Invalid IMAP list pattern"))?;
 
-        Ok(self
-            .list(reference, pattern)?
+        Ok(data_of("LIST", self.list(reference, pattern)?)
             .into_iter()
             .filter(is_selectable)
             .filter_map(|row| {
@@ -197,7 +197,7 @@ impl ImapClient {
         held: &Held<'_>,
     ) -> Result<Option<Enumeration>> {
         let mbox = parse_mailbox(mailbox)?;
-        let data = self.select_delta(mbox, validity, modseq)?;
+        let data = data_of("SELECT", self.select_delta(mbox, validity, modseq)?);
         self.mark_selected(mailbox);
         let uid_validity = data.uid_validity.map(|v| v.get()).unwrap_or(validity.get());
         if uid_validity != validity.get() {
@@ -245,7 +245,10 @@ impl ImapClient {
         };
 
         let mbox = parse_mailbox(mailbox)?;
-        let select = self.select(mbox, ImapMailboxSelectOptions::default())?;
+        let select = data_of(
+            "SELECT",
+            self.select(mbox, ImapMailboxSelectOptions::default())?,
+        );
         self.mark_selected(mailbox);
         let uid_validity = select.uid_validity.map(|v| v.get()).unwrap_or(0);
         if renumbered(held, uid_validity) {
@@ -256,13 +259,14 @@ impl ImapClient {
         let uids: Vec<u32> = if select.exists == Some(0) {
             Vec::new()
         } else {
-            self.search(
+            let found = self.search(
                 Vec1::from(SearchKey::Since(day)),
                 ImapMessageSearchOptions { uid: true },
-            )?
-            .into_iter()
-            .map(NonZeroU32::get)
-            .collect()
+            )?;
+            rows_of("SEARCH", found)?
+                .into_iter()
+                .map(NonZeroU32::get)
+                .collect()
         };
 
         let (items, bytes) = self.list_uids(&uids, uid_validity, held)?;
@@ -291,7 +295,10 @@ impl ImapClient {
         };
 
         let mbox = parse_mailbox(mailbox)?;
-        let select = self.select(mbox, ImapMailboxSelectOptions::default())?;
+        let select = data_of(
+            "SELECT",
+            self.select(mbox, ImapMailboxSelectOptions::default())?,
+        );
         self.mark_selected(mailbox);
         let uid_validity = select.uid_validity.map(|v| v.get()).unwrap_or(0);
         let highest_mod_seq = select.highest_mod_seq.unwrap_or(0);
@@ -397,10 +404,11 @@ impl ImapClient {
             return Ok(Vec::new());
         }
 
-        let uids = self.search(
+        let found = self.search(
             Vec1::from(SearchKey::All),
             ImapMessageSearchOptions { uid: true },
         )?;
+        let uids = rows_of("SEARCH", found)?;
         Ok(uids.into_iter().map(|uid| uid.get().to_string()).collect())
     }
 
@@ -492,8 +500,8 @@ impl ImapClient {
         }
         let criteria = Vec1::try_from(criteria).map_err(|_| anyhow!("Empty IMAP search"))?;
 
-        let mut uids: Vec<u32> = self
-            .search(criteria, ImapMessageSearchOptions { uid: true })?
+        let found = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
+        let mut uids: Vec<u32> = rows_of("SEARCH", found)?
             .into_iter()
             .map(NonZeroU32::get)
             .filter(|uid| above.is_none_or(|above| *uid > above))
@@ -510,7 +518,7 @@ impl ImapClient {
             let Some(set) = uid_set(chunk)? else {
                 continue;
             };
-            let data = self.fetch(
+            let fetched = self.fetch(
                 set,
                 uid_flag_names(),
                 ImapMessageFetchOptions {
@@ -519,7 +527,8 @@ impl ImapClient {
                 },
             )?;
             rows.extend(
-                data.into_values()
+                rows_of("FETCH", fetched)?
+                    .into_values()
                     .filter_map(|items| spine(&items.into_inner())),
             );
         }
@@ -537,7 +546,7 @@ impl ImapClient {
             let Some(set) = uid_set(chunk)? else {
                 continue;
             };
-            let data = self.fetch(
+            let fetched = self.fetch(
                 set,
                 meta_names()?,
                 ImapMessageFetchOptions {
@@ -545,7 +554,7 @@ impl ImapClient {
                     ..Default::default()
                 },
             )?;
-            for items in data.into_values() {
+            for items in rows_of("FETCH", fetched)?.into_values() {
                 let Some((uid, meta, read)) = meta_from(items.into_inner()) else {
                     continue;
                 };
@@ -563,7 +572,8 @@ impl ImapClient {
             return Ok(());
         }
         let mbox = parse_mailbox(mailbox)?;
-        self.select(mbox, ImapMailboxSelectOptions::default())?;
+        let select = self.select(mbox, ImapMailboxSelectOptions::default())?;
+        data_of("SELECT", select);
         self.mark_selected(mailbox);
         Ok(())
     }
@@ -679,6 +689,25 @@ impl ImapClient {
             .collect())
     }
 
+    /// Leaves the connection fit for the next command after a batched body
+    /// fetch failed with `err`: kept after a tagged `NO` or `BAD`, whose
+    /// answer was read whole, opened again after any other failure.
+    pub fn recover(&mut self, err: &anyhow::Error) -> Result<()> {
+        let imap = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<ImapClientError>());
+        if imap.is_some_and(|err| err.status().is_some()) {
+            return Ok(());
+        }
+
+        match imap.is_some_and(ImapClientError::is_connection_lost) {
+            true => debug!("imap connection lost, opening it again"),
+            false => debug!("imap answer left unread, opening the connection again"),
+        }
+        self.reconnect()
+            .context("Cannot open the IMAP connection again")
+    }
+
     /// Streams one message's raw RFC 5322 bytes into `sink` without flipping
     /// `\Seen` (BODY.PEEK[]); a UID answered with nothing is [`Gone`].
     pub fn get_message_stream(&mut self, mailbox: &str, id: &str, sink: impl Write) -> Result<()> {
@@ -739,7 +768,8 @@ impl ImapClient {
         let value = AString::try_from(message_id.to_string())
             .map_err(|_| anyhow!("Invalid IMAP search Message-ID value"))?;
         let criteria = Vec1::from(SearchKey::Header(field, value));
-        let uids = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
+        let found = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
+        let uids = data_of("SEARCH", found);
 
         let uid = uids.into_iter().max().map(|uid| uid.to_string());
         if uid.is_none() {
@@ -759,7 +789,8 @@ impl ImapClient {
         let value = AString::try_from(format!("<{message_id}>"))
             .map_err(|_| anyhow!("Invalid IMAP search Message-ID value"))?;
         let criteria = Vec1::from(SearchKey::Header(field, value));
-        let uids = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
+        let found = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
+        let uids = rows_of("SEARCH", found)?;
 
         Ok(uids.into_iter().min().map(|uid| uid.to_string()))
     }
@@ -798,7 +829,7 @@ impl ImapClient {
             .try_into()
             .map_err(|_| anyhow!("Invalid IMAP mailbox {parent}"))?;
 
-        let rows = self.list(reference, pattern)?;
+        let rows = data_of("LIST", self.list(reference, pattern)?);
         let Some((_, delimiter, attributes)) = rows.first() else {
             return Err(anyhow::Error::new(Refusal(format!(
                 "No IMAP mailbox {parent} to create {name} under"
@@ -848,8 +879,7 @@ impl ImapClient {
             .try_into()
             .map_err(|_| anyhow!("Invalid IMAP list pattern"))?;
 
-        Ok(self
-            .list(reference, pattern)?
+        Ok(data_of("LIST", self.list(reference, pattern)?)
             .into_iter()
             .map(|row| {
                 let delimiter = row.1.as_ref().map(|delimiter| delimiter.inner());
@@ -1079,6 +1109,36 @@ struct Spine {
 struct Meta {
     flags: BTreeSet<Flag>,
     derivation: PimdirDerivation,
+}
+
+/// The result of `command`, warning of the server's alerts and of the
+/// response lines skipped for not decoding.
+fn data_of<T>(command: &str, output: ImapOutput<T>) -> T {
+    for alert in &output.alerts {
+        warn!("server sent an alert: {alert}");
+    }
+
+    if !output.skipped.is_empty() {
+        let count = output.skipped.len();
+        warn!("skipped {count} unreadable line(s) of the {command} response");
+    }
+
+    output.data
+}
+
+/// The rows a listing `command` answered, refused when a line of the
+/// response was skipped for not decoding: read short, it states removals.
+fn rows_of<T>(command: &str, output: ImapOutput<T>) -> Result<T> {
+    for alert in &output.alerts {
+        warn!("server sent an alert: {alert}");
+    }
+
+    if !output.skipped.is_empty() {
+        let count = output.skipped.len();
+        bail!("IMAP {command} response holds {count} line(s) that do not decode");
+    }
+
+    Ok(output.data)
 }
 
 /// The lean FETCH item set for enumeration: UID + FLAGS only (no ENVELOPE).
@@ -1611,6 +1671,51 @@ mod tests {
             };
             let uids: Vec<_> = page.items.iter().map(|item| item.id.as_str()).collect();
             assert_eq!(uids, ["7"], "{:?}", request.listing);
+        }
+    }
+
+    /// A row of a listing that does not decode is no message gone: the
+    /// page fails, where one read without the row would state it removed.
+    #[test]
+    fn a_listing_row_that_does_not_decode_fails_the_page() {
+        let message = |uid, flags: &[&str]| FakeMessage {
+            uid,
+            flags: flags.iter().map(|flag| flag.to_string()).collect(),
+            message_id: format!("m{uid}@x"),
+        };
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 2,
+                highest_mod_seq: 9,
+                // NOTE: `]` is no atom character (RFC 9051 §9).
+                messages: vec![message(7, &[]), message(8, &["a]b"])],
+                states_exists: true,
+            },
+            false,
+        );
+        let request = PimdirEnumerate {
+            listing: PimdirListing::Round {
+                cursor: None,
+                band: false,
+            },
+            scope: PimdirScope::unbounded(),
+        };
+
+        for bound in [&[][..], &["7", "8"][..]] {
+            let mut client =
+                ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+            let handles: HashSet<String> = bound.iter().map(|uid| uid.to_string()).collect();
+            let held = Held {
+                handles: &handles,
+                checkpoint: Some(&encode_checkpoint(2, 9)),
+                coverage: None,
+            };
+
+            let err = match client.enumerate("INBOX", &request, held) {
+                Ok(_) => panic!("a page without the message 8, bound {bound:?}"),
+                Err(err) => err,
+            };
+            assert!(err.to_string().contains("do not decode"), "{err:#}");
         }
     }
 

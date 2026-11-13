@@ -300,7 +300,7 @@ Upgrading from 0.3.0:
 
 - Bumped io-http to 0.6.
 
-- Bumped io-msgraph to 0.7.
+- Bumped io-msgraph to 0.7 at 92c28d5, pinned by git until a release carries a message's header fields.
 
 - Bumped pimalaya-cli to 0.4.
 
@@ -320,9 +320,9 @@ Upgrading from 0.3.0:
 
 ### Fixed
 
-- Fixed a message being keyed otherwise by its listing than by its body, so stored twice or never matched with the copy another client keyed: a `Message-ID` wrapped in comments (IMAP, Gmail, Graph), a header value Gmail serves folded, and on a targeted IMAP summary read a padded subject or an encoded word in a charset that decodes nothing.
+- Fixed a message being keyed otherwise by its listing than by its body, so stored twice or never matched with the copy another client keyed: a `Message-ID` wrapped in comments (IMAP, Gmail, Graph), a header value Gmail serves folded, a subject, a date or a sender Graph decodes otherwise than the message states it, and on a targeted IMAP summary read a padded subject or an encoded word in a charset that decodes nothing.
 
-  IMAP reads the header fields it lists by on that read too, no `ENVELOPE`, and every field is read by pimdir's own rules (STORAGE Annex A.1). A message keyed by an earlier build keeps its key.
+  IMAP reads the header fields it lists by on that read too, no `ENVELOPE`, Graph reads the header fields of a message (`internetMessageHeaders`) wherever it names one, and every field is read by pimdir's own rules (STORAGE Annex A.1). A Graph message listing no header field is named from what Graph decodes. A message keyed by an earlier build keeps its key.
 
 - Fixed a Graph mail folder synced under `--since` dropping every message its closing delta pass did not list, whatever its date and with no guard: a pass answered short emptied the folder's replica, and a two-endpoint account pushed the deletes.
 

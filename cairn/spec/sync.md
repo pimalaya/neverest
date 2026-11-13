@@ -1209,7 +1209,11 @@ A message is named at the `Meta` tier as its body would name it (Annex A.1, pimd
 
 - **IMAP** SHALL read `BODY.PEEK[HEADER.FIELDS (Date From To Cc Bcc Subject Message-ID In-Reply-To Content-Type)]` with `RFC822.SIZE`, and SHALL NOT read an `ENVELOPE`, whose addresses are the server's parse.
 - **Gmail** SHALL lay the metadata headers out as the header block they came from, each field from its first entry, a folded value unfolded by the derivation.
-- **Graph** serves `subject`, `sentDateTime` and its addresses decoded alone: a row is named from them as Graph states them, which stands until the body is read (Annex A.1), and its `internetMessageId` SHALL be read as a `Message-ID` field is, by io-pimdir's `message_id`. `internetMessageHeaders`, the raw read Annex A.1 names for Graph, is not read: io-msgraph 0.7 does not model the property. A Graph member whose decoded summary differs from Annex A.1's reading is so minted apart from its own message where another reading wrote its row, a missed dedup the run reports `disagreed` when the row is its own create.
+- **Graph** SHALL select `internetMessageHeaders` on every read naming a member: the whole-folder delta, a band page, a listing by arrival, the summary batch of a delta or of the pass, and a `Meta` fetch. A row listing header fields SHALL be named off them, the fields a summary reads (`Message-ID`, `In-Reply-To`, `Subject`, `From`, `To`, `Cc`, `Bcc`, `Date`, `Content-Type`) laid out as the header block they came from, each from its first entry of that name. Its size and its attachment mark stay Graph's own (`PidTagMessageSize`, `hasAttachments`), the mark being the top-level `Content-Type`'s where Graph states none. The pass closing a round under a scope names no member, and SHALL select ids, dates and flags alone.
+
+  A row listing no header field, its read having selected none (a delta link made before they were selected carries its own `$select`) or Graph holding none for the message, SHALL be named from `subject`, `sentDateTime` and the addresses as Graph states them, its `internetMessageId` read as a `Message-ID` field is, by io-pimdir's `message_id`: values of the server's own making, which stand until the body is read (Annex A.1). Such a member whose decoded summary differs from Annex A.1's reading is minted apart from its own message where another reading wrote its row, a missed dedup the run reports `disagreed` when the row is its own create.
+
+  The scope of a Graph listing is still read off `sentDateTime`, the member Graph filters and orders by; the `date` a row is named by is its `Date` field's, which the engine's own scope check reads.
 
 A hint already derived (the `Message-ID` an add is searched by) SHALL be compared as it stands, never parsed again.
 
@@ -1222,8 +1226,18 @@ The streamed tier reads a header prefix rather than the whole body, so it SHALL 
 
 #### Scenario: A folded subject and no Message-ID
 - **GIVEN** the message of vectors/fixtures/mail-folded-subject.eml
-- **WHEN** it is listed over IMAP or over Gmail
+- **WHEN** it is listed over IMAP, over Gmail, or over Graph by a row listing its header fields
 - **THEN** its `alt:` key holds the subject unfolded, its two encoded words joined and its padding trimmed, as the vectors state
+
+#### Scenario: A Graph row listing its header fields
+- **GIVEN** a Graph row whose `internetMessageHeaders` lists the fields of one of the ten fixtures under tests/vectors/fixtures, repeated names kept in their order, beside a `subject`, a `sentDateTime`, a `from` and an `internetMessageId` stating another message
+- **WHEN** the row is named
+- **THEN** its key, its `subject`, `date`, `sender`, `sender_name` and `in_reply_to` are those vectors/summaries.json states for the fixture, a field stated twice read from its first entry (src/msgraph/client.rs `a_row_listing_its_header_fields_is_named_as_the_vectors_state`)
+
+#### Scenario: A Graph row listing no header field
+- **GIVEN** a Graph row carrying no `internetMessageHeaders`
+- **WHEN** the row is named
+- **THEN** it is named from `internetMessageId`, `subject`, `sentDateTime` and `from` as Graph states them, the `Message-ID` of vectors/fixtures/mail-id-comment.eml still keyed `comment-1@example.org`
 
 #### Scenario: A non-ASCII subject reaches a reader readable
 - GIVEN a message whose `Subject:` is RFC 2047 encoded

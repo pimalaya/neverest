@@ -79,8 +79,10 @@ use crate::{
 };
 
 /// The summary `$select`: what names a message (pimdir STORAGE Annex A.1)
-/// and its flags, so a page is small enough to hold a thousand.
-pub(super) const SUMMARY_SELECT: &str = "id,subject,from,toRecipients,ccRecipients,sentDateTime,receivedDateTime,isRead,isDraft,flag,hasAttachments,internetMessageId,conversationId,parentFolderId";
+/// and its flags. `internetMessageHeaders` is the raw read a member is
+/// named from, and Graph answers it whole or not at all: every header
+/// field of the message on each row, the trace fields included.
+pub(super) const SUMMARY_SELECT: &str = "id,subject,from,toRecipients,ccRecipients,sentDateTime,receivedDateTime,isRead,isDraft,flag,hasAttachments,internetMessageId,internetMessageHeaders,conversationId,parentFolderId";
 
 /// The `$select` of a link made under a scope: the id, the date the scope
 /// reads and what the flags map from, so its first pass over a whole
@@ -89,8 +91,9 @@ pub(super) const IDS_SELECT: &str = "id,sentDateTime,isRead,isDraft,flag";
 
 /// The messages a page holds at most: `Prefer: odata.maxpagesize` on every
 /// delta request (Graph caps it at 512 for message delta), `$top` on a band
-/// listing. With [`SUMMARY_SELECT`] a delta page of a thousand answered in
-/// under three seconds (measured on a test tenant, 2026-10-07).
+/// listing. A delta page of a thousand answered in under three seconds
+/// (measured on a test tenant, 2026-10-07) with the [`SUMMARY_SELECT`] of
+/// then, which named no header field; not measured since.
 pub(super) const PAGE_SIZE: u32 = 1000;
 
 /// The messages a page of a listing by arrival holds at most (`$top`): a
@@ -720,7 +723,7 @@ enum Change {
     /// A member the store binds, listed by its marks.
     Bound(Marks),
     /// A member the store does not bind, named by its row's summary.
-    Named(Box<MsgraphMessage>),
+    Named(Box<Named>),
     /// A member the store does not bind, whose summary is to read.
     Unread,
 }
@@ -745,7 +748,7 @@ fn delta(
         } else if held.holds(&message.id) {
             Change::Bound(Marks::of(&message))
         } else if let Link::Summary(_) = link {
-            Change::Named(Box::new(message))
+            Change::Named(Box::new(Named::of(message)))
         } else {
             Change::Unread
         }
@@ -770,7 +773,7 @@ fn delta(
             Change::Removed => listing.vanish(folder, id),
             Change::Out => trace!("change of {id} out of scope, dropped"),
             Change::Bound(marks) => listing.bare(&id, marks),
-            Change::Named(message) => listing.named(folder, *message),
+            Change::Named(named) => listing.list(folder, *named),
             Change::Unread => unread.push(id),
         }
     }
@@ -904,16 +907,16 @@ struct Listing {
 impl Listing {
     /// Lists `message` named by its summary, noting the size Graph states.
     fn named(&mut self, folder: &mut Folder, message: MsgraphMessage) {
-        self.bytes += serde_json::to_vec(&message).map_or(0, |json| json.len() as u64);
-        if let Some(size) = message_size(&message).filter(|size| *size > 0) {
-            folder.sizes.push((message.id.clone(), size));
+        self.list(folder, Named::of(message));
+    }
+
+    /// Lists a member its row named, noting the size Graph states.
+    fn list(&mut self, folder: &mut Folder, named: Named) {
+        self.bytes += named.bytes;
+        if let Some(size) = named.size {
+            folder.sizes.push((named.entry.id.clone(), size));
         }
-        self.items.push(EnumEntry {
-            flags: message_flags(&message),
-            revision: None,
-            meta: Some(message_meta(&message)),
-            id: message.id,
-        });
+        self.items.push(named.entry);
     }
 
     /// Lists a member the store binds by its flags, the store naming it.
@@ -971,6 +974,31 @@ impl Listing {
             bytes: self.bytes,
             narrowed: self.narrowed,
             enumerated: self.enumerated,
+        }
+    }
+}
+
+/// A member its row names, the row and its header fields dropped.
+#[derive(Debug)]
+struct Named {
+    entry: EnumEntry,
+    /// The size Graph states for the message.
+    size: Option<u64>,
+    /// The octets the row took.
+    bytes: u64,
+}
+
+impl Named {
+    fn of(message: MsgraphMessage) -> Self {
+        Self {
+            size: message_size(&message).filter(|size| *size > 0),
+            bytes: serde_json::to_vec(&message).map_or(0, |json| json.len() as u64),
+            entry: EnumEntry {
+                flags: message_flags(&message),
+                revision: None,
+                meta: Some(message_meta(&message)),
+                id: message.id,
+            },
         }
     }
 }
@@ -1389,7 +1417,11 @@ mod tests {
                     band.until.unwrap_or_default()
                 )
             });
-            MsgraphMessagesListResponse { value, next_link }
+            MsgraphMessagesListResponse {
+                value,
+                next_link,
+                ..Default::default()
+            }
         }
 
         /// A page of the messages received from `from` on, newest first,
@@ -1411,7 +1443,11 @@ mod tests {
                 .collect();
             self.counts.received_rows += value.len();
             let next_link = (end < ids.len()).then(|| format!("received|{from}|{end}"));
-            MsgraphMessagesListResponse { value, next_link }
+            MsgraphMessagesListResponse {
+                value,
+                next_link,
+                ..Default::default()
+            }
         }
 
         /// A page of `ids` from `offset`, with the link to the next one or,

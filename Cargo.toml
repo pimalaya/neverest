@@ -80,5 +80,6 @@ io-oauth = { version = "0.3", default-features = false, features = ["jwt-bearer"
 
 [patch.crates-io]
 io-http = { git = "https://github.com/pimalaya/io-http", rev = "e1815307771c1ec65a86b77256d46c33241d3038" }
+io-msgraph = { git = "https://github.com/pimalaya/io-msgraph", rev = "92c28d5d8b44963a66eb1cb15017945f080f8ca1" }
 io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "cd33f0e51c93a6276d3b2089e409780bcfbda006" }
 pimalaya-cli = { git = "https://github.com/pimalaya/cli", rev = "eb379626e01e31bed11cbe7f06c252262e810279" }

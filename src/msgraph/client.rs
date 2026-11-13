@@ -72,7 +72,7 @@ use io_pimdir::{
     remote::PimdirEnumerate,
     summary::{
         PimdirAddress, PimdirDerivation,
-        mail::{PimdirMailSummary, message_id},
+        mail::{PimdirMailSummary, derive_meta, message_id},
     },
 };
 use log::{debug, trace, warn};
@@ -634,30 +634,19 @@ impl GraphClient {
     }
 
     /// What names each of a message-id set, one summary get a message, its
-    /// size expanded. The `Meta` tier is an upgrade a frontend asks for
-    /// now and then, every listed member arriving named.
+    /// header fields selected and its size expanded. The `Meta` tier is an
+    /// upgrade a frontend asks for now and then, every listed member
+    /// arriving named.
     fn fetch_metas(
         &mut self,
         _mailbox: &str,
         ids: &[&str],
     ) -> Result<Vec<(String, PimdirDerivation)>> {
-        let user = user_path(&self.inner.user_id);
         let mut metas = Vec::with_capacity(ids.len());
         for id in ids {
-            let url = Url::parse(MSGRAPH_API_BASE)
-                .and_then(|base| base.join(&format!("{user}/messages/{id}")))
-                .map(|mut url| {
-                    url.query_pairs_mut()
-                        .append_pair("$select", mail::SUMMARY_SELECT)
-                        .append_pair("$expand", SIZE_EXPAND);
-                    url
-                })
-                .with_context(|| format!("Cannot build the URL of message {id}"))?;
+            let select = Some(mail::SUMMARY_SELECT);
             let message = self
-                .op(|client| {
-                    let coroutine = MsgraphSend::<MsgraphMessage>::get(&client.auth, url.clone());
-                    client.run(coroutine)
-                })
+                .op(|client| client.message_get(id, select, Some(SIZE_EXPAND)))
                 .with_context(|| format!("Get message {id} error"))?;
             metas.push((id.to_string(), message_meta(&message)));
         }
@@ -1627,12 +1616,47 @@ fn message_date(message: &MsgraphMessage) -> Option<DateTime<FixedOffset>> {
     DateTime::parse_from_rfc3339(raw).ok()
 }
 
-/// What names a delta row at the `Meta` tier (pimdir STORAGE Annex A.1).
+/// The header fields a `Meta`-tier summary reads, among those a row lists.
+const SUMMARY_FIELDS: [&str; 9] = [
+    "Message-ID",
+    "In-Reply-To",
+    "Subject",
+    "From",
+    "To",
+    "Cc",
+    "Bcc",
+    "Date",
+    "Content-Type",
+];
+
+/// What names a row at the `Meta` tier (pimdir STORAGE Annex A.1).
 ///
-/// `internetMessageId` is read as a `Message-ID` field is, by io-pimdir's
-/// own reading. The subject, the date and the addresses are values Graph
-/// decodes itself, which stand as it states them until the body is read.
+/// A row listing its header fields is named off them, each from its first
+/// entry, by the derivation a body is read with. A row listing none is
+/// named from `internetMessageId`, read as a `Message-ID` field is, and
+/// from the subject, the date and the addresses Graph decodes itself,
+/// which stand as it states them until the body is read.
 fn message_meta(message: &MsgraphMessage) -> PimdirDerivation {
+    // NOTE: the MAPI size, when the read expanded it; else none, filled
+    // from the blob length at the `Full` tier.
+    let size = message_size(message).filter(|size| *size > 0);
+
+    let fields = &message.internet_message_headers;
+    if !fields.is_empty() {
+        let mut header = String::new();
+        for name in SUMMARY_FIELDS {
+            let stated = fields
+                .iter()
+                .find(|field| field.name.eq_ignore_ascii_case(name));
+            if let Some(field) = stated {
+                header.push_str(&format!("{name}: {}\r\n", field.value));
+            }
+        }
+        header.push_str("\r\n");
+
+        return derive_meta(header.as_bytes(), size, message.has_attachments);
+    }
+
     let address = |recipient: &MsgraphRecipient| PimdirAddress {
         address: PimdirAddress::canonical(recipient.email_address.address.as_deref().unwrap_or("")),
         name: recipient.email_address.name.clone(),
@@ -1648,9 +1672,7 @@ fn message_meta(message: &MsgraphMessage) -> PimdirDerivation {
         sender_name: first.and_then(|address| address.name.clone()),
         date: message_date(message)
             .map(|date| date.to_utc().to_rfc3339_opts(SecondsFormat::Secs, true)),
-        // NOTE: the MAPI size, when the read expanded it; else none, filled
-        // from the blob length at the `Full` tier.
-        size: message_size(message).filter(|size| *size > 0),
+        size,
         // NOTE: Graph states the mark itself (pimdir STORAGE Annex A.1),
         // which the walk of the parts replaces once the body is in.
         attachment: message.has_attachments,
@@ -1679,7 +1701,7 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use io_msgraph::v1::send::MsgraphSendError;
-    use io_pimdir::summary::PimdirSummary;
+    use io_pimdir::{collection::PimdirScope, summary::PimdirSummary};
 
     use super::*;
     use crate::kind::mail::{parse_body, vectors::VECTORS};
@@ -1802,6 +1824,69 @@ mod tests {
                 vector.name
             );
         }
+    }
+
+    /// A row as a read selecting the header fields answers it: `fields` as
+    /// name and value pairs in their order, repeated names kept, beside
+    /// members Graph decodes itself, which here state another message.
+    fn headed_row(fields: &[(String, String)]) -> serde_json::Value {
+        let headers: Vec<serde_json::Value> = fields
+            .iter()
+            .map(|(name, value)| serde_json::json!({ "name": name, "value": value }))
+            .collect();
+        serde_json::json!({
+            "id": "m1",
+            "subject": "As Graph decodes it",
+            "from": {"emailAddress": {"name": "Decoded", "address": "decoded@example.net"}},
+            "sentDateTime": "2001-01-01T00:00:00Z",
+            "internetMessageId": "<decoded@example.net>",
+            "internetMessageHeaders": headers,
+        })
+    }
+
+    /// A row listing its header fields is named off them as its body would
+    /// name it (pimdir STORAGE Annex A.1, vectors/summaries.json), each
+    /// field from its first entry, whatever Graph decodes beside them.
+    #[test]
+    fn a_row_listing_its_header_fields_is_named_as_the_vectors_state() {
+        for vector in &VECTORS {
+            let message: MsgraphMessage =
+                serde_json::from_value(headed_row(&vector.fields())).unwrap();
+
+            vector.assert_named(&message_meta(&message));
+        }
+    }
+
+    /// On a row listing its header fields the size and the attachment mark
+    /// stay Graph's own, the top-level `Content-Type` making the mark only
+    /// where Graph states none.
+    #[test]
+    fn a_row_listing_its_header_fields_keeps_the_size_and_the_mark_graph_states() {
+        let fields = [
+            (
+                String::from("In-Reply-To"),
+                String::from("<p-1@example.org>"),
+            ),
+            (
+                String::from("Content-Type"),
+                String::from("multipart/mixed; boundary=b"),
+            ),
+        ];
+        let row = |mark: Option<bool>| {
+            let mut row = headed_row(&fields);
+            row["singleValueExtendedProperties"] =
+                size_row("m1", 48_213)["singleValueExtendedProperties"].clone();
+            if let Some(mark) = mark {
+                row["hasAttachments"] = serde_json::json!(mark);
+            }
+            named(&serde_json::from_value(row).unwrap())
+        };
+
+        let stated = row(Some(false));
+        assert_eq!(stated.in_reply_to, ["p-1@example.org"]);
+        assert_eq!(stated.size, Some(48_213));
+        assert_eq!(stated.attachment, Some(false), "Graph's own mark");
+        assert_eq!(row(None).attachment, Some(true), "the Content-Type's");
     }
 
     /// A row stating no `internetMessageId` is keyed as its body is: the
@@ -2906,6 +2991,80 @@ mod tests {
         assert!(requests[0].contains("%24expand="), "{}", requests[0]);
         assert!(!requests[1].contains("%24expand="), "{}", requests[1]);
         assert!(!requests[2].contains("%24expand="), "{}", requests[2]);
+    }
+
+    /// Every read naming a member selects its header fields (pimdir
+    /// STORAGE Annex A.1): a band page, a listing by arrival, a
+    /// whole-folder delta, a summary batch and a summary read by id, which
+    /// names the member off them. The pass closing a round under a scope
+    /// names none, and selects none.
+    #[test]
+    fn every_read_naming_a_member_selects_its_header_fields() {
+        let vector = &VECTORS[0];
+        let page = || Step::ok(serde_json::json!({ "value": [] }));
+        let delta = || {
+            Step::ok(serde_json::json!({
+                "value": [],
+                "@odata.deltaLink": "https://graph.microsoft.com/v1.0/me/mailFolders/id-inbox/messages/delta?$deltatoken=a",
+            }))
+        };
+        let batch = Step::ok(serde_json::json!({ "responses": [
+            { "id": "0", "status": 200, "body": headed_row(&vector.fields()) },
+        ]}));
+        let (mut client, server) = session(vec![vec![
+            page(),
+            page(),
+            delta(),
+            delta(),
+            batch,
+            Step::ok(headed_row(&vector.fields())),
+        ]]);
+        client
+            .folders
+            .insert(String::from("Inbox"), String::from("id-inbox"));
+
+        use mail::MailWire;
+        client
+            .band_first("Inbox", &PimdirScope::unbounded())
+            .unwrap();
+        client
+            .received_first("Inbox", "2026-10-11T10:00:00Z")
+            .unwrap();
+        client.delta_first("Inbox", mail::SUMMARY_SELECT).unwrap();
+        client.delta_first("Inbox", mail::IDS_SELECT).unwrap();
+        let read = client.metas(&["m1"]).unwrap();
+        let fetched = client.fetch_summaries("Inbox", &["m1"]).unwrap();
+
+        let requests = server.requests().remove(0);
+        assert_eq!(requests.len(), 6);
+        for request in &requests[..3] {
+            assert!(request.contains("internetMessageHeaders"), "{request}");
+        }
+        assert!(
+            !requests[3].contains("internetMessageHeaders"),
+            "{}",
+            requests[3]
+        );
+        assert_eq!(
+            requests[5],
+            format!(
+                "GET /v1.0/me/messages/m1?%24select={}&%24expand=singleValueExtendedProperties%28%24filter%3Did+eq+%27Integer+0x0E08%27%29",
+                mail::SUMMARY_SELECT.replace(',', "%2C")
+            )
+        );
+
+        let written = server.written(0);
+        let batched = written
+            .split("POST /v1.0/$batch")
+            .nth(1)
+            .and_then(|batch| batch.split("GET /v1.0/me/messages/m1").next())
+            .unwrap_or_default();
+        assert!(batched.contains("internetMessageHeaders"), "{batched}");
+
+        assert_eq!(read.len(), 1);
+        vector.assert_named(&message_meta(&read[0]));
+        assert_eq!(fetched.len(), 1);
+        vector.assert_named(&fetched[0].1);
     }
 
     const SEND_MAIL: &str = "POST /v1.0/me/sendMail";

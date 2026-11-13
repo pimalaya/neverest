@@ -280,7 +280,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         land(dir.path(), "m1@x", "Quarterly report");
         after_run(dir.path(), &StoreConfig::default(), false, &mut None);
-        restamp_index(dir.path(), "search-draft-07");
+        restamp_index(dir.path(), "search-draft-10");
 
         let mut refreshed = None;
         after_run(dir.path(), &StoreConfig::default(), false, &mut refreshed);

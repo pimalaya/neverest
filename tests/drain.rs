@@ -317,7 +317,7 @@ fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
 fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
-    restamp_store(&fixture, "storage-draft-09");
+    restamp_store(&fixture, "storage-draft-10");
 
     let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
 

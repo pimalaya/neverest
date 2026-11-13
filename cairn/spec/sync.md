@@ -8,7 +8,7 @@ status: current
 
 `neverest sync` reconciles the named sources of every account, or of those `-a` names, through the io-pimdir engine over the pimdir store the accounts share. It is sync-on-demand: one reconcile per invocation, no daemon.
 
-The store and the engine follow pimdir storage-draft-10, sync-draft-10 and search-draft-10 (io-pimdir 0.11, pimdir ae8b231): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
+The store and the engine follow pimdir storage-draft-11, sync-draft-11 and search-draft-11 (io-pimdir cd33f0e, its 0.11 line pinned by git until a release carries the drafts; pimdir d8800fb): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
 
 ### Requirement: An account holds named sources
 An account SHALL hold a map of named sources (`sources.<name>`), each declaring exactly one remote backend, and SHALL require at least one. It MAY additionally hold a map of named targets (`targets.<name>`) on the same terms. Both map keys SHALL be the names its pimdir source ids are made from, so a name is what every binding it owns in the store is recorded against, and a rename SHALL be treated as a new source. One name SHALL NOT be both a source and a target.
@@ -253,7 +253,7 @@ The store-wide ids SHALL carry the account (pimdir STORAGE §4.3, §9.2): a pimd
 A store opens under its own format version alone (pimdir STORAGE §4.2, §6): one any earlier neverest wrote, naming no `store_meta.format_version` or an earlier draft, is refused as `store-version` and never migrated. The refusal is the store's, so it SHALL fail the command before any account runs, naming the reinstall in the order that keeps its queued writes, which live only in that store: sync it with the neverest that wrote it until nothing is queued, move the store directory away, then run again (`neverest init`, then a sync), rather than surfacing the raw refusal alone. The message SHALL never say to delete the store. What the old store held that no server holds (retained items, whatever was still queued) stays in the store moved away. MIGRATION.md SHALL give the same order.
 
 #### Scenario: A store an earlier neverest wrote
-- **GIVEN** a store whose `store_meta.format_version` names `storage-draft-09`
+- **GIVEN** a store whose `store_meta.format_version` names `storage-draft-10`
 - **WHEN** neverest runs `--json drain` on the account
 - **THEN** it exits 1 with `code` `store-version`, the message naming the sync with the previous neverest until nothing is queued and the move of the store directory, and no delete
 
@@ -330,12 +330,19 @@ Neverest SHALL be the only process writing a pimdir store; frontends read it and
 
 Every parked action of an account's collections SHALL surface in that account's report until repaired, and SHALL surface **once per run**, read after every source of the account has run, in a dry run as much as in a real one.
 
+A queued `move` of an item in conflict, the item's or that of the binding it runs through, SHALL be parked, its error naming the diverging body, nothing staged in the collection it leaves nor in the one it names (pimdir SYNC §7, STORAGE §15.2, §15.3): a `move` states no resolution, and its tombstone would leave the decision standing where no listing shows it. The item stays listed where it stood and stays counted among the conflicts waiting. `neverest conflict resolve` settles the conflict first; the parked row then leaves by its producer, retried or cancelled, neverest retrying none. A `copy` meets no conflict.
+
 The subsequent sync of a drained collection pushes the resulting dirty state. An action kind the drain cannot apply itself (a capability-bound intent such as `submit`) SHALL be left pending for the phase that can, never parked.
 
 #### Scenario: A sync that cannot connect
 - **GIVEN** an event queued on a calendar whose server is unreachable
 - **WHEN** the account syncs and exits 4
 - **THEN** the event is in the store, with its `seq`
+
+#### Scenario: A move queued over a card waiting for a decision
+- **GIVEN** a card in conflict and a `move` of it queued by a frontend
+- **WHEN** the queue is drained
+- **THEN** nothing is applied, the report lists the `move` parked with the diverging body's hash in its error, the card is still in its address book and the report still counts one item waiting for a decision (src/offline/driver.rs `a_queued_move_over_a_conflict_parks_and_the_decision_still_waits`)
 
 ### Requirement: A drain applies the queue without syncing
 `neverest drain` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 4, the queue untouched.
@@ -630,6 +637,8 @@ An exit 4 says the run did not do everything, and the patch says which collectio
 
 ### Requirement: A Graph mail is dated by its `Date`
 The Graph mail source SHALL fill a message's summary `date` from `sentDateTime`, Graph's reading of the `Date` header, which pimdir's mail `date` column and sort key hold (STORAGE Annex A.1). A message without one SHALL have no date, never its `receivedDateTime`.
+
+It SHALL write that date as the store takes one, an instant in UTC at seconds precision under `Z` (`2026-08-01T10:00:00Z`, pimdir STORAGE §13), an offset brought to UTC, the text io-pimdir derives from the `Date` of the same message (src/msgraph/client.rs `a_row_and_its_body_derive_one_key`): the store holds a date of any other shape as none, such a message being in every scope. It is the one mail date neverest writes itself, IMAP's and Gmail's being io-pimdir's derivation of the `Date` field.
 
 #### Scenario: A mail delivered late
 - **GIVEN** a Graph message sent at 12:00 and received at 12:05
@@ -1204,7 +1213,7 @@ A message is named at the `Meta` tier as its body would name it (Annex A.1, pimd
 
 A hint already derived (the `Message-ID` an add is searched by) SHALL be compared as it stands, never parsed again.
 
-The streamed tier reads a header prefix rather than the whole body, so it SHALL restate the message's octet length as the summary's `size`, and SHALL leave the attachment mark and the invitation unknown: neverest SHALL NOT walk a body's parts. io-pimdir's write walks each body entering the store once, from its blob, and states the mark and the invitation over the writer's summary; a body the account already holds takes those of a row holding it (Annex A.1, io-pimdir `ca4c589`). A body served from a stored blob SHALL be read up to its header block alone. The `Meta` tier SHALL carry every `From`, `To`, `Cc` and `Bcc` address the backend surfaces, so the address rows the two tiers write agree.
+The streamed tier reads a header prefix rather than the whole body, so it SHALL restate the message's octet length as the summary's `size`, and SHALL leave the attachment mark and the invitation unknown: neverest SHALL NOT walk a body's parts. io-pimdir's write walks each body entering the store once, from its blob, and states the mark and the invitation over the writer's summary; a body the account already holds takes those of a row holding it (Annex A.1, io-pimdir `ca4c589`). That walk reads the last part of a multipart no closing delimiter ends, so a message cut short is marked as the same message closed is, and each entity's `Content-Type`, `Content-Disposition`, `Content-Transfer-Encoding` and `Content-ID` from their first occurrence (Annex A.1 as storage-draft-11 states it). A body served from a stored blob SHALL be read up to its header block alone. The `Meta` tier SHALL carry every `From`, `To`, `Cc` and `Bcc` address the backend surfaces, so the address rows the two tiers write agree.
 
 #### Scenario: A Message-ID wrapped in comments
 - **GIVEN** the message of pimdir vectors/fixtures/mail-id-comment.eml, whose field reads `(via <relay@example.net>) <comment-1@example.org> (trailing)`
@@ -1403,7 +1412,7 @@ A sent copy neverest files (pimdir STORAGE Annex B.2) is in the store when the r
 - **THEN** the message leaves through the SMTP channel, the run exits 0, and the report names nothing unreached and no collection
 
 ### Requirement: A send that may have been delivered is never sent again
-A `submit` that fails after the whole message was handed over and before a verdict came back SHALL be unconfirmed: over SMTP once the data's final `.` was written and flushed and no reply read; over Graph `sendMail` once the request was written whole and flushed and no answer read whole (none, one cut short, one that does not parse), or when 500, 502, 503 or 504 answered. A `sendMail` SHALL never be sent again on a dead connection; only a 429, which Graph answers before acting, SHALL send it again. An unconfirmed `submit` SHALL be parked as an intent whose outcome is unknown (pimdir STORAGE §13, §15.2, io-pimdir `unconfirm_action`), its error beginning with the reserved prefix `unconfirmed: `, which the store writes, so its producer reads it unconfirmed rather than refused; it SHALL be reported in `submitted` with `unconfirmed: true` and an `error` beginning `unconfirmed: `, SHALL make the run that parked it exit 3, and SHALL never be sent again by any run.
+A `submit` that fails after the whole message was handed over and before a verdict came back SHALL be unconfirmed: over SMTP once the data's final `.` was written and flushed and no reply read; over Graph `sendMail` once the request was written whole and flushed and no answer read whole (none, one cut short, one that does not parse), or when 500, 502, 503 or 504 answered. A `sendMail` SHALL never be sent again on a dead connection; only a 429, which Graph answers before acting, SHALL send it again. An unconfirmed `submit` SHALL be parked as an intent whose outcome is unknown (pimdir STORAGE §13, §15.2, io-pimdir `unconfirm_action`), its error beginning with the reserved prefix `unconfirmed: `, which the store's `unconfirm_action` statement alone writes, so its producer reads it unconfirmed rather than refused; it SHALL be reported in `submitted` with `unconfirmed: true` and an `error` beginning `unconfirmed: `, SHALL make the run that parked it exit 3, and SHALL never be sent again by any run.
 
 Before the first byte of a message leaves, the run SHALL count the attempt in the store and SHALL write the intent's id to `submitting` under the store's local/, durably, clearing it once the outcome is recorded; a run finding the mark with that intent still pending SHALL park it as unconfirmed before sending anything, whichever account it belongs to. A store created SHALL start with no mark; a reset of one account SHALL leave it, the mark naming a row of the store.
 
@@ -1626,7 +1635,7 @@ On a source whose handle names one item across its collections (a Gmail message 
 - **THEN** `Work` holds the same body and nothing is downloaded
 
 ### Requirement: A landed body stands for its attachments
-Every body a run lands SHALL reach the store through io-pimdir's write (`PimdirSourceStore::write`, the `WantsWrite` of a sync, an upgrade or a mutation), which records in the same transaction a file holding no body per part of a message disposed as an attachment, in the account's attachments collection, with its name, media type, decoded size and section, and an `attachment` reference from the message (pimdir STORAGE §14.3, io-pimdir `14a8fca`). neverest SHALL write the store by no other way. A body the account already holds (a copy, a move, a second Gmail label) records none, and a body held before is not walked again.
+Every body a run lands SHALL reach the store through io-pimdir's write (`PimdirSourceStore::write`, the `WantsWrite` of a sync, an upgrade or a mutation), which records in the same transaction a file holding no body per part of a message disposed as an attachment, in the account's attachments collection, with its name, media type, decoded size and section, and an `attachment` reference from the message (pimdir STORAGE §14.3, io-pimdir `14a8fca`). neverest SHALL write the store by no other way. A body the account already holds (a copy, a move, a second Gmail label) records none, and a body held before is not walked again. A body entering under a `Message-ID` another row of the account holds another body under, a message it does not agree with on subject, date and sender, records none either: the keys stay the first message's (pimdir STORAGE §11.1, §14.3).
 
 #### Scenario: Primed, paged or after the listing
 - **GIVEN** an IMAP folder holding a message with two attachments, one with an inline image only, one with an attachment two levels down a `multipart/signed`, and a plain one

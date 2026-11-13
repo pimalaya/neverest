@@ -6746,7 +6746,8 @@ mod tests {
         assert!(written_earlier(&refused(Some("storage-draft-07"))));
         assert!(written_earlier(&refused(Some("storage-draft-08"))));
         assert!(written_earlier(&refused(Some("storage-draft-09"))));
-        assert!(!written_earlier(&refused(Some("storage-draft-11"))));
+        assert!(written_earlier(&refused(Some("storage-draft-10"))));
+        assert!(!written_earlier(&refused(Some("storage-draft-12"))));
         assert!(!written_earlier(&refused(Some("storage-v1"))));
         assert!(!written_earlier(&PimdirError::Busy));
     }
@@ -10115,6 +10116,46 @@ mod tests {
 
         let text = report.to_string();
         assert!(text.contains("1 item(s) waiting for a decision"), "{text}");
+    }
+
+    /// A queued `move` of an item in conflict is parked, never applied
+    /// (pimdir SYNC §7, STORAGE §15.2): the report names the row and the
+    /// diverging body, the card stays where it stood and its decision
+    /// still waits.
+    #[test]
+    fn a_queued_move_over_a_conflict_parks_and_the_decision_still_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = card("+3", "old");
+        let mut store =
+            store_with_conflict(dir.path(), &card("+1", "old"), &card("+2", "old"), &remote);
+        store.ensure_collection("archive", "text/vcard").unwrap();
+        let seq = store.seq_for_link("contacts", "uid:a").unwrap().unwrap();
+        let diverging = store.blob_stage().blobs().hash(remote.as_bytes());
+
+        let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
+        let action = PimdirAction::Move {
+            seq,
+            to: PimdirCollectionId("archive".into()),
+        };
+        producer.enqueue("contacts", &action, None).unwrap();
+        drop(producer);
+
+        let mut report = SyncOutput::default();
+        drain_queues(&mut store, &mut report);
+        report_parked(&store, CONFLICT_ACCOUNT, &mut report);
+        count_conflicts(&store, CONFLICT_ACCOUNT, &mut report);
+
+        assert!(report.drained.is_empty(), "{:?}", report.drained);
+        assert_eq!(report.parked.len(), 1);
+        let parked = &report.parked[0];
+        assert_eq!(parked.action, "move");
+        assert!(parked.error.contains(&diverging.0), "{}", parked.error);
+        assert_eq!(report.outstanding_conflicts, 1);
+
+        let held = load_side(&store, "contacts").unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].status, PimdirStatus::Conflict);
+        assert!(load_side(&store, "archive").unwrap().is_empty());
     }
 
     /// A create a frontend staged must still read back as a create.

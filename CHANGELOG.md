@@ -95,6 +95,8 @@ Upgrading from 0.3.0:
 
 - Added attachment stand-ins: a message body the store lands records one bodiless file per attachment in the account's attachments collection, referenced from the message.
 
+  A message reusing the `Message-ID` of another message the account holds records none: the stand-ins under that id stay the first message's.
+
 - Added Microsoft Graph mail writes through the store: a move, a copy, and an add into Drafts, the one folder Graph creates a message in; an add elsewhere is rejected.
 
 - Added CalDAV moves: a task filed into another calendar, or an item moved between calendars, is moved with WebDAV `MOVE`, so the server never holds its `UID` twice.
@@ -266,7 +268,9 @@ Upgrading from 0.3.0:
 
   A zone with no IANA name reads as UTC, with a warning. The first refresh in another zone re-expands every calendar item.
 
-- **BREAKING**: bumped io-pimdir to 0.11 (pimdir storage-draft-10, sync-draft-10, search-draft-10), from crates.io: a store any earlier neverest wrote is refused, never migrated, and the search index is built again by the first refresh.
+- **BREAKING**: bumped io-pimdir to 0.11 at cd33f0e, pinned by git until a release carries the drafts (pimdir storage-draft-11, sync-draft-11, search-draft-11): a store any earlier neverest wrote is refused, never migrated, and the search index is built again by the first refresh.
+
+- Changed a queued move of an item waiting for a decision to be parked, its error naming the diverging body, nothing moved: it was applied, leaving the conflict under an item no listing shows. Settle the conflict with `neverest conflict resolve`, then move the item; a copy is unchanged.
 
 - **BREAKING**: changed where neverest keeps its own files of a store: neverest.json, sync.lock and the `submitting` mark are under the store's local/, the directory pimdir reserves for an owner, created `0700`, each file `0600`.
 
@@ -411,6 +415,8 @@ Upgrading from 0.3.0:
 - Fixed iCalendar lines written from Microsoft Graph or Google left unfolded: they fold at 75 octets.
 
 - Fixed the size, attachment mark and invitation of a message: each body entering the store states them, downloaded or filed again from a body the account holds.
+
+  A message cut short inside a multipart states them as the same message closed does, its last part read.
 
 - Fixed an HTTP response buffered whatever its size: a head over 64 KiB or a body over 256 MiB fails its exchange, and a connection closed mid-body fails it rather than hang the run.
 

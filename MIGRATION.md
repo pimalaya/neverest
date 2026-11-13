@@ -33,7 +33,7 @@ This page lists the changes most likely to bite when upgrading. The full configu
 
 Two things change at once, and neither is migrated:
 
-- The store follows pimdir storage-draft-10, sync-draft-10 and search-draft-10 (io-pimdir 0.11). A store any earlier neverest wrote, v0.3.0 or a git build, is refused by every profile as `store-version`.
+- The store follows pimdir storage-draft-11, sync-draft-11 and search-draft-11 (io-pimdir 0.11 at cd33f0e). A store any earlier neverest wrote, v0.3.0 or a git build, one of draft-10 included, is refused by every profile as `store-version`.
 - **Every account shares one store**: `neverest/` under the state directory itself (`$XDG_STATE_HOME/neverest` on Linux, `~/Library/Application Support/neverest` on macOS, `%LOCALAPPDATA%\neverest` on Windows), no longer one directory per account under it. A neverest directory still holding the per-account stores an earlier neverest kept is refused as `store-layout`, naming each, and so is a `store.root` store whose neverest.json an earlier neverest wrote, or kept beside its pimdir.db.
 
 What only an old store holds is the work it queued (a send, an edit or a create staged by a frontend) and its retained items, so reinstall in this order:
@@ -57,6 +57,7 @@ What else changes:
 - **Frontends** (himalaya, calendula, cardamum): point `pimdir.root` at the neverest directory and name the account with `pimdir.account`. A collection named by its id gains the account (`himalaya -f work/imap/INBOX`); a role (`inbox`, `sent`) keeps working.
 - **neverest keeps its own files under the store's local/**: neverest.json, sync.lock and the mark of a send being handed over, where they stood beside pimdir.db. A script reading or locking one names it there (`local/sync.lock`).
 - **A send that may have been delivered is `unconfirmed`**: its report entry carries `unconfirmed: true` and an `error` beginning `unconfirmed: `, the state every pimdir frontend reads, where a git build wrote `uncertain`.
+- **A queued move of an item waiting for a decision is parked**, nothing moved, its error naming the diverging body, where it was applied: settle the conflict with `neverest conflict resolve`, then move the item again.
 - `neverest check` names, under `orphans`, an account the store holds that no configured account names: renaming an account's TOML key leaves its collections under the old name until the key is renamed back.
 - **Exit statuses follow the Pimalaya exit contract.** A sync that waits for a person exits 3, where v0.3.0 exited 2, and one that could not do all its work 4, where it exited 3; `check` with an endpoint down exits 3. Exit 2 is now a command line neverest refused, printed under `--json` as a failure object coded `usage-invalid`.
 - **The configuration wizard is gone**: `neverest configure`, the offer a bare `neverest` made without a configuration, and the `wizard` cargo feature. Write the configuration by hand from [config.sample.toml](./config.sample.toml); a command finding none fails naming the path it looked for.

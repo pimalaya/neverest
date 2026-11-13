@@ -33,7 +33,7 @@ This page lists the changes most likely to bite when upgrading. The full configu
 
 Two things change at once, and neither is migrated:
 
-- The store follows pimdir storage-draft-11, sync-draft-11 and search-draft-11 (io-pimdir 0.11 at cd33f0e). A store any earlier neverest wrote, v0.3.0 or a git build, one of draft-10 included, is refused by every profile as `store-version`.
+- The store follows pimdir storage-draft-11, sync-draft-11 and search-draft-11 (io-pimdir 0.12). A store any earlier neverest wrote, v0.3.0 or a git build, one of draft-10 included, is refused by every profile as `store-version`.
 - **Every account shares one store**: `neverest/` under the state directory itself (`$XDG_STATE_HOME/neverest` on Linux, `~/Library/Application Support/neverest` on macOS, `%LOCALAPPDATA%\neverest` on Windows), no longer one directory per account under it. A neverest directory still holding the per-account stores an earlier neverest kept is refused as `store-layout`, naming each, and so is a `store.root` store whose neverest.json an earlier neverest wrote, or kept beside its pimdir.db.
 
 What only an old store holds is the work it queued (a send, an edit or a create staged by a frontend) and its retained items, so reinstall in this order:

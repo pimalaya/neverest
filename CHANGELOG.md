@@ -268,7 +268,7 @@ Upgrading from 0.3.0:
 
   A zone with no IANA name reads as UTC, with a warning. The first refresh in another zone re-expands every calendar item.
 
-- **BREAKING**: bumped io-pimdir to 0.11 at cd33f0e, pinned by git until a release carries the drafts (pimdir storage-draft-11, sync-draft-11, search-draft-11): a store any earlier neverest wrote is refused, never migrated, and the search index is built again by the first refresh.
+- **BREAKING**: bumped io-pimdir to 0.12 (pimdir storage-draft-11, sync-draft-11, search-draft-11): a store any earlier neverest wrote is refused, never migrated, and the search index is built again by the first refresh.
 
 - Changed a queued move of an item waiting for a decision to be parked, its error naming the diverging body, nothing moved: it was applied, leaving the conflict under an item no listing shows. Settle the conflict with `neverest conflict resolve`, then move the item; a copy is unchanged.
 

@@ -8,7 +8,7 @@ status: current
 
 `neverest sync` reconciles the named sources of every account, or of those `-a` names, through the io-pimdir engine over the pimdir store the accounts share. It is sync-on-demand: one reconcile per invocation, no daemon.
 
-The store and the engine follow pimdir storage-draft-11, sync-draft-11 and search-draft-11 (io-pimdir cd33f0e, its 0.11 line pinned by git until a release carries the drafts; pimdir d8800fb): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
+The store and the engine follow pimdir storage-draft-11, sync-draft-11 and search-draft-11 (io-pimdir 0.12; pimdir 83102f0, the commit the three tags name): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
 
 ### Requirement: An account holds named sources
 An account SHALL hold a map of named sources (`sources.<name>`), each declaring exactly one remote backend, and SHALL require at least one. It MAY additionally hold a map of named targets (`targets.<name>`) on the same terms. Both map keys SHALL be the names its pimdir source ids are made from, so a name is what every binding it owns in the store is recorded against, and a rename SHALL be treated as a new source. One name SHALL NOT be both a source and a target.

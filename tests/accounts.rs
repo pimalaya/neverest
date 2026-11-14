@@ -14,11 +14,22 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     process::{Command, Output},
+    sync::{Mutex, MutexGuard, PoisonError},
     thread,
 };
 
 use io_pimdir::client::{PimdirStore, reader::PimdirReader};
 use serde_json::Value;
+
+/// Held by each test for its whole run: a child another test spawns holds
+/// every lock this process holds until its exec, so a store opened here
+/// beside a spawn reads as owned.
+static SPAWNS: Mutex<()> = Mutex::new(());
+
+/// Waits for the other tests, whatever a sibling that panicked left.
+fn serialized() -> MutexGuard<'static, ()> {
+    SPAWNS.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// A port nothing listens on, so a run that connects fails.
 fn closed_port() -> u16 {
@@ -165,6 +176,7 @@ impl Fixture {
 /// are.
 #[test]
 fn every_account_is_initialized_into_one_store() {
+    let _serial = serialized();
     let fixture = Fixture::new(&["work", "home"], home_set_server());
 
     let init = fixture.json(&["--json", "init"], 0);
@@ -201,6 +213,7 @@ fn every_account_is_initialized_into_one_store() {
 /// does, and `default` is read and ignored.
 #[test]
 fn a_run_covers_every_account_and_reports_each_apart() {
+    let _serial = serialized();
     let fixture = Fixture::new(&["work", "home"], closed_port());
     fixture.initialized(&["work"]);
 
@@ -238,6 +251,7 @@ fn a_run_covers_every_account_and_reports_each_apart() {
 /// writes, never a delete.
 #[test]
 fn stores_kept_per_account_are_refused_before_anything_is_created() {
+    let _serial = serialized();
     let fixture = Fixture::new(&["work", "home"], closed_port());
     for account in ["work", "home"] {
         let former = fixture.store().join(account);
@@ -269,6 +283,7 @@ fn stores_kept_per_account_are_refused_before_anything_is_created() {
 /// naming the accounts it does.
 #[test]
 fn an_unknown_account_fails_naming_the_configured_ones() {
+    let _serial = serialized();
     let fixture = Fixture::new(&["work", "home"], closed_port());
 
     let failure = fixture.json(&["--json", "sync", "-a", "perso"], 1);
@@ -283,6 +298,7 @@ fn an_unknown_account_fails_naming_the_configured_ones() {
 /// refused, naming them, and nothing is reset.
 #[test]
 fn a_reset_needs_exactly_one_account() {
+    let _serial = serialized();
     let fixture = Fixture::new(&["work", "home"], closed_port());
     fixture.initialized(&["work", "home"]);
 
@@ -297,6 +313,7 @@ fn a_reset_needs_exactly_one_account() {
 /// names, as a renamed key leaves it, and deletes nothing.
 #[test]
 fn a_check_names_an_account_no_configuration_names() {
+    let _serial = serialized();
     let fixture = Fixture::new(&["work"], closed_port());
     fixture.initialized(&["work"]);
     PimdirStore::open(fixture.store())
@@ -327,6 +344,7 @@ fn a_check_names_an_account_no_configuration_names() {
 /// `--accept-mode`, which lets the run through and records the answer.
 #[test]
 fn turning_one_way_on_is_refused_until_accepted() {
+    let _serial = serialized();
     let fixture = Fixture::new(&["work"], closed_port());
     let port = closed_port();
     fs::write(

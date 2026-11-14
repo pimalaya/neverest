@@ -20,7 +20,7 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     process::{Command, Output},
-    sync::mpsc,
+    sync::{Mutex, MutexGuard, PoisonError, mpsc},
     thread,
 };
 
@@ -34,6 +34,16 @@ use io_pimdir::{
     intent::PimdirSubmit,
 };
 use serde_json::Value;
+
+/// Held by each test for its whole run: a child another test spawns holds
+/// every lock this process holds until its exec, so a store opened here
+/// beside a spawn reads as owned.
+static SPAWNS: Mutex<()> = Mutex::new(());
+
+/// Waits for the other tests, whatever a sibling that panicked left.
+fn serialized() -> MutexGuard<'static, ()> {
+    SPAWNS.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 const ACCOUNT: &str = "send";
 /// The account's IMAP source, as the store keys it.
@@ -280,6 +290,7 @@ const BODY: &[u8] =
 /// server is down, is never opened, and no collection is listed.
 #[test]
 fn intents_only_sends_through_smtp_without_opening_the_source() {
+    let _serial = serialized();
     let (port, data) = spawn_smtp(Smtp::Accept);
     let fixture = Fixture::new(port, false);
     let id = fixture.queue_send(BODY, true);
@@ -316,6 +327,7 @@ fn intents_only_sends_through_smtp_without_opening_the_source() {
 /// sent again.
 #[test]
 fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
+    let _serial = serialized();
     let (port, data) = spawn_smtp(Smtp::HangUpAfterData);
     let fixture = Fixture::new(port, false);
     let id = fixture.queue_send(BODY, false);
@@ -345,6 +357,7 @@ fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
 /// as unconfirmed rather than sending it again.
 #[test]
 fn a_send_a_stopped_run_was_handing_over_is_never_sent_again() {
+    let _serial = serialized();
     // NOTE: nothing listens: a run trying to send would name it unreached.
     let fixture = Fixture::new(closed_port(), false);
     let id = fixture.queue_send(BODY, false);
@@ -368,6 +381,7 @@ fn a_send_a_stopped_run_was_handing_over_is_never_sent_again() {
 /// never attempted.
 #[test]
 fn an_unreached_smtp_server_is_named_and_the_send_waits() {
+    let _serial = serialized();
     let fixture = Fixture::new(closed_port(), false);
     let id = fixture.queue_send(BODY, false);
 
@@ -387,6 +401,7 @@ fn an_unreached_smtp_server_is_named_and_the_send_waits() {
 /// reason, not parked and never attempted, and nothing is unreached.
 #[test]
 fn refused_credentials_fail_the_send_without_parking_it() {
+    let _serial = serialized();
     let (port, _) = spawn_smtp(Smtp::RefuseAuth);
     let fixture = Fixture::new(port, true);
     let id = fixture.queue_send(BODY, false);
@@ -409,6 +424,7 @@ fn refused_credentials_fail_the_send_without_parking_it() {
 /// other sends wait for too: the limit holds for the account.
 #[test]
 fn a_send_refused_for_a_quota_stays_queued() {
+    let _serial = serialized();
     let reply = "550 5.4.5 Daily user sending limit exceeded\r\n";
     let (port, data) = spawn_smtp(Smtp::RefuseData(reply));
     let fixture = Fixture::new(port, false);
@@ -441,6 +457,7 @@ fn a_send_refused_for_a_quota_stays_queued() {
 /// parks, coded `recipient-refused`, the reply among its causes.
 #[test]
 fn a_refused_recipient_parks_the_send_coded() {
+    let _serial = serialized();
     let (port, _) = spawn_smtp(Smtp::RefuseRcpt("550 5.1.1 user unknown\r\n"));
     let fixture = Fixture::new(port, false);
     let id = fixture.queue_send(BODY, false);
@@ -462,6 +479,7 @@ fn a_refused_recipient_parks_the_send_coded() {
 /// A collection filter means nothing to a run listing no collection.
 #[test]
 fn intents_only_refuses_a_collection_filter() {
+    let _serial = serialized();
     let fixture = Fixture::new(closed_port(), false);
     let output = fixture.run(&["sync", "-a", ACCOUNT, "--intents-only", "-m", "Sent"]);
     assert!(!output.status.success());
@@ -477,6 +495,7 @@ fn intents_only_refuses_a_collection_filter() {
 /// as attempted, and the next run never sends it again.
 #[test]
 fn the_attempt_is_counted_and_marked_before_the_message_leaves() {
+    let _serial = serialized();
     let (read_tx, read_rx) = mpsc::channel();
     let (answer_tx, answer_rx) = mpsc::channel();
     let (port, _) = spawn_gated_smtp(Smtp::Accept, Some((read_tx, answer_rx)));
@@ -515,6 +534,7 @@ fn the_attempt_is_counted_and_marked_before_the_message_leaves() {
 /// it as unconfirmed and sends nothing.
 #[test]
 fn a_run_killed_mid_send_never_sends_the_message_again() {
+    let _serial = serialized();
     let (read_tx, read_rx) = mpsc::channel();
     let (answer_tx, answer_rx) = mpsc::channel();
     let (port, _) = spawn_gated_smtp(Smtp::Accept, Some((read_tx, answer_rx)));

@@ -18,6 +18,7 @@ use std::{
     net::TcpListener,
     path::PathBuf,
     process::{Command, Output},
+    sync::{Mutex, MutexGuard, PoisonError},
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -32,6 +33,16 @@ use io_pimdir::{
     placement::{PimdirFlags, PimdirLinkId},
 };
 use serde_json::Value;
+
+/// Held by each test for its whole run: a child another test spawns holds
+/// every lock this process holds until its exec, so a store opened here
+/// beside a spawn reads as owned.
+static SPAWNS: Mutex<()> = Mutex::new(());
+
+/// Waits for the other tests, whatever a sibling that panicked left.
+fn serialized() -> MutexGuard<'static, ()> {
+    SPAWNS.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 const ACCOUNT: &str = "drain";
 /// The account's CalDAV source, as the store keys it.
@@ -217,6 +228,7 @@ fn restrict(_path: &std::path::Path) {}
 /// `neverest drain` gives a queued create its id, offline, and says which.
 #[test]
 fn a_drain_applies_a_queued_create_without_any_server() {
+    let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
     let id = fixture.queue_event("drained-1");
@@ -237,6 +249,7 @@ fn a_drain_applies_a_queued_create_without_any_server() {
 /// A sync that cannot reach its server still applies the queue first.
 #[test]
 fn a_sync_drains_before_it_connects() {
+    let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
     let id = fixture.queue_event("drained-2");
@@ -254,6 +267,7 @@ fn a_sync_drains_before_it_connects() {
 /// left as it was.
 #[test]
 fn a_drain_leaves_a_busy_store_alone() {
+    let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
     let id = fixture.queue_event("drained-3");
@@ -296,6 +310,7 @@ fn restamp_store(fixture: &Fixture, version: &str) {
 /// and the message asks for an upgrade, never a reset.
 #[test]
 fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
+    let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
     restamp_store(&fixture, "storage-draft-99");
@@ -315,6 +330,7 @@ fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
 /// delete it.
 #[test]
 fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
+    let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
     restamp_store(&fixture, "storage-draft-10");
@@ -334,6 +350,7 @@ fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
 /// `store.root` from a store to repair, and the database stays as it was.
 #[test]
 fn a_database_another_program_wrote_fails_as_foreign() {
+    let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
     let db = fixture.store().join("pimdir.db");
@@ -365,6 +382,7 @@ fn a_database_another_program_wrote_fails_as_foreign() {
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :8080 and --ignored"]
 fn a_drained_event_keeps_its_id_across_the_push() {
+    let _serial = serialized();
     let server = format!("{DAV}/cal/");
     let fixture = Fixture::new(&server, USER, PASS);
     fixture.json(&["--json", "init", "-a", ACCOUNT], 0);
@@ -403,6 +421,7 @@ fn remove_event(uid: &str) {
 /// scan, so a program reads it without parsing the error.
 #[test]
 fn an_unreachable_endpoint_is_named_in_the_report() {
+    let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
 
@@ -425,6 +444,7 @@ fn an_unreachable_endpoint_is_named_in_the_report() {
 /// with until when, and the run exits 4. About half a minute of back-off.
 #[test]
 fn a_throttling_server_is_named_in_the_report() {
+    let _serial = serialized();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {
@@ -500,6 +520,7 @@ fn home_set_server() -> u16 {
 #[cfg(unix)]
 #[test]
 fn init_makes_a_store_its_readers_open() {
+    let _serial = serialized();
     use std::os::unix::fs::PermissionsExt;
 
     let port = home_set_server();

@@ -328,6 +328,8 @@ Upgrading from 0.3.0:
 
 ### Fixed
 
+- Fixed a credential command prompting for a password (`systemd-ask-password`) hanging the run: it now reads the terminal when neverest runs in one (pimalaya-config 0.4.1).
+
 - Fixed an IMAP body download reading what a failed batch left on its connection as the answers of the reads that followed, which could store a message under another's handle.
 
   After a batch that fails otherwise than refused by the server, the connection is opened again before its messages are read one by one.

@@ -19,7 +19,7 @@ use pimalaya_config::{
     secret::{Secret, SecretResolver},
     toml::{TomlConfig, shell_expanded_string},
 };
-use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider};
+use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider, TlsServer};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -138,17 +138,18 @@ impl TomlConfig for Config {
         env!("CARGO_PKG_NAME")
     }
 
-    fn take_named_account(&mut self, name: &str) -> Option<(String, Self::Account)> {
-        self.accounts.remove_entry(name)
+    fn sample_url() -> &'static str {
+        "https://github.com/pimalaya/neverest/blob/master/config.sample.toml"
     }
 
-    fn take_default_account(&mut self) -> Option<(String, Self::Account)> {
-        let name = self
-            .accounts
+    fn accounts(&self) -> impl Iterator<Item = (&str, bool)> {
+        self.accounts
             .iter()
-            .find_map(|(name, account)| account.default.then(|| name.clone()))?;
+            .map(|(name, account)| (name.as_str(), account.default))
+    }
 
-        self.take_named_account(&name)
+    fn take_named_account(&mut self, name: &str) -> Option<(String, Self::Account)> {
+        self.accounts.remove_entry(name)
     }
 }
 
@@ -1749,7 +1750,8 @@ impl TlsConfig {
                 }),
                 alpn,
             },
-            cert: self.cert,
+            server: self.cert.map(|cert| TlsServer { cert }),
+            client: None,
         }
     }
 }

@@ -61,6 +61,7 @@ What else changes:
 - `neverest check` names, under `orphans`, an account the store holds that no configured account names: renaming an account's TOML key leaves its collections under the old name until the key is renamed back.
 - **A failing row splits its error.** Under `--json`, a `rejected`, `submitted`, `intents`, `parked` or `unreached` row and a failed patch entry carry `code`, `error` (the outermost message) and `sources` (its causes), where `error` held the whole chain; `rejected[].reason` is now `rejected[].error`. Read `code` (`permission-denied`, `quota-exceeded`, `rate-limited`, `recipient-refused`, `null`) rather than matching the text, or join `error` and `sources` with `: ` for the old string.
 - **Exit statuses follow the Pimalaya exit contract.** A sync that waits for a person exits 3, where v0.3.0 exited 2, and one that could not do all its work 4, where it exited 3; `check` with an endpoint down exits 3. Exit 2 is now a command line neverest refused, printed under `--json` as a failure object coded `usage-invalid`.
+- **A configuration key neverest does not read is refused**, at every level, naming it: a typo in a `sources.<name>` or `targets.<name>` table, or at the root, used to be ignored, and a source naming two backend tables kept the first. A key an earlier neverest read is refused naming its replacement and this page: `left`, `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace`, `store.retention`, `store.hydration`, and the flat `smtp.login` and `smtp.password`.
 - **The configuration wizard is gone**: `neverest configure`, the offer a bare `neverest` made without a configuration, and the `wizard` cargo feature. Write the configuration by hand from [config.sample.toml](./config.sample.toml); a command finding none fails naming the path it looked for.
 
 ## From a git master build
@@ -68,6 +69,8 @@ What else changes:
 No v1.0.0 was ever released: what was prepared under that number ships as v0.2.0.
 
 If you ran a build from master, its store is refused as `store-version`: reinstall it as the section above says.
+
+A build from before v0.2.0 may have written the send channel as a flat `smtp.login` and `smtp.password`: write one `smtp.sasl` mechanism instead, spelled as under `imap.sasl` (`smtp.sasl.plain.username` and `smtp.sasl.plain.password`, or `smtp.sasl.login.*` for the LOGIN exchange those keys ran).
 
 ## From v1.0.0-beta to v0.2.0
 

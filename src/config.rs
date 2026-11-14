@@ -28,6 +28,9 @@ use url::Url;
 pub const NO_CONFIG_HINT: &str = "write one by hand: \
      https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
 
+/// Where a removed configuration key's replacement is written down.
+const MIGRATION_NOTES: &str = "https://github.com/pimalaya/neverest/blob/master/MIGRATION.md";
+
 /// `skip_serializing_if` predicate omitting a defaulted field, so a serialized
 /// configuration carries only what differs from the defaults.
 fn is_default<T: Default + PartialEq>(value: &T) -> bool {
@@ -125,7 +128,7 @@ macro_rules! source_ref_accessor {
 
 /// The whole configuration document: nothing but named accounts.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
     /// The named accounts the document declares.
     pub accounts: HashMap<String, AccountConfig>,
@@ -346,6 +349,10 @@ pub struct AccountConfig {
     right: Option<RemovedKey>,
     #[serde(default, skip_serializing, alias = "mailbox")]
     collection: Option<RemovedKey>,
+    #[serde(default, skip_serializing)]
+    folder: Option<RemovedKey>,
+    #[serde(default, skip_serializing)]
+    envelope: Option<RemovedKey>,
 }
 
 impl AccountConfig {
@@ -633,7 +640,8 @@ impl AccountConfig {
                 "`left` and `right` are gone: an account names its endpoints and the direction \
                  between them. Write the authoritative one under `sources` and the other under \
                  `targets`, and add `one-way = true` to copy rather than merge; leaving it off \
-                 keeps them syncing both ways, which is what the pair used to do."
+                 keeps them syncing both ways, which is what the pair used to do. See \
+                 {MIGRATION_NOTES}"
             );
         }
 
@@ -642,28 +650,63 @@ impl AccountConfig {
                 "The account-level `collection` table is gone: a filter belongs to the source it \
                  filters, since an account may hold sources of several kinds. Write it as \
                  `sources.<name>.collection.filter`, or `<protocol>.collection.filter` under the \
-                 account."
+                 account. See {MIGRATION_NOTES}"
             );
         }
 
-        let namespaced: Vec<_> = self
+        if self.folder.is_some() {
+            bail!(
+                "The `folder` table is gone: its filter is `<protocol>.collection.filter`, on the \
+                 source it filters, and its aliases have no replacement. See {MIGRATION_NOTES}"
+            );
+        }
+
+        if self.envelope.is_some() {
+            bail!(
+                "The `envelope` table is gone: `item.filter.since` bounds the mail a sync lists \
+                 by its date. See {MIGRATION_NOTES}"
+            );
+        }
+
+        let sources = self
             .sources
             .iter()
-            .chain(&self.targets)
+            .map(|(name, source)| ("sources", name, source));
+        let targets = self
+            .targets
+            .iter()
+            .map(|(name, source)| ("targets", name, source));
+        let channels = sources.chain(targets).filter_map(|(table, name, source)| {
+            let smtp = source.smtp.as_ref()?;
+            Some((format!("{table}.{name}.smtp"), smtp))
+        });
+        let account = self.smtp.iter().map(|smtp| (String::from("smtp"), smtp));
+
+        for (key, smtp) in account.chain(channels) {
+            smtp.reject_removed_keys(&key)?;
+        }
+
+        self.store.reject_removed_keys()?;
+
+        let mut namespaced: Vec<_> = self
+            .sources()?
+            .into_iter()
+            .chain(self.targets.clone())
             .filter(|(_, source)| source.declares_namespace())
-            .map(|(name, _)| name.as_str())
+            .map(|(name, _)| name)
             .collect();
+        namespaced.sort();
 
         if !namespaced.is_empty() {
             bail!(
                 "`collection.namespace` is gone, on {}: it said which sources met, which is now \
                  whether they sit under `sources` or `targets`, and it never said which way, \
-                 which is now `one-way`. Drop it.",
+                 which is now `one-way`. Drop it. See {MIGRATION_NOTES}",
                 namespaced.join(", "),
             );
         }
 
-        self.store.reject_removed_keys()
+        Ok(())
     }
 }
 
@@ -751,7 +794,7 @@ impl StoreConfig {
             bail!(
                 "`store.retention` and `store.hydration` are gone: whether the store keeps \
                  bodies is the account's `retain`, which is true when the store is the \
-                 destination and false when targets are named."
+                 destination and false when targets are named. See {MIGRATION_NOTES}"
             );
         }
 
@@ -951,7 +994,7 @@ where
 /// natively (Graph's `sendMail`) or needing a companion SMTP server is a
 /// property of the provider. At most one source per account declares one.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[serde(rename_all = "kebab-case", try_from = "SourceTable")]
 pub struct SourceConfig {
     /// The one remote this source names.
     #[serde(flatten)]
@@ -965,9 +1008,72 @@ pub struct SourceConfig {
     pub smtp: Option<SmtpConfig>,
 }
 
+/// A source as written, read without `flatten`, which unknown keys slip by.
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct SourceTable {
+    imap: Option<ImapConfig>,
+    carddav: Option<CarddavConfig>,
+    caldav: Option<CaldavConfig>,
+    jmap: Option<JmapConfig>,
+    gmail: Option<GmailConfig>,
+    msgraph: Option<MsgraphConfig>,
+    msgraph_contacts: Option<MsgraphConfig>,
+    msgraph_calendar: Option<MsgraphConfig>,
+    gpeople: Option<GoogleConfig>,
+    gcal: Option<GoogleConfig>,
+    smtp: Option<SmtpConfig>,
+}
+
+impl TryFrom<SourceTable> for SourceConfig {
+    type Error = String;
+
+    fn try_from(table: SourceTable) -> Result<Self, Self::Error> {
+        let backends = [
+            table.imap.map(SourceBackendConfig::Imap),
+            table.carddav.map(SourceBackendConfig::Carddav),
+            table.caldav.map(SourceBackendConfig::Caldav),
+            table.jmap.map(SourceBackendConfig::Jmap),
+            table.gmail.map(SourceBackendConfig::Gmail),
+            table.msgraph.map(SourceBackendConfig::Msgraph),
+            table
+                .msgraph_contacts
+                .map(SourceBackendConfig::MsgraphContacts),
+            table
+                .msgraph_calendar
+                .map(SourceBackendConfig::MsgraphCalendar),
+            table.gpeople.map(SourceBackendConfig::Gpeople),
+            table.gcal.map(SourceBackendConfig::Gcal),
+        ];
+        let mut backends = backends.into_iter().flatten();
+
+        let Some(backend) = backends.next() else {
+            return Err(String::from(
+                "A source declares no backend: write one table of `imap`, `carddav`, `caldav`, \
+                 `jmap`, `gmail`, `msgraph`, `msgraph-contacts`, `msgraph-calendar`, `gpeople` \
+                 or `gcal` under it",
+            ));
+        };
+
+        if let Some(other) = backends.next() {
+            return Err(format!(
+                "A source declares both `{}` and `{}`, and talks to exactly one backend: move \
+                 one under a source of its own",
+                backend.protocol(),
+                other.protocol(),
+            ));
+        }
+
+        Ok(Self {
+            backend,
+            smtp: table.smtp,
+        })
+    }
+}
+
 /// The remote backend behind a source; exactly one variant per source.
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase", deny_unknown_fields)]
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SourceBackendConfig {
     Imap(ImapConfig),
     Carddav(CarddavConfig),
@@ -1651,6 +1757,27 @@ pub struct SmtpConfig {
     /// Omit it for an unauthenticated relay, which stops after `EHLO` and
     /// sends no `AUTH` at all.
     pub sasl: Option<SaslConfig>,
+    /// Removed keys, kept so a configuration carrying one is refused by
+    /// name. See [`SmtpConfig::reject_removed_keys`].
+    #[serde(default, skip_serializing)]
+    login: Option<RemovedKey>,
+    #[serde(default, skip_serializing)]
+    password: Option<RemovedKey>,
+}
+
+impl SmtpConfig {
+    /// Refuses the flat `login` and `password`, now a `sasl` mechanism.
+    fn reject_removed_keys(&self, key: &str) -> Result<()> {
+        if self.login.is_some() || self.password.is_some() {
+            bail!(
+                "The flat `login` and `password` keys of `{key}` are gone: the send channel names \
+                 one SASL mechanism, as `imap` does, such as `{key}.sasl.plain.username` and \
+                 `{key}.sasl.plain.password`. See {MIGRATION_NOTES}"
+            );
+        }
+
+        Ok(())
+    }
 }
 
 /// Resolves a `server` into a URL, `scheme` filling in for a value with none.
@@ -2371,7 +2498,7 @@ mod tests {
     /// session against a server that requires one, so it is refused.
     #[test]
     fn the_flat_login_and_password_spelling_is_refused() {
-        let err = toml::from_str::<AccountConfig>(
+        let account: AccountConfig = toml::from_str(
             r#"
             imap.server = "imaps://imap.example.org:993"
             smtp.server = "smtps://smtp.example.org:465"
@@ -2379,10 +2506,10 @@ mod tests {
             smtp.password.raw = "pw"
             "#,
         )
-        .unwrap_err()
-        .to_string();
+        .unwrap();
 
-        assert!(err.contains("login"), "got {err}");
+        let err = account.validate().unwrap_err().to_string();
+        assert!(err.contains("`smtp.sasl.plain.username`"), "got {err}");
     }
 
     /// A bare authority with a port used to reach a backend as a hostless
@@ -2656,19 +2783,18 @@ mod tests {
             "#,
         )
         .unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("no variant of enum SourceBackendConfig")
-        );
+        assert!(err.to_string().contains("unknown field `imapp`"), "{err}");
 
         let account: AccountConfig = toml::from_str(
             r#"
             sources.a.imap.server = "imaps://imap.example.org:993"
-            sources.a.msgraph.auth.token.raw = "tok"
+            sources.a.smtp.server = "smtps://smtp.example.org:465"
             "#,
         )
         .unwrap();
-        assert!(account.sources().unwrap()["a"].is_imap());
+        let source = &account.sources().unwrap()["a"];
+        assert!(source.is_imap());
+        assert!(source.smtp.is_some());
     }
 
     /// The DAV sources are the non-mail ones, so they are where the account
@@ -2778,6 +2904,168 @@ mod tests {
 
         let err = account.validate().unwrap_err().to_string();
         assert!(err.contains("both a source and a target"), "got {err}");
+    }
+
+    /// A key nothing reads is a typo, refused at load wherever it sits.
+    #[test]
+    fn an_unknown_key_is_refused_at_every_level() {
+        let mut missed = Vec::new();
+
+        for (document, key) in [
+            (
+                "root-typo = 1\n[accounts.a]\nimap.server = \"imap.example.org\"",
+                "root-typo",
+            ),
+            (
+                "[accounts.a]\nimap.server = \"imap.example.org\"\nsorces.b.imap.server = \"x\"",
+                "sorces",
+            ),
+            (
+                "[accounts.a]\nsources.b.imap.server = \"x\"\nsources.b.source-typo = 1",
+                "source-typo",
+            ),
+            (
+                "[accounts.a]\nsources.b.imap.server = \"x\"\ntargets.c.imap.server = \"y\"\n\
+                 targets.c.target-typo = 1",
+                "target-typo",
+            ),
+            (
+                "[accounts.a]\nsources.b.imap.server = \"x\"\nsources.b.imap.imap-typo = 1",
+                "imap-typo",
+            ),
+            (
+                "[accounts.a]\nsources.b.imap.server = \"x\"\nsources.b.smtp.server = \"y\"\n\
+                 sources.b.smtp.smtp-typo = 1",
+                "smtp-typo",
+            ),
+            (
+                "[accounts.a]\nimap.server = \"x\"\nimap.tls.rustls.rustls-typo = 1",
+                "rustls-typo",
+            ),
+            (
+                "[accounts.a]\nimap.server = \"x\"\nimap.collection.collection-typo = 1",
+                "collection-typo",
+            ),
+            (
+                "[accounts.a]\nimap.server = \"x\"\nstore.store-typo = 1",
+                "store-typo",
+            ),
+        ] {
+            let err = toml::from_str::<Config>(document)
+                .map(|_| String::from("loaded"))
+                .unwrap_or_else(|err| err.to_string());
+            if !err.contains(&format!("unknown field `{key}`")) {
+                missed.push(format!("{key}: {err}"));
+            }
+        }
+
+        assert!(missed.is_empty(), "{missed:#?}");
+    }
+
+    /// A source is one backend: a second one is refused, never dropped.
+    #[test]
+    fn a_source_declaring_two_backends_is_refused() {
+        let err = toml::from_str::<AccountConfig>(
+            r#"
+            sources.a.imap.server = "imaps://imap.example.org:993"
+            sources.a.msgraph.auth.token.raw = "tok"
+            "#,
+        )
+        .map(|_| String::from("loaded"))
+        .unwrap_or_else(|err| err.to_string());
+        assert!(err.contains("`imap` and `msgraph`"), "{err}");
+
+        let err = toml::from_str::<AccountConfig>("sources.a.smtp.server = \"x\"")
+            .map(|_| String::from("loaded"))
+            .unwrap_or_else(|err| err.to_string());
+        assert!(err.contains("declares no backend"), "{err}");
+    }
+
+    /// A key an earlier neverest read is refused by name, pointing at the
+    /// migration notes rather than reading as a typo.
+    #[test]
+    fn a_removed_key_points_at_the_migration_notes() {
+        let mut missed = Vec::new();
+
+        for (document, named) in [
+            (
+                "left.imap.server = \"x\"\nright.imap.server = \"y\"",
+                "`left`",
+            ),
+            ("imap.server = \"x\"\nfolder.filter = \"all\"", "`folder`"),
+            (
+                "imap.server = \"x\"\nenvelope.filter.before = \"2024-01-01\"",
+                "`envelope`",
+            ),
+            (
+                "imap.server = \"x\"\ncollection.filter.include = [\"INBOX\"]",
+                "`collection`",
+            ),
+            (
+                "imap.server = \"x\"\nimap.collection.namespace = \"mail\"",
+                "`collection.namespace`",
+            ),
+            (
+                "imap.server = \"x\"\nstore.retention = \"retain\"",
+                "`store.retention`",
+            ),
+            (
+                "imap.server = \"x\"\nstore.hydration = \"full\"",
+                "`store.hydration`",
+            ),
+            (
+                "imap.server = \"x\"\nsmtp.server = \"y\"\nsmtp.login = \"u\"\n\
+                 smtp.password.raw = \"pw\"",
+                "`login` and `password`",
+            ),
+            (
+                "sources.a.imap.server = \"x\"\nsources.a.smtp.server = \"y\"\n\
+                 sources.a.smtp.password.raw = \"pw\"",
+                "`login` and `password`",
+            ),
+        ] {
+            let err = match toml::from_str::<AccountConfig>(document) {
+                Ok(account) => match account.validate() {
+                    Ok(()) => String::from("validated"),
+                    Err(err) => format!("{err:#}"),
+                },
+                Err(err) => err.to_string(),
+            };
+            if !err.contains(named) || !err.contains("MIGRATION.md") {
+                missed.push(format!("{named}: {err}"));
+            }
+        }
+
+        assert!(missed.is_empty(), "{missed:#?}");
+    }
+
+    /// Every key the sample documents, commented out or not, is one the
+    /// configuration reads: none is refused as unknown.
+    #[test]
+    fn every_key_the_sample_documents_is_known() {
+        let raw = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/config.sample.toml"))
+            .expect("read the sample");
+        let mut keys = 0;
+
+        for line in raw.lines() {
+            let code = line.trim_start_matches('#').trim_start();
+            let Some((key, _)) = code.split_once(" = ") else {
+                continue;
+            };
+            let is_key = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || "-.".contains(c);
+            if key.is_empty() || !key.chars().all(is_key) {
+                continue;
+            }
+
+            keys += 1;
+            let document = format!("[accounts.example]\n{code}");
+            if let Err(err) = toml::from_str::<Config>(&document) {
+                let err = err.to_string();
+                assert!(!err.contains("unknown"), "{code}\n{err}");
+            }
+        }
+
+        assert!(keys > 100, "{keys} keys read from the sample");
     }
 
     fn at(instant: &str) -> DateTime<Utc> {

@@ -22,6 +22,7 @@ Upgrading from 0.3.0:
 - Every `--json` output prints every key: an empty list as `[]`, an absent value as `null`, a bool as `false`. Test `.conflicts | length`, not whether `conflicts` is there.
 - `check` checks every endpoint and exits 3, printing its report, when one does not answer; it exited 1 with the failure object of the first.
 - `configure` and the first-run offer are gone: write the configuration by hand from config.sample.toml. A build naming the `wizard` feature fails until it drops it.
+- A configuration key neverest does not read is refused at load, at every level, where a misspelled key in a source table or at the root was ignored; a source naming two backend tables is refused rather than reduced to the first.
 
 ### Added
 
@@ -156,6 +157,10 @@ Upgrading from 0.3.0:
   A message such a listing leaves out is then kept rather than read as deleted, and the sync report counts them per collection under `unlisted`, printed under `Unlisted`, no warning and no exit code. Only a removal the server states itself deletes, so on an IMAP server without QRESYNC (Gmail's) a message deleted on the server stays in the store while the key is set.
 
 ### Changed
+
+- **BREAKING**: changed the configuration to refuse every key it does not read, at every level, naming the key.
+
+  A source table (`sources.<name>`, `targets.<name>`) was read through serde's `flatten`, which let an unknown key by and kept the first of two backend tables: it now refuses both, and the document root refuses anything but `accounts`. A key an earlier neverest read is refused by name with its replacement and a link to MIGRATION.md: `left`, `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace` (on a backend written directly under the account too, where it was ignored), `store.retention`, `store.hydration`, and the flat `smtp.login` and `smtp.password`.
 
 - **BREAKING**: changed the exit statuses to the Pimalaya exit contract: 2 is a command line neverest refused, and the partial outcomes start at 3. A run that waits for a person (a parked conflict, a refused duplicate `UID`, a rejected write, a parked send, intent or queue action, withheld absences or bodies) exits 3, where it exited 2; a run, a `drain`, an `init` or an `index` that could not do all its work exits 4, where it exited 3; `check` with an endpoint down exits 3, where it exited 2.
 

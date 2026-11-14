@@ -15,7 +15,6 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    fmt,
     io::{self, Write},
     mem,
     sync::{
@@ -49,6 +48,7 @@ use log::{debug, warn};
 use crate::dav::client::is_duplicate_uid;
 use crate::{
     client::{Client, EnumEntry, Gone, Held, Listed, Pool, StoredSize, WrittenItem},
+    error::{Failure, chain},
     item::flag::Flag,
     kind::{Kind, LinkId},
 };
@@ -320,8 +320,8 @@ pub struct RejectedPush {
     /// What the run tried: `update`, `append`, `copy`, `delete`, `move`,
     /// `set flags`.
     pub action: &'static str,
-    /// Why it did not land, as the backend put it.
-    pub reason: String,
+    /// Why it did not land, coded when the server's refusal says so.
+    pub failure: Failure,
 }
 
 impl<'a> PimRemote<'a> {
@@ -436,15 +436,16 @@ impl<'a> PimRemote<'a> {
         collection: &str,
         handle: PimdirHandle,
         action: &'static str,
-        reason: impl fmt::Display,
+        failure: impl Into<Failure>,
     ) -> PimdirPushResult {
-        let reason = reason.to_string();
+        let failure = failure.into();
+        let reason = chain(&failure.error, &failure.sources);
         warn!("{action} {} in {collection} rejected: {reason}", handle.0);
         self.rejected.push(RejectedPush {
             collection: collection.to_string(),
             handle: handle.0.clone(),
             action,
-            reason,
+            failure,
         });
 
         rejected_bare(handle)
@@ -663,7 +664,7 @@ impl PimdirRemote for PimRemote<'_> {
                     match stored {
                         Ok(()) => accepted(handle, None),
                         Err(err) => {
-                            self.reject(&collection, handle, "set flags", format!("{err:#}"))
+                            self.reject(&collection, handle, "set flags", Failure::of(&err))
                         }
                     }
                 }
@@ -696,9 +697,7 @@ impl PimdirRemote for PimRemote<'_> {
 
                         match moved {
                             Ok(()) => relocated(handle),
-                            Err(err) => {
-                                self.reject(&collection, handle, "move", format!("{err:#}"))
-                            }
+                            Err(err) => self.reject(&collection, handle, "move", Failure::of(&err)),
                         }
                     }
                     (None, _) => self.delete(&collection, handle, if_match.as_deref()),
@@ -1290,13 +1289,13 @@ impl PimRemote<'_> {
                 return self.reject(collection, handle, "append", reason);
             }
             Err(err) => {
-                return self.reject(collection, handle, "append", format!("{err:#}"));
+                return self.reject(collection, handle, "append", Failure::of(&err.into()));
             }
         };
         let len = match reader.metadata() {
             Ok(meta) => meta.len() as usize,
             Err(err) => {
-                return self.reject(collection, handle, "append", format!("{err:#}"));
+                return self.reject(collection, handle, "append", Failure::of(&err.into()));
             }
         };
 
@@ -1322,7 +1321,7 @@ impl PimRemote<'_> {
                 // NOTE: a duplicate `UID` gets its own report entry, naming the
                 // identity and the remedy a generic rejection cannot state.
                 if !is_duplicate_uid(&err) {
-                    return self.reject(collection, handle, "append", format!("{err:#}"));
+                    return self.reject(collection, handle, "append", Failure::of(&err));
                 }
 
                 return self.refuse_uid(collection, handle, "append", link);
@@ -1398,7 +1397,7 @@ impl PimRemote<'_> {
                 return Some(self.refuse_uid(collection, handle.clone(), "move", link));
             }
             Err(err) => {
-                return Some(self.reject(collection, handle.clone(), "move", format!("{err:#}")));
+                return Some(self.reject(collection, handle.clone(), "move", Failure::of(&err)));
             }
         };
 
@@ -1423,8 +1422,8 @@ impl PimRemote<'_> {
                 },
             ),
             Err(err) => {
-                let reason = format!("moved as {}, its body not written: {err:#}", moved.id);
-                self.reject(collection, handle.clone(), "move", reason)
+                let err = err.context(format!("moved as {}, its body not written", moved.id));
+                self.reject(collection, handle.clone(), "move", Failure::of(&err))
             }
         };
         Some(result)
@@ -1467,7 +1466,7 @@ impl PimRemote<'_> {
         if let Some(message_id) = link.hint.filter(|_| link.mint.is_none()) {
             let found = match self.pool.primary().find_message(collection, message_id) {
                 Ok(found) => found,
-                Err(err) => return self.reject(collection, handle, "copy", format!("{err:#}")),
+                Err(err) => return self.reject(collection, handle, "copy", Failure::of(&err)),
             };
             let held = |id: &str| {
                 self.held
@@ -1490,7 +1489,7 @@ impl PimRemote<'_> {
         match copied {
             Ok(Some(written)) => self.assign(collection, handle, "copy", written),
             Ok(None) => self.append(collection, handle, flags, object, link),
-            Err(err) => self.reject(collection, handle, "copy", format!("{err:#}")),
+            Err(err) => self.reject(collection, handle, "copy", Failure::of(&err)),
         }
     }
 
@@ -1536,7 +1535,7 @@ impl PimRemote<'_> {
 
         match deleted {
             Ok(()) => accepted(handle, None),
-            Err(err) => self.reject(collection, handle, "delete", format!("{err:#}")),
+            Err(err) => self.reject(collection, handle, "delete", Failure::of(&err)),
         }
     }
 
@@ -1549,7 +1548,7 @@ impl PimRemote<'_> {
     /// on IMAP and Graph mail); a key minted on a handle is never, its
     /// target holding the identity before the move. The targets are asked
     /// one after another, so a session selects each once.
-    fn targets_holding(&mut self, changes: &[PimdirChange]) -> HashMap<usize, Result<(), String>> {
+    fn targets_holding(&mut self, changes: &[PimdirChange]) -> HashMap<usize, Result<(), Failure>> {
         let mut asked: BTreeMap<String, Vec<(usize, &str)>> = BTreeMap::new();
         for (at, change) in changes.iter().enumerate() {
             let PimdirChangeKind::Remove {
@@ -1577,7 +1576,7 @@ impl PimRemote<'_> {
                     }
                     Ok(None) => {}
                     Err(err) => {
-                        holding.insert(at, Err(format!("{err:#}")));
+                        holding.insert(at, Err(Failure::of(&err)));
                     }
                 }
             }
@@ -1604,13 +1603,13 @@ impl PimRemote<'_> {
                 return self.reject(collection, handle, "update", reason);
             }
             Err(err) => {
-                return self.reject(collection, handle, "update", format!("{err:#}"));
+                return self.reject(collection, handle, "update", Failure::of(&err.into()));
             }
         };
         let len = match reader.metadata() {
             Ok(meta) => meta.len() as usize,
             Err(err) => {
-                return self.reject(collection, handle, "update", format!("{err:#}"));
+                return self.reject(collection, handle, "update", Failure::of(&err.into()));
             }
         };
 
@@ -1630,7 +1629,7 @@ impl PimRemote<'_> {
                 revision,
                 relocated: false,
             },
-            Err(err) => self.reject(collection, handle, "update", format!("{err:#}")),
+            Err(err) => self.reject(collection, handle, "update", Failure::of(&err)),
         }
     }
 }

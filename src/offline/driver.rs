@@ -74,7 +74,7 @@ use crate::{
         AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceBackendConfig,
         SourceConfig, SourcePermissions,
     },
-    error::{layout_error, pimdir_error},
+    error::{Failure, layout_error, pimdir_error},
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId, merge::Merged},
     offline::{
@@ -1966,10 +1966,10 @@ fn wanted_sides(
 fn note_source_failure(source_name: &str, err: anyhow::Error, report: &mut SyncOutput) {
     warn!("source {source_name} sync error: {err:#}");
     if let Some(unreached) = err.downcast_ref::<Unreached>() {
-        report.unreached.push(UnreachedEndpoint {
-            endpoint: unreached.endpoint.clone(),
-            error: format!("{err:#}"),
-        });
+        let endpoint = unreached.endpoint.clone();
+        report
+            .unreached
+            .push(UnreachedEndpoint::new(endpoint, Failure::of(&err)));
     }
     report.collection.patch.push(PatchEntry::new(
         CollectionHunk::Scan {
@@ -4374,7 +4374,7 @@ fn unnamed_creates(
             collection: collection.to_string(),
             handle: handle.0.clone(),
             action: "create",
-            reason: String::from("the server rejected it, giving no reason"),
+            failure: Failure::new("the server rejected it, giving no reason"),
         })
         .collect()
 }
@@ -4956,12 +4956,19 @@ fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncOu
             .item
             .patch
             .retain(|entry| !names(&entry.hunk, side, &rejected.collection, &id));
+        let Failure {
+            code,
+            error,
+            sources,
+        } = rejected.failure;
         report.rejected.push(RejectedWrite {
             side: side.to_string(),
             collection: rejected.collection,
             id,
             action: rejected.action.to_string(),
-            reason: rejected.reason,
+            code,
+            error,
+            sources,
         });
     }
 }
@@ -5425,7 +5432,9 @@ fn report_parked(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
                     collection: action.collection,
                     action: action.action,
                     producer: action.producer,
+                    code: None,
                     error: action.error,
+                    sources: Vec::new(),
                 });
             }
         }
@@ -5547,16 +5556,20 @@ fn drain_submits(
 
     #[cfg(any(feature = "smtp", feature = "msgraph"))]
     {
-        let entry = |intent: &submit::SubmitIntent, error: Option<String>, parked, unconfirmed| {
-            SubmitEntry {
-                id: intent.id,
-                collection: intent.collection.clone(),
-                subject: intent.subject(),
-                error,
-                parked,
-                unconfirmed,
-            }
-        };
+        let entry =
+            |intent: &submit::SubmitIntent, failure: Option<Failure>, parked, unconfirmed| {
+                let (code, error, sources) = Failure::row(failure);
+                SubmitEntry {
+                    id: intent.id,
+                    collection: intent.collection.clone(),
+                    subject: intent.subject(),
+                    code,
+                    error,
+                    sources,
+                    parked,
+                    unconfirmed,
+                }
+            };
 
         let mut channel = match open_send_channel(account_config, account, sides, intents.len()) {
             Ok(channel) => channel,
@@ -5565,13 +5578,13 @@ fn drain_submits(
                 report.unreached.push(unreached);
                 return;
             }
-            Err(Unopened::Refused(error)) => {
+            Err(Unopened::Refused(failure)) => {
                 // NOTE: nothing was attempted, so no attempt is counted:
                 // the producer reads the rows as never tried.
                 for intent in &intents {
                     report
                         .submitted
-                        .push(entry(intent, Some(error.clone()), false, false));
+                        .push(entry(intent, Some(failure.clone()), false, false));
                 }
                 return;
             }
@@ -5585,10 +5598,10 @@ fn drain_submits(
         let mut halted: Option<String> = None;
         for intent in &intents {
             if let Some(why) = halted.as_deref().or(channel.stopped()) {
-                let error = format!("Not attempted, {why}");
+                let failure = Failure::new(format!("Not attempted, {why}"));
                 report
                     .submitted
-                    .push(entry(intent, Some(error), false, false));
+                    .push(entry(intent, Some(failure), false, false));
                 continue;
             }
 
@@ -5603,7 +5616,7 @@ fn drain_submits(
                     }
                     report
                         .submitted
-                        .push(entry(intent, Some(reason), parked, false));
+                        .push(entry(intent, Some(failure.failure()), parked, false));
                     continue;
                 }
             };
@@ -5622,7 +5635,7 @@ fn drain_submits(
                 warn!("submit intent #{} not sent, {why}", intent.id);
                 report.submitted.push(entry(
                     intent,
-                    Some(format!("Not attempted, {why}")),
+                    Some(Failure::new(format!("Not attempted, {why}"))),
                     false,
                     false,
                 ));
@@ -5686,7 +5699,8 @@ fn drain_submits(
                                 !unconfirmed
                             }
                         };
-                    (recorded, entry(intent, Some(reason), parked, unconfirmed))
+                    let failure = failure.failure();
+                    (recorded, entry(intent, Some(failure), parked, unconfirmed))
                 }
             };
             report.submitted.push(outcome);
@@ -5802,7 +5816,9 @@ fn park_interrupted(
             id: intent.id,
             collection: intent.collection.clone(),
             subject: intent.subject(),
+            code: None,
             error: Some(error),
+            sources: Vec::new(),
             parked: true,
             unconfirmed: true,
         });
@@ -6233,7 +6249,7 @@ fn settle_intent(
     outcome: Result<(), InvitationFailure>,
     report: &mut SyncOutput,
 ) {
-    let (error, parked) = match outcome {
+    let (failure, parked) = match outcome {
         Ok(()) => {
             info!(
                 "{} intent #{} performed by {performer}",
@@ -6262,9 +6278,10 @@ fn settle_intent(
                     intent.kind, intent.id
                 );
             }
-            (Some(error), parked)
+            (Some(Failure::of(failure.error())), parked)
         }
     };
+    let (code, error, sources) = Failure::row(failure);
 
     report.intents.push(IntentEntry {
         id: intent.id,
@@ -6272,7 +6289,9 @@ fn settle_intent(
         kind: intent.kind.to_owned(),
         source: performer.to_string(),
         seq: intent.seq,
+        code,
         error,
+        sources,
         parked,
     });
 }
@@ -6400,7 +6419,7 @@ enum Unopened {
     /// The SMTP server refused the credentials: each intent fails with this
     /// error, pending and unattempted.
     #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
-    Refused(String),
+    Refused(Failure),
 }
 
 /// Resolves the account's send channel: an `smtp` table, else a native send.
@@ -6440,16 +6459,13 @@ fn open_send_channel<'a>(
             match submit::connect_smtp(&smtp) {
                 Ok(client) => Ok(submit::SendChannel::smtp(client)),
                 Err(err) => {
-                    let error = format!("{err:#}");
-                    warn!("cannot open the smtp channel, {queued} intent(s) stay pending: {error}");
+                    warn!("cannot open the smtp channel, {queued} intent(s) stay pending: {err:#}");
+                    let failure = Failure::of(&err);
                     match submit::open_failure(&err) {
-                        submit::OpenFailure::Unreached => {
-                            Err(Unopened::Unreached(UnreachedEndpoint {
-                                endpoint: format!("{name}.smtp"),
-                                error,
-                            }))
-                        }
-                        submit::OpenFailure::Refused => Err(Unopened::Refused(error)),
+                        submit::OpenFailure::Unreached => Err(Unopened::Unreached(
+                            UnreachedEndpoint::new(format!("{name}.smtp"), failure),
+                        )),
+                        submit::OpenFailure::Refused => Err(Unopened::Refused(failure)),
                     }
                 }
             }
@@ -10020,7 +10036,7 @@ mod tests {
                 collection: String::from("Default"),
                 handle: String::from("card1"),
                 action: "update",
-                reason: String::from("HTTP 403: Resource is not a vCard object"),
+                failure: Failure::from("HTTP 403: Resource is not a vCard object"),
             }],
             &mut report,
         );
@@ -10038,6 +10054,44 @@ mod tests {
             Exit::Conflicted,
             "a run that could not deliver a write is not a run that succeeded",
         );
+    }
+
+    /// A refused write keeps its code and its causes: JSON carries them
+    /// apart, the text prints them as one chain.
+    #[test]
+    fn a_refused_write_keeps_its_code_and_causes() {
+        let mut report = SyncOutput::default();
+        itemize_rejected(
+            "dav",
+            vec![RejectedPush {
+                collection: String::from("Default"),
+                handle: String::from("card1"),
+                action: "update",
+                failure: Failure {
+                    code: Some(crate::error::ErrorCode::PermissionDenied),
+                    error: String::from("Cannot update card1 in Default"),
+                    sources: vec![String::from("WebDAV server returned HTTP 403")],
+                },
+            }],
+            &mut report,
+        );
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            json["rejected"],
+            serde_json::json!([{
+                "side": "dav",
+                "collection": "Default",
+                "id": "card1",
+                "action": "update",
+                "code": "permission-denied",
+                "error": "Cannot update card1 in Default",
+                "sources": ["WebDAV server returned HTTP 403"],
+            }])
+        );
+        let text = report.to_string();
+        let chain = "Cannot update card1 in Default: WebDAV server returned HTTP 403";
+        assert!(text.contains(chain), "{text}");
     }
 
     /// A refused append names the item and takes its copy back.
@@ -10069,7 +10123,7 @@ mod tests {
                 collection: String::from("Calendar"),
                 handle: String::from("event-1\u{1}hub"),
                 action: "append",
-                reason: String::from("HTTP 403"),
+                failure: Failure::from("HTTP 403"),
             }],
             &mut report,
         );
@@ -10972,7 +11026,7 @@ mod tests {
             collection: String::from("Default"),
             handle: String::from(handle),
             action: "update",
-            reason: String::from("HTTP 403: Resource is not a vCard object"),
+            failure: Failure::from("HTTP 403: Resource is not a vCard object"),
         };
 
         let mut report = SyncOutput::default();
@@ -12909,7 +12963,7 @@ mod tests {
             collection: String::from("INBOX"),
             handle: String::from("a\u{1}1"),
             action: "append",
-            reason: String::from("NO over quota"),
+            failure: Failure::from("NO over quota"),
         }];
         let refused = [RefusedCreate {
             collection: String::from("INBOX"),

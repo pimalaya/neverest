@@ -82,12 +82,13 @@ use super::{
 use crate::{
     account::GmailAccount,
     client::{EnumEntry, Enumeration, Gone, Held, Listed, Renamed, StoredSize, WrittenItem},
+    error::ErrorCode,
     item::{
         collection::Collection,
         flag::{Flag, FlagOp, IanaFlag},
     },
     offline::invitation::Refusal,
-    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, rfc3339},
+    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, google_code, rfc3339},
 };
 
 /// Gmail system label marking an unread message; its absence means seen.
@@ -1504,6 +1505,14 @@ fn open_stream(tls: &Tls, url: &str) -> Result<Stream> {
     Ok(stream)
 }
 
+/// The code of a Gmail refusal in an error chain ([`google_code`]).
+pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
+    match cause.downcast_ref::<GmailClientStdError>()? {
+        GmailClientStdError::Send(GmailSendError::Api(err)) => google_code(&google_answer(err)),
+        _ => None,
+    }
+}
+
 /// A Gmail error as the throttle reads it.
 fn google_answer(err: &GmailApiError) -> GoogleAnswer<'_> {
     GoogleAnswer {
@@ -1966,7 +1975,7 @@ mod tests {
 
     use super::scripted::*;
     use super::*;
-    use crate::kind::mail::vectors::VECTORS;
+    use crate::{error::Failure, kind::mail::vectors::VECTORS};
 
     #[test]
     fn a_created_label_nests_under_its_parent_by_name() {
@@ -2406,6 +2415,28 @@ mod tests {
         assert!(!history[0].contains("labelId"), "{}", history[0]);
         assert_eq!(batch.requests().len(), 2, "m1 read once, m3 once");
         assert_eq!(api.left() + batch.left(), 0);
+    }
+
+    /// A delete Gmail refuses for rights is coded `permission-denied`, a
+    /// refused request left uncoded.
+    #[test]
+    fn a_refused_delete_is_coded_by_its_status() {
+        let denied = r#"{"error":{"code":403,"message":"Insufficient Permission","errors":[{"reason":"insufficientPermissions"}]}}"#;
+        let invalid = r#"{"error":{"code":400,"message":"Invalid id value","errors":[{"reason":"invalidArgument"}]}}"#;
+        let cases = [
+            ("403 Forbidden", denied, Some(ErrorCode::PermissionDenied)),
+            ("400 Bad Request", invalid, None),
+        ];
+
+        for (status, body, code) in cases {
+            let (mut client, api, _) = scripted();
+            api.answer(json(status, body));
+            let err = client.delete_item("TRASH", "m1").unwrap_err();
+
+            let failure = Failure::of(&err);
+            assert_eq!(failure.code, code, "{status}: {err:#}");
+            assert_eq!(failure.error, "Delete message m1 error", "{err:#}");
+        }
     }
 
     /// An expired history restarts a round, for that label only.

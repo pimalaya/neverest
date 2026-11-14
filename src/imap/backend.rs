@@ -28,6 +28,7 @@ use io_imap::{
         fetch::{MacroOrMessageDataItemNames, MessageDataItem, MessageDataItemName, Section},
         flag::{Flag as ImapFlag, FlagFetch, FlagNameAttribute, StoreType},
         mailbox::{ListMailbox, Mailbox as ImapMailbox},
+        response::Code,
         search::SearchKey,
         sequence::SequenceSet,
         status::{StatusDataItem, StatusDataItemName},
@@ -42,6 +43,7 @@ use log::{debug, warn};
 
 use crate::{
     client::{EnumEntry, Enumeration, Gone, Held, Listed, Renamed},
+    error::ErrorCode,
     imap::client::{ImapClient, RoundUids},
     item::{
         collection::Collection,
@@ -983,6 +985,21 @@ impl ImapClient {
     }
 }
 
+/// The code of an IMAP refusal in an error chain: a completion naming
+/// `NOPERM` is `permission-denied`, one naming `OVERQUOTA`
+/// `quota-exceeded` (RFC 5530 §3).
+pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
+    let status = cause.downcast_ref::<ImapClientError>()?.status()?;
+
+    match status.code.as_ref()? {
+        Code::OverQuota => Some(ErrorCode::QuotaExceeded),
+        Code::Other(code) if code.inner().eq_ignore_ascii_case(b"NOPERM") => {
+            Some(ErrorCode::PermissionDenied)
+        }
+        _ => None,
+    }
+}
+
 /// The name `mailbox` takes renamed `name`: under the parent it has, joined
 /// by `delimiter`, at the top on a flat namespace. A blank name, or one
 /// holding the delimiter, which would nest by itself, is refused.
@@ -1478,6 +1495,7 @@ mod tests {
     use pimalaya_stream::tls::Tls;
 
     use crate::{
+        error::Failure,
         imap::fake::{FakeImap, FakeMailbox, FakeMessage},
         kind::mail::vectors::VECTORS,
     };
@@ -1553,6 +1571,37 @@ mod tests {
     /// A store checkpoint under `UIDVALIDITY` 1.
     fn stored() -> Vec<u8> {
         encode_checkpoint(1, 5)
+    }
+
+    /// A write the server refuses is coded by its response code, `NOPERM`
+    /// or `OVERQUOTA` (RFC 5530 §3), any other left uncoded.
+    #[test]
+    fn a_refused_write_is_coded_by_its_response_code() {
+        let cases = [
+            ("NO [NOPERM] denied", Some(ErrorCode::PermissionDenied)),
+            ("NO [OVERQUOTA] full", Some(ErrorCode::QuotaExceeded)),
+            ("NO [CANNOT] refused", None),
+        ];
+        let seen = [Flag::from_iana(IanaFlag::Seen)];
+        let message = b"Message-ID: <b@x>\r\n\r\nhi\r\n";
+
+        for (completion, code) in cases {
+            let server = renumbered(false);
+            let mut client =
+                ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+
+            server.refuse_next_write(completion);
+            let err = client
+                .update_flags("INBOX", &["7"], &seen, &[])
+                .unwrap_err();
+            assert_eq!(Failure::of(&err).code, code, "{completion}: {err:#}");
+
+            server.refuse_next_write(completion);
+            let err = client
+                .add_message_stream("INBOX", &[], &message[..], message.len(), Some("b@x"))
+                .unwrap_err();
+            assert_eq!(Failure::of(&err).code, code, "{completion}: {err:#}");
+        }
     }
 
     /// A round cursor under `uid_validity`.

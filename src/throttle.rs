@@ -41,6 +41,8 @@ use std::{
 use chrono::{DateTime, Datelike, Days, NaiveDate, SecondsFormat, TimeZone, Utc, Weekday};
 use log::warn;
 
+use crate::error::ErrorCode;
+
 /// How many times a throttled request is sent again before the source gives
 /// up on it.
 const MAX_RETRIES: u32 = 5;
@@ -355,6 +357,18 @@ pub fn google_refusal(answer: &GoogleAnswer<'_>) -> Option<GoogleRefusal> {
         429 | 403 if names_minute_quota(&text) => Some(GoogleRefusal::Minute),
         429 | 502 | 503 | 504 => Some(GoogleRefusal::Burst),
         403 if rate => Some(GoogleRefusal::Burst),
+        _ => None,
+    }
+}
+
+/// The code of a Google refusal left after the waits: a 429, or a 403
+/// naming a rate limit or a quota ([`google_refusal`]), is `rate-limited`;
+/// any other 403 is `permission-denied`.
+pub fn google_code(answer: &GoogleAnswer<'_>) -> Option<ErrorCode> {
+    match answer.status {
+        429 => Some(ErrorCode::RateLimited),
+        403 if google_refusal(answer).is_some() => Some(ErrorCode::RateLimited),
+        403 => Some(ErrorCode::PermissionDenied),
         _ => None,
     }
 }
@@ -760,6 +774,31 @@ mod tests {
         assert_eq!(out, Err(404));
         assert_eq!(calls.get(), 1);
         assert_eq!(throttle.gave_up(), None);
+    }
+
+    /// A Google refusal left after the waits is coded: a rate limit or a
+    /// quota by status or reason, any other 403 a matter of rights, and a
+    /// server failure not at all.
+    #[test]
+    fn a_google_refusal_is_coded_by_status_and_reason() {
+        let reasons = |status, reason: &str| {
+            google_code(&GoogleAnswer {
+                status,
+                message: "refused",
+                reasons: &[reason.to_owned()],
+                ..Default::default()
+            })
+        };
+        let rate = Some(ErrorCode::RateLimited);
+        let denied = Some(ErrorCode::PermissionDenied);
+
+        assert_eq!(reasons(429, "rateLimitExceeded"), rate);
+        assert_eq!(reasons(403, "userRateLimitExceeded"), rate);
+        assert_eq!(reasons(403, "dailyLimitExceeded"), rate);
+        assert_eq!(reasons(403, "insufficientPermissions"), denied);
+        assert_eq!(reasons(403, "forbidden"), denied);
+        assert_eq!(reasons(503, "backendError"), None);
+        assert_eq!(reasons(400, "invalidArgument"), None);
     }
 
     /// A Google answer read from its status and message alone, as io-gcal

@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Error, Result, anyhow};
 use clap::Parser;
-use pimalaya_cli::{error::code_of, printer::Printer, spinner::Spinner};
+use pimalaya_cli::{printer::Printer, spinner::Spinner};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -24,7 +24,7 @@ use crate::{
     },
     client,
     config::{AccountConfig, AccountMode, Config},
-    error::ErrorCode,
+    error::{self, ErrorCode},
     offline::{driver, state::StoreState},
 };
 
@@ -209,7 +209,7 @@ impl InitOutput {
             store: store.to_path_buf(),
             sources: Vec::new(),
             already_initialized: false,
-            code: code_of(&err),
+            code: error::code(&err),
             error: Some(format!("{err:#}")),
         }
     }

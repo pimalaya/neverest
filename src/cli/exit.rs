@@ -84,11 +84,14 @@ mod tests {
     use anyhow::anyhow;
 
     use super::*;
-    use crate::sync::{
-        hunk::CollectionHunk,
-        report::{
-            IntentEntry, ParkedQueueAction, PatchEntry, SubmitEntry, ThrottledSource,
-            UnreachedEndpoint,
+    use crate::{
+        error::Failure,
+        sync::{
+            hunk::CollectionHunk,
+            report::{
+                IntentEntry, ParkedQueueAction, PatchEntry, SubmitEntry, ThrottledSource,
+                UnreachedEndpoint,
+            },
         },
     };
 
@@ -124,7 +127,9 @@ mod tests {
             id: 1,
             collection: String::from("INBOX"),
             subject: None,
+            code: None,
             error: Some(String::from("550 rejected")),
+            sources: Vec::new(),
             parked: true,
             unconfirmed: false,
         });
@@ -144,7 +149,9 @@ mod tests {
             kind: String::from("calendar-reply"),
             source: String::from("caldav"),
             seq: None,
+            code: None,
             error: Some(String::from("refused")),
+            sources: Vec::new(),
             parked: true,
         });
         assert_eq!(Exit::from(&report), Exit::Conflicted);
@@ -155,7 +162,9 @@ mod tests {
             collection: String::from("imap/INBOX"),
             action: String::from("remove"),
             producer: String::from("himalaya"),
+            code: None,
             error: String::from("unknown seq 9"),
+            sources: Vec::new(),
         });
         assert_eq!(Exit::from(&report), Exit::Conflicted);
     }
@@ -178,7 +187,9 @@ mod tests {
             id: 7,
             collection: String::from("imap/Sent"),
             subject: Some(String::from("hi")),
+            code: None,
             error: Some(String::from("unconfirmed: Reached unexpected EOF")),
+            sources: Vec::new(),
             parked: true,
             unconfirmed: true,
         });
@@ -192,7 +203,9 @@ mod tests {
                 "id": 7,
                 "collection": "imap/Sent",
                 "subject": "hi",
+                "code": null,
                 "error": "unconfirmed: Reached unexpected EOF",
+                "sources": [],
                 "parked": true,
                 "unconfirmed": true,
             }])
@@ -204,10 +217,10 @@ mod tests {
     #[test]
     fn an_unreached_send_channel_makes_the_run_incomplete() {
         let mut report = SyncOutput::default();
-        report.unreached.push(UnreachedEndpoint {
-            endpoint: String::from("imap.smtp"),
-            error: String::from("Cannot connect to the SMTP submission server: refused"),
-        });
+        report.unreached.push(UnreachedEndpoint::new(
+            String::from("imap.smtp"),
+            Failure::new("Cannot connect to the SMTP submission server: refused"),
+        ));
         assert_eq!(Exit::from(&report), Exit::Incomplete);
     }
 

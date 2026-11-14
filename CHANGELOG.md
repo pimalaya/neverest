@@ -147,6 +147,10 @@ Upgrading from 0.3.0:
 
 - Added the `lock-replaced` error code: a lock file of the store was removed or replaced under a run, which wrote nothing more.
 
+- Added the codes `permission-denied`, `quota-exceeded`, `rate-limited` and `recipient-refused`, which Himalaya shares, to a failure a server refused: a 403 or an IMAP `NOPERM`, a 507, Graph's `ErrorQuotaExceeded`, an IMAP `OVERQUOTA` or an SMTP sending limit, a 429 or a Google rate limit left after the waits, a refused `RCPT TO`.
+
+  A refused write, send or intent, a failed hunk and an unreached endpoint carry it as `code`, as an account's row and a failed index refresh do; a DAV 403 naming a precondition other than `need-privileges` carries none.
+
 - Added `collection.capped` to every source: set it to true when the server lists at most a number of the items a collection holds, whatever it holds (Gmail over IMAP with its folder size limit set).
 
   A message such a listing leaves out is then kept rather than read as deleted, and the sync report counts them per collection under `unlisted`, printed under `Unlisted`, no warning and no exit code. Only a removal the server states itself deletes, so on an IMAP server without QRESYNC (Gmail's) a message deleted on the server stays in the store while the key is set.
@@ -156,6 +160,10 @@ Upgrading from 0.3.0:
 - **BREAKING**: changed the exit statuses to the Pimalaya exit contract: 2 is a command line neverest refused, and the partial outcomes start at 3. A run that waits for a person (a parked conflict, a refused duplicate `UID`, a rejected write, a parked send, intent or queue action, withheld absences or bodies) exits 3, where it exited 2; a run, a `drain`, an `init` or an `index` that could not do all its work exits 4, where it exited 3; `check` with an endpoint down exits 3, where it exited 2.
 
   Under `--json`, a refused command line prints the failure object coded `usage-invalid` on stdout; without it, clap's message goes to stderr as before.
+
+- **BREAKING**: changed every failing row of a report, `rejected`, `submitted`, `intents`, `parked`, `unreached` and the patch entries of a sync, `parked` of a drain, to carry pimalaya-cli's item error keys: `code`, `error` the outermost message, `sources` the messages of its causes. `error` held the whole chain, and a `rejected` row named it `reason`.
+
+  The text output still prints the whole chain. An account's row and the index refresh keep `error` whole, beside their `code`.
 
 - **BREAKING**: changed every account naming no `store.root` to share one store, `neverest/` under the state directory, where each had `neverest/<account>/`.
 

@@ -29,7 +29,7 @@ use io_pimdir::{
 use jiff::tz::TimeZone;
 use log::{debug, info, warn};
 
-use crate::{config::StoreConfig, sync::report::IndexRefresh};
+use crate::{config::StoreConfig, error::ErrorCode, sync::report::IndexRefresh};
 
 /// How long a refresh may run after a run a frontend waits on: a drain, a
 /// run performing the queued intents alone or declaring the collections.
@@ -62,6 +62,7 @@ pub fn after_run(dir: &Path, config: &StoreConfig, quick: bool, report: &mut Opt
         Err(err) => {
             warn!("cannot refresh the search index, the next run tries again: {err}");
             IndexRefresh {
+                code: ErrorCode::of_pimdir(&err),
                 error: Some(err.to_string()),
                 ..Default::default()
             }
@@ -92,6 +93,7 @@ pub fn refresh(
         indexed: report.indexed,
         behind: report.head.saturating_sub(report.cursor).max(0) as u64,
         busy: report.busy,
+        code: None,
         error: None,
     })
 }

@@ -13,14 +13,14 @@ use anyhow::{Context, Error, Result, anyhow};
 use clap::Parser;
 use io_pimdir::client::producer::PimdirActionStatus;
 use log::info;
-use pimalaya_cli::{error::code_of, printer::Printer};
+use pimalaya_cli::printer::Printer;
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
     cli::{exit::Exit, sync::try_store_lock},
     config::{AccountConfig, Config},
-    error::ErrorCode,
+    error::{self, ErrorCode, chain},
     offline::{driver, state::StoreState},
     sync::report::{IndexRefresh, OverruledBody},
 };
@@ -186,7 +186,9 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Drain
                 id: row.id,
                 collection: row.collection,
                 kind,
+                code: None,
                 error,
+                sources: Vec::new(),
             }),
             PimdirActionStatus::Pending { .. } => output.waiting += 1,
             // NOTE: a drain performs no intent, so it leaves none
@@ -282,7 +284,7 @@ impl DrainOutput {
 
     fn failed(account: String, err: Error) -> Self {
         Self {
-            code: code_of(&err),
+            code: error::code(&err),
             error: Some(format!("{err:#}")),
             ..Self::new(account)
         }
@@ -363,8 +365,14 @@ pub struct ParkedAction {
     pub collection: String,
     /// The action kind.
     pub kind: String,
-    /// Why the store refused it.
+    /// The stable code of the refusal, `null`: the store keeps its text
+    /// alone.
+    pub code: Option<ErrorCode>,
+    /// Why the store refused it, as the store recorded it.
     pub error: String,
+    /// The messages of the refusal's causes, empty: the store recorded
+    /// them in `error`.
+    pub sources: Vec<String>,
 }
 
 impl fmt::Display for ParkedAction {
@@ -372,7 +380,10 @@ impl fmt::Display for ParkedAction {
         write!(
             f,
             "#{} {} in {} parked: {}",
-            self.id, self.kind, self.collection, self.error
+            self.id,
+            self.kind,
+            self.collection,
+            chain(&self.error, &self.sources)
         )
     }
 }

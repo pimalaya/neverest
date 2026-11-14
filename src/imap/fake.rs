@@ -68,6 +68,8 @@ pub struct FakeImap {
     headers: Arc<Mutex<BTreeMap<u32, Vec<u8>>>>,
     /// The fault its next `UID FETCH` of whole bodies meets.
     fault: Arc<Mutex<Option<FakeFault>>>,
+    /// The completion its next `APPEND` or `UID STORE` is refused with.
+    refusal: Arc<Mutex<Option<&'static str>>>,
 }
 
 impl FakeImap {
@@ -80,12 +82,14 @@ impl FakeImap {
         let headers = Arc::new(Mutex::new(BTreeMap::new()));
         let connections = Arc::new(AtomicUsize::new(0));
         let fault = Arc::new(Mutex::new(None));
+        let refusal = Arc::new(Mutex::new(None));
 
         let logged = Arc::clone(&commands);
         let shared = Arc::clone(&served);
         let stated = Arc::clone(&headers);
         let accepted = Arc::clone(&connections);
         let broken = Arc::clone(&fault);
+        let refused = Arc::clone(&refusal);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
@@ -94,8 +98,11 @@ impl FakeImap {
                 let commands = Arc::clone(&logged);
                 let headers = Arc::clone(&stated);
                 let fault = Arc::clone(&broken);
+                let refusal = Arc::clone(&refused);
                 thread::spawn(move || {
-                    serve(stream, qresync, &mailbox, &headers, &commands, &fault)
+                    serve(
+                        stream, qresync, &mailbox, &headers, &commands, &fault, &refusal,
+                    )
                 });
             }
         });
@@ -107,12 +114,19 @@ impl FakeImap {
             served,
             headers,
             fault,
+            refusal,
         }
     }
 
     /// Has the next `UID FETCH` of whole bodies meet `fault`, once.
     pub fn break_next_body_fetch(&self, fault: FakeFault) {
         *self.fault.lock().unwrap() = Some(fault);
+    }
+
+    /// Has the next `APPEND` or `UID STORE` refused with the tagged
+    /// `completion` (`NO [NOPERM] denied`), once.
+    pub fn refuse_next_write(&self, completion: &'static str) {
+        *self.refusal.lock().unwrap() = Some(completion);
     }
 
     /// Has the message `uid` state `header`, a whole header block, where a
@@ -162,6 +176,7 @@ fn serve(
     headers: &Mutex<BTreeMap<u32, Vec<u8>>>,
     commands: &Mutex<Vec<String>>,
     fault: &Mutex<Option<FakeFault>>,
+    refusal: &Mutex<Option<&'static str>>,
 ) {
     let mut writer = stream.try_clone().unwrap();
     let mut reader = BufReader::new(stream);
@@ -201,6 +216,18 @@ fn serve(
             {
                 return;
             }
+        }
+
+        let upper = command.to_ascii_uppercase();
+        let writes = upper.starts_with("APPEND") || upper.starts_with("UID STORE");
+        if let Some(completion) = writes.then(|| refusal.lock().unwrap().take()).flatten() {
+            if writer
+                .write_all(format!("{tag} {completion}\r\n").as_bytes())
+                .is_err()
+            {
+                return;
+            }
+            continue;
         }
 
         let mut reply = answer(

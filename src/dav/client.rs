@@ -55,6 +55,7 @@ use url::Url;
 
 use crate::{
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
+    error::ErrorCode,
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId},
     throttle::{Request, Throttle},
@@ -998,17 +999,50 @@ fn is_connection_closed(err: &WebdavClientStdError) -> bool {
 ///
 /// io-webdav keeps no `Retry-After`, so the wait is neverest's back-off.
 fn throttle_status(err: &WebdavClientStdError) -> Option<u16> {
+    refused(err).map(|(status, _)| status)
+}
+
+/// The status and body of an answer that refused an exchange, wherever
+/// io-webdav surfaces it.
+fn refused(err: &WebdavClientStdError) -> Option<(u16, &str)> {
     match err {
-        WebdavClientStdError::Send(WebdavSendError::HttpStatus { status, .. })
+        WebdavClientStdError::Send(WebdavSendError::HttpStatus { status, body })
         | WebdavClientStdError::WebdavSyncCollection(WebdavSyncCollectionError::Send(
-            WebdavSendError::HttpStatus { status, .. },
+            WebdavSendError::HttpStatus { status, body },
         ))
         | WebdavClientStdError::WebdavFollowRedirects(WebdavFollowRedirectsError::HttpStatus {
             status,
-            ..
-        }) => Some(*status),
+            body,
+        }) => Some((*status, body)),
         _ => None,
     }
+}
+
+/// The code of a DAV refusal in an error chain.
+///
+/// A 507, or a body naming `quota-not-exceeded` (RFC 4331 §6), is
+/// `quota-exceeded`; a 429 left after the waits `rate-limited`; a 403
+/// `permission-denied` when its body names `need-privileges` (RFC 3744
+/// §7.1.1) or no precondition at all. Any other 403 names a precondition
+/// the written body failed (RFC 4791 §5.3.2), no matter of rights.
+pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
+    let (status, body) = refused(cause.downcast_ref::<WebdavClientStdError>()?)?;
+
+    match status {
+        _ if body.contains("quota-not-exceeded") => Some(ErrorCode::QuotaExceeded),
+        507 => Some(ErrorCode::QuotaExceeded),
+        429 => Some(ErrorCode::RateLimited),
+        403 if body.contains("need-privileges") || !names_precondition(body) => {
+            Some(ErrorCode::PermissionDenied)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a refusal's body is a `DAV:error` element, which names the
+/// precondition the request failed (RFC 4918 §16).
+fn names_precondition(body: &str) -> bool {
+    body.contains(":error") || body.contains("<error")
 }
 
 /// The status a plain request failed with, as io-webdav surfaces a non-2xx
@@ -1228,6 +1262,7 @@ pub(crate) mod scripted {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Failure;
 
     #[test]
     fn a_default_calendar_url_is_keyed_as_a_listing_keys_it() {
@@ -1497,6 +1532,55 @@ mod tests {
         )]);
         let err = dav.move_item("tasks", "work", "t1.ics", None).unwrap_err();
         assert!(is_duplicate_uid(&err), "{err:#}");
+    }
+
+    /// A refused write is coded by its status and the precondition its
+    /// body names: a 403 naming none, or `need-privileges`, is a matter of
+    /// rights, one naming what the body failed is not.
+    #[test]
+    fn a_refused_write_is_coded_by_its_status_and_precondition() {
+        let error = |body: &str| {
+            format!(
+                "<d:error xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">{body}</d:error>"
+            )
+        };
+        let xml = [("Content-Type", "application/xml")];
+        let cases = [
+            (
+                "403 Forbidden",
+                String::new(),
+                Some(ErrorCode::PermissionDenied),
+            ),
+            (
+                "403 Forbidden",
+                error("<d:need-privileges/>"),
+                Some(ErrorCode::PermissionDenied),
+            ),
+            ("403 Forbidden", error("<c:valid-calendar-data/>"), None),
+            (
+                "507 Insufficient Storage",
+                String::new(),
+                Some(ErrorCode::QuotaExceeded),
+            ),
+            (
+                "403 Forbidden",
+                error("<d:quota-not-exceeded/>"),
+                Some(ErrorCode::QuotaExceeded),
+            ),
+            ("409 Conflict", String::new(), None),
+        ];
+
+        for (status, body, code) in cases {
+            let (mut dav, _) = calendars(vec![answer(status, &xml, &body)]);
+            let ical = "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n";
+            let err = dav
+                .update_item_stream("tasks", "t1.ics", ical.as_bytes(), Some("\"1\""))
+                .unwrap_err();
+
+            let failure = Failure::of(&err);
+            assert_eq!(failure.code, code, "{status} {body}: {err:#}");
+            assert_eq!(failure.error, "Cannot update t1.ics in tasks", "{err:#}");
+        }
     }
 
     /// io-webdav moves no card: CardDAV answers none without a request.

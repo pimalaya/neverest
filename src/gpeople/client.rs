@@ -41,8 +41,9 @@ use url::Url;
 
 use crate::{
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
+    error::ErrorCode,
     item::{collection::Collection, flag::Flag},
-    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle},
+    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, google_code},
 };
 
 /// The one collection a People account syncs: every connection.
@@ -150,16 +151,9 @@ impl GpeopleClient {
                 Ok(out.response)
             },
             |err| match err {
-                GpeopleClientStdError::Send(GpeopleSendError::Api(err)) => waits.throttled(
-                    request,
-                    &GoogleAnswer {
-                        status: err.status,
-                        message: &err.message,
-                        reasons: &err.reasons,
-                        detail_reasons: &err.detail_reasons,
-                        google_status: err.google_status.as_deref(),
-                    },
-                ),
+                GpeopleClientStdError::Send(GpeopleSendError::Api(err)) => {
+                    waits.throttled(request, &google_answer(err))
+                }
                 _ => None,
             },
             |message| {
@@ -471,6 +465,25 @@ fn is_missing(err: &anyhow::Error) -> bool {
 /// Whether an error text names an expired sync token.
 fn names_expired_token(text: &str) -> bool {
     text.contains("EXPIRED_SYNC_TOKEN") || text.contains("Sync token is expired")
+}
+
+/// The code of a People refusal in an error chain ([`google_code`]).
+pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
+    match cause.downcast_ref::<GpeopleClientStdError>()? {
+        GpeopleClientStdError::Send(GpeopleSendError::Api(err)) => google_code(&google_answer(err)),
+        _ => None,
+    }
+}
+
+/// A People error as the throttle reads it.
+fn google_answer(err: &GpeopleApiError) -> GoogleAnswer<'_> {
+    GoogleAnswer {
+        status: err.status,
+        message: &err.message,
+        reasons: &err.reasons,
+        detail_reasons: &err.detail_reasons,
+        google_status: err.google_status.as_deref(),
+    }
 }
 
 /// Reads a whole vCard body as UTF-8 text.

@@ -56,6 +56,8 @@ enum Smtp {
     HangUpAfterData,
     /// Reads the whole message, then refuses it with this reply.
     RefuseData(&'static str),
+    /// Refuses every recipient with this reply.
+    RefuseRcpt(&'static str),
     /// Refuses the credentials.
     RefuseAuth,
 }
@@ -95,6 +97,8 @@ fn spawn_gated_smtp(
                     .write_all(b"535 5.7.8 authentication failed\r\n")
                     .unwrap();
                 break;
+            } else if let (true, Smtp::RefuseRcpt(reply)) = (upper.starts_with("RCPT"), smtp) {
+                stream.write_all(reply.as_bytes()).unwrap();
             } else if upper.starts_with("DATA") {
                 stream.write_all(b"354 go\r\n").unwrap();
                 loop {
@@ -257,6 +261,18 @@ fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// A failing row's message followed by its causes, as the text output
+/// prints them.
+fn chain(row: &Value) -> String {
+    let sources = row["sources"].as_array().expect("the causes");
+    let mut text = String::from(row["error"].as_str().expect("an error"));
+    for source in sources {
+        text.push_str(": ");
+        text.push_str(source.as_str().expect("a cause"));
+    }
+    text
+}
+
 const BODY: &[u8] =
     b"From: a@example.org\r\nTo: b@example.org\r\nSubject: intents-only\r\n\r\nhello\r\n";
 
@@ -310,7 +326,7 @@ fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["parked"], true, "{report}");
     assert_eq!(submitted["unconfirmed"], true, "{report}");
-    let error = submitted["error"].as_str().unwrap();
+    let error = chain(submitted);
     assert!(error.starts_with("unconfirmed: "), "{report}");
     let PimdirActionStatus::Unconfirmed { detail, .. } = fixture.status(id) else {
         panic!("the send is parked unconfirmed: {report}");
@@ -379,10 +395,8 @@ fn refused_credentials_fail_the_send_without_parking_it() {
 
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     let submitted = &report["submitted"][0];
-    assert!(
-        submitted["error"].as_str().unwrap().contains("535"),
-        "{report}"
-    );
+    assert!(chain(submitted).contains("535"), "{report}");
+    assert_eq!(submitted["code"], Value::Null, "{report}");
     assert_eq!(submitted["parked"], false, "{report}");
     assert_eq!(submitted["unconfirmed"], false, "{report}");
     assert!(matches!(
@@ -406,8 +420,8 @@ fn a_send_refused_for_a_quota_stays_queued() {
     assert_eq!(data.recv().unwrap(), BODY, "{report}");
     let submitted = &report["submitted"];
     assert_eq!(submitted[0]["id"], first, "{report}");
-    let error = submitted[0]["error"].as_str().unwrap();
-    assert!(error.contains("5.4.5"), "{report}");
+    assert!(chain(&submitted[0]).contains("5.4.5"), "{report}");
+    assert_eq!(submitted[0]["code"], "quota-exceeded", "{report}");
     assert_eq!(submitted[0]["parked"], false, "{report}");
     assert_eq!(submitted[1]["id"], second, "{report}");
     let error = submitted[1]["error"].as_str().unwrap();
@@ -420,6 +434,28 @@ fn a_send_refused_for_a_quota_stays_queued() {
     assert!(matches!(
         fixture.status(second),
         PimdirActionStatus::Pending { attempts: 0, .. }
+    ));
+}
+
+/// A send whose recipient the server refuses for good reached nobody: it
+/// parks, coded `recipient-refused`, the reply among its causes.
+#[test]
+fn a_refused_recipient_parks_the_send_coded() {
+    let (port, _) = spawn_smtp(Smtp::RefuseRcpt("550 5.1.1 user unknown\r\n"));
+    let fixture = Fixture::new(port, false);
+    let id = fixture.queue_send(BODY, false);
+
+    let report = fixture.intents_only(3);
+
+    let submitted = &report["submitted"][0];
+    assert_eq!(submitted["id"], id, "{report}");
+    assert_eq!(submitted["code"], "recipient-refused", "{report}");
+    assert!(chain(submitted).contains("5.1.1"), "{report}");
+    assert_eq!(submitted["parked"], true, "{report}");
+    assert_eq!(submitted["unconfirmed"], false, "{report}");
+    assert!(matches!(
+        fixture.status(id),
+        PimdirActionStatus::Parked { .. }
     ));
 }
 

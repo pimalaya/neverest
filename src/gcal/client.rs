@@ -59,9 +59,10 @@ use url::Url;
 
 use crate::{
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
+    error::ErrorCode,
     item::{collection::Collection, flag::Flag},
     offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp, wall_stamp},
-    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle},
+    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, google_code},
 };
 
 /// The page size requested from the events listing.
@@ -179,16 +180,9 @@ impl GcalClient {
                 Ok(out.response)
             },
             |err| match err {
-                GcalClientStdError::Send(GcalSendError::Api(err)) => waits.throttled(
-                    request,
-                    &GoogleAnswer {
-                        status: err.status,
-                        message: &err.message,
-                        reasons: &err.reasons,
-                        detail_reasons: &err.detail_reasons,
-                        google_status: err.google_status.as_deref(),
-                    },
-                ),
+                GcalClientStdError::Send(GcalSendError::Api(err)) => {
+                    waits.throttled(request, &google_answer(err))
+                }
                 _ => None,
             },
             |message| {
@@ -793,6 +787,25 @@ fn is_missing(err: &anyhow::Error) -> bool {
             Some(GcalClientStdError::Send(send)) if matches!(send.status(), Some(404 | 410))
         )
     })
+}
+
+/// The code of a Calendar refusal in an error chain ([`google_code`]).
+pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
+    match cause.downcast_ref::<GcalClientStdError>()? {
+        GcalClientStdError::Send(GcalSendError::Api(err)) => google_code(&google_answer(err)),
+        _ => None,
+    }
+}
+
+/// A Calendar error as the throttle reads it.
+fn google_answer(err: &GcalApiError) -> GoogleAnswer<'_> {
+    GoogleAnswer {
+        status: err.status,
+        message: &err.message,
+        reasons: &err.reasons,
+        detail_reasons: &err.detail_reasons,
+        google_status: err.google_status.as_deref(),
+    }
 }
 
 /// Reads a whole iCalendar body as raw bytes.

@@ -25,16 +25,50 @@
 //!
 //! One store code is neverest's own, `store-layout`: a store laid out as
 //! an earlier neverest kept it, which no pimdir profile refuses.
+//!
+//! A server's refusal takes a code of the vocabulary Himalaya shares,
+//! `permission-denied`, `quota-exceeded`, `rate-limited` and
+//! `recipient-refused`, read from the typed error of the protocol that
+//! answered it. A report row failing carries it as a [`Failure`].
 
+use anyhow::Error;
 use io_pimdir::client::PimdirError;
-use pimalaya_cli::error::CodedError;
+use pimalaya_cli::error::{CodedError, code_of};
 use schemars::JsonSchema;
 use serde::Serialize;
 
 /// The stable codes, each serialised in kebab-case.
+#[cfg_attr(
+    not(any(
+        feature = "dav",
+        feature = "gcal",
+        feature = "gmail",
+        feature = "gpeople",
+        feature = "imap",
+        feature = "msgraph",
+        feature = "smtp"
+    )),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
+    /// The server refused the request to the account: an HTTP 403 that is
+    /// no rate limit and, on DAV, names no precondition but
+    /// `need-privileges` (RFC 3744 §7.1.1), or an IMAP `NOPERM` (RFC 5530).
+    PermissionDenied,
+    /// The write or the send would exceed the account's quota: an HTTP 507,
+    /// a DAV `quota-not-exceeded` (RFC 4331 §6), an IMAP `OVERQUOTA` (RFC
+    /// 9208), Graph's `ErrorQuotaExceeded`, an SMTP reply naming a sending
+    /// limit.
+    QuotaExceeded,
+    /// The server still throttled the request past the waits neverest
+    /// takes: an HTTP 429, or a Google rate limit or daily quota.
+    RateLimited,
+    /// The SMTP server refused a recipient of a send (RFC 5321 §3.3), so
+    /// the message reached nobody: io-smtp offers none after the first
+    /// refused.
+    RecipientRefused,
     /// The store is of another format version than neverest's (pimdir
     /// STORAGE §4.2, §6), never migrated: one an earlier neverest wrote is
     /// synced by that neverest until nothing is queued, then its directory
@@ -141,6 +175,108 @@ pub fn pimdir_error(err: PimdirError) -> anyhow::Error {
         Some(code) => CodedError::new(code, err.to_string()).into(),
         None => err.into(),
     }
+}
+
+/// A failure as a report row carries it: pimalaya-cli's item error less
+/// its id, the row naming its item itself.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Failure {
+    /// The stable code, `None` for a cause no caller is expected to act on.
+    pub code: Option<ErrorCode>,
+    /// The outermost message.
+    pub error: String,
+    /// The messages of the causes, outermost first.
+    pub sources: Vec<String>,
+}
+
+impl Failure {
+    /// The failure `err` reads as, coded by [`code`].
+    pub fn of(err: &Error) -> Self {
+        Self {
+            code: code(err),
+            error: err.to_string(),
+            sources: err.chain().skip(1).map(ToString::to_string).collect(),
+        }
+    }
+
+    /// A failure neverest states in its own words, with no code and no
+    /// cause.
+    pub fn new(error: impl Into<String>) -> Self {
+        Self {
+            code: None,
+            error: error.into(),
+            sources: Vec::new(),
+        }
+    }
+
+    /// The `code`, `error` and `sources` of a row that may have
+    /// succeeded, `None` reading as a success.
+    pub fn row(failure: Option<Self>) -> (Option<ErrorCode>, Option<String>, Vec<String>) {
+        match failure {
+            Some(Self {
+                code,
+                error,
+                sources,
+            }) => (code, Some(error), sources),
+            None => (None, None, Vec::new()),
+        }
+    }
+}
+
+impl From<String> for Failure {
+    fn from(error: String) -> Self {
+        Self::new(error)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(error: &str) -> Self {
+        Self::new(error)
+    }
+}
+
+/// A failure's message followed by each of its causes, as `{err:#}` reads.
+pub fn chain(error: &str, sources: &[String]) -> String {
+    let mut text = String::from(error);
+    for source in sources {
+        text.push_str(": ");
+        text.push_str(source);
+    }
+    text
+}
+
+/// The code of `err`: the one a coded error in its chain carries, else
+/// the server refusal's under it.
+pub fn code(err: &Error) -> Option<ErrorCode> {
+    code_of(err).or_else(|| refusal_code(err))
+}
+
+/// A reader of one protocol's typed errors, coding the refusals it knows.
+type Refusal = fn(&(dyn std::error::Error + 'static)) -> Option<ErrorCode>;
+
+/// The code of the server refusal `err`'s chain carries, read from the
+/// typed error of the protocol that answered it: the first cause a
+/// protocol codes.
+fn refusal_code(err: &Error) -> Option<ErrorCode> {
+    let refusals: &[Refusal] = &[
+        #[cfg(feature = "dav")]
+        crate::dav::client::refusal_code,
+        #[cfg(feature = "gcal")]
+        crate::gcal::client::refusal_code,
+        #[cfg(feature = "gmail")]
+        crate::gmail::client::refusal_code,
+        #[cfg(feature = "gpeople")]
+        crate::gpeople::client::refusal_code,
+        #[cfg(feature = "imap")]
+        crate::imap::backend::refusal_code,
+        #[cfg(feature = "msgraph")]
+        crate::msgraph::client::refusal_code,
+        #[cfg(feature = "smtp")]
+        crate::offline::submit::refusal_code,
+    ];
+
+    err.chain()
+        .find_map(|cause| refusals.iter().find_map(|refusal| refusal(cause)))
 }
 
 #[cfg(test)]

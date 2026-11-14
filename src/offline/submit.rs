@@ -64,6 +64,9 @@ use pimalaya_stream::proxy::Proxy;
 
 #[cfg(feature = "smtp")]
 use crate::account::SmtpAccount;
+#[cfg(feature = "smtp")]
+use crate::error::ErrorCode;
+use crate::error::Failure;
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::{GraphClient, SendMimeFailure};
 use crate::offline::{local, states_unknown_version};
@@ -195,6 +198,16 @@ impl SubmitFailure {
             Self::Unconfirmed(_) => unconfirmed_reason(&self.detail()),
             Self::Transient(_) | Self::Permanent(_) => self.detail(),
         }
+    }
+
+    /// The failure the report shows, coded: its causes joined to its
+    /// message read as [`reason`](Self::reason) does.
+    pub fn failure(&self) -> Failure {
+        let mut failure = Failure::of(self.error());
+        if let Self::Unconfirmed(_) = self {
+            failure.error = unconfirmed_reason(&unconfirmed_detail(&failure.error));
+        }
+        failure
     }
 }
 
@@ -682,6 +695,28 @@ fn hand_over_smtp(
                 writes += 1;
             }
         }
+    }
+}
+
+/// The code of an SMTP refusal in an error chain: a 5yz reply naming a
+/// sending limit is `quota-exceeded`, any other refused `RCPT TO`
+/// `recipient-refused`.
+#[cfg(feature = "smtp")]
+pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
+    let err = cause.downcast_ref::<SmtpClientError>()?;
+    let (code, text) = reply_of(err)?;
+
+    if (500..600).contains(&code) && names_a_sending_limit(text) {
+        return Some(ErrorCode::QuotaExceeded);
+    }
+
+    match err {
+        SmtpClientError::Rcpt(SmtpRcptError::Rejected { .. })
+        | SmtpClientError::MessageSend(SmtpMessageSendError::RcptTo {
+            error: SmtpRcptError::Rejected { .. },
+            ..
+        }) => Some(ErrorCode::RecipientRefused),
+        _ => None,
     }
 }
 

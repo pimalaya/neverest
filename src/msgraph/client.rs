@@ -90,6 +90,7 @@ use url::Url;
 use self::wire::{Connect, Exchange, Shared, Watched};
 use crate::{
     client::{Gone, Held, Listed, StoredSize, WrittenItem},
+    error::ErrorCode,
     item::{
         collection::Collection,
         flag::{Flag, IanaFlag},
@@ -1513,6 +1514,23 @@ fn is_expired_link(err: &MsgraphClientStdError) -> bool {
     matches!(err, MsgraphClientStdError::Send(send) if send.status() == Some(410))
 }
 
+/// The code of a Graph refusal in an error chain: Graph's
+/// `ErrorQuotaExceeded` or a 507 is `quota-exceeded`, a 429 left after the
+/// waits `rate-limited`, a 403 `permission-denied`.
+pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
+    let MsgraphClientStdError::Send(send) = cause.downcast_ref::<MsgraphClientStdError>()? else {
+        return None;
+    };
+    let err = send.api()?;
+
+    match (err.status, err.code.as_str()) {
+        (_, "ErrorQuotaExceeded") | (507, _) => Some(ErrorCode::QuotaExceeded),
+        (429, _) => Some(ErrorCode::RateLimited),
+        (403, _) => Some(ErrorCode::PermissionDenied),
+        _ => None,
+    }
+}
+
 /// Names the listed folders whose id a well-known lookup answered with, by
 /// the role it states. A well-known folder outside the listing (deeper than
 /// two levels) names nothing.
@@ -1710,7 +1728,10 @@ mod tests {
     use io_pimdir::{collection::PimdirScope, summary::PimdirSummary};
 
     use super::*;
-    use crate::kind::mail::{parse_body, vectors::VECTORS};
+    use crate::{
+        error::Failure,
+        kind::mail::{parse_body, vectors::VECTORS},
+    };
 
     #[test]
     fn a_listed_folder_takes_the_role_its_well_known_id_states() {
@@ -2791,6 +2812,28 @@ mod tests {
             .get_item_stream("Inbox", "m1", Vec::new())
             .unwrap_err();
         assert!(!Gone::is(&err), "{err:#}");
+    }
+
+    /// A write Graph refuses is coded by its `error.code`, then by its
+    /// status; any other refusal is left uncoded.
+    #[test]
+    fn a_refused_write_is_coded_by_its_error_code_and_status() {
+        let cases = [
+            (403, "ErrorAccessDenied", Some(ErrorCode::PermissionDenied)),
+            (403, "ErrorQuotaExceeded", Some(ErrorCode::QuotaExceeded)),
+            (507, "ErrorStorageFull", Some(ErrorCode::QuotaExceeded)),
+            (400, "ErrorInvalidRequest", None),
+        ];
+        let seen = [Flag::from_iana(IanaFlag::Seen)];
+
+        for (status, code, expected) in cases {
+            let (mut client, _server) = session(vec![vec![Step::error(status, code)]]);
+            let err = client.update_flags(&["m1"], &seen, &[]).unwrap_err();
+
+            let failure = Failure::of(&err);
+            assert_eq!(failure.code, expected, "{status} {code}: {err:#}");
+            assert_eq!(failure.error, "Update flags of m1 error", "{err:#}");
+        }
     }
 
     /// Each throttled get of a batch waits its own `Retry-After`: one asking

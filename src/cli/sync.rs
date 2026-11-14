@@ -22,12 +22,12 @@ use io_pimdir::{
     placement::{PimdirBase, PimdirFlags},
 };
 use log::{debug, info, warn};
-use pimalaya_cli::{error::code_of, printer::Printer};
+use pimalaya_cli::printer::Printer;
 
 use crate::{
     cli::exit::Exit,
     config::{AccountConfig, CollectionFilter, Config},
-    error::pimdir_error,
+    error::{self, pimdir_error},
     offline::{
         driver::{self, Bodies, DownloadOrder, Pacing},
         local,
@@ -550,7 +550,7 @@ fn failed(account: String, err: Error) -> AccountSync {
     AccountSync {
         account,
         busy: false,
-        code: code_of(&err),
+        code: error::code(&err),
         error: Some(format!("{err:#}")),
         report: None,
     }

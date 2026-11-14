@@ -9,7 +9,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
-    error::ErrorCode,
+    error::{ErrorCode, Failure, chain},
     sync::hunk::{CollectionHunk, ItemHunk},
 };
 
@@ -640,6 +640,9 @@ pub struct IndexRefresh {
     pub behind: u64,
     /// Whether another indexer held the index, so this one did nothing.
     pub busy: bool,
+    /// The stable code of the failure, `null` when it refreshed or the
+    /// failure carries none.
+    pub code: Option<ErrorCode>,
     /// Why the refresh failed, the index left as it was.
     pub error: Option<String>,
 }
@@ -651,6 +654,7 @@ impl fmt::Display for IndexRefresh {
             indexed,
             behind,
             busy,
+            code: _,
             error,
         } = self;
         if let Some(error) = error {
@@ -761,8 +765,29 @@ pub struct UnreachedEndpoint {
     /// The source or target, as the account names it, or `<source>.smtp`
     /// for a source's SMTP channel.
     pub endpoint: String,
-    /// Why, the whole error chain.
+    /// The stable code of the failure, `null` when it carries none.
+    pub code: Option<ErrorCode>,
+    /// Why, the outermost message.
     pub error: String,
+    /// The messages of the failure's causes, outermost first.
+    pub sources: Vec<String>,
+}
+
+impl UnreachedEndpoint {
+    /// The endpoint `endpoint`, unreached for `failure`.
+    pub fn new(endpoint: String, failure: Failure) -> Self {
+        let Failure {
+            code,
+            error,
+            sources,
+        } = failure;
+        Self {
+            endpoint,
+            code,
+            error,
+            sources,
+        }
+    }
 }
 
 /// One create refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC 6352 §6.3.2).
@@ -811,8 +836,13 @@ pub struct RejectedWrite {
     pub id: String,
     /// What the run tried: `update`, `append`, `delete`, `move`, `set flags`.
     pub action: String,
-    /// Why it did not land, as the backend put it.
-    pub reason: String,
+    /// The stable code of the refusal, `null` when it carries none.
+    pub code: Option<ErrorCode>,
+    /// Why it did not land, the outermost message.
+    pub error: String,
+    /// The messages of the refusal's causes, outermost first, the
+    /// backend's own reason among them.
+    pub sources: Vec<String>,
 }
 
 impl fmt::Display for RejectedWrite {
@@ -822,11 +852,14 @@ impl fmt::Display for RejectedWrite {
             collection,
             id,
             action,
-            reason,
+            code: _,
+            error,
+            sources,
         } = self;
+        let error = chain(error, sources);
         write!(
             f,
-            "{side} refused the {action} of {id} in {collection}, so it stays in the store: {reason}"
+            "{side} refused the {action} of {id} in {collection}, so it stays in the store: {error}"
         )
     }
 }
@@ -896,8 +929,14 @@ pub struct ParkedQueueAction {
     pub action: String,
     /// The enqueuing process, diagnostic only.
     pub producer: String,
-    /// The failure that parked the row.
+    /// The stable code of the failure, `null`: the store keeps its text
+    /// alone.
+    pub code: Option<ErrorCode>,
+    /// The failure that parked the row, as the store recorded it.
     pub error: String,
+    /// The messages of the failure's causes, empty: the store recorded
+    /// them in `error`.
+    pub sources: Vec<String>,
 }
 
 impl fmt::Display for ParkedQueueAction {
@@ -907,8 +946,11 @@ impl fmt::Display for ParkedQueueAction {
             collection,
             action,
             producer,
+            code: _,
             error,
+            sources,
         } = self;
+        let error = chain(error, sources);
         write!(
             f,
             "parked queue action #{id} ({action} in {collection} from {producer}): {error}"
@@ -932,8 +974,13 @@ pub struct SubmitEntry {
     pub collection: String,
     /// The submitted item's subject, when the intent payload carried one.
     pub subject: Option<String>,
-    /// Formatted send error; `None` on success.
+    /// The stable code of the failure, `null` on success or when it
+    /// carries none.
+    pub code: Option<ErrorCode>,
+    /// The send error, the outermost message; `None` on success.
     pub error: Option<String>,
+    /// The messages of the failure's causes, outermost first.
+    pub sources: Vec<String>,
     /// Whether the failure parked the row rather than leaving it pending.
     pub parked: bool,
     /// Whether the message may have been delivered despite the failure:
@@ -948,7 +995,8 @@ pub struct SubmitEntry {
 impl fmt::Display for SubmitEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let subject = self.subject.as_deref().unwrap_or("<no subject>");
-        match (&self.error, self.parked) {
+        let error = self.error.as_deref().map(|err| chain(err, &self.sources));
+        match (error, self.parked) {
             (None, _) => write!(f, "submitted {subject}"),
             (Some(err), true) if self.unconfirmed => {
                 write!(
@@ -980,8 +1028,13 @@ pub struct IntentEntry {
     pub source: String,
     /// The public id of the item, when the payload named one.
     pub seq: Option<i64>,
-    /// Formatted provider error; `None` on success.
+    /// The stable code of the failure, `null` on success or when it
+    /// carries none.
+    pub code: Option<ErrorCode>,
+    /// The provider error, the outermost message; `None` on success.
     pub error: Option<String>,
+    /// The messages of the failure's causes, outermost first.
+    pub sources: Vec<String>,
     /// Whether the failure parked the row rather than leaving it pending.
     pub parked: bool,
 }
@@ -991,7 +1044,8 @@ impl fmt::Display for IntentEntry {
         let Self {
             id, kind, source, ..
         } = self;
-        match (&self.error, self.parked) {
+        let error = self.error.as_deref().map(|err| chain(err, &self.sources));
+        match (error, self.parked) {
             (None, _) => write!(f, "{kind} #{id} performed by {source}"),
             (Some(err), true) => write!(f, "{kind} #{id} parked, never retried: {err}"),
             (Some(err), false) => write!(f, "{kind} #{id} not performed, retried next run: {err}"),
@@ -1095,17 +1149,30 @@ impl<H> Default for PatchOutcome<H> {
 pub struct PatchEntry<H> {
     /// The change the run tried to make.
     pub hunk: H,
-    /// Formatted apply error (`{e:#}`); `None` on success.
+    /// The stable code of the failure, `null` on success or when it
+    /// carries none.
+    pub code: Option<ErrorCode>,
+    /// The apply error, the outermost message; `None` on success.
     pub error: Option<String>,
+    /// The messages of the failure's causes, outermost first.
+    pub sources: Vec<String>,
 }
 
 impl<H> PatchEntry<H> {
     /// Records one hunk and, where the apply failed, how it read.
     pub fn new(hunk: H, error: Option<anyhow::Error>) -> Self {
+        let (code, error, sources) = Failure::row(error.as_ref().map(Failure::of));
         Self {
             hunk,
-            error: error.map(|e| format!("{e:#}")),
+            code,
+            error,
+            sources,
         }
+    }
+
+    /// The apply error and its causes, as the text output prints them.
+    pub fn text(&self) -> Option<String> {
+        self.error.as_deref().map(|err| chain(err, &self.sources))
     }
 }
 
@@ -1297,7 +1364,7 @@ impl fmt::Display for SyncOutput {
                     f,
                     " - {hunk}: {err}",
                     hunk = entry.hunk,
-                    err = entry.error.as_deref().unwrap_or_default(),
+                    err = entry.text().unwrap_or_default(),
                 )?;
             }
             for entry in self.item.patch.iter().filter(|e| e.error.is_some()) {
@@ -1305,7 +1372,7 @@ impl fmt::Display for SyncOutput {
                     f,
                     " - {hunk}: {err}",
                     hunk = entry.hunk,
-                    err = entry.error.as_deref().unwrap_or_default(),
+                    err = entry.text().unwrap_or_default(),
                 )?;
             }
             writeln!(f)?;

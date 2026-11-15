@@ -23,9 +23,9 @@ rustls-ring = ["pimalaya-stream/rustls-ring", "io-webdav?/rustls-ring", "io-imap
 imap = ["dep:io-imap", "io-imap/client", "io-imap/scram"]
 smtp = ["dep:io-smtp", "io-smtp/client", "io-smtp/scram"]
 dav = ["dep:io-webdav", "dep:io-http", "dep:ical-rs", "dep:vcard-rs"]
-msgraph = ["dep:io-msgraph", "dep:base64", "dep:ical-rs", "dep:jiff", "dep:vcard-rs", "io-msgraph/client", "io-msgraph/ical", "io-msgraph/vcard"]
+msgraph = ["dep:io-msgraph", "dep:base64", "dep:ical-rs", "dep:jiff", "jiff/tz-system", "dep:vcard-rs", "io-msgraph/client", "io-msgraph/ical", "io-msgraph/vcard"]
 gpeople = ["dep:io-gpeople", "dep:ical-rs", "dep:vcard-rs", "io-gpeople/client", "io-gpeople/vcard"]
-gcal = ["dep:io-gcal", "dep:ical-rs", "dep:jiff", "dep:vcard-rs", "io-gcal/client", "io-gcal/ical"]
+gcal = ["dep:io-gcal", "dep:ical-rs", "dep:jiff", "jiff/tz-system", "dep:vcard-rs", "io-gcal/client", "io-gcal/ical"]
 gmail = ["dep:io-gmail", "io-gmail/client"]
 vendored = ["io-pimdir/vendored", "pimalaya-config/vendored", "pimalaya-stream/vendored", "io-webdav?/vendored", "io-imap?/vendored", "io-msgraph?/vendored", "io-smtp?/vendored", "io-gpeople?/vendored", "io-gcal?/vendored", "io-gmail?/vendored"]
 search = ["io-pimdir/search", "dep:jiff", "jiff/tz-system"]
@@ -57,7 +57,7 @@ io-msgraph = { version = "0.9", default-features = false, optional = true }
 io-pimdir = { version = "0.13", default-features = false, features = ["client"] }
 io-sasl = { version = "0.2", default-features = false, features = ["scram"] }
 io-smtp = { version = "0.9", default-features = false, optional = true }
-io-webdav = { version = "0.9", default-features = false, optional = true }
+io-webdav = { version = "0.9.1", default-features = false, optional = true }
 jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
 log = "0.4"
 percent-encoding = "2"

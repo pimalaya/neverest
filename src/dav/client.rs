@@ -1699,6 +1699,27 @@ mod tests {
         assert!(dav.delete_item("tasks", "t1.ics", Some("\"e1\"")).is_err());
     }
 
+    /// A collection key or a member id that would address the server root,
+    /// the home set or a parent of either, as another source's store may
+    /// hand one over, is refused before any request is written.
+    #[test]
+    fn an_id_climbing_out_of_its_collection_sends_nothing() {
+        let accepted = || vec![reply("201 Created", &[]), reply("204 No Content", &[])];
+
+        for key in ["..", "/", "", "a/../.."] {
+            let (mut dav, wire) = calendars(accepted());
+            assert!(dav.create_collection(key).is_err(), "{key:?}");
+            assert!(dav.delete_collection(key).is_err(), "{key:?}");
+            assert_eq!(wire.lines(), Vec::<String>::new(), "{key:?}");
+        }
+
+        for id in ["..", ".", ""] {
+            let (mut dav, wire) = calendars(accepted());
+            assert!(dav.delete_item("tasks", id, None).is_err(), "{id:?}");
+            assert_eq!(wire.lines(), Vec::<String>::new(), "{id:?}");
+        }
+    }
+
     /// A delete answered 207 naming a member it could not delete (RFC 4918
     /// §9.6.1) is no delete done: the member is still there.
     #[test]

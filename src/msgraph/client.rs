@@ -97,6 +97,7 @@ use crate::{
         flag::{Flag, IanaFlag},
     },
     throttle::{self, Request, Throttle},
+    zone,
 };
 
 /// The page size requested when listing mail folders.
@@ -171,6 +172,9 @@ pub struct GraphClient {
     used: Instant,
     /// The source's back-off, shared by its connections.
     throttle: Arc<Throttle>,
+    /// The zone a floating time is anchored in, the user's, Graph stating
+    /// none for a calendar.
+    floating_zone: &'static str,
 }
 
 impl GraphClient {
@@ -236,6 +240,7 @@ impl GraphClient {
             reused: false,
             used: Instant::now(),
             throttle,
+            floating_zone: zone::floating_zone(),
         })
     }
 

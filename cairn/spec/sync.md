@@ -997,6 +997,16 @@ The per-source permission set SHALL gate item updates (`item.update`, default tr
 ### Requirement: DAV collections enumerate by sync token and resolve at Full
 A CardDAV or CalDAV source SHALL enumerate through `REPORT sync-collection`, storing the returned sync token verbatim as the collection's opaque checkpoint, and SHALL fall back to a tokenless report (the whole member set, reported complete) when the server rejects the stored token. Because that report returns hrefs and ETags but no `UID`, the bodies of the members it lists SHALL be fetched through `addressbook-multiget` / `calendar-multiget`, in batches, before the page lands, each member named by its body, so a DAV item's link id has exactly one derivation. A member the store holds at the listed ETag SHALL be named by its binding, its body not fetched again.
 
+A body a multiget or a listing reads SHALL be stored as a GET of the member returns it, the whole text of `address-data` or `calendar-data` (io-webdav 0.9.1): iCloud and Fastmail escape each CR as `&#13;`, and a trimmed text cut the final CRLF of every card and object. A body stored short before SHALL stay as it is until its ETag moves, a member at the listed ETag being fetched again by no run.
+
+### Requirement: A DAV id stays inside what it names
+A collection key or a member id that would address the server root, the home set or a parent of either (empty, `/` alone, or holding an empty, `.` or `..` segment, percent-encoded or `\`-separated) SHALL be refused before any request is written: io-webdav's client checks every id it is handed (`check_collection_id`, `check_resource_id`), failing with an I/O error of kind `InvalidInput`, which no retry and no reconnect repeats. neverest takes no DAV id from its command line: the ids reaching a DAV server come from its listings, from the keys another source's collections have in the store, and from the member names it mints, each one segment (`resource_id`). A refused one SHALL fail its collection's or its item's row, io-webdav's reason among the row's sources; the row carries no code, neverest having none for a collection missing.
+
+#### Scenario: A store key climbing out of the home set
+- **GIVEN** a store collection keyed `..`, created by another source, on an account whose CalDAV endpoint may create collections
+- **WHEN** a sync creates it on the CalDAV server
+- **THEN** no request is sent, and the collection's row fails naming the id
+
 ### Requirement: A DAV server without `sync-collection` is listed instead
 `sync-collection` is an extension, so a server MAY implement none of it, advertising a `supported-report-set` of `addressbook-multiget` and `addressbook-query` alone. Such a collection SHALL be enumerated through a `PROPFIND` at Depth 1 requesting the ETag, which yields the same member ids and revisions, rather than failing to enumerate at all.
 
@@ -1386,9 +1396,9 @@ A `gcal` item SHALL be one recurring series with its modified instances, or one 
 - THEN the series' item has a new revision and its body carries the edited instance
 
 ### Requirement: A series is pushed whole or not at all
-A write to a Google Calendar or Graph calendar SHALL carry every occurrence the document sets apart from its master, or SHALL be refused: a write landing as the master alone loses the rest on the server, and the next read loses it in the store. Both providers take an occurrence through its instance, found among the instances listed two days either side of the occurrence's `RECURRENCE-ID` by its original start.
+A write to a Google Calendar or Graph calendar SHALL carry every occurrence the document sets apart from its master, or SHALL be refused: a write landing as the master alone loses the rest on the server, and the next read loses it in the store. Both providers take an occurrence through its instance, found among the instances listed two days either side of the occurrence's `RECURRENCE-ID` by its original start, compared as an instant: a `RECURRENCE-ID` or `EXDATE` value SHALL be read in its `TZID`, or as UTC, and matched against the instance's original start as the instant it names, never by the wall time either writes, Google writing an original start in the calendar's zone or in UTC whatever the series' zone. A date SHALL match the instance's original date. A wall time in no zone the time zone database names (floating, a `TZID` it does not know, an intent's bare `recurrence_id`) SHALL match the time the provider writes, or the one the series' zone shows (on Google the instance's own `timeZone`, on Graph the series' `start` zone).
 
-Graph SHALL take the master first (created, or patched with what changed), then delete the instance of each `EXDATE` and of each override marked `STATUS:CANCELLED`, an instance already gone counting as deleted, and patch the instance of each other override with what it sets differently from the instance (io-msgraph's `instance_update_from_ical`). Google SHALL take the master first (imported, inserted or updated), the `EXDATE`s riding its recurrence, then update the instance of each override with the override merged onto it (io-gcal's `from_ical` reading the override alone, `merge` keeping the instance's identity), with the master's `sendUpdates`.
+Graph SHALL take the master first (created, or patched with what changed), then delete the instance of each `EXDATE` and of each override marked `STATUS:CANCELLED`, an instance already gone counting as deleted, and patch the instance of each other override with what it sets differently from its series carried to that occurrence (io-msgraph's `instance_update_from_ical` against the document's master, the instance's own times standing in for the master's): what the override leaves out SHALL stay as the series has it, never be cleared, a listed instance stating Graph's own `showAs`, `sensitivity` and `importance`, which an override stating no `TRANSP`, `CLASS` or `PRIORITY` would null. An instance Graph holds as an exception already SHALL be patched with what the override sets differently from it, so an override undoing one of its edits sends it. Google SHALL take the master first (imported, inserted or updated), the `EXDATE`s riding its recurrence, then update the instance of each override with the override merged onto it (io-gcal's `from_ical` reading the override alone, `merge` keeping the instance's identity), with the master's `sendUpdates`.
 
 An override of an occurrence the series does not have, and one of an occurrence and every later one (`RANGE=THISANDFUTURE`), which neither provider takes through an instance, SHALL be refused coded `unsupported`, naming the occurrence: the latter before anything is written; the former once the master is created, which is then deleted again. A create whose occurrences do not all land, for any reason, SHALL be deleted again and the write refused, so the store keeps its body and the next run pushes it again. An update failing on an occurrence SHALL be refused; the next run reads the master the update moved as the server's edit. A write of occurrences SHALL report the revision read after them.
 
@@ -1404,18 +1414,33 @@ An occurrence the server holds and the document no longer sets apart (an overrid
 - **WHEN** a sync imports it
 - **THEN** the second instance is updated to its new time and the item records the series' joined revision read after it
 
+#### Scenario: An override in a zoned series reaches Google
+- **GIVEN** a weekly series from 2026-12-07 at 10:00 `Europe/Paris` whose override moves the occurrence of 2026-12-21 (`RECURRENCE-ID;TZID=Europe/Paris:20261221T100000`) to 14:00
+- **WHEN** a sync pushes it to a Google calendar listing that instance's original start as `2026-12-21T09:00:00Z`
+- **THEN** the override updates that instance and the series lands whole
+
+#### Scenario: An override renaming one occurrence reaches Graph
+- **GIVEN** a series whose override changes the `SUMMARY` of one occurrence alone, and a Graph instance listed with `importance` high, `sensitivity` private and `showAs` free
+- **WHEN** a sync pushes it to a Graph calendar
+- **THEN** the instance is patched with its subject alone, its importance, sensitivity and free/busy left as the series has them
+
 #### Scenario: An override of no occurrence
 - **GIVEN** a series whose override names an occurrence its rule does not produce
 - **WHEN** a sync pushes it to Google or Graph
 - **THEN** the series created is deleted again, the write is reported refused, coded `unsupported`, naming the occurrence, and the store keeps the body for the next run
 
 ### Requirement: A floating time is anchored before Google or Graph takes it
-Neither Google Calendar nor Graph stores a floating time (a `DTSTART`, `DTEND`, `RECURRENCE-ID`, `EXDATE` or `RDATE` naming neither a `TZID` nor UTC). Before a create or an update, every floating date-time of the document's events SHALL be anchored: on Google in the zone the calendar states (its calendar list entry's `timeZone`), as a `TZID`; on Graph, which states no zone for a calendar, and on Google when the calendar states none, in UTC, with a warning naming the write. A date is no floating time. The write SHALL then report no revision, so the next sync reads the event back and the store holds what the server does.
+Neither Google Calendar nor Graph stores a floating time (a `DTSTART`, `DTEND`, `RECURRENCE-ID`, `EXDATE` or `RDATE` naming neither a `TZID` nor UTC). Before a create or an update, every floating date-time of the document's events SHALL be anchored: on Google in the zone the calendar states (its calendar list entry's `timeZone`), as a `TZID`; on Graph, which states no zone for a calendar, and on Google when the calendar states none, in the user's zone, the one the search index states as its floating zone ("The store's owner builds its search index"): the IANA name of the zone `TZ` names, else of the system's, as a `TZID`, and UTC when it has no IANA name; with a warning naming the write and the zone. A floating 10:00 SHALL so stay 10:00 where the person reads it. A date is no floating time. The write SHALL then report no revision, so the next sync reads the event back and the store holds what the server does.
 
 #### Scenario: A floating meeting queued on a Google calendar
 - **GIVEN** an event queued at a floating 10:00 on 2026-11-26 into a Google calendar whose zone is `Europe/Paris`
 - **WHEN** a sync pushes it
 - **THEN** Google takes it at 10:00 `Europe/Paris`, the run reports no refusal, and the next sync reads it back into the store
+
+#### Scenario: A floating meeting queued on a Graph calendar
+- **GIVEN** `TZ=Europe/Paris` and an event queued at a floating 10:00 on 2026-11-26 into a Graph calendar
+- **WHEN** a sync pushes it
+- **THEN** Graph takes it at 10:00 `Europe/Paris`, not at 10:00 UTC (11:00 in Paris), and the next sync reads it back into the store
 
 ### Requirement: Gmail is a native mail source
 A `gmail` source SHALL open protocol-direct over io-gmail and sync `message/rfc822`. Its collections SHALL be the user labels and the `INBOX`, `SENT`, `DRAFT`, `SPAM` and `TRASH` system labels, keyed and named by label name, as IMAP exposes them, so a Gmail endpoint and an IMAP endpoint on one account pair their labels. A label id SHALL NOT key a collection: the driver pairs endpoints and creates missing collections by key, and an opaque id would never meet the IMAP name.

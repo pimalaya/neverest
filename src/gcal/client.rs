@@ -22,9 +22,9 @@
 //! through its master, then each occurrence it overrides through its
 //! instance; a create whose overrides do not all land is deleted again.
 //!
-//! Google stores no floating time: one is anchored in the calendar's zone
-//! before the write, which then reports no revision, so the next sync reads
-//! the event back.
+//! Google stores no floating time: one is anchored in the calendar's zone,
+//! else the user's ([`crate::zone`]), before the write, which then reports
+//! no revision, so the next sync reads the event back.
 //!
 //! A new event the account organises and whose attendees are to be told
 //! is inserted with its UID as `iCalUID`, which Google keeps and announces;
@@ -45,8 +45,8 @@ use io_gcal::v3::{
     rest::{
         calendar_list::list::GcalCalendarListListParams,
         events::{
-            GcalEvent, GcalEventAttendeeResponseStatus, GcalEventDateTime, GcalEventStatus,
-            GcalSendUpdates, import::GcalEventImportParams, insert::GcalEventInsertParams,
+            GcalEvent, GcalEventAttendeeResponseStatus, GcalEventStatus, GcalSendUpdates,
+            import::GcalEventImportParams, insert::GcalEventInsertParams,
             instances::GcalEventInstancesParams, list::GcalEventsListParams,
             patch::GcalEventPatchParams, update::GcalEventUpdateParams,
         },
@@ -54,6 +54,7 @@ use io_gcal::v3::{
     send::{GCAL_API_BASE, GcalApiError, GcalSendError, GcalSendOutput},
 };
 use io_pimdir::summary::calendar;
+use jiff::{Timestamp, civil::DateTime, tz::TimeZone};
 use log::{debug, trace, warn};
 use pimalaya_cli::error::CodedError;
 use pimalaya_stream::{
@@ -69,9 +70,10 @@ use crate::{
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
     error::ErrorCode,
     item::{collection::Collection, flag::Flag},
-    kind::event::{self, Occurrences},
-    offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp, wall_stamp},
+    kind::event::{self, OccurrenceId, Occurrences, OriginalStart},
+    offline::invitation::{Partstat, Refusal, occurrence_window},
     throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, google_code},
+    zone::{self, UTC},
 };
 
 /// The page size requested from the events listing.
@@ -111,6 +113,9 @@ pub struct GcalClient {
     /// The sync tokens this run's listings ended on, so one Google refuses
     /// as soon as it issued it is told from one that aged.
     issued: HashSet<String>,
+    /// The zone a floating time is anchored in when the calendar states
+    /// none, the user's.
+    floating_zone: &'static str,
 }
 
 impl GcalClient {
@@ -130,6 +135,7 @@ impl GcalClient {
             throttle,
             owner: None,
             issued: HashSet::new(),
+            floating_zone: zone::floating_zone(),
         })
     }
 
@@ -537,7 +543,7 @@ impl GcalClient {
     }
 
     /// `ical` with its floating times anchored in the zone of `calendar`,
-    /// UTC when Google states none, and whether it held any.
+    /// the user's when Google states none, and whether it held any.
     fn anchor(&mut self, calendar: &str, ical: Vec<u8>) -> Result<(Vec<u8>, bool)> {
         if !event::has_floating(&ical)? {
             return Ok((ical, false));
@@ -546,13 +552,20 @@ impl GcalClient {
         let entry = self
             .op(|gcal| gcal.calendar_list_entry_get(calendar))
             .with_context(|| format!("Get the Google calendar {calendar} error"))?;
-        let zone = entry.time_zone.filter(|zone| !zone.is_empty());
-        match &zone {
-            Some(zone) => debug!("floating time of an event of {calendar} anchored in {zone}"),
-            None => warn!("Google states no zone for {calendar}: floating time anchored in UTC"),
-        }
+        let zone = match entry.time_zone.filter(|zone| !zone.is_empty()) {
+            Some(zone) => {
+                debug!("floating time of an event of {calendar} anchored in {zone}");
+                zone
+            }
+            None => {
+                let zone = self.floating_zone;
+                warn!("Google states no zone for {calendar}: floating time anchored in {zone}");
+                zone.to_owned()
+            }
+        };
+        let zone = (zone != UTC).then_some(zone.as_str());
 
-        Ok((event::anchor_floating(&ical, zone.as_deref())?, true))
+        Ok((event::anchor_floating(&ical, zone)?, true))
     }
 
     /// Whether the account organises a new event: it names no organizer,
@@ -713,9 +726,10 @@ impl GcalClient {
     }
 
     /// The id of the instance of series `id` that a `RECURRENCE-ID` value
-    /// names. None found refuses.
+    /// names in the form of the series' `DTSTART`. None found refuses.
     pub fn occurrence(&mut self, calendar: &str, id: &str, recurrence_id: &str) -> Result<String> {
-        if occurrence_window(recurrence_id).is_none() {
+        let recurrence_id = &OccurrenceId::bare(recurrence_id);
+        if occurrence_window(&recurrence_id.value).is_none() {
             return Err(anyhow::Error::new(Refusal(format!(
                 "{recurrence_id} names no occurrence"
             ))));
@@ -732,17 +746,16 @@ impl GcalClient {
         }
     }
 
-    /// The instance of series `id` that a `RECURRENCE-ID` value names,
-    /// compared the way the projection writes it (the wall time of its
-    /// original start, a date, or a UTC stamp), among the instances Google
-    /// lists two days either side of its date.
+    /// The instance of series `id` whose original start `recurrence_id`
+    /// names ([`names_occurrence`]), among the instances Google lists two
+    /// days either side of its date.
     fn instance(
         &mut self,
         calendar: &str,
         id: &str,
-        recurrence_id: &str,
+        recurrence_id: &OccurrenceId,
     ) -> Result<Option<GcalEvent>> {
-        let Some((start, end)) = occurrence_window(recurrence_id) else {
+        let Some((start, end)) = occurrence_window(&recurrence_id.value) else {
             return Ok(None);
         };
 
@@ -758,12 +771,10 @@ impl GcalClient {
                 .op(|gcal| gcal.event_instances(calendar, id, &params))
                 .with_context(|| format!("List instances of {id} error"))?;
 
-            let found = page.items.into_iter().find(|instance| {
-                instance
-                    .original_start_time
-                    .as_ref()
-                    .is_some_and(|original| names_occurrence(original, recurrence_id))
-            });
+            let found = page
+                .items
+                .into_iter()
+                .find(|instance| names_occurrence(instance, recurrence_id));
             if found.is_some() {
                 return Ok(found);
             }
@@ -962,16 +973,45 @@ fn read_ical(mut source: impl Read) -> Result<Vec<u8>> {
     Ok(ical)
 }
 
-/// Whether an instance's original start is the occurrence a
-/// `RECURRENCE-ID` value names: its date, its wall time, or its UTC stamp.
-fn names_occurrence(original: &GcalEventDateTime, recurrence_id: &str) -> bool {
-    let stamps = [
-        original.date.as_deref().and_then(wall_stamp),
-        original.date_time.as_deref().and_then(wall_stamp),
-        original.date_time.as_deref().and_then(utc_stamp),
-    ];
-    stamps.iter().flatten().any(|stamp| stamp == recurrence_id)
+/// Whether `instance` is the occurrence `recurrence_id` names, by its
+/// original start: the same date, the same instant, or for a wall time of
+/// no zone known the time Google writes or the one the series' zone shows.
+///
+/// Google writes an original start in the zone a listing asks for, the
+/// calendar's by default, so a wall time compared as written misses an
+/// occurrence of a series in another zone.
+fn names_occurrence(instance: &GcalEvent, recurrence_id: &OccurrenceId) -> bool {
+    let Some(original) = &instance.original_start_time else {
+        return false;
+    };
+    let zone = original
+        .time_zone
+        .as_deref()
+        .or_else(|| instance.start.as_ref()?.time_zone.as_deref());
+
+    if let Some(OriginalStart::Date(date)) = recurrence_id.start() {
+        return original.date.as_deref().and_then(|day| day.parse().ok()) == Some(date);
+    }
+    let Some(written) = original.date_time.as_deref() else {
+        return false;
+    };
+
+    let wall = written
+        .get(..19)
+        .and_then(|wall| wall.parse::<DateTime>().ok());
+    if let (Some(OriginalStart::Wall(named)), Some(wall)) = (recurrence_id.start(), wall)
+        && named == wall
+    {
+        return true;
+    }
+
+    let instant = written.parse::<Timestamp>().ok().or_else(|| {
+        let zone = TimeZone::get(zone?).ok()?;
+        Some(wall?.to_zoned(zone).ok()?.timestamp())
+    });
+    instant.is_some_and(|instant| recurrence_id.starts_at(instant, zone))
 }
+
 /// Opens a TLS stream to the Calendar endpoint through `proxy`.
 fn open_stream(tls: &Tls, proxy: &Proxy) -> Result<Stream> {
     let url = Url::parse(GCAL_API_BASE).context("Cannot parse the Calendar API base URL")?;
@@ -990,28 +1030,69 @@ fn open_stream(tls: &Tls, proxy: &Proxy) -> Result<Stream> {
 
 #[cfg(test)]
 mod tests {
-    use io_gcal::v3::rest::events::GcalEventAttendee;
+    use io_gcal::v3::rest::events::{GcalEventAttendee, GcalEventDateTime};
 
     use super::*;
 
+    /// An instance whose original start is `original`, of a series in
+    /// `zone`.
+    fn started(original: GcalEventDateTime, zone: Option<&str>) -> GcalEvent {
+        GcalEvent {
+            original_start_time: Some(original),
+            start: Some(GcalEventDateTime {
+                time_zone: zone.map(String::from),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn an_instance_is_the_occurrence_its_original_start_names() {
-        let timed = GcalEventDateTime {
-            date_time: Some("2026-10-06T09:00:00+02:00".into()),
-            time_zone: Some("Europe/Paris".into()),
-            ..Default::default()
+        let names = |instance: &GcalEvent, value: &str, zone: Option<&str>| {
+            let recurrence_id = OccurrenceId {
+                value: value.into(),
+                zone: zone.map(String::from),
+            };
+            names_occurrence(instance, &recurrence_id)
         };
-        assert!(names_occurrence(&timed, "20261006T090000"));
-        assert!(names_occurrence(&timed, "20261006T070000Z"));
-        assert!(!names_occurrence(&timed, "20261006T080000"));
-        assert!(!names_occurrence(&timed, "20261013T090000"));
 
-        let all_day = GcalEventDateTime {
-            date: Some("2026-10-06".into()),
+        let timed = started(
+            GcalEventDateTime {
+                date_time: Some("2026-10-06T09:00:00+02:00".into()),
+                time_zone: Some("Europe/Paris".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(names(&timed, "20261006T090000", None));
+        assert!(names(&timed, "20261006T090000", Some("Europe/Paris")));
+        assert!(names(&timed, "20261006T070000Z", None));
+        assert!(!names(&timed, "20261006T080000", None));
+        assert!(!names(&timed, "20261013T090000", None));
+
+        // NOTE: listed in UTC, an occurrence of a series in Paris.
+        let utc = GcalEventDateTime {
+            date_time: Some("2026-12-21T09:00:00Z".into()),
             ..Default::default()
         };
-        assert!(names_occurrence(&all_day, "20261006"));
-        assert!(!names_occurrence(&all_day, "20261007"));
+        let paris = started(utc.clone(), Some("Europe/Paris"));
+        assert!(names(&paris, "20261221T100000", Some("Europe/Paris")));
+        assert!(names(&paris, "20261221T100000", None));
+        assert!(!names(&paris, "20261221T090000", Some("Europe/Paris")));
+        let unzoned = started(utc, None);
+        assert!(names(&unzoned, "20261221T100000", Some("Europe/Paris")));
+        assert!(!names(&unzoned, "20261221T100000", None));
+
+        let all_day = started(
+            GcalEventDateTime {
+                date: Some("2026-10-06".into()),
+                ..Default::default()
+            },
+            None,
+        );
+        assert!(names(&all_day, "20261006", None));
+        assert!(!names(&all_day, "20261007", None));
     }
 
     fn attendee(email: &str, me: bool, organizer: bool) -> GcalEventAttendee {
@@ -1145,6 +1226,7 @@ mod tests {
             throttle: Arc::new(Throttle::new("gcal")),
             owner: None,
             issued: HashSet::new(),
+            floating_zone: UTC,
         };
 
         let calendars = client.list_collections().unwrap();
@@ -1180,6 +1262,7 @@ mod tests {
                 throttle: Arc::new(Throttle::new("gcal")),
                 owner: None,
                 issued: HashSet::new(),
+                floating_zone: UTC,
             };
 
             let err = client
@@ -1254,6 +1337,7 @@ mod tests {
             throttle: Arc::new(Throttle::new("gcal")),
             owner: None,
             issued: HashSet::new(),
+            floating_zone: UTC,
         };
 
         client.enumerate("c1", None).unwrap();
@@ -1305,6 +1389,7 @@ mod tests {
             throttle: Arc::new(Throttle::new("gcal")),
             owner: None,
             issued: HashSet::new(),
+            floating_zone: UTC,
         };
         (client, written)
     }
@@ -1394,6 +1479,51 @@ mod tests {
         assert!(update.contains("2026-11-24T15:00:00"), "{update}");
     }
 
+    /// An override in a zoned series names the instance Google lists in
+    /// UTC: 10:00 in Paris on 2026-12-21 is the 09:00Z instance.
+    #[test]
+    fn a_zoned_override_names_the_instance_google_lists_in_utc() {
+        let series = "BEGIN:VCALENDAR\r\n\
+            VERSION:2.0\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:weekly\r\n\
+            DTSTART;TZID=Europe/Paris:20261207T100000\r\n\
+            DTEND;TZID=Europe/Paris:20261207T110000\r\n\
+            RRULE:FREQ=WEEKLY;COUNT=4\r\n\
+            EXDATE;TZID=Europe/Paris:20261214T100000\r\n\
+            SUMMARY:Weekly\r\n\
+            END:VEVENT\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:weekly\r\n\
+            RECURRENCE-ID;TZID=Europe/Paris:20261221T100000\r\n\
+            DTSTART;TZID=Europe/Paris:20261221T140000\r\n\
+            DTEND;TZID=Europe/Paris:20261221T150000\r\n\
+            SUMMARY:Weekly\r\n\
+            END:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let master = r#"{"id":"S","etag":"\"1\"","iCalUID":"weekly"}"#;
+        let instance = r#"{"items":[{"id":"S_20261221T090000Z","recurringEventId":"S","originalStartTime":{"dateTime":"2026-12-21T09:00:00Z"},"etag":"\"2\"","start":{"dateTime":"2026-12-21T09:00:00Z"},"end":{"dateTime":"2026-12-21T10:00:00Z"}}]}"#;
+        let (mut client, written) = answering(&[
+            ("200 OK", master),
+            ("200 OK", instance),
+            (
+                "200 OK",
+                r#"{"id":"S_20261221T090000Z","recurringEventId":"S","etag":"\"3\""}"#,
+            ),
+            ("200 OK", master),
+            ("200 OK", r#"{"items":[]}"#),
+        ]);
+
+        let created = client.add_item_stream("c1", series.as_bytes()).unwrap();
+
+        assert_eq!(created.id, "S");
+        let requests = request_lines(&written.lock().unwrap());
+        assert!(
+            requests[2].starts_with("PUT ") && requests[2].contains("/events/S_20261221T090000Z"),
+            "{requests:#?}"
+        );
+    }
+
     /// An override of an occurrence the series does not have takes the
     /// series back, coded `unsupported`.
     #[test]
@@ -1442,5 +1572,32 @@ mod tests {
         let import = &written[written.find("POST ").unwrap()..];
         assert!(import.contains("2026-11-26T10:00:00"), "{import}");
         assert!(import.contains("Europe/Paris"), "{import}");
+    }
+
+    /// A calendar stating no zone anchors a floating time in the user's.
+    #[test]
+    fn a_floating_time_is_anchored_in_the_users_zone_without_the_calendars() {
+        let floating = "BEGIN:VCALENDAR\r\n\
+            VERSION:2.0\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:floating\r\n\
+            DTSTART:20261126T100000\r\n\
+            DTEND:20261126T110000\r\n\
+            SUMMARY:Floating\r\n\
+            END:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let (mut client, written) = answering(&[
+            ("200 OK", r#"{"id":"c1"}"#),
+            ("200 OK", r#"{"id":"F","etag":"\"1\""}"#),
+        ]);
+        client.floating_zone = "America/New_York";
+
+        let created = client.add_item_stream("c1", floating.as_bytes()).unwrap();
+
+        assert_eq!(created.revision, None);
+        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        let import = &written[written.find("POST ").unwrap()..];
+        assert!(import.contains("2026-11-26T10:00:00"), "{import}");
+        assert!(import.contains("America/New_York"), "{import}");
     }
 }

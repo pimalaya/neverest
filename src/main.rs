@@ -130,6 +130,8 @@ mod msgraph;
 mod offline;
 mod sync;
 mod throttle;
+#[cfg(any(feature = "search", feature = "gcal", feature = "msgraph"))]
+mod zone;
 
 use std::process::{self, ExitCode};
 

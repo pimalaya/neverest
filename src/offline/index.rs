@@ -11,27 +11,25 @@
 //! next one goes on from where it stopped.
 //!
 //! Every refresh states the user's zone, `TZ` then the system's, which the
-//! index reads floating times and dates in (pimdir SEARCH §7, §8.1).
+//! index reads floating times and dates in (pimdir SEARCH §7, §8.1):
+//! [`crate::zone`].
 
 use std::{
     error::Error,
     iter,
     path::Path,
-    sync::OnceLock,
     time::{Duration, Instant},
 };
 
-use io_pimdir::{
-    client::{
-        PimdirError,
-        search::{PimdirIndex, PimdirIndexRefreshOptions},
-    },
-    search::occurrence::FLOATING_ZONE,
+use io_pimdir::client::{
+    PimdirError,
+    search::{PimdirIndex, PimdirIndexRefreshOptions},
 };
-use jiff::tz::TimeZone;
 use log::{debug, info, warn};
 
-use crate::{config::StoreConfig, error::ErrorCode, sync::report::IndexRefresh};
+use crate::{
+    config::StoreConfig, error::ErrorCode, sync::report::IndexRefresh, zone::floating_zone,
+};
 
 /// How long a refresh may run after a run a frontend waits on: a drain, a
 /// run performing the queued intents alone or declaring the collections.
@@ -103,28 +101,6 @@ pub fn refresh(
     })
 }
 
-/// The user's zone, `TZ` then the system's, resolved once per run: UTC,
-/// with a warning, when it has no IANA name.
-pub fn floating_zone() -> &'static str {
-    static ZONE: OnceLock<String> = OnceLock::new();
-    ZONE.get_or_init(|| zone_name(TimeZone::try_system()))
-}
-
-/// The IANA name of `zone`, UTC with a warning when it has none.
-fn zone_name(zone: Result<TimeZone, jiff::Error>) -> String {
-    match zone.map(|zone| zone.iana_name().map(String::from)) {
-        Ok(Some(name)) => name,
-        Ok(None) => {
-            warn!("the time zone has no IANA name, the index reads floating times in UTC");
-            FLOATING_ZONE.into()
-        }
-        Err(err) => {
-            warn!("cannot read the time zone, the index reads floating times in UTC: {err}");
-            FLOATING_ZONE.into()
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -143,6 +119,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::zone::UTC;
 
     /// Files a message whose subject is `subject` into the inbox, as a
     /// sync lands one.
@@ -306,11 +283,11 @@ mod tests {
         land(dir.path(), "m1@x", "Quarterly report");
         let mut index = PimdirIndex::open(dir.path()).unwrap();
 
-        let cut = refresh(&mut index, Some(Duration::ZERO), FLOATING_ZONE).unwrap();
+        let cut = refresh(&mut index, Some(Duration::ZERO), UTC).unwrap();
         assert_eq!(cut.folded, 0);
         assert!(cut.behind > 0, "{cut:?}");
 
-        let next = refresh(&mut index, Some(Duration::from_secs(60)), FLOATING_ZONE).unwrap();
+        let next = refresh(&mut index, Some(Duration::from_secs(60)), UTC).unwrap();
         assert!(next.folded > 0, "{next:?}");
         assert_eq!(next.behind, 0, "{next:?}");
         assert_eq!(found(dir.path(), "quarterly"), 1);
@@ -328,19 +305,6 @@ mod tests {
 
         let query = PimdirIndex::open_query(dir.path()).unwrap();
         assert_eq!(query.floating_zone().unwrap(), "Europe/Paris");
-    }
-
-    /// The zone stated is the user's IANA name, UTC for a POSIX `TZ`
-    /// rule or a zone that cannot be read.
-    #[test]
-    fn a_zone_without_an_iana_name_reads_as_utc() {
-        let paris = TimeZone::get("Europe/Paris");
-        let rule = TimeZone::posix("CET-1CEST,M3.5.0,M10.5.0/3");
-        let unread = TimeZone::get("Nowhere/Atlantis");
-
-        assert_eq!(zone_name(paris), "Europe/Paris");
-        assert_eq!(zone_name(rule), "UTC");
-        assert_eq!(zone_name(unread), "UTC");
     }
 
     /// An index that cannot be opened is reported, never raised: the run

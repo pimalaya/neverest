@@ -24,6 +24,7 @@ use crate::{
     error::pimdir_error,
     offline::{driver, index},
     sync::report::IndexRefresh,
+    zone::floating_zone,
 };
 
 /// How long one slice of the build runs before it says how far it got.
@@ -117,7 +118,7 @@ fn build(dir: &Path, accounts: Vec<String>) -> Result<IndexOutput> {
     };
 
     loop {
-        let slice = index::refresh(&mut index, Some(SLICE), index::floating_zone())
+        let slice = index::refresh(&mut index, Some(SLICE), floating_zone())
             .map_err(pimdir_error)
             .with_context(|| format!("Refresh the search index of {store}"))?;
         built.folded += slice.folded;

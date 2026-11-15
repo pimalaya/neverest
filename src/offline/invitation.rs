@@ -197,31 +197,6 @@ pub fn occurrence_window(recurrence_id: &str) -> Option<(String, String)> {
     Some((format!("{start}T00:00:00Z"), format!("{end}T00:00:00Z")))
 }
 
-/// An instant's UTC `RECURRENCE-ID` value (`YYYYMMDDTHHMMSSZ`), from an
-/// RFC 3339 timestamp of any offset.
-#[cfg(any(feature = "gcal", feature = "msgraph"))]
-pub fn utc_stamp(instant: &str) -> Option<String> {
-    let instant: jiff::Timestamp = instant.parse().ok()?;
-    Some(instant.strftime("%Y%m%dT%H%M%SZ").to_string())
-}
-
-/// A timestamp's wall-time `RECURRENCE-ID` value (`YYYYMMDDTHHMMSS`), the
-/// time as written whatever its offset, or a date's (`YYYYMMDD`).
-#[cfg(feature = "gcal")]
-pub fn wall_stamp(stamp: &str) -> Option<String> {
-    let date = stamp.get(..10)?;
-    let digits = |part: &str| {
-        part.chars()
-            .filter(char::is_ascii_digit)
-            .collect::<String>()
-    };
-    match stamp.get(10..11) {
-        None => Some(digits(date)),
-        Some("T") => Some(format!("{}T{}", digits(date), digits(stamp.get(11..19)?))),
-        Some(_) => None,
-    }
-}
-
 /// How a failed intent is dispositioned.
 #[derive(Debug)]
 pub enum Failure {
@@ -419,25 +394,6 @@ mod tests {
             "2026-02-27T00:00:00Z"
         );
         assert_eq!(occurrence_window("2026"), None);
-
-        assert_eq!(
-            utc_stamp("2026-10-06T09:00:00+02:00").as_deref(),
-            Some("20261006T070000Z")
-        );
-        assert_eq!(
-            utc_stamp("2026-10-06T07:00:00.0000000Z").as_deref(),
-            Some("20261006T070000Z")
-        );
-    }
-
-    #[cfg(feature = "gcal")]
-    #[test]
-    fn a_wall_stamp_is_the_time_as_written() {
-        assert_eq!(
-            wall_stamp("2026-10-06T09:00:00+02:00").as_deref(),
-            Some("20261006T090000")
-        );
-        assert_eq!(wall_stamp("2026-10-06").as_deref(), Some("20261006"));
     }
 
     #[test]

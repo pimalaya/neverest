@@ -3,9 +3,9 @@
 //! What a Google Calendar or Graph source reads of an iCalendar document
 //! before pushing it: the floating times neither provider stores, anchored
 //! in a zone, and the occurrences of a series both take apart from its
-//! master, each through its instance.
+//! master, each through its instance, found by when it originally starts.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, fmt};
 
 use anyhow::{Context, Result};
 use ical::tree::{
@@ -13,6 +13,11 @@ use ical::tree::{
     leaf::IcalLeaf,
     line::IcalLine,
     param::node::IcalParamNode,
+};
+use jiff::{
+    Timestamp,
+    civil::{Date, DateTime},
+    tz::TimeZone,
 };
 use pimalaya_cli::error::CodedError;
 
@@ -24,8 +29,11 @@ const ANCHORED: &[&str] = &["DTSTART", "DTEND", "RECURRENCE-ID", "EXDATE", "RDAT
 /// The occurrences a series document sets apart from its master.
 #[derive(Debug, Default)]
 pub struct Occurrences {
+    /// The document holding the master as its only event, the series an
+    /// override is read against; `None` for overrides with no master.
+    pub master: Option<Vec<u8>>,
     /// The `EXDATE` values of the master, each an occurrence it cancels.
-    pub excluded: Vec<String>,
+    pub excluded: Vec<OccurrenceId>,
     /// The components overriding an occurrence.
     pub overrides: Vec<Override>,
 }
@@ -44,10 +52,26 @@ impl Occurrences {
                 continue;
             }
 
+            let mut alone = calendar.clone();
+            alone.items = calendar
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(other, item)| *other == index || !is_event(item))
+                .map(|(_, item)| item.clone())
+                .collect();
+
             let Some(recurrence_id) = lines(event, "RECURRENCE-ID").next() else {
                 for line in lines(event, "EXDATE") {
-                    occurrences.excluded.extend(values(line));
+                    let zone = zone(line);
+                    occurrences
+                        .excluded
+                        .extend(values(line).into_iter().map(|value| OccurrenceId {
+                            value,
+                            zone: zone.clone(),
+                        }));
                 }
+                occurrences.master.get_or_insert(alone.to_bytes());
                 continue;
             };
 
@@ -64,17 +88,11 @@ impl Occurrences {
                         .any(|value| value.get().eq_ignore_ascii_case("THISANDFUTURE"))
             });
 
-            let mut alone = calendar.clone();
-            alone.items = calendar
-                .items
-                .iter()
-                .enumerate()
-                .filter(|(other, item)| *other == index || !is_event(item))
-                .map(|(_, item)| item.clone())
-                .collect();
-
             occurrences.overrides.push(Override {
-                recurrence_id: recurrence_id.raw_value_str().trim().to_owned(),
+                recurrence_id: OccurrenceId {
+                    value: recurrence_id.raw_value_str().trim().to_owned(),
+                    zone: zone(recurrence_id),
+                },
                 cancelled,
                 this_and_future,
                 document: alone.to_bytes(),
@@ -110,14 +128,97 @@ impl Occurrences {
 /// One component of a series overriding an occurrence.
 #[derive(Debug)]
 pub struct Override {
-    /// The `RECURRENCE-ID` value, parameters aside.
-    pub recurrence_id: String,
+    /// The occurrence its `RECURRENCE-ID` names.
+    pub recurrence_id: OccurrenceId,
     /// Whether it cancels the occurrence (`STATUS:CANCELLED`).
     pub cancelled: bool,
     /// Whether it overrides every later occurrence too.
     pub this_and_future: bool,
     /// The document holding this component as its only event.
     pub document: Vec<u8>,
+}
+
+/// An occurrence of a series, named by its original start as a
+/// `RECURRENCE-ID` or an `EXDATE` value names it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OccurrenceId {
+    /// The value, parameters aside: a date, a wall time or a UTC stamp.
+    pub value: String,
+    /// The zone its `TZID` names, which a wall time is read in.
+    pub zone: Option<String>,
+}
+
+/// When an occurrence originally starts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OriginalStart {
+    /// The date of an all-day occurrence.
+    Date(Date),
+    /// The instant of a timed occurrence: a UTC stamp, or a wall time in a
+    /// zone the time zone database names.
+    Instant(Timestamp),
+    /// A wall time in no zone known: floating, or in a `TZID` the time zone
+    /// database does not name.
+    Wall(DateTime),
+}
+
+impl OccurrenceId {
+    /// The occurrence `value` names in no zone known, as an intent names
+    /// one in the form of its series' `DTSTART` (pimdir STORAGE Annex B.2).
+    pub fn bare(value: &str) -> Self {
+        Self {
+            value: value.trim().to_owned(),
+            zone: None,
+        }
+    }
+
+    /// When the occurrence originally starts; `None` for a value of no
+    /// such shape.
+    pub fn start(&self) -> Option<OriginalStart> {
+        let value = self.value.as_str();
+        if value.len() == 8 {
+            return Date::strptime("%Y%m%d", value)
+                .ok()
+                .map(OriginalStart::Date);
+        }
+
+        let (wall, utc) = match value.strip_suffix(['Z', 'z']) {
+            Some(wall) => (wall, true),
+            None => (value, false),
+        };
+        let wall = DateTime::strptime("%Y%m%dT%H%M%S", wall).ok()?;
+        let zone = match utc {
+            true => Some(TimeZone::UTC),
+            false => self
+                .zone
+                .as_deref()
+                .and_then(|zone| TimeZone::get(zone).ok()),
+        };
+
+        match zone {
+            Some(zone) => Some(OriginalStart::Instant(
+                wall.to_zoned(zone).ok()?.timestamp(),
+            )),
+            None => Some(OriginalStart::Wall(wall)),
+        }
+    }
+
+    /// Whether it names the timed occurrence originally starting at
+    /// `original`, a wall time of no zone known read in `zone`, the series'.
+    pub fn starts_at(&self, original: Timestamp, zone: Option<&str>) -> bool {
+        match self.start() {
+            Some(OriginalStart::Instant(instant)) => instant == original,
+            Some(OriginalStart::Wall(wall)) => zone
+                .and_then(|zone| TimeZone::get(zone).ok())
+                .is_some_and(|zone| original.to_zoned(zone).datetime() == wall),
+            _ => false,
+        }
+    }
+}
+
+impl fmt::Display for OccurrenceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.value)
+    }
 }
 
 /// Whether an event of `ical` holds a floating date-time.
@@ -209,6 +310,16 @@ fn values(line: &IcalLine<'_>) -> Vec<String> {
         .collect()
 }
 
+/// The zone a property's `TZID` names.
+fn zone(line: &IcalLine<'_>) -> Option<String> {
+    line.params
+        .iter()
+        .find(|param| param.name.get().eq_ignore_ascii_case("TZID"))
+        .and_then(|param| param.values.first())
+        .map(|value| value.get().trim().trim_matches('"').to_owned())
+        .filter(|zone| !zone.is_empty())
+}
+
 /// Whether an item is a date-time property of [`ANCHORED`] naming neither a
 /// zone nor UTC.
 fn is_floating(item: &IcalItem<'_>) -> bool {
@@ -278,16 +389,61 @@ mod tests {
     fn a_series_sets_its_exclusion_and_its_override_apart() {
         let occurrences = Occurrences::read(SERIES.as_bytes()).unwrap();
 
-        assert_eq!(occurrences.excluded, ["20261125T140000"]);
+        let paris = |value: &str| OccurrenceId {
+            value: value.into(),
+            zone: Some("Europe/Paris".into()),
+        };
+        assert_eq!(occurrences.excluded, [paris("20261125T140000")]);
         assert_eq!(occurrences.overrides.len(), 1);
         let moved = &occurrences.overrides[0];
-        assert_eq!(moved.recurrence_id, "20261124T140000");
+        assert_eq!(moved.recurrence_id, paris("20261124T140000"));
         assert!(!moved.cancelled && !moved.this_and_future);
 
         let document = String::from_utf8(moved.document.clone()).unwrap();
         assert_eq!(document.matches("BEGIN:VEVENT").count(), 1, "{document}");
         assert!(document.contains("SUMMARY:Daily, moved"), "{document}");
         assert!(document.contains("PRODID:-//test//EN"), "{document}");
+
+        let master = String::from_utf8(occurrences.master.unwrap()).unwrap();
+        assert_eq!(master.matches("BEGIN:VEVENT").count(), 1, "{master}");
+        assert!(master.contains("RRULE:FREQ=DAILY"), "{master}");
+    }
+
+    /// An occurrence is named by when it starts: a date, a wall time read
+    /// in its `TZID`, a UTC stamp, or a wall time in no zone known, read in
+    /// the series' zone.
+    #[test]
+    fn an_occurrence_starts_at_the_instant_its_zone_reads() {
+        let nine_utc: Timestamp = "2026-12-21T09:00:00Z".parse().unwrap();
+        let paris = OccurrenceId {
+            value: "20261221T100000".into(),
+            zone: Some("Europe/Paris".into()),
+        };
+        assert!(paris.starts_at(nine_utc, None));
+        assert!(!paris.starts_at("2026-12-21T10:00:00Z".parse().unwrap(), None));
+
+        assert!(OccurrenceId::bare("20261221T090000Z").starts_at(nine_utc, None));
+
+        let bare = OccurrenceId::bare("20261221T100000");
+        assert!(bare.starts_at(nine_utc, Some("Europe/Paris")));
+        assert!(!bare.starts_at(nine_utc, None));
+        assert!(!bare.starts_at(nine_utc, Some("UTC")));
+
+        let unknown = OccurrenceId {
+            zone: Some("Custom Zone".into()),
+            ..bare.clone()
+        };
+        assert_eq!(
+            unknown.start(),
+            Some(OriginalStart::Wall("2026-12-21T10:00:00".parse().unwrap()))
+        );
+
+        let date = OccurrenceId::bare("20261221").start();
+        assert_eq!(
+            date,
+            Some(OriginalStart::Date("2026-12-21".parse().unwrap()))
+        );
+        assert_eq!(OccurrenceId::bare("next monday").start(), None);
     }
 
     #[test]

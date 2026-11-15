@@ -359,11 +359,15 @@ Upgrading from 0.3.0:
 
   An envelope address that is no mailbox, or holds a line break, fails its send before anything is written.
 
-- Bumped io-webdav to 0.9.
+- Bumped io-webdav to 0.9.1.
 
   A CalDAV or CardDAV multistatus is parsed 3.4 to 9 times faster.
 
   A card or an event a multiget answers 404 or 410 is answered gone without being read again alone; one it could not read otherwise (a 403, a refused body) is read alone, which says what it is.
+
+  A card or an event a listing or a multiget reads is stored as a GET returns it: on iCloud and Fastmail every one was stored two bytes short, its final CRLF cut. A body already stored stays as it is until its server copy changes, nothing being downloaded again.
+
+  A collection key or a member id that would address the server root, the home set or a parent of either (`..`, `/`, an empty one), as another source's store may hand one over, is refused before any request, the row failing with io-webdav's reason.
 
 - Bumped vcard-rs to 0.6.
 
@@ -375,8 +379,8 @@ Upgrading from 0.3.0:
 
 ### Fixed
 
-- Fixed a recurring event pushed to Microsoft Graph or Google Calendar landing as its series alone: its cancelled occurrences (`EXDATE`) and its overrides were lost on Graph, then in the store when the next sync read the series back, and its overrides were lost on Google. Each now reaches its instance after the series; an override neither provider can take is refused, coded `unsupported`, and a new series whose occurrences do not all land is deleted again, the store keeping it for the next run. Both sources declare `calendar.occurrence.update` `partial`, where they declared `none`, so a frontend may queue an update changing an occurrence.
-- Fixed an event at a floating time (no zone, no UTC) queued on a Google or Graph calendar being refused by every sync: it is anchored in the calendar's zone on Google, in UTC on Graph, which states no zone for a calendar, and read back by the next sync.
+- Fixed a recurring event pushed to Microsoft Graph or Google Calendar landing as its series alone: its cancelled occurrences (`EXDATE`) and its overrides were lost on Graph, then in the store when the next sync read the series back, and its overrides were lost on Google. Each now reaches its instance after the series, found by when it originally starts as an instant, so an override in a zoned series finds the instance Google lists in UTC; an override changing what its series states sends that alone to Graph, what it leaves out staying as the series has it; an override neither provider can take is refused, coded `unsupported`, and a new series whose occurrences do not all land is deleted again, the store keeping it for the next run. Both sources declare `calendar.occurrence.update` `partial`, where they declared `none`, so a frontend may queue an update changing an occurrence.
+- Fixed an event at a floating time (no zone, no UTC) queued on a Google or Graph calendar being refused by every sync: it is anchored in the calendar's zone on Google, else in the user's (`TZ`, else the system's, which the search index reads floating times in), as on Graph, which states no zone for a calendar, so a floating 10:00 stays 10:00 where it is read, and read back by the next sync.
 - Fixed every refused create reading `"id": ""` and staying among the hunks applied: it is named by its link id (a `UID`, a `Message-ID`) and taken back.
 - Fixed a widening of the scope (`sync` after `sync --since`) deleting from the store Gmail and Microsoft Graph messages the server still held: those dated in the band by their `Date` and received (Gmail) or submitted (Graph `sentDateTime`) after it, which the band's `before:` or `sentDateTime lt` filter missed. A band is now listed from its floor up, its `Date` deciding what it keeps.
 - Fixed a message queued into a Microsoft Graph folder other than Drafts being accepted, then rejected by every sync: the source declares `mail.message.add` on its Drafts folder alone, so a frontend refuses such an add up front, and a rejected one is coded `unsupported`.

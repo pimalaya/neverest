@@ -6,13 +6,18 @@
 //! [`JsonSchemaCommand`] writes one file per entry. The `neverest-error` key
 //! describes the failure object instead.
 //!
+//! `check`, the hidden former name of `account check`, keeps its
+//! `neverest-check` key beside `neverest-account-check`.
+//!
 //! Every entry is unconditional: the backends are feature-gated but the
 //! output shapes are not, so a build with no backend describes the same
 //! payloads as one with all of them.
 //!
 //! [`JsonSchemaCommand`]: pimalaya_cli::clap::commands::json_schema::JsonSchemaCommand
 
-use pimalaya_cli::{clap::commands::json_schema::JsonSchemaRegistry, error::ErrorReport};
+use pimalaya_cli::{
+    account::AccountListOutput, clap::commands::json_schema::JsonSchemaRegistry, error::ErrorReport,
+};
 
 use crate::{
     cli::{check::CheckRunOutput, drain::DrainRunOutput, init::InitRunOutput},
@@ -30,6 +35,8 @@ use crate::{
 pub fn registry() -> JsonSchemaRegistry {
     let mut registry = JsonSchemaRegistry::new("neverest", env!("CARGO_PKG_VERSION"));
 
+    registry.insert::<AccountListOutput>("neverest-account-list");
+    registry.insert::<CheckRunOutput>("neverest-account-check");
     registry.insert::<CheckRunOutput>("neverest-check");
     registry.insert::<DrainRunOutput>("neverest-drain");
     #[cfg(feature = "search")]

@@ -12,7 +12,7 @@ use std::{
     net::{TcpListener, TcpStream},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     thread,
 };
@@ -70,6 +70,12 @@ pub struct FakeImap {
     fault: Arc<Mutex<Option<FakeFault>>>,
     /// The completion its next `APPEND` or `UID STORE` is refused with.
     refusal: Arc<Mutex<Option<&'static str>>>,
+    /// The completion every search for the messages with no `Date` (`NOT
+    /// HEADER Date ""`) is refused with, as iCloud refuses it.
+    undated: Arc<Mutex<Option<&'static str>>>,
+    /// Whether an `ENABLE` enables what it asks, else answered a bare `OK`
+    /// with no `ENABLED`, as iCloud answers it.
+    enables: Arc<AtomicBool>,
 }
 
 impl FakeImap {
@@ -83,6 +89,8 @@ impl FakeImap {
         let connections = Arc::new(AtomicUsize::new(0));
         let fault = Arc::new(Mutex::new(None));
         let refusal = Arc::new(Mutex::new(None));
+        let undated = Arc::new(Mutex::new(None));
+        let enables = Arc::new(AtomicBool::new(true));
 
         let logged = Arc::clone(&commands);
         let shared = Arc::clone(&served);
@@ -90,6 +98,8 @@ impl FakeImap {
         let accepted = Arc::clone(&connections);
         let broken = Arc::clone(&fault);
         let refused = Arc::clone(&refusal);
+        let blind = Arc::clone(&undated);
+        let enabling = Arc::clone(&enables);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
@@ -99,9 +109,16 @@ impl FakeImap {
                 let headers = Arc::clone(&stated);
                 let fault = Arc::clone(&broken);
                 let refusal = Arc::clone(&refused);
+                let undated = Arc::clone(&blind);
+                let enables = Arc::clone(&enabling);
                 thread::spawn(move || {
+                    let refusals = Refusals {
+                        write: &refusal,
+                        undated: &undated,
+                        enables: &enables,
+                    };
                     serve(
-                        stream, qresync, &mailbox, &headers, &commands, &fault, &refusal,
+                        stream, qresync, &mailbox, &headers, &commands, &fault, refusals,
                     )
                 });
             }
@@ -115,7 +132,21 @@ impl FakeImap {
             headers,
             fault,
             refusal,
+            undated,
+            enables,
         }
+    }
+
+    /// Has every `ENABLE` answered a bare `OK`, enabling nothing, as iCloud
+    /// answers `ENABLE CONDSTORE QRESYNC` while advertising both.
+    pub fn enable_nothing(&self) {
+        self.enables.store(false, Ordering::SeqCst);
+    }
+
+    /// Has every search for the messages with no `Date` refused with the
+    /// tagged `completion` (`NO [UNAVAILABLE] Unexpected exception`).
+    pub fn refuse_undated_search(&self, completion: &'static str) {
+        *self.undated.lock().unwrap() = Some(completion);
     }
 
     /// Has the next `UID FETCH` of whole bodies meet `fault`, once.
@@ -168,6 +199,15 @@ impl FakeImap {
     }
 }
 
+/// The commands a server refuses: its next write, once, every search for
+/// the messages with no `Date`, and what an `ENABLE` asks when it enables
+/// nothing.
+struct Refusals<'a> {
+    write: &'a Mutex<Option<&'static str>>,
+    undated: &'a Mutex<Option<&'static str>>,
+    enables: &'a AtomicBool,
+}
+
 /// Serves one connection until the client leaves.
 fn serve(
     stream: TcpStream,
@@ -176,7 +216,7 @@ fn serve(
     headers: &Mutex<BTreeMap<u32, Vec<u8>>>,
     commands: &Mutex<Vec<String>>,
     fault: &Mutex<Option<FakeFault>>,
-    refusal: &Mutex<Option<&'static str>>,
+    refusals: Refusals<'_>,
 ) {
     let mut writer = stream.try_clone().unwrap();
     let mut reader = BufReader::new(stream);
@@ -220,7 +260,15 @@ fn serve(
 
         let upper = command.to_ascii_uppercase();
         let writes = upper.starts_with("APPEND") || upper.starts_with("UID STORE");
-        if let Some(completion) = writes.then(|| refusal.lock().unwrap().take()).flatten() {
+        let undated = upper.starts_with("UID SEARCH") && upper.contains("HEADER DATE \"\"");
+        let enabling = upper.starts_with("ENABLE") && !refusals.enables.load(Ordering::SeqCst);
+        let refused = match (writes, undated, enabling) {
+            (true, _, _) => refusals.write.lock().unwrap().take(),
+            (_, true, _) => *refusals.undated.lock().unwrap(),
+            (_, _, true) => Some("OK nothing enabled"),
+            _ => None,
+        };
+        if let Some(completion) = refused {
             if writer
                 .write_all(format!("{tag} {completion}\r\n").as_bytes())
                 .is_err()

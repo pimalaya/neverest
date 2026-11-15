@@ -129,7 +129,8 @@ Every command carries its own `--help`, the source of truth for its flags and sy
 neverest init
 neverest sync --dry-run
 neverest sync -a <account> --include-collection INBOX
-neverest check
+neverest account list
+neverest account check
 neverest drain
 neverest index
 neverest conflict list

@@ -17,9 +17,7 @@ use io_pimdir::capability::PimdirSupport;
 use io_pimdir::client::reader::PimdirReader;
 use log::{info, warn};
 use pimalaya_cli::{
-    capability::CapabilityLevel,
-    error::{PartialOutcome, code_of},
-    printer::Printer,
+    account::BackendCheck, capability::CapabilityLevel, error::PartialOutcome, printer::Printer,
     spinner::Spinner,
 };
 use schemars::JsonSchema;
@@ -29,7 +27,7 @@ use crate::{
     account::{Account, SourceAccount},
     client,
     config::{AccountConfig, AccountMode, Config, SourceConfig},
-    error::ErrorCode,
+    error::{self, ErrorCode},
     item::collection::Collection,
     offline::{capability, driver},
 };
@@ -228,7 +226,7 @@ fn check_source(
             "Checked source {label} ({} collections)",
             collections.len()
         )),
-        Err(err) => s.success(format!("Source {label} failed ({err:#})")),
+        Err(err) => s.failure(format!("Source {label} failed ({err:#})")),
     }
 
     // NOTE: nothing is sent: the session is opened, upgraded and
@@ -246,9 +244,9 @@ fn check_source(
                 .map_err(|err| err.context(format!("Check the SMTP channel of {label}")));
             match &opened {
                 Ok(()) => s.success(format!("Checked the SMTP channel of {label}")),
-                Err(err) => s.success(format!("SMTP channel of {label} failed ({err:#})")),
+                Err(err) => s.failure(format!("SMTP channel of {label} failed ({err:#})")),
             }
-            ChannelCheck::from("smtp", opened)
+            BackendCheck::new("smtp", opened.map_err(error::coded))
         });
     #[cfg(not(feature = "smtp"))]
     let smtp = {
@@ -260,12 +258,12 @@ fn check_source(
         Ok(collections) => (collections, Ok(())),
         Err(err) => (Vec::new(), Err(err)),
     };
-    let ChannelCheck {
+    let BackendCheck {
         backend,
         ok,
         code,
         error,
-    } = ChannelCheck::from(config.backend.protocol(), outcome);
+    } = BackendCheck::new(config.backend.protocol(), outcome.map_err(error::coded));
 
     SourceCheck {
         source: label.to_owned(),
@@ -437,8 +435,8 @@ pub struct SourceCheck {
     pub capabilities: Vec<CheckedCapability>,
     /// Whether its SMTP channel opened and authenticated, `null` when it
     /// declares none, when its credentials did not resolve, or in a build
-    /// without SMTP.
-    pub smtp: Option<ChannelCheck>,
+    /// without SMTP: pimalaya-cli's backend check row.
+    pub smtp: Option<BackendCheck<ErrorCode>>,
 }
 
 impl fmt::Display for SourceCheck {
@@ -449,47 +447,11 @@ impl fmt::Display for SourceCheck {
             Some(err) => write!(f, "{source}: FAIL ({err})")?,
         }
         match &self.smtp {
-            Some(ChannelCheck { error: None, .. }) => write!(f, ", SMTP channel authenticated"),
-            Some(ChannelCheck {
+            Some(BackendCheck { error: None, .. }) => write!(f, ", SMTP channel authenticated"),
+            Some(BackendCheck {
                 error: Some(err), ..
             }) => write!(f, ", SMTP channel: FAIL ({err})"),
             None => Ok(()),
-        }
-    }
-}
-
-/// One channel an endpoint opens beside its own, and whether it answered:
-/// the backend check row every pimalaya binary prints.
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ChannelCheck {
-    /// The backend that was checked.
-    pub backend: &'static str,
-    /// Whether it answered.
-    pub ok: bool,
-    /// The stable code of the failure, `null` when it answered or the
-    /// failure carries none.
-    pub code: Option<ErrorCode>,
-    /// Why it did not answer, `null` when it did.
-    pub error: Option<String>,
-}
-
-impl ChannelCheck {
-    /// Folds an attempt at `backend` into its outcome.
-    fn from(backend: &'static str, result: Result<()>) -> Self {
-        match result {
-            Ok(()) => Self {
-                backend,
-                ok: true,
-                code: None,
-                error: None,
-            },
-            Err(err) => Self {
-                backend,
-                ok: false,
-                code: code_of(&err),
-                error: Some(format!("{err:#}")),
-            },
         }
     }
 }

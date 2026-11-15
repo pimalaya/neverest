@@ -79,6 +79,9 @@
 #     longer lists is deleted on the other only when this is true, and a
 #     frontend may ask to delete one (a `collection-delete` intent) only
 #     then
+#   - `collection.rename`: whether a frontend may rename a collection (a
+#     `collection-rename` intent); unset, false on a `one-way` account,
+#     whose sources are copied rather than written to, true otherwise
 #   - `collection.capped`: default false; true when the server lists at most
 #     a number of what a collection holds, so what it leaves out is kept
 #   - `item.{create,delete}`: both required when the block is declared
@@ -173,6 +176,7 @@ imap.sasl.plain.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-
 # Keep the server read-mostly, so a buggy sync cannot destroy its state.
 imap.collection.create = false
 imap.collection.delete = false
+imap.collection.rename = false
 imap.item.create = true
 imap.item.delete = false
 

@@ -4,7 +4,7 @@
 //! pimdir store, plus that store's settings.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     path::PathBuf,
     time::Duration,
@@ -36,8 +36,39 @@ use crate::error::ErrorCode;
 /// one holding no account point at.
 const SAMPLE_URL: &str = "https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
 
-/// Where a removed configuration key's replacement is written down.
-const MIGRATION_NOTES: &str = "https://github.com/pimalaya/neverest/blob/master/MIGRATION.md";
+/// Every backend table an account may write, in the order `account list`
+/// names them, `smtp` the send channel's.
+pub const BACKENDS: [&str; 11] = [
+    "imap",
+    "carddav",
+    "caldav",
+    "jmap",
+    "gmail",
+    "msgraph",
+    "msgraph-contacts",
+    "msgraph-calendar",
+    "gpeople",
+    "gcal",
+    "smtp",
+];
+
+/// Whether this build serves the backend table `name`, its cargo feature
+/// being on. A JMAP source parses and no build opens it.
+pub fn is_built(name: &str) -> bool {
+    let built = [
+        ("imap", cfg!(feature = "imap")),
+        ("carddav", cfg!(feature = "dav")),
+        ("caldav", cfg!(feature = "dav")),
+        ("gmail", cfg!(feature = "gmail")),
+        ("msgraph", cfg!(feature = "msgraph")),
+        ("msgraph-contacts", cfg!(feature = "msgraph")),
+        ("msgraph-calendar", cfg!(feature = "msgraph")),
+        ("gpeople", cfg!(feature = "gpeople")),
+        ("gcal", cfg!(feature = "gcal")),
+        ("smtp", cfg!(feature = "smtp")),
+    ];
+    built.contains(&(name, true))
+}
 
 /// `skip_serializing_if` predicate omitting a defaulted field, so a serialized
 /// configuration carries only what differs from the defaults.
@@ -360,10 +391,10 @@ pub struct AccountConfig {
     /// Removed keys, refused by name as the file is parsed.
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    left: Option<LeftRightRemoved>,
+    left: Option<LeftRemoved>,
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    right: Option<LeftRightRemoved>,
+    right: Option<RightRemoved>,
     #[allow(dead_code)]
     #[serde(default, skip_serializing, alias = "mailbox")]
     collection: Option<AccountCollectionRemoved>,
@@ -455,6 +486,37 @@ impl AccountConfig {
     /// Whether that name came from the sugar rather than the explicit table.
     fn is_sugar(&self, name: &str) -> bool {
         !self.sources.contains_key(name)
+    }
+
+    /// The backend tables the account writes, its sources' and its
+    /// targets', sugar and named alike, each once in [`BACKENDS`] order,
+    /// `smtp` for a send channel. Read off the tables alone, so an account
+    /// a command would refuse lists too.
+    pub fn backends(&self) -> Vec<&'static str> {
+        let sugar = [
+            self.imap.as_ref().map(|_| "imap"),
+            self.carddav.as_ref().map(|_| "carddav"),
+            self.caldav.as_ref().map(|_| "caldav"),
+            self.jmap.as_ref().map(|_| "jmap"),
+            self.gmail.as_ref().map(|_| "gmail"),
+            self.msgraph.as_ref().map(|_| "msgraph"),
+            self.msgraph_contacts.as_ref().map(|_| "msgraph-contacts"),
+            self.msgraph_calendar.as_ref().map(|_| "msgraph-calendar"),
+            self.gpeople.as_ref().map(|_| "gpeople"),
+            self.gcal.as_ref().map(|_| "gcal"),
+            self.smtp.as_ref().map(|_| "smtp"),
+        ];
+        let named = self.sources.values().chain(self.targets.values());
+        let named = named.flat_map(|source| {
+            let smtp = source.smtp.as_ref().map(|_| "smtp");
+            [Some(source.backend.protocol()), smtp]
+        });
+        let declared: BTreeSet<&str> = sugar.into_iter().chain(named).flatten().collect();
+
+        BACKENDS
+            .into_iter()
+            .filter(|name| declared.contains(name))
+            .collect()
     }
 
     /// Every endpoint the account opens, keyed by its pimdir source id.
@@ -648,90 +710,95 @@ impl AccountConfig {
     }
 }
 
-/// Declares a configuration key this version removed: a type no value
-/// deserializes into, refusing the key by name with its replacement as the
-/// file is parsed, rather than as an unknown field with no explanation.
-///
-/// Refused rather than ignored: silently honouring neither the old meaning
-/// nor the new one is how a configuration ends up doing the opposite of
-/// what it says.
-macro_rules! removed_key {
-    ($(#[$doc:meta])* $name:ident, $($message:tt)+) => {
-        $(#[$doc])*
-        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-        pub enum $name {}
+// The keys this version removed, each refused by name in the family
+// sentence as the file is parsed rather than ignored: honouring neither the
+// old meaning nor the new one is how a configuration ends up doing the
+// opposite of what it says.
+pimalaya_config::removed_key! {
+    /// `left`, now `sources`, `targets` and `one-way`.
+    pub LeftRemoved: Table {
+        name: "left",
+        why: "an account naming its endpoints and the direction between them",
+        instead: "write the authoritative one under `sources` and the other under \
+                  `targets`, adding `one-way = true` to copy rather than merge \
+                  (without it they sync both ways, as the pair did)",
+    }
 
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D>(_: D) -> Result<Self, D::Error>
-            where
-                D: serde::Deserializer<'de>,
-            {
-                Err(serde::de::Error::custom(format!($($message)+)))
-            }
-        }
-    };
-}
+    /// `right`, now `sources`, `targets` and `one-way`.
+    pub RightRemoved: Table {
+        name: "right",
+        why: "an account naming its endpoints and the direction between them",
+        instead: "write the authoritative one under `sources` and the other under \
+                  `targets`, adding `one-way = true` to copy rather than merge \
+                  (without it they sync both ways, as the pair did)",
+    }
 
-removed_key!(
-    /// `left` and `right`, now `sources`, `targets` and `one-way`.
-    LeftRightRemoved,
-    "`left` and `right` are gone: an account names its endpoints and the direction \
-     between them. Write the authoritative one under `sources` and the other under \
-     `targets`, and add `one-way = true` to copy rather than merge; leaving it off \
-     keeps them syncing both ways, which is what the pair used to do. See \
-     {MIGRATION_NOTES}"
-);
-
-removed_key!(
     /// The account-level `collection` (or `mailbox`) table, now per source.
-    AccountCollectionRemoved,
-    "The account-level `collection` table is gone: a filter belongs to the source it \
-     filters, since an account may hold sources of several kinds. Write it as \
-     `sources.<name>.collection.filter`, or `<protocol>.collection.filter` under the \
-     account. See {MIGRATION_NOTES}"
-);
+    pub AccountCollectionRemoved: Table {
+        name: "collection",
+        why: "a filter belonging to the source it filters, an account holding \
+              sources of several kinds",
+        instead: "write `sources.<name>.collection.filter`, or \
+                  `<protocol>.collection.filter` under the account",
+    }
 
-removed_key!(
     /// The v0.1 `folder` table.
-    FolderRemoved,
-    "The `folder` table is gone: its filter is `<protocol>.collection.filter`, on the \
-     source it filters, and its aliases have no replacement. See {MIGRATION_NOTES}"
-);
+    pub FolderRemoved: Table {
+        name: "folder",
+        why: "a filter belonging to the source it filters",
+        instead: "write its filter as `<protocol>.collection.filter`, its aliases \
+                  having no replacement",
+    }
 
-removed_key!(
     /// The v0.1 `envelope` table, now `item.filter.since`.
-    EnvelopeRemoved,
-    "The `envelope` table is gone: `item.filter.since` bounds the mail a sync lists \
-     by its date. See {MIGRATION_NOTES}"
-);
+    pub EnvelopeRemoved: Table {
+        name: "envelope",
+        why: "a sync bounding its mail by date alone",
+        instead: "write `item.filter.since`",
+    }
 
-removed_key!(
     /// `collection.namespace`, now the account's arity and `one-way`.
-    NamespaceRemoved,
-    "`collection.namespace` is gone: it said which sources met, which is now whether \
-     they sit under `sources` or `targets`, and it never said which way, which is now \
-     `one-way`. Drop it. See {MIGRATION_NOTES}"
-);
+    pub NamespaceRemoved: Key {
+        name: "collection.namespace",
+        why: "the sources meeting by whether they sit under `sources` or \
+              `targets`, and the direction being `one-way`",
+        instead: "delete it",
+    }
 
-removed_key!(
-    /// `store.retention` and `store.hydration`, now the account's `retain`.
+    /// `store.retention`, now the account's `retain`.
     ///
     /// A three-point scale described a store holding only the bodies that
-    /// happened to cross, which nothing asked for; mapping either key onto
-    /// `retain` would guess.
-    StoreRetentionRemoved,
-    "`store.retention` and `store.hydration` are gone: whether the store keeps \
-     bodies is the account's `retain`, which is true when the store is the \
-     destination and false when targets are named. See {MIGRATION_NOTES}"
-);
+    /// happened to cross, which nothing asked for; mapping it onto `retain`
+    /// would guess.
+    pub StoreRetentionRemoved: Key {
+        name: "store.retention",
+        why: "whether the store keeps bodies being the account's `retain`, true \
+              when the store is the destination and false when targets are named",
+        instead: "delete it",
+    }
 
-removed_key!(
-    /// The flat `smtp.login` and `smtp.password`, now a `sasl` mechanism.
-    SmtpLoginRemoved,
-    "The flat `login` and `password` keys of `smtp` are gone: the send channel names \
-     one SASL mechanism, as `imap` does, such as `smtp.sasl.plain.username` and \
-     `smtp.sasl.plain.password`. See {MIGRATION_NOTES}"
-);
+    /// `store.hydration`, now the account's `retain`.
+    pub StoreHydrationRemoved: Key {
+        name: "store.hydration",
+        why: "whether the store keeps bodies being the account's `retain`, true \
+              when the store is the destination and false when targets are named",
+        instead: "delete it",
+    }
+
+    /// The flat `smtp.login`, now a `sasl` mechanism.
+    pub SmtpLoginRemoved: Key {
+        name: "smtp.login",
+        why: "the send channel naming one SASL mechanism, as `imap` does",
+        instead: "write `smtp.sasl.plain.username` and `smtp.sasl.plain.password`",
+    }
+
+    /// The flat `smtp.password`, now a `sasl` mechanism.
+    pub SmtpPasswordRemoved: Key {
+        name: "smtp.password",
+        why: "the send channel naming one SASL mechanism, as `imap` does",
+        instead: "write `smtp.sasl.plain.username` and `smtp.sasl.plain.password`",
+    }
+}
 
 /// The only part of conflict handling anybody configures.
 ///
@@ -797,7 +864,7 @@ pub struct StoreConfig {
     retention: Option<StoreRetentionRemoved>,
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    hydration: Option<StoreRetentionRemoved>,
+    hydration: Option<StoreHydrationRemoved>,
 }
 
 impl StoreConfig {
@@ -1232,6 +1299,12 @@ pub struct CollectionSourceConfig {
     /// and DAV leave, and a listing may drop a collection nobody deleted.
     #[serde(default, skip_serializing_if = "is_default")]
     pub delete: bool,
+    /// Whether a frontend may rename a collection on this source, through
+    /// the queue. Unset, it reads the account's `one-way`: false on a
+    /// one-way account, whose sources are copied rather than written to,
+    /// true otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rename: Option<bool>,
     /// Removed key, refused by name as the file is parsed.
     ///
     /// Which endpoints meet is now the account's arity, and which way is
@@ -1261,6 +1334,7 @@ impl CollectionSourceConfig {
         CollectionPermissions {
             create: self.create,
             delete: self.delete,
+            rename: self.rename,
         }
     }
 }
@@ -1270,6 +1344,7 @@ impl Default for CollectionSourceConfig {
         Self {
             create: true,
             delete: false,
+            rename: None,
             namespace: None,
             filter: CollectionFilter::default(),
             capped: false,
@@ -1284,6 +1359,16 @@ pub struct CollectionPermissions {
     pub create: bool,
     /// Whether a run may delete one.
     pub delete: bool,
+    /// Whether a frontend may rename one, `None` taking the account's
+    /// answer: allowed unless it is one-way.
+    pub rename: Option<bool>,
+}
+
+impl CollectionPermissions {
+    /// Whether a rename is allowed on an account `one_way` or not.
+    pub fn renames(&self, one_way: bool) -> bool {
+        self.rename.unwrap_or(!one_way)
+    }
 }
 
 impl Default for CollectionPermissions {
@@ -1291,6 +1376,7 @@ impl Default for CollectionPermissions {
         Self {
             create: true,
             delete: false,
+            rename: None,
         }
     }
 }
@@ -1800,7 +1886,7 @@ pub struct SmtpConfig {
     login: Option<SmtpLoginRemoved>,
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    password: Option<SmtpLoginRemoved>,
+    password: Option<SmtpPasswordRemoved>,
 }
 
 /// Resolves a `server` into a URL, `scheme` filling in for a value with none.
@@ -2997,7 +3083,10 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("`collection.namespace` is gone"), "got {err}");
+        assert!(
+            err.contains("The `collection.namespace` key is removed"),
+            "got {err}"
+        );
         assert!(err.contains("one-way"), "got {err}");
     }
 
@@ -3102,38 +3191,41 @@ mod tests {
         for (document, named) in [
             (
                 "left.imap.server = \"x\"\nright.imap.server = \"y\"",
-                "`left`",
+                "The `left` table is removed, ",
             ),
-            ("imap.server = \"x\"\nfolder.filter = \"all\"", "`folder`"),
+            (
+                "imap.server = \"x\"\nfolder.filter = \"all\"",
+                "The `folder` table is removed, ",
+            ),
             (
                 "imap.server = \"x\"\nenvelope.filter.before = \"2024-01-01\"",
-                "`envelope`",
+                "The `envelope` table is removed, ",
             ),
             (
                 "imap.server = \"x\"\ncollection.filter.include = [\"INBOX\"]",
-                "`collection`",
+                "The `collection` table is removed, ",
             ),
             (
                 "imap.server = \"x\"\nimap.collection.namespace = \"mail\"",
-                "`collection.namespace`",
+                "The `collection.namespace` key is removed, ",
             ),
             (
                 "imap.server = \"x\"\nstore.retention = \"retain\"",
-                "`store.retention`",
+                "The `store.retention` key is removed, ",
             ),
             (
                 "imap.server = \"x\"\nstore.hydration = \"full\"",
-                "`store.hydration`",
+                "The `store.hydration` key is removed, ",
             ),
             (
                 "imap.server = \"x\"\nsmtp.server = \"y\"\nsmtp.login = \"u\"\n\
                  smtp.password.raw = \"pw\"",
-                "`login` and `password`",
+                "The `smtp.login` key is removed, ",
             ),
             (
                 "sources.a.imap.server = \"x\"\nsources.a.smtp.server = \"y\"\n\
                  sources.a.smtp.password.raw = \"pw\"",
-                "`login` and `password`",
+                "The `smtp.password` key is removed, ",
             ),
         ] {
             // NOTE: refused as the file is parsed, so an account no command
@@ -3142,7 +3234,7 @@ mod tests {
                 Ok(_) => String::from("parsed"),
                 Err(err) => err.to_string(),
             };
-            if !err.contains(named) || !err.contains("MIGRATION.md") {
+            if !err.contains(named) || !err.contains(", see MIGRATION.md") {
                 missed.push(format!("{named}: {err}"));
             }
         }

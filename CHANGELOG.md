@@ -20,7 +20,7 @@ Upgrading from 0.3.0:
 - A store another user can read is refused (`store-exposed`): `chmod 700` its directory and `chmod 600` its pimdir.db.
 - `sync --json` prints progress events before its report: read the last line, or skip the lines carrying `event`.
 - Every `--json` output prints every key: an empty list as `[]`, an absent value as `null`, a bool as `false`. Test `.conflicts | length`, not whether `conflicts` is there.
-- `check` checks every endpoint and exits 3, printing its report, when one does not answer; it exited 1 with the failure object of the first.
+- `check` checks every endpoint and exits 3, printing its report, when one does not answer; it exited 1 with the failure object of the first. It is now `account check`, `check` still running it, hidden from the help.
 - `configure` and the first-run offer are gone: write the configuration by hand from config.sample.toml. A build naming the `wizard` feature fails until it drops it.
 - A configuration key neverest does not read is refused at load, at every level, where a misspelled key in a source table or at the root was ignored; a source naming two backend tables is refused rather than reduced to the first.
 - `-c` takes one path, repeated to merge several (`-c a.toml -c b.toml`), where it split one value on `:`; `NEVEREST_CONFIG` is no longer read.
@@ -29,7 +29,9 @@ Upgrading from 0.3.0:
 
 ### Added
 
-- Added the first-run welcome: a person at a terminal with no configuration meets the commands that create one from the sample, then `neverest check`, as every Pimalaya CLI does.
+- Added `collection.rename` to every backend table, beside `collection.create` and `collection.delete`: whether a frontend may rename a collection. Unset, it is false on a `one-way` account and true otherwise; off, the source declares `collection.rename: none`, naming the key, so a frontend's rename is refused up front.
+- Added the `account` group, as in every Pimalaya CLI: `account check`, the check (`check` stays a hidden alias), and `account list`, the accounts `-a` names (every one by default) with the backend tables each writes, its sources', targets' and `smtp`, those this build leaves out under `notBuilt` (pimalaya-cli's account row).
+- Added the first-run welcome: a person at a terminal with no configuration meets the commands that create one from the sample, then `neverest account check`, as every Pimalaya CLI does.
 - Added `carddav.home` and `caldav.home`, the home set as a URL, listed with nothing discovered, `server` becoming optional, and `auth = "none"` for a DAV server asking for no credential.
 - Added `imap.sasl-ir` and `imap.id.auto`, `imap.id.fields`, as himalaya and carillon read them.
 - Added `proxy.url`, `proxy.username` and `proxy.password` at the account, under every backend table and under `smtp`; with none, every connection goes through the proxy the `all_proxy` and `https_proxy` environment variables name, as the other Pimalaya CLIs do.
@@ -172,6 +174,9 @@ Upgrading from 0.3.0:
 
 ### Changed
 
+- Changed a check's send channel row to pimalaya-cli's `BackendCheck` (its JSON schema names it so, the keys unchanged), and a check row's `code` to the server refusal's under the failure too (`permission-denied`, `quota-exceeded`, `rate-limited`), as a failure object reads it.
+- Changed the warning of a Google Calendar sync token refused seconds after this run issued it, as Google does for the public holiday calendars, to a debug line: the request was the one that issued it, and the calendar is listed whole again as before.
+- Changed the refusal of a removed configuration key to the family sentence, "The `x` key is removed, <why>: <what to write instead>, see MIGRATION.md" (pimalaya-config 0.5.1), each key of a pair (`left` and `right`, `store.retention` and `store.hydration`, `smtp.login` and `smtp.password`) named alone.
 - **BREAKING**: changed `-c` to pimalaya-cli's shared flag: one path per flag, repeated to merge several files in order, never split on `:`. The `NEVEREST_CONFIG` environment variable is no longer read. `-a` stays repeatable.
 - **BREAKING**: changed a bare `neverest` without a configuration to fail with the missing configuration, exit 1, the welcome at a terminal, as the other Pimalaya CLIs do; with one it prints the help. `completion`, `manual` and `json-schema` with no argument fail on stdout, exit 1, where they printed their help on stderr and exited 2, and come in himalaya's order.
 - **BREAKING**: changed the `check` capability rows to `{name, level, detail}`, `level` pimalaya-cli's capability level, where `support` was a free string.
@@ -370,6 +375,11 @@ Upgrading from 0.3.0:
 
 ### Fixed
 
+- Fixed a widening of the scope (`sync` after `sync --since`) deleting from the store Gmail and Microsoft Graph messages the server still held: those dated in the band by their `Date` and received (Gmail) or submitted (Graph `sentDateTime`) after it, which the band's `before:` or `sentDateTime lt` filter missed. A band is now listed from its floor up, its `Date` deciding what it keeps.
+- Fixed a message queued into a Microsoft Graph folder other than Drafts being accepted, then rejected by every sync: the source declares `mail.message.add` on its Drafts folder alone, so a frontend refuses such an add up front, and a rejected one is coded `unsupported`.
+- Fixed `check` marking a source or an SMTP channel that did not answer with `✓`: it now reads `✗`. A spinner writes no colour to a stderr that is no terminal, nor under `NO_COLOR` (pimalaya-cli 0.5.2).
+- Fixed an IMAP server advertising QRESYNC and enabling nothing (iCloud answers `ENABLE` a bare `OK`) never bringing new mail, flag changes or expunges into a mailbox already synced: QRESYNC is used only when the server's `ENABLED` names it, a mailbox being read again by rounds otherwise.
+- Fixed every date-narrowed IMAP round failing on a server refusing the search for the messages with no `Date` (iCloud answers `NO [UNAVAILABLE]` to `NOT HEADER Date ""`): that search runs apart, and a refusal lists the dated messages, warns once and is not asked again on the connection.
 - Fixed config.sample.toml naming ortie commands that do not exist (`token read`, `access-token read`): every example now reads `["ortie", "token", "show", "-a", "<account>"]`.
 - Fixed a credential command prompting for a password (`systemd-ask-password`) hanging the run: it now reads the terminal when neverest runs in one (pimalaya-config 0.4.1).
 

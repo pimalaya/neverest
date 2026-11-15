@@ -81,7 +81,9 @@ use super::{
 };
 use crate::{
     account::GmailAccount,
-    client::{EnumEntry, Enumeration, Gone, Held, Listed, Renamed, StoredSize, WrittenItem},
+    client::{
+        EnumEntry, Enumeration, Gone, Held, Listed, Renamed, StoredSize, WrittenItem, floor_of,
+    },
     error::ErrorCode,
     item::{
         collection::Collection,
@@ -119,8 +121,8 @@ const PAGE_SIZE: u32 = 500;
 /// The ids one page of a round lists (pimdir SYNC §4).
 const ROUND_PAGE_SIZE: u32 = 100;
 
-/// How far around a scope the `after:` and `before:` searches reach: Gmail
-/// files a message by its reception, which may differ from its `Date`.
+/// How far below a scope the `after:` search reaches: Gmail files a
+/// message by its reception, which may differ from its `Date`.
 const SCOPE_MARGIN_DAYS: i64 = 2;
 
 /// The most ids one `batchModify` takes.
@@ -605,12 +607,13 @@ impl GmailClient {
     /// checkpoint's history id, read once a run, an expired one (HTTP 404)
     /// being a rejected checkpoint. A round lists the label newest first,
     /// [`ROUND_PAGE_SIZE`] ids a page under the scope's `after:` (two days
-    /// below `since`, a superset of the scope on `Date`), its cursor the
-    /// page token; its first page carries the profile's history id, read
-    /// before the listing, so what lands during the round is the next
-    /// delta's, or the head's of a run resuming it. A delta head is the
-    /// delta from the round's history id, an expired one rejecting the
-    /// head; Gmail dates no label change, so it lists no band head.
+    /// below `since`, a superset of the scope on `Date`), never a band's
+    /// `before:` ([`floor_of`]), its cursor the page token; its first page
+    /// carries the profile's history id, read before the listing, so what
+    /// lands during the round is the next delta's, or the head's of a run
+    /// resuming it. A delta head is the delta from the round's history id,
+    /// an expired one rejecting the head; Gmail dates no label change, so
+    /// it lists no band head.
     pub fn enumerate(
         &mut self,
         collection: &str,
@@ -648,7 +651,8 @@ impl GmailClient {
                         None => return Ok(Listed::CursorRejected),
                     },
                 };
-                self.round_page(collection, &label, token, *band, &request.scope, held)
+                let scope = floor_of(&request.scope);
+                self.round_page(collection, &label, token, *band, &scope, held)
             }
         }
     }
@@ -831,14 +835,15 @@ impl GmailClient {
             trace!("left: {left:?}");
         }
 
-        // NOTE: `after:` and `before:` read the arrival, so they miss an
-        // undated draft received before the window and a message whose
-        // `Date` runs ahead of its arrival: a narrowed round's last page
-        // hands every id of the label, which no date filter narrowed
-        // (pimdir SYNC §4, §5), ids alone, PAGE_SIZE a listing, read after
-        // the page's own. A band round hands none: the engine finds absent
-        // there only a member dated in the band, below the round's opening,
-        // which the enumeration could not keep.
+        // NOTE: `after:` reads the arrival, so it misses an undated draft
+        // received before the window and a message whose `Date` runs ahead
+        // of its arrival: a narrowed round's last page hands every id of the
+        // label, which no date filter narrowed (pimdir SYNC §4, §5), ids
+        // alone, PAGE_SIZE a listing, read after the page's own. A band
+        // round hands none: listed with no `before:`, it misses no member
+        // dated in the band and received above it, and the engine finds
+        // absent there only a member dated in the band, below the round's
+        // opening, which the enumeration could not keep.
         let narrowed = query.is_some();
         let enumerated = match narrowed && !band && page.next_page_token.is_none() {
             true => Some(
@@ -1626,33 +1631,15 @@ fn named_entry(id: &str, message: &GmailMessage) -> EnumEntry {
     }
 }
 
-/// The search narrowing a listing to a scope: `after:` [`SCOPE_MARGIN_DAYS`]
-/// below `since` and `before:` as many above `until`, in epoch seconds,
-/// which Gmail reads as instants rather than its own midnights. A superset
-/// of the messages whose `Date` is in scope, which the local check decides.
+/// The search narrowing a listing to a scope's floor: `after:`
+/// [`SCOPE_MARGIN_DAYS`] below `since`, in epoch seconds, which Gmail reads
+/// as an instant rather than its own midnight. Never `before:`, which reads
+/// the arrival too ([`floor_of`]). A superset of the messages whose `Date`
+/// is in scope, which the local check decides.
 fn scope_query(scope: &PimdirScope) -> Option<String> {
-    let epoch = |instant: &str, shift: i64| {
-        let at = DateTime::parse_from_rfc3339(instant).ok()?.to_utc();
-        let at = at.checked_add_signed(chrono::Duration::days(shift))?;
-        Some(at.timestamp())
-    };
-    let terms: Vec<String> = [
-        scope
-            .since
-            .as_deref()
-            .and_then(|since| epoch(since, -SCOPE_MARGIN_DAYS))
-            .map(|at| format!("after:{at}")),
-        scope
-            .until
-            .as_deref()
-            .and_then(|until| epoch(until, SCOPE_MARGIN_DAYS))
-            .map(|at| format!("before:{at}")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-
-    (!terms.is_empty()).then(|| terms.join(" "))
+    let since = DateTime::parse_from_rfc3339(scope.since.as_deref()?).ok()?;
+    let at = since.checked_sub_signed(chrono::Duration::days(SCOPE_MARGIN_DAYS))?;
+    Some(format!("after:{}", at.timestamp()))
 }
 
 /// Whether a label is synced as a collection: every user label, and the
@@ -1851,11 +1838,17 @@ pub(crate) mod scripted {
 
     use super::*;
 
+    /// What answers a request once the scripted answers run out: its first
+    /// line in, the answer out.
+    type Responder = Box<dyn FnMut(&str) -> Vec<u8> + Send>;
+
     /// A scripted Gmail session: each answer served whole to the read that
-    /// follows a request, each request's first line recorded.
+    /// follows a request, each request's first line recorded; once the
+    /// answers run out, the responder answers, when one is set.
     #[derive(Clone, Default)]
     pub(crate) struct Wire {
         answers: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
+        responder: Arc<std::sync::Mutex<Option<Responder>>>,
         requests: Arc<std::sync::Mutex<Vec<String>>>,
         written: Arc<std::sync::Mutex<Vec<u8>>>,
         current: Vec<u8>,
@@ -1865,6 +1858,12 @@ pub(crate) mod scripted {
     impl Wire {
         pub(crate) fn answer(&self, answer: Vec<u8>) {
             self.answers.lock().unwrap().push_back(answer);
+        }
+
+        /// Answers every request past the scripted answers by `responder`,
+        /// given the request's first line.
+        pub(crate) fn respond(&self, responder: impl FnMut(&str) -> Vec<u8> + Send + 'static) {
+            *self.responder.lock().unwrap() = Some(Box::new(responder));
         }
 
         pub(crate) fn requests(&self) -> Vec<String> {
@@ -1884,7 +1883,15 @@ pub(crate) mod scripted {
     impl Read for Wire {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             if self.at == self.current.len() {
-                self.current = self.answers.lock().unwrap().pop_front().unwrap_or_default();
+                let scripted = self.answers.lock().unwrap().pop_front();
+                self.current = match (scripted, self.responder.lock().unwrap().as_mut()) {
+                    (Some(answer), _) => answer,
+                    (None, Some(responder)) => {
+                        let requests = self.requests.lock().unwrap();
+                        responder(requests.last().map_or("", String::as_str))
+                    }
+                    (None, None) => Vec::new(),
+                };
                 self.at = 0;
             }
             let n = buf.len().min(self.current.len() - self.at);
@@ -2238,8 +2245,10 @@ mod tests {
         assert_eq!(summary.date, None);
     }
 
-    /// The search reaches two days around the scope, in epoch seconds Gmail
-    /// reads as instants, its own midnights being Pacific.
+    /// The search reaches two days below the scope, in epoch seconds Gmail
+    /// reads as instants, its own midnights being Pacific, and never caps
+    /// a band: `before:` reads the arrival, which may lie long after the
+    /// `Date`.
     #[test]
     fn a_scope_narrows_the_listing_with_a_margin() {
         assert_eq!(scope_query(&PimdirScope::unbounded()), None);
@@ -2252,10 +2261,12 @@ mod tests {
             since: Some(String::from("2026-10-03T00:00:00Z")),
             until: Some(String::from("2026-10-05T00:00:00Z")),
         };
-        assert_eq!(
-            scope_query(&band).as_deref(),
-            Some("after:1790812800 before:1791331200")
-        );
+        assert_eq!(scope_query(&band).as_deref(), Some("after:1790812800"));
+        let below = PimdirScope {
+            since: None,
+            until: Some(String::from("2026-10-05T00:00:00Z")),
+        };
+        assert_eq!(scope_query(&below), None);
     }
 
     /// A page token Gmail no longer takes is answered 400.

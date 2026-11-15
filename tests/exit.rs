@@ -126,6 +126,12 @@ fn a_failed_check_prints_its_report_and_exits_3() {
     assert_eq!(source["ok"], false, "{json}");
     assert!(source["error"].is_string(), "{json}");
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
+
+    // NOTE: a failure reads as one, and stderr, no terminal, takes no
+    // colour.
+    let stderr = text(&output.stderr);
+    assert!(stderr.contains("✗ Source imap failed"), "{stderr}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr}");
 }
 
 #[test]

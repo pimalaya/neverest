@@ -3,6 +3,7 @@
 //! Clap-driven: top-level parser, one module per subcommand, and the outcome
 //! a run exits with.
 
+pub mod account;
 pub mod check;
 pub mod conflict;
 pub mod drain;

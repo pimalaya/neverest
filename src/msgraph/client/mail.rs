@@ -11,21 +11,23 @@
 //! - **Whole folder** (no scope): a round is the delta itself, with the
 //!   summary `$select`, a page per request, its delta link the checkpoint.
 //! - **Under a scope**: a round lists the scope's mail by date band, a
-//!   plain `/messages` listing filtered on `sentDateTime` (Graph's reading
-//!   of the `Date` header, exact), newest first, each page with its summary
-//!   and resuming below the second the page before ended at, never at an
+//!   plain `/messages` listing filtered on `sentDateTime` from the scope's
+//!   floor up, never below a band's ceiling (Exchange's submission, which
+//!   may lie long after the `Date` the store scopes by: a draft sent weeks
+//!   after it was written), newest first, each page with its summary and
+//!   resuming below the second the page before ended at, never at an
 //!   offset a delete would shift; once the band is listed, one pass of the
 //!   folder's delta with ids, dates and flags only makes the link, lands as
 //!   the round's last page, and lists what changed or arrived while the
 //!   band was listed. It states gone only a row Graph marks removed: what
 //!   it does not list is the engine's to find absent, so a message a band
 //!   page listed and Graph dropped before the pass stays until a later
-//!   round. A round over the band a coverage lacks lists that band alone
-//!   and keeps the link. Every page of a round under a scope states it
-//!   narrowed by its `sentDateTime` filter, which lists no undated
-//!   message, and the pass hands every id of the folder (pimdir SYNC §4,
-//!   §5); a band round hands none, the engine finding absent there only a
-//!   member dated in the band.
+//!   round. A round over the band a coverage lacks lists from that band's
+//!   floor, the `Date` keeping what lies in the band, and keeps the link.
+//!   Every page of a round under a scope states it narrowed by its
+//!   `sentDateTime` filter, which lists no undated message, and the pass
+//!   hands every id of the folder (pimdir SYNC §4, §5); a band round hands
+//!   none, the engine finding absent there only a member dated in the band.
 //! - **A delta** follows the stored link: a change outside the scope is
 //!   dropped, by `sentDateTime`; a changed member in scope the store does
 //!   not bind is named by its summary, read in JSON batches when the link
@@ -74,7 +76,7 @@ use super::{
     message_meta, message_size,
 };
 use crate::{
-    client::{EnumEntry, Enumeration, Held, Listed},
+    client::{EnumEntry, Enumeration, Held, Listed, floor_of},
     item::flag::{Flag, IanaFlag},
 };
 
@@ -302,16 +304,19 @@ pub(super) fn enumerate(
     held: Held<'_>,
 ) -> Result<Listed> {
     let scope = &request.scope;
+    // NOTE: `sentDateTime` is Exchange's submission, at times long after
+    // the `Date` the store scopes by, so a band is listed from its floor up.
+    let listed = &floor_of(scope);
 
     match &request.listing {
         // NOTE: Graph's delta link arrives with a round's last page only,
         // so there is none to list a delta head from (pimdir SYNC §4).
         PimdirListing::Head(PimdirHead::Delta(_)) => Ok(Listed::NoHead),
         PimdirListing::Head(PimdirHead::Band { since }) => {
-            head(wire, folder, mailbox, since, scope, held)
+            head(wire, folder, mailbox, since, listed, held)
         }
         PimdirListing::Delta(checkpoint) => match Link::decode(&checkpoint.0, held.coverage) {
-            Some(link) => delta(wire, folder, mailbox, &link, scope, held),
+            Some(link) => delta(wire, folder, mailbox, &link, listed, held),
             None => {
                 warn!("graph delta link of {mailbox} reads as none, opening a round");
                 Ok(Listed::CursorRejected)
@@ -321,7 +326,7 @@ pub(super) fn enumerate(
             // NOTE: a round opened afresh has had no head yet.
             folder.head = None;
             if *band || !scope.is_unbounded() {
-                band_page(wire, folder, mailbox, None, *band, scope, held)
+                band_page(wire, folder, mailbox, None, *band, listed, held)
             } else {
                 summary_page(wire, folder, mailbox, None, held)
             }
@@ -334,9 +339,9 @@ pub(super) fn enumerate(
                 summary_page(wire, folder, mailbox, Some(&next), held)
             }
             Some(Step::Below(ceiling)) => {
-                band_page(wire, folder, mailbox, Some(&ceiling), *band, scope, held)
+                band_page(wire, folder, mailbox, Some(&ceiling), *band, listed, held)
             }
-            Some(Step::Pass) if !band => pass(wire, folder, mailbox, scope, held),
+            Some(Step::Pass) if !band => pass(wire, folder, mailbox, listed, held),
             _ => Ok(Listed::CursorRejected),
         },
     }
@@ -390,7 +395,8 @@ fn summary_page(
 }
 
 /// One page of a band listing: the messages of `scope` by `sentDateTime`,
-/// newest first, each with its summary. Past its last page, a band round
+/// newest first, each with its summary, `scope` a band's floor alone
+/// ([`floor_of`]). Past its last page, a band round
 /// ends, its last page listing again what the round's band head would list
 /// in the band; a round over the whole scope goes on with the pass, which
 /// needs the marks of what the band listed. A filter on `sentDateTime`
@@ -879,9 +885,9 @@ fn instant(text: &str) -> Option<String> {
 }
 
 /// The `$filter` of a band listing: `sentDateTime` from the scope's floor,
-/// inclusive, below its ceiling, exclusive, as the scope reads the `Date`.
-/// A bound that does not read as an instant is left out, a superset the
-/// local check narrows.
+/// inclusive, below its ceiling, exclusive, the ceiling being where a page
+/// resumes, never a band's ([`floor_of`]). A bound that does not read as
+/// an instant is left out, a superset the local check narrows.
 pub(super) fn band_filter(scope: &PimdirScope) -> Option<String> {
     let since = scope.since.as_deref().and_then(instant);
     let until = scope.until.as_deref().and_then(instant);
@@ -1188,8 +1194,8 @@ mod tests {
 
     // --- the band filter and the links -----------------------------------
 
-    /// A band reads `sentDateTime` exactly as the scope reads the `Date`:
-    /// from its floor, inclusive, below its ceiling, exclusive, in UTC.
+    /// A listing reads `sentDateTime` from its floor, inclusive, below its
+    /// ceiling, exclusive, in UTC.
     #[test]
     fn a_band_filters_the_sent_date_on_the_scope_bounds() {
         let scope = |since: Option<&str>, until: Option<&str>| PimdirScope {
@@ -1209,7 +1215,7 @@ mod tests {
             ))
             .as_deref(),
             Some("sentDateTime ge 2026-06-01T00:00:00Z and sentDateTime lt 2026-09-01T00:00:00Z"),
-            "no margin: the date Graph filters is the one the scope reads",
+            "a page resuming below a second",
         );
         assert_eq!(
             band_filter(&scope(None, Some("2026-01-01T01:00:00+02:00"))).as_deref(),
@@ -1268,6 +1274,9 @@ mod tests {
         /// When Graph received it, UTC to the second: long ago for the
         /// folder a test starts with, now for an arrival.
         received: String,
+        /// The `Date` header its row states, none when the row states no
+        /// header field and is dated by its `sentDateTime`.
+        dated: Option<String>,
         read: bool,
         flagged: bool,
     }
@@ -1344,11 +1353,19 @@ mod tests {
                 Message {
                     sent: sent.map(String::from),
                     received: received.to_owned(),
+                    dated: None,
                     read: false,
                     flagged: false,
                 },
             );
             self.log.push(id.to_owned());
+        }
+
+        /// A message Graph states sent at `sent`, its `Date` header `date`:
+        /// written long before Exchange submitted it.
+        fn sent_after(&mut self, id: &str, sent: &str, date: &str) {
+            self.received(id, Some(sent), LONG_AGO);
+            self.messages.get_mut(id).unwrap().dated = Some(date.to_owned());
         }
 
         fn flag(&mut self, id: &str) {
@@ -1376,6 +1393,12 @@ mod tests {
                 row["subject"] = serde_json::json!(format!("Subject {id}"));
                 row["internetMessageId"] = serde_json::json!(format!("<{id}@example.org>"));
                 row["hasAttachments"] = serde_json::json!(false);
+                if let Some(date) = &message.dated {
+                    row["internetMessageHeaders"] = serde_json::json!([
+                        { "name": "Message-ID", "value": format!("<{id}@example.org>") },
+                        { "name": "Date", "value": date },
+                    ]);
+                }
             }
             serde_json::from_value(row).unwrap()
         }
@@ -1834,9 +1857,9 @@ mod tests {
             .collect()
     }
 
-    /// Three widenings list each message once, by its band, and keep the
-    /// link the first round made: the folder is passed over once, and a
-    /// run within the coverage follows the link.
+    /// Three widenings list their band from its floor up, and keep the link
+    /// the first round made: the folder is passed over once, and a run
+    /// within the coverage follows the link.
     #[test]
     fn widenings_list_their_band_and_keep_the_link() {
         let dir = tempfile::tempdir().unwrap();
@@ -1890,11 +1913,13 @@ mod tests {
             assert_eq!(coverage(&store), Some(since(floor)));
         }
 
+        // NOTE: a band lists from its floor up, `sentDateTime` being no
+        // `Date`: each widening lists the coverage above it again.
         let counts = remote.graph.counts.clone();
-        assert_eq!(counts.bands, 20);
+        assert_eq!(counts.bands, 50);
         assert_eq!(
-            counts.band_rows, 56,
-            "each dated message listed once, and the one each page ended at again"
+            counts.band_rows, 146,
+            "each dated message from the band's floor up, and the one each page ended at again"
         );
         assert_eq!(counts.passes.len(), 1, "the folder passed over once");
         assert_eq!(counts.delta_rows, 41);
@@ -1907,7 +1932,43 @@ mod tests {
             PimdirListing::Delta(_)
         ));
         assert_eq!(remote.graph.counts.delta_rows, 41, "nothing changed");
-        assert_eq!(remote.graph.counts.band_rows, 56);
+        assert_eq!(remote.graph.counts.band_rows, 146);
+    }
+
+    /// A message whose `sentDateTime`, Exchange's submission, lies above the
+    /// band its `Date` puts it in stays bound when a widening lists that
+    /// band: a band listing narrowed below its ceiling by `sentDateTime`
+    /// missed it, and the round found it absent, dated before it opened
+    /// (pimdir SYNC §5), while Graph still held it.
+    #[test]
+    fn a_band_round_keeps_a_message_sent_after_its_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store(dir.path());
+        let mut graph = folder();
+        graph.sent_after(
+            "late",
+            "2026-11-02T10:00:00Z",
+            "Wed, 15 Jul 2026 10:00:00 +0000",
+        );
+        let mut remote = Remote::new(graph);
+
+        sync(&mut store, &mut remote, PimdirScope::unbounded()).unwrap();
+        assert!(stored(&store).contains("late"));
+        sync(&mut store, &mut remote, since("2026-09-01")).unwrap();
+        assert_eq!(coverage(&store), Some(since("2026-09-01")));
+
+        let requests = remote.requests.len();
+        sync(&mut store, &mut remote, since("2026-06-01")).unwrap();
+        assert!(
+            remote.requests[requests..]
+                .iter()
+                .all(|request| matches!(request.listing, PimdirListing::Round { band: true, .. })),
+            "the widening lists its band",
+        );
+        assert_eq!(coverage(&store), Some(since("2026-06-01")));
+        let mut expected = months(&["2026-03", "2026-06", "2026-07", "2026-09"]);
+        expected.insert("late".into());
+        assert_eq!(stored(&store), expected);
     }
 
     /// Every page of a round under a scope states it narrowed by its
@@ -2100,8 +2161,8 @@ mod tests {
         assert_eq!(stored(&store), expected, "the next round finds it absent");
     }
 
-    /// A band round broken after its first page resumes below the date
-    /// that page ended at: a message deleted from the page in between
+    /// A band round broken after a page resumes below the date that page
+    /// ended at: a message deleted from the page in between
     /// shifts no later one out of the round, which has no pass to correct
     /// it.
     #[test]
@@ -2111,7 +2172,9 @@ mod tests {
         let mut remote = Remote::new(folder());
         sync(&mut store, &mut remote, since("2026-07-01")).unwrap();
 
-        remote.fail_at = Some(remote.requests.len() + 1);
+        // NOTE: the band lists from its floor up, newest first, so its
+        // tenth page is the first to reach June.
+        remote.fail_at = Some(remote.requests.len() + 10);
         let err = sync(&mut store, &mut remote, since("2026-06-01")).unwrap_err();
         assert!(format!("{err:#}").contains("connection reset"), "{err:#}");
         assert!(
@@ -2185,8 +2248,8 @@ mod tests {
 
         sync(&mut store, &mut remote, PimdirScope::unbounded()).unwrap();
         assert_eq!(
-            remote.graph.counts.bands, 10,
-            "the band below the coverage, twenty messages"
+            remote.graph.counts.bands, 20,
+            "the band below the coverage, listed with the coverage: 41 dated messages"
         );
         assert_eq!(remote.graph.counts.passes.len(), 1, "and the link kept");
         assert!(
@@ -2213,7 +2276,7 @@ mod tests {
             remote.graph.counts.passes[1], IDS_SELECT,
             "made under the scope"
         );
-        assert_eq!(remote.graph.counts.bands, 15);
+        assert_eq!(remote.graph.counts.bands, 25);
         assert_eq!(
             stored(&store).len(),
             42,

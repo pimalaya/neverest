@@ -28,7 +28,7 @@
 //! meeting it organises, both with `sendUpdates=all`.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     io::{Read, Write},
     sync::Arc,
     time::Duration,
@@ -101,6 +101,9 @@ pub struct GcalClient {
     /// The account's own address, its primary calendar's id, read once
     /// when a new event first needs it.
     owner: Option<String>,
+    /// The sync tokens this run's listings ended on, so one Google refuses
+    /// as soon as it issued it is told from one that aged.
+    issued: HashSet<String>,
 }
 
 impl GcalClient {
@@ -119,6 +122,7 @@ impl GcalClient {
             alive: true,
             throttle,
             owner: None,
+            issued: HashSet::new(),
         })
     }
 
@@ -258,6 +262,16 @@ impl GcalClient {
         let (events, complete, next) = match token {
             None => self.list(calendar, None)?,
             Some(token) => match self.list(calendar, Some(&token)) {
+                // NOTE: Google refuses some calendars a token seconds after
+                // issuing it (a public holiday calendar), the request being
+                // the one that issued it: said at debug, as the calendar's
+                // way rather than a fault.
+                Err(err) if is_expired(&err) && self.issued.contains(&token) => {
+                    debug!(
+                        "calendar sync token of {calendar} refused as soon as issued, listing it whole"
+                    );
+                    self.list(calendar, None)?
+                }
                 Err(err) if is_expired(&err) => {
                     warn!("calendar sync token of {calendar} expired, restarting a full listing");
                     self.list(calendar, None)?
@@ -265,6 +279,7 @@ impl GcalClient {
                 result => result?,
             },
         };
+        self.issued.insert(next.clone());
 
         let mut series: BTreeMap<String, Vec<GcalEvent>> = BTreeMap::new();
         let mut vanished = Vec::new();
@@ -996,6 +1011,7 @@ mod tests {
             alive: true,
             throttle: Arc::new(Throttle::new("gcal")),
             owner: None,
+            issued: HashSet::new(),
         };
 
         let calendars = client.list_collections().unwrap();
@@ -1030,6 +1046,7 @@ mod tests {
                 alive: true,
                 throttle: Arc::new(Throttle::new("gcal")),
                 owner: None,
+                issued: HashSet::new(),
             };
 
             let err = client
@@ -1038,5 +1055,91 @@ mod tests {
 
             assert!(Gone::is(&err), "{status}: {err:#}");
         }
+    }
+
+    /// A session answering each request with the next of `answers`, whole,
+    /// recording what it was sent.
+    struct Answering {
+        answers: std::collections::VecDeque<Vec<u8>>,
+        current: Vec<u8>,
+        written: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl Read for Answering {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            if self.current.is_empty() {
+                self.current = self.answers.pop_front().unwrap_or_default();
+            }
+            let n = self.current.len().min(buf.len());
+            buf[..n].copy_from_slice(&self.current[..n]);
+            self.current.drain(..n);
+            Ok(n)
+        }
+    }
+
+    impl Write for Answering {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.written.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The listing resuming from a sync token asks what the listing that
+    /// issued it asked, the token aside, so a token Google refuses at once
+    /// is the calendar's doing: the calendar is listed whole again, the
+    /// token remembered as issued this run.
+    #[test]
+    fn a_resumed_listing_asks_what_issued_its_token() {
+        let answer = |status: &str, body: &str| {
+            format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+        };
+        let answers = [
+            answer("200 OK", r#"{"items":[],"nextSyncToken":"t1"}"#),
+            answer("410 Gone", r#"{"error":{"code":410,"message":"Gone"}}"#),
+            answer("200 OK", r#"{"items":[],"nextSyncToken":"t2"}"#),
+        ];
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut client = GcalClient {
+            inner: GcalClientStd::new(
+                Answering {
+                    answers: answers.map(String::into_bytes).into(),
+                    current: Vec::new(),
+                    written: Arc::clone(&written),
+                },
+                "token",
+            ),
+            tls: Tls::default(),
+            proxy: Proxy::None,
+            alive: true,
+            throttle: Arc::new(Throttle::new("gcal")),
+            owner: None,
+            issued: HashSet::new(),
+        };
+
+        client.enumerate("c1", None).unwrap();
+        assert!(client.issued.contains("t1"));
+        let listed = client.enumerate("c1", Some(b"t1")).unwrap();
+
+        assert!(listed.complete, "listed whole again");
+        assert_eq!(listed.checkpoint.as_deref(), Some(&b"t2"[..]));
+        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        let requests: Vec<&str> = written
+            .lines()
+            .filter(|line| line.starts_with("GET "))
+            .collect();
+        assert_eq!(requests.len(), 3, "{requests:?}");
+        assert_eq!(
+            requests[1].replace("&syncToken=t1", ""),
+            requests[0],
+            "{requests:?}"
+        );
+        assert_eq!(requests[2], requests[0], "{requests:?}");
     }
 }

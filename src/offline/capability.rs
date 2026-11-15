@@ -48,6 +48,13 @@ const HELD_ONLY: &str = "performed on the collections this source syncs only";
 /// Why a collection stating a role is neither renamed nor deleted.
 const FIXED: &str = "the provider's own collection, stating a role, stays as it is";
 
+/// Why a Graph source adds a message nowhere but in its Drafts folder.
+const GRAPH_DRAFTS_ONLY: &str = "Drafts only: Graph creates every MIME message as a draft";
+
+/// Why a one-way account renames no collection unless asked to.
+const ONE_WAY_RENAME: &str =
+    "one-way copy: collection.rename is off unless set to true on the source";
+
 /// Why a paired account renames no collection.
 const PAIRED_RENAME: &str =
     "the pair mirrors its collections by name, so a rename would read as a delete and a create";
@@ -110,6 +117,37 @@ pub fn declaration(
             }
         })
         .collect()
+}
+
+/// A Graph mail source's `mail.message.add` by collection (pimdir STORAGE
+/// §15.6): Graph creates every MIME message as a draft, so an add lands in
+/// the folder stating the drafts role alone. Where its rights allow an add,
+/// the source-wide row reads `none` and each of `drafts` takes a `full` row
+/// of its own, so a frontend adding elsewhere is refused at enqueue rather
+/// than rejected by every sync. Any other source is left as it is.
+pub fn drafts_only(
+    source: &SourceConfig,
+    capabilities: &mut Vec<PimdirCapability>,
+    drafts: &BTreeSet<String>,
+) {
+    if !matches!(source.backend, SourceBackendConfig::Msgraph(_)) {
+        return;
+    }
+    let wide = capabilities
+        .iter_mut()
+        .find(|row| row.name == MAIL_MESSAGE_ADD && row.collection.is_none());
+    let Some(wide) = wide.filter(|row| row.support != PimdirSupport::None) else {
+        return;
+    };
+    wide.support = PimdirSupport::None;
+    wide.detail = Some(GRAPH_DRAFTS_ONLY.to_owned());
+
+    capabilities.extend(drafts.iter().map(|collection| PimdirCapability {
+        collection: Some(collection.clone()),
+        name: MAIL_MESSAGE_ADD.to_owned(),
+        support: PimdirSupport::Full,
+        detail: None,
+    }));
 }
 
 /// The `calendar.component.vtodo` rows of one source (pimdir STORAGE §15.6):
@@ -218,6 +256,12 @@ pub fn supports(source: &SourceConfig, one_way: bool, paired: bool) -> Vec<Suppo
                     Some("collection.delete is disabled")
                 }
                 COLLECTION_RENAME if paired => Some(PAIRED_RENAME),
+                COLLECTION_RENAME if !perms.collection.renames(one_way) => {
+                    Some(match perms.collection.rename {
+                        Some(_) => "collection.rename is disabled",
+                        None => ONE_WAY_RENAME,
+                    })
+                }
                 MAIL_SUBMIT
                 | MAIL_SUBMIT_COPY
                 | CALENDAR_REPLY
@@ -341,10 +385,7 @@ fn gmail(name: &str, smtp: bool) -> Support {
 
 fn msgraph(name: &str, _smtp: bool) -> Support {
     match name {
-        MAIL_MESSAGE_ADD => (
-            PimdirSupport::Partial,
-            Some("Drafts only: Graph creates every MIME message as a draft"),
-        ),
+        MAIL_MESSAGE_ADD => (PimdirSupport::Partial, Some(GRAPH_DRAFTS_ONLY)),
         MAIL_MESSAGE_REMOVE => (
             PimdirSupport::Partial,
             Some("a soft delete, out of sight, not into Deleted Items"),
@@ -749,6 +790,54 @@ mod tests {
         );
     }
 
+    /// A rename is a write: a one-way account declares it `none` unless its
+    /// source sets `collection.rename = true`, and a two-way one declares
+    /// it unless the source sets it false (owner ruling D14, 2026-11-15).
+    #[test]
+    fn a_rename_follows_its_switch_and_a_one_way_account_is_off() {
+        let imap = |rename: &str| {
+            source(
+                &format!(
+                    "imap.server = \"imap://imap.example.org\"\n\
+                     imap.sasl.plain.username = \"user\"\n\
+                     imap.sasl.plain.password.raw = \"pw\"\n\
+                     {rename}"
+                ),
+                "imap",
+            )
+        };
+        let collections = ["imap/Work".to_string()];
+        // NOTE: a rename the source performs is declared on each collection
+        // it holds; refused, by the source-wide row alone.
+        let renames = |source: &SourceConfig, one_way| {
+            let declaration = declaration(source, one_way, false, &collections, &BTreeSet::new());
+            let renaming = |collection: Option<&str>| {
+                declaration.iter().find(|row| {
+                    row.name == COLLECTION_RENAME && row.collection.as_deref() == collection
+                })
+            };
+            renaming(Some("imap/Work"))
+                .or_else(|| renaming(None))
+                .unwrap()
+                .clone()
+        };
+
+        let off = renames(&imap(""), true);
+        assert_eq!(off.support, PimdirSupport::None);
+        assert!(off.detail.as_deref().unwrap().contains("collection.rename"));
+
+        let on = renames(&imap("imap.collection.rename = true"), true);
+        assert_eq!(on.support, PimdirSupport::Full);
+
+        assert_eq!(renames(&imap(""), false).support, PimdirSupport::Full);
+        let disabled = renames(&imap("imap.collection.rename = false"), false);
+        assert_eq!(disabled.support, PimdirSupport::None);
+        assert_eq!(
+            disabled.detail.as_deref(),
+            Some("collection.rename is disabled")
+        );
+    }
+
     #[test]
     fn a_disabled_collection_create_is_declared_none() {
         let imap = source(
@@ -863,11 +952,13 @@ mod tests {
             Some("collection.delete is disabled")
         );
         assert_eq!(row(COLLECTION_RENAME).1, PimdirSupport::Full);
-        // NOTE: a rename and a delete are asked for, never derived.
+        // NOTE: a delete is asked for, never derived, so a one-way account
+        // granting it declares it; a rename there has its own switch, off
+        // unless set.
         let one_way = supports(&imap_deleting(), true, false);
         let row = |name: &str| one_way.iter().find(|row| row.0 == name).unwrap();
         assert_eq!(row(COLLECTION_DELETE).1, PimdirSupport::Full);
-        assert_eq!(row(COLLECTION_RENAME).1, PimdirSupport::Full);
+        assert_eq!(row(COLLECTION_RENAME).1, PimdirSupport::None);
     }
 
     #[test]

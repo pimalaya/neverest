@@ -75,12 +75,33 @@ pub struct Enumeration {
     /// Gmail `after:`, Graph `sentDateTime`), on every page of such a round
     /// and on no other (pimdir SYNC §4, §5): the filter misses an undated
     /// member and one whose date runs ahead of its arrival, so the round
-    /// finds absent only what was dated before it opened.
+    /// finds absent only what was dated before it opened. A filter reading
+    /// another date than the `Date` lists no band's ceiling ([`floor_of`]).
     pub narrowed: bool,
     /// Every handle the collection holds, read by an enumeration no date
     /// filter narrowed, on the last page of a narrowed round: the round
     /// finds absent whatever it lacks (pimdir SYNC §4).
     pub enumerated: Option<Vec<String>>,
+}
+
+/// The scope a connector lists under when its date filter reads another
+/// date than the `Date` header the store scopes by (Gmail's arrival,
+/// Graph's `sentDateTime`, Exchange's submission): `scope`'s floor alone,
+/// never a band's ceiling (pimdir SYNC §5).
+///
+/// A message is dated before it is submitted and received, at times long
+/// before (a delayed delivery, a draft sent weeks after it was written, an
+/// import), never long after. A ceiling on those dates misses a member its
+/// `Date` puts below it, which the narrowed round then finds absent, dated
+/// before it opened, while the server holds it; a floor misses only one
+/// dated after its submission, beyond the provider's margin. The listing
+/// reaches above a band, and the `Date` keeps what lies in it.
+#[cfg(any(feature = "gmail", feature = "msgraph"))]
+pub fn floor_of(scope: &PimdirScope) -> PimdirScope {
+    PimdirScope {
+        since: scope.since.clone(),
+        until: None,
+    }
 }
 
 #[cfg_attr(

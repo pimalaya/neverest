@@ -441,9 +441,10 @@ impl ImapClient {
 
     /// The UIDs of a round, highest first: every message, or the ones
     /// `SENTSINCE` and `SENTBEFORE` keep with a day's margin around the
-    /// scope (the server compares dates, not instants, in its own zone) and
-    /// the ones with no `Date`, above `above` and below `below` when given.
-    /// None when the `SELECT` stated the mailbox `empty`.
+    /// scope (the server compares dates, not instants, in its own zone) and,
+    /// by a search of their own, the ones with no `Date`, above `above` and
+    /// below `below` when given. None when the `SELECT` stated the mailbox
+    /// `empty`.
     fn search_round(
         &mut self,
         scope: &PimdirScope,
@@ -478,32 +479,47 @@ impl ImapClient {
                 .map_err(|_| anyhow!("Invalid IMAP UID range above {above}"))?;
             criteria.push(SearchKey::Uid(range));
         }
-        // NOTE: a message with no `Date` is in every scope, and `SENTSINCE`
-        // matches none: it is searched for apart.
-        let undated = || {
-            let field = AString::try_from("Date").map_err(|_| anyhow!("Invalid IMAP field"))?;
-            let empty = AString::try_from("").map_err(|_| anyhow!("Invalid IMAP value"))?;
-            Ok::<_, anyhow::Error>(SearchKey::Not(Box::new(SearchKey::Header(field, empty))))
-        };
+        let ranges = criteria.clone();
         if let Some(day) = scope.since.as_deref().and_then(|since| imap_day(since, -1)) {
-            criteria.push(SearchKey::Or(
-                Box::new(SearchKey::SentSince(day)),
-                Box::new(undated()?),
-            ));
+            criteria.push(SearchKey::SentSince(day));
         }
         if let Some(day) = scope.until.as_deref().and_then(|until| imap_day(until, 2)) {
-            criteria.push(SearchKey::Or(
-                Box::new(SearchKey::SentBefore(day)),
-                Box::new(undated()?),
-            ));
+            criteria.push(SearchKey::SentBefore(day));
         }
+        let narrowed = criteria.len() > ranges.len();
         if criteria.is_empty() {
             criteria.push(SearchKey::All);
         }
         let criteria = Vec1::try_from(criteria).map_err(|_| anyhow!("Empty IMAP search"))?;
 
         let found = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
-        let mut uids: Vec<u32> = rows_of("SEARCH", found)?
+        let mut uids = rows_of("SEARCH", found)?;
+
+        // NOTE: a message with no `Date` is in every scope, and `SENTSINCE`
+        // matches none: it is searched for apart. A server refusing that
+        // search (iCloud answers `NO [UNAVAILABLE]`) cannot tell, and is not
+        // asked again on this connection: the round lists its dated mail,
+        // which costs no absence, an undated member being found absent by
+        // the enumeration (`UID SEARCH ALL`) alone, never by a band.
+        if narrowed && !self.undated_refused {
+            let field = AString::try_from("Date").map_err(|_| anyhow!("Invalid IMAP field"))?;
+            let empty = AString::try_from("").map_err(|_| anyhow!("Invalid IMAP value"))?;
+            let mut undated = ranges;
+            undated.push(SearchKey::Not(Box::new(SearchKey::Header(field, empty))));
+            let undated = Vec1::try_from(undated).map_err(|_| anyhow!("Empty IMAP search"))?;
+            match self.search(undated, ImapMessageSearchOptions { uid: true }) {
+                Ok(found) => uids.extend(rows_of("SEARCH", found)?),
+                Err(err) if err.status().is_some() => {
+                    warn!(
+                        "the server refused to search the messages with no Date ({err}), listing the dated ones"
+                    );
+                    self.undated_refused = true;
+                }
+                Err(err) => return Err(err.into()),
+            }
+        }
+
+        let mut uids: Vec<u32> = uids
             .into_iter()
             .map(NonZeroU32::get)
             .filter(|uid| above.is_none_or(|above| *uid > above))
@@ -1830,6 +1846,119 @@ mod tests {
             // scoped one for its enumeration, the band one not at all.
             assert_eq!(all, usize::from(case != "band"), "{case}: {sent:?}");
         }
+    }
+
+    /// A server refusing the search for the messages with no `Date`, as
+    /// iCloud answers it `NO [UNAVAILABLE] Unexpected exception`, still
+    /// lists a scoped round and a band by `SENTSINCE` and `SENTBEFORE`: the
+    /// round goes on, and the connection asks no more.
+    /// A server advertising QRESYNC and enabling nothing (iCloud answers
+    /// `ENABLE CONDSTORE QRESYNC` a bare `OK`) reports no change to a
+    /// QRESYNC `SELECT`: the delta reads it as one without QRESYNC, listing
+    /// the mailbox again, so a message arrived since the checkpoint lands
+    /// rather than the checkpoint moving past it.
+    #[test]
+    fn a_delta_lists_an_arrival_where_qresync_is_not_enabled() {
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 2,
+                highest_mod_seq: 12,
+                messages: ["a@x", "b@x"]
+                    .into_iter()
+                    .zip(1..)
+                    .map(|(id, uid)| FakeMessage {
+                        uid,
+                        flags: Vec::new(),
+                        message_id: String::from(id),
+                    })
+                    .collect(),
+                states_exists: true,
+            },
+            true,
+        );
+        server.enable_nothing();
+        let mut client = ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+        assert!(!client.supports_qresync(), "advertised, never enabled");
+
+        let checkpoint = encode_checkpoint(2, 9);
+        let handles = HashSet::from([String::from("1")]);
+        let held = Held {
+            handles: &handles,
+            checkpoint: Some(&checkpoint),
+            coverage: None,
+        };
+        let request = PimdirEnumerate {
+            listing: PimdirListing::Delta(PimdirCheckpoint(checkpoint.clone())),
+            scope: PimdirScope::unbounded(),
+        };
+        let Listed::Page(page) = client.enumerate("INBOX", &request, held).unwrap() else {
+            panic!("a page");
+        };
+
+        let uids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
+        assert!(uids.contains(&"2"), "the arrival is listed: {uids:?}");
+        let selects = server.sent("SELECT");
+        assert!(
+            selects.iter().all(|line| !line.contains("QRESYNC")),
+            "{selects:?}"
+        );
+    }
+
+    #[test]
+    fn a_round_goes_on_when_the_undated_search_is_refused() {
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 2,
+                highest_mod_seq: 9,
+                messages: ["a@x", "b@x"]
+                    .into_iter()
+                    .zip(1..)
+                    .map(|(id, uid)| FakeMessage {
+                        uid,
+                        flags: Vec::new(),
+                        message_id: String::from(id),
+                    })
+                    .collect(),
+                states_exists: true,
+            },
+            false,
+        );
+        server.refuse_undated_search("NO [UNAVAILABLE] Unexpected exception");
+        let mut client = ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+        let band = PimdirScope {
+            since: Some(String::from("2026-06-01T00:00:00Z")),
+            until: Some(String::from("2026-09-01T00:00:00Z")),
+        };
+
+        for (band, scope) in [
+            (false, PimdirScope::since("2026-09-01T00:00:00Z")),
+            (true, band),
+        ] {
+            let handles = HashSet::new();
+            let held = Held {
+                handles: &handles,
+                checkpoint: None,
+                coverage: None,
+            };
+            let request = PimdirEnumerate {
+                listing: PimdirListing::Round { cursor: None, band },
+                scope,
+            };
+            let Listed::Page(page) = client.enumerate("INBOX", &request, held).unwrap() else {
+                panic!("a page");
+            };
+            let mut uids: Vec<&str> = page.items.iter().map(|item| item.id.as_str()).collect();
+            uids.sort();
+            assert_eq!(uids, ["1", "2"], "band: {band}");
+            assert!(page.narrowed, "band: {band}");
+        }
+
+        let sent = server.sent("UID SEARCH");
+        let undated = sent
+            .iter()
+            .filter(|line| line.to_ascii_uppercase().contains("HEADER DATE"))
+            .count();
+        assert_eq!(undated, 1, "asked once a connection: {sent:?}");
     }
 
     #[test]

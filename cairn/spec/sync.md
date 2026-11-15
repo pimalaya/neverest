@@ -131,7 +131,7 @@ Declaring the same key both directly and under `sources` SHALL be a configuratio
 ### Requirement: The configuration refuses every key it does not read
 The configuration SHALL refuse at load, naming it, every key it does not read, at every level: the document root, which holds `accounts` alone; an account; a `sources.<name>` or `targets.<name>` table; a backend table, written under a source or directly under the account; and every table nested in one (`tls`, `sasl`, `auth`, `collection`, `item`, `flag`, `smtp`, `store`, `conflict`). A source table naming no backend table, or more than one, SHALL be refused at load, naming the backends it found.
 
-A key an earlier neverest read and removed SHALL be refused by name with its replacement, ending on the address of MIGRATION.md, as the file is parsed, so in an account no command opens as in one it does: `left` and `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace` on any source (one written directly under the account included), `store.retention` and `store.hydration`, and the flat `login` and `password` of an `smtp` table.
+A key an earlier neverest read and removed SHALL be refused by name in the family sentence, pimalaya-config's `removed_key!`: "The `x` key is removed, <why>: <what to write instead>, see MIGRATION.md", `table` in place of `key` for a table, as the file is parsed, so in an account no command opens as in one it does: `left` and `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace` on any source (one written directly under the account included), `store.retention` and `store.hydration`, and the flat `login` and `password` of an `smtp` table.
 
 #### Scenario: A typo beside a source's backend
 - GIVEN `sources.work.imap.server = "…"` and `sources.work.imap-typo = 1`
@@ -146,7 +146,7 @@ A key an earlier neverest read and removed SHALL be refused by name with its rep
 #### Scenario: A v0.1 table
 - GIVEN an account carrying `folder.filter = "all"`
 - WHEN a command opens it
-- THEN it is refused naming `folder`, its replacement `<protocol>.collection.filter`, and MIGRATION.md
+- THEN it is refused with "The `folder` table is removed, …: write its filter as `<protocol>.collection.filter`, …, see MIGRATION.md"
 
 ### Requirement: A collection is keyed by kind, namespace and name
 A hub collection SHALL be keyed by the triple `(kind, namespace, name)`: the source's media type, its namespace, and the collection name the backend enumerates. The namespace SHALL be internal, derived from the source name, and SHALL NOT be configurable: it exists so that a CardDAV address book and a mailbox carrying the same name key apart, not so that a user can decide which sources meet. A target binds the namespace of the source it is paired with, which is what makes the two meet.
@@ -220,7 +220,7 @@ The sync SHALL write a `sort_key` beside the summary of every item it summarises
 A sync source SHALL be a remote backend: IMAP, Microsoft Graph and Gmail for `message/rfc822`, CardDAV, Microsoft Graph and Google People for `text/vcard`, CalDAV, Microsoft Graph and Google Calendar for `text/calendar` (JMAP as its backend lands). Local file backends (m2dir, maildir, vdir) SHALL NOT be sync sources: the pimdir store is the local replica, so a local file store is redundant as a source and belongs on the import/export path, which neverest documents rather than syncing directly.
 
 ### Requirement: A first run meets the family's welcome
-A command finding no configuration file, a bare `neverest` included, SHALL fail with pimalaya-config's missing-configuration error, exit 1: "No configuration found at <path>, start from the sample: <url>", the path being the first `-c` path when given, else the default one, and the URL config.sample.toml's. When the output is text and stderr is a terminal, a person SHALL meet pimalaya-cli's first-run welcome on stderr in its place, still exiting 1: the commands creating the file from the sample a package ships, or downloading it when none ships, then `neverest check`. A script or a `--json` caller SHALL get the error.
+A command finding no configuration file, a bare `neverest` included, SHALL fail with pimalaya-config's missing-configuration error, exit 1: "No configuration found at <path>, start from the sample: <url>", the path being the first `-c` path when given, else the default one, and the URL config.sample.toml's. When the output is text and stderr is a terminal, a person SHALL meet pimalaya-cli's first-run welcome on stderr in its place, still exiting 1: the commands creating the file from the sample a package ships, or downloading it when none ships, then `neverest account check`. A script or a `--json` caller SHALL get the error.
 
 With a configuration, a bare `neverest` SHALL print the help and exit 0, a configuration that fails to parse counting as one, its error left to the first command reading it. A command reading a configuration that fails to parse SHALL fail with that error rather than read it as absent. Neverest writes no configuration.
 
@@ -234,7 +234,7 @@ A configuration holding no account SHALL fail pointing at the sample the same wa
 #### Scenario: A first run at a terminal
 - GIVEN no configuration file
 - WHEN a person runs `neverest`
-- THEN the welcome prints on stderr, giving the commands that create the file and `neverest check`, and the run exits 1
+- THEN the welcome prints on stderr, giving the commands that create the file and `neverest account check`, and the run exits 1
 
 ### Requirement: The command line is the family's
 `-c/--config` SHALL be pimalaya-cli's shared flag: one path per flag, never split, repeatable, the first file the base and the next ones deep-merged on top in order. No environment variable SHALL name the configuration (`NEVEREST_CONFIG` is not read). `-a/--account` SHALL stay repeatable, unlike the other Pimalaya CLIs, where it names the one account a command runs on: a neverest run covers several accounts.
@@ -252,6 +252,24 @@ Neverest SHALL have no `repl` and no `mcp`: its commands are batch operations ov
 - GIVEN `-c 'a:b.toml'`, a file that does not exist
 - WHEN `neverest check` runs
 - THEN it fails naming `a:b.toml` whole
+
+### Requirement: The account group is the family's
+Neverest SHALL carry pimalaya-cli's `account` group (pimalaya-cli cairn/spec/commands.md), over the accounts `-a` names, every one when it names none, as every neverest command:
+
+- `account check` SHALL be the check the *A check …* requirements describe, and `check`, its name before the group, SHALL run it too, hidden from the help, its JSON schema kept under `neverest-check` beside `neverest-account-check`. It SHALL keep its own report rather than pimalaya-cli's one-account `AccountCheckOutput`: a run covers several accounts, each with its mode, every endpoint's collections and capabilities and the orphans a store holds; its rows carry the shared backend check keys (`backend`, `ok`, `code`, `error`), the send channel's being pimalaya-cli's `BackendCheck`.
+- `account list` SHALL print pimalaya-cli's `AccountListOutput`, one `{name, default, backends, notBuilt}` row an account, sorted by name, reaching nothing. `backends` SHALL hold the backend tables the account writes, its sources' and its targets', sugar and named alike, each once, in the order `imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `msgraph-contacts`, `msgraph-calendar`, `gpeople`, `gcal`, `smtp` (a send channel), those this build serves; `notBuilt` those it leaves out, JMAP always (it parses and no build opens it). A source's own name is the account's, not a backend, and reads in `account check`. `default` SHALL be `true` on every account: a command naming no `-a` runs over them all, the `default` key being ignored.
+
+Neverest has no `account capability`: what each source can do reads in `account check`, from the configuration.
+
+#### Scenario: Listing a mail account and a JMAP one
+- GIVEN an account `a` with an `imap` table and an `smtp` table, and an account `b` with a `jmap` table
+- WHEN `neverest --json account list` runs
+- THEN it prints `a` with `backends: ["imap", "smtp"]` and `b` with `notBuilt: ["jmap"]`, both `default: true`, and exits 0 without opening anything
+
+#### Scenario: A script calling `check`
+- GIVEN a script running `neverest --json check`
+- WHEN the account group lands
+- THEN it prints the report `account check` prints, and `check` is not listed in the help
 
 ### Requirement: Every remote backend is a cargo feature
 Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backends, `dav` for the CardDAV and CalDAV backends, `gpeople` for the Google People backend, `gcal` for the Google Calendar backend, `gmail` for the Gmail backend, `smtp` for the SMTP submission channel.
@@ -504,8 +522,16 @@ The backend-neutral enumeration seam SHALL carry the incremental-sync cursor as 
 ### Requirement: The spinner reports in-mailbox progress
 In text mode, while syncing a mailbox, the spinner SHALL report progress through the slow inner phase, body hydration (and, under relay, the relayed messages), as a percentage appended to the mailbox line (`[2/7] Syncing INBOX 66%`), updated per streamed `Full` body. Fast phases (enumerate, the `Meta` upgrade) stay silent. The progress tick is invoked from the concurrent fetch pool and is safe to call from several threads at once. Under `--json` the same ticks print `collection-progressed` events instead.
 
+### Requirement: A spinner ends as what it reports
+A spinner line reporting a failure (a check's source or send channel that did not answer) SHALL end with pimalaya-cli's failure mark (`✗`), never its success mark. A spinner SHALL write no colour to a stderr that is no terminal, nor under `NO_COLOR` (pimalaya-cli 0.5.2).
+
+#### Scenario: A check with a source down, its stderr in a file
+- **GIVEN** an account whose IMAP source points at a closed port
+- **WHEN** `neverest check 2>file` runs
+- **THEN** the file reads `✗ Source imap failed (…)`, with no escape sequence
+
 ### Requirement: IMAP enumeration is incremental (QRESYNC)
-Enumeration SHALL carry a per-mailbox checkpoint `(UIDVALIDITY, HIGHESTMODSEQ)`. On a QRESYNC-capable server (ENABLEd on connect) with a checkpoint whose UIDVALIDITY still matches, a delta SHALL be a QRESYNC `SELECT (QRESYNC (uidvalidity highestmodseq))`: only the messages changed since the modseq, the meta read for the ones the store does not bind, plus the vanished UIDs, issuing **no FETCH when nothing changed**. Without a usable checkpoint (first sync, malformed bytes) or on a non-QRESYNC server it SHALL answer a round, page by page. A checkpoint whose UIDVALIDITY moved SHALL fail the delta and name a rekey, never answer a round.
+Enumeration SHALL carry a per-mailbox checkpoint `(UIDVALIDITY, HIGHESTMODSEQ)`. On a server that enabled QRESYNC on connect, its `ENABLED` naming it (RFC 5161; advertising it is not enough, iCloud answering `ENABLE` a bare `OK` and then reporting no change to a QRESYNC `SELECT`), with a checkpoint whose UIDVALIDITY still matches, a delta SHALL be a QRESYNC `SELECT (QRESYNC (uidvalidity highestmodseq))`: only the messages changed since the modseq, the meta read for the ones the store does not bind, plus the vanished UIDs, issuing **no FETCH when nothing changed**. Without a usable checkpoint (first sync, malformed bytes) or on a server that did not enable QRESYNC it SHALL answer a round, page by page, so an arrival, a flag change and an expunge are never stepped over. A checkpoint whose UIDVALIDITY moved SHALL fail the delta and name a rekey, never answer a round.
 
 ### Requirement: A connection SELECTs a mailbox once per run of commands
 An IMAP connection SHALL cache the mailbox it currently has `SELECT`ed and skip a redundant `SELECT` when the next command targets the same mailbox, so a run of commands on one mailbox, most importantly a batch of body fetches, pays a single `SELECT`, not one per command. Every select path SHALL record the selection so a cached skip is always correct. For a hydrate of N bodies across a W-connection pool this makes `SELECT`s ~W rather than ~N, halving the fetch path's round trips over a high-latency link without changing what is fetched. (Pipelining the body `FETCH`es themselves, mbsync-style, is a further io-imap change, not yet done.)
@@ -1343,7 +1369,7 @@ A source MAY declare a `gpeople` backend, syncing Google contacts as `text/vcard
 
 A `gpeople` source SHALL have one collection, `contacts`, holding every connection: a contact group is a label a person carries any number of, not a folder. A `gcal` source SHALL have one collection per calendar of the user's calendar list, keyed by calendar id and named by the user's own name for it.
 
-Enumeration SHALL be the API's sync-token listing, the token as the engine's opaque checkpoint: a resumed listing reports what changed and names removals, a full one reports removals by absence, and an expired token (HTTP 410) restarts a full listing.
+Enumeration SHALL be the API's sync-token listing, the token as the engine's opaque checkpoint: a resumed listing reports what changed and names removals, a full one reports removals by absence, and an expired token (HTTP 410) restarts a full listing. A resumed listing SHALL ask what the listing that issued its token asked (`maxResults`, `showDeleted`, no `singleEvents` nor `timeMin`), the token aside. Google refuses some calendars a token seconds after issuing it (the public holiday calendars): a token refused that this run's listing issued SHALL be said at debug, the calendar listed whole again; one an earlier run issued, at warn.
 
 A `gpeople` item SHALL be one person, its `etag` the revision, projected through io-gpeople's `vcard` feature. Its vCard `UID` rides the projection's `clientData` stash, so it keeps the identity it arrived with; a create whose stash People did not keep SHALL be deleted again and refused. An update SHALL carry the etag, which People enforces, and SHALL merge back, in each field of its mask, what People holds there and a vCard cannot show (io-gpeople's `merge_unprojected`: an organization or occupation after the first, a relation other than spouse or child, a custom type, a sub-field without a vCard slot, the `clientData` entries other clients own), a masked update replacing the field whole. A property too long for the stash, which the projection leaves out, SHALL be named in a warning.
 
@@ -1373,7 +1399,7 @@ Auth SHALL be a bearer access token only, as for every other HTTP source.
 - **THEN** the run lists the history since 500 first, the message lands before the round's next page, and the round closes on the history id that head read, which the next delta lists from
 
 ### Requirement: Every source declares its capabilities before the drain
-At every run, before it drains an action, neverest SHALL declare each source it runs in the store (pimdir STORAGE §15.6): every Annex B capability of the source's kind, from its backend and its configured rights alone, `none` with the reason, and the `calendar.component.vtodo` rows of `A calendar its server keeps from tasks is declared so`, the source-wide ones from the configuration and the per-calendar ones from the sidecar rather than the network. A right the configuration withholds SHALL be `none`; a one-way source SHALL support no write. A JMAP source stays undeclared.
+At every run, before it drains an action, neverest SHALL declare each source it runs in the store (pimdir STORAGE §15.6): every Annex B capability of the source's kind, from its backend and its configured rights alone, `none` with the reason, and the `calendar.component.vtodo` rows of `A calendar its server keeps from tasks is declared so`, the source-wide ones from the configuration and the per-calendar ones from the sidecar rather than the network. A right the configuration withholds SHALL be `none`. A one-way source SHALL support no item or flag write; a collection action on it (`collection.create`, `collection.rename`, `collection.delete`) SHALL be declared only where its switch allows it, and the scheduling intents (`mail.submit`, `calendar.reply`, `calendar.cancel` and their options) SHALL stay allowed, being requests to the provider rather than writes the copy would undo. A JMAP source stays undeclared.
 
 #### Scenario: A source is declared with no network
 - **GIVEN** a Graph source whose token command fails
@@ -1446,7 +1472,12 @@ A delete SHALL remove the collection with the items it holds and never another: 
 
 On an account syncing its source alone, the store SHALL follow a performed intent at once. A rename giving the collection a new id (IMAP and Gmail key a collection by its name) SHALL move it and every collection under it to their new ids through `rename_collection`, each named as its next listing names it, so their items keep their bindings rather than leaving under the old id and arriving again under the new one; a DAV rename SHALL rename the collection in place. A delete SHALL drop the collection from the store once its row is acknowledged, its receipt going with it, a row still queued on it keeping it there. On a paired account the store SHALL NOT follow: a pair settles the collections its endpoints list itself (see the collection requirement of a pair), and a rename SHALL park, the pair mirroring collections by name and reading a rename as a delete and a create.
 
-`collection.rename` and `collection.delete` SHALL be declared as `collection.create` is: on each collection an IMAP, Gmail, CalDAV or CardDAV source syncs and `none` source-wide, `none` where the backend renames or deletes no collection (Graph mail, contacts and calendars, Google Calendar, Google People), and stated under `one-way`, being asked for rather than derived. Each SHALL be `none` on a collection stating a role (an inbox, a sent or trash folder, a Gmail system label, a default calendar or address book), which the provider keeps. `collection.rename` SHALL be `none` on a paired account. `collection.delete` SHALL be `none` where `collection.delete` is disabled, its default, and `partial` on Gmail, whose delete leaves the messages in All Mail.
+`collection.rename` and `collection.delete` SHALL be declared as `collection.create` is: on each collection an IMAP, Gmail, CalDAV or CardDAV source syncs and `none` source-wide, `none` where the backend renames or deletes no collection (Graph mail, contacts and calendars, Google Calendar, Google People), and stated under `one-way`, being asked for rather than derived. Each SHALL be `none` on a collection stating a role (an inbox, a sent or trash folder, a Gmail system label, a default calendar or address book), which the provider keeps. `collection.rename` SHALL be `none` on a paired account, and where the source's `collection.rename` switch is off: unset, it reads the account's `one-way`, off on a one-way account (the detail naming the key) and on otherwise; `collection.rename = true` or `false` on the source sets it whatever the account. `collection.delete` SHALL be `none` where `collection.delete` is disabled, its default, and `partial` on Gmail, whose delete leaves the messages in All Mail.
+
+#### Scenario: A rename on a one-way account
+- **GIVEN** a one-way account whose IMAP source sets no `collection.rename`
+- **WHEN** `neverest account check` runs, or a frontend asks to rename one of its folders
+- **THEN** `collection.rename` reads `none`, its detail naming `collection.rename`, and the frontend's rename is refused up front; with `collection.rename = true` it reads as on a two-way account
 
 #### Scenario: A folder renamed, then deleted
 - **GIVEN** an IMAP account syncing its source alone, a store holding `Archives` with one message and `Archives/2026`, and `collection.delete` enabled
@@ -1466,7 +1497,9 @@ Scans and fetches MAY run over several connections, but no two collections of on
 ### Requirement: Graph mail moves, copies and adds drafts
 An `msgraph` source SHALL relocate a move's remove with `message_move` and SHALL deliver a create carrying an origin (pimdir SYNC §4) by `message_copy` from it, accepted under the id the copy answers with. Graph message ids change on a move or a copy, and immutable ids SHALL NOT be asked for, which would change the ids stores already bind: like an IMAP `MOVE`, a relocation reports no handle, and the target's next enumeration lists the member under its new id, whose fetch lands the pending create by its `Message-ID` (pimdir SYNC §6). A failed copy SHALL be rejected rather than uploaded.
 
-Graph creates every MIME message as a draft, so an append SHALL land in the well-known Drafts folder only, through `message_create_mime`, its `\Seen` and `\Flagged` patched in after, and SHALL be rejected anywhere else, never filed there as a draft. The source declares `mail.message.move` and `mail.message.copy` full, `mail.message.add` partial ("Drafts only") and `mail.flags.draft` partial, Graph setting it on what it creates in Drafts and never changing it.
+Graph creates every MIME message as a draft, so an append SHALL land in the well-known Drafts folder only, through `message_create_mime`, its `\Seen` and `\Flagged` patched in after, and SHALL be rejected anywhere else, never filed there as a draft, the rejected row coded `unsupported` (the code the store's gate gives the same write refused at enqueue). The source declares `mail.message.move` and `mail.message.copy` full and `mail.flags.draft` partial, Graph setting it on what it creates in Drafts and never changing it. It SHALL declare `mail.message.add` by collection, where its rights allow an add: `none` source-wide ("Drafts only"), and `full` on the collection stating the drafts role, so a frontend adding a message elsewhere is refused before it is queued. A check, which knows no store collection, reports the add `partial` ("Drafts only").
+
+An item queued into a folder Graph does not take, and never pushed, stays bound to the source under its provisional handle (pimdir SYNC §2): the store's gate counts that binding as a holder (io-pimdir load_item_capabilities.sql), so with `item.delete` off a frontend cannot remove it either. Dropping such an item locally is the library's to allow.
 
 #### Scenario: A message bounced between the Inbox and a folder
 - **GIVEN** a message in a Graph Inbox
@@ -1476,7 +1509,12 @@ Graph creates every MIME message as a draft, so an append SHALL land in the well
 #### Scenario: A draft staged in Drafts
 - **GIVEN** a message added to Drafts with `\Draft` and `\Seen`
 - **WHEN** the account syncs
-- **THEN** Graph holds it once in Drafts, read, the item bound to its id, and the same add into another folder is a rejected push that files nothing
+- **THEN** Graph holds it once in Drafts, read, the item bound to its id, and the same add into another folder is a rejected push that files nothing, coded `unsupported`
+
+#### Scenario: An add outside Drafts refused at the gate
+- **GIVEN** a Graph mail source syncing a folder stating the drafts role and an `Archive` folder
+- **WHEN** a frontend queues a message into `Archive`, then into Drafts
+- **THEN** the first is refused before it is queued, naming `mail.message.add` and "Drafts only", and the second is queued
 
 ### Requirement: A sync records the role each server states
 Every one-source sync SHALL record in the store (`set_collection_role`, pimdir STORAGE §14), for each collection it declares, the role the server states for it, and SHALL clear a role the server no longer states: the mail roles `check` lists, from the listing on IMAP and the Gmail API and from the well-known folders on Graph mail; `default` for the calendar or address book `check` marks so. A role the listing does not carry (Graph mail, CalDAV) SHALL be looked up only when the source's set of collection ids differs from the one it was last looked up against, the answer kept in the sidecar (`looked_up_roles`), and a failed lookup SHALL leave the recorded roles as they are. A role SHALL never come from a name.
@@ -1537,7 +1575,9 @@ A Graph mail source SHALL fetch the `Full` tier of an id set through JSON batche
 ### Requirement: A mail sync lists within a scope on the `Date`
 An account MAY bound its mail by `item.filter.since`, and a run by `sync --since`, which overrides it: a duration back from today (`30d`, `12w`, `6mo`, `1y`), taken to the start of its UTC day so the runs of one day list one scope, a date at midnight UTC, or an RFC 3339 instant. A mail collection SHALL then sync under the scope from that floor (pimdir SYNC §5): a listed message whose `Date` lies below it SHALL be left out of the page, a message with no usable `Date` SHALL be in every scope, and an explicit removal SHALL apply whatever the date. What a scope leaves out SHALL NOT be deleted, neither in the store nor on the server.
 
-A round whose listing a provider's date filter narrowed (IMAP `SENTSINCE` and `SENTBEFORE`, Gmail's `after:` and `before:` on the arrival, Graph's `sentDateTime`) SHALL state it on every page (`narrowed`), and its last page SHALL hand every handle the collection holds, read by an enumeration no date filter narrowed (`enumerated`, pimdir SYNC §4, §5): the engine then finds absent only a member dated before the round opened or one the enumeration lacks, so an undated draft received before the window and a message whose `Date` runs ahead of its arrival stay in the store. A round over the band a coverage lacks SHALL state `narrowed` and hand no enumeration: the engine finds absent there only a member dated in the band, below the round's opening, and never one with no usable `Date`, which an enumeration could not keep further. A round over the whole collection, a delta and a head SHALL state neither. A scope SHALL be refused, by the key or flag it came from, when an endpoint the run syncs holds contacts or calendars.
+A provider's date filter that reads another date than the `Date` header (Gmail's arrival, Graph's `sentDateTime`, which is Exchange's submission) SHALL narrow a round by the scope's floor alone, never by a band's ceiling: a message is dated before it is submitted and received, at times long before (a delayed delivery, a draft sent weeks after it was written, an import), so a ceiling on those dates misses a member its `Date` puts in the band, which the engine then finds absent, dated before the round opened, while the server holds it. Such a listing reaches above the band, and the page keeps what its `Date` puts in the band. IMAP's `SENTSINCE` and `SENTBEFORE` read the `Date` and keep both bounds.
+
+A round whose listing a provider's date filter narrowed (IMAP `SENTSINCE` and `SENTBEFORE`, Gmail's `after:` on the arrival, Graph's `sentDateTime`) SHALL state it on every page (`narrowed`), and its last page SHALL hand every handle the collection holds, read by an enumeration no date filter narrowed (`enumerated`, pimdir SYNC §4, §5): the engine then finds absent only a member dated before the round opened or one the enumeration lacks, so an undated draft received before the window and a message whose `Date` runs ahead of its arrival stay in the store. A round over the band a coverage lacks SHALL state `narrowed` and hand no enumeration: the engine finds absent there only a member dated in the band, below the round's opening, and never one with no usable `Date`, which an enumeration could not keep further. A round over the whole collection, a delta and a head SHALL state neither. A scope SHALL be refused, by the key or flag it came from, when an endpoint the run syncs holds contacts or calendars.
 
 #### Scenario: An old message received today
 - **GIVEN** a mailbox holding, all appended today, a message dated 2020, one dated in the future and one with no `Date`
@@ -1559,8 +1599,20 @@ A round whose listing a provider's date filter narrowed (IMAP `SENTSINCE` and `S
 - **WHEN** a round under `--since` closes, its last page handing the label's ids
 - **THEN** both stay in the store
 
+#### Scenario: A band keeps a message dated in it and received after it
+- **GIVEN** a Gmail inbox the store binds under a coverage since 2026-10-16, holding a message dated 2026-01-01 and received 2026-11-10 (or a Graph Sent Items message dated 2026-07-15 whose `sentDateTime` is 2026-11-02)
+- **WHEN** an unscoped sync widens the coverage, listing the band below 2026-10-16
+- **THEN** the message stays in the store, as on the server
+
 ### Requirement: A provider narrows a scope with a margin
-A connector MAY narrow a scoped listing by its provider's own filter to a superset of the scope: IMAP `SENTSINCE` a day below the floor (or no `Date` header) and `SENTBEFORE` two days above a ceiling, Gmail `after:` and `before:` two days around the scope, in epoch seconds. Graph lists by `sentDateTime`, its reading of the `Date` header, with no margin. The `Date` SHALL decide what is kept. A connector whose checkpoint is bound to no scope (IMAP, Gmail, Graph mail) SHALL widen a scope by listing only the band its coverage lacks.
+A connector MAY narrow a scoped listing by its provider's own filter to a superset of the scope: IMAP `SENTSINCE` a day below the floor and `SENTBEFORE` two days above a ceiling, the messages with no `Date` header (`NOT HEADER Date ""`) found by a search of their own, Gmail `after:` two days below the floor, in epoch seconds, and never `before:`. Graph lists by `sentDateTime`, Exchange's submission, from the floor with no margin, below no band's ceiling: a page resumes below the second the page before ended at. The `Date` SHALL decide what is kept. A connector whose checkpoint is bound to no scope (IMAP, Gmail, Graph mail) SHALL widen a scope by listing only the band its coverage lacks.
+
+An IMAP server refusing the search for the messages with no `Date` (iCloud answers `NO [UNAVAILABLE] Unexpected exception`, alone or inside an `OR`) SHALL NOT fail the round: the round lists the messages its date filter keeps, warns once, and the connection asks no more. No absence is concluded wrongly: the engine finds an undated member absent through the enumeration (`UID SEARCH ALL`) alone, never in a band. An undated message the store does not hold yet stays unlisted while the scope holds, on such a server.
+
+#### Scenario: A server refusing the undated search
+- **GIVEN** an IMAP server answering `NO [UNAVAILABLE]` to `UID SEARCH NOT HEADER Date ""` and `OK` to `SENTSINCE` and `SENTBEFORE`
+- **WHEN** a scoped round, then a band, list its mailbox
+- **THEN** both list the dated messages and close, and the undated search is sent once on the connection
 
 The enumeration a narrowed round's last page hands SHALL be read after that page's listing, so a member arrived since is in it: IMAP's `UID SEARCH ALL` on the selected mailbox, one command a round; Gmail's ids of the label, listed with no query, 500 ids a request at 5 quota units each, once a round; Graph's ids of the folder's delta pass, the scoped round's last page, which reads them already and costs no request more.
 
@@ -1588,7 +1640,7 @@ A mail round SHALL be answered in pages, newest first, each landing in its own w
 - **THEN** the second run closes the round and the store holds every message once
 
 ### Requirement: An open IMAP round lists its head
-An IMAP source SHALL state delta heads and band heads where its server advertises QRESYNC, band heads alone elsewhere, CONDSTORE without QRESYNC stating no removal, read from the capabilities its connection read when it opened (pimdir SYNC §4); the sync SHALL tell the engine the heads its source states. A delta head SHALL be the QRESYNC `SELECT` from the checkpoint asked, answered as a delta and never as a round page: the messages changed since, their meta read where the store does not bind them under that `UIDVALIDITY`, the vanished UIDs, and the checkpoint the server holds now. A server without QRESYNC, or a checkpoint with no `UIDVALIDITY` or no modseq, SHALL list none; a checkpoint whose `UIDVALIDITY` moved SHALL be refused, the round restarting and its close rebuilding the collection. A band head SHALL be `UID SEARCH SINCE` the day the round opened less two days, by the `INTERNALDATE`, each message's flags or meta read as a round page reads them, with no removal and no checkpoint; an instant it cannot read lists none. A page SHALL read its members by `UID FETCH` when it lists, leaving out a UID the mailbox no longer holds. The last page of a round resumed from a cursor SHALL list again, read after its `SELECT`, every message of the scope above the highest UID the round found when it opened, so what a band head named, stamping nothing, is not found absent when the round closes; a cursor written before it carried that UID SHALL list the whole scope again.
+An IMAP source SHALL state delta heads and band heads where its server enabled QRESYNC (its `ENABLED` naming it), band heads alone elsewhere, CONDSTORE without QRESYNC stating no removal, read from the capabilities its connection read when it opened (pimdir SYNC §4); the sync SHALL tell the engine the heads its source states. A delta head SHALL be the QRESYNC `SELECT` from the checkpoint asked, answered as a delta and never as a round page: the messages changed since, their meta read where the store does not bind them under that `UIDVALIDITY`, the vanished UIDs, and the checkpoint the server holds now. A server without QRESYNC, or a checkpoint with no `UIDVALIDITY` or no modseq, SHALL list none; a checkpoint whose `UIDVALIDITY` moved SHALL be refused, the round restarting and its close rebuilding the collection. A band head SHALL be `UID SEARCH SINCE` the day the round opened less two days, by the `INTERNALDATE`, each message's flags or meta read as a round page reads them, with no removal and no checkpoint; an instant it cannot read lists none. A page SHALL read its members by `UID FETCH` when it lists, leaving out a UID the mailbox no longer holds. The last page of a round resumed from a cursor SHALL list again, read after its `SELECT`, every message of the scope above the highest UID the round found when it opened, so what a band head named, stamping nothing, is not found absent when the round closes; a cursor written before it carried that UID SHALL list the whole scope again.
 
 #### Scenario: An arrival and an expunge while a round is open
 - **GIVEN** a QRESYNC mailbox of 1,100 messages whose first sync was killed after its first page, then a message appended and one the first page listed expunged

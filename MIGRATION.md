@@ -24,7 +24,7 @@ This page lists the changes most likely to bite when upgrading. The full configu
 ## Suggested steps
 
 1. Copy [config.sample.toml](./config.sample.toml) next to the old config.toml and port your accounts.
-2. Run `neverest check` to validate every endpoint and read back what each account does, in words.
+2. Run `neverest account check` to validate every endpoint and read back what each account does, in words.
 3. Run `neverest init` to create the store every account shares.
 4. Run `neverest sync --dry-run` to inspect the first patch.
 5. Drop `--dry-run`, replace the old config, done.
@@ -71,6 +71,9 @@ What else changes:
 - **A queue row is `row`.** Before: `.accounts[].applied[].id` and `.accounts[].parked[].id` of `drain`, `.accounts[].report.parked[].id`, `.accounts[].report.submitted[].id`, `.accounts[].report.intents[].id` and `.accounts[].report.overruled[].action` of `sync`. After: `.row` in each. A sync's parked row names its kind `kind` (`.parked[].action` before), spelled as the store does (`set-flags`), and a rejected flag push's `action` reads `set-flags` (`set flags` before).
 - **A failed account splits its error** under `sync` and `drain`, as the rows already did, and so does a failed index refresh: `.accounts[].error` is the outermost message and `.accounts[].sources` its causes, where `error` held the whole chain. Join `error` and `sources` with `: ` for the old string. `init` keeps the whole chain, its `sources` naming the endpoints it opened.
 - The missing configuration reads "No configuration found at <path>, start from the sample: <url>" and an unknown account "Account `x` not found, the configuration holds: a, b", still coded `account-missing`: match the code, not the text.
+- **A one-way account no longer renames a folder on the server** when a frontend asks, unless its source sets `collection.rename = true`: unset, `collection.rename` is false on a `one-way` account and true otherwise. Before: a frontend's `collection-rename` on a one-way source was performed. After: refused up front, the source declaring `collection.rename: none`.
+- **`check` is `account check`**, as in every Pimalaya CLI. Before: `neverest check`. After: `neverest account check`, the same report; `check` still runs it, hidden from the help, and its JSON schema stays under `neverest-check` beside `neverest-account-check`. `neverest account list` is new: the accounts and the backend tables each writes, under `--json` pimalaya-cli's `{name, default, backends, notBuilt}` rows.
+- **A removed configuration key reads the family sentence**: "The `left` table is removed, <why>: <what to write instead>, see MIGRATION.md", where it read "`left` and `right` are gone: … See <URL>". The same keys are refused: match the key, not the text.
 
 ## From a git master build
 

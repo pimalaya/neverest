@@ -24,8 +24,8 @@ use pimalaya_config::toml::ConfigMissingError;
 use crate::cli::index::IndexCommand;
 use crate::{
     cli::{
-        check::CheckCommand, conflict::ConflictCommand, drain::DrainCommand, exit::Exit,
-        init::InitCommand, sync::SyncCommand,
+        account::AccountCommand, check::CheckCommand, conflict::ConflictCommand,
+        drain::DrainCommand, exit::Exit, init::InitCommand, sync::SyncCommand,
     },
     config::Config,
     json_schema,
@@ -66,6 +66,13 @@ pub struct Cli {
 /// Every verb the binary offers, each one its own command type.
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(subcommand)]
+    Account(AccountCommand),
+    /// Probe every configured source, as `account check` does.
+    ///
+    /// The name `account check` had before the account group, hidden from
+    /// the help so a script calling it runs on.
+    #[command(hide = true)]
     Check(CheckCommand),
     Init(InitCommand),
     Sync(SyncCommand),
@@ -102,6 +109,7 @@ impl Command {
             #[cfg(feature = "search")]
             Self::Index(cmd) => return cmd.execute(printer, config_paths, accounts),
             Self::Init(cmd) => return cmd.execute(printer, config_paths, accounts),
+            Self::Account(cmd) => cmd.execute(printer, config_paths, accounts),
             Self::Check(cmd) => cmd.execute(printer, config_paths, accounts),
             Self::Conflict(cmd) => cmd.execute(printer, config_paths, accounts),
             Self::Completion(cmd) => cmd.execute(printer, Cli::command()),
@@ -130,7 +138,7 @@ pub fn meet_bare_invocation(config_paths: &[PathBuf]) -> Result<()> {
 
 /// The welcome a person meets when no configuration exists at `path`:
 /// the commands creating it from `sample`, the shipped sample
-/// configuration, or downloading it without one, then `check`.
+/// configuration, or downloading it without one, then `account check`.
 pub fn welcome<'a>(
     path: &'a Path,
     config_paths: &'a [PathBuf],
@@ -144,6 +152,6 @@ pub fn welcome<'a>(
         sample,
         sample_url: SAMPLE_RAW_URL,
         next: "Edit it and uncomment the options you need, then check your accounts:",
-        command: "check",
+        command: "account check",
     }
 }

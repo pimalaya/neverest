@@ -79,6 +79,7 @@ use io_pimdir::{
     },
 };
 use log::{debug, trace, warn};
+use pimalaya_cli::error::CodedError;
 use pimalaya_stream::{
     proxy::Proxy,
     stream::{Stream, TlsConnectOptions},
@@ -956,9 +957,10 @@ impl GraphClient {
     ) -> Result<WrittenItem> {
         let folder = self.folder_id(mailbox)?;
         if folder != self.drafts_id()? {
-            bail!(
+            let message = format!(
                 "Graph creates every MIME message as a draft, so it appends to Drafts only, not to {mailbox}"
             );
+            return Err(CodedError::new(ErrorCode::Unsupported, message).into());
         }
 
         let mut raw = Vec::new();
@@ -1733,6 +1735,24 @@ mod tests {
         error::Failure,
         kind::mail::{parse_body, vectors::VECTORS},
     };
+
+    /// An add Graph cannot make, into a folder other than Drafts, is coded
+    /// `unsupported`, as the store's gate codes the same write refused at
+    /// enqueue, and sends nothing.
+    #[test]
+    fn an_add_outside_drafts_is_unsupported() {
+        let (mut client, _server) =
+            GraphClient::scripted(vec![Vec::new()], &[("Archive", "id-archive")]);
+        client.drafts = Some(String::from("id-drafts"));
+
+        let err = client
+            .add_message("Archive", &[], &b"Subject: x\r\n\r\nbody\r\n"[..])
+            .unwrap_err();
+
+        let failure = Failure::of(&err);
+        assert_eq!(failure.code, Some(ErrorCode::Unsupported), "{err:#}");
+        assert!(failure.error.contains("Drafts only"), "{err:#}");
+    }
 
     #[test]
     fn a_listed_folder_takes_the_role_its_well_known_id_states() {

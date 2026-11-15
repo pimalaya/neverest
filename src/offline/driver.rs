@@ -915,6 +915,7 @@ pub(crate) fn declare(
         let namespace = format!("{name}/");
         let mut held = Vec::new();
         let mut fixed = BTreeSet::new();
+        let mut drafts = BTreeSet::new();
         for collection in &collections {
             let syncing = store
                 .collection_sources(&collection.id)
@@ -924,10 +925,14 @@ pub(crate) fn declare(
                 if collection.role.is_some() {
                     fixed.insert(collection.id.clone());
                 }
+                if collection.role.as_deref() == Some("drafts") {
+                    drafts.insert(collection.id.clone());
+                }
             }
         }
         let paired = !mode.targets.is_empty();
         let mut capabilities = capability::declaration(source, mode.one_way, paired, &held, &fixed);
+        capability::drafts_only(source, &mut capabilities, &drafts);
         // NOTE: a source-wide `none` already covers every calendar, and an
         // undeclared source gets no row, which would refuse all it lacks.
         match capability::vtodo_wide(source, &targets) {
@@ -8114,6 +8119,7 @@ mod tests {
     const GRANTED: CollectionPermissions = CollectionPermissions {
         create: true,
         delete: true,
+        rename: None,
     };
 
     #[test]
@@ -8159,6 +8165,7 @@ mod tests {
         let keep = CollectionPermissions {
             create: true,
             delete: false,
+            rename: None,
         };
         let hunks = diff_collections(
             &names(&["gone-on-b"]),
@@ -8556,6 +8563,72 @@ mod tests {
             let reader = PimdirReader::open(dir.path()).unwrap();
             assert!(!reader.accepts_vtodo(collection).unwrap());
         }
+    }
+
+    /// A Graph mail source takes an add in its Drafts folder alone: it
+    /// declares `mail.message.add` full there and none elsewhere, so a
+    /// frontend adding a message to another folder is refused at the gate,
+    /// before it is queued, rather than rejected by every sync after.
+    #[test]
+    fn a_graph_source_takes_an_add_in_its_drafts_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account("live")
+            .for_source("msgraph");
+        // NOTE: a message bound in each folder, so the source syncs both.
+        for collection in ["msgraph/Drafts", "msgraph/Archive"] {
+            store
+                .ensure_collection(collection, "message/rfc822")
+                .unwrap();
+            store
+                .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                    collection: PimdirCollectionId(collection.into()),
+                    handle: PimdirHandle("m0".into()),
+                    link_id: Some(PimdirLinkId(format!("{collection}-m0"))),
+                    object: None,
+                    level: PimdirLevel::Meta,
+                    summary: None,
+                    sort_key: PimdirSortKey::default(),
+                    flags: PimdirFlags::default(),
+                    status: PimdirStatus::Clean,
+                    conflict_revision: None,
+                    conflict_object: None,
+                    base: Some(PimdirBase {
+                        flags: PimdirFlags::default(),
+                        revision: None,
+                        object: None,
+                    }),
+                    origin: None,
+                })])
+                .unwrap();
+        }
+        store
+            .set_collection_role("msgraph/Drafts", Some("drafts"))
+            .unwrap();
+        let config: AccountConfig = toml::from_str("msgraph.auth.token.raw = \"token\"").unwrap();
+        let mode = config.mode().unwrap();
+        declare(dir.path(), "live", &config, &mode, &AccountState::default()).unwrap();
+
+        let add = |collection: &str| {
+            let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
+            let message = b"Message-ID: <a@x>\r\nSubject: x\r\n\r\nbody\r\n";
+            producer.enqueue_with_body(collection, message, |hash| PimdirAction::Add {
+                link_id: None,
+                flags: PimdirFlags::default(),
+                object: Some(hash),
+                supersedes: None,
+            })
+        };
+        match add("msgraph/Archive") {
+            Err(PimdirError::Unsupported(refusal)) => {
+                assert_eq!(refusal.capability, io_pimdir::capability::MAIL_MESSAGE_ADD);
+                assert_eq!(refusal.source, "msgraph");
+                assert!(refusal.detail.unwrap().contains("Drafts only"));
+            }
+            other => panic!("an add outside Drafts is refused at the gate: {other:?}"),
+        }
+        add("msgraph/Drafts").expect("an add in Drafts is queued");
     }
 
     /// A task in a hub calendar crosses to the target, so a calendar the
@@ -13863,6 +13936,93 @@ mod gmail_bodies {
         assert!(enumeration.contains("/messages"), "{requests:?}");
         assert!(!enumeration.contains("q="), "no date filter: {requests:?}");
         assert_eq!(api.left() + batch.left(), 0, "{requests:?}");
+    }
+
+    /// Gmail as it answers for an inbox holding `messages`, each its id
+    /// and its arrival in epoch seconds: `after:` and `before:` read the
+    /// arrival (`internalDate`), never the `Date`, the flag labels hold
+    /// none, and the history is empty.
+    fn inbox(messages: Vec<(&'static str, i64)>) -> impl FnMut(&str) -> Vec<u8> + Send {
+        move |request| {
+            let target = request.split(' ').nth(1).unwrap_or_default();
+            let (path, query) = target.split_once('?').unwrap_or((target, ""));
+            if path.ends_with("/profile") {
+                return ok(serde_json::json!({
+                    "emailAddress": "user@example.org",
+                    "historyId": "500"
+                }));
+            }
+            if path.ends_with("/history") {
+                return ok(serde_json::json!({ "history": [], "historyId": "500" }));
+            }
+
+            let pairs: Vec<(&str, &str)> = query
+                .split('&')
+                .filter_map(|pair| pair.split_once('='))
+                .collect();
+            let labels = pairs.iter().filter(|(key, _)| *key == "labelIds").count();
+            let search = pairs
+                .iter()
+                .find(|(key, _)| *key == "q")
+                .map(|(_, value)| value.replace("%3A", ":").replace(['+'], " "))
+                .unwrap_or_default();
+            let bound = |term: &str| {
+                let mut terms = search.split(' ');
+                terms.find_map(|word| word.strip_prefix(term)?.parse::<i64>().ok())
+            };
+            let (after, before) = (bound("after:"), bound("before:"));
+            let listed: Vec<&str> = messages
+                .iter()
+                .filter(|_| labels == 1)
+                .filter(|(_, at)| after.is_none_or(|after| *at > after))
+                .filter(|(_, at)| before.is_none_or(|before| *at < before))
+                .map(|(id, _)| *id)
+                .collect();
+            ids(&listed)
+        }
+    }
+
+    /// A message dated in a band by its `Date` and received after the band
+    /// stays bound when a widening lists the band: Gmail's `before:` reads
+    /// the arrival, so a band round narrowed by it missed the message, then
+    /// found it absent, dated before the round opened (pimdir SYNC §5), and
+    /// dropped it while Gmail still held it.
+    #[test]
+    fn a_band_round_keeps_a_message_received_after_its_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = store_holding(
+            dir.path(),
+            vec![
+                dated("early", Some("2026-09-01T10:00:00Z")),
+                dated("late", Some("2026-01-01T00:00:00Z")),
+            ],
+        );
+        let blobs = store.blob_stage();
+        // NOTE: `early` received as dated, on 2026-09-01; `late` on
+        // 2026-11-10, ten months after it was dated.
+        let inbox = || inbox(vec![("early", 1_788_256_800), ("late", 1_794_268_800)]);
+
+        let mut requests = Vec::new();
+        for scope in [
+            PimdirScope::since("2026-10-16T00:00:00Z"),
+            PimdirScope::unbounded(),
+        ] {
+            let (mut ctx, api, batch) = connection();
+            ctx.scope = scope;
+            api.respond(inbox());
+            sync_side(INBOX, &mut ctx, &mut store, &blobs, false, None).unwrap();
+            assert_eq!(batch.requests(), Vec::<String>::new());
+            requests = api.requests();
+        }
+
+        let coverage = store.list_coverage(INBOX).unwrap();
+        let closed = coverage[0].coverage.as_ref().expect("the band closed");
+        assert_eq!(closed.scope, PimdirScope::unbounded(), "{requests:?}");
+        let held: Vec<String> = bodies(&store, INBOX)
+            .into_iter()
+            .map(|(handle, _)| handle)
+            .collect();
+        assert_eq!(held, ["early", "late"], "{requests:?}");
     }
 }
 

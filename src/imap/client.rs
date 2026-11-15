@@ -26,7 +26,7 @@ use io_imap::{
 };
 #[cfg(test)]
 use io_sasl::mechanism::Sasl;
-use log::warn;
+use log::{debug, warn};
 #[cfg(test)]
 use pimalaya_stream::{proxy::Proxy, tls::Tls};
 #[cfg(test)]
@@ -51,6 +51,12 @@ pub struct ImapClient {
     /// The UIDs a round still has to list, kept from the search its first
     /// page made so a later page of this run searches nothing.
     pub(crate) round: Option<RoundUids>,
+    /// Whether the server refused to search the messages with no `Date`
+    /// (iCloud answers `NO [UNAVAILABLE]`), so the connection asks no more.
+    pub(crate) undated_refused: bool,
+    /// Whether the server enabled QRESYNC, its `ENABLED` naming it: what an
+    /// incremental `SELECT` and the delta heads stand on.
+    qresync: bool,
     /// What the connection opened from, kept to open it again.
     opening: ImapAccount,
 }
@@ -112,32 +118,46 @@ impl ImapClient {
             capabilities,
             selected: None,
             round: None,
+            undated_refused: false,
+            qresync: false,
             opening,
         };
-        if client.supports_qresync() {
+        if client.capabilities.contains(&Capability::QResync) {
             let condstore = CapabilityEnable::CondStore;
             let qresync = CapabilityEnable::from(
                 Atom::try_from("QRESYNC").expect("`QRESYNC` is a valid IMAP atom"),
             );
             let caps = Vec1::try_from(vec![condstore, qresync]).expect("two is non-empty");
-            client.inner.enable(caps)?;
+            // NOTE: a server may advertise QRESYNC and enable nothing (iCloud
+            // answers a bare OK): its QRESYNC `SELECT` then reports no
+            // change, so only an `ENABLED` naming it is taken.
+            let enabled = client.inner.enable(caps)?.unwrap_or_default();
+            client.qresync = enabled
+                .iter()
+                .any(|cap| cap.to_string().eq_ignore_ascii_case("QRESYNC"));
+            if !client.qresync {
+                debug!("the server advertises QRESYNC and did not enable it");
+            }
         }
         Ok(client)
     }
 
     /// Drops the connection and opens it again as it first opened, nothing
-    /// selected; the UIDs a round has left are kept.
+    /// selected; the UIDs a round has left are kept, and what the server
+    /// refused to search.
     pub fn reconnect(&mut self) -> Result<()> {
         let mut fresh = Self::open(&self.opening)?;
         fresh.round = self.round.take();
+        fresh.undated_refused = self.undated_refused;
         *self = fresh;
 
         Ok(())
     }
 
-    /// Whether the server advertises QRESYNC (RFC 7162).
+    /// Whether QRESYNC is on for the session: the server advertised it and
+    /// its `ENABLED` named it (RFC 7162 §3.2.3, RFC 5161).
     pub fn supports_qresync(&self) -> bool {
-        self.capabilities.contains(&Capability::QResync)
+        self.qresync
     }
 
     /// Whether the server takes `UID EXPUNGE`: it advertises UIDPLUS

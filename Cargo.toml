@@ -82,5 +82,5 @@ io-oauth = { version = "0.7", default-features = false, features = ["jwt-bearer"
 io-gcal = { git = "https://github.com/pimalaya/io-gcal", rev = "dbb4481cd77ef65ca451420cb4e087fdccfe6fdb" }
 io-gpeople = { git = "https://github.com/pimalaya/io-gpeople", rev = "e4a9cac80d023688118dbae88f8535145e8d2c9b" }
 io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "777d34eea1b48f7d90635e3e82e1a96a9d57504e" }
-pimalaya-cli = { git = "https://github.com/pimalaya/cli", rev = "51ce8b17714ee7445bd59874d0cfd988612d9a08" }
+pimalaya-cli = { git = "https://github.com/pimalaya/cli", rev = "8190dc544e277aeeba6acc43817100179f19643b" }
 pimalaya-config = { git = "https://github.com/pimalaya/config", rev = "d5a33cba3fe9826b82f15a479043a7f79ca742ce" }

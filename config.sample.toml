@@ -140,7 +140,7 @@ imap.sasl.plain.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-
 # https://datatracker.ietf.org/doc/html/rfc7628
 #imap.sasl.oauthbearer.username = "user@example.com"
 #imap.sasl.oauthbearer.token.raw = "***"
-#imap.sasl.oauthbearer.token.command = ["ortie", "token", "read", "example"]
+#imap.sasl.oauthbearer.token.command = ["ortie", "token", "show", "-a", "example"]
 
 # XOAUTH2: https://developers.google.com/gmail/imap/xoauth2-protocol
 #imap.sasl.xoauth2.username = "user@example.com"
@@ -192,7 +192,7 @@ imap.item.delete = false
 #jmap.auth.header.raw = "Bearer eyJhbGciOiJ..."
 #jmap.auth.header.command = "pass show fastmail-token"
 #jmap.auth.bearer.token.raw = "***"
-#jmap.auth.bearer.token.command = ["ortie", "access-token", "read", "fastmail-api"]
+#jmap.auth.bearer.token.command = ["ortie", "token", "show", "-a", "fastmail-api"]
 #jmap.auth.basic.username = "user@example.com"
 #jmap.auth.basic.password.raw = "***"
 #jmap.auth.basic.password.command = "pass show fastmail"
@@ -218,7 +218,7 @@ imap.item.delete = false
 
 # Bearer tokens only. Refreshing one is the command's job, typically ortie.
 #gmail.auth.token.raw = "***"
-#gmail.auth.token.command = ["ortie", "access-token", "read", "gmail"]
+#gmail.auth.token.command = ["ortie", "token", "show", "-a", "gmail"]
 
 #gmail.item.create = true
 #gmail.item.delete = false
@@ -261,7 +261,7 @@ imap.item.delete = false
 # Bearer tokens only: neverest runs no OAuth flow. The command runs once a run,
 # typically ortie serving a cached, auto-refreshed token.
 #msgraph.auth.token.raw = "***"
-#msgraph.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
+#msgraph.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
 
 # Graph pushes flags and deletes only; appends and moves are rejected
 # whatever the permissions say.
@@ -277,13 +277,13 @@ imap.item.delete = false
 # deletes; an edit made on Graph since the last sync is refused and picked up by
 # the next run. A card keeps its vCard UID on Graph, in an extended property.
 #msgraph-contacts.user-id = "me"
-#msgraph-contacts.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
+#msgraph-contacts.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
 
 # Graph calendars: the same session and fields as `msgraph`, each calendar a
 # collection, a recurring series and its exceptions one item. The token needs
 # the `Calendars.ReadWrite` scope. Every run lists each calendar in full, and an
 # exception edited locally does not push yet.
-#msgraph-calendar.auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
+#msgraph-calendar.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
 
 # --------------------------------------------------------------------------------
 # Google config (contacts and calendars, not mail)
@@ -292,7 +292,7 @@ imap.item.delete = false
 
 # Google contacts through the People API: every connection syncs as one
 # address book, `contacts`. The token needs the `contacts` scope.
-#gpeople.auth.token.command = ["ortie", "-a", "google", "token", "show", "--auto-refresh"]
+#gpeople.auth.token.command = ["ortie", "token", "show", "-a", "google"]
 #gpeople.tls.provider = "rustls"
 #gpeople.alpn = ["http/1.1"]
 
@@ -300,7 +300,7 @@ imap.item.delete = false
 # is a collection, a recurring series with its modified instances one item.
 # The token needs the `calendar` scope. A locally modified instance of a series
 # does not push yet.
-#gcal.auth.token.command = ["ortie", "-a", "google", "token", "show", "--auto-refresh"]
+#gcal.auth.token.command = ["ortie", "token", "show", "-a", "google"]
 
 # --------------------------------------------------------------------------------
 # CardDAV config (contacts, not mail)
@@ -321,7 +321,7 @@ imap.item.delete = false
 # Pick exactly one of `basic` (the common case) or `bearer`.
 #carddav.auth.basic.username = "user"
 #carddav.auth.basic.password.command = ["pass", "show", "example/dav"]
-#carddav.auth.bearer.token.command = ["ortie", "-a", "dav", "token", "show", "-r"]
+#carddav.auth.bearer.token.command = ["ortie", "token", "show", "-a", "dav"]
 
 # TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
 #carddav.tls.provider = "rustls"
@@ -354,7 +354,7 @@ imap.item.delete = false
 # Pick exactly one of `basic` (the common case) or `bearer`.
 #caldav.auth.basic.username = "user"
 #caldav.auth.basic.password.command = ["pass", "show", "example/dav"]
-#caldav.auth.bearer.token.command = ["ortie", "-a", "dav", "token", "show", "-r"]
+#caldav.auth.bearer.token.command = ["ortie", "token", "show", "-a", "dav"]
 
 # TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
 #caldav.tls.provider = "rustls"
@@ -404,12 +404,13 @@ imap.item.delete = false
 # --------------------------------------------------------------------------------
 
 # Where pimdir.db and `objects/` live. Defaults to neverest/ under the
-# platform's state location ( on Linux and the BSDs,
-# ~/Library/Application Support on macOS, %LOCALAPPDATA% on Windows), the one
-# store every account naming no root shares, each collection grouped under its
-# account. Accounts naming one root share that store; an account naming its
-# own syncs on a schedule of its own. A frontend reads one account of a shared
-# store through its own account key (`pimdir.account` in himalaya).
+# platform's state location ($XDG_STATE_HOME, else ~/.local/state, on Linux
+# and the BSDs, ~/Library/Application Support on macOS, %LOCALAPPDATA% on
+# Windows), the one store every account naming no root shares, each
+# collection grouped under its account. Accounts naming one root share that
+# store; an account naming its own syncs on a schedule of its own. A frontend
+# reads one account of a shared store through its own account key
+# (`pimdir.account` in himalaya).
 #store.root = "~/.local/state/neverest-example"
 
 # What the store keeps is `retain`, at the top of this account. Dropping it from
@@ -480,7 +481,7 @@ imap.item.delete = false
 #smtp.sasl.login.username = "user@example.com"
 #smtp.sasl.login.password.raw = "***"
 #smtp.sasl.oauthbearer.username = "user@example.com"
-#smtp.sasl.oauthbearer.token.command = ["ortie", "token", "read", "example"]
+#smtp.sasl.oauthbearer.token.command = ["ortie", "token", "show", "-a", "example"]
 #smtp.sasl.xoauth2.username = "user@example.com"
 #smtp.sasl.xoauth2.token.raw = "***"
 #smtp.sasl.scram-sha-256.username = "user@example.com"
@@ -524,6 +525,6 @@ imap.item.delete = false
 #   sources.fastmail.imap.sasl.plain.password.command = "pass show fastmail"
 #   sources.gmail.imap.server = "imap.gmail.com"
 #   sources.gmail.imap.sasl.xoauth2.username = "user@gmail.com"
-#   sources.gmail.imap.sasl.xoauth2.token.command = ["ortie", "token", "read", "gmail"]
+#   sources.gmail.imap.sasl.xoauth2.token.command = ["ortie", "token", "show", "-a", "gmail"]
 #
 # `neverest sync --source <name>` narrows a run to the named sources.

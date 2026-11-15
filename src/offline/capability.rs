@@ -353,8 +353,8 @@ fn gmail(name: &str, smtp: bool) -> Support {
             Some("Gmail drafts are the DRAFT label, not a flag"),
         ),
         MAIL_FLAGS_KEYWORDS => (
-            PimdirSupport::Partial,
-            Some("$Important only, which mail.flags.important states too"),
+            PimdirSupport::None,
+            Some("Gmail drops every keyword but $Important, which mail.flags.important states"),
         ),
         MAIL_FLAGS_IMPORTANT => (PimdirSupport::Full, Some("the IMPORTANT label")),
         MAIL_FLAGS_JUNK => (
@@ -982,10 +982,10 @@ mod tests {
             PimdirSupport::Full
         );
         assert_eq!(support(&declaration, MAIL_FLAGS_JUNK), PimdirSupport::None);
-        assert_eq!(
-            support(&declaration, MAIL_FLAGS_KEYWORDS),
-            PimdirSupport::Partial
-        );
+        let keywords = row(&declaration, MAIL_FLAGS_KEYWORDS, None);
+        let detail = keywords.detail.as_deref().unwrap();
+        assert_eq!(keywords.support, PimdirSupport::None);
+        assert!(detail.contains("but $Important"), "{detail}");
         let imap = declaration_of(&imap_deleting());
         assert!(!imap.iter().any(|row| row.name == MAIL_FLAGS_IMPORTANT));
     }

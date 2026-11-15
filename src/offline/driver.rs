@@ -8628,6 +8628,69 @@ mod tests {
         add("msgraph/Drafts").expect("an add in Drafts is queued");
     }
 
+    /// Gmail keeps no keyword but `$Important`, the IMPORTANT label: a
+    /// frontend setting another is refused at the gate rather than queued
+    /// and dropped by the push, and `$Important` passes with no warning.
+    #[test]
+    fn a_gmail_source_refuses_any_keyword_but_important_at_the_gate() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account("live")
+            .for_source("gmail");
+        store
+            .ensure_collection("gmail/INBOX", "message/rfc822")
+            .unwrap();
+        store
+            .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                collection: PimdirCollectionId("gmail/INBOX".into()),
+                handle: PimdirHandle("m0".into()),
+                link_id: Some(PimdirLinkId("m0@example.org".into())),
+                object: None,
+                level: PimdirLevel::Meta,
+                summary: None,
+                sort_key: PimdirSortKey::default(),
+                flags: PimdirFlags::Known(Default::default()),
+                status: PimdirStatus::Clean,
+                conflict_revision: None,
+                conflict_object: None,
+                base: Some(PimdirBase {
+                    flags: PimdirFlags::Known(Default::default()),
+                    revision: None,
+                    object: None,
+                }),
+                origin: None,
+            })])
+            .unwrap();
+        let config: AccountConfig = toml::from_str("gmail.auth.token.raw = \"token\"").unwrap();
+        let mode = config.mode().unwrap();
+        declare(dir.path(), "live", &config, &mode, &AccountState::default()).unwrap();
+        let seq = store.list_items("gmail/INBOX", None, 1).unwrap()[0].seq;
+
+        let set = |flag: &str| {
+            let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
+            let action = PimdirAction::SetFlags {
+                seq,
+                flags: PimdirFlags::from_iter([flag]),
+                base: None,
+            };
+            producer.enqueue("gmail/INBOX", &action, None)
+        };
+        match set("$Custom") {
+            Err(PimdirError::Unsupported(refusal)) => {
+                assert_eq!(
+                    refusal.capability,
+                    io_pimdir::capability::MAIL_FLAGS_KEYWORDS
+                );
+                assert_eq!(refusal.source, "gmail");
+                assert!(refusal.detail.unwrap().contains("but $Important"));
+            }
+            other => panic!("a keyword Gmail drops is refused at the gate: {other:?}"),
+        }
+        let important = set("$Important").expect("$Important is queued");
+        assert!(important.partial.is_empty(), "{:?}", important.partial);
+    }
+
     /// A task in a hub calendar crosses to the target, so a calendar the
     /// target's server keeps from tasks refuses one, under the source's
     /// declaration: the target stays undeclared.

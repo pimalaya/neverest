@@ -97,9 +97,10 @@ fn connect(token: &str) -> MsgraphClientStd {
     MsgraphClientStd::connect(token, options).expect("connect to Graph")
 }
 
-/// The configuration line pointing a source at the test mailbox.
-fn user_line(backend: &str) -> String {
-    format!("{backend}.user-id = \"{}\"", msgraph_user())
+/// The configuration line pointing the `msgraph` table at the test
+/// mailbox, whatever domain it syncs.
+fn user_line() -> String {
+    format!("msgraph.user-id = \"{}\"", msgraph_user())
 }
 
 /// A message seeded in a folder reaches both replicas, flags cross, a fresh
@@ -127,7 +128,7 @@ fn a_graph_mail_folder_syncs_both_ways() {
 
     with_cleanup(
         || {
-            let extra = user_line("msgraph");
+            let extra = user_line();
             let a = Replica::open("msgraph", &extra, &token);
             let b = Replica::open("msgraph", &extra, &token);
 
@@ -211,10 +212,7 @@ fn a_graph_scope_widens_by_its_band() {
         || {
             // NOTE: the account's own scope is the widest the run asks for, so
             // a run without `--since` follows the link.
-            let extra = format!(
-                "{}\nitem.filter.since = \"2024-01-01\"",
-                user_line("msgraph")
-            );
+            let extra = format!("{}\nitem.filter.since = \"2024-01-01\"", user_line());
             let replica = Replica::open("msgraph", &extra, &token);
             let stored = |replica: &Replica| -> Vec<&str> {
                 years
@@ -286,7 +284,7 @@ fn a_graph_move_is_delivered_once() {
 
     with_cleanup(
         || {
-            let extra = user_line("msgraph");
+            let extra = user_line();
             let a = Replica::open("msgraph", &extra, &token);
             let trash = "Deleted Items";
             let keys = ["Inbox", folder.as_str(), trash];
@@ -376,7 +374,7 @@ fn a_graph_add_lands_in_drafts_only() {
 
     with_cleanup(
         || {
-            let extra = user_line("msgraph");
+            let extra = user_line();
             let a = Replica::open("msgraph", &extra, &token);
             a.sync_keys(&["Drafts"], &[0]);
 
@@ -445,7 +443,7 @@ fn a_graph_contact_folder_syncs_both_ways() {
 
     with_cleanup(
         || {
-            let extra = user_line("msgraph-contacts");
+            let extra = user_line();
             round_trip("msgraph-contacts", &extra, &token, &folder, card);
         },
         || {
@@ -472,7 +470,7 @@ fn a_graph_calendar_syncs_both_ways() {
 
     with_cleanup(
         || {
-            let extra = user_line("msgraph-calendar");
+            let extra = user_line();
             round_trip("msgraph-calendar", &extra, &token, &calendar, event);
         },
         || {
@@ -491,7 +489,7 @@ fn a_graph_calendar_syncs_both_ways() {
 #[ignore = "live: needs the app registration's client secret"]
 fn every_graph_calendar_of_the_mailbox_syncs() {
     let token = msgraph_token();
-    let extra = user_line("msgraph-calendar");
+    let extra = user_line();
     let a = Replica::open("msgraph-calendar", &extra, &token);
     a.sync_keys(&[], &[0]);
 }
@@ -503,7 +501,7 @@ fn every_graph_calendar_of_the_mailbox_syncs() {
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_check_names_the_well_known_folders() {
     let token = msgraph_token();
-    let report = Replica::open("msgraph", &user_line("msgraph"), &token).check();
+    let report = Replica::open("msgraph", &user_line(), &token).check();
     let collections = report["sources"][0]["collections"]
         .as_array()
         .unwrap_or_else(|| panic!("collections listed: {report}"));
@@ -565,7 +563,7 @@ fn a_graph_teams_meeting_carries_its_join_link() {
                 return;
             };
 
-            let extra = user_line("msgraph-calendar");
+            let extra = user_line();
             let a = Replica::open("msgraph-calendar", &extra, &token);
             a.sync(&calendar);
             let items = a.items(&calendar, "");
@@ -608,7 +606,7 @@ fn a_graph_online_meeting_is_created_with_its_event() {
 
     with_cleanup(
         || {
-            let extra = user_line("msgraph-calendar");
+            let extra = user_line();
             let a = Replica::open("msgraph-calendar", &extra, &token);
             a.sync(&calendar);
 
@@ -760,7 +758,7 @@ fn a_graph_meeting_is_cancelled() {
 
     with_cleanup(
         || {
-            let extra = user_line("msgraph-calendar");
+            let extra = user_line();
             let a = Replica::open("msgraph-calendar", &extra, &token);
             a.sync(&calendar);
 
@@ -839,7 +837,7 @@ fn a_graph_meeting_edited_right_after_creation_is_pushed_then_cancelled() {
 
     with_cleanup(
         || {
-            let extra = user_line("msgraph-calendar");
+            let extra = user_line();
             let a = Replica::open("msgraph-calendar", &extra, &token);
             a.sync(&calendar);
 
@@ -968,7 +966,7 @@ fn a_graph_invitation_is_answered() {
                 .as_str()
                 .expect("the default calendar has an id")
                 .to_owned();
-            let extra = user_line("msgraph-calendar");
+            let extra = user_line();
             let a = Replica::open("msgraph-calendar", &extra, &token);
             a.sync_until(&calendar, "the invitation reaches the store", |a| {
                 a.item(&calendar, &uid).is_some()

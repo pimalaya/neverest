@@ -133,8 +133,19 @@ pub struct Replica {
 impl Replica {
     /// Writes an account holding one `backend` source, plus `extra` TOML
     /// lines, its token read from the environment of each run.
+    ///
+    /// `backend` is the source the sugar names: a Graph domain's is the
+    /// table it had before (`msgraph-contacts`), written as its domain of
+    /// the one `msgraph` table.
     pub fn open(backend: &str, extra: &str, token: &str) -> Self {
-        let lines = format!("{backend}.auth.token.command = \"printenv {TOKEN_VAR}\"\n{extra}");
+        let (table, domain) = match backend {
+            "msgraph" => ("msgraph", "msgraph.mail = true\n"),
+            "msgraph-contacts" => ("msgraph", "msgraph.contacts = true\n"),
+            "msgraph-calendar" => ("msgraph", "msgraph.calendar = true\n"),
+            backend => (backend, ""),
+        };
+        let lines =
+            format!("{table}.auth.token.command = \"printenv {TOKEN_VAR}\"\n{domain}{extra}");
         Self::with_config(backend, &lines, token)
     }
 

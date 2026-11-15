@@ -1198,9 +1198,18 @@ impl GraphClient {
         scripts: Vec<Vec<scripted::Step>>,
         folders: &[(&str, &str)],
     ) -> (Self, scripted::Server) {
+        Self::scripted_as(GraphKind::Mail, scripts, folders)
+    }
+
+    /// [`scripted`](Self::scripted), a session of `kind`.
+    pub(crate) fn scripted_as(
+        kind: GraphKind,
+        scripts: Vec<Vec<scripted::Step>>,
+        folders: &[(&str, &str)],
+    ) -> (Self, scripted::Server) {
         let server = scripted::Server::new(scripts);
         let mut client = Self::over(
-            GraphKind::Mail,
+            kind,
             &SecretString::from("token"),
             "me",
             server.connect(),

@@ -119,6 +119,18 @@ Every account shares **one pimdir store**, at `neverest/` under your state direc
 
 `one-way` makes the sources authoritative, so the other side's changes are overwritten rather than merged, and `retain` says whether the store keeps bodies or is only the ledger it has to be anyway. Sources never meet, so several cache side by side for a frontend to union at display time.
 
+Microsoft Graph is one `msgraph` table, as in the other Pimalaya CLIs: the session (`auth`, `user-id`, `tls`, `alpn`, `proxy`) once, then the domains it syncs, each a source of its own, `= true` taking the defaults:
+
+```toml
+[accounts.work]
+msgraph.auth.token.command = ["ortie", "token", "show", "-a", "microsoft"]
+msgraph.mail = true
+msgraph.contacts.item.delete = false
+msgraph.calendar = true
+```
+
+The domains sync as the sources `msgraph`, `msgraph-contacts` and `msgraph-calendar`; under `sources.<name>`, an `msgraph` table names one domain and the source is `<name>`.
+
 A collection one endpoint no longer lists is deleted on the other only where that endpoint sets `collection.delete = true`. It is off by default: a missing collection is the only sign IMAP and DAV give of a deletion, and a listing can leave out one nobody deleted. The same setting lets a frontend ask neverest to delete a collection on that server (pimdir's `collection-delete` intent, `himalaya pimdir mailbox delete`); renaming one (`collection-rename`) needs no setting.
 
 ## Usage

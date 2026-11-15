@@ -27,7 +27,10 @@ use pimalaya_config::{
 };
 use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider, TlsServer};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{
+    Deserialize, Deserializer, Serialize,
+    de::{self, MapAccess, Visitor, value::MapAccessDeserializer},
+};
 use url::Url;
 
 use crate::error::ErrorCode;
@@ -38,18 +41,8 @@ const SAMPLE_URL: &str = "https://github.com/pimalaya/neverest/blob/master/confi
 
 /// Every backend table an account may write, in the order `account list`
 /// names them, `smtp` the send channel's.
-pub const BACKENDS: [&str; 11] = [
-    "imap",
-    "carddav",
-    "caldav",
-    "jmap",
-    "gmail",
-    "msgraph",
-    "msgraph-contacts",
-    "msgraph-calendar",
-    "gpeople",
-    "gcal",
-    "smtp",
+pub const BACKENDS: [&str; 9] = [
+    "imap", "carddav", "caldav", "jmap", "gmail", "msgraph", "gpeople", "gcal", "smtp",
 ];
 
 /// Whether this build serves the backend table `name`, its cargo feature
@@ -61,8 +54,6 @@ pub fn is_built(name: &str) -> bool {
         ("caldav", cfg!(feature = "dav")),
         ("gmail", cfg!(feature = "gmail")),
         ("msgraph", cfg!(feature = "msgraph")),
-        ("msgraph-contacts", cfg!(feature = "msgraph")),
-        ("msgraph-calendar", cfg!(feature = "msgraph")),
         ("gpeople", cfg!(feature = "gpeople")),
         ("gcal", cfg!(feature = "gcal")),
         ("smtp", cfg!(feature = "smtp")),
@@ -348,17 +339,22 @@ pub struct AccountConfig {
     /// Direct-backend sugar: a Gmail source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gmail: Option<GmailConfig>,
-    /// Direct-backend sugar: a Graph source named after its protocol.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub msgraph: Option<MsgraphConfig>,
-    /// Direct-backend sugar: a Graph contacts source named after its
-    /// protocol.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub msgraph_contacts: Option<MsgraphConfig>,
-    /// Direct-backend sugar: a Graph calendar source named after its
-    /// protocol.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub msgraph_calendar: Option<MsgraphConfig>,
+    /// Direct-backend sugar: a Graph source a domain the table names, each
+    /// named as the table it had before (`msgraph`, `msgraph-contacts`,
+    /// `msgraph-calendar`).
+    #[serde(
+        default,
+        deserialize_with = "msgraph_sugar",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub msgraph: Option<MsgraphTable>,
+    /// Removed keys, refused by name as the file is parsed.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    msgraph_contacts: Option<MsgraphContactsRemoved>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    msgraph_calendar: Option<MsgraphCalendarRemoved>,
     /// Direct-backend sugar: a Google People source named after its
     /// protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -423,8 +419,9 @@ impl AccountConfig {
     /// Every configured source keyed by its id, the sugar folded into the
     /// explicit `sources` table.
     ///
-    /// The sugar's source id is its protocol name, the same id the expanded
-    /// form writes, so expanding an account by hand is a store no-op.
+    /// The sugar's source id is its protocol name, a Graph domain's the
+    /// table it had before, the same id the expanded form writes, so
+    /// expanding an account by hand is a store no-op.
     pub fn sources(&self) -> Result<HashMap<String, SourceConfig>> {
         let mut sources = self.sources.clone();
 
@@ -434,19 +431,13 @@ impl AccountConfig {
             self.caldav.clone().map(SourceBackendConfig::Caldav),
             self.jmap.clone().map(SourceBackendConfig::Jmap),
             self.gmail.clone().map(SourceBackendConfig::Gmail),
-            self.msgraph.clone().map(SourceBackendConfig::Msgraph),
-            self.msgraph_contacts
-                .clone()
-                .map(SourceBackendConfig::MsgraphContacts),
-            self.msgraph_calendar
-                .clone()
-                .map(SourceBackendConfig::MsgraphCalendar),
             self.gpeople.clone().map(SourceBackendConfig::Gpeople),
             self.gcal.clone().map(SourceBackendConfig::Gcal),
         ];
+        let graph = self.msgraph.iter().flat_map(MsgraphTable::domains);
 
-        for backend in sugar.into_iter().flatten() {
-            let name = backend.protocol().to_string();
+        for backend in sugar.into_iter().flatten().chain(graph) {
+            let name = backend.sugar_name().to_string();
 
             if sources.contains_key(&name) {
                 bail!(
@@ -513,8 +504,6 @@ impl AccountConfig {
             self.jmap.as_ref().map(|_| "jmap"),
             self.gmail.as_ref().map(|_| "gmail"),
             self.msgraph.as_ref().map(|_| "msgraph"),
-            self.msgraph_contacts.as_ref().map(|_| "msgraph-contacts"),
-            self.msgraph_calendar.as_ref().map(|_| "msgraph-calendar"),
             self.gpeople.as_ref().map(|_| "gpeople"),
             self.gcal.as_ref().map(|_| "gcal"),
             self.smtp.as_ref().map(|_| "smtp"),
@@ -564,8 +553,6 @@ impl AccountConfig {
             jmap: None,
             gmail: None,
             msgraph: None,
-            msgraph_contacts: None,
-            msgraph_calendar: None,
             gpeople: None,
             gcal: None,
             smtp: None,
@@ -792,6 +779,50 @@ pimalaya_config::removed_key! {
         name: "collection.filters",
         why: "a source holding one filter",
         instead: "write `collection.filter`",
+    }
+
+    /// The `msgraph-contacts` table, now `msgraph.contacts`.
+    pub MsgraphContactsRemoved: Table {
+        name: "msgraph-contacts",
+        why: "Graph's domains sharing one `msgraph` table and its session",
+        instead: "write `msgraph.contacts`, its `auth`, `user-id`, `tls`, `alpn` \
+                  and `proxy` in `msgraph` itself",
+    }
+
+    /// The `msgraph-calendar` table, now `msgraph.calendar`.
+    pub MsgraphCalendarRemoved: Table {
+        name: "msgraph-calendar",
+        why: "Graph's domains sharing one `msgraph` table and its session",
+        instead: "write `msgraph.calendar`, its `auth`, `user-id`, `tls`, `alpn` \
+                  and `proxy` in `msgraph` itself",
+    }
+
+    /// `msgraph.collection`, now under the domain it filters.
+    pub MsgraphCollectionRemoved: Table {
+        name: "msgraph.collection",
+        why: "each Graph domain syncing its own collections",
+        instead: "write `msgraph.mail.collection` for mail",
+    }
+
+    /// `msgraph.item`, now under the domain it grants.
+    pub MsgraphItemRemoved: Table {
+        name: "msgraph.item",
+        why: "each Graph domain syncing with its own rights",
+        instead: "write `msgraph.mail.item` for mail",
+    }
+
+    /// `msgraph.flag`, now under the domain it grants.
+    pub MsgraphFlagRemoved: Table {
+        name: "msgraph.flag",
+        why: "each Graph domain syncing with its own rights",
+        instead: "write `msgraph.mail.flag` for mail",
+    }
+
+    /// `msgraph.pool-size`, now under the domain it sizes.
+    pub MsgraphPoolSizeRemoved: Key {
+        name: "msgraph.pool-size",
+        why: "each Graph domain opening its own connections",
+        instead: "write `msgraph.mail.pool-size` for mail",
     }
 
     /// The v0.1 `folder` table.
@@ -1038,12 +1069,15 @@ struct SourceTable {
     caldav: Option<CaldavConfig>,
     jmap: Option<JmapConfig>,
     gmail: Option<GmailConfig>,
-    msgraph: Option<MsgraphConfig>,
-    msgraph_contacts: Option<MsgraphConfig>,
-    msgraph_calendar: Option<MsgraphConfig>,
+    msgraph: Option<MsgraphTable>,
     gpeople: Option<GoogleConfig>,
     gcal: Option<GoogleConfig>,
     smtp: Option<SmtpConfig>,
+    /// Removed keys, refused by name as the file is parsed.
+    #[allow(dead_code)]
+    msgraph_contacts: Option<MsgraphContactsRemoved>,
+    #[allow(dead_code)]
+    msgraph_calendar: Option<MsgraphCalendarRemoved>,
 }
 
 impl TryFrom<SourceTable> for SourceConfig {
@@ -1056,13 +1090,7 @@ impl TryFrom<SourceTable> for SourceConfig {
             table.caldav.map(SourceBackendConfig::Caldav),
             table.jmap.map(SourceBackendConfig::Jmap),
             table.gmail.map(SourceBackendConfig::Gmail),
-            table.msgraph.map(SourceBackendConfig::Msgraph),
-            table
-                .msgraph_contacts
-                .map(SourceBackendConfig::MsgraphContacts),
-            table
-                .msgraph_calendar
-                .map(SourceBackendConfig::MsgraphCalendar),
+            table.msgraph.map(MsgraphTable::domain).transpose()?,
             table.gpeople.map(SourceBackendConfig::Gpeople),
             table.gcal.map(SourceBackendConfig::Gcal),
         ];
@@ -1071,8 +1099,7 @@ impl TryFrom<SourceTable> for SourceConfig {
         let Some(backend) = backends.next() else {
             return Err(String::from(
                 "A source declares no backend: write one table of `imap`, `carddav`, `caldav`, \
-                 `jmap`, `gmail`, `msgraph`, `msgraph-contacts`, `msgraph-calendar`, `gpeople` \
-                 or `gcal` under it",
+                 `jmap`, `gmail`, `msgraph`, `gpeople` or `gcal` under it",
             ));
         };
 
@@ -1101,13 +1128,14 @@ pub enum SourceBackendConfig {
     Caldav(CaldavConfig),
     Jmap(JmapConfig),
     Gmail(GmailConfig),
+    /// Microsoft Graph mail, the `mail` domain of an `msgraph` table.
     Msgraph(MsgraphConfig),
-    /// Microsoft Graph contacts: the same session as `msgraph`, syncing
-    /// contact folders instead of mail folders.
+    /// Microsoft Graph contacts, the `contacts` domain of an `msgraph`
+    /// table: the same session, syncing contact folders.
     #[serde(rename = "msgraph-contacts")]
     MsgraphContacts(MsgraphConfig),
-    /// Microsoft Graph calendars: the same session as `msgraph`, syncing
-    /// calendars instead of mail folders.
+    /// Microsoft Graph calendars, the `calendar` domain of an `msgraph`
+    /// table: the same session, syncing calendars.
     #[serde(rename = "msgraph-calendar")]
     MsgraphCalendar(MsgraphConfig),
     /// Google contacts through the People API.
@@ -1132,8 +1160,8 @@ impl SourceBackendConfig {
         }
     }
 
-    /// The protocol table this backend is written under, which is also the
-    /// id of the source the sugar builds from it.
+    /// The backend table this backend is written under, `msgraph` for every
+    /// Graph domain.
     pub fn protocol(&self) -> &'static str {
         match self {
             Self::Imap(_) => "imap",
@@ -1141,11 +1169,30 @@ impl SourceBackendConfig {
             Self::Caldav(_) => "caldav",
             Self::Jmap(_) => "jmap",
             Self::Gmail(_) => "gmail",
-            Self::Msgraph(_) => "msgraph",
-            Self::MsgraphContacts(_) => "msgraph-contacts",
-            Self::MsgraphCalendar(_) => "msgraph-calendar",
+            Self::Msgraph(_) | Self::MsgraphContacts(_) | Self::MsgraphCalendar(_) => "msgraph",
             Self::Gpeople(_) => "gpeople",
             Self::Gcal(_) => "gcal",
+        }
+    }
+
+    /// The id of the source the sugar builds from this backend: its table,
+    /// and for a Graph domain the table it had before the domains shared
+    /// one, so a store keeps every binding.
+    pub fn sugar_name(&self) -> &'static str {
+        match self {
+            Self::MsgraphContacts(_) => "msgraph-contacts",
+            Self::MsgraphCalendar(_) => "msgraph-calendar",
+            backend => backend.protocol(),
+        }
+    }
+
+    /// The Graph domain this backend syncs, `None` off Graph.
+    fn graph_domain(&self) -> Option<&'static str> {
+        match self {
+            Self::Msgraph(_) => Some("mail"),
+            Self::MsgraphContacts(_) => Some("contacts"),
+            Self::MsgraphCalendar(_) => Some("calendar"),
+            _ => None,
         }
     }
 
@@ -1831,12 +1878,13 @@ pub struct GmailAuthConfig {
 }
 
 source_config! {
-    /// A Microsoft Graph source, its mail folders exposed as mailboxes.
+    /// One domain of a Microsoft Graph source: the session of its `msgraph`
+    /// table with the domain's own keys, built by [`MsgraphTable::domains`].
     ///
     /// The API host is fixed, so only the mailbox owner, TLS and the
     /// OAuth 2.0 credential are configurable.
-    #[derive(Clone, Debug, Deserialize, Serialize)]
-    #[serde(rename_all = "kebab-case", deny_unknown_fields)]
+    #[derive(Clone, Debug, Serialize)]
+    #[serde(rename_all = "kebab-case")]
     pub struct MsgraphConfig {
         /// Graph user id, `me` by default: the authenticated user.
         #[serde(default = "default_msgraph_user_id")]
@@ -1867,6 +1915,205 @@ pub struct MsgraphAuthConfig {
     /// Acquiring and refreshing it is the caller's job: point
     /// `token.command` at any command printing a valid token, ortie say.
     pub token: Secret,
+}
+
+/// The refusal of an `msgraph` table naming no domain.
+const MSGRAPH_NO_DOMAIN: &str = "The `msgraph` table names no domain: write `msgraph.mail = \
+                                 true` to sync mail as before, `msgraph.contacts` or \
+                                 `msgraph.calendar` for the others, see MIGRATION.md";
+
+/// The `msgraph` table: one Graph session and the domains it syncs, each
+/// domain a source of its own.
+///
+/// Graph carries mail, contacts and calendars behind one host and one
+/// token, as carillon, cardamum and calendula read it, so the session is
+/// written once. What a domain syncs and may write sits in its own table,
+/// a mail include list meaning nothing to a contact folder.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct MsgraphTable {
+    /// Graph user id, `me` by default: the authenticated user.
+    #[serde(default = "default_msgraph_user_id")]
+    pub user_id: String,
+    /// How the connection is secured.
+    #[serde(default)]
+    pub tls: TlsConfig,
+    /// ALPN identifiers offered during the TLS handshake, `["http/1.1"]` by
+    /// default; `[]` skips ALPN.
+    #[serde(
+        default = "default_http_alpn",
+        skip_serializing_if = "is_default_http_alpn"
+    )]
+    pub alpn: Vec<String>,
+    /// How the Graph session authenticates.
+    pub auth: MsgraphAuthConfig,
+    /// The proxy every domain's connections go through, falling back to
+    /// the account's, then to the `all_proxy` and `https_proxy`
+    /// environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
+    /// The mail folders, the source `msgraph` under the account.
+    #[serde(
+        default,
+        deserialize_with = "msgraph_domain",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mail: Option<MsgraphDomainConfig>,
+    /// The contact folders, the source `msgraph-contacts` under the
+    /// account.
+    #[serde(
+        default,
+        deserialize_with = "msgraph_domain",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub contacts: Option<MsgraphDomainConfig>,
+    /// The calendars, the source `msgraph-calendar` under the account.
+    #[serde(
+        default,
+        deserialize_with = "msgraph_domain",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub calendar: Option<MsgraphDomainConfig>,
+    /// Removed keys, refused by name as the file is parsed: a domain's
+    /// keys now sit in its own table.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    collection: Option<MsgraphCollectionRemoved>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    item: Option<MsgraphItemRemoved>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    flag: Option<MsgraphFlagRemoved>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    pool_size: Option<MsgraphPoolSizeRemoved>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    mailbox: Option<SourceMailboxRemoved>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    message: Option<SourceMessageRemoved>,
+}
+
+impl MsgraphTable {
+    /// One source backend a domain the table names, mail first, each with
+    /// the table's session.
+    pub fn domains(&self) -> Vec<SourceBackendConfig> {
+        let source = |domain: &MsgraphDomainConfig| MsgraphConfig {
+            user_id: self.user_id.clone(),
+            tls: self.tls.clone(),
+            alpn: self.alpn.clone(),
+            auth: self.auth.clone(),
+            collection: domain.collection.clone(),
+            flag: domain.flag,
+            item: domain.item,
+            pool_size: domain.pool_size,
+            proxy: self.proxy.clone(),
+            mailbox: None,
+            message: None,
+        };
+
+        let mail = self.mail.as_ref().map(source);
+        let contacts = self.contacts.as_ref().map(source);
+        let calendar = self.calendar.as_ref().map(source);
+        [
+            mail.map(SourceBackendConfig::Msgraph),
+            contacts.map(SourceBackendConfig::MsgraphContacts),
+            calendar.map(SourceBackendConfig::MsgraphCalendar),
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
+    }
+
+    /// The one domain a named source's table names: a source is one
+    /// pimdir source id, of one kind.
+    fn domain(self) -> Result<SourceBackendConfig, String> {
+        let mut domains = self.domains();
+        if domains.len() == 1 {
+            return Ok(domains.remove(0));
+        }
+
+        let mut names: Vec<String> = domains
+            .iter()
+            .filter_map(SourceBackendConfig::graph_domain)
+            .map(|name| format!("`{name}`"))
+            .collect();
+        let Some(last) = names.pop() else {
+            return Err(MSGRAPH_NO_DOMAIN.to_owned());
+        };
+        Err(format!(
+            "A source's `msgraph` table names {} and {last}, and a source syncs one domain: \
+             give each a source of its own, or write `msgraph` under the account, which names \
+             each after its domain",
+            names.join(", "),
+        ))
+    }
+}
+
+/// What one Graph domain syncs and may write: the keys every backend table
+/// holds beside its connection.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct MsgraphDomainConfig {
+    /// Which collections the domain syncs, and what may be created, renamed
+    /// or deleted on it.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub collection: CollectionSourceConfig,
+    /// Whether flag updates may be pushed.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub flag: FlagSourcePermissions,
+    /// Which item mutations may be pushed.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub item: ItemSourcePermissions,
+    /// Connection pool size override, 3 by default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pool_size: Option<usize>,
+    /// Removed keys, refused by name as the file is parsed.
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    mailbox: Option<SourceMailboxRemoved>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    message: Option<SourceMessageRemoved>,
+}
+
+/// Reads a Graph domain written `true`, taking its defaults, or as a
+/// table; `false` reads as absent.
+fn msgraph_domain<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<MsgraphDomainConfig>, D::Error> {
+    struct Domain;
+
+    impl<'de> Visitor<'de> for Domain {
+        type Value = Option<MsgraphDomainConfig>;
+
+        fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+            f.write_str("`true`, `false` or a table")
+        }
+
+        fn visit_bool<E: de::Error>(self, synced: bool) -> Result<Self::Value, E> {
+            Ok(synced.then(MsgraphDomainConfig::default))
+        }
+
+        fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            MsgraphDomainConfig::deserialize(MapAccessDeserializer::new(map)).map(Some)
+        }
+    }
+
+    deserializer.deserialize_any(Domain)
+}
+
+/// Reads the account's `msgraph` table, refusing one naming no domain.
+fn msgraph_sugar<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<MsgraphTable>, D::Error> {
+    let table = MsgraphTable::deserialize(deserializer)?;
+    if table.domains().is_empty() {
+        return Err(de::Error::custom(MSGRAPH_NO_DOMAIN));
+    }
+    Ok(Some(table))
 }
 
 source_config! {
@@ -2293,7 +2540,7 @@ mod tests {
 
     #[test]
     fn msgraph_auth_is_bearer_token_only() {
-        let config: MsgraphConfig = toml::from_str(
+        let config: MsgraphTable = toml::from_str(
             r#"
             auth.token.raw = "tok"
             "#,
@@ -2301,7 +2548,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.user_id, "me");
 
-        let config: MsgraphConfig = toml::from_str(
+        let config: MsgraphTable = toml::from_str(
             r#"
             user-id = "user@example.org"
             auth.token.command = ["ortie", "-a", "msgraph", "token", "show", "--auto-refresh"]
@@ -2310,7 +2557,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.user_id, "user@example.org");
 
-        let err = toml::from_str::<MsgraphConfig>(
+        let err = toml::from_str::<MsgraphTable>(
             r#"
             [auth.device-code]
             client-id = "id"
@@ -2318,6 +2565,173 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("device-code"));
+    }
+
+    /// A domain is `true`, taking its defaults, or a table of its keys;
+    /// `false` is no domain. Each carries the one session.
+    #[test]
+    fn a_graph_domain_is_true_or_a_table() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            msgraph.auth.token.raw = "tok"
+            msgraph.user-id = "user@example.org"
+            msgraph.mail = true
+            msgraph.contacts.collection.filter.include = ["AAMk"]
+            msgraph.contacts.pool-size = 2
+            msgraph.calendar = false
+            "#,
+        )
+        .unwrap();
+        let sources = account.sources().unwrap();
+
+        let mut ids: Vec<&String> = sources.keys().collect();
+        ids.sort();
+        assert_eq!(ids, ["msgraph", "msgraph-contacts"]);
+        let contacts = &sources["msgraph-contacts"];
+        assert_eq!(
+            contacts.collection().filter,
+            CollectionFilter::Include(vec![String::from("AAMk")])
+        );
+        assert_eq!(contacts.pool_size(), Some(2));
+        assert_eq!(
+            sources["msgraph"].collection().filter,
+            CollectionFilter::All
+        );
+        for source in sources.values() {
+            let (SourceBackendConfig::Msgraph(graph) | SourceBackendConfig::MsgraphContacts(graph)) =
+                &source.backend
+            else {
+                panic!("a Graph source");
+            };
+            assert_eq!(graph.user_id, "user@example.org");
+        }
+        assert_eq!(account.backends(), ["msgraph"]);
+
+        let err = toml::from_str::<AccountConfig>(
+            "msgraph.auth.token.raw = \"tok\"\nmsgraph.contacts.collection-typo = 1",
+        )
+        .map(|_| String::from("loaded"))
+        .unwrap_or_else(|err| err.to_string());
+        assert!(err.contains("unknown field `collection-typo`"), "{err}");
+    }
+
+    /// An `msgraph` table naming no domain is refused, every v0.3 mail-only
+    /// table among them, and a named source holds one domain.
+    #[test]
+    fn a_graph_table_names_its_domains() {
+        for document in [
+            "msgraph.auth.token.raw = \"tok\"",
+            "msgraph.auth.token.raw = \"tok\"\nmsgraph.mail = false",
+            "sources.a.msgraph.auth.token.raw = \"tok\"",
+        ] {
+            let err = toml::from_str::<AccountConfig>(document)
+                .map(|_| String::from("loaded"))
+                .unwrap_or_else(|err| err.to_string());
+            assert!(
+                err.contains("The `msgraph` table names no domain: write `msgraph.mail = true`"),
+                "{document}: {err}"
+            );
+        }
+
+        let err = toml::from_str::<AccountConfig>(
+            "sources.a.msgraph.auth.token.raw = \"tok\"\nsources.a.msgraph.mail = true\n\
+             sources.a.msgraph.contacts = true\nsources.a.msgraph.calendar = true",
+        )
+        .map(|_| String::from("loaded"))
+        .unwrap_or_else(|err| err.to_string());
+        assert!(
+            err.contains(
+                "A source's `msgraph` table names `mail`, `contacts` and `calendar`, and a source \
+                 syncs one domain"
+            ),
+            "{err}"
+        );
+    }
+
+    /// Every Graph endpoint by source id, with its domain and whether it
+    /// deletes items, sorted.
+    fn graph_endpoints(document: &str) -> Vec<(String, &'static str, bool)> {
+        let account: AccountConfig = toml::from_str(document).unwrap();
+        let mut endpoints: Vec<_> = account
+            .namespaced("a")
+            .unwrap()
+            .endpoints()
+            .unwrap()
+            .into_iter()
+            .map(|(id, source)| {
+                let domain = match source.backend {
+                    SourceBackendConfig::Msgraph(_) => "mail",
+                    SourceBackendConfig::MsgraphContacts(_) => "contacts",
+                    SourceBackendConfig::MsgraphCalendar(_) => "calendar",
+                    _ => "other",
+                };
+                (id, domain, source.permissions().item.delete)
+            })
+            .collect();
+        endpoints.sort();
+        endpoints
+    }
+
+    /// A Graph source keeps the id today's stores hold its bindings under,
+    /// whatever table names it: renaming one orphans them.
+    #[test]
+    fn the_graph_tables_keep_their_source_ids() {
+        let id = |id: &str, domain, delete| (String::from(id), domain, delete);
+
+        let sugar = graph_endpoints(
+            r#"
+            msgraph.auth.token.raw = "tok"
+            msgraph.mail = true
+            msgraph.contacts.item.create = true
+            msgraph.contacts.item.delete = false
+            msgraph.calendar = true
+            "#,
+        );
+        assert_eq!(
+            sugar,
+            [
+                id("a/msgraph", "mail", true),
+                id("a/msgraph-calendar", "calendar", true),
+                id("a/msgraph-contacts", "contacts", false),
+            ]
+        );
+
+        let named = graph_endpoints(
+            r#"
+            sources.outlook.msgraph.auth.token.raw = "tok"
+            sources.outlook.msgraph.mail = true
+            sources.people.msgraph.auth.token.raw = "tok"
+            sources.people.msgraph.contacts = true
+            sources.agenda.msgraph.auth.token.raw = "tok"
+            sources.agenda.msgraph.calendar.item.create = true
+            sources.agenda.msgraph.calendar.item.delete = false
+            "#,
+        );
+        assert_eq!(
+            named,
+            [
+                id("a/agenda", "calendar", false),
+                id("a/outlook", "mail", true),
+                id("a/people", "contacts", true),
+            ]
+        );
+
+        let copied = graph_endpoints(
+            r#"
+            one-way = true
+            sources.people.msgraph.auth.token.raw = "tok"
+            sources.people.msgraph.contacts = true
+            targets.copy.msgraph.auth.token.raw = "other"
+            targets.copy.msgraph.contacts = true
+            "#,
+        );
+        assert_eq!(
+            copied,
+            [
+                id("a/copy", "contacts", true),
+                id("a/people", "contacts", true),
+            ]
+        );
     }
 
     /// The store cannot tell the two spellings apart, so expanding an
@@ -3009,6 +3423,7 @@ mod tests {
         let account: AccountConfig = toml::from_str(
             r#"
             msgraph.auth.token.raw = "tok"
+            msgraph.mail = true
             "#,
         )
         .unwrap();
@@ -3063,9 +3478,11 @@ mod tests {
         let account: AccountConfig = toml::from_str(
             r#"
             msgraph.auth.token.raw = "tok"
-            msgraph-contacts.auth.token.raw = "tok"
-            msgraph-calendar.auth.token.raw = "tok"
-            sources.work.msgraph-contacts.auth.token.raw = "tok"
+            msgraph.mail = true
+            msgraph.contacts = true
+            msgraph.calendar = true
+            sources.work.msgraph.auth.token.raw = "tok"
+            sources.work.msgraph.contacts = true
             "#,
         )
         .unwrap();
@@ -3210,6 +3627,7 @@ mod tests {
             r#"
             sources.a.imap.server = "imaps://imap.example.org:993"
             sources.a.msgraph.auth.token.raw = "tok"
+            sources.a.msgraph.mail = true
             "#,
         )
         .map(|_| String::from("loaded"))
@@ -3300,6 +3718,48 @@ mod tests {
             (
                 "imap.server = \"x\"\nimap.collection.filters.include = [\"INBOX\"]",
                 "The `collection.filters` key is removed, ",
+            ),
+            (
+                "msgraph-contacts.auth.token.raw = \"tok\"",
+                "The `msgraph-contacts` table is removed, Graph's domains sharing one \
+                 `msgraph` table and its session: write `msgraph.contacts`",
+            ),
+            (
+                "msgraph-calendar.auth.token.raw = \"tok\"",
+                "The `msgraph-calendar` table is removed, Graph's domains sharing one \
+                 `msgraph` table and its session: write `msgraph.calendar`",
+            ),
+            (
+                "sources.people.msgraph-contacts.auth.token.raw = \"tok\"",
+                "The `msgraph-contacts` table is removed, ",
+            ),
+            (
+                "sources.a.imap.server = \"x\"\ntargets.copy.msgraph-calendar.user-id = \"me\"",
+                "The `msgraph-calendar` table is removed, ",
+            ),
+            (
+                "msgraph.auth.token.raw = \"tok\"\nmsgraph.mail = true\n\
+                 msgraph.collection.filter.include = [\"Inbox\"]",
+                "The `msgraph.collection` table is removed, each Graph domain syncing its own \
+                 collections: write `msgraph.mail.collection` for mail",
+            ),
+            (
+                "msgraph.auth.token.raw = \"tok\"\nmsgraph.mail = true\nmsgraph.item.delete = false\n\
+                 msgraph.item.create = true",
+                "The `msgraph.item` table is removed, ",
+            ),
+            (
+                "msgraph.auth.token.raw = \"tok\"\nmsgraph.mail = true\nmsgraph.flag.update = false",
+                "The `msgraph.flag` table is removed, ",
+            ),
+            (
+                "sources.a.msgraph.auth.token.raw = \"tok\"\nsources.a.msgraph.mail = true\n\
+                 sources.a.msgraph.pool-size = 2",
+                "The `msgraph.pool-size` key is removed, ",
+            ),
+            (
+                "msgraph.auth.token.raw = \"tok\"\nmsgraph.mail.mailbox.create = false",
+                "The `mailbox` table is removed, a source syncing collections",
             ),
         ] {
             // NOTE: refused as the file is parsed, so an account no command

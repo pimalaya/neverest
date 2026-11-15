@@ -72,7 +72,8 @@
 #
 # Each source picks exactly one backend: `imap.*`, `jmap.*`, `gmail.*`,
 # `msgraph.*`, `carddav.*` or `caldav.*`. Its filter, permissions and pool size
-# live inside that backend table:
+# live inside that backend table, a Graph source's in its domain's
+# (`msgraph.mail.*`, `msgraph.contacts.*`, `msgraph.calendar.*`):
 #   - `collection.filter`: which collections this source syncs
 #   - `collection.create`, `flag.update`, `item.update`: default true
 #   - `collection.delete`: default false; a collection one endpoint no
@@ -269,46 +270,53 @@ imap.item.delete = false
 # https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
 # --------------------------------------------------------------------------------
 #
-# Graph carries mail and contacts here: `msgraph` syncs mail folders,
-# `msgraph-contacts` and `msgraph-calendar` (below) contact folders and
-# calendars.
+# One `msgraph` table holds the session and names the domains it syncs, each a
+# source of its own: `msgraph.mail` the mail folders (the source `msgraph`),
+# `msgraph.contacts` the contact folders (`msgraph-contacts`) and
+# `msgraph.calendar` the calendars (`msgraph-calendar`). Name one at least:
+# `= true` takes its defaults, a table of its keys sets them. Under
+# `sources.<name>`, an `msgraph` table names one domain, the source keeping
+# `<name>`.
 
-# Mail folders are exposed as collections; the API host is fixed, so only the
-# owner, TLS and the credential are configurable.
+# The API host is fixed, so only the owner, TLS, the proxy and the credential
+# are configurable, once for every domain.
 #msgraph.user-id = "me"
 #msgraph.tls.provider = "rustls"
 #msgraph.tls.rustls.crypto = "ring"
 #msgraph.tls.cert = "/path/to/custom/cert.pem"
 #msgraph.alpn = ["http/1.1"]
 #msgraph.alpn = []
+#msgraph.proxy.url = "socks5h://localhost:1080"
 
 # Bearer tokens only: neverest runs no OAuth flow. The command runs once a run,
-# typically ortie serving a cached, auto-refreshed token.
+# typically ortie serving a cached, auto-refreshed token. It needs the scope of
+# every domain the table names.
 #msgraph.auth.token.raw = "***"
 #msgraph.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
 
-# Graph pushes flags and deletes only; appends and moves are rejected
-# whatever the permissions say.
-#msgraph.item.create = true
-#msgraph.item.delete = false
-
+# Mail folders, each a collection. Graph takes an added message in Drafts alone,
+# and no edit of a message's body.
+#msgraph.mail = true
+#msgraph.mail.collection.filter.include = ["Inbox", "Sent Items"]
+#msgraph.mail.item.create = true
+#msgraph.mail.item.delete = false
 # Graph serves four requests at once a mailbox, a `$batch`'s among them.
-#msgraph.pool-size = 3
+#msgraph.mail.pool-size = 3
 
-# Graph contacts: the same session and fields as `msgraph`, its contact folders
-# exposed as address books, the default Contacts folder as `contacts`. The token
-# needs the `Contacts.ReadWrite` scope. Contacts push creates, updates and
-# deletes; an edit made on Graph since the last sync is refused and picked up by
-# the next run. A card keeps its vCard UID on Graph, in an extended property.
-#msgraph-contacts.user-id = "me"
-#msgraph-contacts.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
+# Contact folders, exposed as address books, the default Contacts folder as
+# `contacts`. The token needs the `Contacts.ReadWrite` scope. Contacts push
+# creates, updates and deletes; an edit made on Graph since the last sync is
+# refused and picked up by the next run. A card keeps its vCard UID on Graph,
+# in an extended property.
+#msgraph.contacts = true
+#msgraph.contacts.item.create = true
+#msgraph.contacts.item.delete = false
 
-# Graph calendars: the same session and fields as `msgraph`, each calendar a
-# collection, a recurring series and its exceptions one item. The token needs
-# the `Calendars.ReadWrite` scope. Every run lists each calendar in full. A
-# series pushes its exceptions through its instances, and a floating time is
-# anchored in UTC, Graph stating no zone for a calendar.
-#msgraph-calendar.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
+# Calendars, each a collection, a recurring series and its exceptions one item.
+# The token needs the `Calendars.ReadWrite` scope. Every run lists each calendar
+# in full. A series pushes its exceptions through its instances, and a floating
+# time is anchored in UTC, Graph stating no zone for a calendar.
+#msgraph.calendar = true
 
 # --------------------------------------------------------------------------------
 # Google config (contacts and calendars, not mail)

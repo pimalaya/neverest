@@ -415,7 +415,7 @@ pub struct SourceCheck {
     /// The endpoint's pimdir source id.
     pub source: String,
     /// Its protocol, the table it is written under: `imap`, `caldav`,
-    /// `msgraph-calendar`…
+    /// `msgraph` for every Graph domain…
     pub backend: &'static str,
     /// Whether it opened and listed its collections.
     pub ok: bool,
@@ -593,7 +593,7 @@ mod tests {
         assert_eq!(row.level, CapabilityLevel::None);
         assert!(row.detail.as_deref().unwrap().contains("Google Tasks"));
 
-        let declared = declared_by("msgraph-calendar.auth.token.raw = \"token\"");
+        let declared = declared_by("msgraph.auth.token.raw = \"token\"\nmsgraph.calendar = true");
         let row = vtodo(&declared["msgraph-calendar"]).expect("a Graph source takes no task");
         assert!(row.detail.as_deref().unwrap().contains("Microsoft To Do"));
 

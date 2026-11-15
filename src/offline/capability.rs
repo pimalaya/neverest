@@ -555,7 +555,7 @@ mod tests {
 
     fn msgraph_calendar() -> SourceConfig {
         source(
-            "msgraph-calendar.auth.token.raw = \"token\"",
+            "msgraph.auth.token.raw = \"token\"\nmsgraph.calendar = true",
             "msgraph-calendar",
         )
     }
@@ -601,7 +601,8 @@ mod tests {
 
     #[test]
     fn a_graph_mail_source_moves_copies_and_adds_drafts() {
-        let account: AccountConfig = toml::from_str("msgraph.auth.token.raw = \"token\"").unwrap();
+        let account: AccountConfig =
+            toml::from_str("msgraph.auth.token.raw = \"token\"\nmsgraph.mail = true").unwrap();
         let source = account.sources().unwrap().remove("msgraph").unwrap();
         let declaration = declaration(&source, false, false, &[], &BTreeSet::new());
         let row = |name: &str| declaration.iter().find(|row| row.name == name).unwrap();
@@ -766,7 +767,8 @@ mod tests {
             .find(|(name, ..)| *name == COLLECTION_CREATE);
         assert_eq!(create.map(|row| row.1), Some(PimdirSupport::Full));
 
-        let account: AccountConfig = toml::from_str("msgraph.auth.token.raw = \"token\"").unwrap();
+        let account: AccountConfig =
+            toml::from_str("msgraph.auth.token.raw = \"token\"\nmsgraph.mail = true").unwrap();
         let graph = account.sources().unwrap().remove("msgraph").unwrap();
         let graph_rows = super::declaration(
             &graph,

@@ -89,6 +89,36 @@ fn account_list_prints_the_shared_rows_reaching_nothing() {
     );
 }
 
+/// `account ls` is `account list`, as in every family binary, and the
+/// group and its list read himalaya's abouts.
+#[test]
+fn account_ls_lists_and_the_abouts_are_the_familys() {
+    let home = TempDir::new().unwrap();
+    let config = configuration(home.path());
+    let list = run(home.path(), &["--json", "-c", &config, "account", "list"]);
+    let ls = run(home.path(), &["--json", "-c", &config, "account", "ls"]);
+
+    assert_eq!(ls.status.code(), Some(0), "{}", text(&ls.stderr));
+    assert_eq!(text(&ls.stdout), text(&list.stdout));
+
+    let output = run(home.path(), &["account", "--help"]);
+    let help = text(&output.stdout);
+    assert!(
+        help.starts_with(
+            "Manage accounts defined in the TOML configuration file.\n\n\
+             An account is a named group of sources over one pimdir store"
+        ),
+        "{help}"
+    );
+
+    let output = run(home.path(), &["account", "-h"]);
+    let help = text(&output.stdout);
+    assert!(
+        help.contains("  list   List all accounts declared in the configuration [alias: ls]\n"),
+        "{help}"
+    );
+}
+
 #[test]
 fn account_check_is_the_check_and_check_its_hidden_name() {
     let home = TempDir::new().unwrap();

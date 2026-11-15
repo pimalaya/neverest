@@ -280,7 +280,7 @@ Neverest SHALL have no `repl` and no `mcp`: its commands are batch operations ov
 Neverest SHALL carry pimalaya-cli's `account` group (pimalaya-cli cairn/spec/commands.md), over the accounts `-a` names, every one when it names none, as every neverest command:
 
 - `account check` SHALL be the check the *A check …* requirements describe, and `check`, its name before the group, SHALL run it too, hidden from the help, its JSON schema kept under `neverest-check` beside `neverest-account-check`. It SHALL keep its own report rather than pimalaya-cli's one-account `AccountCheckOutput`: a run covers several accounts, each with its mode, every endpoint's collections and capabilities and the orphans a store holds; its rows carry the shared backend check keys (`backend`, `ok`, `code`, `error`), the send channel's being pimalaya-cli's `BackendCheck`. A row's `backend` SHALL be the backend table the source writes, `msgraph` for every Graph domain.
-- `account list` SHALL print pimalaya-cli's `AccountListOutput`, one `{name, default, backends, notBuilt}` row an account, sorted by name, reaching nothing. `backends` SHALL hold the backend tables the account writes, its sources' and its targets', sugar and named alike, each once, in the order `imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`, `smtp` (a send channel), those this build serves; `notBuilt` those it leaves out, JMAP always (it parses and no build opens it). A source's own name is the account's, not a backend, and reads in `account check`. `default` SHALL be `true` on every account: a command naming no `-a` runs over them all, the `default` key being ignored.
+- `account list`, `ls` its visible alias as in every family binary, SHALL print pimalaya-cli's `AccountListOutput`, one `{name, default, backends, notBuilt}` row an account, sorted by name, reaching nothing. `backends` SHALL hold the backend tables the account writes, its sources' and its targets', sugar and named alike, each once, in the order `imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`, `smtp` (a send channel), those this build serves; `notBuilt` those it leaves out, JMAP always (it parses and no build opens it). A source's own name is the account's, not a backend, and reads in `account check`. `default` SHALL be `true` on every account: a command naming no `-a` runs over them all, the `default` key being ignored.
 
 Neverest has no `account capability`: what each source can do reads in `account check`, from the configuration.
 
@@ -293,6 +293,11 @@ Neverest has no `account capability`: what each source can do reads in `account 
 - GIVEN a script running `neverest --json check`
 - WHEN the account group lands
 - THEN it prints the report `account check` prints, and `check` is not listed in the help
+
+#### Scenario: Listing with `ls`
+- GIVEN a configuration holding an account
+- WHEN `neverest account ls` runs
+- THEN it prints what `account list` prints and exits 0, and `account -h` lists `list` with `[alias: ls]`
 
 ### Requirement: Every remote backend is a cargo feature
 Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backends, `dav` for the CardDAV and CalDAV backends, `gpeople` for the Google People backend, `gcal` for the Google Calendar backend, `gmail` for the Gmail backend, `smtp` for the SMTP submission channel.

@@ -177,6 +177,7 @@ Upgrading from 0.3.0:
 
 ### Changed
 
+- Changed `account list` to answer to `ls` too, a visible alias as in every Pimalaya CLI, and the `account` and `account list` abouts to himalaya's: "Manage accounts defined in the TOML configuration file" and "List all accounts declared in the configuration".
 - Changed a check's send channel row to pimalaya-cli's `BackendCheck` (its JSON schema names it so, the keys unchanged), and a check row's `code` to the server refusal's under the failure too (`permission-denied`, `quota-exceeded`, `rate-limited`), as a failure object reads it.
 - Changed the warning of a Google Calendar sync token refused seconds after this run issued it, as Google does for the public holiday calendars, to a debug line: the request was the one that issued it, and the calendar is listed whole again as before.
 - Changed the refusal of a removed configuration key to the family sentence, "The `x` key is removed, <why>: <what to write instead>, see MIGRATION.md" (pimalaya-config 0.5.1), each key of a pair (`left` and `right`, `store.retention` and `store.hydration`, `smtp.login` and `smtp.password`) named alone.

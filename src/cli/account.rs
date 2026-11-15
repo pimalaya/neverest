@@ -17,13 +17,14 @@ use crate::{
     config::{self, AccountConfig, Config},
 };
 
-/// Inspect the accounts the configuration declares.
+/// Manage accounts defined in the TOML configuration file.
 ///
 /// An account is a named group of sources over one pimdir store, written
 /// by hand from the sample; these subcommands only read it. Like every
 /// command, they run over the accounts `-a` names, or every one.
 #[derive(Debug, Subcommand)]
 pub enum AccountCommand {
+    #[command(visible_alias = "ls")]
     List(AccountListCommand),
     Check(CheckCommand),
 }
@@ -43,7 +44,7 @@ impl AccountCommand {
     }
 }
 
-/// List the accounts the configuration declares.
+/// List all accounts declared in the configuration.
 ///
 /// One line per account, sorted by name: the backend tables it writes (its
 /// sources' and targets', `smtp` for a send channel), those this build

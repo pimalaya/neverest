@@ -149,6 +149,9 @@ pub struct SyncOutput {
     /// the run stopped before they settled, so it is incomplete (exit 4)
     /// and a rerun goes on.
     pub unsettled: Vec<String>,
+    /// Whether a termination signal stopped the run before it reconciled
+    /// everything: it is incomplete (exit 4) and a rerun goes on.
+    pub interrupted: bool,
     /// The listings that found most of what a collection held gone, or that
     /// named no member while the collection held some, and so dropped
     /// nothing (pimdir SYNC §5, §8; counted as warnings).
@@ -232,6 +235,7 @@ impl SyncOutput {
             waiting,
             disagreed,
             unlisted,
+            interrupted,
             index: _,
         } = other;
 
@@ -257,6 +261,7 @@ impl SyncOutput {
         self.waiting.extend(waiting);
         self.disagreed.extend(disagreed);
         self.unlisted.extend(unlisted);
+        self.interrupted |= interrupted;
     }
 
     /// Names every endpoint as the account's configuration does, rather than
@@ -342,7 +347,8 @@ impl SyncOutput {
     /// nothing to do never carrying an error. A send channel that did not
     /// open is named in `unreached` alone, having no collection to scan.
     pub fn incomplete(&self) -> bool {
-        !self.throttled.is_empty()
+        self.interrupted
+            || !self.throttled.is_empty()
             || !self.unanswered.is_empty()
             || !self.unreached.is_empty()
             || !self.unsettled.is_empty()
@@ -1345,6 +1351,14 @@ impl fmt::Display for SyncOutput {
                 f,
                 "Conflicts: {n} item(s) waiting for a decision",
                 n = self.outstanding_conflicts,
+            )?;
+            writeln!(f)?;
+        }
+
+        if self.interrupted {
+            writeln!(
+                f,
+                "Interrupted: a signal stopped the run, rerun it to go on"
             )?;
             writeln!(f)?;
         }

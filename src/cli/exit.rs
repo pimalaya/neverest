@@ -464,4 +464,17 @@ mod tests {
             "disk full"
         );
     }
+
+    /// A run a termination signal stopped did not see everything: it
+    /// exits 4, as any incomplete run, and says so.
+    #[test]
+    fn an_interrupted_run_is_incomplete() {
+        let report = SyncOutput {
+            interrupted: true,
+            ..Default::default()
+        };
+
+        assert_eq!(Exit::from(&report), Exit::Incomplete);
+        assert!(report.to_string().contains("Interrupted"), "{report}");
+    }
 }

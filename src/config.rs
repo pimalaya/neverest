@@ -14,6 +14,7 @@ use io_sasl::{
     rfc7628::oauthbearer::SaslOauthbearerCreds, xoauth2::SaslXoauth2Creds,
 };
 use log::warn;
+use pimalaya_cli::error::CodedError;
 use pimalaya_config::{
     command::CommandConfig,
     secret::{Secret, SecretResolver},
@@ -23,6 +24,8 @@ use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider, TlsServer};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use url::Url;
+
+use crate::error::ErrorCode;
 
 /// How to get a configuration, for the errors meeting none.
 pub const NO_CONFIG_HINT: &str = "write one by hand: \
@@ -185,10 +188,11 @@ impl Config {
         }
 
         if let Some(unknown) = names.iter().find(|name| !self.accounts.contains_key(*name)) {
-            bail!(
+            let message = format!(
                 "Cannot find account {unknown}, the configuration declares {}",
                 join(&configured),
             );
+            return Err(CodedError::new(ErrorCode::AccountMissing, message).into());
         }
 
         if let Some(name) = configured.iter().find(|name| name.contains('/')) {
@@ -1083,6 +1087,15 @@ impl SourceBackendConfig {
             Self::MsgraphCalendar(_) => "msgraph-calendar",
             Self::Gpeople(_) => "gpeople",
             Self::Gcal(_) => "gcal",
+        }
+    }
+
+    /// The cargo feature that builds this backend.
+    pub fn feature(&self) -> &'static str {
+        match self {
+            Self::Carddav(_) | Self::Caldav(_) => "dav",
+            Self::Msgraph(_) | Self::MsgraphContacts(_) | Self::MsgraphCalendar(_) => "msgraph",
+            backend => backend.protocol(),
         }
     }
 }

@@ -299,8 +299,25 @@ impl SyncCommand {
         let json = printer.lock().unwrap().is_json();
         let total = order.len();
 
+        // NOTE: from here a first SIGINT or SIGTERM stops the run between
+        // collections and accounts, which then prints what it did.
+        crate::sync::install_shutdown()?;
+
         for (dir, accounts) in runnable {
+            if crate::sync::stopping() {
+                for (name, _) in accounts {
+                    outcomes.push(failed(name, anyhow!("Interrupted before the account ran")));
+                }
+                continue;
+            }
+
             for (name, account_config, drained) in self.ready(&dir, accounts, &mut outcomes)? {
+                if crate::sync::stopping() {
+                    let err = anyhow!("Interrupted before the account ran");
+                    outcomes.push(failed(name, err));
+                    continue;
+                }
+
                 let sink = |mut event: SyncEvent| {
                     event.name_endpoints(&name);
                     if let Err(err) = printer.lock().unwrap().event(event) {
@@ -321,7 +338,10 @@ impl SyncCommand {
 
                 let outcome = self.run_account(&name, &account_config, drained, progress);
                 outcomes.push(match outcome {
-                    Ok(report) => ran(name, report),
+                    Ok(mut report) => {
+                        report.interrupted = crate::sync::stopping();
+                        ran(name, report)
+                    }
                     Err(err) => {
                         warn!("account {name} sync error: {err:#}");
                         failed(name, err)

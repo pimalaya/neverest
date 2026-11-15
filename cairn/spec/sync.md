@@ -236,7 +236,7 @@ Backends sharing one adapter and one dependency SHALL share one feature rather t
 
 All of them SHALL ship in the default feature set, `msgraph` included again: it was held out under `msgraph-waits-for-its-domains` because a Graph account meant mail and nothing said so, and declaring the domain is what lifts that.
 
-A missing backend SHALL surface at runtime, never at build time: every feature combination compiles, the configuration surface stays whole (every source config still parses), and an unavailable backend fails when the source is *opened*, as the JMAP source already does. A build with neither `smtp` nor `msgraph` has no send channel and SHALL warn rather than perform a submit intent. Each optional backend crate SHALL take its TLS provider from neverest's own `native-tls` / `rustls-aws` / `rustls-ring` / `vendored` features rather than pinning one.
+A missing backend SHALL surface at runtime, never at build time: every feature combination compiles, the configuration surface stays whole (every source config still parses), and an unavailable backend fails when the source is *opened*, coded `backend-not-built` and naming the cargo feature that builds it; a JMAP source, which no feature opens yet, fails saying so. A build with neither `smtp` nor `msgraph` has no send channel and SHALL warn rather than perform a submit intent. Each optional backend crate SHALL take its TLS provider from neverest's own `native-tls` / `rustls-aws` / `rustls-ring` / `vendored` features rather than pinning one.
 
 ### Requirement: A backend owns its ALPN default
 The `alpn` field of a source or channel config that has a backend crate SHALL be optional, and unset SHALL mean that crate's own default (io-imap's `["imap"]`, io-smtp's `["smtp"]`), resolved where the connection is opened. An explicit `[]` SHALL skip ALPN. Neverest SHALL NOT restate a backend's default in the config schema, so the default lives in exactly one place.
@@ -1109,7 +1109,7 @@ Every such output type SHALL be registered in the schema registry under its invo
 - THEN the schema of the JSON failure object is printed, its `$id` being `https://pimalaya.org/schemas/neverest/v0.3/neverest-error.json`
 
 ### Requirement: A sync prints its progress as events
-Under `--json`, `neverest sync` SHALL print its progress as events before its result, one line each, each an object carrying `event`: `account-started` (`account`, `position`, `total`) before each account the run covers, the events after it being that account's; `opened` (`endpoint`) once an endpoint's first connection is open, `listed` (`endpoint`, `collections`) once it listed its collections; for a pair, `collection-started` (`source`, `target`, `collection`, `position`, `total`), `collection-progressed` (`source`, `target`, `collection`, `done`, `total`) and `collection-finished` (`source`, `target`, `collection`, `error`, `null` unless the collection stopped short); for a source with no target, `scan-progressed` and `download-progressed` (`source`, `done`, `total`), each printed as its phase starts. An endpoint SHALL be named as its account names it. A progress count SHALL be printed at most once per percent of its total, a new count of a collection's next phase starting again. Events SHALL report progress only: everything the run did or left SHALL stay in the result, the last line. The events SHALL be registered as `neverest-sync.events`.
+Under `--json`, `neverest sync` SHALL print its progress as events before its result, one line each, each an object carrying `event`: `account-started` (`account`, `position`, `total`) before each account the run covers, the events after it being that account's; `opened` (`endpoint`) once an endpoint's first connection is open, `listed` (`endpoint`, `collections`) once it listed its collections; for a pair, `collection-started` (`source`, `target`, `collection`, `position`, `total`), `collection-progressed` (`source`, `target`, `collection`, `done`, `total`) and `collection-finished` (`source`, `target`, `collection`, then `code`, `error` and `sources` as an item error carries them, `code` and `error` `null` and `sources` `[]` unless the collection stopped short); for a source with no target, `scan-progressed` and `download-progressed` (`source`, `done`, `total`), each printed as its phase starts. An endpoint SHALL be named as its account names it. A progress count SHALL be printed at most once per percent of its total, a new count of a collection's next phase starting again. Events SHALL report progress only: everything the run did or left SHALL stay in the result, the last line. The events SHALL be registered as `neverest-sync.events`.
 
 Text mode SHALL print no event, the spinner on stderr being their text form; under `--json` no spinner SHALL be drawn.
 
@@ -1122,6 +1122,14 @@ Text mode SHALL print no event, the spinner on stderr being their text form; und
 - GIVEN a sync piped to a script
 - WHEN the run succeeds
 - THEN the last line is the result, listing each account's report, without an `event` key, and every line before it carries one
+
+### Requirement: A signal stops a sync cleanly
+`neverest sync` SHALL install pimalaya-cli's `signal::Shutdown` once its stores are locked. On a first SIGINT or SIGTERM the run SHALL start no new account, collection, spine or body batch, let what is in flight finish, and print its result: an account it did not reach as failed with "Interrupted before the account ran", an account it stopped in with its report marked `interrupted`. An interrupted report is incomplete, so the run exits 4. A second signal ends the process with 130.
+
+#### Scenario: Ctrl-C during a long download
+- GIVEN a sync downloading the bodies of a large mailbox
+- WHEN the person presses Ctrl-C
+- THEN the batches in flight land, no other starts, the result prints with `interrupted` true, and the exit code is 4
 
 ### Requirement: A check opens the send channel too
 `neverest check` SHALL open the SMTP channel an endpoint declares, upgrade it and authenticate, then quit without sending. Each endpoint's row SHALL carry the channel's own check row as `smtp`, `{backend: "smtp", ok, code, error}`, `null` when the endpoint declares no channel, when its credentials did not resolve, or in a build without SMTP. A channel that does not open SHALL fail its row and make the check exit 3, the other endpoints still checked.
@@ -1994,7 +2002,7 @@ neverest.json, under the store's local/, SHALL record the collection-id layout o
 - **THEN** that run is refused naming `--accept-mode`, and the one-way account still syncs
 
 ### Requirement: `-a` filters the accounts a command runs over
-`-a/--account` SHALL be repeatable and SHALL filter the configured accounts. Without it, `sync`, `check`, `drain` and `init` SHALL run over every configured account, store by store and in name order within a store, one after the other inside one run holding each store's lock once; with it, over the named ones. The configuration is merged into a sorted table before neverest reads it, so name order is the only order it can keep. A name the configuration does not declare SHALL fail the command before anything runs, naming the configured accounts, and so SHALL an account whose configuration does not validate, the configuration being one document.
+`-a/--account` SHALL be repeatable and SHALL filter the configured accounts. Without it, `sync`, `check`, `drain` and `init` SHALL run over every configured account, store by store and in name order within a store, one after the other inside one run holding each store's lock once; with it, over the named ones. The configuration is merged into a sorted table before neverest reads it, so name order is the only order it can keep. A name the configuration does not declare SHALL fail the command before anything runs, naming the configured accounts, coded `account-missing` (`default` among them, a name like any other: neverest has no default account), and so SHALL an account whose configuration does not validate, the configuration being one document.
 
 Each account's failure SHALL be its own: the run SHALL go on with the next account and SHALL end with one result listing every account's outcome, a failed one carrying its error and its `code`. The command SHALL exit 0 when every account succeeded, otherwise with the partial-outcome code its own outcomes give (3 for a sync that left work waiting for a person), a failed or a busy account making it 4, the code of a run that could not do all its work. A failure common to the run (no configuration, a store refused as a whole) SHALL fail the command with the failure object, exit 1.
 
@@ -2082,7 +2090,7 @@ A `submit`, `calendar-reply`, `calendar-cancel`, `collection-create`, `collectio
 - **THEN** nothing is sent, the row reads pending with no attempt, and the report names no failed send
 
 ### Requirement: A server's refusal carries its code
-A failure a server refused SHALL carry a code of the vocabulary Himalaya shares, read from the typed error of the protocol that answered it, wherever a row or an account reports it:
+A failure a server refused SHALL carry a code of the vocabulary Himalaya shares, read from the typed error of the protocol that answered it, wherever a row or an account reports it, the failure object a failed command prints included, through pimalaya-cli's `with_code`:
 
 | Code | When |
 |---|---|

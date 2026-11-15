@@ -26,6 +26,10 @@ Upgrading from 0.3.0:
 
 ### Added
 
+- Added a clean stop on SIGINT and SIGTERM to `sync`: the run starts no new account, collection or body batch, lets what is in flight land, prints its result with `interrupted` set on the account it stopped in, and exits 4. A second signal ends it at once (130).
+- Added `backend-not-built`: a source whose backend this build leaves out still loads, and opening it fails with that code, naming the cargo feature to rebuild with.
+- Added `account-missing`, the code of a name `-a` gives that no account has.
+- Added the code of a server refusal under a failed command to its failure object, which only rows and accounts carried (pimalaya-cli `with_code`).
 - Added `drain`: applies what frontends queued in the store without reading a credential or opening an endpoint, so a queued create gets its id at once, offline included.
 
   A store a sync holds answers `busy`, exit 4.
@@ -130,7 +134,7 @@ Upgrading from 0.3.0:
 
 - Added `neverest-error`, the JSON Schema of the failure object.
 
-- **BREAKING**: added progress events to `sync --json`, one line each before the report, carrying `event`: `opened`, `listed`, `collection-started`, `collection-progressed`, `collection-finished`, `scan-progressed` and `download-progressed`, described by `neverest json-schema neverest-sync.events`.
+- **BREAKING**: added progress events to `sync --json`, one line each before the report, carrying `event`: `opened`, `listed`, `collection-started`, `collection-progressed`, `collection-finished`, `scan-progressed` and `download-progressed`, described by `neverest json-schema neverest-sync.events`. A collection that stopped short names its failure in `collection-finished` as an item error does: `code`, `error` (the outermost message) and `sources`.
 
   A count prints at most once per percent. Text mode keeps the spinner, and `--json` no longer draws it.
 

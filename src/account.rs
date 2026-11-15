@@ -30,7 +30,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 #[cfg(any(feature = "imap", feature = "smtp"))]
 use io_sasl::mechanism::Sasl;
-use pimalaya_cli::spinner::Spinner;
+use pimalaya_cli::{error::CodedError, spinner::Spinner};
 use pimalaya_config::secret::SecretResolver;
 #[cfg(any(
     feature = "imap",
@@ -59,6 +59,7 @@ use crate::config::server_url;
 use crate::config::{AccountConfig, SourceBackendConfig, SourceConfig};
 #[cfg(feature = "dav")]
 use crate::dav::client::DavKind;
+use crate::error::{ErrorCode, Failure};
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::{GraphKind, SizeHints};
 use crate::throttle::Throttle;
@@ -74,7 +75,7 @@ pub struct Account {
     /// A failure is kept as its rendered message: an endpoint is read once
     /// per source syncing against it, and an error carrying a cause chain
     /// cannot be handed out twice.
-    endpoints: HashMap<String, Result<SourceAccount, String>>,
+    endpoints: HashMap<String, Result<SourceAccount, Failure>>,
 }
 
 impl Account {
@@ -98,7 +99,7 @@ impl Account {
             .into_iter()
             .map(|(name, config)| {
                 let resolved = SourceAccount::resolve_with(&name, &config, &mut resolver, max_wait)
-                    .map_err(|err| format!("{err:#}"));
+                    .map_err(|err| Failure::of(&err));
                 (name, resolved)
             })
             .collect();
@@ -115,7 +116,7 @@ impl Account {
     pub fn get(&self, name: &str) -> Result<SourceAccount> {
         match self.endpoints.get(name) {
             Some(Ok(account)) => Ok(account.clone()),
-            Some(Err(err)) => bail!("{err}"),
+            Some(Err(failure)) => Err(failure.to_error()),
             None => bail!("This account declares no endpoint named {name}"),
         }
     }
@@ -348,12 +349,23 @@ impl SourceAccountBackend {
                     run: Arc::new(crate::gmail::run::GmailRun::new(settings)),
                 }))
             }
+            SourceBackendConfig::Jmap(_) => {
+                bail!("A JMAP source parses but cannot be opened yet")
+            }
             #[allow(unreachable_patterns)]
-            _ => bail!(
-                "This side's backend is not available in this build (rebuild with the matching cargo feature; only the imap, msgraph, dav, gpeople, gcal and gmail backends exist for now)"
-            ),
+            config => Err(backend_not_built(config.feature())),
         }
     }
+}
+
+/// The failure of a source whose backend this build leaves out, coded
+/// `backend-not-built` and naming the cargo feature: its table loads, so
+/// one file serves every build.
+fn backend_not_built(feature: &str) -> anyhow::Error {
+    let message = format!(
+        "This build leaves out the `{feature}` backend, rebuild with `--features {feature}`"
+    );
+    CodedError::new(ErrorCode::BackendNotBuilt, message).into()
 }
 
 /// A resolved IMAP endpoint: the arguments of an IMAP session open.
@@ -534,5 +546,27 @@ mod tests {
         for source in ["imap", "caldav"] {
             assert_eq!(account.get(source).unwrap().throttle.max_wait(), wait);
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "gcal")))]
+mod build_tests {
+    use pimalaya_cli::error::code_of;
+
+    use super::Account;
+    use crate::{config::AccountConfig, error::ErrorCode};
+
+    /// A source of a backend the build leaves out loads, and opening it
+    /// fails coded `backend-not-built`, naming the cargo feature.
+    #[test]
+    fn a_backend_left_out_of_the_build_names_its_feature() {
+        let config: AccountConfig = toml::from_str("gcal.auth.token.raw = \"token\"").unwrap();
+
+        let Err(err) = Account::resolve(&config).unwrap().get("gcal") else {
+            panic!("a gcal source opened in a build without gcal");
+        };
+
+        assert_eq!(code_of(&err), Some(ErrorCode::BackendNotBuilt));
+        assert!(format!("{err:#}").contains("--features gcal"), "{err:#}");
     }
 }

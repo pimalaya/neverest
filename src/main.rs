@@ -149,6 +149,8 @@ fn main() -> ExitCode {
 
     // NOTE: the outcome that is neither success nor failure comes back here
     // rather than exiting inside a subcommand, so one place decides it.
+    // NOTE: a server refusal under the failure reaches its code.
+    let result = result.map_err(error::coded);
     ErrorReport::<ErrorCode>::eval_coded(&mut printer, result).into()
 }
 

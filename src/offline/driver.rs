@@ -74,7 +74,7 @@ use crate::{
         AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceBackendConfig,
         SourceConfig, SourcePermissions,
     },
-    error::{Failure, layout_error, pimdir_error},
+    error::{Failure, chain, layout_error, pimdir_error},
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId, merge::Merged},
     offline::{
@@ -1296,6 +1296,10 @@ fn run_pair(
 
     let total = common.len();
     for (index, name) in common.iter().enumerate() {
+        if crate::sync::stopping() {
+            break;
+        }
+
         let collection = &hub_id(namespace, name);
         let label = format!("[{}/{total}] Syncing {name}", index + 1);
         let s = progress.start(label.clone());
@@ -1306,11 +1310,16 @@ fn run_pair(
             position: index + 1,
             total,
         });
-        let finished = |error: Option<String>| SyncEvent::CollectionFinished {
-            source: left_name.clone(),
-            target: right_name.clone(),
-            collection: name.clone(),
-            error,
+        let finished = |failure: Option<Failure>| {
+            let (code, error, sources) = Failure::row(failure);
+            SyncEvent::CollectionFinished {
+                source: left_name.clone(),
+                target: right_name.clone(),
+                collection: name.clone(),
+                code,
+                error,
+                sources,
+            }
         };
         let ticks = CollectionProgress {
             step: &s,
@@ -1338,7 +1347,7 @@ fn run_pair(
         ) {
             warn!("{name} sync error: {err:#}");
             s.success(format!("{name}: error ({err:#})"));
-            progress.emit(|| finished(Some(format!("{err:#}"))));
+            progress.emit(|| finished(Some(Failure::of(&err))));
             continue;
         }
 
@@ -1356,7 +1365,7 @@ fn run_pair(
             )
         {
             warn!("{name} full hydration error: {err:#}");
-            error = Some(format!("{err:#}"));
+            error = Some(Failure::of(&err));
         }
         // NOTE: a body the full hydration fetched may settle a divergence by
         // a side's policy (pimdir SYNC §6), after the collection itemized
@@ -1365,7 +1374,10 @@ fn run_pair(
         itemize_noted(&mut right, report);
 
         match &error {
-            Some(err) => s.success(format!("{name}: error ({err})")),
+            Some(err) => s.success(format!(
+                "{name}: error ({})",
+                chain(&err.error, &err.sources)
+            )),
             None => s.success(format!("{name}: done")),
         }
         progress.emit(|| finished(error));
@@ -2435,6 +2447,11 @@ impl Work {
     /// The next job, waiting while one may still come; `None` once every
     /// spine and primed download has ended and nothing is queued.
     fn next(&self) -> Option<Job> {
+        // NOTE: a stopping run starts no new spine nor batch.
+        if crate::sync::stopping() {
+            return None;
+        }
+
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         loop {
             if let Some(batch) = self.take(&mut state.primed) {
@@ -3216,7 +3233,7 @@ fn hydrate_pool<W: Send>(
     thread::scope(|scope| {
         for worker in workers.iter_mut() {
             scope.spawn(move || {
-                while !stop_ref.load(Ordering::Relaxed) {
+                while !stop_ref.load(Ordering::Relaxed) && !crate::sync::stopping() {
                     let Some(batch) = queue_ref.pop() else {
                         break;
                     };

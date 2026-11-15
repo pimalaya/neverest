@@ -33,7 +33,7 @@
 
 use anyhow::Error;
 use io_pimdir::client::PimdirError;
-use pimalaya_cli::error::{CodedError, code_of};
+use pimalaya_cli::error::{CodedError, code_of, with_code};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -125,6 +125,11 @@ pub enum ErrorCode {
     /// neverest's (pimdir SEARCH §2), left as it is: one of its shape at an
     /// earlier version is rebuilt instead.
     IndexVersion,
+    /// No account has a name `-a` gives.
+    AccountMissing,
+    /// A source's backend is one this build leaves out: rebuild with the
+    /// cargo feature the message names.
+    BackendNotBuilt,
 }
 
 /// The store codes neverest relays, by io-pimdir's spelling, which
@@ -199,6 +204,25 @@ impl Failure {
         }
     }
 
+    /// The error this failure was read from, its messages and code kept,
+    /// the code carried by the innermost message.
+    pub fn to_error(&self) -> Error {
+        let mut messages: Vec<&str> = Some(self.error.as_str())
+            .into_iter()
+            .chain(self.sources.iter().map(String::as_str))
+            .collect();
+        let innermost = messages.pop().unwrap_or_default().to_owned();
+        let err = match self.code {
+            Some(code) => Error::new(CodedError::new(code, innermost)),
+            None => Error::msg(innermost),
+        };
+
+        messages
+            .into_iter()
+            .rev()
+            .fold(err, |err, message| err.context(message.to_owned()))
+    }
+
     /// A failure neverest states in its own words, with no code and no
     /// cause.
     pub fn new(error: impl Into<String>) -> Self {
@@ -249,6 +273,13 @@ pub fn chain(error: &str, sources: &[String]) -> String {
 /// the server refusal's under it.
 pub fn code(err: &Error) -> Option<ErrorCode> {
     code_of(err).or_else(|| refusal_code(err))
+}
+
+/// `err` as the report reads it: the server refusal's code under it
+/// carried by an innermost coded error, its messages kept (see
+/// [`with_code`]).
+pub fn coded(err: Error) -> Error {
+    with_code(err, refusal_code)
 }
 
 /// A reader of one protocol's typed errors, coding the refusals it knows.

@@ -15,6 +15,8 @@ use std::fmt;
 use schemars::JsonSchema;
 use serde::Serialize;
 
+use crate::error::{ErrorCode, chain};
+
 /// One step of a sync run, as soon as the run observes it.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(
@@ -82,8 +84,14 @@ pub enum SyncEvent {
         target: String,
         /// The collection name.
         collection: String,
-        /// Why the collection stopped short, `null` when it did not.
+        /// The stable code of why the collection stopped short, `null`
+        /// when it did not or no caller is expected to act on it.
+        code: Option<ErrorCode>,
+        /// Why the collection stopped short, the outermost message, `null`
+        /// when it did not.
         error: Option<String>,
+        /// The messages of its causes, outermost first.
+        sources: Vec<String>,
     },
     /// A source with no target listed `done` of its `total` collections
     /// into the store. Printed as the scan starts, then once per collection.
@@ -164,8 +172,9 @@ impl fmt::Display for SyncEvent {
             Self::CollectionFinished {
                 collection,
                 error: Some(error),
+                sources,
                 ..
-            } => writeln!(f, "{collection}: error ({error})"),
+            } => writeln!(f, "{collection}: error ({})", chain(error, sources)),
             Self::ScanProgressed {
                 source,
                 done,
@@ -177,5 +186,49 @@ impl fmt::Display for SyncEvent {
                 total,
             } => writeln!(f, "Downloading {source} ({done}/{total})"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::anyhow;
+    use serde_json::json;
+
+    use crate::{
+        error::{ErrorCode, Failure},
+        sync::event::SyncEvent,
+    };
+
+    /// A collection that stopped short names its failure as an item error
+    /// does, code and causes apart, so a caller acts on the code.
+    #[test]
+    fn a_collection_stopped_short_carries_its_code_and_causes() {
+        let err = anyhow!("403 Forbidden").context("Cannot list INBOX");
+        let Failure { error, sources, .. } = Failure::of(&err);
+        let event = SyncEvent::CollectionFinished {
+            source: "imap".into(),
+            target: "store".into(),
+            collection: "INBOX".into(),
+            code: Some(ErrorCode::PermissionDenied),
+            error: Some(error),
+            sources,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            json!({
+                "event": "collection-finished",
+                "source": "imap",
+                "target": "store",
+                "collection": "INBOX",
+                "code": "permission-denied",
+                "error": "Cannot list INBOX",
+                "sources": ["403 Forbidden"],
+            }),
+        );
+        assert_eq!(
+            event.to_string(),
+            "INBOX: error (Cannot list INBOX: 403 Forbidden)\n"
+        );
     }
 }

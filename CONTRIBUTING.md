@@ -50,3 +50,5 @@ cargo test --test carddav -- --ignored --test-threads=1
 `tests/pimdir.sh` installs the `pimdir` CLI some suites read the store with, built from the io-pimdir commit Cargo.lock locks, under target/pimdir/. Under a rootless Docker, which binds no port under 1024, start the servers with `./tests/pasta.sh servers` and run each suite as `./tests/pasta.sh cargo test …`: pasta (from passt) forwards the ports the suites name to the shifted ones.
 
 They exist because the unit tests drive a scripted remote: the SMTP dialogue, the ETag plumbing, the conflict path and the duplicate freeze are only proven end to end here.
+
+In CI, the offline jobs run on every push. The suites against the real Google and Microsoft accounts (tests/google.rs, tests/msgraph.rs) never run on push: they run weekly (Mondays, 05:00 UTC) and by hand with `gh workflow run tests.yml`. A release runs them by hand on the commit to tag. Each Google calendar test works in its own long-lived calendar, `pimalaya-live-neverest-<purpose>`, created when absent, emptied at the start and end of a run, and never deleted.

@@ -3,6 +3,10 @@ name: Tests
 on:
   push:
   workflow_dispatch:
+  # The suites against real accounts (google, microsoft) run weekly and by
+  # hand, never on push: a push storm burns their quotas.
+  schedule:
+    - cron: "0 5 * * 1"
 
 jobs:
   tests:
@@ -10,10 +14,10 @@ jobs:
     secrets: inherit
 
   live:
-    # Only in this repository: a fork holds no secret, and the job would fail on
-    # every contributor's push for want of one. One job per provider, so one
+    # Only in this repository, weekly or by hand: a fork holds no secret, and
+    # the job would fail there for want of one. One job per provider, so one
     # provider failing (a quota) leaves the other's tests running.
-    if: github.repository == 'pimalaya/neverest'
+    if: github.repository == 'pimalaya/neverest' && (github.event_name == 'workflow_dispatch' || github.event_name == 'schedule')
     strategy:
       fail-fast: false
       matrix:

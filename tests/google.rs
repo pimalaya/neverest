@@ -3,12 +3,16 @@
 //!
 //! The protocol crates are tested live on their own and the sync on local
 //! servers, so these prove the adapters in between: each runs two replicas
-//! of one account against one throwaway collection (see tests/common), one
-//! pushing what the other pulls through its delta round.
+//! of one account against one collection (see tests/common), one pushing
+//! what the other pulls through its delta round.
 //!
-//! Every resource a run creates is named `neverest-live-<millis>` and deleted
-//! however the run ends. Run with a service account key holding domain-wide
-//! delegation for the scopes below:
+//! Every label, message, card and event a run creates is named
+//! `neverest-live-<millis>` and deleted however the run ends. A calendar
+//! test works in its own long-lived calendar,
+//! `pimalaya-live-neverest-<purpose>`, created when absent and never
+//! deleted, since Google caps the calendars a user may create a day. Run
+//! with a service account key holding domain-wide delegation for the scopes
+//! below:
 //!
 //! ```sh
 //! GOOGLE_SERVICE_ACCOUNT_KEY_FILE=key.json \
@@ -45,7 +49,7 @@ const GMAIL_SCOPES: &[&str] = &["https://mail.google.com/"];
 #[cfg(feature = "gpeople")]
 const CONTACTS_SCOPES: &[&str] = &["https://www.googleapis.com/auth/contacts"];
 /// The events and the calendar list the gcal source reads, as the Android
-/// app asks them, plus the throwaway calendars the tests create and delete.
+/// app asks them, plus the calendars the tests create when absent.
 #[cfg(feature = "gcal")]
 const CALENDAR_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/calendar.events",
@@ -307,32 +311,98 @@ fn google_contacts_sync_both_ways() {
     );
 }
 
-/// An event crosses both ways through a throwaway calendar.
+/// An event crosses both ways through the test's own calendar.
 #[test]
 #[ignore = "live: needs a Google service account key"]
 #[cfg(feature = "gcal")]
 fn a_google_calendar_syncs_both_ways() {
     let token = google_token(CALENDAR_SCOPES);
-    let connect =
-        || GcalClientStd::connect(&token, GcalClientStdConnectOptions::default()).unwrap();
-    let calendar = connect()
+    let calendar = google_calendar(&token, "sync");
+    clear_google_calendar(&token, &calendar);
+
+    with_cleanup(
+        || round_trip("gcal", "", &token, &calendar, event),
+        || clear_google_calendar(&token, &calendar),
+    );
+}
+
+/// The id of the long-lived calendar `pimalaya-live-neverest-<purpose>`,
+/// created when the calendar list holds none, never deleted.
+#[cfg(feature = "gcal")]
+fn google_calendar(token: &str, purpose: &str) -> String {
+    use io_gcal::v3::rest::calendar_list::list::GcalCalendarListListParams;
+
+    let summary = format!("pimalaya-live-neverest-{purpose}");
+    let mut client = GcalClientStd::connect(token, GcalClientStdConnectOptions::default())
+        .expect("connect to Calendar");
+
+    let mut page = None;
+    loop {
+        let params = GcalCalendarListListParams {
+            page_token: page.as_deref(),
+            ..Default::default()
+        };
+        let list = client
+            .calendar_list_list(&params)
+            .expect("list the calendars")
+            .response;
+        let found = list
+            .items
+            .into_iter()
+            .find(|entry| entry.summary.as_deref() == Some(summary.as_str()));
+        if let Some(id) = found.and_then(|entry| entry.id) {
+            return id;
+        }
+        match list.next_page_token {
+            Some(token) => page = Some(token),
+            None => break,
+        }
+    }
+
+    client
         .calendar_insert(&GcalCalendar {
-            summary: Some(tag()),
+            summary: Some(summary),
             ..Default::default()
         })
         .expect("create the calendar")
         .response
         .id
-        .expect("the calendar has an id");
+        .expect("the calendar has an id")
+}
 
-    with_cleanup(
-        || round_trip("gcal", "", &token, &calendar, event),
-        || {
-            if let Err(err) = connect().calendar_delete(&calendar) {
-                eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
-            }
-        },
-    );
+/// Deletes every event of the test's own `calendar`, the leftovers of an
+/// earlier run at the start, the run's own at the end.
+#[cfg(feature = "gcal")]
+fn clear_google_calendar(token: &str, calendar: &str) {
+    use io_gcal::v3::rest::events::{GcalSendUpdates, list::GcalEventsListParams};
+
+    let mut client = GcalClientStd::connect(token, GcalClientStdConnectOptions::default())
+        .expect("connect to Calendar");
+
+    let mut ids = Vec::new();
+    let mut page = None;
+    loop {
+        let params = GcalEventsListParams {
+            page_token: page.as_deref(),
+            ..Default::default()
+        };
+        let events = client
+            .events_list(calendar, &params)
+            .expect("list the calendar's events")
+            .response;
+        ids.extend(events.items.into_iter().filter_map(|event| event.id));
+        match events.next_page_token {
+            Some(token) => page = Some(token),
+            None => break,
+        }
+    }
+
+    for id in ids {
+        let none = Some(GcalSendUpdates::None);
+        if let Err(err) = client.event_delete(calendar, &id, none, None) {
+            eprintln!("WARNING: leftover event {id} in {calendar}: {err:?}");
+        }
+    }
 }
 
 /// The Workspace user the invitations go to: the delegated subject itself,
@@ -364,26 +434,20 @@ fn meeting(uid: &str, marker: &str, organizer: &str, attendee: &str) -> String {
     )
 }
 
-/// A throwaway calendar, deleted with every copy of the run's events
-/// however the run ends.
+/// The test's own calendar for `purpose`, emptied before the run, then
+/// emptied with every copy of the run's events however the run ends.
 #[cfg(feature = "gcal")]
-fn with_google_calendar(token: &str, uid: &str, body: impl FnOnce(&str)) {
+fn with_google_calendar(token: &str, purpose: &str, uid: &str, body: impl FnOnce(&str)) {
     use io_gcal::v3::rest::events::list::GcalEventsListParams;
 
     let connect = || GcalClientStd::connect(token, GcalClientStdConnectOptions::default()).unwrap();
-    let calendar = connect()
-        .calendar_insert(&GcalCalendar {
-            summary: Some(tag()),
-            ..Default::default()
-        })
-        .expect("create the calendar")
-        .response
-        .id
-        .expect("the calendar has an id");
+    let calendar = google_calendar(token, purpose);
+    clear_google_calendar(token, &calendar);
 
     with_cleanup(
         || body(&calendar),
         || {
+            clear_google_calendar(token, &calendar);
             let mut client = connect();
             // NOTE: the invitation's copy on the attendee's own calendar.
             let params = GcalEventsListParams {
@@ -397,9 +461,6 @@ fn with_google_calendar(token: &str, uid: &str, body: impl FnOnce(&str)) {
                         eprintln!("WARNING: leftover invitation {id}: {err:?}");
                     }
                 }
-            }
-            if let Err(err) = client.calendar_delete(&calendar) {
-                eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
             }
             #[cfg(feature = "gmail")]
             delete_mail_about(uid);
@@ -450,7 +511,7 @@ fn a_google_meeting_is_invited_to_and_cancelled() {
     let uid = tag();
     let subject = google_subject();
 
-    with_google_calendar(&token, &uid, |calendar| {
+    with_google_calendar(&token, "meeting", &uid, |calendar| {
         let a = Replica::open("gcal", "", &token);
         a.sync(calendar);
 
@@ -530,7 +591,7 @@ fn a_google_meet_is_created_with_its_event() {
     let uid = tag();
     let subject = google_subject();
 
-    with_google_calendar(&token, &uid, |calendar| {
+    with_google_calendar(&token, "meet", &uid, |calendar| {
         let a = Replica::open("gcal", "", &token);
         a.sync(calendar);
 
@@ -582,9 +643,9 @@ fn a_google_invitation_is_answered() {
     let uid = tag();
     let subject = google_subject();
 
-    with_google_calendar(&token, &uid, |calendar| {
+    with_google_calendar(&token, "invitation", &uid, |calendar| {
         // NOTE: the organizer is the Workspace user and the attendee the
-        // throwaway calendar, so the reply stays in the domain.
+        // test's own calendar, so the reply stays in the domain.
         let invitation = meeting(&uid, "invitation", &subject, calendar);
         let event = GcalEvent::from_ical(invitation.as_bytes()).expect("project the invitation");
         GcalClientStd::connect(&token, GcalClientStdConnectOptions::default())

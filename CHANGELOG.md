@@ -331,6 +331,8 @@ Upgrading from 0.3.0:
 
   A CalDAV or CardDAV multistatus is parsed 3.4 to 9 times faster.
 
+  A card or an event a multiget answers 404 or 410 is answered gone without being read again alone; one it could not read otherwise (a 403, a refused body) is read alone, which says what it is.
+
 - Bumped vcard-rs to 0.6.
 
 ### Removed

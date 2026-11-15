@@ -1295,7 +1295,7 @@ dependencies = [
 [[package]]
 name = "io-webdav"
 version = "0.8.0"
-source = "git+https://github.com/pimalaya/io-webdav?rev=185ab63be5859c5ef6115bef97e4df5cb1187973#185ab63be5859c5ef6115bef97e4df5cb1187973"
+source = "git+https://github.com/pimalaya/io-webdav?rev=777d34eea1b48f7d90635e3e82e1a96a9d57504e#777d34eea1b48f7d90635e3e82e1a96a9d57504e"
 dependencies = [
  "anyhow",
  "io-http",

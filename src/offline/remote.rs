@@ -2303,29 +2303,23 @@ mod hydrate_tests {
         scripted::{answer, reply},
     };
 
-    /// A multiget naming a member 404 and a read of it alone answering 404
-    /// again leaves it gone, owed nothing more in the run: the batch, and
-    /// the collection with it, is not failed for good by a member every
-    /// read finds missing.
-    #[test]
-    fn a_member_missing_from_every_read_is_gone() {
-        let missing = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
-                       <d:multistatus xmlns:d=\"DAV:\"><d:response>\
-                       <d:href>/caldav/v2/alice%40g/tasks/t1.ics</d:href>\
-                       <d:status>HTTP/1.1 404 Not Found</d:status>\
-                       </d:response></d:multistatus>";
-        let (client, wire) = DavClient::scripted(
-            DavKind::Cal,
-            "/caldav/v2/alice%40g/",
-            vec![
-                answer(
-                    "207 Multi-Status",
-                    &[("Content-Type", "application/xml")],
-                    missing,
-                ),
-                reply("404 Not Found", &[]),
-            ],
+    /// A multiget answering one member's row with `status`, then the lone
+    /// reads `lone` answers, over a one-member batch.
+    fn hydrate_one(status: &str, lone: Vec<String>) -> (Hydrated, usize) {
+        let row = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+             <d:multistatus xmlns:d=\"DAV:\"><d:response>\
+             <d:href>/caldav/v2/alice%40g/tasks/t1.ics</d:href>\
+             <d:status>HTTP/1.1 {status}</d:status>\
+             </d:response></d:multistatus>"
         );
+        let mut script = vec![answer(
+            "207 Multi-Status",
+            &[("Content-Type", "application/xml")],
+            &row,
+        )];
+        script.extend(lone);
+        let (client, wire) = DavClient::scripted(DavKind::Cal, "/caldav/v2/alice%40g/", script);
         let mut client = Client::Dav(Box::new(client));
         let dir = tempfile::tempdir().unwrap();
         let blobs = PimdirStore::open(dir.path()).unwrap().blob_stage();
@@ -2342,9 +2336,32 @@ mod hydrate_tests {
         )
         .unwrap();
 
-        assert_eq!(wire.lines().len(), 2, "{:?}", wire.lines());
+        (hydrated, wire.lines().len())
+    }
+
+    /// A multiget answering a member 404 leaves it gone, owed nothing more
+    /// in the run and read no more alone: the batch, and the collection
+    /// with it, is not failed for good by a member the server says is
+    /// missing.
+    #[test]
+    fn a_member_a_multiget_answers_missing_is_gone() {
+        let (hydrated, requests) = hydrate_one("404 Not Found", Vec::new());
+
+        assert_eq!(requests, 1);
         assert!(hydrated.items.is_empty());
-        assert_eq!(hydrated.gone, handles);
+        assert_eq!(hydrated.gone, [PimdirHandle("t1.ics".into())]);
+    }
+
+    /// A member a multiget could not read for another reason is read
+    /// alone, which tells what it is: gone when that read answers 404.
+    #[test]
+    fn a_member_a_multiget_could_not_read_is_read_alone() {
+        let lone = vec![reply("404 Not Found", &[])];
+        let (hydrated, requests) = hydrate_one("403 Forbidden", lone);
+
+        assert_eq!(requests, 2);
+        assert!(hydrated.items.is_empty());
+        assert_eq!(hydrated.gone, [PimdirHandle("t1.ics".into())]);
     }
 }
 

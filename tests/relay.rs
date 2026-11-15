@@ -3,14 +3,14 @@
 //!
 //! Proves the two-source pass-through: a message on server A is relayed to
 //! server B by *streaming* it server-to-server, the pimdir store keeping only the
-//! spine — no body blob at rest. Steps:
+//! spine: no body blob at rest. Steps:
 //!   1. Append a message to server A (via `curl` IMAP).
-//!   2. Sync A ↔ B with `store.retention = "relay"`.
+//!   2. Sync A as a source into B as a target, the store retaining no body.
 //!   3. Assert server B has the message (via `curl` IMAP SEARCH).
 //!   4. Assert the relay account's store kept NO object blob (pure spine).
 //!
 //! Seeding/verifying uses `curl` rather than a local backend, since neverest no
-//! longer has one (m2dir/maildir sides were dropped — it manages remotes only).
+//! longer has one (it syncs remotes only).
 //!
 //! Start the servers and run with:
 //! ```sh

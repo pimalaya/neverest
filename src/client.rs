@@ -809,9 +809,7 @@ impl Client {
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.fetch_bodies(collection, ids, sizes, open, done),
             #[cfg(feature = "dav")]
-            Client::Dav(c) => c
-                .fetch_bodies(collection, ids, open, done)
-                .map(|()| Vec::new()),
+            Client::Dav(c) => c.fetch_bodies(collection, ids, open, done),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => c
                 .fetch_bodies(collection, ids, open, done)

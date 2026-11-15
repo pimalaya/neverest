@@ -555,34 +555,39 @@ impl DavClient {
 
     /// Batch-fetches bodies in one multiget round-trip, routing each into the
     /// sink the caller opens for it.
+    /// Answers the ids the server said are gone.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         collection: &str,
         ids: &[&str],
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         if ids.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let kind = self.kind;
-        let objects: Vec<(String, Option<String>, Vec<u8>)> = match kind {
+        let (objects, unreadable) = match kind {
             DavKind::Card => self
                 .op(|dav| dav.multiget_cards(collection, ids))
-                .map(|cards| {
-                    cards
+                .map(|ok| {
+                    let cards = ok
+                        .cards
                         .into_iter()
                         .map(|card| (card.id, card.etag, card.data))
-                        .collect()
+                        .collect::<Vec<_>>();
+                    (cards, ok.unreadable)
                 }),
             DavKind::Cal => self
                 .op(|dav| dav.multiget_items(collection, ids))
-                .map(|items| {
-                    items
+                .map(|ok| {
+                    let items = ok
+                        .items
                         .into_iter()
                         .map(|item| (item.id, item.etag, item.data))
-                        .collect()
+                        .collect::<Vec<_>>();
+                    (items, ok.unreadable)
                 }),
         }
         .with_context(|| format!("Cannot fetch {kind} bodies from {collection}"))?;
@@ -594,7 +599,21 @@ impl DavClient {
             done(&id, etag.as_deref(), sink)?;
         }
 
-        Ok(())
+        // A row the server answered missing is gone, as a lone read finding
+        // it so; any other unreadable row stays unanswered, for the caller's
+        // lone read to report what it is.
+        let mut gone = Vec::new();
+        for entry in unreadable {
+            match entry.status {
+                Some(404 | 410) => gone.push(entry.id),
+                status => debug!(
+                    "{kind} multiget of {collection} could not read {} (status {status:?})",
+                    entry.href,
+                ),
+            }
+        }
+
+        Ok(gone)
     }
 
     /// Streams one resource's raw bytes, returning the ETag they correspond to.

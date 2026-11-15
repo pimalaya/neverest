@@ -105,17 +105,17 @@ nix run
 
 ## Configuration
 
-A configuration is loaded from the first valid path among:
+A configuration is loaded from every existing path among the following, each one deep-merged on top of the ones before, so $HOME/.neverestrc overrides the others:
 
-- `$XDG_CONFIG_HOME/neverest/config.toml`
-- `$HOME/.config/neverest/config.toml`
-- `$HOME/.neverestrc`
+- $XDG_CONFIG_HOME/neverest/config.toml
+- $HOME/.config/neverest/config.toml
+- $HOME/.neverestrc
 
-Override the path with `-c <PATH>` or `NEVEREST_CONFIG=<PATH>`; multiple paths can be passed at once, separated by `:`. The first one is the base and the rest are deep-merged on top. The full field reference lives in [config.sample.toml](./config.sample.toml).
+Override those paths with `-c <PATH>`. Repeat it to merge several files, such as `-c public.toml -c private.toml`: the first one is the base and the next ones are deep-merged on top. Each `-c` takes one path, never split, and no environment variable is read. The full field reference lives in [config.sample.toml](./config.sample.toml).
 
-Neverest writes no configuration for you: copy [config.sample.toml](./config.sample.toml) to one of the paths above and uncomment what you need. A command finding no configuration file fails naming the path it looked for, and a bare `neverest` prints the help.
+Neverest writes no configuration for you: copy [config.sample.toml](./config.sample.toml) to one of the paths above and uncomment what you need. A command finding no configuration file fails naming the path it looked for and the sample to start from; at a terminal, a bare `neverest` or any command meets a welcome giving the commands that create it. With a configuration, a bare `neverest` prints the help.
 
-Every account shares **one pimdir store**, at `neverest/` under your state directory (`` on Linux, `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows) unless it names its own `store.root`. Each account is fed by one or more named **sources**, each a remote, and it may hold several kinds at once; its collections are grouped under its name, so a frontend reads one account of the store through its own account key (`pimdir.account` in himalaya, calendula and cardamum). What an account does is its arity plus two flags: with no `targets` every source syncs into the local store, the offline replica; with them the source is copied to each target.
+Every account shares **one pimdir store**, at `neverest/` under your state directory ($XDG_STATE_HOME on Linux, `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows) unless it names its own `store.root`. Each account is fed by one or more named **sources**, each a remote, and it may hold several kinds at once; its collections are grouped under its name, so a frontend reads one account of the store through its own account key (`pimdir.account` in himalaya, calendula and cardamum). What an account does is its arity plus two flags: with no `targets` every source syncs into the local store, the offline replica; with them the source is copied to each target.
 
 `one-way` makes the sources authoritative, so the other side's changes are overwritten rather than merged, and `retain` says whether the store keeps bodies or is only the ledger it has to be anyway. Sources never meet, so several cache side by side for a frontend to union at display time.
 

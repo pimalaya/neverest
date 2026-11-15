@@ -181,6 +181,7 @@ impl GraphClient {
         token: &SecretString,
         user: &str,
         tls: Tls,
+        proxy: Proxy,
         sizes: SizeHints,
         throttle: Arc<Throttle>,
     ) -> Result<Self> {
@@ -190,7 +191,7 @@ impl GraphClient {
             let host = url.host_str().context("Graph API base URL has no host")?;
             let opts = TlsConnectOptions {
                 tls: tls.clone(),
-                proxy: Proxy::None,
+                proxy: proxy.clone(),
                 ..Default::default()
             };
             let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;

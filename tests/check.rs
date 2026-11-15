@@ -34,7 +34,7 @@ fn a_caldav_check_names_the_default_calendar_the_scheduling_inbox_states() {
     assert_eq!(defaults.len(), 1, "{report}");
     assert_eq!(defaults[0]["id"], "default", "{report}");
 
-    assert_eq!(support(source, "calendar.item.add"), "full", "{report}");
+    assert_eq!(level(source, "calendar.item.add"), "full", "{report}");
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn a_carddav_check_names_no_default_address_book() {
             .all(|collection| collection["default"] == false),
         "{report}"
     );
-    assert_eq!(support(source, "contacts.card.add"), "full", "{report}");
+    assert_eq!(level(source, "contacts.card.add"), "full", "{report}");
 }
 
 /// Checks a one-source account of `protocol` on `server`, and returns the
@@ -77,14 +77,14 @@ fn check(protocol: &str, server: &str) -> Value {
     checked["accounts"][0].clone()
 }
 
-/// The support a source declares for the capability `name`.
-fn support<'a>(source: &'a Value, name: &str) -> &'a str {
+/// The level a source declares for the capability `name`.
+fn level<'a>(source: &'a Value, name: &str) -> &'a str {
     source["capabilities"]
         .as_array()
         .expect("capabilities")
         .iter()
         .find(|capability| capability["name"] == name)
-        .and_then(|capability| capability["support"].as_str())
+        .and_then(|capability| capability["level"].as_str())
         .unwrap_or_else(|| panic!("no {name} declared: {source}"))
 }
 

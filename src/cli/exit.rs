@@ -160,8 +160,10 @@ mod tests {
         report.parked.push(ParkedQueueAction {
             id: 3,
             collection: String::from("imap/INBOX"),
-            action: String::from("remove"),
+            kind: String::from("remove"),
             producer: String::from("himalaya"),
+            queued_at: String::from("2026-11-15T08:00:00.000Z"),
+            attempts: 1,
             code: None,
             error: String::from("unknown seq 9"),
             sources: Vec::new(),
@@ -200,7 +202,7 @@ mod tests {
         assert_eq!(
             json["submitted"],
             serde_json::json!([{
-                "id": 7,
+                "row": 7,
                 "collection": "imap/Sent",
                 "subject": "hi",
                 "code": null,
@@ -399,7 +401,7 @@ mod tests {
                 "side": null,
                 "collection": "work",
                 "id": null,
-                "action": 7,
+                "row": 7,
                 "kept": "dup:e1@x#e1.ics",
             }])
         );

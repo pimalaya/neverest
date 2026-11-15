@@ -36,7 +36,7 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use io_gcal::v3::{
-    client::{GcalClientStd, GcalClientStdConnectOptions, GcalClientStdError},
+    client::{GcalClientStd, GcalClientStdError},
     rest::{
         calendar_list::list::GcalCalendarListListParams,
         events::{
@@ -51,13 +51,15 @@ use io_gcal::v3::{
 use io_pimdir::summary::calendar;
 use log::{debug, trace, warn};
 use pimalaya_stream::{
+    proxy::Proxy,
     stream::{Stream, TlsConnectOptions},
     tls::Tls,
 };
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use url::Url;
 
 use crate::{
+    account::GoogleAccount,
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
     error::ErrorCode,
     item::{collection::Collection, flag::Flag},
@@ -89,6 +91,8 @@ pub struct GcalClient {
     inner: GcalClientStd,
     /// The TLS configuration, kept for stream reopens.
     tls: Tls,
+    /// The proxy, kept for stream reopens.
+    proxy: Proxy,
     /// Whether the server allowed reusing the stream after the last
     /// exchange; when false the next operation reopens it.
     alive: bool,
@@ -101,14 +105,17 @@ pub struct GcalClient {
 
 impl GcalClient {
     /// Opens the TLS connection to the Calendar API with a bearer token.
-    pub fn connect(token: &SecretString, tls: Tls, throttle: Arc<Throttle>) -> Result<Self> {
-        let options = GcalClientStdConnectOptions { tls: tls.clone() };
-        let inner = GcalClientStd::connect(token.expose_secret(), options)
-            .context("Cannot connect to Google Calendar")?;
+    pub fn connect(account: &GoogleAccount, throttle: Arc<Throttle>) -> Result<Self> {
+        let GoogleAccount { token, tls, proxy } = account;
+        // NOTE: the stream is opened here, io-gcal's own connect taking no
+        // proxy.
+        let stream = open_stream(tls, proxy).context("Cannot connect to Google Calendar")?;
+        let inner = GcalClientStd::new(stream, token.expose_secret());
 
         Ok(Self {
             inner,
-            tls,
+            tls: tls.clone(),
+            proxy: proxy.clone(),
             alive: true,
             throttle,
             owner: None,
@@ -119,17 +126,7 @@ impl GcalClient {
     fn reconnect(&mut self) -> Result<()> {
         debug!("reopening the calendar stream");
 
-        let url = Url::parse(GCAL_API_BASE).context("Cannot parse the Calendar API base URL")?;
-        let host = url
-            .host_str()
-            .context("Calendar API base URL has no host")?;
-        let opts = TlsConnectOptions {
-            tls: self.tls.clone(),
-            ..Default::default()
-        };
-        let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-
+        let stream = open_stream(&self.tls, &self.proxy)?;
         self.inner.set_stream(stream);
         self.alive = true;
         Ok(())
@@ -827,6 +824,21 @@ fn names_occurrence(original: &GcalEventDateTime, recurrence_id: &str) -> bool {
     ];
     stamps.iter().flatten().any(|stamp| stamp == recurrence_id)
 }
+/// Opens a TLS stream to the Calendar endpoint through `proxy`.
+fn open_stream(tls: &Tls, proxy: &Proxy) -> Result<Stream> {
+    let url = Url::parse(GCAL_API_BASE).context("Cannot parse the Calendar API base URL")?;
+    let host = url
+        .host_str()
+        .context("Calendar API base URL has no host")?;
+    let opts = TlsConnectOptions {
+        tls: tls.clone(),
+        proxy: proxy.clone(),
+        ..Default::default()
+    };
+    let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    Ok(stream)
+}
 
 #[cfg(test)]
 mod tests {
@@ -980,6 +992,7 @@ mod tests {
         let mut client = GcalClient {
             inner: GcalClientStd::new(stream, "token"),
             tls: Tls::default(),
+            proxy: Proxy::None,
             alive: true,
             throttle: Arc::new(Throttle::new("gcal")),
             owner: None,
@@ -1013,6 +1026,7 @@ mod tests {
                     "token",
                 ),
                 tls: Tls::default(),
+                proxy: Proxy::None,
                 alive: true,
                 throttle: Arc::new(Throttle::new("gcal")),
                 owner: None,

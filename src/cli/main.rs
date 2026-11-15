@@ -1,22 +1,24 @@
 //! # Parser
 //!
-//! Top-level CLI parser and subcommand dispatcher.
+//! Top-level CLI parser and subcommand dispatcher, and the first-run
+//! welcome a bare invocation or a command meets without a configuration.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 use pimalaya_cli::{
     clap::{
-        args::{JsonFlag, LogFlags},
+        args::{ConfigFlags, JsonFlag, LogFlags},
         commands::{
             completion::CompletionCommand, json_schema::JsonSchemaCommand, manual::ManualCommand,
         },
-        parsers::path_parser,
     },
-    long_version,
+    footer, long_version,
     printer::Printer,
+    welcome::Welcome,
 };
+use pimalaya_config::toml::ConfigMissingError;
 
 #[cfg(feature = "search")]
 use crate::cli::index::IndexCommand;
@@ -25,38 +27,38 @@ use crate::{
         check::CheckCommand, conflict::ConflictCommand, drain::DrainCommand, exit::Exit,
         init::InitCommand, sync::SyncCommand,
     },
+    config::Config,
     json_schema,
 };
+
+/// The sample configuration as a raw file, for `curl` to fetch.
+const SAMPLE_RAW_URL: &str =
+    "https://raw.githubusercontent.com/pimalaya/neverest/master/config.sample.toml";
 
 /// The command line neverest parses, and the flags every subcommand shares.
 #[derive(Parser, Debug)]
 #[command(name = env!("CARGO_PKG_NAME"))]
 #[command(author, version, about)]
 #[command(long_version = long_version!())]
+#[command(after_help = footer!())]
 #[command(propagate_version = true, infer_subcommands = true)]
 pub struct Cli {
-    /// The command to run; a bare `neverest` prints the help.
+    /// The command to run, a bare `neverest` showing this help.
     #[command(subcommand)]
     pub command: Option<Command>,
-    /// Override the default configuration file path.
-    ///
-    /// Paths are shell-expanded then canonicalized; multiple paths may be
-    /// delimited by `:` and are merged left-to-right.
-    #[arg(short, long = "config", global = true, env = "NEVEREST_CONFIG")]
-    #[arg(value_name = "PATH", value_parser = path_parser, value_delimiter = ':')]
-    pub config_paths: Vec<PathBuf>,
+    #[command(flatten)]
+    pub config: ConfigFlags,
     /// The accounts to run over, every configured one when none is named.
     ///
-    /// Repeatable. An account is named by the key of its `[accounts.<name>]`
+    /// Repeatable, unlike the other Pimalaya CLIs: a run covers several
+    /// accounts. An account is named by the key of its `[accounts.<name>]`
     /// table. Every account shares one store unless it names its own
     /// `store.root`.
     #[arg(long = "account", short = 'a', global = true)]
     #[arg(value_name = "NAME", action = ArgAction::Append)]
     pub accounts: Vec<String>,
-    /// Whether to print the command payload as JSON rather than as text.
     #[command(flatten)]
     pub json: JsonFlag,
-    /// How verbose the logs on stderr are.
     #[command(flatten)]
     pub log: LogFlags,
 }
@@ -73,12 +75,10 @@ pub enum Command {
     #[command(arg_required_else_help = true)]
     #[command(alias = "conflicts")]
     Conflict(ConflictCommand),
-    #[command(arg_required_else_help = true)]
-    #[command(alias = "manuals")]
-    Manual(ManualCommand),
-    #[command(arg_required_else_help = true)]
     #[command(alias = "completions")]
     Completion(CompletionCommand),
+    #[command(alias = "manuals")]
+    Manual(ManualCommand),
     #[command(alias = "json-schemas")]
     JsonSchema(JsonSchemaCommand),
 }
@@ -104,11 +104,46 @@ impl Command {
             Self::Init(cmd) => return cmd.execute(printer, config_paths, accounts),
             Self::Check(cmd) => cmd.execute(printer, config_paths, accounts),
             Self::Conflict(cmd) => cmd.execute(printer, config_paths, accounts),
-            Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
             Self::Completion(cmd) => cmd.execute(printer, Cli::command()),
+            Self::Manual(cmd) => cmd.execute(printer, Cli::command()),
             Self::JsonSchema(cmd) => cmd.execute(printer, json_schema::registry()),
         };
 
         done.map(|()| Exit::Success)
+    }
+}
+
+/// Meets a bare `neverest`: the help when a configuration exists, the
+/// missing configuration otherwise, which a person meets as the welcome.
+pub fn meet_bare_invocation(config_paths: &[PathBuf]) -> Result<()> {
+    // NOTE: a broken file counts as a configuration, its error left to
+    // the first command reading it.
+    if let Err(err) = Config::load(config_paths)
+        && err.is::<ConfigMissingError>()
+    {
+        return Err(err);
+    }
+
+    Cli::command().print_help()?;
+    Ok(())
+}
+
+/// The welcome a person meets when no configuration exists at `path`:
+/// the commands creating it from `sample`, the shipped sample
+/// configuration, or downloading it without one, then `check`.
+pub fn welcome<'a>(
+    path: &'a Path,
+    config_paths: &'a [PathBuf],
+    sample: Option<&'a Path>,
+) -> Welcome<'a> {
+    Welcome {
+        bin: "neverest",
+        intro: "Welcome to Neverest, the CLI to synchronize PIM collections.",
+        path,
+        config_paths,
+        sample,
+        sample_url: SAMPLE_RAW_URL,
+        next: "Edit it and uncomment the options you need, then check your accounts:",
+        command: "check",
     }
 }

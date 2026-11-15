@@ -219,15 +219,39 @@ The sync SHALL write a `sort_key` beside the summary of every item it summarises
 ### Requirement: Sources are remote backends only
 A sync source SHALL be a remote backend: IMAP, Microsoft Graph and Gmail for `message/rfc822`, CardDAV, Microsoft Graph and Google People for `text/vcard`, CalDAV, Microsoft Graph and Google Calendar for `text/calendar` (JMAP as its backend lands). Local file backends (m2dir, maildir, vdir) SHALL NOT be sync sources: the pimdir store is the local replica, so a local file store is redundant as a source and belongs on the import/export path, which neverest documents rather than syncing directly.
 
-### Requirement: A bare invocation prints the help
-Running `neverest` with no subcommand SHALL print the help and exit 0, with a configuration file or without one: neverest writes no configuration, so a first run has nothing to offer but the commands. A configuration is written by hand against the documented sample, config.sample.toml.
+### Requirement: A first run meets the family's welcome
+A command finding no configuration file, a bare `neverest` included, SHALL fail with pimalaya-config's missing-configuration error, exit 1: "No configuration found at <path>, start from the sample: <url>", the path being the first `-c` path when given, else the default one, and the URL config.sample.toml's. When the output is text and stderr is a terminal, a person SHALL meet pimalaya-cli's first-run welcome on stderr in its place, still exiting 1: the commands creating the file from the sample a package ships, or downloading it when none ships, then `neverest check`. A script or a `--json` caller SHALL get the error.
 
-A command that finds no configuration file SHALL fail, exit 1, naming the path it looked at (the first `--config` path when given, else the default one) and the documented sample; it SHALL NOT exit reporting success. A configuration file that fails to parse SHALL be an error rather than read as absent.
+With a configuration, a bare `neverest` SHALL print the help and exit 0, a configuration that fails to parse counting as one, its error left to the first command reading it. A command reading a configuration that fails to parse SHALL fail with that error rather than read it as absent. Neverest writes no configuration.
+
+A configuration holding no account SHALL fail pointing at the sample the same way.
 
 #### Scenario: A first run
 - GIVEN no configuration file
-- WHEN `neverest sync` runs
+- WHEN `neverest sync` runs from a script
 - THEN it exits 1 naming the path it looked at and the sample, and writes nothing
+
+#### Scenario: A first run at a terminal
+- GIVEN no configuration file
+- WHEN a person runs `neverest`
+- THEN the welcome prints on stderr, giving the commands that create the file and `neverest check`, and the run exits 1
+
+### Requirement: The command line is the family's
+`-c/--config` SHALL be pimalaya-cli's shared flag: one path per flag, never split, repeatable, the first file the base and the next ones deep-merged on top in order. No environment variable SHALL name the configuration (`NEVEREST_CONFIG` is not read). `-a/--account` SHALL stay repeatable, unlike the other Pimalaya CLIs, where it names the one account a command runs on: a neverest run covers several accounts.
+
+`completion`, `manual` and `json-schema` SHALL come in that order, with pimalaya-cli's abouts, and SHALL run like any other command when given no argument: what is ambiguous to write on the standard output fails with the failure object on stdout, exit 1. The help SHALL end with pimalaya-cli's footer. clap SHALL be built with the feature set the family uses (`derive`, `error-context`, `help`, `std`, `suggestions`, `usage`), so the help and errors are plain text read from no environment.
+
+Neverest SHALL have no `repl` and no `mcp`: its commands are batch operations over every account and its store (sync, drain, check, init, index), which a session or an agent gains nothing from composing; reading and writing items is the frontends' job (himalaya, cardamum, calendula), each with its own `repl` and `mcp` over the store neverest keeps.
+
+#### Scenario: Two configuration files
+- GIVEN `-c public.toml -c private.toml`, each declaring one account
+- WHEN `neverest drain` runs
+- THEN it runs over both accounts, the second file merged on top of the first
+
+#### Scenario: A path holding a colon
+- GIVEN `-c 'a:b.toml'`, a file that does not exist
+- WHEN `neverest check` runs
+- THEN it fails naming `a:b.toml` whole
 
 ### Requirement: Every remote backend is a cargo feature
 Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backends, `dav` for the CardDAV and CalDAV backends, `gpeople` for the Google People backend, `gcal` for the Google Calendar backend, `gmail` for the Gmail backend, `smtp` for the SMTP submission channel.
@@ -463,7 +487,7 @@ A provider refusing a send for its daily limit has not refused the message: the 
 - **THEN** the row is parked with its error
 
 ### Requirement: A run reclaims retained items on a schedule
-The store retains an item rather than deleting it when its last binding vanishes, so reclaiming is the client's schedule. An account SHALL configure it as `store.purge-after`, a human duration (one integer plus `s`/`m`/`h`/`d`/`w`). **Unset SHALL mean never purge**; `"0"` SHALL purge immediately, reproducing a terminal delete. There SHALL be no boolean beside it: the delay is the switch.
+The store retains an item rather than deleting it when its last binding vanishes, so reclaiming is the client's schedule. An account SHALL configure it as `store.purge-after`, a duration as pimalaya-config reads one: an integer of seconds, or a number plus `s`/`m`/`h`/`d`/`w` (`"90d"`), a day being 86400 seconds and months and years refused. **Unset SHALL mean never purge**; `0` or `"0"` SHALL purge immediately, reproducing a terminal delete. There SHALL be no boolean beside it: the delay is the switch.
 
 A sync run SHALL sweep **after** the sync and before the report is finalised, on both the pair and the solo paths, never in a dry run, purging every retained item of the account's own collections whose `retained_at` precedes `now - purge-after` (RFC 3339, the shape the store stamps), one item at a time (`purge`), never another account's: the store's own sweep (`purge_retained_before`) is store-wide, and one account's delay would decide for every other. Sweeping after the sync means an item this run retired starts its delay now rather than being reclaimed by the run that retired it. The sweep SHALL warn rather than fail the run, as the send channel does, and `sync --no-purge` SHALL skip it. The report SHALL carry what was reclaimed (items and bytes) in both the text and `--json` output.
 
@@ -1076,7 +1100,7 @@ CardDAV and CalDAV SHALL be implemented by one client adapter, parameterised by 
 The adapter SHALL report its own media type to the client seam, so one backend variant still declares two kinds and the store records the right one per collection.
 
 ### Requirement: A path key expands at deserialize, never at a call site
-Every path-valued configuration key SHALL be shell-expanded by its own deserializer, so a value reaching any call site is already resolved. A key SHALL NOT be expanded at the point it is read: one reader forgetting is a lookup for a literal `./~/…` path, which fails naming a file the user never wrote.
+Every path-valued configuration key (`store.root`, every `tls.cert`) SHALL be shell-expanded by pimalaya-config's own deserializer, a leading `~` and every `$VAR` or `${VAR}` alike, as in every Pimalaya CLI, so a value reaching any call site is already resolved. A key SHALL NOT be expanded at the point it is read: one reader forgetting is a lookup for a literal `./~/…` path, which fails naming a file the user never wrote. A variable that is not set SHALL leave the value as written.
 
 An absent optional key SHALL stay absent rather than expanding an empty path, which is what `#[serde(default)]` beside the deserializer buys.
 
@@ -1084,6 +1108,11 @@ An absent optional key SHALL stay absent rather than expanding an empty path, wh
 - GIVEN `imap.tls.cert = "~/ca.pem"`
 - WHEN the configuration is loaded
 - THEN the certificate path is the one under the user's home directory
+
+#### Scenario: A store under a variable
+- GIVEN `store.root = "$HOME/store"`
+- WHEN the configuration is loaded
+- THEN the store is the one under the user's home directory
 
 ### Requirement: A data command describes what it prints
 A command returning data SHALL hand the printer one named `*Output` type deriving `Display` for the terminal, `Serialize` for `--json` and `JsonSchema` for the registry, and SHALL print it once. It SHALL NOT report data as a message: a message serialises as one prose string, so `--json` over one yields nothing a consumer can read, and several messages in one run yield several documents where a consumer expects one value.
@@ -1111,7 +1140,7 @@ Every such output type SHALL be registered in the schema registry under its invo
 ### Requirement: A sync prints its progress as events
 Under `--json`, `neverest sync` SHALL print its progress as events before its result, one line each, each an object carrying `event`: `account-started` (`account`, `position`, `total`) before each account the run covers, the events after it being that account's; `opened` (`endpoint`) once an endpoint's first connection is open, `listed` (`endpoint`, `collections`) once it listed its collections; for a pair, `collection-started` (`source`, `target`, `collection`, `position`, `total`), `collection-progressed` (`source`, `target`, `collection`, `done`, `total`) and `collection-finished` (`source`, `target`, `collection`, then `code`, `error` and `sources` as an item error carries them, `code` and `error` `null` and `sources` `[]` unless the collection stopped short); for a source with no target, `scan-progressed` and `download-progressed` (`source`, `done`, `total`), each printed as its phase starts. An endpoint SHALL be named as its account names it. A progress count SHALL be printed at most once per percent of its total, a new count of a collection's next phase starting again. Events SHALL report progress only: everything the run did or left SHALL stay in the result, the last line. The events SHALL be registered as `neverest-sync.events`.
 
-Text mode SHALL print no event, the spinner on stderr being their text form; under `--json` no spinner SHALL be drawn.
+Text mode SHALL print no event, the spinner on stderr being their text form; under `--json` no spinner SHALL be drawn. `sync` SHALL print through pimalaya-cli's streaming printer, as carillon's `watch` does, so an event it prints reaches a pipe as it comes.
 
 #### Scenario: A frontend follows a long download
 - GIVEN an account with no target whose store owes 2 bodies
@@ -1167,12 +1196,12 @@ A caller choosing one calendar and one address book for an account takes the mar
 - THEN that calendar is listed with `default: true`, and no other
 
 ### Requirement: A check reports what each source declares it can do
-`neverest check` SHALL list, for each source, the capabilities a sync declares for it in the store (pimdir STORAGE §15.6) as `capabilities: [{ name, support, detail }]`, one row per capability, `support` being `full`, `partial` or `none` and `detail` why it is partial or refused, `null` otherwise, from its backend and configured rights alone. An intent a source performs on the collections it holds (`calendar.reply`, `calendar.cancel`, their `.occurrence` options, `collection.create`, `collection.rename`, `collection.delete`), which the store gets as a `none` source-wide row and one row per collection, SHALL read as it does on those collections: the store's collections are unknown to a check, so the `none` a rename or a delete gets on a collection stating a role is not listed. The source-wide `calendar.component.vtodo` row a sync declares from the configuration (a Google Calendar or Graph calendar source, or a source one of whose targets is one) SHALL be listed with them. What a CalDAV listing states of a calendar SHALL be listed on that collection as `takesTasks`, `false` for a component set without `VTODO`, `true` for one naming it, `null` where no set is stated, on a target's collections as on a source's: a sync declares it as `calendar.component.vtodo` `none` on the source's calendar of that name. A target and an undeclared (JMAP) source SHALL list no capability. A capability a source learns to declare is reported by the check with no change to it.
+`neverest check` SHALL list, for each source, the capabilities a sync declares for it in the store (pimdir STORAGE §15.6) as `capabilities: [{ name, level, detail }]`, one row per capability, `level` being pimalaya-cli's capability level as every pimalaya binary prints it (`full`, `partial` or `none`, the store stating no `server`) and `detail` what a partial level leaves out or why it is refused, `null` otherwise, from its backend and configured rights alone. An intent a source performs on the collections it holds (`calendar.reply`, `calendar.cancel`, their `.occurrence` options, `collection.create`, `collection.rename`, `collection.delete`), which the store gets as a `none` source-wide row and one row per collection, SHALL read as it does on those collections: the store's collections are unknown to a check, so the `none` a rename or a delete gets on a collection stating a role is not listed. The source-wide `calendar.component.vtodo` row a sync declares from the configuration (a Google Calendar or Graph calendar source, or a source one of whose targets is one) SHALL be listed with them. What a CalDAV listing states of a calendar SHALL be listed on that collection as `takesTasks`, `false` for a component set without `VTODO`, `true` for one naming it, `null` where no set is stated, on a target's collections as on a source's: a sync declares it as `calendar.component.vtodo` `none` on the source's calendar of that name. A target and an undeclared (JMAP) source SHALL list no capability. A capability a source learns to declare is reported by the check with no change to it.
 
 #### Scenario: A check names the calendars that take no tasks
 - **GIVEN** a CalDAV source whose server lists `events` with `VEVENT` alone and a Google Calendar target
 - **WHEN** `neverest check --json` runs
-- **THEN** `events` is listed with `takesTasks: false`, and the source's capabilities hold `calendar.component.vtodo` `none` naming the target
+- **THEN** `events` is listed with `takesTasks: false`, and the source's capabilities hold `calendar.component.vtodo` at level `none` naming the target
 
 ### Requirement: A check reports every endpoint
 `neverest check` SHALL check every endpoint of every account it runs over whatever the others answer, and SHALL print, under each account, one row per endpoint, sorted by name: `source`, `backend` (its protocol table), `ok`, `code` and `error` (`null` when it answered), then `collections` (empty when it did not answer), `capabilities` and `smtp`. A credential that does not resolve SHALL fail its endpoint's row alone. When an endpoint or its send channel did not answer, the command SHALL print the report and exit 3, never the failure object.
@@ -1956,7 +1985,7 @@ A create the engine reports its server rejected (`rejected_creates`) SHALL be re
 `conflict resolve` SHALL stage its body in one step with the gate (`enqueue_with_body_checked`) and SHALL print the capabilities a source supports in part that the next push relies on, under `partial` in its JSON.
 
 ### Requirement: The store's owner builds its search index
-A build with the `search` feature (on by default) SHALL refresh the store's search index (index.db, pimdir SEARCH §3, §4) after each account a sync runs over, last, for at most the account's `store.index-timeout` (60 seconds unless set, `"0"` turning it off), and after a drain, a run performing the queued intents alone and a run declaring collections, for at most 2 seconds. A dry run SHALL NOT refresh. A refresh cut by its deadline SHALL leave the index behind the store and the next refresh SHALL go on from there.
+A build with the `search` feature (on by default) SHALL refresh the store's search index (index.db, pimdir SEARCH §3, §4) after each account a sync runs over, last, for at most the account's `store.index-timeout` (60 seconds unless set, a duration as `store.purge-after` reads one, `0` turning it off), and after a drain, a run performing the queued intents alone and a run declaring collections, for at most 2 seconds. A dry run SHALL NOT refresh. A refresh cut by its deadline SHALL leave the index behind the store and the next refresh SHALL go on from there.
 
 The run SHALL report the refresh under `index`: the changes folded, the bodies newly indexed, the stamps still `behind`, whether another indexer held it (`busy`), and the error of a failed one. An index failure SHALL be a warning and SHALL NOT fail the run or change its exit code: the index is derived from the store.
 
@@ -2002,11 +2031,11 @@ neverest.json, under the store's local/, SHALL record the collection-id layout o
 - **THEN** that run is refused naming `--accept-mode`, and the one-way account still syncs
 
 ### Requirement: `-a` filters the accounts a command runs over
-`-a/--account` SHALL be repeatable and SHALL filter the configured accounts. Without it, `sync`, `check`, `drain` and `init` SHALL run over every configured account, store by store and in name order within a store, one after the other inside one run holding each store's lock once; with it, over the named ones. The configuration is merged into a sorted table before neverest reads it, so name order is the only order it can keep. A name the configuration does not declare SHALL fail the command before anything runs, naming the configured accounts, coded `account-missing` (`default` among them, a name like any other: neverest has no default account), and so SHALL an account whose configuration does not validate, the configuration being one document.
+`-a/--account` SHALL be repeatable and SHALL filter the configured accounts. Without it, `sync`, `check`, `drain` and `init` SHALL run over every configured account, store by store and in name order within a store, one after the other inside one run holding each store's lock once; with it, over the named ones. The configuration is merged into a sorted table before neverest reads it, so name order is the only order it can keep. A name the configuration does not declare SHALL fail the command before anything runs, coded `account-missing`, in the family's words: "Account `x` not found, the configuration holds: a, b" (`default` among them, a name like any other: neverest has no default account); and so SHALL an account whose configuration does not validate, the configuration being one document.
 
 Each account's failure SHALL be its own: the run SHALL go on with the next account and SHALL end with one result listing every account's outcome, a failed one carrying its error and its `code`. The command SHALL exit 0 when every account succeeded, otherwise with the partial-outcome code its own outcomes give (3 for a sync that left work waiting for a person), a failed or a busy account making it 4, the code of a run that could not do all its work. A failure common to the run (no configuration, a store refused as a whole) SHALL fail the command with the failure object, exit 1.
 
-`index` is store-wide: it SHALL build the stores of the accounts the filter keeps, each once and whole, every account of a store included. `conflict show`, `conflict resolve` and `sync --reset` address one item or start one account over, so they SHALL need exactly one account: a filter leaving none or several SHALL fail, naming the accounts. `conflict list` SHALL list the conflicts of every account it runs over, each row naming its account. `configure` SHALL take no account.
+`index` is store-wide: it SHALL build the stores of the accounts the filter keeps, each once and whole, every account of a store included. `conflict show`, `conflict resolve` and `sync --reset` address one item or start one account over, so they SHALL need exactly one account: a filter leaving none or several SHALL fail, naming the accounts. `conflict list` SHALL list the conflicts of every account it runs over, each row naming its account.
 
 #### Scenario: Two accounts, one of them failing
 - **GIVEN** two accounts, the first initialized and the second not
@@ -2016,7 +2045,7 @@ Each account's failure SHALL be its own: the run SHALL go on with the next accou
 #### Scenario: An unknown account
 - **GIVEN** a configuration declaring `work` and `home`
 - **WHEN** `neverest sync -a perso` runs
-- **THEN** it exits 1 before anything runs, naming `home` and `work`
+- **THEN** it exits 1 before anything runs, coded `account-missing`, its error "Account `perso` not found, the configuration holds: home, work"
 
 #### Scenario: A reset needs one account
 - **GIVEN** a configuration declaring `work` and `home`
@@ -2119,13 +2148,52 @@ The codes are read once a row is built, from the chain the client returned, so t
 - THEN its `rejected` row's `code` is `permission-denied`, where a 403 naming `valid-address-data` carries none
 
 ### Requirement: A failing row carries its code and its causes
-A report row naming what a run could not do to one item or one endpoint SHALL carry, beside its own keys, those of pimalaya-cli's item error but its id: `code`, `null` when the failure carries none; `error`, the outermost message; and `sources`, the messages of its causes, outermost first. These rows are the collection and item patch entries, `rejected`, `submitted`, `intents`, `parked` and `unreached` of a sync, and `parked` of a drain. A row that succeeded SHALL carry `code` and `error` null and `sources` empty. The text output SHALL print a row's message and its causes as one chain, as `{err:#}` reads.
+A report row naming what a run could not do to one item or one endpoint SHALL carry, beside its own keys, those of pimalaya-cli's item error but its id: `code`, `null` when the failure carries none; `error`, the outermost message; and `sources`, the messages of its causes, outermost first. These rows are the collection and item patch entries, `rejected`, `submitted`, `intents`, `parked` and `unreached` of a sync, and `parked` of a drain. A `rejected` row SHALL be pimalaya-cli's `ItemError` itself, its `id` the item's handle on the side that refused it, beside `side`, `collection` and `action`. A row that succeeded SHALL carry `code` and `error` null and `sources` empty. The text output SHALL print a row's message and its causes as one chain, as `{err:#}` reads.
 
 A parked queue row SHALL carry the error the store recorded, with no code and no causes, the store keeping its text alone. An unconfirmed send's `error` SHALL begin `unconfirmed: `, its causes under `sources`, so its message and causes joined read as its parked row does.
 
-An account's row (`sync`, `drain`, `init`) and the index refresh SHALL keep the shape of a check row, `code` beside an `error` holding the whole chain: `init` names the endpoints it opened `sources`. Their `code` SHALL be read as a row's is, a server's refusal included; the index refresh's is the store's (`index-version`, `index-fts5-missing`).
+An account's row of `sync` and `drain` and the index refresh SHALL carry `code`, `error` and `sources` the same way, `error` the outermost message, `null` and `[]` when it ran. Their `code` SHALL be read as a row's is, a server's refusal included; the index refresh's is the store's (`index-version`, `index-fts5-missing`). An account's row of `init` SHALL keep the shape of a check row, `code` beside an `error` holding the whole chain: `init` names the endpoints it opened `sources`.
 
 #### Scenario: A refused update under `--json`
 - GIVEN a CardDAV source refusing an update 403
 - WHEN `neverest --json sync` reports it
 - THEN its `rejected` row reads `{side, collection, id, action: "update", code: "permission-denied", error: "Cannot update <id> in <collection>", sources: ["WebDAV server returned HTTP 403…"]}`, and the text prints `Cannot update <id> in <collection>: WebDAV server returned HTTP 403…`
+
+#### Scenario: An account that failed
+- GIVEN an account whose store cannot be opened
+- WHEN `neverest --json sync` reports it
+- THEN its row reads `error` the outermost message and `sources` its causes, and the text prints them as one chain
+
+### Requirement: A queue row is keyed `row`
+Every report row naming a row of the store's queue SHALL name it `row`, as himalaya's `pimdir queue list` does: `applied` and `parked` of a drain; `parked`, `submitted` and `intents` of a sync; and an overruled body a queued action settled (`id` naming the item a side's write settled stays `id`). A parked row, of a drain or of a sync, SHALL read `{row, collection, kind, producer, queuedAt, attempts, code, error, sources}`: `kind` the action as the store spells it, kebab-case (`add`, `update`, `set-flags`, `remove`, `move`, `copy`, `submit`, `calendar-reply`…), `queuedAt` the instant the store stamped the row with, `attempts` how many times it was tried before it was parked. A drained row SHALL read `{row, collection, kind, seq}`. A rejected write SHALL spell its `action` the same way (`set-flags`).
+
+#### Scenario: A parked flag change
+- GIVEN a `set-flags` row himalaya queued, which the drain parks
+- WHEN `neverest --json drain` reports it
+- THEN its `parked` row reads `{row, collection, kind: "set-flags", producer: "himalaya", queuedAt, attempts, code: null, error, sources: []}`
+
+### Requirement: A DAV source may name its home set
+A `carddav` or `caldav` table SHALL take `home`, the address book or calendar home set as a full URL, as cardamum and calendula do: the session SHALL connect to it and list its collections there, discovering no principal and no home set, `server` then being ignored. Without `home`, `server` SHALL be required and the home set discovered from it as before. A table naming neither SHALL fail when the account resolves, naming both keys.
+
+The `auth` table SHALL also take `"none"`, for a server asking for no credential: no `Authorization` header is sent.
+
+#### Scenario: Google's address books
+- GIVEN `carddav.home = "https://www.googleapis.com/carddav/v1/principals/<email>/lists/"` and a bearer token
+- WHEN the source opens
+- THEN its address books are listed under that URL, no `PROPFIND` for a principal sent first
+
+### Requirement: An IMAP source takes the SASL-IR and ID quirks
+An `imap` table SHALL take `sasl-ir`, forcing the RFC 4959 initial response on or off, unset following the advertised `SASL-IR` capability; and `id.auto` with `id.fields`, as himalaya and carillon do: with `id.auto = true` the session sends an RFC 2971 `ID` straight after authenticating, each of `id.fields` set to `true` carrying neverest's value for a well-known key (`name`, `version`, `vendor`, `support-url`) and `NIL` otherwise, none at all sending `ID NIL`. Every connection of the source, a reopened one included, opens the same way.
+
+#### Scenario: A server requiring an ID
+- GIVEN `imap.id.auto = true` and `imap.id.fields.name = true`
+- WHEN the source opens
+- THEN the session sends `ID ("name" "neverest")` after authenticating
+
+### Requirement: A connection goes through the configured proxy
+An account SHALL take `proxy.url`, `proxy.username` and `proxy.password` (a secret), and so SHALL every backend table and every `smtp` table, as the sibling CLIs do: `url` a `socks5://`, `socks5h://` or `http://` proxy URL, `password` requiring `username`. Every connection a source opens, its send channel's included, SHALL go through the proxy its own table names, else the account's, else the one the `all_proxy` and `https_proxy` environment variables name when the connection opens, else none.
+
+#### Scenario: One source through a SOCKS proxy
+- GIVEN an account naming `proxy.url = "http://proxy.example.org:3128"` and one source naming `proxy.url = "socks5h://127.0.0.1:1080"`
+- WHEN a sync opens the account's sources
+- THEN that source connects through the SOCKS proxy and every other through the HTTP one

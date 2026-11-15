@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use pimalaya_cli::error::ItemError;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -44,8 +45,12 @@ pub struct AccountSync {
     /// The stable code of the failure that stopped the account, `null` when
     /// it ran or the failure carries none.
     pub code: Option<ErrorCode>,
-    /// Why the account stopped short of a report, `null` when it ran.
+    /// Why the account stopped short of a report, the outermost message,
+    /// `null` when it ran.
     pub error: Option<String>,
+    /// The messages of the failure's causes, outermost first, empty when it
+    /// ran.
+    pub sources: Vec<String>,
     /// What the run did and left on the account, `null` when it did not
     /// run.
     pub report: Option<SyncOutput>,
@@ -56,7 +61,10 @@ impl fmt::Display for AccountSync {
         let account = &self.account;
         match (&self.report, &self.error) {
             (Some(report), _) => write!(f, "{report}"),
-            (None, Some(error)) => writeln!(f, "\nAccount {account} failed: {error}"),
+            (None, Some(error)) => {
+                let error = chain(error, &self.sources);
+                writeln!(f, "\nAccount {account} failed: {error}")
+            }
             (None, None) => writeln!(
                 f,
                 "\nAccount {account} did not run: another run holds its store"
@@ -465,6 +473,7 @@ pub struct OverruledBody {
     /// The item's handle on that side.
     pub id: Option<String>,
     /// The queue row whose apply settled it.
+    #[serde(rename = "row")]
     pub action: Option<i64>,
     /// The key of the retained item keeping the losing body.
     pub kept: String,
@@ -649,8 +658,11 @@ pub struct IndexRefresh {
     /// The stable code of the failure, `null` when it refreshed or the
     /// failure carries none.
     pub code: Option<ErrorCode>,
-    /// Why the refresh failed, the index left as it was.
+    /// Why the refresh failed, the index left as it was, the outermost
+    /// message.
     pub error: Option<String>,
+    /// The messages of the failure's causes, outermost first.
+    pub sources: Vec<String>,
 }
 
 impl fmt::Display for IndexRefresh {
@@ -662,8 +674,10 @@ impl fmt::Display for IndexRefresh {
             busy,
             code: _,
             error,
+            sources,
         } = self;
         if let Some(error) = error {
+            let error = chain(error, sources);
             return write!(f, "search index not refreshed: {error}");
         }
         if *busy {
@@ -838,17 +852,14 @@ pub struct RejectedWrite {
     pub side: String,
     /// The collection the item sits in.
     pub collection: String,
-    /// The item's handle on that side.
-    pub id: String,
-    /// What the run tried: `update`, `append`, `delete`, `move`, `set flags`.
+    /// What the run tried: `update`, `append`, `copy`, `delete`, `move`,
+    /// `set-flags`.
     pub action: String,
-    /// The stable code of the refusal, `null` when it carries none.
-    pub code: Option<ErrorCode>,
-    /// Why it did not land, the outermost message.
-    pub error: String,
-    /// The messages of the refusal's causes, outermost first, the
-    /// backend's own reason among them.
-    pub sources: Vec<String>,
+    /// The item error: the item's handle on that side as `id`, then the
+    /// refusal's code, outermost message and causes, the backend's own
+    /// reason among them.
+    #[serde(flatten)]
+    pub failure: ItemError<ErrorCode>,
 }
 
 impl fmt::Display for RejectedWrite {
@@ -856,13 +867,11 @@ impl fmt::Display for RejectedWrite {
         let Self {
             side,
             collection,
-            id,
             action,
-            code: _,
-            error,
-            sources,
+            failure,
         } = self;
-        let error = chain(error, sources);
+        let id = failure.id.as_deref().unwrap_or_default();
+        let error = chain(&failure.error, &failure.sources);
         write!(
             f,
             "{side} refused the {action} of {id} in {collection}, so it stays in the store: {error}"
@@ -928,13 +937,19 @@ impl fmt::Display for DrainedQueue {
 #[serde(rename_all = "camelCase")]
 pub struct ParkedQueueAction {
     /// The queue row's global append id.
+    #[serde(rename = "row")]
     pub id: i64,
     /// The collection the action was anchored on.
     pub collection: String,
-    /// The raw action kind (`add`, `set_flags`, …).
-    pub action: String,
+    /// The action kind, kebab-case as the store spells it: `add`, `update`,
+    /// `set-flags`, `remove`, `move`, `copy`, `submit`, `calendar-reply`…
+    pub kind: String,
     /// The enqueuing process, diagnostic only.
     pub producer: String,
+    /// When the row was appended, stamped by the store's own clock.
+    pub queued_at: String,
+    /// How many times the row was tried before it was parked.
+    pub attempts: i64,
     /// The stable code of the failure, `null`: the store keeps its text
     /// alone.
     pub code: Option<ErrorCode>,
@@ -950,16 +965,16 @@ impl fmt::Display for ParkedQueueAction {
         let Self {
             id,
             collection,
-            action,
+            kind,
             producer,
-            code: _,
             error,
             sources,
+            ..
         } = self;
         let error = chain(error, sources);
         write!(
             f,
-            "parked queue action #{id} ({action} in {collection} from {producer}): {error}"
+            "parked queue action #{id} ({kind} in {collection} from {producer}): {error}"
         )
     }
 }
@@ -975,6 +990,7 @@ impl fmt::Display for ParkedQueueAction {
 #[serde(rename_all = "camelCase")]
 pub struct SubmitEntry {
     /// The queue row's global append id.
+    #[serde(rename = "row")]
     pub id: i64,
     /// The collection the intent was anchored on.
     pub collection: String,
@@ -1025,6 +1041,7 @@ impl fmt::Display for SubmitEntry {
 #[serde(rename_all = "camelCase")]
 pub struct IntentEntry {
     /// The queue row's global append id.
+    #[serde(rename = "row")]
     pub id: i64,
     /// The collection of the item it addresses.
     pub collection: String,

@@ -64,6 +64,7 @@ use io_pimdir::{
     upgrade::{PimdirUpgrade, PimdirUpgradeOptions, PimdirUpgradeReport},
 };
 use log::{debug, info, warn};
+use pimalaya_cli::error::ItemError;
 
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::GraphKind;
@@ -4981,11 +4982,13 @@ fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncOu
         report.rejected.push(RejectedWrite {
             side: side.to_string(),
             collection: rejected.collection,
-            id,
             action: rejected.action.to_string(),
-            code,
-            error,
-            sources,
+            failure: ItemError {
+                id: Some(id),
+                code,
+                error,
+                sources,
+            },
         });
     }
 }
@@ -5447,8 +5450,10 @@ fn report_parked(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
                 report.parked.push(ParkedQueueAction {
                     id: action.id,
                     collection: action.collection,
-                    action: action.action,
+                    kind: action.action,
                     producer: action.producer,
+                    queued_at: action.created_at,
+                    attempts: action.attempts,
                     code: None,
                     error: action.error,
                     sources: Vec::new(),
@@ -7415,6 +7420,9 @@ mod tests {
                 tls: Tls::default(),
                 starttls: false,
                 sasl: None,
+                proxy: pimalaya_stream::proxy::Proxy::None,
+                sasl_ir: None,
+                auto_id: None,
             }),
             #[cfg(feature = "smtp")]
             smtp: None,
@@ -7947,6 +7955,9 @@ mod tests {
                 tls: Tls::default(),
                 starttls: false,
                 sasl: None,
+                proxy: pimalaya_stream::proxy::Proxy::None,
+                sasl_ir: None,
+                auto_id: None,
             }),
             #[cfg(feature = "smtp")]
             smtp: None,
@@ -8891,9 +8902,7 @@ mod tests {
         assert!(report.purged.is_none());
         assert!(config.store.purge_cutoff(Utc::now()).is_none());
 
-        config.store.purge_after = Some(crate::config::HumanDuration(
-            std::time::Duration::from_secs(0),
-        ));
+        config.store.purge_after = Some(std::time::Duration::from_secs(0));
         sweep_retained(&config, &mut store, &mut report);
         let purged = report.purged.expect("a retention section");
         assert_eq!(purged.items, 0);
@@ -10219,7 +10228,7 @@ mod tests {
         assert!(report.drained.is_empty(), "{:?}", report.drained);
         assert_eq!(report.parked.len(), 1);
         let parked = &report.parked[0];
-        assert_eq!(parked.action, "move");
+        assert_eq!(parked.kind, "move");
         assert!(parked.error.contains(&diverging.0), "{}", parked.error);
         assert_eq!(report.outstanding_conflicts, 1);
 
@@ -13612,6 +13621,7 @@ mod gmail_bodies {
                 token: SecretString::from(String::from("token")),
                 user_id: String::from("me"),
                 tls: Tls::default(),
+                proxy: pimalaya_stream::proxy::Proxy::None,
                 run: Arc::new(GmailRun::new(Default::default())),
             }),
             #[cfg(feature = "smtp")]
@@ -14335,6 +14345,7 @@ mod graph_heads {
                 user_id: String::from("me"),
                 tls: Tls::default(),
                 sizes: SizeHints::default(),
+                proxy: pimalaya_stream::proxy::Proxy::None,
             }),
             #[cfg(feature = "smtp")]
             smtp: None,

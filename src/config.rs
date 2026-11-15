@@ -3,7 +3,12 @@
 //! The TOML schema: each account holds named [`SourceConfig`]s over one
 //! pimdir store, plus that store's settings.
 
-use std::{collections::HashMap, fmt, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    path::PathBuf,
+    time::Duration,
+};
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Days, Months, NaiveDate, NaiveTime, SecondsFormat, Utc};
@@ -18,7 +23,7 @@ use pimalaya_cli::error::CodedError;
 use pimalaya_config::{
     command::CommandConfig,
     secret::{Secret, SecretResolver},
-    toml::{TomlConfig, shell_expanded_string},
+    toml::{TomlConfig, opt_shell_expanded_path, shell_expanded_string},
 };
 use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider, TlsServer};
 use schemars::JsonSchema;
@@ -27,9 +32,9 @@ use url::Url;
 
 use crate::error::ErrorCode;
 
-/// How to get a configuration, for the errors meeting none.
-pub const NO_CONFIG_HINT: &str = "write one by hand: \
-     https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
+/// The documented sample configuration, which a missing configuration and
+/// one holding no account point at.
+const SAMPLE_URL: &str = "https://github.com/pimalaya/neverest/blob/master/config.sample.toml";
 
 /// Where a removed configuration key's replacement is written down.
 const MIGRATION_NOTES: &str = "https://github.com/pimalaya/neverest/blob/master/MIGRATION.md";
@@ -84,6 +89,11 @@ macro_rules! source_config {
             /// Connection pool size override; the default is per backend.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub pool_size: Option<usize>,
+            /// The proxy this source's connections go through, falling back
+            /// to the account's, then to the `all_proxy` and `https_proxy`
+            /// environment variables.
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            pub proxy: Option<ProxyConfig>,
         }
     };
 }
@@ -145,7 +155,7 @@ impl TomlConfig for Config {
     }
 
     fn sample_url() -> &'static str {
-        "https://github.com/pimalaya/neverest/blob/master/config.sample.toml"
+        SAMPLE_URL
     }
 
     fn accounts(&self) -> impl Iterator<Item = (&str, bool)> {
@@ -161,15 +171,13 @@ impl TomlConfig for Config {
 
 impl Config {
     /// Loads `Config` from `config_paths`, failing when none exists with
-    /// the path looked for and how to write one.
+    /// pimalaya-config's [`ConfigMissingError`], naming the path looked for
+    /// and the sample to start from, which `main` meets a person with as the
+    /// welcome.
+    ///
+    /// [`ConfigMissingError`]: pimalaya_config::toml::ConfigMissingError
     pub fn load(config_paths: &[PathBuf]) -> Result<Config> {
-        match Config::from_paths_or_default(config_paths)? {
-            Some(config) => Ok(config),
-            None => bail!(
-                "No configuration found at {}, {NO_CONFIG_HINT}",
-                Config::target_path(config_paths)?.display(),
-            ),
-        }
+        <Config as TomlConfig>::load(config_paths)
     }
 
     /// The accounts a command runs over, each with its configuration:
@@ -184,12 +192,12 @@ impl Config {
         configured.sort();
 
         if configured.is_empty() {
-            bail!("The configuration declares no account, {NO_CONFIG_HINT}");
+            bail!("The configuration holds no account, start from the sample: {SAMPLE_URL}");
         }
 
         if let Some(unknown) = names.iter().find(|name| !self.accounts.contains_key(*name)) {
             let message = format!(
-                "Cannot find account {unknown}, the configuration declares {}",
+                "Account `{unknown}` not found, the configuration holds: {}",
                 join(&configured),
             );
             return Err(CodedError::new(ErrorCode::AccountMissing, message).into());
@@ -325,6 +333,10 @@ pub struct AccountConfig {
     /// spelling of `sources.<name>.smtp`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<SmtpConfig>,
+    /// The proxy every endpoint of the account goes through unless its own
+    /// table names one, the environment's when neither does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
     /// The local pimdir store this account syncs through.
     ///
     /// Optional: the store is implicit, the one every account naming no
@@ -750,24 +762,35 @@ pub struct StoreConfig {
     /// Linux and the BSDs, Application Support on macOS, `%LOCALAPPDATA%` on
     /// Windows), one store for every account naming no root. Accounts
     /// naming one root share that store.
-    #[serde(default, deserialize_with = "shell_expanded_path_opt")]
+    #[serde(default, deserialize_with = "opt_shell_expanded_path")]
     pub root: Option<PathBuf>,
-    /// How long a retained item survives: `store.purge-after = "90d"`.
+    /// How long a retained item survives: `store.purge-after = "90d"`, or an
+    /// integer of seconds.
     ///
     /// A pimdir store never truly deletes: the row is retained, hidden but
     /// keeping its body, and neverest is the sweeper. Unset means never
-    /// purge and `"0"` purges at once; there is deliberately no boolean.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub purge_after: Option<HumanDuration>,
+    /// purge and `0` purges at once; there is deliberately no boolean. A
+    /// day is 86400 seconds and a week 7 days, months and years being
+    /// refused for having no fixed length.
+    #[serde(
+        default,
+        with = "pimalaya_config::duration::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub purge_after: Option<Duration>,
     /// How long the search index may be refreshed after a sync:
-    /// `store.index-timeout = "60s"`, the default.
+    /// `store.index-timeout = "60s"`, the default, or an integer of seconds.
     ///
     /// A large first build spreads over several runs, each going on from
     /// where the last stopped; `neverest index` builds it whole. A drain
-    /// refreshes for 2 seconds at most, `"0"` turns the refresh off, and a
+    /// refreshes for 2 seconds at most, `0` turns the refresh off, and a
     /// build without the `search` feature ignores it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index_timeout: Option<HumanDuration>,
+    #[serde(
+        default,
+        with = "pimalaya_config::duration::option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub index_timeout: Option<Duration>,
     /// Removed keys, refused by name as the file is parsed.
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
@@ -784,7 +807,7 @@ impl StoreConfig {
     /// it, which means the same. The format matches what the store stamps
     /// `retained_at` with, so the comparison is plain lexicographic.
     pub fn purge_cutoff(&self, now: DateTime<Utc>) -> Option<String> {
-        let after = chrono::Duration::from_std(self.purge_after?.0).ok()?;
+        let after = chrono::Duration::from_std(self.purge_after?).ok()?;
         let cutoff = now.checked_sub_signed(after)?;
         Some(cutoff.to_rfc3339_opts(SecondsFormat::Millis, true))
     }
@@ -793,92 +816,7 @@ impl StoreConfig {
     /// unless `index-timeout` says otherwise; zero turns it off.
     #[cfg(feature = "search")]
     pub fn index_timeout(&self) -> Duration {
-        self.index_timeout
-            .map_or(Duration::from_secs(60), |timeout| timeout.0)
-    }
-}
-
-/// A human-written duration (`"90d"`, `"12h"`, `"2w"`), or a bare `"0"`.
-///
-/// A day is 86400 seconds and a week 7 days: a retention delay is not
-/// calendar arithmetic, so no time zone or DST rule enters into it, and
-/// months and years are refused for having no fixed length.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct HumanDuration(pub Duration);
-
-impl HumanDuration {
-    /// Parses `"<integer><unit>"`, or a bare `"0"`.
-    fn parse(raw: &str) -> Result<Self, String> {
-        let raw = raw.trim();
-        if raw.is_empty() {
-            return Err(String::from("empty duration"));
-        }
-
-        let digits = raw.trim_end_matches(|c: char| c.is_ascii_alphabetic());
-        let unit = &raw[digits.len()..];
-        let count: u64 = digits
-            .parse()
-            .map_err(|_| format!("{raw} is not a `<number><unit>` duration (e.g. `90d`)"))?;
-
-        let seconds = match unit {
-            "s" => 1,
-            "m" => 60,
-            "h" => 3600,
-            "d" => 86400,
-            "w" => 7 * 86400,
-            "" if count == 0 => 1,
-            "" => {
-                return Err(format!(
-                    "duration {raw} misses its unit (`s`, `m`, `h`, `d` or `w`)"
-                ));
-            }
-            other => {
-                return Err(format!(
-                    "unknown duration unit {other} in {raw} (expected `s`, `m`, `h`, `d` or `w`)"
-                ));
-            }
-        };
-
-        let total = count
-            .checked_mul(seconds)
-            .ok_or_else(|| format!("duration {raw} overflows"))?;
-        Ok(Self(Duration::from_secs(total)))
-    }
-}
-
-impl fmt::Display for HumanDuration {
-    /// Renders back the largest unit dividing the duration evenly, so a
-    /// round-trip through the config document is stable.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let secs = self.0.as_secs();
-        if secs == 0 {
-            return f.write_str("0");
-        }
-        for (unit, size) in [("w", 7 * 86400), ("d", 86400), ("h", 3600), ("m", 60)] {
-            if secs.is_multiple_of(size) {
-                return write!(f, "{}{unit}", secs / size);
-            }
-        }
-        write!(f, "{secs}s")
-    }
-}
-
-impl<'de> Deserialize<'de> for HumanDuration {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let raw = String::deserialize(deserializer)?;
-        HumanDuration::parse(&raw).map_err(serde::de::Error::custom)
-    }
-}
-
-impl Serialize for HumanDuration {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        serializer.serialize_str(&self.to_string())
+        self.index_timeout.unwrap_or(Duration::from_secs(60))
     }
 }
 
@@ -950,19 +888,6 @@ impl fmt::Display for AccountMode {
             write!(f, "{sources} and {targets} sync both ways{body}")
         }
     }
-}
-
-/// `serde` helper: shell-expand an optional path.
-///
-/// TODO: replace with `pimalaya_config::toml::shell_expanded_path_opt`, the
-/// optional twin of what the crate already ships. ortie hand-rolls the same
-/// function, so the two copies exist only because the shared one does not.
-fn shell_expanded_path_opt<'de, D>(deserializer: D) -> Result<Option<PathBuf>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw: Option<String> = Option::deserialize(deserializer)?;
-    Ok(raw.map(|s| PathBuf::from(shellexpand::tilde(&s).into_owned())))
 }
 
 /// One source: the remote it talks to, plus the channel its sends leave by.
@@ -1073,6 +998,21 @@ pub enum SourceBackendConfig {
 }
 
 impl SourceBackendConfig {
+    /// The proxy the backend table names, `None` when it names none.
+    pub fn proxy(&self) -> Option<&ProxyConfig> {
+        match self {
+            Self::Imap(c) => c.proxy.as_ref(),
+            Self::Carddav(c) => c.proxy.as_ref(),
+            Self::Caldav(c) => c.proxy.as_ref(),
+            Self::Jmap(c) => c.proxy.as_ref(),
+            Self::Gmail(c) => c.proxy.as_ref(),
+            Self::Msgraph(c) | Self::MsgraphContacts(c) | Self::MsgraphCalendar(c) => {
+                c.proxy.as_ref()
+            }
+            Self::Gpeople(c) | Self::Gcal(c) => c.proxy.as_ref(),
+        }
+    }
+
     /// The protocol table this backend is written under, which is also the
     /// id of the source the sugar builds from it.
     pub fn protocol(&self) -> &'static str {
@@ -1422,14 +1362,41 @@ source_config! {
         pub alpn: Option<Vec<String>>,
         /// The one SASL mechanism the session authenticates with.
         pub sasl: Option<SaslConfig>,
+        /// Forces the RFC 4959 SASL-IR initial response on or off.
+        ///
+        /// Unset follows the advertised `SASL-IR` capability, which Coremail
+        /// (126.com, 163.com) advertises falsely: set it to `false` there.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub sasl_ir: Option<bool>,
+        /// RFC 2971 `ID` quirks, `id.auto = true` opting in to the exchange
+        /// mail.qq.com and Fastmail require straight after authentication.
+        #[serde(default, skip_serializing_if = "is_default")]
+        pub id: ImapIdConfig,
     }
+}
+
+/// The `imap.id.*` quirks.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ImapIdConfig {
+    /// Chains an `ID` round-trip after the tagged authentication response.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub auto: bool,
+    /// The parameters the automatic `ID` sends, none sending `ID NIL`.
+    ///
+    /// `true` sends neverest's canned value for the well-known keys
+    /// (`name`, `version`, `vendor`, `support-url`) and `NIL` for the
+    /// others, `false` always `NIL`. An absent key is not sent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub fields: BTreeMap<String, bool>,
 }
 
 source_config! {
     /// A CardDAV source (RFC 6352), each address book a collection.
     ///
     /// The server URL is the entry point only: the principal and the
-    /// address book home set are discovered from it.
+    /// address book home set are discovered from it, unless `home` names the
+    /// home set itself. One of the two is required.
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct CarddavConfig {
@@ -1438,7 +1405,13 @@ source_config! {
         /// A bare authority (`dav.example.org[:port]`, read as
         /// `https://<authority>`) or a full URL, `http://` included for a
         /// server on a trusted network.
-        pub server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub server: Option<String>,
+        /// The address book home set, as a full URL: the session lists its
+        /// collections there and discovers nothing, `server` then being
+        /// ignored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub home: Option<String>,
         /// How the connection is secured.
         #[serde(default)]
         pub tls: TlsConfig,
@@ -1459,7 +1432,8 @@ source_config! {
     /// A CalDAV source (RFC 4791), each calendar a collection.
     ///
     /// The server URL is the entry point only: the principal and the
-    /// calendar home set are discovered from it.
+    /// calendar home set are discovered from it, unless `home` names the
+    /// home set itself. One of the two is required.
     #[derive(Clone, Debug, Deserialize, Serialize)]
     #[serde(rename_all = "kebab-case", deny_unknown_fields)]
     pub struct CaldavConfig {
@@ -1468,7 +1442,13 @@ source_config! {
         /// A bare authority (`dav.example.org[:port]`, read as
         /// `https://<authority>`) or a full URL, `http://` included for a
         /// server on a trusted network.
-        pub server: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub server: Option<String>,
+        /// The calendar home set, as a full URL: the session lists its
+        /// collections there and discovers nothing, `server` then being
+        /// ignored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub home: Option<String>,
         /// How the connection is secured.
         #[serde(default)]
         pub tls: TlsConfig,
@@ -1485,11 +1465,13 @@ source_config! {
     }
 }
 
-/// DAV authentication: HTTP Basic, or a bearer token for a provider
+/// DAV authentication: none, HTTP Basic, or a bearer token for a provider
 /// fronting DAV with OAuth 2.0.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DavAuthConfig {
+    /// No credentials, for a server that asks for none: `auth = "none"`.
+    None,
     /// A username and a password, HTTP Basic.
     Basic {
         #[serde(deserialize_with = "shell_expanded_string")]
@@ -1516,6 +1498,7 @@ impl DavAuthConfig {
         use secrecy::ExposeSecret;
 
         Ok(match self {
+            Self::None => WebdavAuth::None,
             Self::Basic { username, password } => WebdavAuth::Basic(HttpAuthBasic::new(
                 username,
                 resolver.resolve(password)?.expose_secret(),
@@ -1524,6 +1507,75 @@ impl DavAuthConfig {
                 resolver.resolve(token)?.expose_secret(),
             )),
         })
+    }
+}
+
+/// The proxy a connection goes through.
+///
+/// `url` is a `socks5://`, `socks5h://` or `http://` proxy URL. Its user
+/// info authenticates too, but `username` and `password` keep the secret
+/// out of the URL.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct ProxyConfig {
+    /// The proxy URL.
+    pub url: String,
+    /// The proxy username, required by `password`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// The proxy password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<Secret>,
+}
+
+impl ProxyConfig {
+    /// Resolves the first configuration of `configs`, the one closest to
+    /// the connection first, none reading the environment at connect time.
+    #[cfg_attr(
+        not(any(
+            feature = "imap",
+            feature = "smtp",
+            feature = "dav",
+            feature = "msgraph",
+            feature = "gpeople",
+            feature = "gcal",
+            feature = "gmail"
+        )),
+        allow(dead_code)
+    )]
+    pub fn resolve(
+        configs: &[Option<&Self>],
+        resolver: &mut SecretResolver,
+    ) -> Result<pimalaya_stream::proxy::Proxy> {
+        use pimalaya_stream::proxy::{Proxy, ProxyAuth};
+        use secrecy::SecretString;
+
+        let Some(config) = configs.iter().flatten().next() else {
+            return Ok(Proxy::System);
+        };
+
+        let mut proxy = Proxy::from_url(&config.url)?;
+
+        let auth = match (&config.username, &config.password) {
+            (None, None) => return Ok(proxy),
+            (None, Some(_)) => bail!("Proxy password requires a username"),
+            (Some(user), pass) => ProxyAuth {
+                user: user.clone(),
+                pass: match pass {
+                    Some(pass) => resolver.resolve(pass.clone())?,
+                    None => SecretString::default(),
+                },
+            },
+        };
+
+        match &mut proxy {
+            Proxy::Socks5 { auth: slot, .. } | Proxy::Http { auth: slot, .. } => {
+                *slot = Some(auth);
+            }
+            Proxy::None | Proxy::System => {}
+        }
+
+        Ok(proxy)
     }
 }
 
@@ -1738,6 +1790,10 @@ pub struct SmtpConfig {
     /// Omit it for an unauthenticated relay, which stops after `EHLO` and
     /// sends no `AUTH` at all.
     pub sasl: Option<SaslConfig>,
+    /// The proxy the channel goes through, falling back to the account's,
+    /// then to the `all_proxy` and `https_proxy` environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
     /// Removed keys, refused by name as the file is parsed.
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
@@ -1789,7 +1845,7 @@ pub struct TlsConfig {
     #[serde(default)]
     pub rustls: RustlsConfig,
     /// Path to an extra CA certificate to trust, shell-expanded.
-    #[serde(default, deserialize_with = "shell_expanded_path_opt")]
+    #[serde(default, deserialize_with = "opt_shell_expanded_path")]
     pub cert: Option<PathBuf>,
 }
 
@@ -2629,7 +2685,7 @@ mod tests {
     /// carries the expansion and reloads to the same value.
     #[test]
     fn a_tilde_path_is_expanded_at_deserialize() {
-        let home = PathBuf::from(shellexpand::tilde("~").into_owned());
+        let home = dirs::home_dir().unwrap();
 
         let store: StoreConfig = toml::from_str(r#"root = "~/store""#).unwrap();
         assert_eq!(store.root, Some(home.join("store")));
@@ -2644,6 +2700,20 @@ mod tests {
         // absent rather than expanding an empty path.
         let tls: TlsConfig = toml::from_str("").unwrap();
         assert_eq!(tls.cert, None);
+    }
+
+    /// A path key expands environment variables too, as every other
+    /// Pimalaya path does through pimalaya-config, where the tilde alone
+    /// used to.
+    #[test]
+    fn a_variable_in_a_path_is_expanded_at_deserialize() {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+
+        let store: StoreConfig = toml::from_str(r#"root = "$HOME/store""#).unwrap();
+        assert_eq!(store.root, Some(home.join("store")));
+
+        let tls: TlsConfig = toml::from_str(r#"cert = "${HOME}/ca.pem""#).unwrap();
+        assert_eq!(tls.cert, Some(home.join("ca.pem")));
     }
 
     #[test]
@@ -2705,31 +2775,106 @@ mod tests {
         assert!(err.contains("90 days"), "{err}");
     }
 
+    /// The keys the sibling CLIs read and neverest did not load: a DAV home
+    /// set with no server and no credential, the IMAP `SASL-IR` and `ID`
+    /// quirks, and a proxy at the account, under a backend and its channel.
     #[test]
-    fn a_human_duration_round_trips_through_the_document() {
-        for (raw, secs) in [
-            ("0", 0),
-            ("45s", 45),
-            ("30m", 1800),
-            ("12h", 43200),
-            ("90d", 7776000),
-            ("2w", 1209600),
-        ] {
-            let parsed = HumanDuration::parse(raw).expect(raw);
-            assert_eq!(parsed.0.as_secs(), secs, "{raw}");
-            assert_eq!(parsed.to_string(), raw, "{raw}");
+    fn the_family_connection_keys_load() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            proxy.url = "http://proxy.example.org:3128"
+            carddav.home = "https://dav.example.org/card/user/"
+            carddav.auth = "none"
+            sources.cal.caldav.home = "https://dav.example.org/cal/user/"
+            sources.cal.caldav.auth.basic.username = "user"
+            sources.cal.caldav.auth.basic.password.raw = "pw"
+            sources.cal.caldav.proxy.url = "socks5h://127.0.0.1:1080"
+            sources.cal.caldav.proxy.username = "user"
+            sources.cal.caldav.proxy.password.raw = "pw"
+            sources.mail.imap.server = "imap.example.org"
+            sources.mail.imap.sasl-ir = false
+            sources.mail.imap.id.auto = true
+            sources.mail.imap.id.fields.name = true
+            sources.mail.imap.id.fields.os = false
+            sources.mail.smtp.server = "smtp.example.org"
+            sources.mail.smtp.proxy.url = "http://smtp-proxy.example.org:3128"
+            "#,
+        )
+        .unwrap();
+        let sources = account.sources().unwrap();
+
+        assert_eq!(account.proxy.unwrap().url, "http://proxy.example.org:3128");
+        let SourceBackendConfig::Carddav(card) = &sources["carddav"].backend else {
+            panic!("a CardDAV source");
+        };
+        assert_eq!(card.server, None);
+        assert_eq!(
+            card.home.as_deref(),
+            Some("https://dav.example.org/card/user/")
+        );
+        assert!(matches!(card.auth, DavAuthConfig::None));
+        assert!(card.proxy.is_none());
+
+        let proxy = sources["cal"].backend.proxy().unwrap();
+        assert_eq!(proxy.url, "socks5h://127.0.0.1:1080");
+        assert_eq!(proxy.username.as_deref(), Some("user"));
+
+        let SourceBackendConfig::Imap(imap) = &sources["mail"].backend else {
+            panic!("an IMAP source");
+        };
+        assert_eq!(imap.sasl_ir, Some(false));
+        assert!(imap.id.auto);
+        let fields = BTreeMap::from([(String::from("name"), true), (String::from("os"), false)]);
+        assert_eq!(imap.id.fields, fields);
+        let smtp = sources["mail"].smtp.as_ref().unwrap();
+        assert_eq!(
+            smtp.proxy.as_ref().unwrap().url,
+            "http://smtp-proxy.example.org:3128"
+        );
+    }
+
+    /// A proxy table is spelled as the siblings spell it: a typo is refused.
+    #[test]
+    fn a_proxy_table_refuses_an_unknown_key() {
+        let err = toml::from_str::<AccountConfig>("proxy.uri = \"http://p:1\"").unwrap_err();
+        assert!(err.to_string().contains("uri"), "{err}");
+    }
+
+    /// A duration is pimalaya-config's: an integer of seconds or a number
+    /// and its unit, written back in the largest unit dividing it.
+    #[test]
+    fn a_duration_reads_seconds_or_a_unit_and_round_trips() {
+        let cases = [
+            ("0", 0, r#""0""#),
+            (r#""0""#, 0, r#""0""#),
+            ("45", 45, r#""45s""#),
+            (r#""45s""#, 45, r#""45s""#),
+            (r#""30m""#, 1800, r#""30m""#),
+            (r#""12h""#, 43200, r#""12h""#),
+            ("7776000", 7776000, r#""90d""#),
+            (r#""90d""#, 7776000, r#""90d""#),
+            (r#""2w""#, 1209600, r#""2w""#),
+            ("90061", 90061, r#""90061s""#),
+        ];
+
+        for (raw, secs, written) in cases {
+            let store: StoreConfig = toml::from_str(&format!("purge-after = {raw}")).unwrap();
+            assert_eq!(store.purge_after, Some(Duration::from_secs(secs)), "{raw}");
+            let document = toml::to_string(&store).unwrap();
+            assert_eq!(document.trim(), format!("purge-after = {written}"));
+
+            let store: StoreConfig = toml::from_str(&format!("index-timeout = {raw}")).unwrap();
+            assert_eq!(
+                store.index_timeout,
+                Some(Duration::from_secs(secs)),
+                "{raw}"
+            );
         }
 
-        assert_eq!(HumanDuration(Duration::from_secs(86400)).to_string(), "1d");
-        assert_eq!(
-            HumanDuration(Duration::from_secs(90061)).to_string(),
-            "90061s"
-        );
-
-        assert!(HumanDuration::parse("").is_err());
-        assert!(HumanDuration::parse("90").is_err());
-        assert!(HumanDuration::parse("90y").is_err());
-        assert!(HumanDuration::parse("d").is_err());
+        for raw in [r#""""#, r#""90""#, r#""90y""#, r#""d""#, "-1"] {
+            let toml = format!("purge-after = {raw}");
+            assert!(toml::from_str::<StoreConfig>(&toml).is_err(), "{raw}");
+        }
     }
 
     #[test]

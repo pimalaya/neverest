@@ -37,6 +37,15 @@ use std::{
 };
 
 #[cfg(feature = "smtp")]
+#[cfg(feature = "smtp")]
+use crate::account::SmtpAccount;
+#[cfg(feature = "smtp")]
+use crate::error::ErrorCode;
+use crate::error::Failure;
+#[cfg(feature = "msgraph")]
+use crate::msgraph::client::{GraphClient, SendMimeFailure};
+use crate::offline::{local, states_unknown_version};
+#[cfg(feature = "smtp")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
@@ -59,17 +68,6 @@ use io_smtp::{
     send::SmtpCommandSendError,
     session::{SmtpSessionOpenError, SmtpSessionOpenOptions},
 };
-#[cfg(feature = "smtp")]
-use pimalaya_stream::proxy::Proxy;
-
-#[cfg(feature = "smtp")]
-use crate::account::SmtpAccount;
-#[cfg(feature = "smtp")]
-use crate::error::ErrorCode;
-use crate::error::Failure;
-#[cfg(feature = "msgraph")]
-use crate::msgraph::client::{GraphClient, SendMimeFailure};
-use crate::offline::{local, states_unknown_version};
 
 /// The queue action kind neverest defines for a submission.
 ///
@@ -520,7 +518,7 @@ pub fn open_failure(err: &anyhow::Error) -> OpenFailure {
 pub fn connect_smtp(account: &SmtpAccount) -> Result<SmtpClientStd> {
     let opts = SmtpClientStdConnectOptions {
         tls: account.tls.clone(),
-        proxy: Proxy::None,
+        proxy: account.proxy.clone(),
         sasl: account.sasl.clone(),
         session: SmtpSessionOpenOptions {
             starttls: account.starttls,

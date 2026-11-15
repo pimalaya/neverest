@@ -299,7 +299,7 @@ fn intents_only_sends_through_smtp_without_opening_the_source() {
 
     assert_eq!(data.recv().unwrap(), BODY, "{report}");
     let submitted = &report["submitted"][0];
-    assert_eq!(submitted["id"], id, "{report}");
+    assert_eq!(submitted["row"], id, "{report}");
     assert_eq!(submitted["error"], Value::Null, "{report}");
     assert_eq!(submitted["parked"], false, "{report}");
     assert_eq!(submitted["unconfirmed"], false, "{report}");
@@ -350,7 +350,7 @@ fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
     let report = fixture.intents_only(3);
     assert_eq!(report["submitted"], serde_json::json!([]), "{report}");
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
-    assert_eq!(report["parked"][0]["id"], id, "{report}");
+    assert_eq!(report["parked"][0]["row"], id, "{report}");
 }
 
 /// A run stopped mid-send leaves its mark: the next one parks that send
@@ -366,7 +366,7 @@ fn a_send_a_stopped_run_was_handing_over_is_never_sent_again() {
     let report = fixture.intents_only(3);
 
     let submitted = &report["submitted"][0];
-    assert_eq!(submitted["id"], id, "{report}");
+    assert_eq!(submitted["row"], id, "{report}");
     assert_eq!(submitted["parked"], true, "{report}");
     assert_eq!(submitted["unconfirmed"], true, "{report}");
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
@@ -435,11 +435,11 @@ fn a_send_refused_for_a_quota_stays_queued() {
 
     assert_eq!(data.recv().unwrap(), BODY, "{report}");
     let submitted = &report["submitted"];
-    assert_eq!(submitted[0]["id"], first, "{report}");
+    assert_eq!(submitted[0]["row"], first, "{report}");
     assert!(chain(&submitted[0]).contains("5.4.5"), "{report}");
     assert_eq!(submitted[0]["code"], "quota-exceeded", "{report}");
     assert_eq!(submitted[0]["parked"], false, "{report}");
-    assert_eq!(submitted[1]["id"], second, "{report}");
+    assert_eq!(submitted[1]["row"], second, "{report}");
     let error = submitted[1]["error"].as_str().unwrap();
     assert!(error.starts_with("Not attempted"), "{report}");
     assert_eq!(submitted[1]["parked"], false, "{report}");
@@ -465,7 +465,7 @@ fn a_refused_recipient_parks_the_send_coded() {
     let report = fixture.intents_only(3);
 
     let submitted = &report["submitted"][0];
-    assert_eq!(submitted["id"], id, "{report}");
+    assert_eq!(submitted["row"], id, "{report}");
     assert_eq!(submitted["code"], "recipient-refused", "{report}");
     assert!(chain(submitted).contains("5.1.1"), "{report}");
     assert_eq!(submitted["parked"], true, "{report}");
@@ -561,7 +561,7 @@ fn a_run_killed_mid_send_never_sends_the_message_again() {
 
     let report = fixture.intents_only(3);
     let submitted = &report["submitted"][0];
-    assert_eq!(submitted["id"], id, "{report}");
+    assert_eq!(submitted["row"], id, "{report}");
     assert_eq!(submitted["unconfirmed"], true, "{report}");
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
     assert!(matches!(

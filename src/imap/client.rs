@@ -10,22 +10,29 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use io_imap::{
     client::{ImapClient as _, ImapClientStd as Inner, ImapClientStdConnectOptions},
     rfc3501::select::ImapMailboxSelectData,
     send::ImapOutput,
     session::ImapSessionOpenOptions,
     types::{
-        core::{Atom, Vec1},
+        IntoStatic,
+        core::{Atom, IString, NString, Vec1},
         extensions::enable::CapabilityEnable,
         mailbox::Mailbox,
         response::Capability,
     },
 };
+#[cfg(test)]
 use io_sasl::mechanism::Sasl;
+use log::warn;
+#[cfg(test)]
 use pimalaya_stream::{proxy::Proxy, tls::Tls};
+#[cfg(test)]
 use url::Url;
+
+use crate::{account::ImapAccount, config::ImapIdConfig};
 
 /// Live IMAP client wrapping the io-imap session.
 ///
@@ -45,15 +52,7 @@ pub struct ImapClient {
     /// page made so a later page of this run searches nothing.
     pub(crate) round: Option<RoundUids>,
     /// What the connection opened from, kept to open it again.
-    opening: Opening,
-}
-
-/// The arguments of [`ImapClient::connect`].
-struct Opening {
-    server: Url,
-    tls: Tls,
-    starttls: bool,
-    sasl: Option<Sasl>,
+    opening: ImapAccount,
 }
 
 /// The UIDs left to list in a round of one mailbox, newest first.
@@ -70,25 +69,38 @@ pub(crate) struct RoundUids {
 }
 
 impl ImapClient {
-    /// Opens the IMAP connection (TCP/TLS/STARTTLS, greeting, SASL), the ALPN
-    /// identifiers riding the passed [`Tls`].
+    /// Opens a direct IMAP connection to `server`, with no `ID` and the
+    /// advertised `SASL-IR`: what a test server needs.
+    #[cfg(test)]
     pub fn connect(server: &Url, tls: &Tls, starttls: bool, sasl: Option<Sasl>) -> Result<Self> {
-        let opening = Opening {
+        Self::open(&ImapAccount {
             server: server.clone(),
             tls: tls.clone(),
             starttls,
-            sasl: sasl.clone(),
-        };
-        let opts = ImapClientStdConnectOptions {
-            tls: tls.clone(),
-            proxy: Proxy::None,
             sasl,
+            proxy: Proxy::None,
+            sasl_ir: None,
+            auto_id: None,
+        })
+    }
+
+    /// Opens the IMAP connection (proxy, TCP/TLS/STARTTLS, greeting, SASL,
+    /// then the `ID` the account asks for), the ALPN identifiers riding its
+    /// [`Tls`].
+    pub fn open(account: &ImapAccount) -> Result<Self> {
+        let opening = account.clone();
+        let opts = ImapClientStdConnectOptions {
+            tls: account.tls.clone(),
+            proxy: account.proxy.clone(),
+            sasl: account.sasl.clone(),
             session: ImapSessionOpenOptions {
-                starttls,
+                starttls: account.starttls,
+                auto_id: account.auto_id.clone(),
+                sasl_ir: account.sasl_ir,
                 ..Default::default()
             },
         };
-        let (inner, mut capabilities) = Inner::connect(server, opts)?;
+        let (inner, mut capabilities) = Inner::connect(&account.server, opts)?;
         // NOTE: a debug build can be told to read the server as one without
         // QRESYNC, which the integration tests take to list band heads
         // against a server offering it; a release build never reads it.
@@ -116,14 +128,7 @@ impl ImapClient {
     /// Drops the connection and opens it again as it first opened, nothing
     /// selected; the UIDs a round has left are kept.
     pub fn reconnect(&mut self) -> Result<()> {
-        let Opening {
-            server,
-            tls,
-            starttls,
-            sasl,
-        } = &self.opening;
-
-        let mut fresh = Self::connect(server, tls, *starttls, sasl.clone())?;
+        let mut fresh = Self::open(&self.opening)?;
         fresh.round = self.round.take();
         *self = fresh;
 
@@ -194,6 +199,51 @@ impl Deref for ImapClient {
 impl DerefMut for ImapClient {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
+    }
+}
+
+/// The parameters the automatic `ID` (RFC 2971) of `config` sends, `None`
+/// when `auto` is off.
+///
+/// A key set to `true` takes neverest's canned value, or `NIL` with a
+/// warning when there is none; one set to `false` sends `NIL`.
+pub fn auto_id(config: &ImapIdConfig) -> Result<Option<Vec<(IString<'static>, NString<'static>)>>> {
+    if !config.auto {
+        return Ok(None);
+    }
+
+    let mut params = Vec::with_capacity(config.fields.len());
+    for (key, &canned) in &config.fields {
+        let ikey = IString::try_from(key.clone())
+            .map_err(|err| anyhow!("Invalid IMAP ID parameter key `{key}`: {err}"))?
+            .into_static();
+
+        let value = match canned.then(|| canned_id_value(key)).flatten() {
+            Some(value) => NString::try_from(value)
+                .map_err(|err| anyhow!("Invalid IMAP ID value `{value}` for `{key}`: {err}"))?
+                .into_static(),
+            None => {
+                if canned {
+                    warn!("imap.id.fields.{key} = true: no canned value defined, sending NIL");
+                }
+                NString::NIL
+            }
+        };
+
+        params.push((ikey, value));
+    }
+
+    Ok(Some(params))
+}
+
+/// Neverest's value for a well-known `ID` key.
+fn canned_id_value(key: &str) -> Option<&'static str> {
+    match key {
+        "name" => Some(env!("CARGO_PKG_NAME")),
+        "version" => Some(env!("CARGO_PKG_VERSION")),
+        "vendor" => Some("Pimalaya"),
+        "support-url" => Some("https://github.com/pimalaya/neverest"),
+        _ => None,
     }
 }
 

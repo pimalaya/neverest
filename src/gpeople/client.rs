@@ -36,10 +36,11 @@ use pimalaya_stream::{
     stream::{Stream, TlsConnectOptions},
     tls::Tls,
 };
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use url::Url;
 
 use crate::{
+    account::GoogleAccount,
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
     error::ErrorCode,
     item::{collection::Collection, flag::Flag},
@@ -61,6 +62,8 @@ pub struct GpeopleClient {
     inner: GpeopleClientStd,
     /// The TLS configuration, kept for stream reopens.
     tls: Tls,
+    /// The proxy, kept for stream reopens.
+    proxy: Proxy,
     /// Whether the server allowed reusing the stream after the last
     /// exchange; when false the next operation reopens it.
     alive: bool,
@@ -70,17 +73,19 @@ pub struct GpeopleClient {
 
 impl GpeopleClient {
     /// Opens the TLS connection to the People API with a bearer token.
-    pub fn connect(token: &SecretString, tls: Tls, throttle: Arc<Throttle>) -> Result<Self> {
+    pub fn connect(account: &GoogleAccount, throttle: Arc<Throttle>) -> Result<Self> {
+        let GoogleAccount { token, tls, proxy } = account;
         let options = GpeopleClientStdConnectOptions {
             tls: tls.clone(),
-            proxy: Proxy::None,
+            proxy: proxy.clone(),
         };
         let inner = GpeopleClientStd::connect(token.expose_secret(), options)
             .context("Cannot connect to Google People")?;
 
         Ok(Self {
             inner,
-            tls,
+            tls: tls.clone(),
+            proxy: proxy.clone(),
             alive: true,
             throttle,
         })
@@ -94,6 +99,7 @@ impl GpeopleClient {
         let host = url.host_str().context("People API base URL has no host")?;
         let opts = TlsConnectOptions {
             tls: self.tls.clone(),
+            proxy: self.proxy.clone(),
             ..Default::default()
         };
         let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
@@ -558,6 +564,7 @@ mod tests {
             let mut client = GpeopleClient {
                 inner: GpeopleClientStd::new(Canned(answer.into_bytes()), "token"),
                 tls: Tls::default(),
+                proxy: Proxy::None,
                 alive: true,
                 throttle: Arc::new(Throttle::new("gpeople")),
             };
@@ -634,6 +641,7 @@ mod tests {
         let mut client = GpeopleClient {
             inner: GpeopleClientStd::new(stream, "token"),
             tls: Tls::default(),
+            proxy: Proxy::None,
             alive: true,
             throttle: Arc::new(Throttle::new("gpeople")),
         };

@@ -20,7 +20,7 @@ use serde::Serialize;
 use crate::{
     cli::{exit::Exit, sync::try_store_lock},
     config::{AccountConfig, Config},
-    error::{self, ErrorCode, chain},
+    error::{ErrorCode, Failure, chain},
     offline::{driver, state::StoreState},
     sync::report::{IndexRefresh, OverruledBody},
 };
@@ -182,10 +182,15 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Drain
                 kind,
                 seq,
             }),
-            PimdirActionStatus::Parked { error, .. } => output.parked.push(ParkedAction {
+            PimdirActionStatus::Parked {
+                attempts, error, ..
+            } => output.parked.push(ParkedAction {
                 id: row.id,
                 collection: row.collection,
                 kind,
+                producer: row.producer,
+                queued_at: row.created_at,
+                attempts,
                 code: None,
                 error,
                 sources: Vec::new(),
@@ -241,8 +246,12 @@ pub struct DrainOutput {
     /// The stable code of the failure that stopped the account, `null`
     /// when it was drained or the failure carries none.
     pub code: Option<ErrorCode>,
-    /// Why the account was not drained, `null` when it was.
+    /// Why the account was not drained, the outermost message, `null` when
+    /// it was.
     pub error: Option<String>,
+    /// The messages of the failure's causes, outermost first, empty when it
+    /// was drained.
+    pub sources: Vec<String>,
     /// The actions applied to the account's collections, in queue order.
     pub applied: Vec<DrainedAction>,
     /// The actions refused for good this time, kept for an operator.
@@ -267,6 +276,7 @@ impl DrainOutput {
             busy: false,
             code: None,
             error: None,
+            sources: Vec::new(),
             applied: Vec::new(),
             parked: Vec::new(),
             waiting: 0,
@@ -283,9 +293,11 @@ impl DrainOutput {
     }
 
     fn failed(account: String, err: Error) -> Self {
+        let failure = Failure::of(&err);
         Self {
-            code: error::code(&err),
-            error: Some(format!("{err:#}")),
+            code: failure.code,
+            error: Some(failure.error),
+            sources: failure.sources,
             ..Self::new(account)
         }
     }
@@ -302,6 +314,7 @@ impl fmt::Display for DrainOutput {
         }
 
         if let Some(error) = &self.error {
+            let error = chain(error, &self.sources);
             return writeln!(f, "Account {} was not drained: {error}", self.account);
         }
 
@@ -335,11 +348,12 @@ impl fmt::Display for DrainOutput {
 #[serde(rename_all = "camelCase")]
 pub struct DrainedAction {
     /// The queue row, as its producer's enqueue returned it.
+    #[serde(rename = "row")]
     pub id: i64,
     /// The collection it was queued on.
     pub collection: String,
-    /// The action kind: `add`, `update`, `set-flags`, `remove`, `move`,
-    /// `copy`.
+    /// The action kind, kebab-case as the store spells it: `add`, `update`,
+    /// `set-flags`, `remove`, `move`, `copy`.
     pub kind: String,
     /// The item an `add` created, the id readers list it under.
     pub seq: Option<i64>,
@@ -360,11 +374,19 @@ impl fmt::Display for DrainedAction {
 #[serde(rename_all = "camelCase")]
 pub struct ParkedAction {
     /// The queue row.
+    #[serde(rename = "row")]
     pub id: i64,
     /// The collection it was queued on.
     pub collection: String,
-    /// The action kind.
+    /// The action kind, kebab-case as the store spells it: `add`, `update`,
+    /// `set-flags`, `remove`, `move`, `copy`.
     pub kind: String,
+    /// The enqueuing process, diagnostic only.
+    pub producer: String,
+    /// When the row was appended, stamped by the store's own clock.
+    pub queued_at: String,
+    /// How many times the row was tried before it was parked.
+    pub attempts: i64,
     /// The stable code of the refusal, `null`: the store keeps its text
     /// alone.
     pub code: Option<ErrorCode>,
@@ -385,5 +407,71 @@ impl fmt::Display for ParkedAction {
             self.collection,
             chain(&self.error, &self.sources)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::cli::drain::*;
+
+    /// A drained or parked row is keyed `row`, as himalaya's `pimdir queue
+    /// list` keys it, and a parked one carries its producer, when it was
+    /// queued and how often it was tried.
+    #[test]
+    fn a_drain_keys_its_rows_row() {
+        let mut output = DrainOutput::new(String::from("work"));
+        output.applied.push(DrainedAction {
+            id: 2,
+            collection: String::from("work/imap/INBOX"),
+            kind: String::from("add"),
+            seq: Some(5),
+        });
+        output.parked.push(ParkedAction {
+            id: 3,
+            collection: String::from("work/imap/INBOX"),
+            kind: String::from("set-flags"),
+            producer: String::from("himalaya"),
+            queued_at: String::from("2026-11-15T08:00:00.000Z"),
+            attempts: 1,
+            code: None,
+            error: String::from("unknown seq 9"),
+            sources: Vec::new(),
+        });
+        let json = serde_json::to_value(&output).unwrap();
+
+        assert_eq!(json["applied"][0]["row"], 2, "{json}");
+        assert_eq!(
+            json["parked"][0],
+            json!({
+                "row": 3,
+                "collection": "work/imap/INBOX",
+                "kind": "set-flags",
+                "producer": "himalaya",
+                "queuedAt": "2026-11-15T08:00:00.000Z",
+                "attempts": 1,
+                "code": null,
+                "error": "unknown seq 9",
+                "sources": [],
+            })
+        );
+    }
+
+    /// An account that could not be drained names its failure as an item
+    /// error does, the causes apart from the outermost message.
+    #[test]
+    fn an_undrained_account_carries_its_causes_apart() {
+        let err = anyhow!("no such table").context("Open the store");
+        let output = DrainOutput::failed(String::from("work"), err);
+        let json = serde_json::to_value(&output).unwrap();
+
+        assert_eq!(json["error"], "Open the store", "{json}");
+        assert_eq!(json["sources"], json!(["no such table"]), "{json}");
+        let text = output.to_string();
+        assert!(
+            text.contains("drained: Open the store: no such table"),
+            "{text}"
+        );
     }
 }

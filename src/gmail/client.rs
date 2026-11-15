@@ -180,6 +180,8 @@ pub struct GmailClient {
     token: SecretString,
     /// The TLS configuration, kept for stream reopens.
     tls: Tls,
+    /// The proxy, kept for stream reopens.
+    proxy: Proxy,
     /// Label name to label id, refreshed from the label listing when a name
     /// misses.
     labels: HashMap<String, String>,
@@ -204,7 +206,7 @@ impl GmailClient {
     pub fn connect(account: &GmailAccount, throttle: Arc<Throttle>) -> Result<Self> {
         let options = GmailClientStdConnectOptions {
             tls: account.tls.clone(),
-            proxy: Proxy::None,
+            proxy: account.proxy.clone(),
             user_id: account.user_id.clone(),
         };
         let inner = GmailClientStd::connect(account.token.expose_secret(), options)
@@ -215,6 +217,7 @@ impl GmailClient {
             batch: None,
             token: account.token.clone(),
             tls: account.tls.clone(),
+            proxy: account.proxy.clone(),
             labels: HashMap::new(),
             alive: true,
             batch_alive: false,
@@ -227,7 +230,7 @@ impl GmailClient {
     /// Reopens the stream to the Gmail endpoint, keeping the credential.
     fn reconnect(&mut self) -> Result<()> {
         debug!("reopening the gmail stream");
-        let stream = open_stream(&self.tls, GMAIL_API_BASE)?;
+        let stream = open_stream(&self.tls, &self.proxy, GMAIL_API_BASE)?;
         self.inner.set_stream(stream);
         self.alive = true;
         Ok(())
@@ -238,14 +241,14 @@ impl GmailClient {
     fn batch_session(&mut self) -> Result<&mut GmailClientStd, GmailClientStdError> {
         if !self.batch_alive || self.batch.is_none() {
             debug!("opening the gmail batch stream");
-            let stream = open_stream(&self.tls, GMAIL_BATCH_URL)
+            let stream = open_stream(&self.tls, &self.proxy, GMAIL_BATCH_URL)
                 .map_err(|err| GmailClientStdError::Io(io::Error::other(format!("{err:#}"))))?;
             match &mut self.batch {
                 Some(session) => session.set_stream(stream),
                 None => {
                     let options = GmailClientStdConnectOptions {
                         tls: self.tls.clone(),
-                        proxy: Proxy::None,
+                        proxy: self.proxy.clone(),
                         user_id: self.inner.user_id.clone(),
                     };
                     let token = self.token.expose_secret();
@@ -1490,14 +1493,15 @@ struct Changes {
     since: Instant,
 }
 
-/// Opens a TLS stream to the host of `url`.
-fn open_stream(tls: &Tls, url: &str) -> Result<Stream> {
+/// Opens a TLS stream to the host of `url`, through `proxy`.
+fn open_stream(tls: &Tls, proxy: &Proxy, url: &str) -> Result<Stream> {
     let url = Url::parse(url).with_context(|| format!("Cannot parse {url}"))?;
     let host = url
         .host_str()
         .with_context(|| format!("{url} has no host"))?;
     let opts = TlsConnectOptions {
         tls: tls.clone(),
+        proxy: proxy.clone(),
         ..Default::default()
     };
     let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
@@ -1953,6 +1957,7 @@ pub(crate) mod scripted {
             batch: Some(GmailClientStd::new(batch.clone(), "token", options())),
             token: SecretString::from(String::from("token")),
             tls: Tls::default(),
+            proxy: Proxy::None,
             labels: HashMap::from([
                 (String::from("INBOX"), String::from("INBOX")),
                 (String::from("Work"), String::from("Label_1")),

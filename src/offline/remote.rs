@@ -318,7 +318,7 @@ pub struct RejectedPush {
     /// The item's handle on this side.
     pub handle: String,
     /// What the run tried: `update`, `append`, `copy`, `delete`, `move`,
-    /// `set flags`.
+    /// `set-flags`.
     pub action: &'static str,
     /// Why it did not land, coded when the server's refusal says so.
     pub failure: Failure,
@@ -664,7 +664,7 @@ impl PimdirRemote for PimRemote<'_> {
                     match stored {
                         Ok(()) => accepted(handle, None),
                         Err(err) => {
-                            self.reject(&collection, handle, "set flags", Failure::of(&err))
+                            self.reject(&collection, handle, "set-flags", Failure::of(&err))
                         }
                     }
                 }
@@ -2059,9 +2059,12 @@ mod push_tests {
         let account = SourceAccount {
             backend: SourceAccountBackend::Dav(DavAccount {
                 kind: DavKind::Cal,
-                server: Url::parse("https://dav.example.org/").unwrap(),
+                endpoint: crate::account::DavEndpoint::Server(
+                    Url::parse("https://dav.example.org/").unwrap(),
+                ),
                 tls: Tls::default(),
                 auth: io_webdav::rfc4918::WebdavAuth::None,
+                proxy: pimalaya_stream::proxy::Proxy::None,
             }),
             #[cfg(feature = "smtp")]
             smtp: None,

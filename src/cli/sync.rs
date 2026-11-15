@@ -27,7 +27,7 @@ use pimalaya_cli::printer::Printer;
 use crate::{
     cli::exit::Exit,
     config::{AccountConfig, CollectionFilter, Config},
-    error::{self, pimdir_error},
+    error::{Failure, pimdir_error},
     offline::{
         driver::{self, Bodies, DownloadOrder, Pacing},
         local,
@@ -561,17 +561,20 @@ fn ran(account: String, report: SyncOutput) -> AccountSync {
         busy: false,
         code: None,
         error: None,
+        sources: Vec::new(),
         report: Some(report),
     }
 }
 
 /// The outcome of an account that failed, keeping the failure's code.
 fn failed(account: String, err: Error) -> AccountSync {
+    let failure = Failure::of(&err);
     AccountSync {
         account,
         busy: false,
-        code: error::code(&err),
-        error: Some(format!("{err:#}")),
+        code: failure.code,
+        error: Some(failure.error),
+        sources: failure.sources,
         report: None,
     }
 }
@@ -583,6 +586,7 @@ fn busy(account: String) -> AccountSync {
         busy: true,
         code: None,
         error: None,
+        sources: Vec::new(),
         report: None,
     }
 }
@@ -1083,5 +1087,83 @@ mod tests {
         let err = reset_account(dir.path(), "home", &namespaced("home"), true).unwrap_err();
 
         assert!(format!("{err:#}").contains("neverest init -a home"));
+    }
+
+    /// An account that failed names its failure as an item error does: the
+    /// outermost message in `error`, its causes in `sources`, where `error`
+    /// held the whole chain.
+    #[test]
+    fn a_failed_account_carries_its_causes_apart() {
+        let err = anyhow!("connection refused").context("Open imap");
+        let output = failed(String::from("work"), err);
+        let json = serde_json::to_value(&output).unwrap();
+
+        assert_eq!(json["error"], "Open imap", "{json}");
+        assert_eq!(json["sources"], serde_json::json!(["connection refused"]));
+        let text = output.to_string();
+        assert!(
+            text.contains("work failed: Open imap: connection refused"),
+            "{text}"
+        );
+    }
+
+    /// A queue row is keyed `row` wherever the report names one, as
+    /// himalaya's `pimdir queue list` does, and a parked row carries its
+    /// kebab-case `kind`, when it was queued and how often it was tried.
+    #[test]
+    fn a_queue_row_is_keyed_row_and_a_parked_one_names_its_kind() {
+        use crate::sync::report::{IntentEntry, ParkedQueueAction, SubmitEntry};
+
+        let mut report = SyncOutput::default();
+        report.parked.push(ParkedQueueAction {
+            id: 3,
+            collection: String::from("work/imap/INBOX"),
+            kind: String::from("set-flags"),
+            producer: String::from("himalaya"),
+            queued_at: String::from("2026-11-15T08:00:00.000Z"),
+            attempts: 2,
+            code: None,
+            error: String::from("unknown seq 9"),
+            sources: Vec::new(),
+        });
+        report.submitted.push(SubmitEntry {
+            id: 4,
+            collection: String::from("work/imap/Sent"),
+            subject: None,
+            code: None,
+            error: None,
+            sources: Vec::new(),
+            parked: false,
+            unconfirmed: false,
+        });
+        report.intents.push(IntentEntry {
+            id: 5,
+            collection: String::from("work/caldav/home"),
+            kind: String::from("calendar-reply"),
+            source: String::from("caldav"),
+            seq: None,
+            code: None,
+            error: None,
+            sources: Vec::new(),
+            parked: false,
+        });
+        let json = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(
+            json["parked"][0],
+            serde_json::json!({
+                "row": 3,
+                "collection": "work/imap/INBOX",
+                "kind": "set-flags",
+                "producer": "himalaya",
+                "queuedAt": "2026-11-15T08:00:00.000Z",
+                "attempts": 2,
+                "code": null,
+                "error": "unknown seq 9",
+                "sources": [],
+            })
+        );
+        assert_eq!(json["submitted"][0]["row"], 4, "{json}");
+        assert_eq!(json["intents"][0]["row"], 5, "{json}");
     }
 }

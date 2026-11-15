@@ -23,8 +23,18 @@ Upgrading from 0.3.0:
 - `check` checks every endpoint and exits 3, printing its report, when one does not answer; it exited 1 with the failure object of the first.
 - `configure` and the first-run offer are gone: write the configuration by hand from config.sample.toml. A build naming the `wizard` feature fails until it drops it.
 - A configuration key neverest does not read is refused at load, at every level, where a misspelled key in a source table or at the root was ignored; a source naming two backend tables is refused rather than reduced to the first.
+- `-c` takes one path, repeated to merge several (`-c a.toml -c b.toml`), where it split one value on `:`; `NEVEREST_CONFIG` is no longer read.
+- A bare `neverest` without a configuration fails, exit 1, where it printed the help; `completion`, `manual` and `json-schema` with no argument fail on stdout, exit 1, where they printed their help on stderr, exit 2.
+- Under `--json`, a `check` capability reads `level` (`support` is gone), every queue row `row` (`id` is gone, and `action` on an overruled body), a sync's parked row `kind` (`action` is gone); a failed account of `sync` or `drain` and a failed index refresh split their `error` into `error` and `sources`.
 
 ### Added
+
+- Added the first-run welcome: a person at a terminal with no configuration meets the commands that create one from the sample, then `neverest check`, as every Pimalaya CLI does.
+- Added `carddav.home` and `caldav.home`, the home set as a URL, listed with nothing discovered, `server` becoming optional, and `auth = "none"` for a DAV server asking for no credential.
+- Added `imap.sasl-ir` and `imap.id.auto`, `imap.id.fields`, as himalaya and carillon read them.
+- Added `proxy.url`, `proxy.username` and `proxy.password` at the account, under every backend table and under `smtp`; with none, every connection goes through the proxy the `all_proxy` and `https_proxy` environment variables name, as the other Pimalaya CLIs do.
+- Added integer seconds to `store.purge-after` and `store.index-timeout` (`7776000` beside `"90d"`, pimalaya-config 0.5.1).
+- Added `queuedAt`, `attempts` and, on a drain, `producer` to the parked rows, and `sources` to the failed account rows of `sync` and `drain` and to the index refresh.
 
 - Added a clean stop on SIGINT and SIGTERM to `sync`: the run starts no new account, collection or body batch, lets what is in flight land, prints its result with `interrupted` set on the account it stopped in, and exits 4. A second signal ends it at once (130).
 - Added `backend-not-built`: a source whose backend this build leaves out still loads, and opening it fails with that code, naming the cargo feature to rebuild with.
@@ -161,6 +171,15 @@ Upgrading from 0.3.0:
   A message such a listing leaves out is then kept rather than read as deleted, and the sync report counts them per collection under `unlisted`, printed under `Unlisted`, no warning and no exit code. Only a removal the server states itself deletes, so on an IMAP server without QRESYNC (Gmail's) a message deleted on the server stays in the store while the key is set.
 
 ### Changed
+
+- **BREAKING**: changed `-c` to pimalaya-cli's shared flag: one path per flag, repeated to merge several files in order, never split on `:`. The `NEVEREST_CONFIG` environment variable is no longer read. `-a` stays repeatable.
+- **BREAKING**: changed a bare `neverest` without a configuration to fail with the missing configuration, exit 1, the welcome at a terminal, as the other Pimalaya CLIs do; with one it prints the help. `completion`, `manual` and `json-schema` with no argument fail on stdout, exit 1, where they printed their help on stderr and exited 2, and come in himalaya's order.
+- **BREAKING**: changed the `check` capability rows to `{name, level, detail}`, `level` pimalaya-cli's capability level, where `support` was a free string.
+- **BREAKING**: changed every queue row of a report to `row`, as himalaya's `pimdir queue list` keys it: `applied` and `parked` of a drain, `parked`, `submitted` and `intents` of a sync (`id` before), and an overruled body (`action` before). A sync's parked row names its kind `kind`, where it was `action`, and a rejected flag push reads `set-flags`, where it read `set flags`.
+- Changed the missing configuration and the unknown account to the family's words: "No configuration found at <path>, start from the sample: <url>" and "Account `x` not found, the configuration holds: a, b".
+- Changed the help to end with the Pimalaya footer, and clap to the feature set of the other Pimalaya CLIs: no colour, no wrapping.
+- Changed `store.root` and `tls.cert` to expand `$VAR` as well as `~` (pimalaya-config's deserializer).
+- Changed `sync` to print through pimalaya-cli's streaming printer, as carillon's `watch` does, and a `rejected` row to pimalaya-cli's item error, its JSON unchanged.
 
 - **BREAKING**: changed the configuration to refuse every key it does not read, at every level, naming the key.
 

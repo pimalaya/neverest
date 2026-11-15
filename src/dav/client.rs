@@ -54,6 +54,7 @@ use pimalaya_stream::{proxy::Proxy, tls::Tls};
 use url::Url;
 
 use crate::{
+    account::{DavAccount, DavEndpoint},
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
     error::ErrorCode,
     item::{collection::Collection, flag::Flag},
@@ -118,30 +119,46 @@ pub struct DavClient {
     server: Url,
     tls: Tls,
     auth: WebdavAuth,
+    proxy: Proxy,
     /// The source's back-off, shared by its connections.
     throttle: Arc<Throttle>,
 }
 
 impl DavClient {
     /// Opens the session and discovers the home set, so a misconfigured URL or
-    /// credential fails here rather than at the first enumeration.
-    pub fn connect(
-        kind: DavKind,
-        server: &Url,
-        tls: &Tls,
-        auth: WebdavAuth,
-        throttle: Arc<Throttle>,
-    ) -> Result<Self> {
-        let inner = WebdavClientStd::connect(server, auth.clone(), connect_options(tls))
+    /// credential fails here rather than at the first enumeration. A home
+    /// set the account names is taken as it is, nothing discovered.
+    pub fn connect(account: &DavAccount, throttle: Arc<Throttle>) -> Result<Self> {
+        let DavAccount {
+            kind,
+            endpoint,
+            tls,
+            auth,
+            proxy,
+        } = account;
+        let kind = *kind;
+        let server = endpoint.url();
+        let options = connect_options(tls, proxy);
+        let inner = WebdavClientStd::connect(server, auth.clone(), options)
             .with_context(|| format!("Cannot connect to the {kind} server"))?;
         let mut client = Self {
             kind,
             inner,
             server: server.clone(),
             tls: tls.clone(),
-            auth,
+            auth: auth.clone(),
+            proxy: proxy.clone(),
             throttle,
         };
+
+        if let DavEndpoint::Home(home) = endpoint {
+            match kind {
+                DavKind::Card => client.inner.addressbook_home_set = Some(home.clone()),
+                DavKind::Cal => client.inner.calendar_home_set = Some(home.clone()),
+            }
+            debug!("{kind} home set, as configured: {home}");
+            return Ok(client);
+        }
 
         let home = match kind {
             DavKind::Card => client.op(WebdavClientStd::addressbook_home_set),
@@ -218,8 +235,8 @@ impl DavClient {
     /// discovered: only its own is ever populated, so the other copies an
     /// absence.
     fn reconnect(&mut self) -> Result<(), WebdavClientStdError> {
-        let mut inner =
-            WebdavClientStd::connect(&self.server, self.auth.clone(), connect_options(&self.tls))?;
+        let options = connect_options(&self.tls, &self.proxy);
+        let mut inner = WebdavClientStd::connect(&self.server, self.auth.clone(), options)?;
         inner.principal_url = self.inner.principal_url.clone();
         inner.addressbook_home_set = self.inner.addressbook_home_set.clone();
         inner.addressbook_reports = self.inner.addressbook_reports.clone();
@@ -880,12 +897,11 @@ where
         }
     }
 }
-/// The connect options of a session: the configured TLS, and a direct
-/// connection, as every other source of the account opens its own.
-fn connect_options(tls: &Tls) -> WebdavClientStdConnectOptions {
+/// The connect options of a session: the configured TLS and proxy.
+fn connect_options(tls: &Tls, proxy: &Proxy) -> WebdavClientStdConnectOptions {
     WebdavClientStdConnectOptions {
         tls: tls.clone(),
-        proxy: Proxy::None,
+        proxy: proxy.clone(),
     }
 }
 
@@ -1160,6 +1176,7 @@ impl DavClient {
             server: Url::parse("http://127.0.0.1:1/").unwrap(),
             tls: Tls::default(),
             auth,
+            proxy: Proxy::None,
             throttle: Arc::new(Throttle::new("dav")),
         };
         (client, wire)
@@ -1282,6 +1299,28 @@ pub(crate) mod scripted {
 mod tests {
     use super::*;
     use crate::error::Failure;
+
+    /// A configured home set is where the session lists, nothing being
+    /// discovered: the server here accepts the connection and never
+    /// answers, so a discovery request would hang or fail.
+    #[test]
+    fn a_configured_home_set_is_taken_without_discovery() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let home = Url::parse(&format!("http://127.0.0.1:{port}/card/user/")).unwrap();
+        let account = DavAccount {
+            kind: DavKind::Card,
+            endpoint: DavEndpoint::Home(home.clone()),
+            tls: Tls::default(),
+            auth: WebdavAuth::None,
+            proxy: Proxy::None,
+        };
+
+        let client = DavClient::connect(&account, Arc::new(Throttle::new("carddav"))).unwrap();
+
+        assert_eq!(client.inner.addressbook_home_set, Some(home));
+        assert_eq!(client.inner.principal_url, None);
+    }
 
     #[test]
     fn a_default_calendar_url_is_keyed_as_a_listing_keys_it() {
@@ -1768,6 +1807,7 @@ mod tests {
             server,
             tls: Tls::default(),
             auth: WebdavAuth::None,
+            proxy: Proxy::None,
             throttle: Arc::new(Throttle::new("carddav")),
         }
     }

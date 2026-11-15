@@ -333,7 +333,7 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     );
     let report = json_report(&report);
     let submitted = &report["submitted"][0];
-    assert_eq!(submitted["id"], id, "{report}");
+    assert_eq!(submitted["row"], id, "{report}");
     assert_eq!(submitted["error"], serde_json::Value::Null, "{report}");
     assert_eq!(submitted["unconfirmed"], false, "{report}");
     assert_eq!(

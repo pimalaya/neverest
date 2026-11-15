@@ -14,6 +14,8 @@
 //! index reads floating times and dates in (pimdir SEARCH §7, §8.1).
 
 use std::{
+    error::Error,
+    iter,
     path::Path,
     sync::OnceLock,
     time::{Duration, Instant},
@@ -61,9 +63,11 @@ pub fn after_run(dir: &Path, config: &StoreConfig, quick: bool, report: &mut Opt
         },
         Err(err) => {
             warn!("cannot refresh the search index, the next run tries again: {err}");
+            let sources = iter::successors(Error::source(&err), |cause| (*cause).source());
             IndexRefresh {
                 code: ErrorCode::of_pimdir(&err),
                 error: Some(err.to_string()),
+                sources: sources.map(ToString::to_string).collect(),
                 ..Default::default()
             }
         }
@@ -95,6 +99,7 @@ pub fn refresh(
         busy: report.busy,
         code: None,
         error: None,
+        sources: Vec::new(),
     })
 }
 

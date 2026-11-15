@@ -131,37 +131,68 @@ mod offline;
 mod sync;
 mod throttle;
 
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
 
 use anyhow::Result;
-use clap::CommandFactory;
-use pimalaya_cli::{clap::parse, error::ErrorReport, log::Logger, printer::StdoutPrinter};
+use pimalaya_cli::{
+    clap::parse,
+    error::{EXIT_FAILURE, ErrorReport},
+    log::Logger,
+    printer::StdoutPrinter,
+    welcome::{is_wanted, shipped_sample},
+};
+use pimalaya_config::toml::ConfigMissingError;
 
 use crate::{
-    cli::{exit::Exit, main::Cli},
+    cli::{
+        exit::Exit,
+        main::{self as cli_main, Cli},
+    },
     error::ErrorCode,
 };
 
 fn main() -> ExitCode {
     let cli = parse::<Cli>();
     let mut printer = StdoutPrinter::new(&cli.json);
+
+    // NOTE: a sync prints its events to a pipe too, a status bar reading
+    // them as they come.
+    if matches!(cli.command, Some(cli::main::Command::Sync(_))) {
+        printer = printer.streaming();
+    }
+
+    let config_paths = cli.config.paths.clone();
     let result = execute(&mut printer, cli);
 
     // NOTE: the outcome that is neither success nor failure comes back here
     // rather than exiting inside a subcommand, so one place decides it.
     // NOTE: a server refusal under the failure reaches its code.
     let result = result.map_err(error::coded);
+
+    // A person missing a configuration meets the welcome, a script or a
+    // JSON caller the error.
+    if let Err(err) = &result
+        && let Some(missing) = err.downcast_ref::<ConfigMissingError>()
+        && is_wanted(&printer)
+    {
+        let sample = shipped_sample("neverest");
+        let welcome = cli_main::welcome(&missing.path, &config_paths, sample.as_deref());
+        eprint!("{welcome}");
+        process::exit(EXIT_FAILURE);
+    }
+
     ErrorReport::<ErrorCode>::eval_coded(&mut printer, result).into()
 }
 
+/// Runs the subcommand, or meets a bare `neverest`.
 fn execute(printer: &mut StdoutPrinter, cli: Cli) -> Result<Exit> {
     Logger::try_init(&cli.log)?;
-    let config_paths = cli.config_paths.as_ref();
+    let config_paths = &cli.config.paths;
 
     match cli.command {
         Some(command) => command.execute(printer, config_paths, &cli.accounts),
         None => {
-            Cli::command().print_help()?;
+            cli_main::meet_bare_invocation(config_paths)?;
             Ok(Exit::Success)
         }
     }

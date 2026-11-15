@@ -1183,8 +1183,7 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
     match &account.backend {
         #[cfg(feature = "imap")]
         SourceAccountBackend::Imap(imap) => {
-            let client =
-                ImapClient::connect(&imap.server, &imap.tls, imap.starttls, imap.sasl.clone())?;
+            let client = ImapClient::open(imap)?;
             Ok(Client::Imap(Box::new(client)))
         }
         #[cfg(feature = "msgraph")]
@@ -1194,6 +1193,7 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
                 &msgraph.token,
                 &msgraph.user_id,
                 msgraph.tls.clone(),
+                msgraph.proxy.clone(),
                 msgraph.sizes.clone(),
                 account.throttle.clone(),
             )?;
@@ -1201,28 +1201,17 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
         }
         #[cfg(feature = "gpeople")]
         SourceAccountBackend::Gpeople(google) => {
-            let client = GpeopleClient::connect(
-                &google.token,
-                google.tls.clone(),
-                account.throttle.clone(),
-            )?;
+            let client = GpeopleClient::connect(google, account.throttle.clone())?;
             Ok(Client::Gpeople(Box::new(client)))
         }
         #[cfg(feature = "gcal")]
         SourceAccountBackend::Gcal(google) => {
-            let client =
-                GcalClient::connect(&google.token, google.tls.clone(), account.throttle.clone())?;
+            let client = GcalClient::connect(google, account.throttle.clone())?;
             Ok(Client::Gcal(Box::new(client)))
         }
         #[cfg(feature = "dav")]
         SourceAccountBackend::Dav(dav) => {
-            let client = DavClient::connect(
-                dav.kind,
-                &dav.server,
-                &dav.tls,
-                dav.auth.clone(),
-                account.throttle.clone(),
-            )?;
+            let client = DavClient::connect(dav, account.throttle.clone())?;
             Ok(Client::Dav(Box::new(client)))
         }
         #[cfg(feature = "gmail")]

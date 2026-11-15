@@ -1,14 +1,15 @@
 # ================================================================================
 # `neverest` configuration file.
 #
-# Loaded from the first valid path among:
+# Loaded from every existing path among the following, each one deep-merged on
+# top of the ones before:
 #   - $XDG_CONFIG_HOME/neverest/config.toml
 #   - $HOME/.config/neverest/config.toml
 #   - $HOME/.neverestrc
 #
-# Override with `neverest -c <PATH>` or `NEVEREST_CONFIG=<PATH>`. Multiple paths
-# can be passed at once, separated by `:`; the first one is the base and the
-# rest are deep-merged on top of it.
+# Override with `neverest -c <PATH>`, repeated to merge several files: the first
+# one is the base and the next ones are deep-merged on top of it. Each `-c`
+# takes one path, never split, and no environment variable is read.
 #
 # Every account shares ONE pimdir STORE, each fed by one or more named SOURCES,
 # each a remote. A backend written directly under the account
@@ -149,6 +150,25 @@ imap.sasl.plain.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-
 # SCRAM-SHA-256: https://datatracker.ietf.org/doc/html/rfc7677
 #imap.sasl.scram-sha-256.username = "user@example.com"
 #imap.sasl.scram-sha-256.password.raw = "***"
+
+# Force the RFC 4959 initial response on or off. Unset follows the advertised
+# SASL-IR capability, which Coremail (126.com, 163.com) advertises falsely: set
+# it to false there.
+#imap.sasl-ir = false
+
+# Send an RFC 2971 ID straight after authentication, as mail.qq.com and
+# Fastmail require. Each field set to true sends neverest's value (name,
+# version, vendor, support-url), false sends NIL; none at all sends `ID NIL`.
+#imap.id.auto = true
+#imap.id.fields.name = true
+#imap.id.fields.version = true
+
+# The proxy the connections go through, over the account's own `proxy` and the
+# all_proxy and https_proxy environment variables. Every backend table and
+# `smtp` take it.
+#imap.proxy.url = "socks5h://127.0.0.1:1080"
+#imap.proxy.username = "user"
+#imap.proxy.password.command = ["pass", "show", "proxy"]
 
 # Keep the server read-mostly, so a buggy sync cannot destroy its state.
 imap.collection.create = false
@@ -318,10 +338,16 @@ imap.item.delete = false
 #carddav.server = "dav.example.org:8443"
 #carddav.server = "https://dav.example.org/dav/"
 
-# Pick exactly one of `basic` (the common case) or `bearer`.
+# Or the address book home set itself, a full URL: nothing is discovered and
+# `server` may be left out (Google's lists no principal neverest can walk to).
+#carddav.home = "https://www.googleapis.com/carddav/v1/principals/<email>/lists/"
+
+# Pick exactly one of `basic` (the common case) or `bearer`, or `none` for a
+# server asking for no credential.
 #carddav.auth.basic.username = "user"
 #carddav.auth.basic.password.command = ["pass", "show", "example/dav"]
 #carddav.auth.bearer.token.command = ["ortie", "token", "show", "-a", "dav"]
+#carddav.auth = "none"
 
 # TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
 #carddav.tls.provider = "rustls"
@@ -351,10 +377,16 @@ imap.item.delete = false
 #caldav.server = "dav.example.org:8443"
 #caldav.server = "https://dav.example.org/dav/"
 
-# Pick exactly one of `basic` (the common case) or `bearer`.
+# Or the calendar home set itself, a full URL: nothing is discovered and
+# `server` may be left out.
+#caldav.home = "https://dav.example.org/dav/calendars/user/"
+
+# Pick exactly one of `basic` (the common case) or `bearer`, or `none` for a
+# server asking for no credential.
 #caldav.auth.basic.username = "user"
 #caldav.auth.basic.password.command = ["pass", "show", "example/dav"]
 #caldav.auth.bearer.token.command = ["ortie", "token", "show", "-a", "dav"]
+#caldav.auth = "none"
 
 # TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
 #caldav.tls.provider = "rustls"
@@ -423,16 +455,23 @@ imap.item.delete = false
 
 # The store never truly deletes: an item whose last binding vanishes is retained,
 # hidden but kept with its body. This is how long before a sync reclaims it: an
-# integer plus `s`, `m`, `h`, `d` or `w`. UNSET never purges, `"0"` purges at
-# once, `sync --no-purge` skips one run, `pimdir` restores retained items. It
-# is this account's alone: another account of the store keeps its own delay.
+# integer of seconds, or a number plus `s`, `m`, `h`, `d` or `w`. UNSET never
+# purges, `0` purges at once, `sync --no-purge` skips one run, `pimdir`
+# restores retained items. It is this account's alone: another account of the
+# store keeps its own delay.
 #store.purge-after = "90d"
 
 # The longest a sync refreshes the store's search index, which frontends query:
 # a large first build spreads over several runs, or `neverest index` builds it
-# whole. `"0"` turns the refresh off; a build without the `search` feature
-# ignores it.
+# whole. An integer of seconds or a number and its unit; `0` turns the refresh
+# off; a build without the `search` feature ignores it.
 #store.index-timeout = "60s"
+#store.index-timeout = 60
+
+# The proxy every endpoint of the account goes through unless its own table
+# names one (see `imap.proxy`). Unset, the all_proxy and https_proxy environment
+# variables are read.
+#proxy.url = "http://proxy.example.org:3128"
 
 # BACKUP RECIPE: a read-only source plus no purge, so a remote expunge cannot
 # lose anything. The item stays in the store, restorable, until you purge on

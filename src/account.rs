@@ -28,6 +28,8 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
+#[cfg(feature = "imap")]
+use io_imap::types::core::{IString, NString};
 #[cfg(any(feature = "imap", feature = "smtp"))]
 use io_sasl::mechanism::Sasl;
 use pimalaya_cli::{error::CodedError, spinner::Spinner};
@@ -41,7 +43,7 @@ use pimalaya_config::secret::SecretResolver;
     feature = "gcal",
     feature = "gmail"
 ))]
-use pimalaya_stream::tls::Tls;
+use pimalaya_stream::{proxy::Proxy, tls::Tls};
 #[cfg(any(
     feature = "msgraph",
     feature = "gpeople",
@@ -56,7 +58,7 @@ use url::Url;
 use crate::config::SmtpConfig;
 #[cfg(any(feature = "imap", feature = "smtp", feature = "dav"))]
 use crate::config::server_url;
-use crate::config::{AccountConfig, SourceBackendConfig, SourceConfig};
+use crate::config::{AccountConfig, ProxyConfig, SourceBackendConfig, SourceConfig};
 #[cfg(feature = "dav")]
 use crate::dav::client::DavKind;
 use crate::error::{ErrorCode, Failure};
@@ -92,14 +94,16 @@ impl Account {
     /// on a throttling provider (`sync --max-wait`).
     pub fn resolve_waiting(config: &AccountConfig, max_wait: Duration) -> Result<Self> {
         let endpoints = config.endpoints()?;
+        let proxy = config.proxy.as_ref();
         let s = Spinner::start("Resolving credentials…");
 
         let mut resolver = SecretResolver::new();
         let endpoints: HashMap<_, _> = endpoints
             .into_iter()
             .map(|(name, config)| {
-                let resolved = SourceAccount::resolve_with(&name, &config, &mut resolver, max_wait)
-                    .map_err(|err| Failure::of(&err));
+                let resolved =
+                    SourceAccount::resolve_with(&name, &config, proxy, &mut resolver, max_wait)
+                        .map_err(|err| Failure::of(&err));
                 (name, resolved)
             })
             .collect();
@@ -170,21 +174,23 @@ pub struct SourceAccount {
 
 impl SourceAccount {
     /// Resolves one endpoint, so endpoints naming one command spawn it once,
-    /// its throttle waiting at most `max_wait` at once.
+    /// its throttle waiting at most `max_wait` at once. `proxy` is the
+    /// account's, which a table naming none goes through.
     fn resolve_with(
         name: &str,
         config: &SourceConfig,
+        proxy: Option<&ProxyConfig>,
         resolver: &mut SecretResolver,
         max_wait: Duration,
     ) -> Result<Self> {
-        let backend = SourceAccountBackend::resolve(&config.backend, resolver)
+        let backend = SourceAccountBackend::resolve(&config.backend, proxy, resolver)
             .with_context(|| format!("Resolve the credentials of {name}"))?;
 
         #[cfg(feature = "smtp")]
         let smtp = config
             .smtp
             .as_ref()
-            .map(|smtp| SmtpAccount::resolve_with(smtp, resolver))
+            .map(|smtp| SmtpAccount::resolve_with(smtp, proxy, resolver))
             .transpose()
             .with_context(|| format!("Resolve the send credentials of {name}"))?;
 
@@ -259,7 +265,17 @@ impl SourceAccountBackend {
         )),
         allow(unused_variables)
     )]
-    fn resolve(config: &SourceBackendConfig, resolver: &mut SecretResolver) -> Result<Self> {
+    fn resolve(
+        config: &SourceBackendConfig,
+        account_proxy: Option<&ProxyConfig>,
+        resolver: &mut SecretResolver,
+    ) -> Result<Self> {
+        // NOTE: the backend's own proxy first, then the account's, then the
+        // environment's, read when a connection opens.
+        let proxy = |resolver: &mut SecretResolver| {
+            ProxyConfig::resolve(&[config.proxy(), account_proxy], resolver)
+        };
+
         match config {
             #[cfg(feature = "imap")]
             SourceBackendConfig::Imap(config) => {
@@ -285,21 +301,26 @@ impl SourceAccountBackend {
                     tls: config.tls.clone().into_tls(alpn),
                     starttls: config.starttls,
                     sasl,
+                    proxy: proxy(resolver)?,
+                    sasl_ir: config.sasl_ir,
+                    auto_id: crate::imap::client::auto_id(&config.id)?,
                 }))
             }
             #[cfg(feature = "dav")]
             SourceBackendConfig::Carddav(config) => Ok(Self::Dav(DavAccount {
                 kind: DavKind::Card,
-                server: server_url(&config.server, "https")?,
+                endpoint: DavEndpoint::of(config.server.as_deref(), config.home.as_deref())?,
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 auth: config.auth.clone().try_into_dav_auth(resolver)?,
+                proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "dav")]
             SourceBackendConfig::Caldav(config) => Ok(Self::Dav(DavAccount {
                 kind: DavKind::Cal,
-                server: server_url(&config.server, "https")?,
+                endpoint: DavEndpoint::of(config.server.as_deref(), config.home.as_deref())?,
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 auth: config.auth.clone().try_into_dav_auth(resolver)?,
+                proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "msgraph")]
             SourceBackendConfig::Msgraph(config) => Ok(Self::Msgraph(MsgraphAccount {
@@ -308,6 +329,7 @@ impl SourceAccountBackend {
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 sizes: SizeHints::default(),
+                proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "msgraph")]
             SourceBackendConfig::MsgraphContacts(config) => Ok(Self::Msgraph(MsgraphAccount {
@@ -316,6 +338,7 @@ impl SourceAccountBackend {
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 sizes: SizeHints::default(),
+                proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "msgraph")]
             SourceBackendConfig::MsgraphCalendar(config) => Ok(Self::Msgraph(MsgraphAccount {
@@ -324,16 +347,19 @@ impl SourceAccountBackend {
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 sizes: SizeHints::default(),
+                proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "gpeople")]
             SourceBackendConfig::Gpeople(config) => Ok(Self::Gpeople(GoogleAccount {
                 token: resolver.resolve(config.auth.token.clone())?,
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
+                proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "gcal")]
             SourceBackendConfig::Gcal(config) => Ok(Self::Gcal(GoogleAccount {
                 token: resolver.resolve(config.auth.token.clone())?,
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
+                proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "gmail")]
             SourceBackendConfig::Gmail(config) => {
@@ -346,6 +372,7 @@ impl SourceAccountBackend {
                     token: resolver.resolve(config.auth.token.clone())?,
                     user_id: config.user_id.clone(),
                     tls: config.tls.clone().into_tls(config.alpn.clone()),
+                    proxy: proxy(resolver)?,
                     run: Arc::new(crate::gmail::run::GmailRun::new(settings)),
                 }))
             }
@@ -380,20 +407,66 @@ pub struct ImapAccount {
     pub starttls: bool,
     /// The credential to authenticate with, `None` if preauthenticated.
     pub sasl: Option<Sasl>,
+    /// How the connection reaches the server.
+    pub proxy: Proxy,
+    /// Whether the SASL initial response rides the `AUTHENTICATE` command,
+    /// `None` following the advertised `SASL-IR`.
+    pub sasl_ir: Option<bool>,
+    /// The parameters of the `ID` sent after authentication, `None` sending
+    /// none.
+    pub auto_id: Option<Vec<(IString<'static>, NString<'static>)>>,
 }
 
 /// A resolved DAV endpoint, `kind` telling CardDAV and CalDAV apart.
 #[cfg(feature = "dav")]
 #[derive(Clone)]
 pub struct DavAccount {
-    /// Which home set the session discovers from the server URL.
+    /// Which home set the session discovers, or is given.
     pub kind: DavKind,
-    /// The DAV entry point, a configured authority already read as a URL.
-    pub server: Url,
+    /// Where the session starts.
+    pub endpoint: DavEndpoint,
     /// The TLS handle, ALPN folded in.
     pub tls: Tls,
     /// The credential every request carries.
     pub auth: io_webdav::rfc4918::WebdavAuth,
+    /// How the connections reach the server.
+    pub proxy: Proxy,
+}
+
+/// Where a DAV session starts: an entry point it discovers the home set
+/// from, or the home set itself.
+#[cfg(feature = "dav")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DavEndpoint {
+    /// The DAV entry point, a configured authority already read as a URL.
+    Server(Url),
+    /// The home set, where the session lists its collections.
+    Home(Url),
+}
+
+#[cfg(feature = "dav")]
+impl DavEndpoint {
+    /// The endpoint a table names: its `home` when it has one, else its
+    /// `server`, read as `https://` when bare.
+    pub fn of(server: Option<&str>, home: Option<&str>) -> Result<Self> {
+        if let Some(home) = home {
+            let url =
+                Url::parse(home).with_context(|| format!("Read the home set `{home}` as a URL"))?;
+            return Ok(Self::Home(url));
+        }
+
+        match server {
+            Some(server) => Ok(Self::Server(server_url(server, "https")?)),
+            None => bail!("A DAV source needs `server`, or the `home` set it lists"),
+        }
+    }
+
+    /// The URL the session connects to.
+    pub fn url(&self) -> &Url {
+        match self {
+            Self::Server(url) | Self::Home(url) => url,
+        }
+    }
 }
 
 /// A resolved Microsoft Graph endpoint.
@@ -410,6 +483,8 @@ pub struct MsgraphAccount {
     pub tls: Tls,
     /// The message sizes its listings stated, shared by its connections.
     pub sizes: SizeHints,
+    /// How the connections reach the server.
+    pub proxy: Proxy,
 }
 
 /// A resolved Google endpoint, People or Calendar.
@@ -420,6 +495,8 @@ pub struct GoogleAccount {
     pub token: SecretString,
     /// The TLS handle, ALPN folded in.
     pub tls: Tls,
+    /// How the connections reach the server.
+    pub proxy: Proxy,
 }
 
 /// A resolved Gmail endpoint.
@@ -432,6 +509,8 @@ pub struct GmailAccount {
     pub user_id: String,
     /// The TLS handle, ALPN folded in.
     pub tls: Tls,
+    /// How the connections reach the server.
+    pub proxy: Proxy,
     /// What the source's connections share for the run: its batch
     /// settings and gate, its caches, its history.
     pub run: Arc<crate::gmail::run::GmailRun>,
@@ -449,6 +528,8 @@ pub struct SmtpAccount {
     pub starttls: bool,
     /// The credential to authenticate with, `None` for an open relay.
     pub sasl: Option<Sasl>,
+    /// How the connection reaches the server.
+    pub proxy: Proxy,
 }
 
 #[cfg(feature = "smtp")]
@@ -456,12 +537,17 @@ impl SmtpAccount {
     /// Resolves a send channel on its own, for the submission tests.
     #[cfg(test)]
     pub fn resolve(config: &SmtpConfig) -> Result<Self> {
-        Self::resolve_with(config, &mut SecretResolver::new())
+        Self::resolve_with(config, None, &mut SecretResolver::new())
     }
 
     /// Resolves a send channel, spawning nothing when it shares its
-    /// source's credential.
-    fn resolve_with(config: &SmtpConfig, resolver: &mut SecretResolver) -> Result<Self> {
+    /// source's credential, through its own proxy, else `proxy`, the
+    /// account's.
+    fn resolve_with(
+        config: &SmtpConfig,
+        proxy: Option<&ProxyConfig>,
+        resolver: &mut SecretResolver,
+    ) -> Result<Self> {
         let server = server_url(&config.server, "smtps")?;
         let alpn = config
             .alpn
@@ -484,6 +570,7 @@ impl SmtpAccount {
             tls: config.tls.clone().into_tls(alpn),
             starttls: config.starttls,
             sasl,
+            proxy: ProxyConfig::resolve(&[config.proxy.as_ref(), proxy], resolver)?,
         })
     }
 }
@@ -568,5 +655,113 @@ mod build_tests {
 
         assert_eq!(code_of(&err), Some(ErrorCode::BackendNotBuilt));
         assert!(format!("{err:#}").contains("--features gcal"), "{err:#}");
+    }
+}
+
+#[cfg(test)]
+mod connection_tests {
+    use pimalaya_config::secret::SecretResolver;
+    use pimalaya_stream::proxy::Proxy;
+
+    use crate::config::ProxyConfig;
+
+    fn proxy(toml: &str) -> ProxyConfig {
+        toml::from_str(toml).unwrap()
+    }
+
+    /// The table closest to the connection names the proxy, the account's
+    /// next; none reads the environment when the connection opens.
+    #[test]
+    fn the_closest_proxy_wins_and_none_reads_the_environment() {
+        let mut resolver = SecretResolver::new();
+        let own = proxy(r#"url = "socks5h://127.0.0.1:1080""#);
+        let account = proxy(r#"url = "http://proxy.example.org:3128""#);
+
+        let resolved = ProxyConfig::resolve(&[Some(&own), Some(&account)], &mut resolver);
+        assert!(matches!(
+            resolved.unwrap(),
+            Proxy::Socks5 { port: 1080, .. }
+        ));
+
+        let resolved = ProxyConfig::resolve(&[None, Some(&account)], &mut resolver);
+        assert!(matches!(resolved.unwrap(), Proxy::Http { port: 3128, .. }));
+
+        let resolved = ProxyConfig::resolve(&[None, None], &mut resolver);
+        assert!(matches!(resolved.unwrap(), Proxy::System));
+    }
+
+    /// A password with no username is refused, a username alone sent with
+    /// an empty password.
+    #[test]
+    fn a_proxy_password_needs_a_username() {
+        let mut resolver = SecretResolver::new();
+        let config = proxy("url = \"http://p.example.org:3128\"\npassword.raw = \"pw\"");
+        let err = ProxyConfig::resolve(&[Some(&config)], &mut resolver).unwrap_err();
+        assert!(err.to_string().contains("requires a username"), "{err}");
+
+        let config = proxy("url = \"http://p.example.org:3128\"\nusername = \"user\"");
+        let resolved = ProxyConfig::resolve(&[Some(&config)], &mut resolver).unwrap();
+        let Proxy::Http {
+            auth: Some(auth), ..
+        } = resolved
+        else {
+            panic!("an authenticated HTTP proxy");
+        };
+        assert_eq!(auth.user, "user");
+    }
+
+    /// A DAV table's `home` is where the session starts, its `server` the
+    /// entry point otherwise, and one of the two is required.
+    #[cfg(feature = "dav")]
+    #[test]
+    fn a_dav_home_set_is_taken_over_the_server() {
+        use crate::account::DavEndpoint;
+
+        let home = "https://dav.example.org/card/user/";
+        let endpoint = DavEndpoint::of(Some("dav.example.org"), Some(home)).unwrap();
+        assert!(matches!(&endpoint, DavEndpoint::Home(url) if url.as_str() == home));
+
+        let endpoint = DavEndpoint::of(Some("dav.example.org"), None).unwrap();
+        let server = "https://dav.example.org/";
+        assert!(matches!(&endpoint, DavEndpoint::Server(url) if url.as_str() == server));
+
+        let err = DavEndpoint::of(None, None).unwrap_err();
+        assert!(err.to_string().contains("`home`"), "{err}");
+    }
+
+    /// `id.auto` sends the fields asked for, neverest's value for a known
+    /// key set to true and `NIL` otherwise; off, no `ID` is sent.
+    #[cfg(feature = "imap")]
+    #[test]
+    fn the_imap_id_sends_the_fields_asked_for() {
+        use io_imap::types::core::NString;
+
+        use crate::{config::ImapIdConfig, imap::client::auto_id};
+
+        let off: ImapIdConfig = toml::from_str("fields.name = true").unwrap();
+        assert!(auto_id(&off).unwrap().is_none());
+
+        let config: ImapIdConfig = toml::from_str(
+            "auto = true\nfields.name = true\nfields.os = true\nfields.vendor = false",
+        )
+        .unwrap();
+        let params = auto_id(&config).unwrap().unwrap();
+        let params: Vec<(String, Option<String>)> = params
+            .into_iter()
+            .map(|(key, value)| {
+                let key = String::from_utf8_lossy(key.as_ref()).into_owned();
+                let value = match value {
+                    NString(Some(value)) => Some(String::from_utf8_lossy(value.as_ref()).into()),
+                    NString(None) => None,
+                };
+                (key, value)
+            })
+            .collect();
+        let expected = [
+            (String::from("name"), Some(String::from("neverest"))),
+            (String::from("os"), None),
+            (String::from("vendor"), None),
+        ];
+        assert_eq!(params, expected);
     }
 }

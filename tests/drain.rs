@@ -239,7 +239,7 @@ fn a_drain_applies_a_queued_create_without_any_server() {
     assert_eq!(drained["account"], ACCOUNT, "{drained}");
     assert_eq!(drained["busy"], false, "{drained}");
     let applied = &drained["applied"][0];
-    assert_eq!(applied["id"], id, "{drained}");
+    assert_eq!(applied["row"], id, "{drained}");
     assert_eq!(applied["kind"], "add", "{drained}");
     assert_eq!(applied["collection"], COLLECTION, "{drained}");
     let seq = applied["seq"].as_i64().expect("the created item's id");

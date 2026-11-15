@@ -13,9 +13,11 @@ use std::{
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use io_pimdir::capability::PimdirSupport;
 use io_pimdir::client::reader::PimdirReader;
 use log::{info, warn};
 use pimalaya_cli::{
+    capability::CapabilityLevel,
     error::{PartialOutcome, code_of},
     printer::Printer,
     spinner::Spinner,
@@ -199,7 +201,7 @@ fn declared(
     if let Some(wide) = capability::vtodo_wide(config, &targets) {
         capabilities.push(CheckedCapability {
             name: wide.name,
-            support: wide.support.as_str().to_owned(),
+            level: level(wide.support),
             detail: wide.detail,
         });
     }
@@ -524,15 +526,18 @@ pub struct CheckedCollection {
     pub takes_tasks: Option<bool>,
 }
 
-/// One capability a source declares.
+/// One capability a source declares, as the capability rows of every
+/// pimalaya binary read: its name, how well it is served and what that
+/// leaves out. The backend serving it is the row's endpoint.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckedCapability {
     /// Its pimdir name, e.g. `mail.message.add`, `calendar.reply`.
     pub name: String,
-    /// `full`, `partial` or `none`.
-    pub support: String,
-    /// Why it is partial or refused.
+    /// How well the source serves it: `full`, `partial` or `none`, as the
+    /// store records it.
+    pub level: CapabilityLevel,
+    /// What a partial level leaves out, or why it is refused.
     pub detail: Option<String>,
 }
 
@@ -540,9 +545,18 @@ impl From<capability::SupportRow> for CheckedCapability {
     fn from((name, support, detail): capability::SupportRow) -> Self {
         Self {
             name: name.to_owned(),
-            support: support.as_str().to_owned(),
+            level: level(support),
             detail: detail.map(str::to_owned),
         }
+    }
+}
+
+/// The shared level of a support the store records.
+fn level(support: PimdirSupport) -> CapabilityLevel {
+    match support {
+        PimdirSupport::Full => CapabilityLevel::Full,
+        PimdirSupport::Partial => CapabilityLevel::Partial,
+        PimdirSupport::None => CapabilityLevel::None,
     }
 }
 
@@ -614,7 +628,7 @@ mod tests {
     fn a_check_reports_the_calendars_that_take_no_tasks() {
         let declared = declared_by("gcal.auth.token.raw = \"token\"");
         let row = vtodo(&declared["gcal"]).expect("a Google source takes no task");
-        assert_eq!(row.support, "none");
+        assert_eq!(row.level, CapabilityLevel::None);
         assert!(row.detail.as_deref().unwrap().contains("Google Tasks"));
 
         let declared = declared_by("msgraph-calendar.auth.token.raw = \"token\"");
@@ -630,9 +644,31 @@ mod tests {
             "{caldav}one-way = true\ntargets.google.gcal.auth.token.raw = \"token\""
         ));
         let row = vtodo(&declared["caldav"]).expect("a source copied to Google takes no task");
-        assert_eq!(row.support, "none");
+        assert_eq!(row.level, CapabilityLevel::None);
         assert!(row.detail.as_deref().unwrap().contains("target google"));
         assert!(declared["google"].is_empty());
+    }
+
+    /// A capability row reads as every pimalaya binary's: `level`, the
+    /// shared enum, where it was a free `support` string.
+    #[test]
+    fn a_capability_row_carries_the_shared_level() {
+        let declared = declared_by("gcal.auth.token.raw = \"token\"");
+        let json = serde_json::to_value(&declared["gcal"]).unwrap();
+        let rows = json.as_array().unwrap();
+
+        assert!(
+            rows.iter().all(|row| row.get("support").is_none()),
+            "{json}"
+        );
+        let levels = ["full", "partial", "none"];
+        let level = |row: &serde_json::Value| levels.contains(&row["level"].as_str().unwrap());
+        assert!(rows.iter().all(level), "{json}");
+        let vtodo = rows
+            .iter()
+            .find(|row| row["name"] == io_pimdir::capability::CALENDAR_COMPONENT_VTODO)
+            .unwrap();
+        assert_eq!(vtodo["level"], "none", "{json}");
     }
 
     /// A CalDAV calendar's component set is reported on the collection, a

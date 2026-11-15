@@ -371,7 +371,11 @@ Upgrading from 0.3.0:
 
   An envelope address that is no mailbox, or holds a line break, fails its send before anything is written.
 
-- Bumped io-webdav to 0.9.1.
+- Bumped io-webdav to 0.11.0.
+
+  Collection keys and member ids keep the spelling their server served (`My%20Cal`, or a raw `My Cal`), where io-webdav now decodes the ids it reads (`My Cal` for both): no store key moves, and nothing is synced again.
+
+  A card or an event a multiget reads is matched to the member it was asked for as the listing names it, where a server spelling its name otherwise (a raw `:`, a lowercase escape) had it read again alone.
 
   A CalDAV or CardDAV multistatus is parsed 3.4 to 9 times faster.
 

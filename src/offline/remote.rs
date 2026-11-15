@@ -2366,6 +2366,57 @@ mod hydrate_tests {
         assert!(hydrated.items.is_empty());
         assert_eq!(hydrated.gone, [PimdirHandle("t1.ics".into())]);
     }
+
+    /// A batch whose hrefs carry escapes io-webdav decodes, or raw bytes,
+    /// still finds each body under its handle, the segment served, in the
+    /// one multiget, none read alone.
+    #[test]
+    fn a_batch_of_served_hrefs_finds_each_body() {
+        let handles = ["a%20b.ics", "r%C3%A9union%201.ics", "raw réunion.ics"];
+        let rows: String = handles
+            .iter()
+            .map(|handle| {
+                format!(
+                    "<d:response><d:href>/dav/cal/My%20Cal/{handle}</d:href>\
+                     <d:propstat><d:prop><d:getetag>\"e1\"</d:getetag>\
+                     <c:calendar-data>BEGIN:VCALENDAR</c:calendar-data>\
+                     </d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>\
+                     </d:response>"
+                )
+            })
+            .collect();
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+             <d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">\
+             {rows}</d:multistatus>"
+        );
+        let script = vec![answer(
+            "207 Multi-Status",
+            &[("Content-Type", "application/xml")],
+            &xml,
+        )];
+        let (client, wire) = DavClient::scripted(DavKind::Cal, "/dav/cal/", script);
+        let mut client = Client::Dav(Box::new(client));
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let handles = handles.map(|handle| PimdirHandle(handle.into()));
+
+        let hydrated = hydrate_batch(
+            Kind::Ical,
+            &mut client,
+            "My%20Cal",
+            &handles,
+            &|_| None,
+            &blobs,
+            None,
+        )
+        .unwrap();
+
+        let found: Vec<&PimdirHandle> = hydrated.items.iter().map(|item| &item.handle).collect();
+        assert_eq!(found, handles.iter().collect::<Vec<_>>());
+        assert!(hydrated.gone.is_empty());
+        assert_eq!(wire.lines(), ["REPORT /dav/cal/My%20Cal/ HTTP/1.1"]);
+    }
 }
 
 #[cfg(all(test, feature = "imap"))]

@@ -10,9 +10,9 @@
 //! where the ETag and `If-Match` plumbing built for mail is finally exercised.
 //!
 //! Three shapes differ from the mail backends: collections are keyed by their
-//! path segment under the home set, else by their path, starting with a slash
-//! (io-webdav's id), a display name being optional, mutable and free to
-//! collide;
+//! path segment under the home set, as the server served it, else by their
+//! path, starting with a slash (io-webdav's id), a display name being
+//! optional, mutable and free to collide;
 //! items resolve at `Full` only, a `sync-collection` REPORT carrying hrefs and
 //! ETags but never a `UID`; flags are known-empty rather than unknown.
 //!
@@ -37,8 +37,7 @@ use anyhow::{Context, Result, bail};
 use io_http::rfc9112::send::Http11SendError;
 use io_webdav::{
     client::{WebdavClientStd, WebdavClientStdConnectOptions, WebdavClientStdError},
-    coroutine::{WebdavCoroutine, WebdavCoroutineState, WebdavYield},
-    rfc4791::calendar::{CALDAV, CaldavCalendar},
+    rfc4791::calendar::{CALDAV, CaldavCalendar, CaldavCalendarPatch},
     rfc4918::{
         WebdavAuth, WebdavProperty, collection_id, follow_redirects::WebdavFollowRedirectsError,
         propfind::WebdavPropfind, resolve_href, send::WebdavSendError,
@@ -254,13 +253,16 @@ impl DavClient {
     /// makes.
     pub fn list_collections(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         let kind = self.kind;
-        // NOTE: by id, the display name and whether the server states the
+        // NOTE: by key, the display name and whether the server states the
         // collection takes tasks.
         let collections: BTreeMap<String, (Option<String>, Option<bool>)> = match kind {
             DavKind::Card => self.op(WebdavClientStd::list_addressbooks).map(|books| {
                 books
                     .into_iter()
-                    .map(|book| (book.id, (book.display_name, None)))
+                    .map(|book| {
+                        let key = listed_key(book.id, &book.href);
+                        (key, (book.display_name, None))
+                    })
                     .collect()
             }),
             DavKind::Cal => self.op(WebdavClientStd::list_calendars).map(|calendars| {
@@ -268,7 +270,8 @@ impl DavClient {
                     .into_iter()
                     .map(|calendar| {
                         let tasks = takes_tasks(&calendar.components);
-                        (calendar.id, (calendar.display_name, tasks))
+                        let key = listed_key(calendar.id, &calendar.href);
+                        (key, (calendar.display_name, tasks))
                     })
                     .collect()
             }),
@@ -341,7 +344,7 @@ impl DavClient {
         let multistatus = self.op(|dav| {
             let coroutine: WebdavPropfind =
                 WebdavPropfind::new(&dav.base_url, dav.auth(), &dav.user_agent, path, 0, &[prop]);
-            run(dav, coroutine)
+            dav.run(coroutine)
         })?;
         let base = self.inner.base_url.clone();
         Ok(multistatus
@@ -400,12 +403,14 @@ impl DavClient {
                 self.op(|dav| dav.update_addressbook(&patch))
             }
             DavKind::Cal => {
-                let calendar = CaldavCalendar {
+                let patch = CaldavCalendarPatch {
                     id: collection.to_owned(),
-                    display_name: name,
-                    ..Default::default()
+                    display_name: Some(name),
+                    description: None,
+                    color: None,
+                    tz: None,
                 };
-                self.op(|dav| dav.update_calendar(&calendar))
+                self.op(|dav| dav.update_calendar(&patch))
             }
         }
         .with_context(|| format!("Cannot rename the {kind} collection {collection}"))
@@ -470,11 +475,13 @@ impl DavClient {
     }
 
     /// The reports the server advertises for a collection, read from the
-    /// `supported-report-set` io-webdav caches while listing.
+    /// `supported-report-set` io-webdav caches while listing, under the id
+    /// [`webdav_id`] gives the key.
     fn reports(&self, collection: &str) -> Option<&BTreeSet<String>> {
+        let id = webdav_id(collection);
         match self.kind {
-            DavKind::Card => self.inner.addressbook_reports.get(collection),
-            DavKind::Cal => self.inner.calendar_reports.get(collection),
+            DavKind::Card => self.inner.addressbook_reports.get(&id),
+            DavKind::Cal => self.inner.calendar_reports.get(&id),
         }
     }
 
@@ -572,7 +579,8 @@ impl DavClient {
 
     /// Batch-fetches bodies in one multiget round-trip, routing each into the
     /// sink the caller opens for it.
-    /// Answers the ids the server said are gone.
+    /// Answers the ids the server said are gone. Each row is named by the id
+    /// [`href_id`] reads from its href, as the enumeration names members.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         collection: &str,
@@ -592,7 +600,7 @@ impl DavClient {
                     let cards = ok
                         .cards
                         .into_iter()
-                        .map(|card| (card.id, card.etag, card.data))
+                        .map(|card| (href_id(&card.href), card.etag, card.data))
                         .collect::<Vec<_>>();
                     (cards, ok.unreadable)
                 }),
@@ -602,7 +610,7 @@ impl DavClient {
                     let items = ok
                         .items
                         .into_iter()
-                        .map(|item| (item.id, item.etag, item.data))
+                        .map(|item| (href_id(&item.href), item.etag, item.data))
                         .collect::<Vec<_>>();
                     (items, ok.unreadable)
                 }),
@@ -622,7 +630,7 @@ impl DavClient {
         let mut gone = Vec::new();
         for entry in unreadable {
             match entry.status {
-                Some(404 | 410) => gone.push(entry.id),
+                Some(404 | 410) => gone.push(href_id(&entry.href)),
                 status => debug!(
                     "{kind} multiget of {collection} could not read {} (status {status:?})",
                     entry.href,
@@ -778,7 +786,7 @@ impl DavClient {
         // NOTE: a create at the target, which a 503 may have applied.
         match self.op_create(|dav| dav.move_item(from, id, to, if_match)) {
             Ok(moved) => Ok(Some(WrittenItem {
-                id: moved.id,
+                id: served_segment(&moved.href).to_owned(),
                 revision: moved.etag,
             })),
             Err(err) if is_unsupported_move(&err) => {
@@ -827,13 +835,13 @@ impl DavClient {
             DavKind::Card => self
                 .op_create(|dav| dav.create_card(collection, id, body.clone()))
                 .map(|created| WrittenItem {
-                    id: created.id,
+                    id: served_segment(&created.href).to_owned(),
                     revision: created.etag,
                 }),
             DavKind::Cal => self
                 .op_create(|dav| dav.create_item(collection, id, body.clone()))
                 .map(|created| WrittenItem {
-                    id: created.id,
+                    id: served_segment(&created.href).to_owned(),
                     revision: created.etag,
                 }),
         }
@@ -867,36 +875,48 @@ const SCHEDULE_DEFAULT_CALENDAR_URL: WebdavProperty = WebdavProperty {
 };
 
 /// The key a listing gives the collection at `path` under the home set
-/// path `home`, as io-webdav keys a calendar: its last segment directly
-/// under the home set, else its path, starting with a slash (Google lists
-/// every calendar as `/caldav/v2/<calendar>/events/`).
+/// path `home`, as [`listed_key`] keys a calendar: its last segment directly
+/// under the home set, as served, else its path, starting with a slash
+/// (Google lists every calendar as `/caldav/v2/<calendar>/events/`).
 fn collection_key(home: &str, path: &str) -> Option<String> {
-    let key = collection_id(home, path);
+    let key = listed_key(collection_id(home, path), path);
     (!key.trim_matches('/').is_empty()).then_some(key)
 }
 
-/// Runs a coroutine io-webdav's client has no method for over its stream.
-fn run<C, T, E>(dav: &mut WebdavClientStd, mut coroutine: C) -> Result<T, WebdavClientStdError>
-where
-    C: WebdavCoroutine<Yield = WebdavYield, Return = Result<T, E>>,
-    E: Into<WebdavClientStdError>,
-{
-    let mut buf = [0u8; 8192];
-    let mut read = None;
-
-    loop {
-        let arg = read.take().map(|n| &buf[..n]);
-        match coroutine.resume(arg) {
-            WebdavCoroutineState::Complete(out) => return out.map_err(Into::into),
-            WebdavCoroutineState::Yielded(WebdavYield::WantsWrite(bytes)) => {
-                dav.stream.write_all(&bytes)?;
-            }
-            WebdavCoroutineState::Yielded(WebdavYield::WantsRead) => {
-                read = Some(dav.stream.read(&mut buf)?);
-            }
-        }
+/// The key of the collection io-webdav lists as `id` at `href`: a path id
+/// as it stands, else the href's last segment as the server served it.
+///
+/// io-webdav decodes that segment (`My%20Cal` read as `My Cal`), as it
+/// reads a raw `My Cal` another server serves: the segment is the key
+/// io-webdav 0.9.1 gave, so no store key moves and the two stay apart.
+fn listed_key(id: String, href: &str) -> String {
+    match id.starts_with('/') {
+        true => id,
+        false => served_segment(href).to_owned(),
     }
 }
+
+/// The id io-webdav lists the collection keyed `key` under, which keys
+/// what it caches of it: a segment decoded as its listing decodes one, any
+/// other key as it stands.
+fn webdav_id(key: &str) -> String {
+    match key.contains(['/', '?', '#']) {
+        true => key.to_owned(),
+        false => collection_id("", key),
+    }
+}
+
+/// The last path segment of `href` as the server served it, its query and
+/// fragment dropped: the id io-webdav 0.9.1 read from an href, before it
+/// decoded one.
+fn served_segment(href: &str) -> &str {
+    let path = href.split(['?', '#']).next().unwrap_or(href);
+    path.trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+}
+
 /// The connect options of a session: the configured TLS and proxy.
 fn connect_options(tls: &Tls, proxy: &Proxy) -> WebdavClientStdConnectOptions {
     WebdavClientStdConnectOptions {
@@ -1331,6 +1351,16 @@ mod tests {
         );
         assert_eq!(collection_key("/cal", "/cal/work").as_deref(), Some("work"));
         assert_eq!(collection_key("/cal/", "/"), None);
+
+        // NOTE: io-webdav decodes these two; the key stays the segment.
+        assert_eq!(
+            collection_key("/cal/", "/cal/My%20Cal/").as_deref(),
+            Some("My%20Cal")
+        );
+        assert_eq!(
+            collection_key("/cal/", "/cal/R%C3%A9unions/").as_deref(),
+            Some("R%C3%A9unions")
+        );
     }
 
     /// A calendar outside the home set is keyed by its path, as io-webdav
@@ -1759,6 +1789,204 @@ mod tests {
             ),
             "{request}"
         );
+    }
+
+    /// A 207 answer carrying `responses`, the CalDAV namespace bound to `c`
+    /// and the CardDAV one to `card`.
+    fn multistatus(responses: &str) -> String {
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"utf-8\"?>\
+             <d:multistatus xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\" \
+             xmlns:card=\"urn:ietf:params:xml:ns:carddav\">{responses}</d:multistatus>"
+        );
+        answer(
+            "207 Multi-Status",
+            &[("Content-Type", "application/xml")],
+            &xml,
+        )
+    }
+
+    /// A response of `href` carrying the properties `props`.
+    fn row(href: &str, props: &str) -> String {
+        format!(
+            "<d:response><d:href>{href}</d:href><d:propstat><d:prop>{props}</d:prop>\
+             <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+        )
+    }
+
+    /// A response of `href` the server answers 404.
+    fn missing(href: &str) -> String {
+        format!(
+            "<d:response><d:href>{href}</d:href>\
+             <d:status>HTTP/1.1 404 Not Found</d:status></d:response>"
+        )
+    }
+
+    /// A listed collection is keyed by the segment its server served, the
+    /// key io-webdav 0.9.1 gave (`My%20Cal`), never by the id io-webdav
+    /// decodes it to (`My Cal`): a raw `My Cal` or `Réunions` keeps its
+    /// spelling too, a key of its own. The reports a collection advertises
+    /// are found under its key: no `sync-collection` here, so it is listed
+    /// by `PROPFIND`, no REPORT tried first.
+    #[test]
+    fn a_listed_collection_is_keyed_by_the_segment_served() {
+        let calendar = "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype>\
+                        <d:supported-report-set><d:supported-report><d:report>\
+                        <c:calendar-multiget/></d:report></d:supported-report>\
+                        </d:supported-report-set>";
+        let listing = [
+            row("/dav/cal/My%20Cal/", calendar),
+            row("/dav/cal/My Cal/", calendar),
+            row("/dav/cal/R%C3%A9unions%202026/", calendar),
+            row("https://dav.example.org/dav/cal/Réunions/", calendar),
+            row("/team/x%20y/events/", calendar),
+        ];
+        let members = row(
+            "/dav/cal/My%20Cal/r%C3%A9union%201.ics",
+            "<d:getetag>\"e1\"</d:getetag>",
+        );
+        let (mut dav, wire) = calendars(vec![
+            multistatus(&listing.concat()),
+            multistatus(&members),
+            multistatus(""),
+        ]);
+
+        let keys: Vec<String> = dav
+            .list_collections(false)
+            .unwrap()
+            .into_iter()
+            .map(|collection| collection.id)
+            .collect();
+        let listed = dav.enumerate("My%20Cal", None).unwrap();
+        dav.enumerate("Réunions", None).unwrap();
+
+        assert_eq!(
+            keys,
+            [
+                "/team/x%20y/events",
+                "My Cal",
+                "My%20Cal",
+                "R%C3%A9unions%202026",
+                "Réunions"
+            ]
+        );
+        assert_eq!(
+            wire.lines()[1..],
+            [
+                "PROPFIND /dav/cal/My%20Cal/ HTTP/1.1",
+                "PROPFIND /dav/cal/R%C3%A9unions/ HTTP/1.1"
+            ]
+        );
+        let ids: Vec<&str> = listed.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["r%C3%A9union%201.ics"]);
+    }
+
+    /// A multiget answers each body, and each member gone, under the id
+    /// [`href_id`] reads from the href served, as the enumeration names
+    /// the member: an escape kept (`a%20b.ics`, which io-webdav decodes),
+    /// and a raw space or non-ASCII byte kept raw.
+    #[test]
+    fn a_multiget_answers_each_member_under_the_segment_served() {
+        for (kind, home, data) in [
+            (DavKind::Cal, "/dav/cal/", "c:calendar-data"),
+            (DavKind::Card, "/dav/card/", "card:address-data"),
+        ] {
+            let extension = kind.extension();
+            let body = format!("<d:getetag>\"e1\"</d:getetag><{data}>BEGIN</{data}>");
+            let found = ["a%20b", "r%C3%A9union%201", "raw b", "réunion 2"]
+                .map(|name| format!("{name}.{extension}"));
+            let gone = ["gone%20%C3%A9", "gone é"].map(|name| format!("{name}.{extension}"));
+            let rows: String = found
+                .iter()
+                .map(|id| row(&format!("{home}My%20Cal/{id}"), &body))
+                .chain(
+                    gone.iter()
+                        .map(|id| missing(&format!("{home}My%20Cal/{id}"))),
+                )
+                .collect();
+            let (mut dav, wire) = DavClient::scripted(kind, home, vec![multistatus(&rows)]);
+            let ids: Vec<&str> = found.iter().chain(&gone).map(String::as_str).collect();
+            let mut opened = Vec::new();
+            let mut done = Vec::new();
+
+            let answered = dav
+                .fetch_bodies(
+                    "My%20Cal",
+                    &ids,
+                    |id| {
+                        opened.push(id.to_owned());
+                        Ok(Vec::new())
+                    },
+                    |id, _, _| {
+                        done.push(id.to_owned());
+                        Ok(())
+                    },
+                )
+                .unwrap();
+
+            assert_eq!(opened, found, "{kind}");
+            assert_eq!(done, opened, "{kind}");
+            assert_eq!(answered, gone, "{kind}");
+            let report = format!("REPORT {home}My%20Cal/ HTTP/1.1");
+            assert_eq!(wire.lines(), [report], "{kind}");
+        }
+    }
+
+    /// A member the server names on create (a `Location`) keeps the id its
+    /// segment gave io-webdav 0.9.1: an escape kept (io-webdav decodes it),
+    /// a raw space or non-ASCII byte kept raw, a query dropped.
+    #[test]
+    fn a_created_member_keeps_the_segment_its_location_served() {
+        for (kind, home) in [(DavKind::Cal, "/dav/cal/"), (DavKind::Card, "/dav/card/")] {
+            let extension = kind.extension();
+            for (location, key) in [
+                (
+                    format!("{home}My%20Cal/r%C3%A9union%201.{extension}"),
+                    "r%C3%A9union%201",
+                ),
+                (
+                    format!("{home}My%20Cal/raw réunion.{extension}"),
+                    "raw réunion",
+                ),
+                (
+                    format!("https://dav.example.org{home}My%20Cal/x%20y.{extension}?v=1"),
+                    "x%20y",
+                ),
+            ] {
+                let created = reply("201 Created", &[("Location", &location)]);
+                let (mut dav, wire) = DavClient::scripted(kind, home, vec![created]);
+
+                let written = dav
+                    .add_item_stream("My%20Cal", &b"BEGIN"[..], stated("t1"))
+                    .unwrap();
+
+                assert_eq!(written.id, format!("{key}.{extension}"), "{location}");
+                let put = format!("PUT {home}My%20Cal/t1.{extension} HTTP/1.1");
+                assert_eq!(wire.lines(), [put]);
+            }
+        }
+    }
+
+    /// A moved member keeps the id it was sent under, which io-webdav
+    /// hands back decoded.
+    #[test]
+    fn a_moved_member_keeps_the_segment_it_was_sent_under() {
+        let (mut dav, wire) = calendars(vec![reply("201 Created", &[])]);
+
+        let moved = dav
+            .move_item("My%20Cal", "R%C3%A9unions", "r%C3%A9union%201.ics", None)
+            .unwrap()
+            .expect("a CalDAV server moves");
+
+        assert_eq!(moved.id, "r%C3%A9union%201.ics");
+        assert_eq!(
+            wire.lines(),
+            ["MOVE /dav/cal/My%20Cal/r%C3%A9union%201.ics HTTP/1.1"]
+        );
+        let request = &wire.requests()[0];
+        let destination = "destination: \
+                           https://dav.example.org/dav/cal/R%C3%A9unions/r%C3%A9union%201.ics";
+        assert!(carries(request, destination), "{request}");
     }
 
     /// A stream replaying one canned HTTP answer a read, discarding writes.

@@ -1029,6 +1029,19 @@ A collection key or a member id that would address the server root, the home set
 - **WHEN** a sync creates it on the CalDAV server
 - **THEN** no request is sent, and the collection's row fails naming the id
 
+### Requirement: A DAV key keeps the segment the server served
+Every collection key and member id neverest takes from io-webdav SHALL keep the spelling the server served, the key io-webdav 0.9.1 gave. It SHALL be read from the href io-webdav carries beside each id (io-webdav 0.11), never from the id, which io-webdav decodes wherever encoding it gives the segment back (`My%20Cal` read as `My Cal`, as a raw `My Cal` is): a collection listed directly under the home set by the last segment of its href, query and fragment dropped, and the default calendar a scheduling inbox names by that of its URL's path, a collection outside the home set by io-webdav's path id, which keeps the server's spelling; a member a multiget answers, read or gone, by the id the enumeration reads from its href (A resource has one spelling); a created member by the last segment of the `Location` its server sent, else of the URL the create was sent to; a moved member by the last segment of the `Destination` io-webdav sent. A segment served escaped and one served raw (a space or a non-ASCII byte, which RFC 3986 keeps out of an href but a server may send) SHALL stay two keys, each spelled as served. The reports io-webdav caches while listing, under its own id, SHALL be found under the key, through the id io-webdav reads from that segment, so a collection advertising no `sync-collection` is listed with no REPORT first.
+
+#### Scenario: A calendar named with a space
+- **GIVEN** a calendar the server lists as `/dav/cal/My%20Cal/`, synced under io-webdav 0.9.1 as `My%20Cal`, holding a member listed as `r%C3%A9union%201.ics`
+- **WHEN** a sync on io-webdav 0.11 lists the calendars and fetches the member's body
+- **THEN** the calendar is keyed `My%20Cal`, and the multiget answers the body under `r%C3%A9union%201.ics`, nothing read alone
+
+#### Scenario: A raw space beside an escaped one
+- **GIVEN** a server listing both `/dav/cal/My%20Cal/` and `/dav/cal/My Cal/`, which io-webdav reads as the one id `My Cal`
+- **WHEN** the calendars are listed
+- **THEN** they are keyed `My%20Cal` and `My Cal`, two collections, as under io-webdav 0.9.1
+
 ### Requirement: A DAV server without `sync-collection` is listed instead
 `sync-collection` is an extension, so a server MAY implement none of it, advertising a `supported-report-set` of `addressbook-multiget` and `addressbook-query` alone. Such a collection SHALL be enumerated through a `PROPFIND` at Depth 1 requesting the ETag, which yields the same member ids and revisions, rather than failing to enumerate at all.
 
@@ -1397,7 +1410,7 @@ The cross-collection link id and the typed summary SHALL be produced by io-pimdi
 The `text/calendar` sort key SHALL be the item's start resolved to RFC 3339 in UTC (`DUE` then `DTSTART` for a `VTODO`, `DTSTART` otherwise), read through the `VTIMEZONE` the resource itself carries, so an agenda reads chronologically without the store holding a time zone database.
 
 ### Requirement: A collection is keyed by its backend id and named by its display name
-Every hub collection id, every wire call and the account's collection filter SHALL be built from the backend's own id: the mailbox name on IMAP and on Graph, the label name on Gmail, on DAV the path segment of a collection directly under the home set and the href's path, starting with a slash, of one outside it (io-webdav's id; Google lists every calendar as `/caldav/v2/<calendar>/events/`, hub id `caldav//caldav/v2/<calendar>/events`). A display name SHALL NOT address a collection, being optional, mutable and free to collide. The default calendar a scheduling inbox names SHALL be keyed as the listing keys it.
+Every hub collection id, every wire call and the account's collection filter SHALL be built from the backend's own id: the mailbox name on IMAP and on Graph, the label name on Gmail, on DAV the path segment of a collection directly under the home set, as the server served it (A DAV key keeps the segment the server served), and the href's path, starting with a slash, of one outside it (io-webdav's id; Google lists every calendar as `/caldav/v2/<calendar>/events/`, hub id `caldav//caldav/v2/<calendar>/events`). A display name SHALL NOT address a collection, being optional, mutable and free to collide. The default calendar a scheduling inbox names SHALL be keyed as the listing keys it.
 
 The store SHALL still carry what the collection is called: `set_collection_name` runs beside every `ensure_collection` with the name without the namespace the hub id carries. A DAV source SHALL take it from `DAV:displayname`, falling back to the id when it is blank or absent; every other source's id is already its name. Where two sources meet, the first in declared order with a non-blank name wins. Naming SHALL NOT fail a run: nothing keys on the column, so a refused write is logged and the sync continues.
 

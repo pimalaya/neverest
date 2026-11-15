@@ -305,8 +305,9 @@ imap.item.delete = false
 
 # Graph calendars: the same session and fields as `msgraph`, each calendar a
 # collection, a recurring series and its exceptions one item. The token needs
-# the `Calendars.ReadWrite` scope. Every run lists each calendar in full, and an
-# exception edited locally does not push yet.
+# the `Calendars.ReadWrite` scope. Every run lists each calendar in full. A
+# series pushes its exceptions through its instances, and a floating time is
+# anchored in UTC, Graph stating no zone for a calendar.
 #msgraph-calendar.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
 
 # --------------------------------------------------------------------------------
@@ -322,8 +323,8 @@ imap.item.delete = false
 
 # Google calendars through the Calendar API: each calendar of the user's list
 # is a collection, a recurring series with its modified instances one item.
-# The token needs the `calendar` scope. A locally modified instance of a series
-# does not push yet.
+# The token needs the `calendar` scope. A series pushes its modified instances
+# through its instances, and a floating time is anchored in the calendar's zone.
 #gcal.auth.token.command = ["ortie", "token", "show", "-a", "google"]
 
 # --------------------------------------------------------------------------------

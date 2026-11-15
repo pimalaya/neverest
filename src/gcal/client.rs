@@ -18,8 +18,13 @@
 //! differs from the stored one, and the body read records the whole one.
 //!
 //! An update and a delete are checked against that joined revision, then
-//! guarded natively by the series event's own etag. Only the series event
-//! is written: an instance modified locally does not push yet.
+//! guarded natively by the series event's own etag. A series is written
+//! through its master, then each occurrence it overrides through its
+//! instance; a create whose overrides do not all land is deleted again.
+//!
+//! Google stores no floating time: one is anchored in the calendar's zone
+//! before the write, which then reports no revision, so the next sync reads
+//! the event back.
 //!
 //! A new event the account organises and whose attendees are to be told
 //! is inserted with its UID as `iCalUID`, which Google keeps and announces;
@@ -50,6 +55,7 @@ use io_gcal::v3::{
 };
 use io_pimdir::summary::calendar;
 use log::{debug, trace, warn};
+use pimalaya_cli::error::CodedError;
 use pimalaya_stream::{
     proxy::Proxy,
     stream::{Stream, TlsConnectOptions},
@@ -63,6 +69,7 @@ use crate::{
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
     error::ErrorCode,
     item::{collection::Collection, flag::Flag},
+    kind::event::{self, Occurrences},
     offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp, wall_stamp},
     throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, google_code},
 };
@@ -451,15 +458,19 @@ impl GcalClient {
         Ok(Some(revision))
     }
 
-    /// Creates an event from an iCalendar object.
+    /// Creates an event from an iCalendar object, then the occurrences a
+    /// series overrides through their instances.
     ///
     /// One carrying no UID is inserted, Google minting it. One carrying a
     /// UID keeps it as the event's `iCalUID`, so it matches its copy on
     /// another source: inserted with it when the resource is scheduled and
     /// the account organises it, Google then inviting the attendees, and
     /// imported otherwise, which notifies nobody (pimdir STORAGE Annex B.1).
+    /// A series whose overrides do not all land is deleted again.
     pub fn add_item_stream(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
-        let ical = read_ical(source)?;
+        let (ical, anchored) = self.anchor(calendar, read_ical(source)?)?;
+        let occurrences = Occurrences::read(&ical)?;
+        occurrences.refuse_ranges("Google Calendar")?;
         let mut event = GcalEvent::from_ical(&ical)?;
         let meeting = asks_meeting(&event);
 
@@ -492,15 +503,56 @@ impl GcalClient {
                 .with_context(|| format!("Insert event into {calendar} error"))?
         };
 
-        let revision = revision(std::slice::from_ref(&created));
+        let mut written = Some(revision(std::slice::from_ref(&created)));
         let id = created
             .id
             .context("Google returned the created event without an id")?;
 
+        if !occurrences.overrides.is_empty() {
+            let send_updates = match invites {
+                true => GcalSendUpdates::All,
+                false => GcalSendUpdates::None,
+            };
+            if let Err(err) = self.write_overrides(calendar, &id, &occurrences, send_updates) {
+                let deleted =
+                    self.op(|gcal| gcal.event_delete(calendar, &id, Some(send_updates), None));
+                if let Err(undo) = deleted {
+                    warn!("cannot delete series {id} of {calendar} again: {undo}");
+                }
+                return Err(err.context(format!(
+                    "Google took the series created in {calendar} without its \
+                     occurrences, so it was deleted again"
+                )));
+            }
+            written = self
+                .series(calendar, &id)
+                .ok()
+                .map(|events| revision(&events));
+        }
+
         Ok(WrittenItem {
             id,
-            revision: (!meeting).then_some(revision),
+            revision: written.filter(|_| !meeting && !anchored),
         })
+    }
+
+    /// `ical` with its floating times anchored in the zone of `calendar`,
+    /// UTC when Google states none, and whether it held any.
+    fn anchor(&mut self, calendar: &str, ical: Vec<u8>) -> Result<(Vec<u8>, bool)> {
+        if !event::has_floating(&ical)? {
+            return Ok((ical, false));
+        }
+
+        let entry = self
+            .op(|gcal| gcal.calendar_list_entry_get(calendar))
+            .with_context(|| format!("Get the Google calendar {calendar} error"))?;
+        let zone = entry.time_zone.filter(|zone| !zone.is_empty());
+        match &zone {
+            Some(zone) => debug!("floating time of an event of {calendar} anchored in {zone}"),
+            None => warn!("Google states no zone for {calendar}: floating time anchored in UTC"),
+        }
+
+        Ok((event::anchor_floating(&ical, zone.as_deref())?, true))
     }
 
     /// Whether the account organises a new event: it names no organizer,
@@ -533,7 +585,8 @@ impl GcalClient {
     }
 
     /// Replaces a series event from an iCalendar object, merged onto the
-    /// server copy so the fields iCalendar does not model survive.
+    /// server copy so the fields iCalendar does not model survive, then the
+    /// occurrences it overrides through their instances.
     pub fn update_item_stream(
         &mut self,
         calendar: &str,
@@ -541,7 +594,9 @@ impl GcalClient {
         source: impl Read,
         if_match: Option<&str>,
     ) -> Result<Option<String>> {
-        let ical = read_ical(source)?;
+        let (ical, anchored) = self.anchor(calendar, read_ical(source)?)?;
+        let occurrences = Occurrences::read(&ical)?;
+        occurrences.refuse_ranges("Google Calendar")?;
         let projected = GcalEvent::from_ical(&ical)?;
         let meeting = asks_meeting(&projected);
 
@@ -572,12 +627,20 @@ impl GcalClient {
             })
             .with_context(|| format!("Update event {id} of {calendar} error"))?;
 
-        if meeting {
-            return Ok(None);
-        }
+        let written = match occurrences.overrides.is_empty() {
+            true => {
+                events.insert(0, updated);
+                Some(revision(&events))
+            }
+            false => {
+                self.write_overrides(calendar, id, &occurrences, send_updates)?;
+                self.series(calendar, id)
+                    .ok()
+                    .map(|events| revision(&events))
+            }
+        };
 
-        events.insert(0, updated);
-        Ok(Some(revision(&events)))
+        Ok(written.filter(|_| !meeting && !anchored))
     }
 
     /// Deletes a series, refused when it moved since `if_match`.
@@ -598,15 +661,89 @@ impl GcalClient {
         Ok(())
     }
 
+    /// Writes the occurrences series `id` overrides through their instances,
+    /// each merged onto the instance Google holds.
+    ///
+    /// An override of an occurrence the series does not have is refused,
+    /// coded `unsupported`.
+    fn write_overrides(
+        &mut self,
+        calendar: &str,
+        id: &str,
+        occurrences: &Occurrences,
+        send_updates: GcalSendUpdates,
+    ) -> Result<()> {
+        let params = GcalEventUpdateParams {
+            send_updates: Some(send_updates),
+            conference_data_version: CONFERENCE_DATA_VERSION,
+            ..Default::default()
+        };
+
+        for occurrence in &occurrences.overrides {
+            let recurrence_id = &occurrence.recurrence_id;
+            let instance = match self.instance(calendar, id, recurrence_id)? {
+                Some(instance) => instance,
+                None if occurrence.cancelled => continue,
+                None => {
+                    let message = format!(
+                        "Google Calendar has no occurrence {recurrence_id} of series {id} \
+                         to override"
+                    );
+                    return Err(CodedError::new(ErrorCode::Unsupported, message).into());
+                }
+            };
+            let Some(instance_id) = instance.id.clone() else {
+                continue;
+            };
+
+            let event = GcalEvent::from_ical(&occurrence.document)?.merge(&instance);
+            self.op(|gcal| {
+                gcal.event_update(
+                    calendar,
+                    &instance_id,
+                    &event,
+                    &params,
+                    instance.etag.as_deref(),
+                )
+            })
+            .with_context(|| format!("Override occurrence {recurrence_id} of {id} error"))?;
+        }
+
+        Ok(())
+    }
+
     /// The id of the instance of series `id` that a `RECURRENCE-ID` value
-    /// names, compared the way the projection writes it (the wall time of
-    /// its original start, a date, or a UTC stamp), among the instances
-    /// Google lists two days either side of its date. None found refuses.
+    /// names. None found refuses.
     pub fn occurrence(&mut self, calendar: &str, id: &str, recurrence_id: &str) -> Result<String> {
-        let Some((start, end)) = occurrence_window(recurrence_id) else {
+        if occurrence_window(recurrence_id).is_none() {
             return Err(anyhow::Error::new(Refusal(format!(
                 "{recurrence_id} names no occurrence"
             ))));
+        }
+
+        match self
+            .instance(calendar, id, recurrence_id)?
+            .and_then(|instance| instance.id)
+        {
+            Some(instance_id) => Ok(instance_id),
+            None => Err(anyhow::Error::new(Refusal(format!(
+                "Series {id} has no occurrence {recurrence_id}"
+            )))),
+        }
+    }
+
+    /// The instance of series `id` that a `RECURRENCE-ID` value names,
+    /// compared the way the projection writes it (the wall time of its
+    /// original start, a date, or a UTC stamp), among the instances Google
+    /// lists two days either side of its date.
+    fn instance(
+        &mut self,
+        calendar: &str,
+        id: &str,
+        recurrence_id: &str,
+    ) -> Result<Option<GcalEvent>> {
+        let Some((start, end)) = occurrence_window(recurrence_id) else {
+            return Ok(None);
         };
 
         let mut page_token: Option<String> = None;
@@ -627,19 +764,15 @@ impl GcalClient {
                     .as_ref()
                     .is_some_and(|original| names_occurrence(original, recurrence_id))
             });
-            if let Some(instance_id) = found.and_then(|instance| instance.id) {
-                return Ok(instance_id);
+            if found.is_some() {
+                return Ok(found);
             }
 
             match page.next_page_token {
                 Some(next) => page_token = Some(next),
-                None => break,
+                None => return Ok(None),
             }
         }
-
-        Err(anyhow::Error::new(Refusal(format!(
-            "Series {id} has no occurrence {recurrence_id}"
-        ))))
     }
 
     /// Answers an invitation as the calendar's own attendee, the organizer
@@ -1141,5 +1274,173 @@ mod tests {
             "{requests:?}"
         );
         assert_eq!(requests[2], requests[0], "{requests:?}");
+    }
+
+    /// A session answering `answers` in order, each a status and a JSON
+    /// body, and what it was sent.
+    fn answering(answers: &[(&str, &str)]) -> (GcalClient, Arc<std::sync::Mutex<Vec<u8>>>) {
+        let answers = answers.iter().map(|(status, body)| {
+            let headers = match body.is_empty() {
+                true => String::new(),
+                false => format!(
+                    "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                    body.len()
+                ),
+            };
+            format!("HTTP/1.1 {status}\r\n{headers}\r\n{body}").into_bytes()
+        });
+        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let client = GcalClient {
+            inner: GcalClientStd::new(
+                Answering {
+                    answers: answers.collect(),
+                    current: Vec::new(),
+                    written: Arc::clone(&written),
+                },
+                "token",
+            ),
+            tls: Tls::default(),
+            proxy: Proxy::None,
+            alive: true,
+            throttle: Arc::new(Throttle::new("gcal")),
+            owner: None,
+            issued: HashSet::new(),
+        };
+        (client, written)
+    }
+
+    /// The request lines of what a session was sent, in order.
+    fn request_lines(written: &[u8]) -> Vec<String> {
+        String::from_utf8_lossy(written)
+            .split("\r\n")
+            .filter(|line| line.ends_with(" HTTP/1.1"))
+            .map(|line| {
+                // NOTE: a request line follows the body of the one before.
+                let start = ["GET /", "POST /", "PUT /", "PATCH /", "DELETE /"]
+                    .iter()
+                    .filter_map(|method| line.rfind(method))
+                    .max()
+                    .unwrap_or(0);
+                line[start..].trim_end_matches(" HTTP/1.1").to_owned()
+            })
+            .collect()
+    }
+
+    /// A daily series of four from 2026-11-23 at 13:00 UTC, the second
+    /// occurrence moved to 15:00.
+    const SERIES: &str = "BEGIN:VCALENDAR\r\n\
+        VERSION:2.0\r\n\
+        BEGIN:VEVENT\r\n\
+        UID:series\r\n\
+        DTSTART:20261123T130000Z\r\n\
+        DTEND:20261123T140000Z\r\n\
+        RRULE:FREQ=DAILY;COUNT=4\r\n\
+        EXDATE:20261125T130000Z\r\n\
+        SUMMARY:Daily\r\n\
+        END:VEVENT\r\n\
+        BEGIN:VEVENT\r\n\
+        UID:series\r\n\
+        RECURRENCE-ID:20261124T130000Z\r\n\
+        DTSTART:20261124T150000Z\r\n\
+        DTEND:20261124T160000Z\r\n\
+        SUMMARY:Daily\r\n\
+        END:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+
+    const INSTANCE: &str = r#"{"items":[{"id":"S_20261124T130000Z","recurringEventId":"S","originalStartTime":{"dateTime":"2026-11-24T13:00:00Z"},"etag":"\"2\"","start":{"dateTime":"2026-11-24T13:00:00Z"},"end":{"dateTime":"2026-11-24T14:00:00Z"}}]}"#;
+
+    /// A series imported with a moved occurrence lands on Google whole: the
+    /// import, then the instance updated with the override.
+    #[test]
+    fn a_series_lands_with_its_moved_occurrence() {
+        let master = r#"{"id":"S","etag":"\"1\"","iCalUID":"series","recurrence":["RRULE:FREQ=DAILY;COUNT=4"]}"#;
+        let (mut client, written) = answering(&[
+            ("200 OK", master),
+            ("200 OK", INSTANCE),
+            (
+                "200 OK",
+                r#"{"id":"S_20261124T130000Z","recurringEventId":"S","etag":"\"3\""}"#,
+            ),
+            ("200 OK", master),
+            (
+                "200 OK",
+                r#"{"items":[{"id":"S_20261124T130000Z","recurringEventId":"S","etag":"\"3\""}]}"#,
+            ),
+        ]);
+
+        let created = client.add_item_stream("c1", SERIES.as_bytes()).unwrap();
+
+        assert_eq!(created.id, "S");
+        assert_eq!(created.revision.as_deref(), Some(r#""1" "3""#));
+        let written = written.lock().unwrap().clone();
+        let requests = request_lines(&written);
+        let methods: Vec<&str> = requests
+            .iter()
+            .map(|request| request.split_once(' ').unwrap().0)
+            .collect();
+        assert_eq!(
+            methods,
+            ["POST", "GET", "PUT", "GET", "GET"],
+            "{requests:#?}"
+        );
+        assert!(requests[0].contains("/events/import"), "{}", requests[0]);
+        assert!(
+            requests[2].contains("/events/S_20261124T130000Z"),
+            "{}",
+            requests[2]
+        );
+        let written = String::from_utf8_lossy(&written).into_owned();
+        let update = &written[written.find("PUT ").unwrap()..];
+        assert!(update.contains("2026-11-24T15:00:00"), "{update}");
+    }
+
+    /// An override of an occurrence the series does not have takes the
+    /// series back, coded `unsupported`.
+    #[test]
+    fn a_series_whose_override_finds_no_occurrence_is_taken_back() {
+        let (mut client, written) = answering(&[
+            ("200 OK", r#"{"id":"S","etag":"\"1\""}"#),
+            ("200 OK", r#"{"items":[]}"#),
+            ("204 No Content", ""),
+        ]);
+
+        let err = client.add_item_stream("c1", SERIES.as_bytes()).unwrap_err();
+
+        let failure = crate::error::Failure::of(&err);
+        assert_eq!(failure.code, Some(ErrorCode::Unsupported), "{err:#}");
+        let requests = request_lines(&written.lock().unwrap());
+        let last = requests.last().unwrap();
+        assert!(
+            last.starts_with("DELETE ") && last.contains("/events/S"),
+            "{requests:#?}"
+        );
+    }
+
+    /// A floating time, which Google cannot store, is anchored in the zone
+    /// the calendar states, and the write reports no revision, so the next
+    /// sync reads it back.
+    #[test]
+    fn a_floating_time_is_anchored_in_the_calendars_zone() {
+        let floating = "BEGIN:VCALENDAR\r\n\
+            VERSION:2.0\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:floating\r\n\
+            DTSTART:20261126T100000\r\n\
+            DTEND:20261126T110000\r\n\
+            SUMMARY:Floating\r\n\
+            END:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let (mut client, written) = answering(&[
+            ("200 OK", r#"{"id":"c1","timeZone":"Europe/Paris"}"#),
+            ("200 OK", r#"{"id":"F","etag":"\"1\""}"#),
+        ]);
+
+        let created = client.add_item_stream("c1", floating.as_bytes()).unwrap();
+
+        assert_eq!(created.revision, None);
+        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        let import = &written[written.find("POST ").unwrap()..];
+        assert!(import.contains("2026-11-26T10:00:00"), "{import}");
+        assert!(import.contains("Europe/Paris"), "{import}");
     }
 }

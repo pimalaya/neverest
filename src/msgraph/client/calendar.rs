@@ -13,8 +13,13 @@
 //!
 //! Graph has no conditional write for events, so an `If-Match` from the
 //! engine is checked against the server's current revision right before
-//! the write. Only the series master is written: an exception edited
-//! locally does not push.
+//! the write. A series is written through its master, then each occurrence
+//! it sets apart through its instance: deleted when cancelled, patched when
+//! overridden. A create whose occurrences do not all land is deleted again.
+//!
+//! Graph stores no floating time and states no zone for a calendar: one is
+//! anchored in UTC before the write, which then reports no revision, so the
+//! next sync reads the event back.
 //!
 //! The invitation intents go through the event's own actions, `accept`,
 //! `tentativelyAccept`, `decline` and `cancel`, Graph sending the iTIP
@@ -39,13 +44,16 @@ use io_msgraph::v1::{
 };
 use jiff::{Timestamp, ToSpan, civil::Date, tz::TimeZone};
 use log::{debug, trace, warn};
+use pimalaya_cli::error::CodedError;
 use serde_json::json;
 use url::Url;
 
-use super::{GraphClient, chain_not_found};
+use super::{GraphClient, chain_not_found, is_not_found};
 use crate::{
     client::{EnumEntry, Enumeration, WrittenItem},
+    error::ErrorCode,
     item::collection::Collection,
+    kind::event::{self, Occurrences},
     offline::invitation::{Partstat, Refusal, occurrence_window, utc_stamp},
 };
 
@@ -276,13 +284,17 @@ impl GraphClient {
         Ok(revision)
     }
 
-    /// Creates an event from an iCalendar object in a calendar.
+    /// Creates an event from an iCalendar object in a calendar, then the
+    /// occurrences a series sets apart through their instances.
     ///
     /// The event is read back with its stash: one whose UID did not survive
     /// would read back under Graph's own `iCalUId`, a second event for every
-    /// other source, so it is deleted again and the write refused.
+    /// other source, so it is deleted again and the write refused. So is a
+    /// series whose occurrences do not all land.
     pub(super) fn add_event(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
-        let ical = read_bytes(source)?;
+        let (ical, anchored) = anchor(read_bytes(source)?, calendar)?;
+        let occurrences = Occurrences::read(&ical)?;
+        occurrences.refuse_ranges("Microsoft Graph")?;
         let event = MsgraphEvent::create_from_ical(&ical)?;
         let uid = event.stashed_uid();
 
@@ -304,22 +316,38 @@ impl GraphClient {
             );
         }
 
+        let mut revision = stored.change_key.clone();
+        if !occurrences.is_empty() {
+            if let Err(err) = self.write_occurrences(&stored, &occurrences, &[]) {
+                if let Err(undo) = self.op(|graph| graph.event_delete(&stored.id)) {
+                    warn!("cannot delete series {} again: {undo}", stored.id);
+                }
+                return Err(err.context(format!(
+                    "Graph took the series created in {calendar} without its \
+                     occurrences, so it was deleted again"
+                )));
+            }
+            revision = self.event(&stored.id).ok().and_then(|read| read.change_key);
+        }
+
         Ok(WrittenItem {
             id: stored.id,
-            revision: stored.change_key.filter(|_| !asks_meeting(&event)),
+            revision: revision.filter(|_| !asks_meeting(&event) && !anchored),
         })
     }
 
     /// Replaces a series master from an iCalendar object, sending only what
     /// changed against the server copy, which also serves the `If-Match`
-    /// check.
+    /// check, then the occurrences it sets apart through their instances.
     pub(super) fn update_event(
         &mut self,
         id: &str,
         source: impl Read,
         if_match: Option<&str>,
     ) -> Result<Option<String>> {
-        let ical = read_bytes(source)?;
+        let (ical, anchored) = anchor(read_bytes(source)?, id)?;
+        let occurrences = Occurrences::read(&ical)?;
+        occurrences.refuse_ranges("Microsoft Graph")?;
         let (current, exceptions) = self.series(id)?;
         check_revision(id, &current, if_match)?;
 
@@ -331,13 +359,91 @@ impl GraphClient {
             .op(|graph| graph.event_update(id, &patch))
             .with_context(|| format!("Update event {id} error"))?;
 
-        Ok(updated.change_key.filter(|_| !asks_meeting(&patch)))
+        let mut revision = updated.change_key;
+        if !occurrences.is_empty() {
+            // NOTE: a moved start or rule drops Graph's cancellations.
+            let held = match patch.start.is_unset() && patch.recurrence.is_unset() {
+                true => Occurrences::read(base.as_bytes())?.excluded,
+                false => Vec::new(),
+            };
+            let master = self.event(id)?;
+            self.write_occurrences(&master, &occurrences, &held)?;
+            revision = self.event(id).ok().and_then(|read| read.change_key);
+        }
+
+        Ok(revision.filter(|_| !asks_meeting(&patch) && !anchored))
+    }
+
+    /// Writes the occurrences series `master` sets apart through their
+    /// instances: one cancelled is deleted, but one of `held`, which Graph
+    /// cancelled already, and one overridden patched.
+    ///
+    /// An override of an occurrence the series does not have is refused,
+    /// coded `unsupported`.
+    fn write_occurrences(
+        &mut self,
+        master: &MsgraphEvent,
+        occurrences: &Occurrences,
+        held: &[String],
+    ) -> Result<()> {
+        let id = &master.id;
+
+        for recurrence_id in &occurrences.excluded {
+            if held.contains(recurrence_id) {
+                continue;
+            }
+            if let Some(instance) = self.instance(master, recurrence_id)? {
+                self.cancel_instance(id, &instance.id, recurrence_id)?;
+            }
+        }
+
+        for occurrence in &occurrences.overrides {
+            let recurrence_id = &occurrence.recurrence_id;
+            let instance = match self.instance(master, recurrence_id)? {
+                Some(instance) => instance,
+                None if occurrence.cancelled => continue,
+                None => {
+                    let message = format!(
+                        "Microsoft Graph has no occurrence {recurrence_id} of series {id} \
+                         to override"
+                    );
+                    return Err(CodedError::new(ErrorCode::Unsupported, message).into());
+                }
+            };
+
+            if occurrence.cancelled {
+                self.cancel_instance(id, &instance.id, recurrence_id)?;
+                continue;
+            }
+
+            let base = instance.to_ical();
+            let patch =
+                MsgraphEvent::instance_update_from_ical(&occurrence.document, base.as_bytes())?;
+            let Some(patch) = patch else {
+                continue;
+            };
+            self.op(|graph| graph.event_update(&instance.id, &patch))
+                .with_context(|| format!("Override occurrence {recurrence_id} of {id} error"))?;
+        }
+
+        Ok(())
+    }
+
+    /// Deletes the instance of series `id` an occurrence cancels; one gone
+    /// already counts as deleted.
+    fn cancel_instance(&mut self, id: &str, instance: &str, recurrence_id: &str) -> Result<()> {
+        match self.op(|graph| graph.event_delete(instance)) {
+            Err(err) if is_not_found(&err) => Ok(()),
+            deleted => {
+                deleted
+                    .with_context(|| format!("Cancel occurrence {recurrence_id} of {id} error"))?;
+                Ok(())
+            }
+        }
     }
 
     /// The id of the instance of series `id` that a `RECURRENCE-ID` value
-    /// names, compared the way the projection writes it (the wall time in
-    /// the series' zone, a date, or a UTC stamp), among the instances Graph
-    /// lists two days either side of its date. None found refuses.
+    /// names. None found refuses.
     pub fn occurrence_event(&mut self, id: &str, recurrence_id: &str) -> Result<String> {
         let master = self.event(id)?;
         if master.event_type != Some(MsgraphEventType::SeriesMaster) {
@@ -345,10 +451,35 @@ impl GraphClient {
                 "Event {id} is not a series, it has no occurrence {recurrence_id}"
             ))));
         }
-        let Some((start, end)) = occurrence_window(recurrence_id) else {
+        if occurrence_window(recurrence_id).is_none() {
             return Err(anyhow::Error::new(Refusal(format!(
                 "{recurrence_id} names no occurrence"
             ))));
+        }
+
+        match self.instance(&master, recurrence_id)? {
+            Some(instance) => Ok(instance.id),
+            None => Err(anyhow::Error::new(Refusal(format!(
+                "Series {id} has no occurrence {recurrence_id}"
+            )))),
+        }
+    }
+
+    /// The instance of series `master` that a `RECURRENCE-ID` value names,
+    /// compared the way the projection writes it (the wall time in the
+    /// series' zone, a date, or a UTC stamp), among the instances Graph
+    /// lists two days either side of its date.
+    fn instance(
+        &mut self,
+        master: &MsgraphEvent,
+        recurrence_id: &str,
+    ) -> Result<Option<MsgraphEvent>> {
+        let id = &master.id;
+        if master.event_type != Some(MsgraphEventType::SeriesMaster) {
+            return Ok(None);
+        }
+        let Some((start, end)) = occurrence_window(recurrence_id) else {
+            return Ok(None);
         };
 
         let params = MsgraphEventsListParams {
@@ -367,21 +498,17 @@ impl GraphClient {
                         || utc_stamp(original).as_deref() == Some(recurrence_id)
                 })
             });
-            if let Some(instance) = found {
-                return Ok(instance.id);
+            if found.is_some() {
+                return Ok(found);
             }
 
             let Some(next) = page.next_link else {
-                break;
+                return Ok(None);
             };
             page = self
                 .op(|graph| graph.events_list_from_link(&next))
                 .with_context(|| format!("Page instances of {id} error"))?;
         }
-
-        Err(anyhow::Error::new(Refusal(format!(
-            "Series {id} has no occurrence {recurrence_id}"
-        ))))
     }
 
     /// Answers an invitation, Graph sending the reply to the organizer with
@@ -542,6 +669,17 @@ fn asks_meeting(event: &MsgraphEvent) -> bool {
     event.is_online_meeting.as_option() == Some(&true)
 }
 
+/// `ical` with its floating times anchored in UTC, Graph stating no zone for
+/// a calendar, and whether it held any; `what` names the write in the log.
+fn anchor(ical: Vec<u8>, what: &str) -> Result<(Vec<u8>, bool)> {
+    if !event::has_floating(&ical)? {
+        return Ok((ical, false));
+    }
+
+    warn!("{what} holds a floating time, which Graph cannot store: anchored in UTC");
+    Ok((event::anchor_floating(&ical, None)?, true))
+}
+
 /// Reads a whole body.
 fn read_bytes(mut source: impl Read) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
@@ -560,7 +698,195 @@ mod tests {
         },
     };
 
+    use std::sync::Arc;
+
+    use secrecy::SecretString;
+
     use super::*;
+    use crate::{
+        error::Failure,
+        msgraph::client::{
+            GraphKind, SizeHints,
+            scripted::{Server, Step},
+        },
+        throttle::Throttle,
+    };
+
+    /// A calendar session over a scripted server of one connection.
+    fn session(script: Vec<Step>) -> (GraphClient, Server) {
+        let server = Server::new(vec![script]);
+        let client = GraphClient::over(
+            GraphKind::Calendar,
+            &SecretString::from("token"),
+            "me",
+            server.connect(),
+            SizeHints::default(),
+            Arc::new(Throttle::new("msgraph")),
+        )
+        .unwrap();
+        (client, server)
+    }
+
+    /// A daily series of four from 2026-11-23 at 13:00 UTC, the third
+    /// occurrence excluded and the second moved to 15:00.
+    const SERIES: &str = "BEGIN:VCALENDAR\r\n\
+        VERSION:2.0\r\n\
+        BEGIN:VEVENT\r\n\
+        UID:series\r\n\
+        DTSTART:20261123T130000Z\r\n\
+        DTEND:20261123T140000Z\r\n\
+        RRULE:FREQ=DAILY;COUNT=4\r\n\
+        EXDATE:20261125T130000Z\r\n\
+        SUMMARY:Daily\r\n\
+        END:VEVENT\r\n\
+        BEGIN:VEVENT\r\n\
+        UID:series\r\n\
+        RECURRENCE-ID:20261124T130000Z\r\n\
+        DTSTART:20261124T150000Z\r\n\
+        DTEND:20261124T160000Z\r\n\
+        SUMMARY:Daily\r\n\
+        END:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+
+    /// The series master as Graph reads it back, at `change_key`.
+    fn master(change_key: &str) -> Step {
+        Step::ok(json!({
+            "id": "S",
+            "changeKey": change_key,
+            "type": "seriesMaster",
+            "subject": "Daily",
+            "start": { "dateTime": "2026-11-23T13:00:00.0000000", "timeZone": "UTC" },
+            "end": { "dateTime": "2026-11-23T14:00:00.0000000", "timeZone": "UTC" },
+            "recurrence": {
+                "pattern": { "type": "daily", "interval": 1 },
+                "range": { "type": "numbered", "startDate": "2026-11-23", "numberOfOccurrences": 4 },
+            },
+            "singleValueExtendedProperties": [{
+                "id": "String {c8e5e5cf-3f6c-4f0a-9d4e-52f1e7b2a9d3} Name pimalaya-ical",
+                "value": "UID:series",
+            }],
+        }))
+    }
+
+    /// The instances of the series listed around one date: the occurrence
+    /// that started at `original`, if any.
+    fn instances(original: Option<(&str, &str)>) -> Step {
+        let value: Vec<serde_json::Value> = original
+            .into_iter()
+            .map(|(id, original)| {
+                json!({
+                    "id": id,
+                    "type": "occurrence",
+                    "seriesMasterId": "S",
+                    "originalStart": original,
+                    "subject": "Daily",
+                    "start": { "dateTime": original.trim_end_matches('Z'), "timeZone": "UTC" },
+                    "end": { "dateTime": "2026-11-24T14:00:00", "timeZone": "UTC" },
+                })
+            })
+            .collect();
+        Step::ok(json!({ "value": value }))
+    }
+
+    fn no_content() -> Step {
+        Step::Reply(b"HTTP/1.1 204 No Content\r\n\r\n".to_vec())
+    }
+
+    /// A series created with an excluded and a moved occurrence lands on
+    /// Graph whole: the excluded instance deleted, the moved one patched.
+    #[test]
+    fn a_series_lands_with_its_excluded_and_its_moved_occurrence() {
+        let (mut client, server) = session(vec![
+            Step::json(201, &json!({ "id": "S", "changeKey": "c0" })),
+            master("c1"),
+            instances(Some(("I25", "2026-11-25T13:00:00Z"))),
+            no_content(),
+            instances(Some(("I24", "2026-11-24T13:00:00Z"))),
+            Step::ok(json!({ "id": "I24" })),
+            master("c2"),
+        ]);
+
+        let written = client.add_event("cal", SERIES.as_bytes()).unwrap();
+
+        assert_eq!(written.id, "S");
+        assert_eq!(written.revision.as_deref(), Some("c2"));
+        let requests = server.requests().remove(0);
+        let methods: Vec<&str> = requests
+            .iter()
+            .map(|request| request.split_once(' ').unwrap().0)
+            .collect();
+        assert_eq!(
+            methods,
+            ["POST", "GET", "GET", "DELETE", "GET", "PATCH", "GET"],
+            "{requests:#?}"
+        );
+        assert!(requests[3].ends_with("/me/events/I25"), "{}", requests[3]);
+        assert!(requests[5].ends_with("/me/events/I24"), "{}", requests[5]);
+        let written = server.written(0);
+        let patch = &written[written.rfind("PATCH ").unwrap()..];
+        assert!(patch.contains("2026-11-24T15:00:00"), "{patch}");
+    }
+
+    /// An override of an occurrence the series does not have takes the
+    /// series back: the write is refused, coded `unsupported`, and the
+    /// store keeps it for the next run rather than the master alone.
+    #[test]
+    fn a_series_whose_override_finds_no_occurrence_is_taken_back() {
+        let (mut client, server) = session(vec![
+            Step::json(201, &json!({ "id": "S", "changeKey": "c0" })),
+            master("c1"),
+            instances(Some(("I25", "2026-11-25T13:00:00Z"))),
+            no_content(),
+            instances(None),
+            no_content(),
+        ]);
+
+        let err = client.add_event("cal", SERIES.as_bytes()).unwrap_err();
+
+        let failure = Failure::of(&err);
+        assert_eq!(failure.code, Some(ErrorCode::Unsupported), "{err:#}");
+        assert!(format!("{err:#}").contains("20261124T130000Z"), "{err:#}");
+        let requests = server.requests().remove(0);
+        assert!(
+            requests.last().unwrap().ends_with("/me/events/S"),
+            "{requests:#?}"
+        );
+        assert!(requests.last().unwrap().starts_with("DELETE "));
+    }
+
+    /// A floating time, which Graph cannot store, is anchored in UTC, and
+    /// the write reports no revision, so the next sync reads it back.
+    #[test]
+    fn a_floating_time_is_anchored_in_utc() {
+        let floating = "BEGIN:VCALENDAR\r\n\
+            VERSION:2.0\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:floating\r\n\
+            DTSTART:20261126T100000\r\n\
+            DTEND:20261126T110000\r\n\
+            SUMMARY:Floating\r\n\
+            END:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let (mut client, server) = session(vec![
+            Step::json(201, &json!({ "id": "F", "changeKey": "c0" })),
+            Step::ok(json!({
+                "id": "F",
+                "changeKey": "c1",
+                "singleValueExtendedProperties": [{
+                    "id": "String {c8e5e5cf-3f6c-4f0a-9d4e-52f1e7b2a9d3} Name pimalaya-ical",
+                    "value": "UID:floating",
+                }],
+            })),
+        ]);
+
+        let written = client.add_event("cal", floating.as_bytes()).unwrap();
+
+        assert_eq!(written.revision, None);
+        let written = server.written(0);
+        let create = &written[..written.find("GET ").unwrap()];
+        assert!(create.contains("2026-11-26T10:00:00"), "{create}");
+        assert!(create.contains("\"timeZone\":\"UTC\""), "{create}");
+    }
 
     fn event(id: &str, change_key: &str) -> MsgraphEvent {
         MsgraphEvent {

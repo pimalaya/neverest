@@ -4960,13 +4960,10 @@ fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncOu
     let mut seen: HashSet<(String, String, &'static str)> = HashSet::new();
 
     for rejected in rejected {
-        // NOTE: the hub stages an append under a handle of its own making,
-        // the item's link id with a marker appended, the item having no
-        // handle on the side it is being created on. That marker is what a
-        // person would read, and the copy hunk names the item by the link id
-        // alone, so both the report and the retraction take the id back.
-        let id = match rejected.handle.split_once('\u{1}') {
-            Some((link, _)) => link.to_string(),
+        // NOTE: a create is staged under its provisional handle, U+0001 then
+        // the link id (pimdir SYNC §2), which its hunk names it by.
+        let id = match rejected.handle.strip_prefix('\u{1}') {
+            Some(link) => link.to_string(),
             None => rejected.handle.clone(),
         };
         let key = (rejected.collection.clone(), id.clone(), rejected.action);
@@ -10193,13 +10190,13 @@ mod tests {
         assert!(text.contains(chain), "{text}");
     }
 
-    /// A refused append names the item and takes its copy back.
+    /// A refused append names the item and takes its hunk back.
     ///
-    /// The hub stages an append under the item's link id with a marker, the
-    /// item having no handle on the side it is created on. Reported raw the
-    /// marker reads as part of the name, and the copy hunk was left in.
+    /// A create is staged under its provisional handle, U+0001 then the link
+    /// id (pimdir SYNC §2). Read as a marker after the link id, it reported
+    /// an empty id and left the copy, or a frontend's add, in the patch.
     #[test]
-    fn a_refused_append_is_named_by_its_link_id_and_its_copy_is_taken_back() {
+    fn a_refused_append_is_named_by_its_link_id_and_its_hunk_is_taken_back() {
         let mut report = SyncOutput::default();
         for id in ["event-1", "event-2"] {
             report.item.patch.push(PatchEntry::new(
@@ -10215,25 +10212,42 @@ mod tests {
                 None,
             ));
         }
+        report.item.patch.push(PatchEntry::new(
+            ItemHunk::Add {
+                side: String::from("dav"),
+                collection: String::from("Calendar"),
+                id: String::from("event-3"),
+                flags: BTreeSet::new(),
+                content_key: 0,
+            },
+            None,
+        ));
 
+        let rejected = |link: &str| RejectedPush {
+            collection: String::from("Calendar"),
+            handle: PimdirLinkId::from(link).provisional().0,
+            action: "append",
+            failure: Failure::from("HTTP 403"),
+        };
         itemize_rejected(
             "dav",
-            vec![RejectedPush {
-                collection: String::from("Calendar"),
-                handle: String::from("event-1\u{1}hub"),
-                action: "append",
-                failure: Failure::from("HTTP 403"),
-            }],
+            vec![rejected("event-1"), rejected("event-3")],
             &mut report,
         );
 
         let left: Vec<&ItemHunk> = report.item.patch.iter().map(|entry| &entry.hunk).collect();
-        assert_eq!(left.len(), 1, "the refused append left the patch: {left:?}");
+        assert_eq!(left.len(), 1, "a refused append left the patch: {left:?}");
         assert!(format!("{:?}", left[0]).contains("event-2"), "{left:?}");
 
+        let ids: Vec<Option<&str>> = report
+            .rejected
+            .iter()
+            .map(|rejected| rejected.failure.id.as_deref())
+            .collect();
+        assert_eq!(ids, [Some("event-1"), Some("event-3")]);
         let text = report.to_string();
         assert!(text.contains("refused the append of event-1 in"), "{text}");
-        assert!(!text.contains("event-1\u{1}"), "the marker is printed raw");
+        assert!(!text.contains('\u{1}'), "the marker is printed raw");
     }
 
     /// A conflict an earlier run parked reaches no later run's report.

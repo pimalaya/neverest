@@ -432,7 +432,7 @@ The driver SHALL then run io-pimdir's rekey on the collection before syncing it 
 ### Requirement: Microsoft Graph is a first-class source
 An `msgraph` source SHALL open protocol-direct over io-msgraph (never through a frozen aggregator). Graph carries several PIM domains behind one protocol, one host and one credential, and which domain a source syncs SHALL fall out of its backend as it does everywhere else: `msgraph` is mail, `msgraph-contacts` is the address book, `msgraph-calendar` the calendars. One adapter SHALL serve both, parameterised by which it speaks, as one adapter serves both DAV protocols. A `kind` field on the configuration SHALL NOT be introduced for this or any other backend.
 
-For **calendars** (`msgraph-calendar`): the user's calendars keyed by id and named by name, events as `text/calendar` through io-msgraph's `ical` projection. Graph's event delta only runs over a calendar view, a time window, and an event leaving a sliding window would read as deleted and be deleted on every other source, so the enumeration SHALL list each calendar's lone events and series masters in full every run, with no window, the master's `changeKey` as the revision and removals reported by absence; an event Graph repeats across `@odata.nextLink` pages SHALL be enumerated once, and one id at two revisions SHALL fail the enumeration. A series SHALL be one item, read with its exceptions from the instances of its own date range, bounded by its range type (a `numbered` range sized from its occurrence count, an open-ended one five years either side of today), never by the `0001-01-01` `endDate` Graph fills the other types with, and listed in windows of at most five years, the longest Graph accepts, its cancelled occurrences as EXDATEs. The UID SHALL ride the projection's stash extended property, a create whose UID did not survive being deleted again and refused; an event with no stashed UID SHALL be keyed by Graph's `iCalUId`, unwrapped when it is a global object id wrapping the organizer's UID (an invitation Exchange took in by mail, the `vCal-Uid` form), so the event keeps the UID the organizer and the other attendees know; an update or delete SHALL be refused when the master's `changeKey` moved. Only the series master is written: an exception edited locally does not push, and an edit Graph makes to one occurrence alone is seen once the master's `changeKey` moves.
+For **calendars** (`msgraph-calendar`): the user's calendars keyed by id and named by name, events as `text/calendar` through io-msgraph's `ical` projection. Graph's event delta only runs over a calendar view, a time window, and an event leaving a sliding window would read as deleted and be deleted on every other source, so the enumeration SHALL list each calendar's lone events and series masters in full every run, with no window, the master's `changeKey` as the revision and removals reported by absence; an event Graph repeats across `@odata.nextLink` pages SHALL be enumerated once, and one id at two revisions SHALL fail the enumeration. A series SHALL be one item, read with its exceptions from the instances of its own date range, bounded by its range type (a `numbered` range sized from its occurrence count, an open-ended one five years either side of today), never by the `0001-01-01` `endDate` Graph fills the other types with, and listed in windows of at most five years, the longest Graph accepts, its cancelled occurrences as EXDATEs. The UID SHALL ride the projection's stash extended property, a create whose UID did not survive being deleted again and refused; an event with no stashed UID SHALL be keyed by Graph's `iCalUId`, unwrapped when it is a global object id wrapping the organizer's UID (an invitation Exchange took in by mail, the `vCal-Uid` form), so the event keeps the UID the organizer and the other attendees know; an update or delete SHALL be refused when the master's `changeKey` moved. A series SHALL be written whole, as "A series is pushed whole or not at all" says, and a floating time anchored, as "A floating time is anchored before Google or Graph takes it" says; an edit Graph makes to one occurrence alone is seen once the master's `changeKey` moves.
 
 
 For **mail**: folders listed two levels deep (`Parent/Child` naming), enumeration through the messages delta query carrying the `@odata.deltaLink` as the engine's opaque checkpoint (HTTP 410 = expired link, restarting a fresh full round; any other failure surfaces), the `Meta` tier read by one summary get a message (`mid:`/`alt:` link ids, meta v1), the `Full` tier from the raw MIME content streamed into the blob store. Flags map to the IANA wire spellings (`isRead` = `\Seen`, a flagged follow-up = `\Flagged`, `isDraft` = `\Draft`). Push scope is honest: flag changes push through `message_update`, deletes through `message_delete`, moves and copies as the requirement "Graph mail moves, copies and adds drafts" says; an append lands in Drafts only, and content updates are rejected and documented.
@@ -1295,14 +1295,19 @@ The far side's own permission decides what may be hydrated for it: `item.create`
 - THEN the target carries the source's body, nothing is counted as a conflict, and the run exits 0
 
 ### Requirement: A refused write names the item as a person knows it
-A write a remote refused SHALL be reported under the item's own identity, never under a handle the engine minted for its own bookkeeping. An append the hub staged carries the item's link id with a marker appended, the item having no handle on the side it is being created on, and the marker SHALL NOT reach the report.
+A write a remote refused SHALL be reported under the item's own identity, never under a handle the engine minted for its own bookkeeping. A create is staged under its provisional handle, U+0001 followed by the item's link id (pimdir SYNC §2), the item having no handle on the side it is being created on: the report SHALL name it by that link id, and the U+0001 SHALL NOT reach the report.
 
-The hunk the refused write was derived from SHALL be taken back whatever its kind, a copy included: a copy is named by the link id the staged handle carries, so a run whose appends were all refused SHALL report no hunk applied.
+The hunk the refused write was derived from SHALL be taken back whatever its kind, a copy and a frontend's add included: both are named by the link id the provisional handle carries, so a run whose appends were all refused SHALL report no hunk applied.
 
 #### Scenario: A read-only collection refuses every append
 - GIVEN a target collection the server serves read-only
 - WHEN a run tries to copy items into it
 - THEN each refusal names its item plainly, the item patch is empty, and the run exits 3
+
+#### Scenario: A frontend's add refused
+- GIVEN an event a frontend queued into a Google calendar, which Google refuses
+- WHEN a sync pushes it
+- THEN the refusal names the event by its `UID`, never an empty `id`, and the add is not among the hunks applied
 
 ### Requirement: The summary is the format's typed row
 The summary written for an item SHALL be io-pimdir's `PimdirSummary`, the row of the kind's summary table with the addresses it names (pimdir STORAGE Annex A): `mail_summary` for `message/rfc822`, `contact_summary` for `text/vcard`, `event_summary`, `task_summary` or `journal_summary` for `text/calendar`, plus `item_address`. A reader renders a list from those rows and never parses a blob. Flags are not in the summary. Both the listed (`Meta`) and the streamed (`Full`) paths of mail SHALL emit the same row, the streamed path carrying the message's known octet length as `size` rather than the header prefix it read.
@@ -1373,12 +1378,44 @@ Enumeration SHALL be the API's sync-token listing, the token as the engine's opa
 
 A `gpeople` item SHALL be one person, its `etag` the revision, projected through io-gpeople's `vcard` feature. Its vCard `UID` rides the projection's `clientData` stash, so it keeps the identity it arrived with; a create whose stash People did not keep SHALL be deleted again and refused. An update SHALL carry the etag, which People enforces, and SHALL merge back, in each field of its mask, what People holds there and a vCard cannot show (io-gpeople's `merge_unprojected`: an organization or occupation after the first, a relation other than spouse or child, a custom type, a sub-field without a vCard slot, the `clientData` entries other clients own), a masked update replacing the field whole. A property too long for the stash, which the projection leaves out, SHALL be named in a warning.
 
-A `gcal` item SHALL be one recurring series with its modified instances, or one lone event, keyed by the series' event id, its revision joining the etags of the series and of its instances so an edit to any of them moves it, projected through io-gcal's `ical` feature. A create SHALL import an object carrying a UID, so the UID survives as the event's `iCalUID`. An update or delete SHALL be refused when the joined revision moved, then be guarded by the series event's own etag. Only the series event SHALL be written: an instance modified locally does not push yet.
+A `gcal` item SHALL be one recurring series with its modified instances, or one lone event, keyed by the series' event id, its revision joining the etags of the series and of its instances so an edit to any of them moves it, projected through io-gcal's `ical` feature. A create SHALL import an object carrying a UID, so the UID survives as the event's `iCalUID`. An update or delete SHALL be refused when the joined revision moved, then be guarded by the series event's own etag. A series SHALL be written whole, as "A series is pushed whole or not at all" says, and a floating time anchored, as "A floating time is anchored before Google or Graph takes it" says.
 
 #### Scenario: A series edited on one instance moves its item
 - GIVEN a weekly series with one modified instance, synced into the store
 - WHEN the instance is edited on Google and the account synced again
 - THEN the series' item has a new revision and its body carries the edited instance
+
+### Requirement: A series is pushed whole or not at all
+A write to a Google Calendar or Graph calendar SHALL carry every occurrence the document sets apart from its master, or SHALL be refused: a write landing as the master alone loses the rest on the server, and the next read loses it in the store. Both providers take an occurrence through its instance, found among the instances listed two days either side of the occurrence's `RECURRENCE-ID` by its original start.
+
+Graph SHALL take the master first (created, or patched with what changed), then delete the instance of each `EXDATE` and of each override marked `STATUS:CANCELLED`, an instance already gone counting as deleted, and patch the instance of each other override with what it sets differently from the instance (io-msgraph's `instance_update_from_ical`). Google SHALL take the master first (imported, inserted or updated), the `EXDATE`s riding its recurrence, then update the instance of each override with the override merged onto it (io-gcal's `from_ical` reading the override alone, `merge` keeping the instance's identity), with the master's `sendUpdates`.
+
+An override of an occurrence the series does not have, and one of an occurrence and every later one (`RANGE=THISANDFUTURE`), which neither provider takes through an instance, SHALL be refused coded `unsupported`, naming the occurrence: the latter before anything is written; the former once the master is created, which is then deleted again. A create whose occurrences do not all land, for any reason, SHALL be deleted again and the write refused, so the store keeps its body and the next run pushes it again. An update failing on an occurrence SHALL be refused; the next run reads the master the update moved as the server's edit. A write of occurrences SHALL report the revision read after them.
+
+An occurrence the server holds and the document no longer sets apart (an override dropped, on Graph an `EXDATE` removed too) is not written back: Graph restores no cancelled occurrence. Both sources SHALL therefore declare `calendar.occurrence.update` `partial`, the detail naming what such an update leaves on the server.
+
+#### Scenario: A series with an exclusion and a moved occurrence reaches Graph
+- **GIVEN** a daily series queued with an `EXDATE` on its third occurrence and an override moving its second
+- **WHEN** a sync pushes it to a Graph calendar
+- **THEN** the master is created, the third instance deleted and the second patched to its new time, and the item records the master's revision read after them
+
+#### Scenario: A moved occurrence reaches Google
+- **GIVEN** the same series pushed to a Google calendar
+- **WHEN** a sync imports it
+- **THEN** the second instance is updated to its new time and the item records the series' joined revision read after it
+
+#### Scenario: An override of no occurrence
+- **GIVEN** a series whose override names an occurrence its rule does not produce
+- **WHEN** a sync pushes it to Google or Graph
+- **THEN** the series created is deleted again, the write is reported refused, coded `unsupported`, naming the occurrence, and the store keeps the body for the next run
+
+### Requirement: A floating time is anchored before Google or Graph takes it
+Neither Google Calendar nor Graph stores a floating time (a `DTSTART`, `DTEND`, `RECURRENCE-ID`, `EXDATE` or `RDATE` naming neither a `TZID` nor UTC). Before a create or an update, every floating date-time of the document's events SHALL be anchored: on Google in the zone the calendar states (its calendar list entry's `timeZone`), as a `TZID`; on Graph, which states no zone for a calendar, and on Google when the calendar states none, in UTC, with a warning naming the write. A date is no floating time. The write SHALL then report no revision, so the next sync reads the event back and the store holds what the server does.
+
+#### Scenario: A floating meeting queued on a Google calendar
+- **GIVEN** an event queued at a floating 10:00 on 2026-11-26 into a Google calendar whose zone is `Europe/Paris`
+- **WHEN** a sync pushes it
+- **THEN** Google takes it at 10:00 `Europe/Paris`, the run reports no refusal, and the next sync reads it back into the store
 
 ### Requirement: Gmail is a native mail source
 A `gmail` source SHALL open protocol-direct over io-gmail and sync `message/rfc822`. Its collections SHALL be the user labels and the `INBOX`, `SENT`, `DRAFT`, `SPAM` and `TRASH` system labels, keyed and named by label name, as IMAP exposes them, so a Gmail endpoint and an IMAP endpoint on one account pair their labels. A label id SHALL NOT key a collection: the driver pairs endpoints and creates missing collections by key, and an opaque id would never meet the IMAP name.

@@ -18,6 +18,8 @@
 //! An enum rather than a trait: the set of kinds is closed and small, there
 //! is one dispatch point, and a trait would buy dispatch nobody needs.
 
+#[cfg(any(feature = "gcal", feature = "msgraph"))]
+pub mod event;
 pub mod mail;
 pub mod merge;
 

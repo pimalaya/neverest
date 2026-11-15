@@ -475,8 +475,8 @@ fn caldav(name: &str, _smtp: bool) -> Support {
 fn gcal(name: &str, _smtp: bool) -> Support {
     match name {
         CALENDAR_OCCURRENCE_UPDATE => (
-            PimdirSupport::None,
-            Some("a modified instance does not push yet"),
+            PimdirSupport::Partial,
+            Some("an override the update drops stays on Google"),
         ),
         CALENDAR_SCHEDULING => (
             PimdirSupport::Partial,
@@ -505,8 +505,8 @@ fn gcal(name: &str, _smtp: bool) -> Support {
 fn msgraph_calendar(name: &str, _smtp: bool) -> Support {
     match name {
         CALENDAR_OCCURRENCE_UPDATE => (
-            PimdirSupport::None,
-            Some("an edited exception does not push yet"),
+            PimdirSupport::Partial,
+            Some("an override or an exclusion the update drops stays on Graph"),
         ),
         CALENDAR_SCHEDULING => (
             PimdirSupport::Partial,

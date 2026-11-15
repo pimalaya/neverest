@@ -375,6 +375,9 @@ Upgrading from 0.3.0:
 
 ### Fixed
 
+- Fixed a recurring event pushed to Microsoft Graph or Google Calendar landing as its series alone: its cancelled occurrences (`EXDATE`) and its overrides were lost on Graph, then in the store when the next sync read the series back, and its overrides were lost on Google. Each now reaches its instance after the series; an override neither provider can take is refused, coded `unsupported`, and a new series whose occurrences do not all land is deleted again, the store keeping it for the next run. Both sources declare `calendar.occurrence.update` `partial`, where they declared `none`, so a frontend may queue an update changing an occurrence.
+- Fixed an event at a floating time (no zone, no UTC) queued on a Google or Graph calendar being refused by every sync: it is anchored in the calendar's zone on Google, in UTC on Graph, which states no zone for a calendar, and read back by the next sync.
+- Fixed every refused create reading `"id": ""` and staying among the hunks applied: it is named by its link id (a `UID`, a `Message-ID`) and taken back.
 - Fixed a widening of the scope (`sync` after `sync --since`) deleting from the store Gmail and Microsoft Graph messages the server still held: those dated in the band by their `Date` and received (Gmail) or submitted (Graph `sentDateTime`) after it, which the band's `before:` or `sentDateTime lt` filter missed. A band is now listed from its floor up, its `Date` deciding what it keeps.
 - Fixed a message queued into a Microsoft Graph folder other than Drafts being accepted, then rejected by every sync: the source declares `mail.message.add` on its Drafts folder alone, so a frontend refuses such an add up front, and a rejected one is coded `unsupported`.
 - Fixed `check` marking a source or an SMTP channel that did not answer with `✓`: it now reads `✗`. A spinner writes no colour to a stderr that is no terminal, nor under `NO_COLOR` (pimalaya-cli 0.5.2).

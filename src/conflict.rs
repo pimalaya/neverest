@@ -26,7 +26,7 @@ use io_pimdir::{
 };
 use log::{info, warn};
 
-use crate::{error::pimdir_error, kind::Kind};
+use crate::{conflict::report::PartialCapability, error::pimdir_error, kind::Kind};
 
 /// One divergence waiting for a decision: an item whose local body and whose
 /// remote body both moved away from the base the last sync agreed on.
@@ -81,8 +81,8 @@ pub struct Conflict {
 pub enum Applied {
     /// The chosen body was staged as an edit and drained, so the item is no
     /// longer conflicted. Carries the capabilities a source supports in
-    /// part that the edit relies on, each as a sentence to show.
-    Resolved(Vec<String>),
+    /// part that the edit relies on.
+    Resolved(Vec<PartialCapability>),
     /// The store has observed a newer remote revision than the decision was
     /// computed against, so nothing was pushed. Carries what it holds now.
     Moved(Option<String>),
@@ -221,7 +221,11 @@ impl Conflict {
 
         info!("resolved conflict {} in {}", self.id, self.collection);
 
-        let partial = enqueued.partial.iter().map(ToString::to_string).collect();
+        let partial = enqueued
+            .partial
+            .into_iter()
+            .map(|partial| PartialCapability::new(partial, &self.account))
+            .collect();
         Ok(Applied::Resolved(partial))
     }
 }
@@ -497,6 +501,22 @@ mod tests {
             listed.contains("waiting for its diverging body"),
             "{listed}"
         );
+    }
+
+    /// A listed divergence prints the item's public id as a string, as
+    /// himalaya, cardamum and calendula print a store id, where it printed
+    /// an integer.
+    #[test]
+    fn a_listed_conflict_prints_its_id_as_a_string() {
+        use crate::conflict::report::ConflictSummary;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_conflict(dir.path());
+        let conflict = list(&store, ACCOUNT).unwrap().remove(0);
+
+        let json = serde_json::to_value(ConflictSummary::from(&conflict)).unwrap();
+
+        assert_eq!(json["id"], serde_json::json!(conflict.id.to_string()));
     }
 
     /// A body no parser reads is not a decision, whoever wrote it.

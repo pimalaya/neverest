@@ -82,14 +82,17 @@ impl fmt::Display for AccountSync {
 #[derive(Debug, Default, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncOutput {
-    /// The account the run reconciled.
+    /// The account the run reconciled, which the account row around the
+    /// report already names.
+    #[serde(skip)]
     pub account: String,
     /// Whether the run only planned the patch instead of applying it.
     pub dry_run: bool,
-    /// The collection-level patch, one entry per hunk.
-    pub collection: PatchOutcome<CollectionHunk>,
-    /// The item-level patch, one entry per hunk.
-    pub item: PatchOutcome<ItemHunk>,
+    /// The collection-level hunks the run applied, in the order it applied
+    /// them.
+    pub collection_patch: Vec<PatchEntry<CollectionHunk>>,
+    /// The item-level hunks the run applied, in the order it applied them.
+    pub item_patch: Vec<PatchEntry<ItemHunk>>,
     /// Content-key collisions this sync surfaced; the first entry is kept.
     pub collisions: Vec<MessageCollision>,
     /// Frontend-queued actions the pre-sync drain applied, per collection.
@@ -219,8 +222,8 @@ impl SyncOutput {
         let Self {
             account: _,
             dry_run: _,
-            collection,
-            item,
+            collection_patch,
+            item_patch,
             collisions,
             drained,
             parked,
@@ -247,8 +250,8 @@ impl SyncOutput {
             index: _,
         } = other;
 
-        self.collection.patch.extend(collection.patch);
-        self.item.patch.extend(item.patch);
+        self.collection_patch.extend(collection_patch);
+        self.item_patch.extend(item_patch);
         self.collisions.extend(collisions);
         self.drained.extend(drained);
         self.parked.extend(parked);
@@ -279,10 +282,10 @@ impl SyncOutput {
         let prefix = format!("{}/", self.account);
         let mut endpoints: Vec<&mut String> = Vec::new();
 
-        for entry in &mut self.collection.patch {
+        for entry in &mut self.collection_patch {
             endpoints.extend(entry.hunk.endpoints_mut());
         }
-        for entry in &mut self.item.patch {
+        for entry in &mut self.item_patch {
             endpoints.extend(entry.hunk.endpoints_mut());
         }
         endpoints.extend(self.collisions.iter_mut().map(|c| &mut c.side));
@@ -365,11 +368,10 @@ impl SyncOutput {
                 .iter()
                 .any(|coverage| coverage.round.is_some() && !self.parks(coverage))
             || self
-                .collection
-                .patch
+                .collection_patch
                 .iter()
                 .any(|entry| entry.error.is_some())
-            || self.item.patch.iter().any(|entry| entry.error.is_some())
+            || self.item_patch.iter().any(|entry| entry.error.is_some())
             || self
                 .submitted
                 .iter()
@@ -1151,24 +1153,10 @@ impl fmt::Display for MessageCollision {
     }
 }
 
-/// One level of the patch a run applied, collection or item.
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct PatchOutcome<H> {
-    /// The hunks the run applied at that level, in the order it applied
-    /// them.
-    pub patch: Vec<PatchEntry<H>>,
-}
-
-impl<H> Default for PatchOutcome<H> {
-    fn default() -> Self {
-        Self { patch: Vec::new() }
-    }
-}
-
 /// One hunk of a patch, and whether applying it worked.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
+#[schemars(rename = "{H}Entry")]
 pub struct PatchEntry<H> {
     /// The change the run tried to make.
     pub hunk: H,
@@ -1203,14 +1191,13 @@ impl fmt::Display for SyncOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f)?;
 
-        let total = self.collection.patch.len() + self.item.patch.len();
+        let total = self.collection_patch.len() + self.item_patch.len();
         let mailbox_errors = self
-            .collection
-            .patch
+            .collection_patch
             .iter()
             .filter(|e| e.error.is_some())
             .count();
-        let item_errors = self.item.patch.iter().filter(|e| e.error.is_some()).count();
+        let item_errors = self.item_patch.iter().filter(|e| e.error.is_some()).count();
         let submit_errors = self.submitted.iter().filter(|e| e.error.is_some()).count();
         let intent_errors = self.intents.iter().filter(|e| e.error.is_some()).count();
         let errors = mailbox_errors + item_errors + submit_errors + intent_errors;
@@ -1253,21 +1240,21 @@ impl fmt::Display for SyncOutput {
             writeln!(f)?;
         }
 
-        if !self.collection.patch.is_empty() {
+        if !self.collection_patch.is_empty() {
             writeln!(
                 f,
                 "Collection patches ({n}):",
-                n = self.collection.patch.len()
+                n = self.collection_patch.len()
             )?;
-            for entry in &self.collection.patch {
+            for entry in &self.collection_patch {
                 writeln!(f, " - {hunk}", hunk = entry.hunk)?;
             }
             writeln!(f)?;
         }
 
-        if !self.item.patch.is_empty() {
-            writeln!(f, "Item patches ({n}):", n = self.item.patch.len())?;
-            for entry in &self.item.patch {
+        if !self.item_patch.is_empty() {
+            writeln!(f, "Item patches ({n}):", n = self.item_patch.len())?;
+            for entry in &self.item_patch {
                 writeln!(f, " - {hunk}", hunk = entry.hunk)?;
             }
             writeln!(f)?;
@@ -1390,7 +1377,7 @@ impl fmt::Display for SyncOutput {
 
         if errors > 0 {
             writeln!(f, "Errors ({errors}):")?;
-            for entry in self.collection.patch.iter().filter(|e| e.error.is_some()) {
+            for entry in self.collection_patch.iter().filter(|e| e.error.is_some()) {
                 writeln!(
                     f,
                     " - {hunk}: {err}",
@@ -1398,7 +1385,7 @@ impl fmt::Display for SyncOutput {
                     err = entry.text().unwrap_or_default(),
                 )?;
             }
-            for entry in self.item.patch.iter().filter(|e| e.error.is_some()) {
+            for entry in self.item_patch.iter().filter(|e| e.error.is_some()) {
                 writeln!(
                     f,
                     " - {hunk}: {err}",

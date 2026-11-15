@@ -131,7 +131,7 @@ fn a_body_is_kept_as_it_arrives() {
 
     let report = neverest(&["--json", "sync", "-a", "hydrate"], &config);
     let report = account_report(&report);
-    let fetched = report["item"]["patch"]
+    let fetched = report["itemPatch"]
         .as_array()
         .expect("item patch")
         .iter()
@@ -526,7 +526,7 @@ fn a_primed_run_reports_each_fetch_once() {
         );
 
         let report = account_report(&String::from_utf8_lossy(&output.stdout));
-        let fetched: Vec<&str> = report["item"]["patch"]
+        let fetched: Vec<&str> = report["itemPatch"]
             .as_array()
             .expect("item patch")
             .iter()
@@ -706,7 +706,7 @@ fn a_body_gone_mid_run_is_owed_nothing() {
 
     let report = neverest(&["--json", "sync", "-a", "gone"], &config);
     let report = account_report(&report);
-    let fetched = report["item"]["patch"]
+    let fetched = report["itemPatch"]
         .as_array()
         .expect("item patch")
         .iter()

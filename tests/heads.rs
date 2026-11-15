@@ -262,7 +262,7 @@ fn sync(config: &Path, account: &str, env: &[(&str, &str)], extra: &[&str]) -> s
 
 /// How many bodies a report fetched.
 fn fetches(report: &serde_json::Value) -> usize {
-    report["item"]["patch"]
+    report["itemPatch"]
         .as_array()
         .expect("item patch")
         .iter()
@@ -272,7 +272,7 @@ fn fetches(report: &serde_json::Value) -> usize {
 
 /// How many removals a report names.
 fn deletes(report: &serde_json::Value) -> usize {
-    report["item"]["patch"]
+    report["itemPatch"]
         .as_array()
         .expect("item patch")
         .iter()

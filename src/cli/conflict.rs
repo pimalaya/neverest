@@ -210,7 +210,9 @@ impl ConflictResolveCommand {
             };
 
             let Some(body) = self.decide(account_config, &conflict, sides)? else {
-                return printer.out(ConflictResolveOutput::Aborted { id: conflict.id });
+                return printer.out(ConflictResolveOutput::Aborted {
+                    id: conflict.id.to_string(),
+                });
             };
 
             let _lock = acquire_store_lock(dir, LOCK_TIMEOUT)?;
@@ -218,7 +220,7 @@ impl ConflictResolveCommand {
             match conflict.apply(dir, name, &body)? {
                 Applied::Resolved(partial) => {
                     return printer.out(ConflictResolveOutput::Resolved {
-                        id: conflict.id,
+                        id: conflict.id.to_string(),
                         collection: conflict.collection,
                         side: String::from(self.side()),
                         partial,

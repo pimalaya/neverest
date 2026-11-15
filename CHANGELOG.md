@@ -26,6 +26,7 @@ Upgrading from 0.3.0:
 - `-c` takes one path, repeated to merge several (`-c a.toml -c b.toml`), where it split one value on `:`; `NEVEREST_CONFIG` is no longer read.
 - A bare `neverest` without a configuration fails, exit 1, where it printed the help; `completion`, `manual` and `json-schema` with no argument fail on stdout, exit 1, where they printed their help on stderr, exit 2.
 - Under `--json`, a `check` capability reads `level` (`support` is gone), every queue row `row` (`id` is gone, and `action` on an overruled body), a sync's parked row `kind` (`action` is gone); a failed account of `sync` or `drain` and a failed index refresh split their `error` into `error` and `sources`.
+- Under `--json`, a conflict's `id` is a string in `conflict list`, `show` and `resolve`; a sync report lists `collectionPatch` and `itemPatch` (`collection.patch` and `item.patch` are gone) and no longer repeats `account`; a failed `init` account splits its `error` into `error` and `sources`, the endpoints it opened now under `opened`.
 - The `mailbox`, `message` and `filters` spellings are refused by name: write `collection`, `item` and `collection.filter` (`imap.mailbox.create` is `imap.collection.create`).
 - A keyword other than `$Important` is refused on a Gmail label before it is queued, in every frontend, with the action carrying it (a flag change beside `\Seen`, an add, copy or move of a message holding one); one queued before parks at the next drain.
 - Microsoft Graph is one `msgraph` table, its domains under `msgraph.mail`, `msgraph.contacts` and `msgraph.calendar`: `msgraph-contacts` and `msgraph-calendar` are refused by name, and so is an `msgraph` table naming no domain (add `msgraph.mail = true` to sync mail as before). The sources keep their names, so nothing in the store moves (MIGRATION.md).
@@ -145,7 +146,7 @@ Upgrading from 0.3.0:
 
 - Added `store.index-timeout`, the longest a sync refreshes the search index.
 
-- Added `partial` to the `conflict resolve` output: the capabilities a source supports in part that the next push relies on.
+- Added `partial` to the `conflict resolve` output: the capabilities a source supports in part that the next push relies on, each a row `{capability, source, detail}`, `source` as the configuration names it.
 
 - Added `neverest-error`, the JSON Schema of the failure object.
 
@@ -192,6 +193,9 @@ Upgrading from 0.3.0:
 - **BREAKING**: changed a bare `neverest` without a configuration to fail with the missing configuration, exit 1, the welcome at a terminal, as the other Pimalaya CLIs do; with one it prints the help. `completion`, `manual` and `json-schema` with no argument fail on stdout, exit 1, where they printed their help on stderr and exited 2.
 - **BREAKING**: changed the `check` capability rows to `{name, level, detail}`, `level` pimalaya-cli's capability level, where `support` was a free string.
 - **BREAKING**: changed every queue row of a report to `row`, as himalaya's `pimdir queue list` keys it: `applied` and `parked` of a drain, `parked`, `submitted` and `intents` of a sync (`id` before), and an overruled body (`action` before). A sync's parked row names its kind `kind`, where it was `action`, and a rejected flag push reads `set-flags`, where it read `set flags`.
+- **BREAKING**: changed `conflict list`, `conflict show` and `conflict resolve` to print the item's public `id` as a string, as himalaya, cardamum and calendula print a store id, where it was an integer. The commands still take it as before.
+- **BREAKING**: changed a sync report's patches to two arrays, `collectionPatch` and `itemPatch`, their entries described as `CollectionHunkEntry` and `ItemHunkEntry`, where `collection` and `item` were objects holding `patch` (`PatchOutcome`, `PatchEntry2`); the report no longer repeats `account`, which the account row around it names.
+- **BREAKING**: changed `init`'s account row to split a failure as every row does: `error` the outermost message and `sources` its causes, where `error` held the whole chain. The endpoints it opened are listed under `opened`, those opened before a failure included, where `sources` named them and a failed account listed none.
 - Changed the missing configuration and the unknown account to the family's words: "No configuration found at <path>, start from the sample: <url>" and "Account `x` not found, the configuration holds: a, b".
 - Changed the help to end with the Pimalaya footer, and clap to the feature set of the other Pimalaya CLIs: no colour, no wrapping.
 - Changed `store.root` and `tls.cert` to expand `$VAR` as well as `~` (pimalaya-config's deserializer).

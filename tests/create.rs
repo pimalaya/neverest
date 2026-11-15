@@ -228,11 +228,7 @@ fn a_queued_folder_is_created_by_a_run_performing_intents_alone() {
     );
     assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
     let parsed = account_report(&report);
-    assert_eq!(
-        parsed["collection"]["patch"],
-        serde_json::json!([]),
-        "{report}"
-    );
+    assert_eq!(parsed["collectionPatch"], serde_json::json!([]), "{report}");
     assert!(listed(&config, &state).contains(&folder));
 
     let _ = Command::new("curl")

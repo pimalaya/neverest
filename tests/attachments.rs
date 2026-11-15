@@ -498,7 +498,7 @@ fn report(out: &str) -> serde_json::Value {
 
 /// The bodies a run's report says it fetched.
 fn fetches(report: &serde_json::Value) -> usize {
-    report["item"]["patch"]
+    report["itemPatch"]
         .as_array()
         .map(|patch| {
             patch

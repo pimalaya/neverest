@@ -286,7 +286,7 @@ fn a_page_s_bodies_land_before_its_round_closes() {
     assert!(kept > 0 && kept <= count, "the bodies landed stay ({kept})");
 
     let report = sync(&config, "early", &["-j", "4"]);
-    let fetched = report["item"]["patch"]
+    let fetched = report["itemPatch"]
         .as_array()
         .expect("item patch")
         .iter()

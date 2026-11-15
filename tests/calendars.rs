@@ -261,7 +261,7 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
         &state,
         0,
     );
-    let id = conflict_id(&listed, "event-1.ics").to_string();
+    let id = conflict_id(&listed, "event-1.ics");
 
     neverest(
         &["conflict", "resolve", "-a", "cal", &id, "--prefer-local"],
@@ -396,7 +396,7 @@ fn component<'a>(ics: &'a str, marker: &str) -> &'a str {
 
 /// The id `conflict list --json` gave the divergence of `handle`, which is what
 /// `conflict resolve` addresses it by.
-fn conflict_id(listing: &str, handle: &str) -> i64 {
+fn conflict_id(listing: &str, handle: &str) -> String {
     let listed: serde_json::Value = serde_json::from_str(listing).expect("conflict listing");
 
     listed["conflicts"]
@@ -405,8 +405,9 @@ fn conflict_id(listing: &str, handle: &str) -> i64 {
         .iter()
         .find(|conflict| conflict["handle"] == handle)
         .unwrap_or_else(|| panic!("no conflict for {handle} in:\n{listing}"))["id"]
-        .as_i64()
+        .as_str()
         .expect("a conflict id")
+        .to_owned()
 }
 
 /// The account every test runs: one source and one target, each a CalDAV

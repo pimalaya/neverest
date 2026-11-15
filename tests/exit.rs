@@ -134,6 +134,25 @@ fn a_failed_check_prints_its_report_and_exits_3() {
     assert!(!stderr.contains('\u{1b}'), "{stderr}");
 }
 
+/// An account `init` could not open carries its failure as every report
+/// row does: the outermost message in `error`, its causes in `sources`,
+/// and the endpoints it opened under `opened`.
+#[test]
+fn a_failed_init_carries_its_causes_apart() {
+    let home = TempDir::new().unwrap();
+    let config = closed_port_account(home.path());
+    let output = run(home.path(), &["--json", "-c", &config, "init"]);
+    let stdout = text(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(4), "{stdout}");
+    let json: Value = serde_json::from_str(&stdout).unwrap();
+    let account = &json["accounts"][0];
+    assert_eq!(account["error"], "Initialize imap", "{json}");
+    let sources = account["sources"].as_array().expect("its causes");
+    assert!(!sources.is_empty(), "{json}");
+    assert_eq!(account["opened"], Value::Array(Vec::new()), "{json}");
+}
+
 #[test]
 fn an_undrained_account_prints_its_report_and_exits_4() {
     let home = TempDir::new().unwrap();

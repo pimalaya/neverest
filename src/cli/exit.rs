@@ -110,7 +110,7 @@ mod tests {
         let mut report = SyncOutput::default();
         assert_eq!(Exit::from(&report), Exit::Success);
 
-        report.collection.patch.push(unreachable());
+        report.collection_patch.push(unreachable());
         assert_eq!(Exit::from(&report), Exit::Incomplete);
         assert_eq!(ExitCode::from(Exit::Incomplete), ExitCode::from(4));
 

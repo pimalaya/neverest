@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use io_pimdir::capability::PimdirPartial;
 use pimalaya_cli::output::Bytes;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -46,8 +47,9 @@ impl fmt::Display for ConflictListOutput {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ConflictSummary {
-    /// The item's public id, which is what the show and resolve verbs take.
-    pub id: i64,
+    /// The item's public id, which is what the show and resolve verbs take:
+    /// an opaque string, as every Pimalaya binary prints a store id.
+    pub id: String,
     /// The account whose collection holds the item.
     pub account: String,
     /// The store collection the item sits in.
@@ -69,7 +71,7 @@ pub struct ConflictSummary {
 impl From<&Conflict> for ConflictSummary {
     fn from(conflict: &Conflict) -> Self {
         Self {
-            id: conflict.id,
+            id: conflict.id.to_string(),
             account: conflict.account.clone(),
             collection: conflict.collection.clone(),
             source: conflict.endpoint().to_owned(),
@@ -208,25 +210,76 @@ pub enum ConflictResolveOutput {
     /// The decision was applied: the item holds the chosen body and is no
     /// longer conflicted. The next run pushes it.
     Resolved {
-        /// The item that was settled.
-        id: i64,
+        /// The item that was settled, its public id.
+        id: String,
         /// The store collection it sits in.
         collection: String,
         /// The side the decision took: the local body, the remote one, or
         /// the one the interactive merger wrote.
         side: String,
         /// What a source supports in part that the next run's push relies
-        /// on (pimdir STORAGE §15.6), each as a sentence: an event's
-        /// attendees notified by the provider's rules rather than the
-        /// event's own, for one.
-        partial: Vec<String>,
+        /// on (pimdir STORAGE §15.6): an event's attendees notified by the
+        /// provider's rules rather than the event's own, for one.
+        partial: Vec<PartialCapability>,
     },
     /// The merger aborted, by exiting non-zero or by leaving its output
     /// untouched, so nothing was decided and nothing was pushed.
     Aborted {
-        /// The item that stays conflicted.
-        id: i64,
+        /// The item that stays conflicted, its public id.
+        id: String,
     },
+}
+
+/// A capability a source supports in part, which a settled body relies on.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialCapability {
+    /// The capability, as the store names it (pimdir STORAGE §15).
+    pub capability: String,
+    /// The source declaring it, as the account's configuration names it.
+    pub source: String,
+    /// What the source leaves out, `null` when it says nothing more.
+    pub detail: Option<String>,
+}
+
+impl PartialCapability {
+    /// The store's partial row, its source named as the configuration of
+    /// `account` names it rather than by its store id, `<account>/<name>`.
+    pub fn new(partial: PimdirPartial, account: &str) -> Self {
+        let PimdirPartial {
+            capability,
+            source,
+            detail,
+        } = partial;
+        let source = match source.strip_prefix(&format!("{account}/")) {
+            Some(name) => name.to_owned(),
+            None => source,
+        };
+
+        Self {
+            capability,
+            source,
+            detail,
+        }
+    }
+}
+
+impl fmt::Display for PartialCapability {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            capability,
+            source,
+            detail,
+        } = self;
+
+        write!(f, "Source {source} supports {capability} in part")?;
+
+        if let Some(detail) = detail {
+            write!(f, ": {detail}")?;
+        }
+
+        Ok(())
+    }
 }
 
 impl fmt::Display for ConflictResolveOutput {
@@ -278,5 +331,48 @@ mod tests {
         let body = ConflictBody::new("FN:René\r\n".as_bytes().to_vec(), "text/vcard");
 
         assert_eq!(serde_json::to_value(&body).unwrap(), json!("FN:René\r\n"));
+    }
+
+    /// A settled divergence names what a source supports in part as rows a
+    /// program reads, its source as the configuration names it, where each
+    /// was a sentence.
+    #[test]
+    fn a_partial_capability_prints_as_a_row() {
+        use io_pimdir::capability::PimdirPartial;
+
+        use super::{ConflictResolveOutput, PartialCapability};
+
+        let partial = PimdirPartial {
+            capability: String::from("calendar.scheduling"),
+            source: String::from("work/gcal"),
+            detail: Some(String::from("Google notifies the attendees")),
+        };
+        let output = ConflictResolveOutput::Resolved {
+            id: String::from("42"),
+            collection: String::from("work/gcal/primary"),
+            side: String::from("local"),
+            partial: vec![PartialCapability::new(partial, "work")],
+        };
+
+        assert_eq!(
+            serde_json::to_value(&output).unwrap(),
+            json!({
+                "outcome": "resolved",
+                "id": "42",
+                "collection": "work/gcal/primary",
+                "side": "local",
+                "partial": [{
+                    "capability": "calendar.scheduling",
+                    "source": "gcal",
+                    "detail": "Google notifies the attendees",
+                }],
+            }),
+        );
+        assert!(
+            output
+                .to_string()
+                .contains(" - Source gcal supports calendar.scheduling in part: Google"),
+            "{output}"
+        );
     }
 }

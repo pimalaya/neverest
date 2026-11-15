@@ -337,7 +337,7 @@ fn a_queued_edit_and_a_server_edit_of_the_same_field_park_until_a_person_decides
     );
 
     // The decision, then the run that carries it.
-    let id = conflict_id(&listed, "card-1.vcf").to_string();
+    let id = conflict_id(&listed, "card-1.vcf");
     neverest(
         &["conflict", "resolve", "-a", REPLICA, &id, "--prefer-local"],
         &config,
@@ -478,7 +478,7 @@ fn queue_update(state: &Path, account: &str, book: &str, link_id: &str, body: &s
 
 /// The id `conflict list --json` gave the divergence of `handle`, which is
 /// what `conflict resolve` addresses it by.
-fn conflict_id(listing: &str, handle: &str) -> i64 {
+fn conflict_id(listing: &str, handle: &str) -> String {
     let listed: serde_json::Value = serde_json::from_str(listing).expect("conflict listing");
 
     listed["conflicts"]
@@ -487,8 +487,9 @@ fn conflict_id(listing: &str, handle: &str) -> i64 {
         .iter()
         .find(|conflict| conflict["handle"] == handle)
         .unwrap_or_else(|| panic!("no conflict for {handle} in:\n{listing}"))["id"]
-        .as_i64()
+        .as_str()
         .expect("a conflict id")
+        .to_owned()
 }
 
 /// Recreates an address book on the server, so a run starts from an empty one

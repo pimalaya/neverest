@@ -336,12 +336,8 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     assert_eq!(submitted["row"], id, "{report}");
     assert_eq!(submitted["error"], serde_json::Value::Null, "{report}");
     assert_eq!(submitted["unconfirmed"], false, "{report}");
-    assert_eq!(
-        report["collection"]["patch"],
-        serde_json::json!([]),
-        "{report}"
-    );
-    assert_eq!(report["item"]["patch"], serde_json::json!([]), "{report}");
+    assert_eq!(report["collectionPatch"], serde_json::json!([]), "{report}");
+    assert_eq!(report["itemPatch"], serde_json::json!([]), "{report}");
     assert_eq!(report["drained"][0]["collection"], sent, "{report}");
 
     wait_for_delivery(&marker).expect("the submitted message reached the server");

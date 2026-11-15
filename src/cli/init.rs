@@ -24,7 +24,7 @@ use crate::{
     },
     client,
     config::{AccountConfig, AccountMode, Config},
-    error::{self, ErrorCode},
+    error::{ErrorCode, Failure, chain},
     offline::{driver, state::StoreState},
 };
 
@@ -83,15 +83,20 @@ impl InitCommand {
                         dir.display(),
                         LOCK_TIMEOUT.as_secs()
                     );
-                    outputs.push(InitOutput::failed(name, account_config.mode()?, &dir, err));
+                    let mode = account_config.mode()?;
+                    outputs.push(InitOutput::failed(name, mode, &dir, &[], err));
                 }
                 continue;
             };
 
             for (name, account_config) in accounts {
-                let output = match init(&dir, &name, &account_config) {
+                let mut opened = Vec::new();
+                let output = match init(&dir, &name, &account_config, &mut opened) {
                     Ok(output) => output,
-                    Err(err) => InitOutput::failed(name, account_config.mode()?, &dir, err),
+                    Err(err) => {
+                        let mode = account_config.mode()?;
+                        InitOutput::failed(name, mode, &dir, &opened, err)
+                    }
                 };
                 outputs.push(output);
             }
@@ -112,8 +117,14 @@ impl InitCommand {
 
 /// Opens every endpoint of `account`, then adds it to the store at `dir`,
 /// creating the store when there is none. An account initialized already
-/// is left as it is: its store may hold work no server has.
-fn init(dir: &Path, name: &str, account_config: &AccountConfig) -> Result<InitOutput> {
+/// is left as it is: its store may hold work no server has. `opened` gets
+/// each endpoint as it opens, so a failure still names those it reached.
+fn init(
+    dir: &Path,
+    name: &str,
+    account_config: &AccountConfig,
+    opened: &mut Vec<String>,
+) -> Result<InitOutput> {
     let mode = account_config.mode()?;
 
     if StoreState::load(dir)?.initialized(name) {
@@ -121,22 +132,21 @@ fn init(dir: &Path, name: &str, account_config: &AccountConfig) -> Result<InitOu
             account: name.to_owned(),
             mode,
             store: dir.to_path_buf(),
-            sources: Vec::new(),
+            opened: Vec::new(),
             already_initialized: true,
             code: None,
             error: None,
+            sources: Vec::new(),
         });
     }
 
     let account = Account::resolve(account_config)?;
-    let mut sources = Vec::new();
     for endpoint in account_config.endpoints()?.keys() {
         let s = Spinner::start(format!("Initializing {endpoint} of account {name}…"));
         client::init(&account.get(endpoint)?).with_context(|| format!("Initialize {endpoint}"))?;
         s.success(format!("Initialized {endpoint} of account {name}"));
-        sources.push(endpoint.clone());
+        opened.push(endpoint.clone());
     }
-    sources.sort();
 
     if !dir.join("pimdir.db").exists() {
         let s = Spinner::start("Creating the store…");
@@ -152,11 +162,19 @@ fn init(dir: &Path, name: &str, account_config: &AccountConfig) -> Result<InitOu
         account: name.to_owned(),
         mode,
         store: dir.to_path_buf(),
-        sources,
+        opened: sorted(opened),
         already_initialized: false,
         code: None,
         error: None,
+        sources: Vec::new(),
     })
+}
+
+/// The endpoints `init` opened, sorted, so a report reads the same twice.
+fn sorted(opened: &[String]) -> Vec<String> {
+    let mut opened = opened.to_vec();
+    opened.sort();
+    opened
 }
 
 /// What `neverest init` reports of every account it covered.
@@ -189,28 +207,40 @@ pub struct InitOutput {
     /// The store directory the account syncs into, which every account
     /// naming no `store.root` shares.
     pub store: PathBuf,
-    /// The endpoints that were opened, sorted; empty when the account was
-    /// initialized already or failed.
-    pub sources: Vec<String>,
+    /// The endpoints `init` opened, sorted, those it opened before a
+    /// failure included; empty when the account was initialized already.
+    pub opened: Vec<String>,
     /// Whether the account was initialized already, and left as it was.
     pub already_initialized: bool,
     /// The stable code of the failure that stopped the account, `null`
     /// when it was initialized or the failure carries none.
     pub code: Option<ErrorCode>,
-    /// Why the account was not initialized, `null` when it was.
+    /// Why the account was not initialized, the outermost message, `null`
+    /// when it was.
     pub error: Option<String>,
+    /// The messages of the failure's causes, outermost first, empty when
+    /// the account was initialized.
+    pub sources: Vec<String>,
 }
 
 impl InitOutput {
-    fn failed(account: String, mode: AccountMode, store: &Path, err: Error) -> Self {
+    fn failed(
+        account: String,
+        mode: AccountMode,
+        store: &Path,
+        opened: &[String],
+        err: Error,
+    ) -> Self {
+        let failure = Failure::of(&err);
         Self {
             account,
             mode,
             store: store.to_path_buf(),
-            sources: Vec::new(),
+            opened: sorted(opened),
             already_initialized: false,
-            code: error::code(&err),
-            error: Some(format!("{err:#}")),
+            code: failure.code,
+            error: Some(failure.error),
+            sources: failure.sources,
         }
     }
 }
@@ -226,6 +256,7 @@ impl fmt::Display for InitOutput {
         let store = store.display();
 
         if let Some(error) = &self.error {
+            let error = chain(error, &self.sources);
             return writeln!(f, "Account {account} was not initialized: {error}");
         }
         if self.already_initialized {

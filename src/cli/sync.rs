@@ -1166,4 +1166,21 @@ mod tests {
         assert_eq!(json["submitted"][0]["row"], 4, "{json}");
         assert_eq!(json["intents"][0]["row"], 5, "{json}");
     }
+
+    /// A report lists its hunks as two arrays, `collectionPatch` and
+    /// `itemPatch`, where each was a single-key object around `patch`, and
+    /// leaves its account to the account row around it.
+    #[test]
+    fn a_report_lists_its_patches_as_arrays_and_names_no_account() {
+        let output = ran(String::from("work"), SyncOutput::default());
+        let json = serde_json::to_value(&output).unwrap();
+        let report = &json["report"];
+
+        assert_eq!(json["account"], "work", "{json}");
+        assert_eq!(report["collectionPatch"], serde_json::json!([]), "{json}");
+        assert_eq!(report["itemPatch"], serde_json::json!([]), "{json}");
+        for key in ["account", "collection", "item"] {
+            assert!(report.get(key).is_none(), "{key}: {json}");
+        }
+    }
 }

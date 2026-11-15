@@ -1247,12 +1247,12 @@ fn run_pair(
                 warn!("cannot drop {id} from the store: {err}");
             }
         }
-        report.collection.patch.push(PatchEntry::new(hunk, error));
+        report.collection_patch.push(PatchEntry::new(hunk, error));
     }
 
     let mut present_left = left_filtered.clone();
     let mut present_right = right_filtered.clone();
-    for entry in &report.collection.patch {
+    for entry in &report.collection_patch {
         if entry.error.is_some() {
             continue;
         }
@@ -1989,7 +1989,7 @@ fn note_source_failure(source_name: &str, err: anyhow::Error, report: &mut SyncO
             .unreached
             .push(UnreachedEndpoint::new(endpoint, Failure::of(&err)));
     }
-    report.collection.patch.push(PatchEntry::new(
+    report.collection_patch.push(PatchEntry::new(
         CollectionHunk::Scan {
             side: source_name.to_owned(),
             collection: String::from("*"),
@@ -2200,8 +2200,7 @@ fn phase1_spine(
                             merged_ref
                                 .lock()
                                 .unwrap()
-                                .collection
-                                .patch
+                                .collection_patch
                                 .push(PatchEntry::new(
                                     CollectionHunk::Scan {
                                         side: ctx.name.clone(),
@@ -3323,7 +3322,7 @@ fn itemize_pulled(
                 };
                 let (added, removed) = flag_diff(&old, new);
                 if !added.is_empty() {
-                    report.item.patch.push(PatchEntry::new(
+                    report.item_patch.push(PatchEntry::new(
                         ItemHunk::AddFlags {
                             side: source.to_string(),
                             collection: display.to_string(),
@@ -3335,7 +3334,7 @@ fn itemize_pulled(
                     ));
                 }
                 if !removed.is_empty() {
-                    report.item.patch.push(PatchEntry::new(
+                    report.item_patch.push(PatchEntry::new(
                         ItemHunk::RemoveFlags {
                             side: source.to_string(),
                             collection: display.to_string(),
@@ -3348,7 +3347,7 @@ fn itemize_pulled(
                 }
             }
             PimdirSyncEvent::Vanished(handle) => {
-                report.item.patch.push(PatchEntry::new(
+                report.item_patch.push(PatchEntry::new(
                     ItemHunk::Delete {
                         side: source.to_string(),
                         collection: display.to_string(),
@@ -3420,7 +3419,7 @@ fn itemize_single(
         .with_context(|| format!("Project {} {display}", ctx.name))?;
     for placement in view {
         for hunk in placement_hunks(&ctx.name, &ctx.name, &ctx.namespace, display, &placement) {
-            report.item.patch.push(PatchEntry::new(hunk, None));
+            report.item_patch.push(PatchEntry::new(hunk, None));
         }
     }
     Ok(())
@@ -3469,7 +3468,7 @@ fn itemize_fetches(
             .as_ref()
             .map(|l| l.0.clone())
             .unwrap_or_else(|| placement.handle.0.clone());
-        report.item.patch.push(PatchEntry::new(
+        report.item_patch.push(PatchEntry::new(
             ItemHunk::Fetch {
                 side: source.to_string(),
                 collection: display.to_string(),
@@ -3825,7 +3824,7 @@ fn relay_copies(
         bind_relayed(target_store, collection, &target, written)
             .with_context(|| format!("Record the relay of {} in {wire}", target.handle.0))?;
 
-        report.item.patch.push(PatchEntry::new(
+        report.item_patch.push(PatchEntry::new(
             ItemHunk::Copy {
                 source_side: target.holding.clone(),
                 target_side: target_name,
@@ -4818,7 +4817,7 @@ fn itemize(
         for placement in view {
             for hunk in placement_hunks(&ctx.name, &other.name, &ctx.namespace, display, &placement)
             {
-                report.item.patch.push(PatchEntry::new(hunk, None));
+                report.item_patch.push(PatchEntry::new(hunk, None));
             }
         }
     }
@@ -4973,8 +4972,7 @@ fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncOu
         }
 
         report
-            .item
-            .patch
+            .item_patch
             .retain(|entry| !names(&entry.hunk, side, &rejected.collection, &id));
         let Failure {
             code,
@@ -10179,7 +10177,7 @@ mod tests {
     fn a_refused_write_is_reported_instead_of_counted_as_a_hunk() {
         let mut report = SyncOutput::default();
         for id in ["card1", "card2"] {
-            report.item.patch.push(PatchEntry::new(
+            report.item_patch.push(PatchEntry::new(
                 ItemHunk::Update {
                     side: String::from("dav"),
                     collection: String::from("Default"),
@@ -10201,7 +10199,7 @@ mod tests {
             &mut report,
         );
 
-        let ids: Vec<&ItemHunk> = report.item.patch.iter().map(|entry| &entry.hunk).collect();
+        let ids: Vec<&ItemHunk> = report.item_patch.iter().map(|entry| &entry.hunk).collect();
         assert_eq!(ids.len(), 1, "the refused write left the patch: {ids:?}");
         assert!(format!("{:?}", ids[0]).contains("card2"), "{ids:?}");
 
@@ -10263,7 +10261,7 @@ mod tests {
     fn a_refused_append_is_named_by_its_link_id_and_its_hunk_is_taken_back() {
         let mut report = SyncOutput::default();
         for id in ["event-1", "event-2"] {
-            report.item.patch.push(PatchEntry::new(
+            report.item_patch.push(PatchEntry::new(
                 ItemHunk::Copy {
                     source_side: String::from("local"),
                     target_side: String::from("dav"),
@@ -10276,7 +10274,7 @@ mod tests {
                 None,
             ));
         }
-        report.item.patch.push(PatchEntry::new(
+        report.item_patch.push(PatchEntry::new(
             ItemHunk::Add {
                 side: String::from("dav"),
                 collection: String::from("Calendar"),
@@ -10299,7 +10297,7 @@ mod tests {
             &mut report,
         );
 
-        let left: Vec<&ItemHunk> = report.item.patch.iter().map(|entry| &entry.hunk).collect();
+        let left: Vec<&ItemHunk> = report.item_patch.iter().map(|entry| &entry.hunk).collect();
         assert_eq!(left.len(), 1, "a refused append left the patch: {left:?}");
         assert!(format!("{:?}", left[0]).contains("event-2"), "{left:?}");
 
@@ -10821,14 +10819,13 @@ mod tests {
         for (source, other) in [("left", "right"), ("right", "left")] {
             for placement in projection_view(&right, "contacts", source).unwrap() {
                 for hunk in placement_hunks(source, other, source, "contacts", &placement) {
-                    report.item.patch.push(PatchEntry::new(hunk, None));
+                    report.item_patch.push(PatchEntry::new(hunk, None));
                 }
             }
         }
 
         let deletes: Vec<&str> = report
-            .item
-            .patch
+            .item_patch
             .iter()
             .filter_map(|entry| match &entry.hunk {
                 ItemHunk::Delete { side, .. } => Some(side.as_str()),
@@ -10839,7 +10836,7 @@ mod tests {
             deletes,
             ["left", "right"],
             "the pull names it on left, the projection owes it on right: {:?}",
-            report.item.patch,
+            report.item_patch,
         );
     }
 
@@ -11121,7 +11118,7 @@ mod tests {
         };
         for placement in &view {
             for hunk in placement_hunks("left", "right", "left", "INBOX", placement) {
-                report.item.patch.push(PatchEntry::new(hunk, None));
+                report.item_patch.push(PatchEntry::new(hunk, None));
             }
         }
 
@@ -11207,7 +11204,7 @@ mod tests {
         };
 
         let mut report = SyncOutput::default();
-        report.item.patch.push(PatchEntry::new(
+        report.item_patch.push(PatchEntry::new(
             ItemHunk::Update {
                 side: String::from("dav"),
                 collection: String::from("Default"),
@@ -11223,7 +11220,7 @@ mod tests {
         );
 
         assert_eq!(report.rejected.len(), 2);
-        assert!(report.item.patch.is_empty(), "and the hunk is still gone");
+        assert!(report.item_patch.is_empty(), "and the hunk is still gone");
     }
 
     #[test]
@@ -11259,7 +11256,7 @@ mod tests {
             account: "relay".into(),
             ..Default::default()
         };
-        report.item.patch.push(PatchEntry::new(
+        report.item_patch.push(PatchEntry::new(
             ItemHunk::Copy {
                 source_side: target.holding.clone(),
                 target_side: String::from("right"),
@@ -11696,7 +11693,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            report.item.patch.is_empty(),
+            report.item_patch.is_empty(),
             "a body held from before is no fetch"
         );
 
@@ -11711,9 +11708,9 @@ mod tests {
             &mut report,
         )
         .unwrap();
-        assert_eq!(report.item.patch.len(), 1);
+        assert_eq!(report.item_patch.len(), 1);
         assert!(
-            matches!(&report.item.patch[0].hunk, ItemHunk::Fetch { id, .. } if id == "uid:card-1"),
+            matches!(&report.item_patch[0].hunk, ItemHunk::Fetch { id, .. } if id == "uid:card-1"),
             "named by the identity its body states",
         );
     }
@@ -11761,7 +11758,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            report.item.patch.len(),
+            report.item_patch.len(),
             1,
             "Full with no object is a body to re-fetch, not a finished item",
         );
@@ -11932,7 +11929,7 @@ mod tests {
 
         let first = spine(&mut store, &mut remote, "caldav/agenda");
         assert_eq!(
-            first.item.patch.len(),
+            first.item_patch.len(),
             2,
             "both resources are bodies to fetch on the first run",
         );
@@ -11969,11 +11966,10 @@ mod tests {
         // nothing left to say.
         let second = spine(&mut store, &mut remote, "caldav/agenda");
         assert!(
-            second.item.patch.is_empty(),
+            second.item_patch.is_empty(),
             "a settled collection reports nothing: {:?}",
             second
-                .item
-                .patch
+                .item_patch
                 .iter()
                 .map(|e| e.hunk.to_string())
                 .collect::<Vec<_>>(),

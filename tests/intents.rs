@@ -304,11 +304,7 @@ fn intents_only_sends_through_smtp_without_opening_the_source() {
     assert_eq!(submitted["parked"], false, "{report}");
     assert_eq!(submitted["unconfirmed"], false, "{report}");
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
-    assert_eq!(
-        report["collection"]["patch"],
-        serde_json::json!([]),
-        "{report}"
-    );
+    assert_eq!(report["collectionPatch"], serde_json::json!([]), "{report}");
     assert!(matches!(
         fixture.status(id),
         PimdirActionStatus::Applied { seq: None, .. }

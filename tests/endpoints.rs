@@ -412,7 +412,7 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
     // Bound on both endpoints means the run has nothing left to do.
     let report = sync(&config, &state, BIND_BOOK, 0);
     assert!(
-        report.contains(r#""patch":[]"#),
+        report.contains(r#""itemPatch":[]"#),
         "a bound pair is quiescent; report was:\n{report}",
     );
 }
@@ -490,8 +490,8 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
         &state,
         0,
     );
-    let local = conflict_id(&listed, "card-1.vcf").to_string();
-    let remote = conflict_id(&listed, "card-2.vcf").to_string();
+    let local = conflict_id(&listed, "card-1.vcf");
+    let remote = conflict_id(&listed, "card-2.vcf");
 
     neverest(
         &["conflict", "resolve", "-a", "div", &local, "--prefer-local"],
@@ -530,7 +530,7 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
 
 /// The id `conflict list --json` gave the divergence of `handle`, which is what
 /// `conflict resolve` addresses it by.
-fn conflict_id(listing: &str, handle: &str) -> i64 {
+fn conflict_id(listing: &str, handle: &str) -> String {
     let listed: serde_json::Value = serde_json::from_str(listing).expect("conflict listing");
 
     listed["conflicts"]
@@ -539,8 +539,9 @@ fn conflict_id(listing: &str, handle: &str) -> i64 {
         .iter()
         .find(|conflict| conflict["handle"] == handle)
         .unwrap_or_else(|| panic!("no conflict for {handle} in:\n{listing}"))["id"]
-        .as_i64()
+        .as_str()
         .expect("a conflict id")
+        .to_owned()
 }
 
 /// The account every test runs: one source and one target, each a principal of

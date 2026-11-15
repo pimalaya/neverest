@@ -282,7 +282,7 @@ struct Parked {
     /// The state directory holding the account's store.
     state: PathBuf,
     /// The id `conflict resolve` addresses the divergence by.
-    id: i64,
+    id: String,
 }
 
 /// The directory name every temporary path a command builds sits under.
@@ -343,7 +343,10 @@ fn park(root: &Path, book: &str, merger: &str) -> Parked {
         "the merger is handed three bodies, so all three are held: {listed}",
     );
 
-    let id = conflicts[0]["id"].as_i64().expect("a conflict id");
+    let id = conflicts[0]["id"]
+        .as_str()
+        .expect("a conflict id")
+        .to_owned();
 
     Parked { config, state, id }
 }
@@ -351,10 +354,10 @@ fn park(root: &Path, book: &str, merger: &str) -> Parked {
 /// Settles the parked divergence through the account's merger, and returns
 /// what the command said about it.
 fn resolve(parked: &Parked) -> String {
-    let id = parked.id.to_string();
+    let id = &parked.id;
 
     neverest(
-        &["conflict", "resolve", "-a", ACCOUNT, &id, "-i"],
+        &["conflict", "resolve", "-a", ACCOUNT, id, "-i"],
         &parked.config,
         &parked.state,
         0,

@@ -162,6 +162,8 @@ Upgrading from 0.3.0:
 
   A source table (`sources.<name>`, `targets.<name>`) was read through serde's `flatten`, which let an unknown key by and kept the first of two backend tables: it now refuses both, and the document root refuses anything but `accounts`. A key an earlier neverest read is refused by name with its replacement and a link to MIGRATION.md: `left`, `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace` (on a backend written directly under the account too, where it was ignored), `store.retention`, `store.hydration`, and the flat `smtp.login` and `smtp.password`.
 
+- **BREAKING**: changed `conflict show --json` to print a body that is not valid UTF-8 as `{data, size, mime}`, `data` in base64 and `mime` the collection's media type, where it printed it decoded with U+FFFD replacements, losing the bytes a decision is made between. A UTF-8 body is still a string.
+
 - **BREAKING**: changed the exit statuses to the Pimalaya exit contract: 2 is a command line neverest refused, and the partial outcomes start at 3. A run that waits for a person (a parked conflict, a refused duplicate `UID`, a rejected write, a parked send, intent or queue action, withheld absences or bodies) exits 3, where it exited 2; a run, a `drain`, an `init` or an `index` that could not do all its work exits 4, where it exited 3; `check` with an endpoint down exits 3, where it exited 2.
 
   Under `--json`, a refused command line prints the failure object coded `usage-invalid` on stdout; without it, clap's message goes to stderr as before.

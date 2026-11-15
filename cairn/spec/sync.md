@@ -1196,6 +1196,14 @@ Every output type neverest prints SHALL print every key it declares: a list as `
 - WHEN `neverest sync --json` runs
 - THEN the report holds `conflicts`, `parked`, `refused` and `unreached`, each `[]`, and `purged` as `null` when no sweep ran
 
+### Requirement: A conflict body is printed as stored
+`conflict show` SHALL print each of `base`, `local` and `remote` as a string when its stored bytes are valid UTF-8, else as the family's bytes object `{data, size, mime}`, `data` in base64 and `mime` the collection's media type, `null` when the store holds none. It SHALL NOT decode a body lossily under `--json`: the bytes printed are the ones a decision picks between. The text form MAY show such a body with its invalid sequences replaced, saying so.
+
+#### Scenario: A Latin-1 card in conflict
+- GIVEN a conflicted card whose local body is a vCard 2.1 in Latin-1
+- WHEN `neverest conflict show <id> --json` runs
+- THEN `local` is `{data, size, mime}` holding the exact bytes, `mime` `text/vcard`
+
 ### Requirement: The mode is data
 `check` and `init` SHALL print the account's mode as an object, `{sources, targets, oneWay, retain}`: the source and target names sorted, whether the sources are authoritative, and whether the store keeps bodies. The sentence describing it SHALL be its text form only.
 

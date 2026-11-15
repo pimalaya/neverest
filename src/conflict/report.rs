@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use pimalaya_cli::output::Bytes;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -109,25 +110,64 @@ pub struct ConflictShowOutput {
     #[serde(flatten)]
     pub conflict: ConflictSummary,
     /// The body the last sync agreed on, the merge's common ancestor.
-    pub base: Option<String>,
+    pub base: Option<ConflictBody>,
     /// The local side of the divergence.
-    pub local: Option<String>,
+    pub local: Option<ConflictBody>,
     /// The remote side, `null` until a run has fetched it.
-    pub remote: Option<String>,
+    pub remote: Option<ConflictBody>,
 }
 
 impl ConflictShowOutput {
-    /// Renders the three bodies as text, which every kind reaching a conflict
-    /// is: mail alone is immutable-content, and it reaches none of this.
+    /// Takes the three bodies as stored, typed by the collection's media
+    /// type. Every kind reaching a conflict is text: mail alone is
+    /// immutable-content, and it reaches none of this.
     pub fn new(conflict: &Conflict, sides: Sides) -> Self {
-        let text =
-            |body: Option<Vec<u8>>| body.map(|body| String::from_utf8_lossy(&body).into_owned());
+        let body =
+            |body: Option<Vec<u8>>| body.map(|body| ConflictBody::new(body, &conflict.media_type));
 
         Self {
             conflict: conflict.into(),
-            base: text(sides.base),
-            local: text(sides.local),
-            remote: text(sides.remote),
+            base: body(sides.base),
+            local: body(sides.local),
+            remote: body(sides.remote),
+        }
+    }
+}
+
+/// One side of a divergence: its text when the stored bytes are UTF-8,
+/// else the bytes themselves, never decoded lossily.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum ConflictBody {
+    /// The body, valid UTF-8.
+    Text(String),
+    /// The body, not valid UTF-8 (a vCard 2.1 in Latin-1, for one).
+    Bytes(Bytes),
+}
+
+impl ConflictBody {
+    fn new(body: Vec<u8>, media_type: &str) -> Self {
+        match String::from_utf8(body) {
+            Ok(text) => Self::Text(text),
+            Err(err) => Self::Bytes(Bytes {
+                data: err.into_bytes(),
+                mime: media_type.to_owned(),
+            }),
+        }
+    }
+}
+
+impl fmt::Display for ConflictBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text(text) => writeln!(f, "{}", text.trim_end()),
+            // NOTE: a person reads this to decide; --json and the store
+            // keep the bytes.
+            Self::Bytes(bytes) => {
+                writeln!(f, "(not UTF-8, invalid sequences shown as U+FFFD)")?;
+                let text = String::from_utf8_lossy(&bytes.data);
+                writeln!(f, "{}", text.trim_end())
+            }
         }
     }
 }
@@ -147,7 +187,7 @@ impl fmt::Display for ConflictShowOutput {
             match body {
                 Some(body) => {
                     writeln!(f, "{name}:")?;
-                    writeln!(f, "{}", body.trim_end())?;
+                    write!(f, "{body}")?;
                 }
                 None => writeln!(f, "{name}: not in the store")?,
             }
@@ -212,5 +252,31 @@ impl fmt::Display for ConflictResolveOutput {
                 "The merger decided nothing, so conflict {id} is exactly as it was"
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::ConflictBody;
+
+    /// A body that is not UTF-8 prints its exact bytes, where it was
+    /// decoded with U+FFFD replacements.
+    #[test]
+    fn a_latin1_body_prints_its_bytes() {
+        let body = ConflictBody::new(b"FN:Ren\xe9\r\n".to_vec(), "text/vcard");
+
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            json!({"data": "Rk46UmVu6Q0K", "size": 9, "mime": "text/vcard"}),
+        );
+    }
+
+    #[test]
+    fn a_utf8_body_prints_as_text() {
+        let body = ConflictBody::new("FN:René\r\n".as_bytes().to_vec(), "text/vcard");
+
+        assert_eq!(serde_json::to_value(&body).unwrap(), json!("FN:René\r\n"));
     }
 }

@@ -131,7 +131,7 @@ Declaring the same key both directly and under `sources` SHALL be a configuratio
 ### Requirement: The configuration refuses every key it does not read
 The configuration SHALL refuse at load, naming it, every key it does not read, at every level: the document root, which holds `accounts` alone; an account; a `sources.<name>` or `targets.<name>` table; a backend table, written under a source or directly under the account; and every table nested in one (`tls`, `sasl`, `auth`, `collection`, `item`, `flag`, `smtp`, `store`, `conflict`). A source table naming no backend table, or more than one, SHALL be refused at load, naming the backends it found.
 
-A key an earlier neverest read and removed SHALL be refused by name in the family sentence, pimalaya-config's `removed_key!`: "The `x` key is removed, <why>: <what to write instead>, see MIGRATION.md", `table` in place of `key` for a table, as the file is parsed, so in an account no command opens as in one it does: `left` and `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace` on any source (one written directly under the account included), `store.retention` and `store.hydration`, and the flat `login` and `password` of an `smtp` table.
+A key an earlier neverest read and removed SHALL be refused by name in the family sentence, pimalaya-config's `removed_key!`: "The `x` key is removed, <why>: <what to write instead>, see MIGRATION.md", `table` in place of `key` for a table, as the file is parsed, so in an account no command opens as in one it does: `left` and `right`, `folder`, `envelope`, the account-level `collection`, `mailbox` and `message`, `collection.namespace` on any source (one written directly under the account included), the `mailbox` and `message` tables and the `collection.filters` key of any backend table, `store.retention` and `store.hydration`, and the flat `login` and `password` of an `smtp` table. No key SHALL be read under an old spelling: an alias either loads a configuration the person thinks is refused or refuses it under a name the person never wrote.
 
 #### Scenario: A typo beside a source's backend
 - GIVEN `sources.work.imap.server = "…"` and `sources.work.imap-typo = 1`
@@ -147,6 +147,11 @@ A key an earlier neverest read and removed SHALL be refused by name in the famil
 - GIVEN an account carrying `folder.filter = "all"`
 - WHEN a command opens it
 - THEN it is refused with "The `folder` table is removed, …: write its filter as `<protocol>.collection.filter`, …, see MIGRATION.md"
+
+#### Scenario: A v0.2 mail spelling
+- GIVEN an account carrying `imap.mailbox.create = false`
+- WHEN the configuration is loaded
+- THEN it is refused with "The `mailbox` table is removed, …: write `collection` in its place, as in `imap.collection.filter`, see MIGRATION.md", where it loaded as `imap.collection.create`
 
 ### Requirement: A collection is keyed by kind, namespace and name
 A hub collection SHALL be keyed by the triple `(kind, namespace, name)`: the source's media type, its namespace, and the collection name the backend enumerates. The namespace SHALL be internal, derived from the source name, and SHALL NOT be configurable: it exists so that a CardDAV address book and a mailbox carrying the same name key apart, not so that a user can decide which sources meet. A target binds the namespace of the source it is paired with, which is what makes the two meet.

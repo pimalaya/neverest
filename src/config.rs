@@ -89,8 +89,8 @@ fn is_default_http_alpn(alpn: &[String]) -> bool {
 /// Splices the per-source shared fields (`collection`, `flag`, `item`,
 /// `pool_size`) onto every protocol-specific config struct.
 ///
-/// `collection` and `item` keep a serde alias on their old `mailbox` and
-/// `message` spellings, so an existing mail configuration keeps loading.
+/// The old `mailbox` and `message` spellings of `collection` and `item`
+/// are refused by name.
 macro_rules! source_config {
     (
         $(#[$struct_meta:meta])*
@@ -109,14 +109,21 @@ macro_rules! source_config {
             )*
             /// Which collections this source syncs, and what may be created
             /// or deleted on it.
-            #[serde(default, alias = "mailbox", skip_serializing_if = "is_default")]
+            #[serde(default, skip_serializing_if = "is_default")]
             pub collection: CollectionSourceConfig,
             /// Whether flag updates may be pushed to this source.
             #[serde(default, skip_serializing_if = "is_default")]
             pub flag: FlagSourcePermissions,
             /// Which item mutations may be pushed to this source.
-            #[serde(default, alias = "message", skip_serializing_if = "is_default")]
+            #[serde(default, skip_serializing_if = "is_default")]
             pub item: ItemSourcePermissions,
+            /// Removed keys, refused by name as the file is parsed.
+            #[allow(dead_code)]
+            #[serde(default, skip_serializing)]
+            mailbox: Option<SourceMailboxRemoved>,
+            #[allow(dead_code)]
+            #[serde(default, skip_serializing)]
+            message: Option<SourceMessageRemoved>,
             /// Connection pool size override; the default is per backend.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub pool_size: Option<usize>,
@@ -380,7 +387,7 @@ pub struct AccountConfig {
     pub conflict: ConflictConfig,
     // TODO: item-level sync filters (date range, sender, subject).
     /// Item-level sync options.
-    #[serde(default, alias = "message")]
+    #[serde(default)]
     pub item: ItemSyncConfig,
     /// Max connections per source for concurrent body fetches, 4 by default.
     ///
@@ -396,8 +403,14 @@ pub struct AccountConfig {
     #[serde(default, skip_serializing)]
     right: Option<RightRemoved>,
     #[allow(dead_code)]
-    #[serde(default, skip_serializing, alias = "mailbox")]
+    #[serde(default, skip_serializing)]
     collection: Option<AccountCollectionRemoved>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    mailbox: Option<AccountMailboxRemoved>,
+    #[allow(dead_code)]
+    #[serde(default, skip_serializing)]
+    message: Option<AccountMessageRemoved>,
     #[allow(dead_code)]
     #[serde(default, skip_serializing)]
     folder: Option<FolderRemoved>,
@@ -733,13 +746,52 @@ pimalaya_config::removed_key! {
                   (without it they sync both ways, as the pair did)",
     }
 
-    /// The account-level `collection` (or `mailbox`) table, now per source.
+    /// The account-level `collection` table, now per source.
     pub AccountCollectionRemoved: Table {
         name: "collection",
         why: "a filter belonging to the source it filters, an account holding \
               sources of several kinds",
         instead: "write `sources.<name>.collection.filter`, or \
                   `<protocol>.collection.filter` under the account",
+    }
+
+    /// The account-level `mailbox` table, the old spelling of the account's
+    /// `collection`, now per source.
+    pub AccountMailboxRemoved: Table {
+        name: "mailbox",
+        why: "a filter belonging to the source it filters, an account holding \
+              sources of several kinds",
+        instead: "write `sources.<name>.collection.filter`, or \
+                  `<protocol>.collection.filter` under the account",
+    }
+
+    /// The account-level `message` table, now `item`.
+    pub AccountMessageRemoved: Table {
+        name: "message",
+        why: "an account syncing items of every kind, not messages alone",
+        instead: "write `item` in its place, as in `item.filter.since`",
+    }
+
+    /// A backend table's `mailbox`, now `collection`.
+    pub SourceMailboxRemoved: Table {
+        name: "mailbox",
+        why: "a source syncing collections of every kind, not mailboxes alone",
+        instead: "write `collection` in its place, as in \
+                  `imap.collection.filter`",
+    }
+
+    /// A backend table's `message`, now `item`.
+    pub SourceMessageRemoved: Table {
+        name: "message",
+        why: "a source syncing items of every kind, not messages alone",
+        instead: "write `item` in its place, as in `imap.item.delete`",
+    }
+
+    /// `collection.filters`, now `collection.filter`.
+    pub CollectionFiltersRemoved: Key {
+        name: "collection.filters",
+        why: "a source holding one filter",
+        instead: "write `collection.filter`",
     }
 
     /// The v0.1 `folder` table.
@@ -1316,8 +1368,12 @@ pub struct CollectionSourceConfig {
     /// Per source, because an account may hold several kinds and a mailbox
     /// include-list means nothing to a contacts source. Filters are
     /// therefore asymmetric: a collection may sync on one source only.
-    #[serde(default, alias = "filters", skip_serializing_if = "is_default")]
+    #[serde(default, skip_serializing_if = "is_default")]
     pub filter: CollectionFilter,
+    /// Removed key, refused by name as the file is parsed: the old plural
+    /// of [`filter`](Self::filter).
+    #[serde(default, skip_serializing)]
+    filters: Option<CollectionFiltersRemoved>,
     /// Whether this source lists at most a number of the items a collection
     /// holds, whatever it holds: a folder size limit set on the server.
     ///
@@ -1347,6 +1403,7 @@ impl Default for CollectionSourceConfig {
             rename: None,
             namespace: None,
             filter: CollectionFilter::default(),
+            filters: None,
             capped: false,
         }
     }
@@ -2661,28 +2718,10 @@ mod tests {
         assert_eq!(url.scheme(), "imap");
     }
 
+    /// The kind-neutral spellings load; the old mail ones are refused by
+    /// name ([`a_removed_key_points_at_the_migration_notes`]).
     #[test]
-    fn the_pre_generic_pim_sync_spellings_still_load() {
-        let account: AccountConfig = toml::from_str(
-            r#"
-            imap.server = "imaps://imap.example.org:993"
-            imap.mailbox.create = false
-            imap.mailbox.delete = false
-            imap.message.create = true
-            imap.message.delete = false
-            "#,
-        )
-        .unwrap();
-
-        let sources = account.sources().unwrap();
-        let perms = sources["imap"].permissions();
-        assert!(!perms.collection.create);
-        assert!(!perms.collection.delete);
-        assert!(perms.item.create);
-        assert!(!perms.item.delete);
-        assert!(perms.flag.update);
-        assert!(perms.item.update);
-
+    fn the_generic_pim_sync_spellings_load() {
         let account: AccountConfig = toml::from_str(
             r#"
             imap.server = "imaps://imap.example.org:993"
@@ -2704,6 +2743,8 @@ mod tests {
         assert!(!perms.collection.delete);
         assert!(perms.item.create);
         assert!(!perms.item.delete);
+        assert!(perms.flag.update);
+        assert!(perms.item.update);
     }
 
     /// A collection is deleted on a server only where the user asked for it:
@@ -3226,6 +3267,39 @@ mod tests {
                 "sources.a.imap.server = \"x\"\nsources.a.smtp.server = \"y\"\n\
                  sources.a.smtp.password.raw = \"pw\"",
                 "The `smtp.password` key is removed, ",
+            ),
+            (
+                "imap.server = \"x\"\nmailbox.filter.include = [\"INBOX\"]",
+                "The `mailbox` table is removed, a filter belonging to the source",
+            ),
+            (
+                "imap.server = \"x\"\nmessage.filter.since = \"30d\"",
+                "The `message` table is removed, an account syncing items",
+            ),
+            (
+                "imap.server = \"x\"\nimap.mailbox.create = false",
+                "The `mailbox` table is removed, a source syncing collections",
+            ),
+            (
+                "sources.a.carddav.server = \"x\"\nsources.a.carddav.mailbox.delete = false",
+                "The `mailbox` table is removed, a source syncing collections",
+            ),
+            (
+                "imap.server = \"x\"\nimap.message.delete = false",
+                "The `message` table is removed, a source syncing items",
+            ),
+            (
+                "sources.a.imap.server = \"x\"\ntargets.b.imap.server = \"y\"\n\
+                 targets.b.imap.message.create = true",
+                "The `message` table is removed, a source syncing items",
+            ),
+            (
+                "imap.server = \"x\"\nimap.collection.filters = \"all\"",
+                "The `collection.filters` key is removed, ",
+            ),
+            (
+                "imap.server = \"x\"\nimap.collection.filters.include = [\"INBOX\"]",
+                "The `collection.filters` key is removed, ",
             ),
         ] {
             // NOTE: refused as the file is parsed, so an account no command

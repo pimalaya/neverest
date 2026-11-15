@@ -26,6 +26,7 @@ Upgrading from 0.3.0:
 - `-c` takes one path, repeated to merge several (`-c a.toml -c b.toml`), where it split one value on `:`; `NEVEREST_CONFIG` is no longer read.
 - A bare `neverest` without a configuration fails, exit 1, where it printed the help; `completion`, `manual` and `json-schema` with no argument fail on stdout, exit 1, where they printed their help on stderr, exit 2.
 - Under `--json`, a `check` capability reads `level` (`support` is gone), every queue row `row` (`id` is gone, and `action` on an overruled body), a sync's parked row `kind` (`action` is gone); a failed account of `sync` or `drain` and a failed index refresh split their `error` into `error` and `sources`.
+- The `mailbox`, `message` and `filters` spellings are refused by name: write `collection`, `item` and `collection.filter` (`imap.mailbox.create` is `imap.collection.create`).
 
 ### Added
 
@@ -373,6 +374,7 @@ Upgrading from 0.3.0:
 
 ### Removed
 
+- **BREAKING**: removed the `mailbox`, `message` and `filters` spellings of `collection`, `item` and `collection.filter`, aliases since v0.2.0: each is refused by name in the family sentence, pointing at MIGRATION.md, `mailbox` and `message` under a backend table and under the account, `collection.filters` under a backend table. The account-level `mailbox` is refused under its own name, where the refusal named `collection`.
 - **BREAKING**: removed the configuration wizard: the `configure` command (alias `cfg`), the offer a bare `neverest` made without a configuration file, and the `wizard` cargo feature, with its io-pim-discovery dependency.
 
   pimalaya-cli 0.4 dropped the wizards of every Pimalaya CLI. A configuration is written by hand from config.sample.toml; a command finding none fails naming the path it looked for, and a bare `neverest` prints the help.

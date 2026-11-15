@@ -101,8 +101,8 @@ use crate::{
         report::{
             CollectionCoverage, DisagreedMember, DrainedQueue, IntentEntry, ItemConflict,
             OpenRound, OverruledBody, ParkedAbsence, ParkedQueueAction, PatchEntry, PurgedItems,
-            RefusedDuplicate, RejectedWrite, SourceDownload, SubmitEntry, SyncOutput,
-            ThrottledSource, UnansweredPushes, UnlistedMembers, UnreachedEndpoint,
+            RefusedChange, RefusedDuplicate, RejectedWrite, SourceDownload, SubmitEntry,
+            SyncOutput, ThrottledSource, UnansweredPushes, UnlistedMembers, UnreachedEndpoint,
             UnreadableBodies, WaitReason, WaitingCreate,
         },
     },
@@ -315,7 +315,8 @@ fn store_refusal(dir: &Path, err: PimdirError) -> anyhow::Error {
             pimdir_error(err).context(format!(
                 "The store at {} was written by an earlier neverest and cannot be migrated: \
                  sync it with the neverest that wrote it until nothing is queued, move the \
-                 store directory away, then run `neverest init` again (see MIGRATION.md)",
+                 store directory away, then rebuild it with `neverest init` and \
+                 `neverest sync` (see MIGRATION.md)",
                 dir.display(),
             ))
         }
@@ -4086,6 +4087,10 @@ struct Noted {
     /// identity (pimdir SYNC §5, §6): the member's handle and the create's
     /// key.
     disagreed: Vec<(String, PimdirHandle, PimdirLinkId)>,
+    /// The changes the remote refused as they stand, this pass or one
+    /// before (pimdir SYNC §5): the handle and the reason, the last a
+    /// pass gave.
+    refusals: BTreeMap<(String, PimdirHandle), String>,
     /// The members a capped round did not list, and so kept (pimdir SYNC
     /// §5): the most one pass counted.
     unlisted: BTreeMap<String, usize>,
@@ -4156,6 +4161,12 @@ impl Noted {
                         self.disagreed.push(apart);
                     }
                 }
+                // NOTE: a held change is reported by every pass meeting it,
+                // so each is kept once.
+                PimdirSyncEvent::Refused { handle, reason } => {
+                    let key = (collection.to_string(), handle.clone());
+                    self.refusals.insert(key, reason.clone());
+                }
                 // NOTE: reported by an `Abandon` alone, which no neverest
                 // command stages yet (pimdir SYNC §7).
                 PimdirSyncEvent::Abandoned(handle) => {
@@ -4178,8 +4189,28 @@ fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
         waiting,
         disagreed,
         unlisted,
+        refusals,
     } = mem::take(&mut ctx.noted);
     let display = |collection: &str| display_name(&ctx.namespace, collection).to_string();
+
+    for ((collection, handle), reason) in refusals {
+        // NOTE: a create is held under its provisional handle, U+0001 then
+        // its key (pimdir SYNC §2), which its hunk names it by.
+        let id = handle.as_str().trim_start_matches('\u{1}').to_owned();
+        let collection = display(&collection);
+        report
+            .item_patch
+            .retain(|entry| !names(&entry.hunk, &ctx.name, &collection, &id));
+        report
+            .refusals
+            .retain(|r| r.side != ctx.name || r.collection != collection || r.id != id);
+        report.refusals.push(RefusedChange {
+            side: ctx.name.clone(),
+            collection,
+            id,
+            reason,
+        });
+    }
 
     for (collection, (parked, rebuild)) in parked {
         report.absences.push(ParkedAbsence {
@@ -6785,7 +6816,9 @@ mod tests {
         assert!(written_earlier(&refused(Some("storage-draft-08"))));
         assert!(written_earlier(&refused(Some("storage-draft-09"))));
         assert!(written_earlier(&refused(Some("storage-draft-10"))));
-        assert!(!written_earlier(&refused(Some("storage-draft-12"))));
+        assert!(written_earlier(&refused(Some("storage-draft-11"))));
+        assert!(written_earlier(&refused(Some("storage-draft-12"))));
+        assert!(!written_earlier(&refused(Some("storage-draft-14"))));
         assert!(!written_earlier(&refused(Some("storage-v1"))));
         assert!(!written_earlier(&PimdirError::Busy));
     }
@@ -7655,6 +7688,122 @@ mod tests {
         let text = report.to_string();
         assert!(text.contains("Waiting (1):"), "{text}");
         assert!(!text.contains("Warnings"), "waiting is no warning: {text}");
+    }
+
+    /// A create the server refuses as it stands (an IMAP `NO [CANNOT]`) is
+    /// refused, not rejected: the store records the refusal on its binding
+    /// and holds the change, so the next run appends nothing and reports
+    /// it again, its hunk taken back (pimdir SYNC §4, §5, vectors 162,
+    /// 163). A `NO` naming a quota is rejected and appended again by the
+    /// next run, the account's state outliving the change.
+    #[test]
+    #[cfg(feature = "imap")]
+    fn a_create_refused_as_it_stands_is_held_and_reported() {
+        use crate::imap::fake::{FakeImap, FakeMailbox};
+
+        const INBOX: &str = "imap/INBOX";
+        const BODY: &str = "Message-ID: <held@x>\r\nSubject: held\r\n\r\nbody\r\n";
+
+        for (completion, held) in [
+            ("NO [CANNOT] Cannot store that message", true),
+            ("NO [OVERQUOTA] Mailbox full", false),
+        ] {
+            let server = FakeImap::start(
+                FakeMailbox {
+                    uid_validity: 1,
+                    highest_mod_seq: 9,
+                    messages: Vec::new(),
+                    states_exists: true,
+                },
+                true,
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let (mut ctx, mut store) = bound_imap_inbox(dir.path(), &server, true, None);
+            let blobs = store.blob_stage();
+            let object = blobs.stage_body(BODY.as_bytes()).unwrap();
+            let key = PimdirLinkId("held@x".into());
+            store
+                .write(vec![
+                    PimdirWriteOp::StoreObject {
+                        object: object.clone(),
+                        body: None,
+                    },
+                    PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                        collection: PimdirCollectionId(INBOX.into()),
+                        handle: key.provisional(),
+                        link_id: Some(key),
+                        object: Some(object.hash),
+                        level: PimdirLevel::Full,
+                        summary: None,
+                        sort_key: PimdirSortKey::default(),
+                        flags: PimdirFlags::default(),
+                        status: PimdirStatus::Created,
+                        conflict_revision: None,
+                        conflict_object: None,
+                        base: None,
+                        origin: None,
+                    }),
+                ])
+                .unwrap();
+
+            server.refuse_next_write(completion);
+            sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None)
+                .expect("the sync");
+            assert_eq!(server.sent("APPEND").len(), 1, "{completion}");
+
+            server.refuse_next_write(completion);
+            let mut report = SyncOutput::default();
+            report.item_patch.push(PatchEntry::new(
+                ItemHunk::Add {
+                    side: String::from("imap"),
+                    collection: String::from("INBOX"),
+                    id: String::from("held@x"),
+                    flags: BTreeSet::new(),
+                    content_key: 0,
+                },
+                None,
+            ));
+            sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None)
+                .expect("the sync");
+            itemize_noted(&mut ctx, &mut report);
+            itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
+
+            let standing = PimdirReader::open(dir.path())
+                .unwrap()
+                .refusals(INBOX)
+                .unwrap();
+            assert!(
+                report.item_patch.is_empty(),
+                "{completion}: the hunk taken back"
+            );
+            assert_eq!(Exit::from(&report), Exit::Conflicted, "{completion}");
+            if !held {
+                assert_eq!(server.sent("APPEND").len(), 2, "appended again");
+                assert!(standing.is_empty(), "{standing:?}");
+                assert!(report.refusals.is_empty(), "{:?}", report.refusals);
+                assert_eq!(report.rejected.len(), 1, "{:?}", report.rejected);
+                continue;
+            }
+
+            assert_eq!(server.sent("APPEND").len(), 1, "held, never appended again");
+            assert_eq!(standing.len(), 1, "{standing:?}");
+            assert_eq!(standing[0].source, "imap");
+            assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+            let json = serde_json::to_value(&report).unwrap();
+            let refusals = json["refusals"].as_array().unwrap();
+            assert_eq!(refusals.len(), 1, "{json}");
+            assert_eq!(refusals[0]["side"], "imap");
+            assert_eq!(refusals[0]["collection"], "INBOX");
+            assert_eq!(refusals[0]["id"], "held@x", "the key, no control character");
+            let reason = refusals[0]["reason"].as_str().unwrap();
+            assert!(reason.contains("Cannot store that message"), "{reason}");
+            let text = report.to_string();
+            assert!(text.contains("Warnings (1):"), "{text}");
+            assert!(
+                text.contains("imap refused the change of held@x in INBOX"),
+                "{text}"
+            );
+        }
     }
 
     /// A member named apart from a create of its side holding its identity

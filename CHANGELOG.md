@@ -8,7 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 Upgrading from 0.3.0:
 
-- Every store an earlier neverest wrote, 0.3.0 or a git build, is refused (`store-version`), never migrated: sync it with the neverest that wrote it until nothing is queued, upgrade, move it out of the neverest directory, then `neverest init` and sync (MIGRATION.md).
+- Every store an earlier neverest wrote, 0.3.0 or a git build (one of pimdir draft-11 included, which every git build before 2026-11-15 night wrote), is refused (`store-version`), never migrated: sync it with the neverest that wrote it until nothing is queued, upgrade, move it out of the neverest directory, then rebuild it with `neverest init` and a sync (MIGRATION.md).
+- A change a server refuses as it stands is held in the store and reported under `refusals` by every run (exit 3) rather than pushed again: change the item, or remove it.
 - Every account shares one store, `neverest/` under the state directory itself: a neverest directory still holding the per-account stores 0.3.0 kept is refused (`store-layout`), naming each, until they are moved out.
 - `-a` is a filter: without it, `sync`, `check`, `drain` and `init` run over every account, and `default = true` is ignored. A script running one account names it with `-a`.
 - `sync`, `drain`, `init` and `check` print one result listing every account under `--json` (`.accounts[]`, a sync's report under `.accounts[].report`), and `index` one listing every store (`.stores[]`).
@@ -32,6 +33,8 @@ Upgrading from 0.3.0:
 - Microsoft Graph is one `msgraph` table, its domains under `msgraph.mail`, `msgraph.contacts` and `msgraph.calendar`: `msgraph-contacts` and `msgraph-calendar` are refused by name, and so is an `msgraph` table naming no domain (add `msgraph.mail = true` to sync mail as before). The sources keep their names, so nothing in the store moves (MIGRATION.md).
 
 ### Added
+
+- Added the refusal of a change as it stands (pimdir sync-draft-13): a server refusing a write for good (an HTTP 4xx naming the request but 401, 407, 408, 409, 412, 423, 425 and 429, an IMAP `NO [CANNOT]`, `[PARSE]`, `[TOOBIG]` or `[NOPERM]`, Graph's append outside Drafts, an override Google or Graph takes through no instance) has the store hold the change while it stands, pushed again only once the item changes. `sync` reports each under `refusals` (`side`, `collection`, `id`, `reason`), a warning (exit 3), and prints a `refused` event under `--json`. A quota, a rate limit, a stale base and any failure that cannot tell stay under `rejected`, pushed again by the next run.
 
 - Added `collection.rename` to every backend table, beside `collection.create` and `collection.delete`: whether a frontend may rename a collection. Unset, it is false on a `one-way` account and true otherwise; off, the source declares `collection.rename: none`, naming the key, so a frontend's rename is refused up front.
 - Added the `account` group, as in every Pimalaya CLI: `account check`, the check (`check` stays a hidden alias), and `account list`, the accounts `-a` names (every one by default) with the backend tables each writes, its sources', targets' and `smtp`, those this build leaves out under `notBuilt` (pimalaya-cli's account row).
@@ -326,7 +329,11 @@ Upgrading from 0.3.0:
 
   A zone with no IANA name reads as UTC, with a warning. The first refresh in another zone re-expands every calendar item.
 
-- **BREAKING**: bumped io-pimdir to 0.12 (pimdir storage-draft-11, sync-draft-11, search-draft-11): a store any earlier neverest wrote is refused, never migrated, and the search index is built again by the first refresh.
+- **BREAKING**: bumped io-pimdir to 0.14 (pimdir storage-draft-13, sync-draft-13, search-draft-13): a store any earlier neverest wrote, a draft-11 one included, is refused, never migrated, its message naming the rebuild, and the search index is built again by the first refresh.
+
+- Changed the last page of a band round, which lists the band a widened scope lacks, to hand every handle the collection holds, as a scoped round's does (pimdir sync-draft-12): a message deleted on the server inside the band is dropped from the store, where a band round now finds nothing absent without it. IMAP sends one `UID SEARCH ALL`, Gmail lists the label's ids, and Graph reads them by a fresh delta of the folder, ids, dates and flags only, its link dropped.
+
+- Changed a message added to a Graph folder other than Drafts to be held in the store and reported under `refusals`, rather than rejected and appended again by every run; a frontend may remove it whatever the source's `item.delete`.
 
 - Changed a queued move of an item waiting for a decision to be parked, its error naming the diverging body, nothing moved: it was applied, leaving the conflict under an item no listing shows. Settle the conflict with `neverest conflict resolve`, then move the item; a copy is unchanged.
 
@@ -367,6 +374,12 @@ Upgrading from 0.3.0:
 - Bumped pimalaya-cli to 0.5 and pimalaya-config to 0.5.2.
 
   An unknown configuration key's error lists no removed key among the keys it expects.
+
+- Bumped pimalaya-cli to 0.6.0, its `Listing` printing `Next page:` after the listing; neverest prints none, so no output moves.
+
+- Bumped io-imap to 0.11.2: QRESYNC is used only when the server's `ENABLED` lists it.
+
+- Bumped io-gpeople to 0.8.1, io-msgraph to 0.9.2 and io-gcal to 0.5.1.
 
 - Bumped io-sasl to 0.2.
 

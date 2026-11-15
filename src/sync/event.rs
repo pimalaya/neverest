@@ -4,9 +4,10 @@
 //! [`SyncOutput`]: one line per event, each told apart from the result by
 //! its `event` key. Without `--json`, the spinner on stderr says the same.
 //!
-//! Events report progress only. What the run did and left (hunks,
-//! conflicts, parked work) stays in the result, so a caller reading the
-//! last line alone loses nothing.
+//! Events report progress, and the refusals a source holds (`refused`),
+//! printed as an account ends. What the run did and left (hunks,
+//! conflicts, parked work, those refusals) stays in the result, so a
+//! caller reading the last line alone loses nothing.
 //!
 //! [`SyncOutput`]: crate::sync::report::SyncOutput
 
@@ -113,6 +114,20 @@ pub enum SyncEvent {
         /// How many bodies the store owes.
         total: usize,
     },
+    /// A source refused a change as it stands, this run or a run before:
+    /// the store holds it while the refusal stands (pimdir SYNC §5).
+    /// Printed once the account's run ends, before its result, which names
+    /// it again under `refusals`.
+    Refused {
+        /// The source that refused the change, as the account names it.
+        source: String,
+        /// The collection the item sits in, as the source names it.
+        collection: String,
+        /// The item's handle on that source, the item's key for a create.
+        id: String,
+        /// What the source said.
+        reason: String,
+    },
 }
 
 impl SyncEvent {
@@ -126,7 +141,9 @@ impl SyncEvent {
             Self::CollectionStarted { source, target, .. }
             | Self::CollectionProgressed { source, target, .. }
             | Self::CollectionFinished { source, target, .. } => vec![source, target],
-            Self::ScanProgressed { source, .. } | Self::DownloadProgressed { source, .. } => {
+            Self::ScanProgressed { source, .. }
+            | Self::DownloadProgressed { source, .. }
+            | Self::Refused { source, .. } => {
                 vec![source]
             }
         };
@@ -185,6 +202,12 @@ impl fmt::Display for SyncEvent {
                 done,
                 total,
             } => writeln!(f, "Downloading {source} ({done}/{total})"),
+            Self::Refused {
+                source,
+                collection,
+                id,
+                reason,
+            } => writeln!(f, "{source} refused {id} in {collection}: {reason}"),
         }
     }
 }
@@ -229,6 +252,34 @@ mod tests {
         assert_eq!(
             event.to_string(),
             "INBOX: error (Cannot list INBOX: 403 Forbidden)\n"
+        );
+    }
+
+    /// A refusal a source holds is named as its result row names it, the
+    /// source as the account names it, under the kebab-case `refused`.
+    #[test]
+    fn a_refusal_is_an_event_named_as_its_row() {
+        let mut event = SyncEvent::Refused {
+            source: "work/msgraph".into(),
+            collection: "Archive".into(),
+            id: "m1@x".into(),
+            reason: "Graph appends to Drafts only".into(),
+        };
+        event.name_endpoints("work");
+
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            json!({
+                "event": "refused",
+                "source": "msgraph",
+                "collection": "Archive",
+                "id": "m1@x",
+                "reason": "Graph appends to Drafts only",
+            }),
+        );
+        assert_eq!(
+            event.to_string(),
+            "msgraph refused m1@x in Archive: Graph appends to Drafts only\n"
         );
     }
 }

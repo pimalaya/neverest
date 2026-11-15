@@ -48,7 +48,7 @@ use log::{debug, warn};
 use crate::dav::client::is_duplicate_uid;
 use crate::{
     client::{Client, EnumEntry, Gone, Held, Listed, Pool, StoredSize, WrittenItem},
-    error::{Failure, chain},
+    error::{Failure, chain, refusal},
     item::flag::Flag,
     kind::{Kind, LinkId},
 };
@@ -450,6 +450,34 @@ impl<'a> PimRemote<'a> {
 
         rejected_bare(handle)
     }
+
+    /// Answers a write the server failed with `err`: refused, when it
+    /// refused the change as it stands ([`refusal`]), else rejected.
+    ///
+    /// A refusal is recorded by the engine on the binding, which then holds
+    /// the change while its key stands and reports it every run (pimdir
+    /// SYNC §5): the run reports it from that event, so it is not recorded
+    /// here too.
+    fn fail(
+        &mut self,
+        collection: &str,
+        handle: PimdirHandle,
+        action: &'static str,
+        err: &anyhow::Error,
+    ) -> PimdirPushResult {
+        let Some(reason) = refusal(err) else {
+            return self.reject(collection, handle, action, Failure::of(err));
+        };
+
+        warn!("{action} {} in {collection} refused: {reason}", handle.0);
+        PimdirPushResult {
+            handle,
+            outcome: PimdirPushOutcome::Refused { reason },
+            assigned: None,
+            revision: None,
+            relocated: false,
+        }
+    }
 }
 
 /// The name the backend knows a hub collection by.
@@ -663,9 +691,7 @@ impl PimdirRemote for PimRemote<'_> {
 
                     match stored {
                         Ok(()) => accepted(handle, None),
-                        Err(err) => {
-                            self.reject(&collection, handle, "set-flags", Failure::of(&err))
-                        }
+                        Err(err) => self.fail(&collection, handle, "set-flags", &err),
                     }
                 }
                 PimdirChangeKind::Remove {
@@ -697,7 +723,7 @@ impl PimdirRemote for PimRemote<'_> {
 
                         match moved {
                             Ok(()) => relocated(handle),
-                            Err(err) => self.reject(&collection, handle, "move", Failure::of(&err)),
+                            Err(err) => self.fail(&collection, handle, "move", &err),
                         }
                     }
                     (None, _) => self.delete(&collection, handle, if_match.as_deref()),
@@ -1321,7 +1347,7 @@ impl PimRemote<'_> {
                 // NOTE: a duplicate `UID` gets its own report entry, naming the
                 // identity and the remedy a generic rejection cannot state.
                 if !is_duplicate_uid(&err) {
-                    return self.reject(collection, handle, "append", Failure::of(&err));
+                    return self.fail(collection, handle, "append", &err);
                 }
 
                 return self.refuse_uid(collection, handle, "append", link);
@@ -1397,7 +1423,7 @@ impl PimRemote<'_> {
                 return Some(self.refuse_uid(collection, handle.clone(), "move", link));
             }
             Err(err) => {
-                return Some(self.reject(collection, handle.clone(), "move", Failure::of(&err)));
+                return Some(self.fail(collection, handle.clone(), "move", &err));
             }
         };
 
@@ -1423,7 +1449,7 @@ impl PimRemote<'_> {
             ),
             Err(err) => {
                 let err = err.context(format!("moved as {}, its body not written", moved.id));
-                self.reject(collection, handle.clone(), "move", Failure::of(&err))
+                self.fail(collection, handle.clone(), "move", &err)
             }
         };
         Some(result)
@@ -1489,7 +1515,7 @@ impl PimRemote<'_> {
         match copied {
             Ok(Some(written)) => self.assign(collection, handle, "copy", written),
             Ok(None) => self.append(collection, handle, flags, object, link),
-            Err(err) => self.reject(collection, handle, "copy", Failure::of(&err)),
+            Err(err) => self.fail(collection, handle, "copy", &err),
         }
     }
 
@@ -1535,7 +1561,7 @@ impl PimRemote<'_> {
 
         match deleted {
             Ok(()) => accepted(handle, None),
-            Err(err) => self.reject(collection, handle, "delete", Failure::of(&err)),
+            Err(err) => self.fail(collection, handle, "delete", &err),
         }
     }
 
@@ -1586,9 +1612,11 @@ impl PimRemote<'_> {
 
     /// Replaces an item's body in place, conditional on the synced revision.
     ///
-    /// A refusal is [`PimdirPushOutcome::Rejected`] rather than an error: it
-    /// is what makes io-pimdir re-merge and mark the placement conflicted
-    /// instead of clobbering the remote body, an error aborting the batch.
+    /// A refusal is an outcome rather than an error: a stale base
+    /// [`PimdirPushOutcome::Rejected`] makes io-pimdir re-merge and mark
+    /// the placement conflicted instead of clobbering the remote body, a
+    /// refusal as it stands holds the change, and an error aborts the
+    /// batch.
     fn update(
         &mut self,
         collection: &str,
@@ -1629,7 +1657,7 @@ impl PimRemote<'_> {
                 revision,
                 relocated: false,
             },
-            Err(err) => self.reject(collection, handle, "update", Failure::of(&err)),
+            Err(err) => self.fail(collection, handle, "update", &err),
         }
     }
 }
@@ -2268,6 +2296,63 @@ mod push_tests {
         assert!(refused.is_empty());
         assert_eq!(rejected.len(), 1);
         assert_eq!(rejected[0].action, "move");
+    }
+
+    /// A create the server refuses as it stands, a status naming the
+    /// request or a precondition the body failed, is answered `Refused`
+    /// with the server's text and recorded as no rejection: the engine
+    /// holds it (pimdir SYNC §4, §5). A stale base (409, 412) and a quota
+    /// stay `Rejected`, pushed again by the next run.
+    #[test]
+    fn a_create_refused_as_it_stands_is_refused_not_rejected() {
+        let error = |body: &str| {
+            format!(
+                "<d:error xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">{body}</d:error>"
+            )
+        };
+        let xml = [("Content-Type", "application/xml")];
+        let cases = [
+            ("400 Bad Request", String::new(), true),
+            ("403 Forbidden", error("<c:valid-calendar-data/>"), true),
+            ("409 Conflict", String::new(), false),
+            ("412 Precondition Failed", String::new(), false),
+            ("403 Forbidden", error("<d:quota-not-exceeded/>"), false),
+            ("507 Insufficient Storage", String::new(), false),
+        ];
+
+        for (status, body, refused) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let (blobs, hash) = stored(dir.path());
+            let (mut pool, wire) = caldav(vec![answer(status, &xml, &body)]);
+            let collection = PimdirCollectionId(format!("caldav/{TARGET}"));
+            let add = PimdirChange::new(
+                &collection,
+                PimdirChangeKind::Add {
+                    handle: PimdirLinkId("t1".into()).provisional(),
+                    link_id: Some(PimdirLinkId("t1".into())),
+                    flags: PimdirFlags::default(),
+                    origin: None,
+                    supersedes: None,
+                    object: Some(hash),
+                },
+            );
+
+            let (result, _, rejected) = push(&mut pool, blobs, add);
+
+            assert_eq!(wire.lines().len(), 1, "{status}");
+            match result.outcome {
+                PimdirPushOutcome::Refused { reason } => {
+                    assert!(refused, "{status} {body}: refused");
+                    assert!(reason.contains(&status[..3]), "{reason}");
+                    assert!(rejected.is_empty(), "{status}");
+                }
+                PimdirPushOutcome::Rejected => {
+                    assert!(!refused, "{status} {body}: rejected");
+                    assert_eq!(rejected.len(), 1, "{status}");
+                }
+                outcome => panic!("{status}: {outcome:?}"),
+            }
+        }
     }
 
     /// The superseded member's delete comes after the move took it along:

@@ -68,7 +68,7 @@ use url::Url;
 use crate::{
     account::GoogleAccount,
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
-    error::ErrorCode,
+    error::{ErrorCode, names_the_request},
     item::{collection::Collection, flag::Flag},
     kind::event::{self, OccurrenceId, Occurrences, OriginalStart},
     offline::invitation::{Partstat, Refusal, occurrence_window},
@@ -945,6 +945,16 @@ fn is_missing(err: &anyhow::Error) -> bool {
     })
 }
 
+/// Whether a Calendar answer in an error chain refused the change as it
+/// stands, its status naming the request ([`names_the_request`]); a rate
+/// limit is told apart by [`crate::error::refusal`].
+pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
+    match cause.downcast_ref::<GcalClientStdError>() {
+        Some(GcalClientStdError::Send(GcalSendError::Api(err))) => names_the_request(err.status),
+        _ => false,
+    }
+}
+
 /// The code of a Calendar refusal in an error chain ([`google_code`]).
 pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
     match cause.downcast_ref::<GcalClientStdError>()? {
@@ -1201,6 +1211,58 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    /// An event Google refuses as it stands (its 400 on a time it cannot
+    /// read, as a floating one) is refused for good; a duplicate id (409)
+    /// and a rate limit (429) stay rejected (pimdir SYNC §4).
+    #[test]
+    fn an_event_refused_as_it_stands_is_told_by_its_status() {
+        const EVENT: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+                             UID:e1\r\nDTSTAMP:20261101T000000Z\r\n\
+                             DTSTART:20261124T130000Z\r\nDTEND:20261124T140000Z\r\n\
+                             SUMMARY:Lunch\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        let floating = r#"{"error":{"code":400,"message":"Missing time zone definition for start time.","errors":[{"reason":"timeRangeEmpty"}]}}"#;
+        let duplicate = r#"{"error":{"code":409,"message":"The requested identifier already exists.","errors":[{"reason":"duplicate"}]}}"#;
+        let limited = r#"{"error":{"code":429,"message":"Rate Limit Exceeded","errors":[{"reason":"rateLimitExceeded"}]}}"#;
+        let cases = [
+            ("400 Bad Request", floating, true),
+            ("409 Conflict", duplicate, false),
+            ("429 Too Many Requests", limited, false),
+        ];
+
+        for (status, body, refused) in cases {
+            let answer = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let mut client = GcalClient {
+                inner: GcalClientStd::new(
+                    Recorded {
+                        answer: answer.into_bytes(),
+                        written: Arc::default(),
+                    },
+                    "token",
+                ),
+                tls: Tls::default(),
+                proxy: Proxy::None,
+                alive: true,
+                throttle: Arc::new(Throttle::new("gcal").waiting(Duration::ZERO)),
+                owner: None,
+                issued: HashSet::new(),
+                floating_zone: UTC,
+            };
+
+            let err = client
+                .add_item_stream("c1", EVENT.as_bytes())
+                .expect_err("refused");
+
+            let reason = crate::error::refusal(&err);
+            assert_eq!(reason.is_some(), refused, "{status}: {err:#}");
+            if let Some(reason) = reason {
+                assert!(reason.contains("Missing time zone definition"), "{reason}");
+            }
         }
     }
 

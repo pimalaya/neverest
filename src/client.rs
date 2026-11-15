@@ -74,13 +74,15 @@ pub struct Enumeration {
     /// Whether a date filter narrowed the round's listing (IMAP `SENTSINCE`,
     /// Gmail `after:`, Graph `sentDateTime`), on every page of such a round
     /// and on no other (pimdir SYNC §4, §5): the filter misses an undated
-    /// member and one whose date runs ahead of its arrival, so the round
-    /// finds absent only what was dated before it opened. A filter reading
-    /// another date than the `Date` lists no band's ceiling ([`floor_of`]).
+    /// member and one whose date runs ahead of or behind its arrival, so
+    /// the round finds absent only what its enumeration lacks. A filter
+    /// reading another date than the `Date` lists no band's ceiling
+    /// ([`floor_of`]).
     pub narrowed: bool,
     /// Every handle the collection holds, read by an enumeration no date
-    /// filter narrowed, on the last page of a narrowed round: the round
-    /// finds absent whatever it lacks (pimdir SYNC §4).
+    /// filter narrowed, on the last page of a narrowed round, a band's
+    /// included: the round finds absent whatever in its scope it lacks,
+    /// and nothing when none is handed (pimdir SYNC §4, §5).
     pub enumerated: Option<Vec<String>>,
 }
 

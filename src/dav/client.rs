@@ -55,7 +55,7 @@ use url::Url;
 use crate::{
     account::{DavAccount, DavEndpoint},
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
-    error::ErrorCode,
+    error::{ErrorCode, names_the_request},
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId},
     throttle::{Request, Throttle},
@@ -1092,6 +1092,18 @@ pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<
         }
         _ => None,
     }
+}
+
+/// Whether a DAV answer in an error chain refused the change as it stands
+/// (pimdir SYNC §4): a status naming the request ([`names_the_request`]),
+/// a precondition the written body failed (RFC 4791 §5.3.2) or a write the
+/// account may not make. A duplicate `UID` is caught before, with its own
+/// report entry.
+pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
+    cause
+        .downcast_ref::<WebdavClientStdError>()
+        .and_then(refused)
+        .is_some_and(|(status, _)| names_the_request(status))
 }
 
 /// Whether a refusal's body is a `DAV:error` element, which names the

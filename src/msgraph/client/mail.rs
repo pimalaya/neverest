@@ -26,8 +26,8 @@
 //!   floor, the `Date` keeping what lies in the band, and keeps the link.
 //!   Every page of a round under a scope states it narrowed by its
 //!   `sentDateTime` filter, which lists no undated message, and the pass
-//!   hands every id of the folder (pimdir SYNC §4, §5); a band round hands
-//!   none, the engine finding absent there only a member dated in the band.
+//!   hands every id of the folder (pimdir SYNC §4, §5); a band round's last
+//!   page hands them too, read by a fresh delta whose link it drops.
 //! - **A delta** follows the stored link: a change outside the scope is
 //!   dropped, by `sentDateTime`; a changed member in scope the store does
 //!   not bind is named by its summary, read in JSON batches when the link
@@ -401,9 +401,9 @@ fn summary_page(
 /// in the band; a round over the whole scope goes on with the pass, which
 /// needs the marks of what the band listed. A filter on `sentDateTime`
 /// lists no message with no date, so every page states the round narrowed
-/// (pimdir SYNC §4, §5). A band round hands no enumeration: the engine
-/// finds absent there only a member dated in the band, which lies below
-/// the round's opening, never an undated one (pimdir SYNC §5).
+/// (pimdir SYNC §4, §5). A band round's last page hands every id of the
+/// folder ([`folder_ids`]), a narrowed round handing none finding no member
+/// absent (pimdir SYNC §5).
 ///
 /// A page resumes `below` the second the page before it ended at, that
 /// second included, so a member deleted between two pages, in one run or
@@ -467,6 +467,9 @@ fn band_page(
     if last {
         relist_head(wire, folder, mailbox, scope, held, &mut listing)?;
     }
+    if last && band {
+        listing.enumerated = Some(folder_ids(wire, mailbox, &mut listing.bytes)?);
+    }
     listing.narrowed = true;
 
     Ok(Listed::Page(listing.page(
@@ -474,6 +477,22 @@ fn band_page(
         cursor.map(|step| step.encode()),
         None,
     )))
+}
+
+/// Every message id of `mailbox`, read by a fresh delta with ids, dates and
+/// flags, which no date filter narrowed (pimdir SYNC §4): a band round's
+/// enumeration, its link dropped, the band keeping the stored one. A fresh
+/// delta states no removal, so every row it lists is a member. Its octets
+/// are added to `bytes`.
+fn folder_ids(wire: &mut impl MailWire, mailbox: &str, bytes: &mut u64) -> Result<Vec<String>> {
+    let followed = follow(wire, mailbox, None, |_, removed| !removed)?
+        .with_context(|| format!("Enumeration of {mailbox} expired"))?;
+    *bytes += followed.bytes;
+    Ok(followed
+        .rows
+        .into_iter()
+        .filter_map(|(id, present)| present.then_some(id))
+        .collect())
 }
 
 /// Whether `messages` were sent within one second, the first and the last
@@ -1921,8 +1940,12 @@ mod tests {
             counts.band_rows, 146,
             "each dated message from the band's floor up, and the one each page ended at again"
         );
-        assert_eq!(counts.passes.len(), 1, "the folder passed over once");
-        assert_eq!(counts.delta_rows, 41);
+        assert_eq!(
+            counts.passes.len(),
+            4,
+            "the folder passed over once for its link, then once a band for its ids"
+        );
+        assert_eq!(counts.delta_rows, 41 * 4);
         assert_eq!(counts.metas, 1);
 
         let requests = remote.requests.len();
@@ -1931,7 +1954,7 @@ mod tests {
             remote.requests[requests].listing,
             PimdirListing::Delta(_)
         ));
-        assert_eq!(remote.graph.counts.delta_rows, 41, "nothing changed");
+        assert_eq!(remote.graph.counts.delta_rows, 41 * 4, "nothing changed");
         assert_eq!(remote.graph.counts.band_rows, 146);
     }
 
@@ -1974,7 +1997,7 @@ mod tests {
     /// Every page of a round under a scope states it narrowed by its
     /// `sentDateTime` filter, and the pass closing it hands every id of the
     /// folder (pimdir SYNC §4, §5); a band round, widening the coverage,
-    /// states it narrowed alone, and a delta neither.
+    /// hands them on its last page too, and a delta states neither.
     #[test]
     fn a_scoped_round_is_narrowed_and_its_pass_enumerates_the_folder() {
         let dir = tempfile::tempdir().unwrap();
@@ -1991,8 +2014,8 @@ mod tests {
 
         let pages = remote.stated.len();
         sync(&mut store, &mut remote, since("2026-07-01")).unwrap();
-        let widened = &remote.stated[pages..];
-        assert!(!widened.is_empty());
+        let (last, widened) = remote.stated[pages..].split_last().unwrap();
+        assert_eq!(*last, (true, Some(41)), "the band's last page enumerates");
         assert!(
             widened.iter().all(|stated| *stated == (true, None)),
             "{widened:?}"
@@ -2251,7 +2274,11 @@ mod tests {
             remote.graph.counts.bands, 20,
             "the band below the coverage, listed with the coverage: 41 dated messages"
         );
-        assert_eq!(remote.graph.counts.passes.len(), 1, "and the link kept");
+        assert_eq!(
+            remote.graph.counts.passes.len(),
+            2,
+            "and the folder's ids enumerated by a fresh delta"
+        );
         assert!(
             flags_of(&store, "2026-03-02").contains("\\Flagged"),
             "the band reads what the delta dropped",
@@ -2271,9 +2298,9 @@ mod tests {
             .unwrap();
         remote.graph.expired.insert(version);
         sync(&mut store, &mut remote, since("2026-09-01")).unwrap();
-        assert_eq!(remote.graph.counts.passes.len(), 2, "a new link");
+        assert_eq!(remote.graph.counts.passes.len(), 3, "a new link");
         assert_eq!(
-            remote.graph.counts.passes[1], IDS_SELECT,
+            remote.graph.counts.passes[2], IDS_SELECT,
             "made under the scope"
         );
         assert_eq!(remote.graph.counts.bands, 25);

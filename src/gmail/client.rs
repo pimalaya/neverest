@@ -84,7 +84,7 @@ use crate::{
     client::{
         EnumEntry, Enumeration, Gone, Held, Listed, Renamed, StoredSize, WrittenItem, floor_of,
     },
-    error::ErrorCode,
+    error::{ErrorCode, names_the_request},
     item::{
         collection::Collection,
         flag::{Flag, FlagOp, IanaFlag},
@@ -840,12 +840,10 @@ impl GmailClient {
         // of its arrival: a narrowed round's last page hands every id of the
         // label, which no date filter narrowed (pimdir SYNC §4, §5), ids
         // alone, PAGE_SIZE a listing, read after the page's own. A band
-        // round hands none: listed with no `before:`, it misses no member
-        // dated in the band and received above it, and the engine finds
-        // absent there only a member dated in the band, below the round's
-        // opening, which the enumeration could not keep.
+        // round hands it too, a narrowed round handing none finding no
+        // member absent.
         let narrowed = query.is_some();
-        let enumerated = match narrowed && !band && page.next_page_token.is_none() {
+        let enumerated = match narrowed && page.next_page_token.is_none() {
             true => Some(
                 self.list_ids(label, None, None)
                     .with_context(|| format!("Enumerate the ids of {collection} error"))?,
@@ -1512,6 +1510,16 @@ fn open_stream(tls: &Tls, proxy: &Proxy, url: &str) -> Result<Stream> {
     let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     Ok(stream)
+}
+
+/// Whether a Gmail answer in an error chain refused the change as it
+/// stands, its status naming the request ([`names_the_request`]); a rate
+/// limit is told apart by [`crate::error::refusal`].
+pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
+    match cause.downcast_ref::<GmailClientStdError>() {
+        Some(GmailClientStdError::Send(GmailSendError::Api(err))) => names_the_request(err.status),
+        _ => false,
+    }
 }
 
 /// The code of a Gmail refusal in an error chain ([`google_code`]).
@@ -2433,6 +2441,42 @@ mod tests {
         assert_eq!(api.left() + batch.left(), 0);
     }
 
+    /// A band round narrowed by `after:` hands, on its last page, every id
+    /// of the label listed with no query, as a scoped round does (pimdir
+    /// SYNC §4, §5): a narrowed round handing none finds no member absent,
+    /// so a delete in the band would go unseen (pimdir vectors 160, 161).
+    #[test]
+    fn a_band_round_hands_the_label_s_ids_on_its_last_page() {
+        let (mut client, api, _) = scripted();
+        let bound = HashSet::from([String::from("m1")]);
+        let band = PimdirEnumerate {
+            listing: PimdirListing::Round {
+                cursor: None,
+                band: true,
+            },
+            scope: PimdirScope {
+                since: Some(String::from("2026-01-01T00:00:00Z")),
+                until: Some(String::from("2026-10-16T00:00:00Z")),
+            },
+        };
+
+        api.answer(listed(&["m1"]));
+        api.answer(listed(&[]));
+        api.answer(listed(&[]));
+        api.answer(listed(&[]));
+        api.answer(listed(&["m1", "m9"]));
+        let last = page(client.enumerate("INBOX", &band, held(&bound)).unwrap());
+
+        assert!(last.narrowed);
+        let mut enumerated = last.enumerated.expect("the label's ids");
+        enumerated.sort();
+        assert_eq!(enumerated, ["m1", "m9"]);
+        let requests = api.requests();
+        let unfiltered = requests.last().expect("the enumeration");
+        assert!(!unfiltered.contains("q="), "{requests:?}");
+        assert_eq!(api.left(), 0, "{requests:?}");
+    }
+
     /// A delete Gmail refuses for rights is coded `permission-denied`, a
     /// refused request left uncoded.
     #[test]
@@ -2452,6 +2496,35 @@ mod tests {
             let failure = Failure::of(&err);
             assert_eq!(failure.code, code, "{status}: {err:#}");
             assert_eq!(failure.error, "Delete message m1 error", "{err:#}");
+        }
+    }
+
+    /// A write Gmail answers with a status naming the request (400, a 403
+    /// for rights) is refused as it stands; a stale base (409, 412) and a
+    /// rate limit (a 403 naming one) stay rejected (pimdir SYNC §4).
+    #[test]
+    fn a_write_refused_as_it_stands_is_told_by_its_status() {
+        let invalid = r#"{"error":{"code":400,"message":"Invalid id value","errors":[{"reason":"invalidArgument"}]}}"#;
+        let denied = r#"{"error":{"code":403,"message":"Insufficient Permission","errors":[{"reason":"insufficientPermissions"}]}}"#;
+        let conflict =
+            r#"{"error":{"code":409,"message":"Conflict","errors":[{"reason":"conflict"}]}}"#;
+        let stale = r#"{"error":{"code":412,"message":"Precondition Failed","errors":[{"reason":"conditionNotMet"}]}}"#;
+        let daily = r#"{"error":{"code":403,"message":"Daily Limit Exceeded","errors":[{"reason":"dailyLimitExceeded"}]}}"#;
+        let cases = [
+            ("400 Bad Request", invalid, true),
+            ("403 Forbidden", denied, true),
+            ("409 Conflict", conflict, false),
+            ("412 Precondition Failed", stale, false),
+            ("403 Forbidden", daily, false),
+        ];
+
+        for (status, body, refused) in cases {
+            let (mut client, api, _) = scripted();
+            api.answer(json(status, body));
+            let err = client.delete_item("TRASH", "m1").unwrap_err();
+
+            let reason = crate::error::refusal(&err);
+            assert_eq!(reason.is_some(), refused, "{status} {body}: {err:#}");
         }
     }
 

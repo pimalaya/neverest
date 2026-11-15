@@ -28,7 +28,7 @@ use io_imap::{
         fetch::{MacroOrMessageDataItemNames, MessageDataItem, MessageDataItemName, Section},
         flag::{Flag as ImapFlag, FlagFetch, FlagNameAttribute, StoreType},
         mailbox::{ListMailbox, Mailbox as ImapMailbox},
-        response::Code,
+        response::{Code, StatusKind},
         search::SearchKey,
         sequence::SequenceSet,
         status::{StatusDataItem, StatusDataItemName},
@@ -377,11 +377,10 @@ impl ImapClient {
         // the store, so a narrowed round's last page hands every UID of the
         // mailbox, which no date filter narrowed (pimdir SYNC §4, §5), read
         // after the page's listing: a message arrived since is in it and
-        // absent from nothing. A band round hands none: the engine finds
-        // absent there only a member dated in the band, below the round's
-        // opening, which the enumeration could not keep.
+        // absent from nothing. A band round hands it too, a narrowed round
+        // handing none finding no member absent.
         let narrowed = narrows(scope);
-        let enumerated = match narrowed && !band && next.is_none() {
+        let enumerated = match narrowed && next.is_none() {
             true => Some(self.search_all(empty)?),
             false => None,
         };
@@ -500,7 +499,7 @@ impl ImapClient {
         // search (iCloud answers `NO [UNAVAILABLE]`) cannot tell, and is not
         // asked again on this connection: the round lists its dated mail,
         // which costs no absence, an undated member being found absent by
-        // the enumeration (`UID SEARCH ALL`) alone, never by a band.
+        // the enumeration (`UID SEARCH ALL`) alone.
         if narrowed && !self.undated_refused {
             let field = AString::try_from("Date").map_err(|_| anyhow!("Invalid IMAP field"))?;
             let empty = AString::try_from("").map_err(|_| anyhow!("Invalid IMAP value"))?;
@@ -998,6 +997,33 @@ impl ImapClient {
         self.uid_expunge(sequence_set)?;
 
         Ok(())
+    }
+}
+
+/// Whether an IMAP completion in an error chain refused the change as it
+/// stands (pimdir SYNC §4): a `NO` naming a rule the change breaks, the
+/// message the server cannot parse (`PARSE`), one too large for it
+/// (`TOOBIG`, RFC 7889), a write it can never do (`CANNOT`) or one the
+/// account may not make (`NOPERM`, RFC 5530 §3). A `NO` naming none, a
+/// `BAD` or a code naming a state that passes (`OVERQUOTA`, `INUSE`,
+/// `UNAVAILABLE`) cannot tell, and stays a rejection.
+pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
+    let Some(status) = cause
+        .downcast_ref::<ImapClientError>()
+        .and_then(ImapClientError::status)
+    else {
+        return false;
+    };
+    if status.kind != StatusKind::No {
+        return false;
+    }
+
+    match &status.code {
+        Some(Code::Parse | Code::TooBig) => true,
+        Some(Code::Other(code)) => [&b"CANNOT"[..], b"NOPERM", b"TOOBIG"]
+            .iter()
+            .any(|name| code.inner().eq_ignore_ascii_case(name)),
+        _ => false,
     }
 }
 
@@ -1621,6 +1647,49 @@ mod tests {
         }
     }
 
+    /// A write the server refuses as it stands, a `NO` naming a rule the
+    /// change breaks (`CANNOT`, `PARSE`, `NOPERM`), is refused for good;
+    /// one naming a quota or a passing state, a bare `NO` and a `BAD`
+    /// cannot tell, and stay rejected (pimdir SYNC §4).
+    #[test]
+    fn a_write_refused_as_it_stands_is_told_from_one_that_may_land() {
+        let cases = [
+            ("NO [CANNOT] Cannot store that", true),
+            ("NO [PARSE] Unparseable message", true),
+            ("NO [NOPERM] denied", true),
+            ("NO [OVERQUOTA] full", false),
+            ("NO [INUSE] busy", false),
+            ("NO [UNAVAILABLE] down", false),
+            ("NO failed", false),
+            ("BAD [CANNOT] malformed", false),
+        ];
+        let seen = [Flag::from_iana(IanaFlag::Seen)];
+        let message = b"Message-ID: <b@x>\r\n\r\nhi\r\n";
+
+        for (completion, refused) in cases {
+            let server = renumbered(false);
+            let mut client =
+                ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+
+            server.refuse_next_write(completion);
+            let err = client
+                .update_flags("INBOX", &["7"], &seen, &[])
+                .unwrap_err();
+            let reason = crate::error::refusal(&err);
+            assert_eq!(reason.is_some(), refused, "{completion}: {err:#}");
+
+            server.refuse_next_write(completion);
+            let err = client
+                .add_message_stream("INBOX", &[], &message[..], message.len(), Some("b@x"))
+                .unwrap_err();
+            let reason = crate::error::refusal(&err);
+            assert_eq!(reason.is_some(), refused, "{completion}: {err:#}");
+            if let Some(reason) = reason {
+                assert!(reason.contains(&completion[completion.find(']').unwrap() + 2..]));
+            }
+        }
+    }
+
     /// A round cursor under `uid_validity`.
     fn cursor(uid_validity: u32) -> PimdirCursor {
         PimdirCursor(encode_cursor(RoundCursor {
@@ -1787,8 +1856,9 @@ mod tests {
 
     /// A round a scope narrows by `SENTSINCE` states it on its page, and
     /// its last page hands every UID by `UID SEARCH ALL` (pimdir SYNC §4,
-    /// §5); a band round states it alone, and a round over the whole
-    /// mailbox states neither.
+    /// §5), a band round as well, so a delete in the band is still found
+    /// (pimdir vectors 160, 161); a round over the whole mailbox states
+    /// neither.
     #[test]
     fn a_narrowed_round_hands_every_uid_on_its_last_page() {
         let server = FakeImap::start(
@@ -1811,7 +1881,7 @@ mod tests {
         let since = PimdirScope::since("2026-09-01T00:00:00Z");
         let cases = [
             ("scoped", false, since.clone(), true, Some(vec!["1", "2"])),
-            ("band", true, since, true, None),
+            ("band", true, since, true, Some(vec!["1", "2"])),
             ("whole", false, PimdirScope::unbounded(), false, None),
         ];
 
@@ -1842,9 +1912,9 @@ mod tests {
                 .iter()
                 .filter(|line| line.eq_ignore_ascii_case("UID SEARCH ALL"))
                 .count();
-            // NOTE: the whole mailbox's round searches `ALL` itself, the
-            // scoped one for its enumeration, the band one not at all.
-            assert_eq!(all, usize::from(case != "band"), "{case}: {sent:?}");
+            // NOTE: the whole mailbox's round searches `ALL` itself, a
+            // narrowed one for its enumeration.
+            assert_eq!(all, 1, "{case}: {sent:?}");
         }
     }
 

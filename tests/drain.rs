@@ -323,17 +323,17 @@ fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
     assert!(!error.contains("--reset"), "{failure}");
 }
 
-/// A store an earlier neverest wrote is refused, never migrated (pimdir
-/// STORAGE §6): the message names the reinstall, syncing with that
-/// neverest first so no queued write is lost, then moving the store
-/// directory away, every account's store being one, and never says to
-/// delete it.
+/// A store an earlier neverest wrote, the draft-11 one of io-pimdir 0.13
+/// included, is refused, never migrated (pimdir STORAGE §6): the message
+/// names the reinstall, syncing with that neverest first so no queued
+/// write is lost, then moving the store directory away, every account's
+/// store being one, then the rebuild, and never says to delete it.
 #[test]
 fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
     let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
-    restamp_store(&fixture, "storage-draft-10");
+    restamp_store(&fixture, "storage-draft-11");
 
     let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
 
@@ -341,6 +341,10 @@ fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
     let error = failure["error"].as_str().unwrap_or_default();
     assert!(error.contains("until nothing is queued"), "{failure}");
     assert!(error.contains("move the store directory away"), "{failure}");
+    assert!(
+        error.contains("rebuild it with `neverest init`"),
+        "{failure}"
+    );
     assert!(!error.contains("--reset"), "{failure}");
     assert!(!error.to_lowercase().contains("delete "), "{failure}");
 }

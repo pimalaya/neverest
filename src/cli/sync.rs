@@ -340,6 +340,14 @@ impl SyncCommand {
                 outcomes.push(match outcome {
                     Ok(mut report) => {
                         report.interrupted = crate::sync::stopping();
+                        for refused in &report.refusals {
+                            progress.emit(|| SyncEvent::Refused {
+                                source: refused.side.clone(),
+                                collection: refused.collection.clone(),
+                                id: refused.id.clone(),
+                                reason: refused.reason.clone(),
+                            });
+                        }
                         ran(name, report)
                     }
                     Err(err) => {

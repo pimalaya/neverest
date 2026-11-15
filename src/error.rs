@@ -282,6 +282,68 @@ pub fn coded(err: Error) -> Error {
     with_code(err, refusal_code)
 }
 
+/// The reason a server refused a change for good, as it stands, `err`'s
+/// messages joined, `None` when nothing in its chain says so (pimdir SYNC
+/// §4): the push is then rejected, the change pushed again by the next run.
+///
+/// A change is refused by a coded `unsupported` (a rule the change breaks,
+/// which neverest states before any request: Graph's append outside
+/// Drafts, an override a provider takes through no instance) or by a
+/// protocol's refusal naming the request ([`names_the_request`], an IMAP
+/// `NO` naming the change). A quota exceeded or a rate limit is never
+/// one: the account's state, not the change's, which the same change
+/// outlives, and the engine would hold it for good.
+pub fn refusal(err: &Error) -> Option<String> {
+    if matches!(
+        code(err),
+        Some(ErrorCode::QuotaExceeded | ErrorCode::RateLimited)
+    ) {
+        return None;
+    }
+
+    let refusers: &[Refuses] = &[
+        #[cfg(feature = "dav")]
+        crate::dav::client::refuses,
+        #[cfg(feature = "gcal")]
+        crate::gcal::client::refuses,
+        #[cfg(feature = "gmail")]
+        crate::gmail::client::refuses,
+        #[cfg(feature = "gpeople")]
+        crate::gpeople::client::refuses,
+        #[cfg(feature = "imap")]
+        crate::imap::backend::refuses,
+        #[cfg(feature = "msgraph")]
+        crate::msgraph::client::refuses,
+    ];
+    let refused = code_of(err) == Some(ErrorCode::Unsupported)
+        || err
+            .chain()
+            .any(|cause| refusers.iter().any(|refuses| refuses(cause)));
+
+    refused.then(|| format!("{err:#}"))
+}
+
+/// Whether an HTTP status names the request itself (pimdir SYNC §4): any
+/// from 400 to 499 but those naming the credentials (401, 407), a state
+/// that passes (408, 423, 425, 429) or a stale base (409, 412).
+#[cfg_attr(
+    not(any(
+        feature = "dav",
+        feature = "gcal",
+        feature = "gmail",
+        feature = "gpeople",
+        feature = "msgraph"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn names_the_request(status: u16) -> bool {
+    (400..500).contains(&status) && !matches!(status, 401 | 407 | 408 | 409 | 412 | 423 | 425 | 429)
+}
+
+/// A reader of one protocol's typed errors, telling a refusal of the
+/// change as it stands ([`refusal`]).
+type Refuses = fn(&(dyn std::error::Error + 'static)) -> bool;
+
 /// A reader of one protocol's typed errors, coding the refusals it knows.
 type Refusal = fn(&(dyn std::error::Error + 'static)) -> Option<ErrorCode>;
 
@@ -330,6 +392,42 @@ mod tests {
             Some(ErrorCode::StoreBusy)
         );
         assert!(format!("{err:#}").contains("write lock"), "{err:#}");
+    }
+
+    /// A status from 400 to 499 names the request, but those naming the
+    /// credentials, a passing state or a stale base (pimdir SYNC §4); a
+    /// server failure never does.
+    #[test]
+    fn a_status_names_the_request_but_a_few() {
+        for status in [400, 403, 404, 405, 410, 413, 415, 422] {
+            assert!(names_the_request(status), "{status}");
+        }
+        for status in [
+            200, 302, 401, 407, 408, 409, 412, 423, 425, 429, 500, 503, 507,
+        ] {
+            assert!(!names_the_request(status), "{status}");
+        }
+    }
+
+    /// A rule the change breaks, coded `unsupported`, refuses it as it
+    /// stands, under any context; a quota or a rate limit never does, and
+    /// an uncoded failure cannot tell.
+    #[test]
+    fn an_unsupported_change_is_refused_and_a_quota_is_not() {
+        let unsupported = Error::new(CodedError::new(
+            ErrorCode::Unsupported,
+            String::from("Graph appends to Drafts only"),
+        ))
+        .context("Append to Archive");
+        let reason = refusal(&unsupported).expect("refused");
+        assert_eq!(reason, "Append to Archive: Graph appends to Drafts only");
+
+        let quota = Error::new(CodedError::new(
+            ErrorCode::QuotaExceeded,
+            String::from("full"),
+        ));
+        assert_eq!(refusal(&quota), None);
+        assert_eq!(refusal(&anyhow::anyhow!("connection reset")), None);
     }
 
     /// A lock file replaced under a run is a failure its caller can act

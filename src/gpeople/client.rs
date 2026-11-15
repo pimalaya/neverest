@@ -42,7 +42,7 @@ use url::Url;
 use crate::{
     account::GoogleAccount,
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
-    error::ErrorCode,
+    error::{ErrorCode, names_the_request},
     item::{collection::Collection, flag::Flag},
     throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, google_code},
 };
@@ -473,6 +473,18 @@ fn names_expired_token(text: &str) -> bool {
     text.contains("EXPIRED_SYNC_TOKEN") || text.contains("Sync token is expired")
 }
 
+/// Whether a People answer in an error chain refused the change as it
+/// stands, its status naming the request ([`names_the_request`]); a rate
+/// limit is told apart by [`crate::error::refusal`].
+pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
+    match cause.downcast_ref::<GpeopleClientStdError>() {
+        Some(GpeopleClientStdError::Send(GpeopleSendError::Api(err))) => {
+            names_the_request(err.status)
+        }
+        _ => false,
+    }
+}
+
 /// The code of a People refusal in an error chain ([`google_code`]).
 pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
     match cause.downcast_ref::<GpeopleClientStdError>()? {
@@ -574,6 +586,38 @@ mod tests {
                 .expect_err("no person to read");
 
             assert!(Gone::is(&err), "{status}: {err:#}");
+        }
+    }
+
+    /// A write People answers with a status naming the request (400) is
+    /// refused as it stands; a stale base (409, 412) stays rejected (pimdir
+    /// SYNC §4).
+    #[test]
+    fn a_write_refused_as_it_stands_is_told_by_its_status() {
+        let cases = [
+            ("400 Bad Request", 400, "Invalid resource name", true),
+            ("409 Conflict", 409, "Aborted", false),
+            ("412 Precondition Failed", 412, "Precondition failed", false),
+        ];
+
+        for (status, code, message, refused) in cases {
+            let body = format!(r#"{{"error":{{"code":{code},"message":"{message}"}}}}"#);
+            let answer = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let mut client = GpeopleClient {
+                inner: GpeopleClientStd::new(Canned(answer.into_bytes()), "token"),
+                tls: Tls::default(),
+                proxy: Proxy::None,
+                alive: true,
+                throttle: Arc::new(Throttle::new("gpeople")),
+            };
+
+            let err = client.delete_item("c1", None).expect_err("refused");
+
+            let reason = crate::error::refusal(&err);
+            assert_eq!(reason.is_some(), refused, "{status}: {err:#}");
         }
     }
 

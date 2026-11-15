@@ -127,6 +127,12 @@ pub struct SyncOutput {
     /// Re-tried and re-reported by every run until it lands or an operator
     /// removes the reason (counted as warnings).
     pub rejected: Vec<RejectedWrite>,
+    /// Changes a remote refused as they stand, held in the store while the
+    /// refusal stands (pimdir SYNC §5; counted as warnings).
+    ///
+    /// Reported by every run until the item changes, which pushes it anew,
+    /// or is removed, which withdraws it: a rerun alone holds it again.
+    pub refusals: Vec<RefusedChange>,
     /// The endpoints the run could not open: a server it could not reach, or
     /// one refusing the connection or its credentials.
     ///
@@ -198,7 +204,9 @@ pub struct SyncOutput {
     /// The members a source configured as capped did not list in a round
     /// that closed, counted per collection and kept (pimdir SYNC §5). They
     /// are no warning and change no exit code: a capped source lists the
-    /// same part of a collection at every round.
+    /// same part of a collection at every round. The engine counts there a
+    /// narrowed round handing no enumeration too, which every narrowed
+    /// round of neverest hands.
     pub unlisted: Vec<UnlistedMembers>,
     /// What the run did to the store's search index (pimdir SEARCH), `null`
     /// in a dry run and in a build without the `search` feature.
@@ -234,6 +242,7 @@ impl SyncOutput {
             outstanding_conflicts: _,
             refused,
             rejected,
+            refusals,
             unreached,
             throttled,
             coverage,
@@ -260,6 +269,7 @@ impl SyncOutput {
         self.conflicts.extend(conflicts);
         self.refused.extend(refused);
         self.rejected.extend(rejected);
+        self.refusals.extend(refusals);
         self.unreached.extend(unreached);
         self.throttled.extend(throttled);
         self.coverage.extend(coverage);
@@ -293,6 +303,7 @@ impl SyncOutput {
         endpoints.extend(self.conflicts.iter_mut().map(|c| &mut c.side));
         endpoints.extend(self.refused.iter_mut().map(|r| &mut r.side));
         endpoints.extend(self.rejected.iter_mut().map(|r| &mut r.side));
+        endpoints.extend(self.refusals.iter_mut().map(|r| &mut r.side));
         endpoints.extend(self.unreached.iter_mut().map(|u| &mut u.endpoint));
         endpoints.extend(self.throttled.iter_mut().map(|t| &mut t.source));
         endpoints.extend(self.coverage.iter_mut().map(|c| &mut c.source));
@@ -332,7 +343,8 @@ impl SyncOutput {
     /// Whether the run left work no rerun clears, which the exit code answers.
     ///
     /// A divergence waiting for a decision, a duplicate `UID` the other side
-    /// will not take, a write a remote refused, a send or an intent parked
+    /// will not take, a write a remote rejected, a change it refused as it
+    /// stands (held until the item changes), a send or an intent parked
     /// (refused for good, or possibly delivered) and a queued action the
     /// store holds parked are one class: waiting until a person acts, and
     /// none of them a failure of the run. So are a listing that parked a
@@ -345,6 +357,7 @@ impl SyncOutput {
             || !self.unreadable.is_empty()
             || !self.refused.is_empty()
             || !self.rejected.is_empty()
+            || !self.refusals.is_empty()
             || !self.parked.is_empty()
             || self.submitted.iter().any(|entry| entry.parked)
             || self.intents.iter().any(|entry| entry.parked)
@@ -842,6 +855,42 @@ impl fmt::Display for RefusedDuplicate {
     }
 }
 
+/// One change a remote refused as it stands, this run or a run before
+/// (pimdir SYNC §4, §5).
+///
+/// The store records the refusal on the item's binding and holds the
+/// change while it stands, pushing nothing: the same change would be
+/// refused again. Changing the item (an edit, a flag, a move into a
+/// collection the source takes) pushes it anew, and removing it withdraws
+/// it. Reported by every run while it stands.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RefusedChange {
+    /// The side that refused the change.
+    pub side: String,
+    /// The collection the item sits in, as the side names it.
+    pub collection: String,
+    /// The item's handle on that side, the item's key for a create.
+    pub id: String,
+    /// What the remote said, as the store keeps it.
+    pub reason: String,
+}
+
+impl fmt::Display for RefusedChange {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            id,
+            reason,
+        } = self;
+        write!(
+            f,
+            "{side} refused the change of {id} in {collection} as it stands, held until the item changes: {reason}"
+        )
+    }
+}
+
 /// One write a remote would not take, or that never reached the wire.
 ///
 /// Carried here rather than among the applied hunks, so `already in sync`
@@ -1206,6 +1255,7 @@ impl fmt::Display for SyncOutput {
             + self.conflicts.len()
             + self.refused.len()
             + self.rejected.len()
+            + self.refusals.len()
             + self.absences.len()
             + self.unreadable.len()
             + self.overruled.len()
@@ -1322,6 +1372,9 @@ impl fmt::Display for SyncOutput {
                 writeln!(f, " - {r}")?;
             }
             for r in &self.rejected {
+                writeln!(f, " - {r}")?;
+            }
+            for r in &self.refusals {
                 writeln!(f, " - {r}")?;
             }
             for p in &self.parked {

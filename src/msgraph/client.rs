@@ -91,7 +91,7 @@ use url::Url;
 use self::wire::{Connect, Exchange, Shared, Watched};
 use crate::{
     client::{Gone, Held, Listed, StoredSize, WrittenItem},
-    error::ErrorCode,
+    error::{ErrorCode, names_the_request},
     item::{
         collection::Collection,
         flag::{Flag, IanaFlag},
@@ -1531,6 +1531,16 @@ fn is_expired_link(err: &MsgraphClientStdError) -> bool {
     matches!(err, MsgraphClientStdError::Send(send) if send.status() == Some(410))
 }
 
+/// Whether a Graph answer in an error chain refused the change as it
+/// stands, its status naming the request ([`names_the_request`]).
+pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
+    let Some(MsgraphClientStdError::Send(send)) = cause.downcast_ref::<MsgraphClientStdError>()
+    else {
+        return false;
+    };
+    send.api().is_some_and(|err| names_the_request(err.status))
+}
+
 /// The code of a Graph refusal in an error chain: Graph's
 /// `ErrorQuotaExceeded` or a 507 is `quota-exceeded`, a 429 left after the
 /// waits `rate-limited`, a 403 `permission-denied`.
@@ -1752,7 +1762,8 @@ mod tests {
 
     /// An add Graph cannot make, into a folder other than Drafts, is coded
     /// `unsupported`, as the store's gate codes the same write refused at
-    /// enqueue, and sends nothing.
+    /// enqueue, sends nothing, and is refused as it stands (pimdir SYNC
+    /// §4): the store holds it rather than appending it every run.
     #[test]
     fn an_add_outside_drafts_is_unsupported() {
         let (mut client, _server) =
@@ -1766,6 +1777,8 @@ mod tests {
         let failure = Failure::of(&err);
         assert_eq!(failure.code, Some(ErrorCode::Unsupported), "{err:#}");
         assert!(failure.error.contains("Drafts only"), "{err:#}");
+        let reason = crate::error::refusal(&err).expect("refused as it stands");
+        assert!(reason.contains("appends to Drafts only"), "{reason}");
     }
 
     #[test]
@@ -2868,6 +2881,40 @@ mod tests {
             let failure = Failure::of(&err);
             assert_eq!(failure.code, expected, "{status} {code}: {err:#}");
             assert_eq!(failure.error, "Update flags of m1 error", "{err:#}");
+        }
+    }
+
+    /// A write Graph answers with a status naming the request (400, a 403
+    /// for rights) is refused as it stands, on mail, contacts and events
+    /// alike; a stale base (409, 412) and a quota (`ErrorQuotaExceeded`)
+    /// stay rejected (pimdir SYNC §4).
+    #[test]
+    fn a_write_refused_as_it_stands_is_told_by_its_status() {
+        let cases = [
+            (400, "ErrorInvalidRequest", true),
+            (403, "ErrorAccessDenied", true),
+            (409, "ErrorIrresolvableConflict", false),
+            (412, "ErrorIrresolvableConflict", false),
+            (403, "ErrorQuotaExceeded", false),
+        ];
+        let seen = [Flag::from_iana(IanaFlag::Seen)];
+
+        for (status, code, refused) in cases {
+            let (mut client, _server) = session(vec![vec![Step::error(status, code)]]);
+            let err = client.update_flags(&["m1"], &seen, &[]).unwrap_err();
+            let reason = crate::error::refusal(&err);
+            assert_eq!(reason.is_some(), refused, "mail {status} {code}: {err:#}");
+
+            for kind in [GraphKind::Contacts, GraphKind::Calendar] {
+                let (mut client, _server) = session_of(kind, vec![vec![Step::error(status, code)]]);
+                let err = client.delete_item("c1", None).unwrap_err();
+                let reason = crate::error::refusal(&err);
+                assert_eq!(
+                    reason.is_some(),
+                    refused,
+                    "{kind:?} {status} {code}: {err:#}"
+                );
+            }
         }
     }
 

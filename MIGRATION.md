@@ -4,7 +4,9 @@ v0.1.0 and v1.0.0-beta were early releases sitting on top of `email-lib`. v0.2.0
 
 This page lists the changes most likely to bite when upgrading. The full configuration schema lives in [config.sample.toml](./config.sample.toml), and the exhaustive list of changes in [CHANGELOG.md](./CHANGELOG.md).
 
-## Highlights
+## From v0.1 to v0.4
+
+### Highlights
 
 - The binary is synchronous: Tokio is gone, the `io-*` clients using `std::net`.
 - **`left` and `right` are gone.** An account names its endpoints and the direction between them: **sources** over one pimdir store, optionally **targets** to copy them to. A configuration still carrying either is refused, naming its replacement.
@@ -18,10 +20,10 @@ This page lists the changes most likely to bite when upgrading. The full configu
 - **CardDAV** and **CalDAV** are new backends, behind the `dav` cargo feature and in the default set. **Microsoft Graph** is behind `msgraph`, which is not a default while it syncs mail alone. JMAP and Gmail sources parse but cannot be opened yet.
 - **Notmuch** is removed.
 - **Keyring** and **OAuth** are out of the binary: source secrets from a command instead, such as `pass` or `secret-tool`, and [ortie](https://github.com/pimalaya/ortie) for OAuth access tokens.
-- The sync vocabulary is kind-neutral: **collections** and **items** rather than mailboxes and messages. The `mailbox`, `message` and `filters` spellings kept working as config aliases through v0.3.0 and are refused by name after it (see the next release below); the v0.1 `folder` ones never did, and no alias survives in the `--json` report.
+- The sync vocabulary is kind-neutral: **collections** and **items** rather than mailboxes and messages. The `mailbox`, `message` and `filters` spellings kept working as config aliases through v0.3.0 and are refused by name after it (see [From v0.3 to v0.4](#from-v03-to-v04) below); the v0.1 `folder` ones never did, and no alias survives in the `--json` report.
 - **A sync can exit 3 or 4.** A run that reconciled every collection and still left something waiting for a person (a parked conflict, a refused duplicate `UID`, a rejected write) exits 3 rather than 0 or 1, and one that could not do all its work exits 4. A script treating any non-zero code as failure needs to tell 3 and 4 from 1. Exit 2 is a command line neverest refused.
 
-## Suggested steps
+### Suggested steps
 
 1. Copy [config.sample.toml](./config.sample.toml) next to the old config.toml and port your accounts.
 2. Run `neverest account check` to validate every endpoint and read back what each account does, in words.
@@ -29,7 +31,7 @@ This page lists the changes most likely to bite when upgrading. The full configu
 4. Run `neverest sync --dry-run` to inspect the first patch.
 5. Drop `--dry-run`, replace the old config, done.
 
-## From v0.3.0, or any earlier build, to the next release
+## From v0.3 to v0.4
 
 Two things change at once, and neither is migrated:
 
@@ -85,17 +87,17 @@ What else changes:
 - **A Gmail source refuses every keyword but `$Important`**, before a frontend queues it, where it let any through with a warning and the push dropped it. Before: `himalaya flag add -m <account>/gmail/INBOX 42 -f seen -f custom` was queued, `\Seen` reached Gmail and `custom` was lost. After: it is refused naming `mail.flags.keywords`; queue `-f seen` alone. An add, copy or move into a Gmail label of a message carrying a keyword (a `$Forwarded` from an IMAP folder) is refused too, as one carrying `\Answered` already was: remove the keyword first. Such an action queued before the upgrade parks at the next `neverest drain` or `sync`, listed under `parked`: cancel it in its frontend and queue it again without the keyword.
 - **A removed configuration key reads the family sentence**: "The `left` table is removed, <why>: <what to write instead>, see MIGRATION.md", where it read "`left` and `right` are gone: … See <URL>". The same keys are refused: match the key, not the text.
 
-## From a git master build
+### From a git master build
 
 No v1.0.0 was ever released: what was prepared under that number ships as v0.2.0.
 
-If you ran a build from master, its store is refused as `store-version`: reinstall it as the section above says.
+If you ran a build from master, its store is refused as `store-version`: reinstall it as [From v0.3 to v0.4](#from-v03-to-v04) says above.
 
 A build from before v0.2.0 may have written the send channel as a flat `smtp.login` and `smtp.password`: write one `smtp.sasl` mechanism instead, spelled as under `imap.sasl` (`smtp.sasl.plain.username` and `smtp.sasl.plain.password`, or `smtp.sasl.login.*` for the LOGIN exchange those keys ran).
 
-## From v1.0.0-beta to v0.2.0
+## From v1.0.0-beta to v0.2
 
-Everything in the v0.1.0 section below applies too: v1.0.0-beta only added a few cosmetic changes on top of v0.1.0.
+Everything in [From v0.1 to v0.2](#from-v01-to-v02) below applies too: v1.0.0-beta only added a few cosmetic changes on top of v0.1.0.
 
 ### CLI
 
@@ -115,7 +117,7 @@ Everything in the v0.1.0 section below applies too: v1.0.0-beta only added a few
 
 `color-eyre`'s spantrace and backtrace output is gone: errors flow through `anyhow` and pimalaya-cli's error report. `tracing` is replaced by `log`.
 
-## From v0.1.0 to v0.2.0
+## From v0.1 to v0.2
 
 ### CLI
 

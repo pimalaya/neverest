@@ -62,7 +62,7 @@ jiff = { version = "0.2", default-features = false, features = ["std"], optional
 log = "0.4"
 percent-encoding = "2"
 pimalaya-cli = { version = "0.5.2", default-features = false, features = ["terminal", "spinner"] }
-pimalaya-config = { version = "0.5.1", default-features = false, features = ["toml", "secret"] }
+pimalaya-config = { version = "0.5.2", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.4", default-features = false }
 rusqlite = { version = "0.41", default-features = false }
 schemars = "1"

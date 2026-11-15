@@ -359,7 +359,9 @@ Upgrading from 0.3.0:
 
 - Bumped io-msgraph to 0.8.
 
-- Bumped pimalaya-cli and pimalaya-config to 0.5.
+- Bumped pimalaya-cli to 0.5 and pimalaya-config to 0.5.2.
+
+  An unknown configuration key's error lists no removed key among the keys it expects.
 
 - Bumped io-sasl to 0.2.
 

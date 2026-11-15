@@ -9,10 +9,15 @@ jobs:
     uses: pimalaya/nix/.github/workflows/tests.yml@master
     secrets: inherit
 
-  live-tests:
+  live:
     # Only in this repository: a fork holds no secret, and the job would fail on
-    # every contributor's push for want of one.
+    # every contributor's push for want of one. One job per provider, so one
+    # provider failing (a quota) leaves the other's tests running.
     if: github.repository == 'pimalaya/neverest'
+    strategy:
+      fail-fast: false
+      matrix:
+        provider: [google, microsoft]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,12 +31,17 @@ jobs:
           extraPullNames: nix-community
       - uses: Swatinem/rust-cache@v2
       - name: Run the live tests
+        if: matrix.provider == 'google'
         env:
           GOOGLE_SERVICE_ACCOUNT_KEY: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_KEY }}
+        run: nix develop -c cargo test --test google -- --ignored --test-threads 1
+      - name: Run the live tests
+        if: matrix.provider == 'microsoft'
+        env:
           MSGRAPH_TENANT_ID: ${{ secrets.MICROSOFT_TENANT_ID }}
           MSGRAPH_CLIENT_ID: ${{ secrets.MICROSOFT_CLIENT_ID }}
           MSGRAPH_CLIENT_SECRET: ${{ secrets.MICROSOFT_CLIENT_SECRET }}
-        run: nix develop -c cargo test --test google --test msgraph -- --ignored --test-threads 1
+        run: nix develop -c cargo test --test msgraph -- --ignored --test-threads 1
 
   features:
     # Each backend builds alone, so clippy runs over every feature set a

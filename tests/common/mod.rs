@@ -39,7 +39,7 @@ use io_oauth::{
 };
 use io_pimdir::{
     client::{
-        PimdirStore,
+        PimdirError, PimdirStore,
         blobs::PimdirBlobs,
         producer::PimdirProducer,
         reader::{PimdirItem, PimdirReader},
@@ -358,12 +358,19 @@ impl Replica {
 
     /// Stages a creation, as a frontend does.
     pub fn add(&self, key: &str, body: &str, flags: &[&str]) {
-        self.enqueue_body(key, body, |hash| PimdirAction::Add {
+        self.try_add(key, body, flags).expect("enqueue the action");
+    }
+
+    /// Stages a creation as [`add`](Self::add) does, answering the store's
+    /// refusal (a capability the source declares `none`) where `add`
+    /// panics.
+    pub fn try_add(&self, key: &str, body: &str, flags: &[&str]) -> Result<(), PimdirError> {
+        self.try_enqueue_body(key, body, |hash| PimdirAction::Add {
             link_id: None,
             flags: known(flags),
             object: Some(hash),
             supersedes: None,
-        });
+        })
     }
 
     /// Queues a send of `body` from and to `user`, its copy filed in the
@@ -493,10 +500,22 @@ impl Replica {
         body: &str,
         action: impl FnOnce(io_pimdir::object::PimdirHash) -> PimdirAction,
     ) {
+        self.try_enqueue_body(key, body, action)
+            .expect("enqueue the action");
+    }
+
+    /// Stages `body` and its action as [`enqueue_body`](Self::enqueue_body)
+    /// does, answering the store's refusal of the action.
+    fn try_enqueue_body(
+        &self,
+        key: &str,
+        body: &str,
+        action: impl FnOnce(io_pimdir::object::PimdirHash) -> PimdirAction,
+    ) -> Result<(), PimdirError> {
         PimdirProducer::open(self.store(), "neverest-live")
             .expect("open producer")
             .enqueue_with_body(&self.collection(key), body.as_bytes(), action)
-            .expect("enqueue the action");
+            .map(drop)
     }
 
     fn enqueue(&self, key: &str, action: PimdirAction) {

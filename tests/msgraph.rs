@@ -35,11 +35,19 @@ use io_msgraph::v1::{
         messages::{MsgraphMessage, list::MsgraphMessagesListParams},
     },
 };
+use io_pimdir::{
+    capability::{MAIL_MESSAGE_ADD, PimdirRefusal},
+    client::PimdirError,
+};
 
 use crate::common::*;
 
 /// How long Graph may take to list what a run wrote.
 const LISTED: Duration = Duration::from_secs(60);
+
+/// Why a Graph source refuses an add outside Drafts, as neverest declares
+/// it (src/offline/capability.rs).
+const GRAPH_DRAFTS_ONLY: &str = "Drafts only: Graph creates every MIME message as a draft";
 
 /// The messages of the folder `folder` (an id or a well-known name)
 /// whose `Message-ID` is `<tag@pimalaya.org>`, as `message` writes it.
@@ -354,8 +362,9 @@ fn a_graph_move_is_delivered_once() {
 }
 
 /// A message added through the store lands in Drafts with its flags, bound
-/// to the id Graph gave it; an add anywhere else is rejected, not filed as
-/// a draft.
+/// to the id Graph gave it; an add anywhere else is refused at enqueue, the
+/// source declaring `mail.message.add` for Drafts alone, and nothing is
+/// filed.
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_add_lands_in_drafts_only() {
@@ -407,15 +416,24 @@ fn a_graph_add_lands_in_drafts_only() {
             assert!(set.contains("\\Draft") && set.contains("\\Seen"), "{set:?}");
 
             a.sync_keys(&[&draft], &[0]);
-            a.add(&draft, &message(&elsewhere, &msgraph_user()), &[]);
-            a.sync_keys(&[&draft], &[3]);
+            let refused = a.try_add(&draft, &message(&elsewhere, &msgraph_user()), &[]);
+            let expected = PimdirRefusal {
+                capability: MAIL_MESSAGE_ADD.to_owned(),
+                source: a.source(),
+                detail: Some(GRAPH_DRAFTS_ONLY.to_owned()),
+            };
+            match refused {
+                Err(PimdirError::Unsupported(refusal)) => assert_eq!(refusal, expected),
+                other => panic!("an add outside Drafts is refused at enqueue: {other:?}"),
+            }
+            assert!(
+                a.item(&draft, &elsewhere).is_none(),
+                "the refused add is not queued"
+            );
+            a.sync_keys(&[&draft], &[0]);
             assert!(
                 messages(&token, &folder_id, &elsewhere).is_empty(),
                 "nothing is filed outside Drafts"
-            );
-            assert!(
-                a.item(&draft, &elsewhere).is_some(),
-                "the rejected add stays pending"
             );
         },
         || {

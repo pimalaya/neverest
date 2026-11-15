@@ -1097,8 +1097,9 @@ dependencies = [
 
 [[package]]
 name = "io-gcal"
-version = "0.4.0"
-source = "git+https://github.com/pimalaya/io-gcal?rev=dbb4481cd77ef65ca451420cb4e087fdccfe6fdb#dbb4481cd77ef65ca451420cb4e087fdccfe6fdb"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac7a50d6921fc35f3fa98ce0523756b9da5d3d2e3a8a69992dc997fa449b3a7f"
 dependencies = [
  "anyhow",
  "ical-rs",
@@ -1114,9 +1115,9 @@ dependencies = [
 
 [[package]]
 name = "io-gmail"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "babcff323c91ac2c9f1a66beb80ecde0f9302f132906cb31649a73267b1a2c63"
+checksum = "5992425f089d8eb98b68d71f8264b1177ac188a8ad7dddd6485dbd58b00f8fc2"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -1131,8 +1132,9 @@ dependencies = [
 
 [[package]]
 name = "io-gpeople"
-version = "0.7.0"
-source = "git+https://github.com/pimalaya/io-gpeople?rev=e4a9cac80d023688118dbae88f8535145e8d2c9b#e4a9cac80d023688118dbae88f8535145e8d2c9b"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53c86e1dba5542329e8f8fc2ead09da949d20c2c044c10c76c3e66325d94d3c0"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -1164,9 +1166,9 @@ dependencies = [
 
 [[package]]
 name = "io-imap"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f08d53d879f2a96b5de67712fbe2ae5edcd16df5a415592ab58c86f6be226ba2"
+checksum = "2e8e9c025dbc82dc63da2a7d6fccb69c9613d9c30f0b31c0b439c62524cac3a1"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -1174,7 +1176,7 @@ dependencies = [
  "imap-codec",
  "io-sasl",
  "log",
- "mime-rs",
+ "mime-rs 0.2.0",
  "pimalaya-stream",
  "rand",
  "secrecy",
@@ -1235,7 +1237,7 @@ dependencies = [
  "ical-rs",
  "jiff",
  "log",
- "mime-rs",
+ "mime-rs 0.1.0",
  "rusqlite",
  "rustix",
  "serde",
@@ -1294,8 +1296,9 @@ dependencies = [
 
 [[package]]
 name = "io-webdav"
-version = "0.8.0"
-source = "git+https://github.com/pimalaya/io-webdav?rev=777d34eea1b48f7d90635e3e82e1a96a9d57504e#777d34eea1b48f7d90635e3e82e1a96a9d57504e"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b75d504a0f6babb28ecd8697bbbf952c87cbdfa5eff09f4b55017c47a7acde0a"
 dependencies = [
  "anyhow",
  "io-http",
@@ -1539,6 +1542,18 @@ dependencies = [
  "base64-codec",
  "encoding_rs",
  "memchr",
+ "quoted-printable-codec",
+ "simd-cpu",
+]
+
+[[package]]
+name = "mime-rs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64fab22816df54ec4d6650ed93ac149d33b2844315959c2f4aa773b721482ccc"
+dependencies = [
+ "base64-codec",
+ "encoding_rs",
  "quoted-printable-codec",
  "simd-cpu",
 ]
@@ -1841,8 +1856,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pimalaya-cli"
-version = "0.4.0"
-source = "git+https://github.com/pimalaya/cli?rev=8190dc544e277aeeba6acc43817100179f19643b#8190dc544e277aeeba6acc43817100179f19643b"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc9fe296711004ff85b90ff0e96bb758ba649f28c8036400e75eddf230ceff86"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -1864,8 +1880,9 @@ dependencies = [
 
 [[package]]
 name = "pimalaya-config"
-version = "0.4.1"
-source = "git+https://github.com/pimalaya/config?rev=d5a33cba3fe9826b82f15a479043a7f79ca742ce#d5a33cba3fe9826b82f15a479043a7f79ca742ce"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a8fe720198d49083f777f07b9f1617b6b387d4bcdbf69e38a3ab4e7f238e9a5"
 dependencies = [
  "anyhow",
  "dirs 7.0.0",

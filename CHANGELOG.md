@@ -309,21 +309,23 @@ Upgrading from 0.3.0:
 
 - Bumped ical-rs to 0.7.
 
-- Bumped io-gcal to 0.4.
+- Bumped io-gcal to 0.5.
 
   An event giving its end as a `DURATION` is pushed to Google Calendar, no longer refused. A calendar whose id holds `#`, `?` or `/`, a subscribed holiday calendar among them, is read as itself.
 
-- Bumped io-gmail to 0.7.
+- Bumped io-gmail to 0.9.
 
-- Bumped io-gpeople to 0.7.
+- Bumped io-gpeople to 0.8.
 
 - Bumped io-http to 0.7.
 
-- Bumped io-imap to 0.9.
+- Bumped io-imap to 0.11.
+
+  A FETCH line io-imap decodes in part fails a listing page, as a line it skips does: read short, the page would state the missing message removed.
 
 - Bumped io-msgraph to 0.8.
 
-- Bumped pimalaya-cli to 0.4.
+- Bumped pimalaya-cli and pimalaya-config to 0.5.
 
 - Bumped io-sasl to 0.2.
 
@@ -333,7 +335,7 @@ Upgrading from 0.3.0:
 
   An envelope address that is no mailbox, or holds a line break, fails its send before anything is written.
 
-- Bumped io-webdav to 0.8.
+- Bumped io-webdav to 0.9.
 
   A CalDAV or CardDAV multistatus is parsed 3.4 to 9 times faster.
 

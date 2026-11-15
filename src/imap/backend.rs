@@ -1129,14 +1129,14 @@ struct Meta {
 }
 
 /// The result of `command`, warning of the server's alerts and of the
-/// response lines skipped for not decoding.
+/// response lines skipped, or decoded in part, for not decoding.
 fn data_of<T>(command: &str, output: ImapOutput<T>) -> T {
     for alert in &output.alerts {
         warn!("server sent an alert: {alert}");
     }
 
-    if !output.skipped.is_empty() {
-        let count = output.skipped.len();
+    let count = output.skipped.len() + output.partial.len();
+    if count > 0 {
         warn!("skipped {count} unreadable line(s) of the {command} response");
     }
 
@@ -1144,14 +1144,15 @@ fn data_of<T>(command: &str, output: ImapOutput<T>) -> T {
 }
 
 /// The rows a listing `command` answered, refused when a line of the
-/// response was skipped for not decoding: read short, it states removals.
+/// response was skipped, or decoded in part, for not decoding: read short,
+/// it states removals.
 fn rows_of<T>(command: &str, output: ImapOutput<T>) -> Result<T> {
     for alert in &output.alerts {
         warn!("server sent an alert: {alert}");
     }
 
-    if !output.skipped.is_empty() {
-        let count = output.skipped.len();
+    let count = output.skipped.len() + output.partial.len();
+    if count > 0 {
         bail!("IMAP {command} response holds {count} line(s) that do not decode");
     }
 

@@ -1176,7 +1176,7 @@ dependencies = [
  "imap-codec",
  "io-sasl",
  "log",
- "mime-rs 0.2.0",
+ "mime-rs",
  "pimalaya-stream",
  "rand",
  "secrecy",
@@ -1227,9 +1227,9 @@ dependencies = [
 
 [[package]]
 name = "io-pimdir"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d11d62e181a0d63b6068e222f2dafc748eba384847ae2ce67e7082acd1f61c9"
+checksum = "772eaa836ddb21349245eda71daca1cd32060e46bc7b5f42c72e726e5087c12d"
 dependencies = [
  "blake3",
  "encoding_rs",
@@ -1237,7 +1237,7 @@ dependencies = [
  "ical-rs",
  "jiff",
  "log",
- "mime-rs 0.1.0",
+ "mime-rs",
  "rusqlite",
  "rustix",
  "serde",
@@ -1535,25 +1535,13 @@ dependencies = [
 
 [[package]]
 name = "mime-rs"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "44ca77080cce04174d6788fb762d0a5576a1a4902291da9f30862fa4180ec130"
-dependencies = [
- "base64-codec",
- "encoding_rs",
- "memchr",
- "quoted-printable-codec",
- "simd-cpu",
-]
-
-[[package]]
-name = "mime-rs"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "64fab22816df54ec4d6650ed93ac149d33b2844315959c2f4aa773b721482ccc"
 dependencies = [
  "base64-codec",
  "encoding_rs",
+ "memchr",
  "quoted-printable-codec",
  "simd-cpu",
 ]

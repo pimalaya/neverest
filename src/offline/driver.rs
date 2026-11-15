@@ -8867,7 +8867,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
         let mut config: AccountConfig =
-            toml::from_str(r#"left.imap.server = "imaps://imap.example.org:993""#).unwrap();
+            toml::from_str(r#"imap.server = "imaps://imap.example.org:993""#).unwrap();
 
         let mut report = SyncOutput::default();
         sweep_retained(&config, &mut store, &mut report);
@@ -8946,7 +8946,7 @@ mod tests {
         let mut store = PimdirStore::open(dir.path()).unwrap();
         let config: AccountConfig = toml::from_str(
             r#"
-            left.imap.server = "imaps://imap.example.org:993"
+            imap.server = "imaps://imap.example.org:993"
             store.purge-after = "0s"
             "#,
         )

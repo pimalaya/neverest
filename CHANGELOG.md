@@ -160,7 +160,7 @@ Upgrading from 0.3.0:
 
 - **BREAKING**: changed the configuration to refuse every key it does not read, at every level, naming the key.
 
-  A source table (`sources.<name>`, `targets.<name>`) was read through serde's `flatten`, which let an unknown key by and kept the first of two backend tables: it now refuses both, and the document root refuses anything but `accounts`. A key an earlier neverest read is refused by name with its replacement and a link to MIGRATION.md: `left`, `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace` (on a backend written directly under the account too, where it was ignored), `store.retention`, `store.hydration`, and the flat `smtp.login` and `smtp.password`.
+  A source table (`sources.<name>`, `targets.<name>`) was read through serde's `flatten`, which let an unknown key by and kept the first of two backend tables: it now refuses both, and the document root refuses anything but `accounts`. A key an earlier neverest read is refused by name with its replacement and a link to MIGRATION.md, as the file is parsed, in every account whether a command opens it or not: `left`, `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace` (on a backend written directly under the account too, where it was ignored), `store.retention`, `store.hydration`, and the flat `smtp.login` and `smtp.password`.
 
 - **BREAKING**: changed `conflict show --json` to print a body that is not valid UTF-8 as `{data, size, mime}`, `data` in base64 and `mime` the collection's media type, where it printed it decoded with U+FFFD replacements, losing the bytes a decision is made between. A UTF-8 body is still a string.
 

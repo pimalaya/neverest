@@ -131,7 +131,7 @@ Declaring the same key both directly and under `sources` SHALL be a configuratio
 ### Requirement: The configuration refuses every key it does not read
 The configuration SHALL refuse at load, naming it, every key it does not read, at every level: the document root, which holds `accounts` alone; an account; a `sources.<name>` or `targets.<name>` table; a backend table, written under a source or directly under the account; and every table nested in one (`tls`, `sasl`, `auth`, `collection`, `item`, `flag`, `smtp`, `store`, `conflict`). A source table naming no backend table, or more than one, SHALL be refused at load, naming the backends it found.
 
-A key an earlier neverest read and removed SHALL be refused by name with its replacement, ending on the address of MIGRATION.md, by every command that opens the account and before anything connects: `left` and `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace` on any source (one written directly under the account included), `store.retention` and `store.hydration`, and the flat `login` and `password` of an `smtp` table.
+A key an earlier neverest read and removed SHALL be refused by name with its replacement, ending on the address of MIGRATION.md, as the file is parsed, so in an account no command opens as in one it does: `left` and `right`, `folder`, `envelope`, the account-level `collection`, `collection.namespace` on any source (one written directly under the account included), `store.retention` and `store.hydration`, and the flat `login` and `password` of an `smtp` table.
 
 #### Scenario: A typo beside a source's backend
 - GIVEN `sources.work.imap.server = "…"` and `sources.work.imap-typo = 1`

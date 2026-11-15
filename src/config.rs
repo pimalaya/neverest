@@ -341,18 +341,22 @@ pub struct AccountConfig {
     /// --connections N` overrides it for one run.
     #[serde(default)]
     pub connections: Option<usize>,
-    /// Removed keys, kept so a configuration carrying one is refused by name
-    /// rather than as an unknown field. See [`AccountConfig::validate`].
+    /// Removed keys, refused by name as the file is parsed.
+    #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    left: Option<RemovedKey>,
+    left: Option<LeftRightRemoved>,
+    #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    right: Option<RemovedKey>,
+    right: Option<LeftRightRemoved>,
+    #[allow(dead_code)]
     #[serde(default, skip_serializing, alias = "mailbox")]
-    collection: Option<RemovedKey>,
+    collection: Option<AccountCollectionRemoved>,
+    #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    folder: Option<RemovedKey>,
+    folder: Option<FolderRemoved>,
+    #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    envelope: Option<RemovedKey>,
+    envelope: Option<EnvelopeRemoved>,
 }
 
 impl AccountConfig {
@@ -529,14 +533,12 @@ impl AccountConfig {
         })
     }
 
-    /// Rejects an account a command cannot run: a removed key, no source, a
-    /// source declaring what its backend cannot honour, two senders.
+    /// Rejects an account a command cannot run: no source, a source
+    /// declaring what its backend cannot honour, two senders.
     ///
     /// Run by every command that opens an account, so a bad configuration is
     /// refused before a connection rather than halfway through a sync.
     pub fn validate(&self) -> Result<()> {
-        self.reject_removed_keys()?;
-
         let sources = self.sources()?;
 
         if sources.is_empty() {
@@ -628,105 +630,92 @@ impl AccountConfig {
 
         Ok(PimdirScope::since(since))
     }
-
-    /// Refuses a key this version removed, naming what replaces it.
-    ///
-    /// Refused rather than ignored: silently honouring neither the old
-    /// meaning nor the new one is how a configuration ends up doing the
-    /// opposite of what it says.
-    fn reject_removed_keys(&self) -> Result<()> {
-        if self.left.is_some() || self.right.is_some() {
-            bail!(
-                "`left` and `right` are gone: an account names its endpoints and the direction \
-                 between them. Write the authoritative one under `sources` and the other under \
-                 `targets`, and add `one-way = true` to copy rather than merge; leaving it off \
-                 keeps them syncing both ways, which is what the pair used to do. See \
-                 {MIGRATION_NOTES}"
-            );
-        }
-
-        if self.collection.is_some() {
-            bail!(
-                "The account-level `collection` table is gone: a filter belongs to the source it \
-                 filters, since an account may hold sources of several kinds. Write it as \
-                 `sources.<name>.collection.filter`, or `<protocol>.collection.filter` under the \
-                 account. See {MIGRATION_NOTES}"
-            );
-        }
-
-        if self.folder.is_some() {
-            bail!(
-                "The `folder` table is gone: its filter is `<protocol>.collection.filter`, on the \
-                 source it filters, and its aliases have no replacement. See {MIGRATION_NOTES}"
-            );
-        }
-
-        if self.envelope.is_some() {
-            bail!(
-                "The `envelope` table is gone: `item.filter.since` bounds the mail a sync lists \
-                 by its date. See {MIGRATION_NOTES}"
-            );
-        }
-
-        let sources = self
-            .sources
-            .iter()
-            .map(|(name, source)| ("sources", name, source));
-        let targets = self
-            .targets
-            .iter()
-            .map(|(name, source)| ("targets", name, source));
-        let channels = sources.chain(targets).filter_map(|(table, name, source)| {
-            let smtp = source.smtp.as_ref()?;
-            Some((format!("{table}.{name}.smtp"), smtp))
-        });
-        let account = self.smtp.iter().map(|smtp| (String::from("smtp"), smtp));
-
-        for (key, smtp) in account.chain(channels) {
-            smtp.reject_removed_keys(&key)?;
-        }
-
-        self.store.reject_removed_keys()?;
-
-        let mut namespaced: Vec<_> = self
-            .sources()?
-            .into_iter()
-            .chain(self.targets.clone())
-            .filter(|(_, source)| source.declares_namespace())
-            .map(|(name, _)| name)
-            .collect();
-        namespaced.sort();
-
-        if !namespaced.is_empty() {
-            bail!(
-                "`collection.namespace` is gone, on {}: it said which sources met, which is now \
-                 whether they sit under `sources` or `targets`, and it never said which way, \
-                 which is now `one-way`. Drop it. See {MIGRATION_NOTES}",
-                namespaced.join(", "),
-            );
-        }
-
-        Ok(())
-    }
 }
 
-/// Presence marker for a configuration key this version removed.
+/// Declares a configuration key this version removed: a type no value
+/// deserializes into, refusing the key by name with its replacement as the
+/// file is parsed, rather than as an unknown field with no explanation.
 ///
-/// Deserializing accepts whatever the key held and discards it, so the
-/// account refuses it by name with its replacement rather than as an
-/// unknown field with no explanation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RemovedKey;
+/// Refused rather than ignored: silently honouring neither the old meaning
+/// nor the new one is how a configuration ends up doing the opposite of
+/// what it says.
+macro_rules! removed_key {
+    ($(#[$doc:meta])* $name:ident, $($message:tt)+) => {
+        $(#[$doc])*
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum $name {}
 
-impl<'de> Deserialize<'de> for RemovedKey {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        serde::de::IgnoredAny::deserialize(deserializer)?;
-        Ok(Self)
-    }
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(_: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                Err(serde::de::Error::custom(format!($($message)+)))
+            }
+        }
+    };
 }
+
+removed_key!(
+    /// `left` and `right`, now `sources`, `targets` and `one-way`.
+    LeftRightRemoved,
+    "`left` and `right` are gone: an account names its endpoints and the direction \
+     between them. Write the authoritative one under `sources` and the other under \
+     `targets`, and add `one-way = true` to copy rather than merge; leaving it off \
+     keeps them syncing both ways, which is what the pair used to do. See \
+     {MIGRATION_NOTES}"
+);
+
+removed_key!(
+    /// The account-level `collection` (or `mailbox`) table, now per source.
+    AccountCollectionRemoved,
+    "The account-level `collection` table is gone: a filter belongs to the source it \
+     filters, since an account may hold sources of several kinds. Write it as \
+     `sources.<name>.collection.filter`, or `<protocol>.collection.filter` under the \
+     account. See {MIGRATION_NOTES}"
+);
+
+removed_key!(
+    /// The v0.1 `folder` table.
+    FolderRemoved,
+    "The `folder` table is gone: its filter is `<protocol>.collection.filter`, on the \
+     source it filters, and its aliases have no replacement. See {MIGRATION_NOTES}"
+);
+
+removed_key!(
+    /// The v0.1 `envelope` table, now `item.filter.since`.
+    EnvelopeRemoved,
+    "The `envelope` table is gone: `item.filter.since` bounds the mail a sync lists \
+     by its date. See {MIGRATION_NOTES}"
+);
+
+removed_key!(
+    /// `collection.namespace`, now the account's arity and `one-way`.
+    NamespaceRemoved,
+    "`collection.namespace` is gone: it said which sources met, which is now whether \
+     they sit under `sources` or `targets`, and it never said which way, which is now \
+     `one-way`. Drop it. See {MIGRATION_NOTES}"
+);
+
+removed_key!(
+    /// `store.retention` and `store.hydration`, now the account's `retain`.
+    ///
+    /// A three-point scale described a store holding only the bodies that
+    /// happened to cross, which nothing asked for; mapping either key onto
+    /// `retain` would guess.
+    StoreRetentionRemoved,
+    "`store.retention` and `store.hydration` are gone: whether the store keeps \
+     bodies is the account's `retain`, which is true when the store is the \
+     destination and false when targets are named. See {MIGRATION_NOTES}"
+);
+
+removed_key!(
+    /// The flat `smtp.login` and `smtp.password`, now a `sasl` mechanism.
+    SmtpLoginRemoved,
+    "The flat `login` and `password` keys of `smtp` are gone: the send channel names \
+     one SASL mechanism, as `imap` does, such as `smtp.sasl.plain.username` and \
+     `smtp.sasl.plain.password`. See {MIGRATION_NOTES}"
+);
 
 /// The only part of conflict handling anybody configures.
 ///
@@ -775,32 +764,16 @@ pub struct StoreConfig {
     /// build without the `search` feature ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index_timeout: Option<HumanDuration>,
-    /// Removed keys, kept so a configuration carrying one is refused by
-    /// name. See [`StoreConfig::reject_removed_keys`].
+    /// Removed keys, refused by name as the file is parsed.
+    #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    retention: Option<RemovedKey>,
+    retention: Option<StoreRetentionRemoved>,
+    #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    hydration: Option<RemovedKey>,
+    hydration: Option<StoreRetentionRemoved>,
 }
 
 impl StoreConfig {
-    /// Refuses `retention` and `hydration`, now the account's `retain`.
-    ///
-    /// A three-point scale described a store holding only the bodies that
-    /// happened to cross, which nothing asked for; mapping either key onto
-    /// `retain` would guess, so both are refused by name.
-    fn reject_removed_keys(&self) -> Result<()> {
-        if self.retention.is_some() || self.hydration.is_some() {
-            bail!(
-                "`store.retention` and `store.hydration` are gone: whether the store keeps \
-                 bodies is the account's `retain`, which is true when the store is the \
-                 destination and false when targets are named. See {MIGRATION_NOTES}"
-            );
-        }
-
-        Ok(())
-    }
-
     /// The RFC 3339 cutoff at `now`: an older retained item is reclaimed.
     ///
     /// `None` when `purge-after` is unset, or so large no instant precedes
@@ -1129,11 +1102,6 @@ impl SourceConfig {
     source_accessor!(item, ItemSourcePermissions);
     source_accessor!(pool_size, Option<usize>);
 
-    /// Whether this source carries the removed `collection.namespace` key.
-    fn declares_namespace(&self) -> bool {
-        self.collection().namespace.is_some()
-    }
-
     /// Whether this source is the IMAP backend.
     pub fn is_imap(&self) -> bool {
         matches!(self.backend, SourceBackendConfig::Imap(_))
@@ -1311,12 +1279,12 @@ pub struct CollectionSourceConfig {
     /// and DAV leave, and a listing may drop a collection nobody deleted.
     #[serde(default, skip_serializing_if = "is_default")]
     pub delete: bool,
-    /// Removed key, kept so a configuration carrying it is refused by name.
+    /// Removed key, refused by name as the file is parsed.
     ///
     /// Which endpoints meet is now the account's arity, and which way is
     /// [`AccountConfig::one_way`].
     #[serde(default, skip_serializing)]
-    namespace: Option<RemovedKey>,
+    namespace: Option<NamespaceRemoved>,
     /// Collection-name filter for this source.
     ///
     /// Per source, because an account may hold several kinds and a mailbox
@@ -1757,27 +1725,13 @@ pub struct SmtpConfig {
     /// Omit it for an unauthenticated relay, which stops after `EHLO` and
     /// sends no `AUTH` at all.
     pub sasl: Option<SaslConfig>,
-    /// Removed keys, kept so a configuration carrying one is refused by
-    /// name. See [`SmtpConfig::reject_removed_keys`].
+    /// Removed keys, refused by name as the file is parsed.
+    #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    login: Option<RemovedKey>,
+    login: Option<SmtpLoginRemoved>,
+    #[allow(dead_code)]
     #[serde(default, skip_serializing)]
-    password: Option<RemovedKey>,
-}
-
-impl SmtpConfig {
-    /// Refuses the flat `login` and `password`, now a `sasl` mechanism.
-    fn reject_removed_keys(&self, key: &str) -> Result<()> {
-        if self.login.is_some() || self.password.is_some() {
-            bail!(
-                "The flat `login` and `password` keys of `{key}` are gone: the send channel names \
-                 one SASL mechanism, as `imap` does, such as `{key}.sasl.plain.username` and \
-                 `{key}.sasl.plain.password`. See {MIGRATION_NOTES}"
-            );
-        }
-
-        Ok(())
-    }
+    password: Option<SmtpLoginRemoved>,
 }
 
 /// Resolves a `server` into a URL, `scheme` filling in for a value with none.
@@ -2366,45 +2320,46 @@ mod tests {
 
     #[test]
     fn a_removed_key_is_refused_by_name_with_its_replacement() {
-        let account: AccountConfig = toml::from_str(
+        let err = toml::from_str::<AccountConfig>(
             r#"
             left.imap.server = "imaps://imap.example.org:993"
             right.imap.server = "imaps://imap.other.org:993"
             "#,
         )
-        .unwrap();
-        let err = account.validate().unwrap_err().to_string();
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("`targets`"), "got {err}");
         assert!(err.contains("one-way"), "got {err}");
 
-        let account: AccountConfig = toml::from_str(
+        let err = toml::from_str::<AccountConfig>(
             r#"
             imap.server = "imaps://imap.example.org:993"
             collection.filter.include = ["INBOX"]
             "#,
         )
-        .unwrap();
-        let err = account.validate().unwrap_err().to_string();
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("collection.filter"), "got {err}");
 
-        let account: AccountConfig = toml::from_str(
+        let err = toml::from_str::<AccountConfig>(
             r#"
             imap.server = "imaps://imap.example.org:993"
             store.retention = "retain"
             "#,
         )
-        .unwrap();
-        let err = account.validate().unwrap_err().to_string();
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("the account's `retain`"), "got {err}");
 
-        let account: AccountConfig = toml::from_str(
-            r#"
+        assert!(
+            toml::from_str::<AccountConfig>(
+                r#"
             imap.server = "imaps://imap.example.org:993"
             store.hydration = "full"
             "#,
-        )
-        .unwrap();
-        assert!(account.validate().is_err());
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -2498,7 +2453,7 @@ mod tests {
     /// session against a server that requires one, so it is refused.
     #[test]
     fn the_flat_login_and_password_spelling_is_refused() {
-        let account: AccountConfig = toml::from_str(
+        let err = toml::from_str::<AccountConfig>(
             r#"
             imap.server = "imaps://imap.example.org:993"
             smtp.server = "smtps://smtp.example.org:465"
@@ -2506,9 +2461,8 @@ mod tests {
             smtp.password.raw = "pw"
             "#,
         )
-        .unwrap();
-
-        let err = account.validate().unwrap_err().to_string();
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("`smtp.sasl.plain.username`"), "got {err}");
     }
 
@@ -2877,15 +2831,14 @@ mod tests {
     /// rather than being ignored and leaving the account doing something else.
     #[test]
     fn a_declared_namespace_is_refused_by_name() {
-        let account: AccountConfig = toml::from_str(
+        let err = toml::from_str::<AccountConfig>(
             r#"
             sources.a.imap.server = "imaps://a.example.org:993"
             sources.a.imap.collection.namespace = "mail"
             "#,
         )
-        .unwrap();
-
-        let err = account.validate().unwrap_err().to_string();
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("`collection.namespace` is gone"), "got {err}");
         assert!(err.contains("one-way"), "got {err}");
     }
@@ -2981,8 +2934,9 @@ mod tests {
         assert!(err.contains("declares no backend"), "{err}");
     }
 
-    /// A key an earlier neverest read is refused by name, pointing at the
-    /// migration notes rather than reading as a typo.
+    /// A key an earlier neverest read is refused by name as the file is
+    /// parsed, pointing at the migration notes rather than reading as a
+    /// typo.
     #[test]
     fn a_removed_key_points_at_the_migration_notes() {
         let mut missed = Vec::new();
@@ -3024,11 +2978,10 @@ mod tests {
                 "`login` and `password`",
             ),
         ] {
+            // NOTE: refused as the file is parsed, so an account no command
+            // opens is refused too.
             let err = match toml::from_str::<AccountConfig>(document) {
-                Ok(account) => match account.validate() {
-                    Ok(()) => String::from("validated"),
-                    Err(err) => format!("{err:#}"),
-                },
+                Ok(_) => String::from("parsed"),
                 Err(err) => err.to_string(),
             };
             if !err.contains(named) || !err.contains("MIGRATION.md") {

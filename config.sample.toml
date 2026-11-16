@@ -42,10 +42,6 @@
 
 [accounts.example]
 
-# `default` is read and ignored, with a warning: no account is the default, a
-# command running over every one unless `-a` names some.
-#default = true
-
 # Make the sources authoritative: their side wins and the other's change is
 # DISCARDED rather than merged, so nothing is reported as a conflict. Turning it
 # on over an account that synced both ways is refused once; `neverest sync

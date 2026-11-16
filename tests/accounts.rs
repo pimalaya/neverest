@@ -83,8 +83,7 @@ struct Fixture {
 
 impl Fixture {
     /// A configuration declaring `accounts`, each with one CalDAV source
-    /// on `port`, `work` still claiming the `default` an earlier neverest
-    /// read.
+    /// on `port`.
     fn new(accounts: &[&str], port: u16) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
@@ -94,9 +93,6 @@ impl Fixture {
         let mut document = String::new();
         for account in accounts {
             document.push_str(&format!("[accounts.{account}]\n"));
-            if *account == "work" {
-                document.push_str("default = true\n");
-            }
             document.push_str(&format!(
                 "caldav.server = \"http://127.0.0.1:{port}/\"\n\
                  caldav.auth.basic.username = \"user\"\n\
@@ -210,14 +206,14 @@ fn every_account_is_initialized_into_one_store() {
 /// A run covers every account, one after the other: one that cannot run
 /// is reported with its error, the next one still runs, and the run exits
 /// 3. Its events and its report name an endpoint as the configuration
-/// does, and `default` is read and ignored.
+/// does.
 #[test]
 fn a_run_covers_every_account_and_reports_each_apart() {
     let _serial = serialized();
     let fixture = Fixture::new(&["work", "home"], closed_port());
     fixture.initialized(&["work"]);
 
-    let (lines, stderr) = fixture.lines(&["--json", "--log-level", "warn", "sync"], 4);
+    let (lines, _) = fixture.lines(&["--json", "--log-level", "warn", "sync"], 4);
     let result = lines.last().unwrap();
 
     let home = &result["accounts"][0];
@@ -242,8 +238,6 @@ fn a_run_covers_every_account_and_reports_each_apart() {
     assert_eq!(started[0]["account"], "work");
     assert_eq!(started[0]["position"], 2);
     assert_eq!(started[0]["total"], 2);
-
-    assert!(stderr.contains("`default` key is ignored"), "{stderr}");
 }
 
 /// The stores an earlier neverest kept per account are refused before

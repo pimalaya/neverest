@@ -18,7 +18,6 @@ use io_sasl::{
     rfc4616::plain::SaslPlainCreds, rfc5801::SaslGs2ChannelBinding, rfc5802::SaslScramCreds,
     rfc7628::oauthbearer::SaslOauthbearerCreds, xoauth2::SaslXoauth2Creds,
 };
-use log::warn;
 use pimalaya_cli::error::CodedError;
 use pimalaya_config::{
     command::CommandConfig,
@@ -108,13 +107,6 @@ macro_rules! source_config {
             /// Which item mutations may be pushed to this source.
             #[serde(default, skip_serializing_if = "is_default")]
             pub item: ItemSourcePermissions,
-            /// Removed keys, refused by name as the file is parsed.
-            #[allow(dead_code)]
-            #[serde(default, skip_serializing)]
-            mailbox: Option<SourceMailboxRemoved>,
-            #[allow(dead_code)]
-            #[serde(default, skip_serializing)]
-            message: Option<SourceMessageRemoved>,
             /// Connection pool size override; the default is per backend.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub pool_size: Option<usize>,
@@ -188,9 +180,7 @@ impl TomlConfig for Config {
     }
 
     fn accounts(&self) -> impl Iterator<Item = (&str, bool)> {
-        self.accounts
-            .iter()
-            .map(|(name, account)| (name.as_str(), account.default))
+        self.accounts.keys().map(|name| (name.as_str(), false))
     }
 
     fn take_named_account(&mut self, name: &str) -> Option<(String, Self::Account)> {
@@ -214,8 +204,7 @@ impl Config {
     ///
     /// A name the configuration does not declare fails before anything
     /// runs, and so does one holding `/`, which separates the account from
-    /// the rest of a store-wide id (pimdir STORAGE §9.2). `default` is
-    /// read and ignored, with one warning.
+    /// the rest of a store-wide id (pimdir STORAGE §9.2).
     pub fn select(&self, names: &[String]) -> Result<Vec<(String, AccountConfig)>> {
         let mut configured: Vec<&String> = self.accounts.keys().collect();
         configured.sort();
@@ -236,19 +225,6 @@ impl Config {
             bail!(
                 "Account name {name} holds a `/`, which separates the account from the source \
                  in the store's ids: rename its `[accounts.<name>]` key"
-            );
-        }
-
-        let defaults: Vec<&String> = configured
-            .iter()
-            .copied()
-            .filter(|name| self.accounts[*name].default)
-            .collect();
-        if !defaults.is_empty() {
-            warn!(
-                "the `default` key is ignored (set on {}): a command runs over every account \
-                 unless `-a` names some",
-                join(&defaults),
             );
         }
 
@@ -295,11 +271,6 @@ fn join(names: &[&String]) -> String {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct AccountConfig {
-    /// Read and ignored, with a warning: a command runs over every
-    /// account unless `-a` names some, so none is the default. Kept so a
-    /// configuration an earlier neverest wrote still loads.
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub default: bool,
     /// Named sources, the map key being the pimdir source id.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sources: HashMap<String, SourceConfig>,
@@ -348,13 +319,6 @@ pub struct AccountConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub msgraph: Option<MsgraphTable>,
-    /// Removed keys, refused by name as the file is parsed.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    msgraph_contacts: Option<MsgraphContactsRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    msgraph_calendar: Option<MsgraphCalendarRemoved>,
     /// Direct-backend sugar: a Google People source named after its
     /// protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -391,28 +355,6 @@ pub struct AccountConfig {
     /// --connections N` overrides it for one run.
     #[serde(default)]
     pub connections: Option<usize>,
-    /// Removed keys, refused by name as the file is parsed.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    left: Option<LeftRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    right: Option<RightRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    collection: Option<AccountCollectionRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    mailbox: Option<AccountMailboxRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    message: Option<AccountMessageRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    folder: Option<FolderRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    envelope: Option<EnvelopeRemoved>,
 }
 
 impl AccountConfig {
@@ -710,179 +652,6 @@ impl AccountConfig {
     }
 }
 
-// The keys this version removed, each refused by name in the family
-// sentence as the file is parsed rather than ignored: honouring neither the
-// old meaning nor the new one is how a configuration ends up doing the
-// opposite of what it says.
-pimalaya_config::removed_key! {
-    /// `left`, now `sources`, `targets` and `one-way`.
-    pub LeftRemoved: Table {
-        name: "left",
-        why: "an account naming its endpoints and the direction between them",
-        instead: "write the authoritative one under `sources` and the other under \
-                  `targets`, adding `one-way = true` to copy rather than merge \
-                  (without it they sync both ways, as the pair did)",
-    }
-
-    /// `right`, now `sources`, `targets` and `one-way`.
-    pub RightRemoved: Table {
-        name: "right",
-        why: "an account naming its endpoints and the direction between them",
-        instead: "write the authoritative one under `sources` and the other under \
-                  `targets`, adding `one-way = true` to copy rather than merge \
-                  (without it they sync both ways, as the pair did)",
-    }
-
-    /// The account-level `collection` table, now per source.
-    pub AccountCollectionRemoved: Table {
-        name: "collection",
-        why: "a filter belonging to the source it filters, an account holding \
-              sources of several kinds",
-        instead: "write `sources.<name>.collection.filter`, or \
-                  `<protocol>.collection.filter` under the account",
-    }
-
-    /// The account-level `mailbox` table, the old spelling of the account's
-    /// `collection`, now per source.
-    pub AccountMailboxRemoved: Table {
-        name: "mailbox",
-        why: "a filter belonging to the source it filters, an account holding \
-              sources of several kinds",
-        instead: "write `sources.<name>.collection.filter`, or \
-                  `<protocol>.collection.filter` under the account",
-    }
-
-    /// The account-level `message` table, now `item`.
-    pub AccountMessageRemoved: Table {
-        name: "message",
-        why: "an account syncing items of every kind, not messages alone",
-        instead: "write `item` in its place, as in `item.filter.since`",
-    }
-
-    /// A backend table's `mailbox`, now `collection`.
-    pub SourceMailboxRemoved: Table {
-        name: "mailbox",
-        why: "a source syncing collections of every kind, not mailboxes alone",
-        instead: "write `collection` in its place, as in \
-                  `imap.collection.filter`",
-    }
-
-    /// A backend table's `message`, now `item`.
-    pub SourceMessageRemoved: Table {
-        name: "message",
-        why: "a source syncing items of every kind, not messages alone",
-        instead: "write `item` in its place, as in `imap.item.delete`",
-    }
-
-    /// `collection.filters`, now `collection.filter`.
-    pub CollectionFiltersRemoved: Key {
-        name: "collection.filters",
-        why: "a source holding one filter",
-        instead: "write `collection.filter`",
-    }
-
-    /// The `msgraph-contacts` table, now `msgraph.contacts`.
-    pub MsgraphContactsRemoved: Table {
-        name: "msgraph-contacts",
-        why: "Graph's domains sharing one `msgraph` table and its session",
-        instead: "write `msgraph.contacts`, its `auth`, `user-id`, `tls`, `alpn` \
-                  and `proxy` in `msgraph` itself",
-    }
-
-    /// The `msgraph-calendar` table, now `msgraph.calendar`.
-    pub MsgraphCalendarRemoved: Table {
-        name: "msgraph-calendar",
-        why: "Graph's domains sharing one `msgraph` table and its session",
-        instead: "write `msgraph.calendar`, its `auth`, `user-id`, `tls`, `alpn` \
-                  and `proxy` in `msgraph` itself",
-    }
-
-    /// `msgraph.collection`, now under the domain it filters.
-    pub MsgraphCollectionRemoved: Table {
-        name: "msgraph.collection",
-        why: "each Graph domain syncing its own collections",
-        instead: "write `msgraph.mail.collection` for mail",
-    }
-
-    /// `msgraph.item`, now under the domain it grants.
-    pub MsgraphItemRemoved: Table {
-        name: "msgraph.item",
-        why: "each Graph domain syncing with its own rights",
-        instead: "write `msgraph.mail.item` for mail",
-    }
-
-    /// `msgraph.flag`, now under the domain it grants.
-    pub MsgraphFlagRemoved: Table {
-        name: "msgraph.flag",
-        why: "each Graph domain syncing with its own rights",
-        instead: "write `msgraph.mail.flag` for mail",
-    }
-
-    /// `msgraph.pool-size`, now under the domain it sizes.
-    pub MsgraphPoolSizeRemoved: Key {
-        name: "msgraph.pool-size",
-        why: "each Graph domain opening its own connections",
-        instead: "write `msgraph.mail.pool-size` for mail",
-    }
-
-    /// The v0.1 `folder` table.
-    pub FolderRemoved: Table {
-        name: "folder",
-        why: "a filter belonging to the source it filters",
-        instead: "write its filter as `<protocol>.collection.filter`, its aliases \
-                  having no replacement",
-    }
-
-    /// The v0.1 `envelope` table, now `item.filter.since`.
-    pub EnvelopeRemoved: Table {
-        name: "envelope",
-        why: "a sync bounding its mail by date alone",
-        instead: "write `item.filter.since`",
-    }
-
-    /// `collection.namespace`, now the account's arity and `one-way`.
-    pub NamespaceRemoved: Key {
-        name: "collection.namespace",
-        why: "the sources meeting by whether they sit under `sources` or \
-              `targets`, and the direction being `one-way`",
-        instead: "delete it",
-    }
-
-    /// `store.retention`, now the account's `retain`.
-    ///
-    /// A three-point scale described a store holding only the bodies that
-    /// happened to cross, which nothing asked for; mapping it onto `retain`
-    /// would guess.
-    pub StoreRetentionRemoved: Key {
-        name: "store.retention",
-        why: "whether the store keeps bodies being the account's `retain`, true \
-              when the store is the destination and false when targets are named",
-        instead: "delete it",
-    }
-
-    /// `store.hydration`, now the account's `retain`.
-    pub StoreHydrationRemoved: Key {
-        name: "store.hydration",
-        why: "whether the store keeps bodies being the account's `retain`, true \
-              when the store is the destination and false when targets are named",
-        instead: "delete it",
-    }
-
-    /// The flat `smtp.login`, now a `sasl` mechanism.
-    pub SmtpLoginRemoved: Key {
-        name: "smtp.login",
-        why: "the send channel naming one SASL mechanism, as `imap` does",
-        instead: "write `smtp.sasl.plain.username` and `smtp.sasl.plain.password`",
-    }
-
-    /// The flat `smtp.password`, now a `sasl` mechanism.
-    pub SmtpPasswordRemoved: Key {
-        name: "smtp.password",
-        why: "the send channel naming one SASL mechanism, as `imap` does",
-        instead: "write `smtp.sasl.plain.username` and `smtp.sasl.plain.password`",
-    }
-}
-
 /// The only part of conflict handling anybody configures.
 ///
 /// Whether a run merges is not a setting: the three-way merge is a pure
@@ -941,13 +710,6 @@ pub struct StoreConfig {
         skip_serializing_if = "Option::is_none"
     )]
     pub index_timeout: Option<Duration>,
-    /// Removed keys, refused by name as the file is parsed.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    retention: Option<StoreRetentionRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    hydration: Option<StoreHydrationRemoved>,
 }
 
 impl StoreConfig {
@@ -1073,11 +835,6 @@ struct SourceTable {
     gpeople: Option<GoogleConfig>,
     gcal: Option<GoogleConfig>,
     smtp: Option<SmtpConfig>,
-    /// Removed keys, refused by name as the file is parsed.
-    #[allow(dead_code)]
-    msgraph_contacts: Option<MsgraphContactsRemoved>,
-    #[allow(dead_code)]
-    msgraph_calendar: Option<MsgraphCalendarRemoved>,
 }
 
 impl TryFrom<SourceTable> for SourceConfig {
@@ -1400,12 +1157,6 @@ pub struct CollectionSourceConfig {
     /// true otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rename: Option<bool>,
-    /// Removed key, refused by name as the file is parsed.
-    ///
-    /// Which endpoints meet is now the account's arity, and which way is
-    /// [`AccountConfig::one_way`].
-    #[serde(default, skip_serializing)]
-    namespace: Option<NamespaceRemoved>,
     /// Collection-name filter for this source.
     ///
     /// Per source, because an account may hold several kinds and a mailbox
@@ -1413,10 +1164,6 @@ pub struct CollectionSourceConfig {
     /// therefore asymmetric: a collection may sync on one source only.
     #[serde(default, skip_serializing_if = "is_default")]
     pub filter: CollectionFilter,
-    /// Removed key, refused by name as the file is parsed: the old plural
-    /// of [`filter`](Self::filter).
-    #[serde(default, skip_serializing)]
-    filters: Option<CollectionFiltersRemoved>,
     /// Whether this source lists at most a number of the items a collection
     /// holds, whatever it holds: a folder size limit set on the server.
     ///
@@ -1444,9 +1191,7 @@ impl Default for CollectionSourceConfig {
             create: true,
             delete: false,
             rename: None,
-            namespace: None,
             filter: CollectionFilter::default(),
-            filters: None,
             capped: false,
         }
     }
@@ -1916,8 +1661,8 @@ pub struct MsgraphAuthConfig {
 
 /// The refusal of an `msgraph` table naming no domain.
 const MSGRAPH_NO_DOMAIN: &str = "The `msgraph` table names no domain: write `msgraph.mail = \
-                                 true` to sync mail as before, `msgraph.contacts` or \
-                                 `msgraph.calendar` for the others, see MIGRATION.md";
+                                 true` to sync mail, `msgraph.contacts` or `msgraph.calendar` for \
+                                 the others";
 
 /// The `msgraph` table: one Graph session and the domains it syncs, each
 /// domain a source of its own.
@@ -1971,26 +1716,6 @@ pub struct MsgraphTable {
         skip_serializing_if = "Option::is_none"
     )]
     pub calendar: Option<MsgraphDomainConfig>,
-    /// Removed keys, refused by name as the file is parsed: a domain's
-    /// keys now sit in its own table.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    collection: Option<MsgraphCollectionRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    item: Option<MsgraphItemRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    flag: Option<MsgraphFlagRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    pool_size: Option<MsgraphPoolSizeRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    mailbox: Option<SourceMailboxRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    message: Option<SourceMessageRemoved>,
 }
 
 impl MsgraphTable {
@@ -2007,8 +1732,6 @@ impl MsgraphTable {
             item: domain.item,
             pool_size: domain.pool_size,
             proxy: self.proxy.clone(),
-            mailbox: None,
-            message: None,
         };
 
         let mail = self.mail.as_ref().map(source);
@@ -2067,13 +1790,6 @@ pub struct MsgraphDomainConfig {
     /// Connection pool size override, 3 by default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pool_size: Option<usize>,
-    /// Removed keys, refused by name as the file is parsed.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    mailbox: Option<SourceMailboxRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    message: Option<SourceMessageRemoved>,
 }
 
 /// Reads a Graph domain written `true`, taking its defaults, or as a
@@ -2181,13 +1897,6 @@ pub struct SmtpConfig {
     /// then to the `all_proxy` and `https_proxy` environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
-    /// Removed keys, refused by name as the file is parsed.
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    login: Option<SmtpLoginRemoved>,
-    #[allow(dead_code)]
-    #[serde(default, skip_serializing)]
-    password: Option<SmtpPasswordRemoved>,
 }
 
 /// Resolves a `server` into a URL, `scheme` filling in for a value with none.
@@ -2435,13 +2144,11 @@ mod tests {
 
     use super::*;
 
-    /// Two accounts, `home` declared after `work`, one of them still
-    /// claiming the `default` an earlier neverest read.
+    /// Two accounts, `home` declared after `work`.
     fn two_accounts() -> Config {
         toml::from_str(
             r#"
             [accounts.work]
-            default = true
             imap.server = "imaps://w.example.org:993"
 
             [accounts.home]
@@ -2455,8 +2162,8 @@ mod tests {
         selected.iter().map(|(name, _)| name.as_str()).collect()
     }
 
-    /// With no `-a`, a command runs over every account in name order, the
-    /// `default` key making none of them special; `-a` filters them.
+    /// With no `-a`, a command runs over every account in name order; `-a`
+    /// filters them.
     #[test]
     fn every_account_runs_unless_named() {
         let config = two_accounts();
@@ -2947,52 +2654,8 @@ mod tests {
     }
 
     #[test]
-    fn a_removed_key_is_refused_by_name_with_its_replacement() {
-        let err = toml::from_str::<AccountConfig>(
-            r#"
-            left.imap.server = "imaps://imap.example.org:993"
-            right.imap.server = "imaps://imap.other.org:993"
-            "#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("`targets`"), "got {err}");
-        assert!(err.contains("one-way"), "got {err}");
-
-        let err = toml::from_str::<AccountConfig>(
-            r#"
-            imap.server = "imaps://imap.example.org:993"
-            collection.filter.include = ["INBOX"]
-            "#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("collection.filter"), "got {err}");
-
-        let err = toml::from_str::<AccountConfig>(
-            r#"
-            imap.server = "imaps://imap.example.org:993"
-            store.retention = "retain"
-            "#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("the account's `retain`"), "got {err}");
-
-        assert!(
-            toml::from_str::<AccountConfig>(
-                r#"
-            imap.server = "imaps://imap.example.org:993"
-            store.hydration = "full"
-            "#,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
     fn an_account_with_no_source_is_refused() {
-        let account: AccountConfig = toml::from_str("default = true").unwrap();
+        let account: AccountConfig = toml::from_str("").unwrap();
         let err = account.validate().unwrap_err().to_string();
         assert!(err.contains("no source"), "got {err}");
     }
@@ -3077,23 +2740,6 @@ mod tests {
         assert!(relay.smtp.expect("a declared channel").sasl.is_none());
     }
 
-    /// Ignoring the retired flat spelling would open an unauthenticated
-    /// session against a server that requires one, so it is refused.
-    #[test]
-    fn the_flat_login_and_password_spelling_is_refused() {
-        let err = toml::from_str::<AccountConfig>(
-            r#"
-            imap.server = "imaps://imap.example.org:993"
-            smtp.server = "smtps://smtp.example.org:465"
-            smtp.login = "user@example.org"
-            smtp.password.raw = "pw"
-            "#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("`smtp.sasl.plain.username`"), "got {err}");
-    }
-
     /// A bare authority with a port used to reach a backend as a hostless
     /// URL, `url` reading `dav.example.org:8443` as a scheme and a path.
     #[test]
@@ -3134,8 +2780,8 @@ mod tests {
         assert_eq!(url.scheme(), "imap");
     }
 
-    /// The kind-neutral spellings load; the old mail ones are refused by
-    /// name ([`a_removed_key_points_at_the_migration_notes`]).
+    /// The kind-neutral spellings load; the old mail ones are refused as
+    /// unknown ([`a_key_this_version_does_not_read_is_refused`]).
     #[test]
     fn the_generic_pim_sync_spellings_load() {
         let account: AccountConfig = toml::from_str(
@@ -3551,25 +3197,6 @@ mod tests {
         assert!(err.contains("`sources.dav.smtp`"), "got {err}");
     }
 
-    /// The removed key is refused by name on whichever endpoint carries it,
-    /// rather than being ignored and leaving the account doing something else.
-    #[test]
-    fn a_declared_namespace_is_refused_by_name() {
-        let err = toml::from_str::<AccountConfig>(
-            r#"
-            sources.a.imap.server = "imaps://a.example.org:993"
-            sources.a.imap.collection.namespace = "mail"
-            "#,
-        )
-        .unwrap_err()
-        .to_string();
-        assert!(
-            err.contains("The `collection.namespace` key is removed"),
-            "got {err}"
-        );
-        assert!(err.contains("one-way"), "got {err}");
-    }
-
     /// A name is the pimdir source id its bindings are recorded under, so one
     /// name cannot be two endpoints.
     #[test]
@@ -3662,126 +3289,126 @@ mod tests {
         assert!(err.contains("declares no backend"), "{err}");
     }
 
-    /// A key an earlier neverest read is refused by name as the file is
-    /// parsed, pointing at the migration notes rather than reading as a
-    /// typo.
+    /// A key an earlier neverest read, `default` included, is refused as
+    /// unknown at whatever level it sits.
     #[test]
-    fn a_removed_key_points_at_the_migration_notes() {
+    fn a_key_this_version_does_not_read_is_refused() {
         let mut missed = Vec::new();
 
         for (document, named) in [
             (
+                "default = true\nimap.server = \"x\"",
+                "unknown field `default`",
+            ),
+            (
                 "left.imap.server = \"x\"\nright.imap.server = \"y\"",
-                "The `left` table is removed, ",
+                "unknown field `left`",
             ),
             (
                 "imap.server = \"x\"\nfolder.filter = \"all\"",
-                "The `folder` table is removed, ",
+                "unknown field `folder`",
             ),
             (
                 "imap.server = \"x\"\nenvelope.filter.before = \"2024-01-01\"",
-                "The `envelope` table is removed, ",
+                "unknown field `envelope`",
             ),
             (
                 "imap.server = \"x\"\ncollection.filter.include = [\"INBOX\"]",
-                "The `collection` table is removed, ",
+                "unknown field `collection`",
             ),
             (
                 "imap.server = \"x\"\nimap.collection.namespace = \"mail\"",
-                "The `collection.namespace` key is removed, ",
+                "unknown field `namespace`",
             ),
             (
                 "imap.server = \"x\"\nstore.retention = \"retain\"",
-                "The `store.retention` key is removed, ",
+                "unknown field `retention`",
             ),
             (
                 "imap.server = \"x\"\nstore.hydration = \"full\"",
-                "The `store.hydration` key is removed, ",
+                "unknown field `hydration`",
             ),
             (
                 "imap.server = \"x\"\nsmtp.server = \"y\"\nsmtp.login = \"u\"\n\
                  smtp.password.raw = \"pw\"",
-                "The `smtp.login` key is removed, ",
+                "unknown field `login`",
             ),
             (
                 "sources.a.imap.server = \"x\"\nsources.a.smtp.server = \"y\"\n\
                  sources.a.smtp.password.raw = \"pw\"",
-                "The `smtp.password` key is removed, ",
+                "unknown field `password`",
             ),
             (
                 "imap.server = \"x\"\nmailbox.filter.include = [\"INBOX\"]",
-                "The `mailbox` table is removed, a filter belonging to the source",
+                "unknown field `mailbox`",
             ),
             (
                 "imap.server = \"x\"\nmessage.filter.since = \"30d\"",
-                "The `message` table is removed, an account syncing items",
+                "unknown field `message`",
             ),
             (
                 "imap.server = \"x\"\nimap.mailbox.create = false",
-                "The `mailbox` table is removed, a source syncing collections",
+                "unknown field `mailbox`",
             ),
             (
                 "sources.a.carddav.server = \"x\"\nsources.a.carddav.mailbox.delete = false",
-                "The `mailbox` table is removed, a source syncing collections",
+                "unknown field `mailbox`",
             ),
             (
                 "imap.server = \"x\"\nimap.message.delete = false",
-                "The `message` table is removed, a source syncing items",
+                "unknown field `message`",
             ),
             (
                 "sources.a.imap.server = \"x\"\ntargets.b.imap.server = \"y\"\n\
                  targets.b.imap.message.create = true",
-                "The `message` table is removed, a source syncing items",
+                "unknown field `message`",
             ),
             (
                 "imap.server = \"x\"\nimap.collection.filters = \"all\"",
-                "The `collection.filters` key is removed, ",
+                "unknown field `filters`",
             ),
             (
                 "imap.server = \"x\"\nimap.collection.filters.include = [\"INBOX\"]",
-                "The `collection.filters` key is removed, ",
+                "unknown field `filters`",
             ),
             (
                 "msgraph-contacts.auth.token.raw = \"tok\"",
-                "The `msgraph-contacts` table is removed, Graph's domains sharing one \
-                 `msgraph` table and its session: write `msgraph.contacts`",
+                "unknown field `msgraph-contacts`",
             ),
             (
                 "msgraph-calendar.auth.token.raw = \"tok\"",
-                "The `msgraph-calendar` table is removed, Graph's domains sharing one \
-                 `msgraph` table and its session: write `msgraph.calendar`",
+                "unknown field `msgraph-calendar`",
             ),
             (
                 "sources.people.msgraph-contacts.auth.token.raw = \"tok\"",
-                "The `msgraph-contacts` table is removed, ",
+                "unknown field `msgraph-contacts`",
             ),
             (
                 "sources.a.imap.server = \"x\"\ntargets.copy.msgraph-calendar.user-id = \"me\"",
-                "The `msgraph-calendar` table is removed, ",
+                "unknown field `msgraph-calendar`",
             ),
             (
                 "msgraph.auth.token.raw = \"tok\"\nmsgraph.mail = true\n\
                  msgraph.collection.filter.include = [\"Inbox\"]",
-                "The `msgraph.collection` table is removed, each Graph domain syncing its own \
-                 collections: write `msgraph.mail.collection` for mail",
+                "unknown field `collection`",
             ),
             (
                 "msgraph.auth.token.raw = \"tok\"\nmsgraph.mail = true\nmsgraph.item.delete = false\n\
                  msgraph.item.create = true",
-                "The `msgraph.item` table is removed, ",
+                "unknown field `item`",
             ),
             (
                 "msgraph.auth.token.raw = \"tok\"\nmsgraph.mail = true\nmsgraph.flag.update = false",
-                "The `msgraph.flag` table is removed, ",
+                "unknown field `flag`",
             ),
             (
                 "sources.a.msgraph.auth.token.raw = \"tok\"\nsources.a.msgraph.mail = true\n\
                  sources.a.msgraph.pool-size = 2",
-                "The `msgraph.pool-size` key is removed, ",
+                "unknown field `pool-size`",
             ),
             (
                 "msgraph.auth.token.raw = \"tok\"\nmsgraph.mail.mailbox.create = false",
-                "The `mailbox` table is removed, a source syncing collections",
+                "unknown field `mailbox`",
             ),
         ] {
             // NOTE: refused as the file is parsed, so an account no command
@@ -3790,7 +3417,7 @@ mod tests {
                 Ok(_) => String::from("parsed"),
                 Err(err) => err.to_string(),
             };
-            if !err.contains(named) || !err.contains(", see MIGRATION.md") {
+            if !err.contains(named) {
                 missed.push(format!("{named}: {err}"));
             }
         }

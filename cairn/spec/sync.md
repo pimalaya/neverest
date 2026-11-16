@@ -144,7 +144,7 @@ Writing Graph as one `msgraph` table, where `msgraph-contacts` and `msgraph-cale
 ### Requirement: The configuration refuses every key it does not read
 The configuration SHALL refuse at load, naming it, every key it does not read, at every level: the document root, which holds `accounts` alone; an account; a `sources.<name>` or `targets.<name>` table; a backend table, written under a source or directly under the account; and every table nested in one (`tls`, `sasl`, `auth`, `collection`, `item`, `flag`, `smtp`, `store`, `conflict`, an `msgraph` domain table). A source table naming no backend table, or more than one, SHALL be refused at load, naming the backends it found.
 
-A key an earlier neverest read and removed SHALL be refused by name in the family sentence, pimalaya-config's `removed_key!`: "The `x` key is removed, <why>: <what to write instead>, see MIGRATION.md", `table` in place of `key` for a table, as the file is parsed, so in an account no command opens as in one it does: `left` and `right`, `folder`, `envelope`, the account-level `collection`, `mailbox` and `message`, `collection.namespace` on any source (one written directly under the account included), the `mailbox` and `message` tables and the `collection.filters` key of any backend table, the `msgraph-contacts` and `msgraph-calendar` tables under the account, a source or a target, the `collection`, `item` and `flag` tables and the `pool-size` key written directly in an `msgraph` table, `store.retention` and `store.hydration`, and the flat `login` and `password` of an `smtp` table. No key SHALL be read under an old spelling: an alias either loads a configuration the person thinks is refused or refuses it under a name the person never wrote.
+A key an earlier neverest read and this one does not, `default` included, SHALL be refused as any unknown key is, by serde's `deny_unknown_fields`, with no sentence of its own and no pointer to a migration guide: v1 reads no 0.x configuration, a person writes a new one from the sample. No key SHALL be read under an old spelling: an alias either loads a configuration the person thinks is refused or refuses it under a name the person never wrote.
 
 #### Scenario: A typo beside a source's backend
 - GIVEN `sources.work.imap.server = "…"` and `sources.work.imap-typo = 1`
@@ -156,20 +156,10 @@ A key an earlier neverest read and removed SHALL be refused by name in the famil
 - WHEN the configuration is loaded
 - THEN it fails naming `imap` and `jmap`, where the second used to be dropped
 
-#### Scenario: A v0.1 table
-- GIVEN an account carrying `folder.filter = "all"`
-- WHEN a command opens it
-- THEN it is refused with "The `folder` table is removed, …: write its filter as `<protocol>.collection.filter`, …, see MIGRATION.md"
-
-#### Scenario: A v0.2 mail spelling
-- GIVEN an account carrying `imap.mailbox.create = false`
+#### Scenario: A key an earlier neverest read
+- GIVEN an account carrying `folder.filter = "all"`, `imap.mailbox.create = false` or `default = true`
 - WHEN the configuration is loaded
-- THEN it is refused with "The `mailbox` table is removed, …: write `collection` in its place, as in `imap.collection.filter`, see MIGRATION.md", where it loaded as `imap.collection.create`
-
-#### Scenario: A v0.3 Graph contacts table
-- GIVEN an account carrying `msgraph-contacts.auth.token.command = "…"`
-- WHEN the configuration is loaded
-- THEN it is refused with "The `msgraph-contacts` table is removed, …: write `msgraph.contacts`, …, see MIGRATION.md"
+- THEN it fails naming the unknown field `folder`, `mailbox` or `default`
 
 ### Requirement: A collection is keyed by kind, namespace and name
 A hub collection SHALL be keyed by the triple `(kind, namespace, name)`: the source's media type, its namespace, and the collection name the backend enumerates. The namespace SHALL be internal, derived from the source name, and SHALL NOT be configurable: it exists so that a CardDAV address book and a mailbox carrying the same name key apart, not so that a user can decide which sources meet. A target binds the namespace of the source it is paired with, which is what makes the two meet.
@@ -280,7 +270,7 @@ Neverest SHALL have no `repl` and no `mcp`: its commands are batch operations ov
 Neverest SHALL carry pimalaya-cli's `account` group (pimalaya-cli cairn/spec/commands.md), over the accounts `-a` names, every one when it names none, as every neverest command:
 
 - `account check` SHALL be the check the *A check …* requirements describe, and `check`, its name before the group, SHALL run it too, hidden from the help, its JSON schema kept under `neverest-check` beside `neverest-account-check`. It SHALL keep its own report rather than pimalaya-cli's one-account `AccountCheckOutput`: a run covers several accounts, each with its mode, every endpoint's collections and capabilities and the orphans a store holds; its rows carry the shared backend check keys (`backend`, `ok`, `code`, `error`), the send channel's being pimalaya-cli's `BackendCheck`. A row's `backend` SHALL be the backend table the source writes, `msgraph` for every Graph domain.
-- `account list`, `ls` its visible alias as in every family binary, SHALL print pimalaya-cli's `AccountListOutput`, one `{name, default, backends, notBuilt}` row an account, sorted by name, reaching nothing. `backends` SHALL hold the backend tables the account writes, its sources' and its targets', sugar and named alike, each once, in the order `imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`, `smtp` (a send channel), those this build serves; `notBuilt` those it leaves out, JMAP always (it parses and no build opens it). A source's own name is the account's, not a backend, and reads in `account check`. `default` SHALL be `true` on every account: a command naming no `-a` runs over them all, the `default` key being ignored.
+- `account list`, `ls` its visible alias as in every family binary, SHALL print pimalaya-cli's `AccountListOutput`, one `{name, default, backends, notBuilt}` row an account, sorted by name, reaching nothing. `backends` SHALL hold the backend tables the account writes, its sources' and its targets', sugar and named alike, each once, in the order `imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`, `smtp` (a send channel), those this build serves; `notBuilt` those it leaves out, JMAP always (it parses and no build opens it). A source's own name is the account's, not a backend, and reads in `account check`. `default` SHALL be `true` on every account: a command naming no `-a` runs over them all, no account being the default.
 
 Neverest has no `account capability`: what each source can do reads in `account check`, from the configuration.
 
@@ -345,7 +335,7 @@ The store-wide ids SHALL carry the account (pimdir STORAGE §4.3, §9.2): a pimd
 - **THEN** the store holds `work/imap/INBOX` under `work` and `home/imap/INBOX` under `home`, and declaring one leaves the other's capabilities in place
 
 ### Requirement: A store the format outgrew is refused with its remedy
-A store opens under its own format version alone (pimdir STORAGE §4.2, §6): one any earlier neverest wrote, naming no `store_meta.format_version` or an earlier draft, is refused as `store-version` and never migrated. The refusal is the store's, so it SHALL fail the command before any account runs, naming the reinstall in the order that keeps its queued writes, which live only in that store: sync it with the neverest that wrote it until nothing is queued, move the store directory away, then rebuild it (`neverest init`, then a sync), rather than surfacing the raw refusal alone. The message SHALL never say to delete the store. What the old store held that no server holds (retained items, whatever was still queued) stays in the store moved away. MIGRATION.md SHALL give the same order.
+A store opens under its own format version alone (pimdir STORAGE §4.2, §6): one any earlier neverest wrote, naming no `store_meta.format_version` or an earlier draft, is refused as `store-version` and never migrated. The refusal is the store's, so it SHALL fail the command before any account runs, naming the reinstall in the order that keeps its queued writes, which live only in that store: sync it with the neverest that wrote it until nothing is queued, move the store directory away, then rebuild it (`neverest init`, then a sync), rather than surfacing the raw refusal alone. The message SHALL never say to delete the store. What the old store held that no server holds (retained items, whatever was still queued) stays in the store moved away.
 
 #### Scenario: A store an earlier neverest wrote
 - **GIVEN** a store whose `store_meta.format_version` names `storage-draft-11`, as io-pimdir 0.13 wrote it
@@ -2230,9 +2220,6 @@ Each account's failure SHALL be its own: the run SHALL go on with the next accou
 - **GIVEN** a configuration declaring `work` and `home`
 - **WHEN** `neverest sync --reset` runs with no `-a`
 - **THEN** it exits 1, naming both accounts, and resets nothing
-
-### Requirement: `default` is accepted and ignored
-An account's `default` key SHALL be read and ignored, with one warning a run naming the key, so a configuration an earlier neverest wrote still loads: a command runs over every account unless `-a` names some, so no account is the default.
 
 ### Requirement: A check names the accounts a store holds that no configuration names
 `neverest check` SHALL report, under `orphans`, every account a store the run reads holds collections of (pimdir `list_accounts`) and no configured account sharing that store names, with the store: renaming an account's TOML key leaves its collections under the old name. The report SHALL say the key must be renamed back to reach them, and SHALL NOT delete them nor change the exit code.

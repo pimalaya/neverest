@@ -5,8 +5,19 @@ change: the-v1-review
 
 # Delta
 
+Folded into cairn/spec/sync.md phase by phase, as each lands.
+
 ## ADDED Requirements
 
 ## MODIFIED Requirements
 
+### Requirement: The configuration refuses every key it does not read
+Phase 1: a key an earlier neverest read, `default` included, is refused as any unknown key is, by serde's `deny_unknown_fields`; no by-name sentence, no MIGRATION.md pointer.
+
+### Requirement: A store the format outgrew is refused with its remedy
+Phase 1: the refusal keeps its order (sync with the neverest that wrote it until nothing is queued, move the store away, `neverest init`, sync) and cites no MIGRATION.md, which is deleted.
+
 ## REMOVED Requirements
+
+### Requirement: `default` is accepted and ignored
+Phase 1: the key is refused as unknown (A8).

@@ -177,8 +177,7 @@ pub fn refuse_former_stores(dir: &Path) -> Result<()> {
     Err(layout_error(format!(
         "{} holds the stores an earlier neverest kept per account ({}), and this neverest \
          keeps every account in one store there: sync each with the neverest that wrote it \
-         until nothing is queued, move it out of {}, then run `neverest init` again (see \
-         MIGRATION.md)",
+         until nothing is queued, move it out of {}, then run `neverest init` again",
         dir.display(),
         named.join(", "),
         dir.display(),
@@ -316,7 +315,7 @@ fn store_refusal(dir: &Path, err: PimdirError) -> anyhow::Error {
                 "The store at {} was written by an earlier neverest and cannot be migrated: \
                  sync it with the neverest that wrote it until nothing is queued, move the \
                  store directory away, then rebuild it with `neverest init` and \
-                 `neverest sync` (see MIGRATION.md)",
+                 `neverest sync`",
                 dir.display(),
             ))
         }
@@ -814,7 +813,6 @@ pub fn run(
         sidecar.save(&work_dir)?;
     }
 
-    crate::offline::prof::report();
     Ok(report)
 }
 

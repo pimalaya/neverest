@@ -273,7 +273,7 @@ fn earlier(dir: &Path, what: &str) -> anyhow::Error {
     layout_error(format!(
         "The store at {} holds {what}, which an earlier neverest wrote and this one does not \
          read: sync it with the neverest that wrote it until nothing is queued, move the \
-         store directory away, then run `neverest init` again (see MIGRATION.md)",
+         store directory away, then run `neverest init` again",
         dir.display(),
     ))
 }

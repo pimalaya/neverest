@@ -114,9 +114,6 @@ name = "bitflags"
 version = "2.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
-dependencies = [
- "serde_core",
-]
 
 [[package]]
 name = "blake3"
@@ -406,7 +403,6 @@ dependencies = [
  "mio",
  "parking_lot",
  "rustix",
- "serde",
  "signal-hook",
  "signal-hook-mio",
  "winapi",
@@ -1529,7 +1525,6 @@ dependencies = [
  "chrono",
  "clap",
  "crossbeam-queue",
- "crossterm",
  "dirs",
  "ical-rs",
  "io-gcal",

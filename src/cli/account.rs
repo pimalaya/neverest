@@ -17,7 +17,7 @@ use crate::{
     config::{self, AccountConfig, Config},
 };
 
-/// Manage accounts defined in the TOML configuration file.
+/// List and check the configured accounts.
 ///
 /// An account is a named group of sources over one pimdir store, written
 /// by hand from the sample; these subcommands only read it. Like every

@@ -54,13 +54,13 @@ exit 2;
 
 ## Phase 1: deletions and small fixes
 
-- [ ] Owner's Cargo.toml and deny.toml as staged.
-- [ ] D3: delete `MIGRATION_NOTES`, the removed-key checks and their tests in src/config.rs (`AccountConfig::validate`, `SmtpConfig::reject_removed_keys`, the `removed_key!` uses); every type keeps `deny_unknown_fields`; spec sync.md:147 and its scenarios (:162, :167, :172) go.
-- [ ] A8: drop the `default` field and its warning; a config naming it fails as unknown.
-- [ ] D2: delete MIGRATION.md; reword the `store-version` refusal (src/offline/state.rs:276) to keep its order (sync with the neverest that wrote it until nothing is queued, move the store directory away, `neverest init`, sync; never delete) without citing MIGRATION.md; spec sync.md:343 likewise; remove MIGRATION.md from README and from CHANGELOG lines.
-- [ ] A3: delete src/offline/prof.rs and its 8 call sites.
-- [ ] Remove the dead direct `crossterm` dependency (Cargo.toml).
-- [ ] src/cli/account.rs:20: "List and check the configured accounts".
+- [x] Owner's Cargo.toml and deny.toml as staged.
+- [x] D3: delete `MIGRATION_NOTES`, the removed-key checks and their tests in src/config.rs (`AccountConfig::validate`, `SmtpConfig::reject_removed_keys`, the `removed_key!` uses); every type keeps `deny_unknown_fields`; spec sync.md:147 and its scenarios (:162, :167, :172) go.
+- [x] A8: drop the `default` field and its warning; a config naming it fails as unknown.
+- [x] D2: delete MIGRATION.md; reword the `store-version` refusal (src/offline/state.rs:276) to keep its order (sync with the neverest that wrote it until nothing is queued, move the store directory away, `neverest init`, sync; never delete) without citing MIGRATION.md; spec sync.md:343 likewise; remove MIGRATION.md from README and from CHANGELOG lines.
+- [x] A3: delete src/offline/prof.rs and its 8 call sites.
+- [x] Remove the dead direct `crossterm` dependency (Cargo.toml).
+- [x] src/cli/account.rs:20: "List and check the configured accounts".
 - Done when: `rg -n 'MIGRATION|removed_key|NEVEREST_PROFILE|crossterm' src Cargo.toml cairn/spec` finds nothing; gate green.
 
 ## Phase 2: plain output (D4)

@@ -14,8 +14,6 @@
 //! contacts source under one account, or two providers cached side by side,
 //! never share a collection.
 
-use std::time::Instant;
-
 use anyhow::{Result, anyhow};
 use io_pimdir::{
     client::PimdirSourceStore,
@@ -35,7 +33,6 @@ pub mod index;
 pub mod invitation;
 pub mod local;
 pub mod pipe;
-pub mod prof;
 pub mod progress;
 pub mod remote;
 pub mod state;
@@ -67,9 +64,9 @@ pub fn states_unknown_version(kind: &str, payload: &str) -> bool {
 
 /// Runs an io-pimdir coroutine to completion over borrowed seams.
 ///
-/// io-pimdir's `PimdirSourceStore::run`, but borrowing the remote and timing
-/// each yield for [`prof`], so the driver keeps its long-lived store handle
-/// and client across the ephemeral coroutine.
+/// io-pimdir's `PimdirSourceStore::run`, but borrowing the remote, so the
+/// driver keeps its long-lived store handle and client across the
+/// ephemeral coroutine.
 pub fn run_verb<R, C, T, E>(
     store: &mut PimdirSourceStore,
     remote: &mut R,
@@ -170,17 +167,6 @@ where
             PimdirCoroutineState::Yielded(yielded) => yielded,
         };
 
-        let stat = match &yielded {
-            PimdirYield::WantsLoad { .. } => &prof::LOAD,
-            PimdirYield::WantsLookupObject(_) => &prof::LOOKUP,
-            PimdirYield::WantsWrite(_) => &prof::WRITE,
-            PimdirYield::WantsEnumerate { .. } => &prof::ENUMERATE,
-            PimdirYield::WantsFetch { .. } => &prof::FETCH,
-            PimdirYield::WantsPush { .. } => &prof::PUSH,
-            PimdirYield::WantsVerify(_) => &prof::VERIFY,
-        };
-        let t = Instant::now();
-
         let serviced = store
             .service(yielded)
             .map_err(|err| anyhow!("Storage error: {err}"))?;
@@ -244,7 +230,5 @@ where
             ),
             Err(_) => unreachable!("a storage yield is serviced by the store"),
         });
-
-        stat.add(t.elapsed());
     }
 }

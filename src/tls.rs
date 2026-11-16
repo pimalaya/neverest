@@ -3,7 +3,7 @@
 //! Turns the `tls` tables into the runtime [`Tls`] handle the network
 //! backends connect with.
 
-use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsProvider, TlsServer};
+use pimalaya_stream::tls::{Rustls, RustlsCrypto, Tls, TlsClient, TlsProvider, TlsServer};
 
 use crate::config::tls::{RustlsCryptoConfig, TlsConfig, TlsProviderConfig};
 
@@ -27,7 +27,10 @@ impl TlsConfig {
                 alpn,
             },
             server: self.cert.map(|cert| TlsServer { cert }),
-            client: None,
+            client: self.client.map(|client| TlsClient {
+                cert: client.cert,
+                key: client.key,
+            }),
         }
     }
 }

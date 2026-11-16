@@ -1095,6 +1095,14 @@ mod tests {
 
         let tls: TlsConfig = toml::from_str("").unwrap();
         assert_eq!(tls.cert, None);
+        assert!(tls.client.is_none());
+
+        let tls: TlsConfig =
+            toml::from_str(r#"client = { cert = "~/me.pem", key = "~/me.key.pem" }"#).unwrap();
+        let client = tls.client.unwrap();
+        assert_eq!(client.cert, home.join("me.pem"));
+        assert_eq!(client.key, home.join("me.key.pem"));
+        assert!(toml::from_str::<TlsConfig>(r#"client.cert = "~/me.pem""#).is_err());
     }
 
     /// A path key expands environment variables too, as every other

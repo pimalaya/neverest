@@ -41,11 +41,13 @@
 #imap.item.update = true				# an item's body is edited in place, cards and events only
 
 # Network, the same keys under smtp, jmap, gmail, msgraph, gpeople, gcal, carddav and caldav
-#imap.tls.provider = "rustls"			# the build's first otherwise [native-tls]
-#imap.tls.rustls.crypto = "ring"		# the build's first otherwise [aws]
-#imap.tls.cert = "/path/to/cert.pem"		# a PEM certificate to trust
-#imap.alpn = ["imap"]				# the ALPN ids rustls offers, empty for none
-#imap.proxy.url = "socks5h://localhost:1080"	# the proxy keys, for IMAP alone
+#imap.tls.provider = "rustls"				# the build's first otherwise [native-tls]
+#imap.tls.rustls.crypto = "ring"			# the build's first otherwise [aws]
+#imap.tls.cert = "/path/to/cert.pem"			# a PEM certificate to trust
+#imap.tls.client.cert = "/path/to/client.pem"		# a PEM client certificate, for mutual TLS
+#imap.tls.client.key = "/path/to/client.key.pem"	# its PEM private key, PKCS#8 under native-tls
+#imap.alpn = ["imap"]					# the ALPN ids rustls offers, empty for none
+#imap.proxy.url = "socks5h://localhost:1080"		# the proxy keys, for IMAP alone
 
 # SMTP, the send channel of queued messages, one per account
 #smtp.server = "smtp.example.org"		# implicit TLS on 465; smtp://host is cleartext on 25

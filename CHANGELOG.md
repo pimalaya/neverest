@@ -80,6 +80,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Added `proxy.url`, `proxy.username` and `proxy.password` at the account, under every backend table and under `smtp`; with none, the `all_proxy` and `https_proxy` environment variables apply.
 
+- Added `tls.client.cert` and `tls.client.key` under every backend table and `smtp`, a client certificate presented for mutual TLS, as himalaya reads them.
+
 - Added `imap.sasl-ir`, `imap.id.auto` and `imap.id.fields`, as himalaya reads them.
 
 - Added `carddav.home` and `caldav.home`, the home set as a URL with nothing discovered, and `auth = "none"` for a DAV server asking for no credential.

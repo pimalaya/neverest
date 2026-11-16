@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use pimalaya_config::toml::opt_shell_expanded_path;
+use pimalaya_config::toml::{opt_shell_expanded_path, shell_expanded_path};
 use serde::{Deserialize, Serialize};
 
 /// How a connection is secured, shared by every backend.
@@ -19,6 +19,21 @@ pub struct TlsConfig {
     /// Path to an extra CA certificate to trust, shell-expanded.
     #[serde(default, deserialize_with = "opt_shell_expanded_path")]
     pub cert: Option<PathBuf>,
+    /// A client certificate, presented when the server asks for one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<TlsClientConfig>,
+}
+
+/// A client certificate and its key, both PEM, shell-expanded.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct TlsClientConfig {
+    /// The certificate, optionally followed by its intermediates.
+    #[serde(deserialize_with = "shell_expanded_path")]
+    pub cert: PathBuf,
+    /// The private key, PKCS#8 under native-tls.
+    #[serde(deserialize_with = "shell_expanded_path")]
+    pub key: PathBuf,
 }
 
 /// Which TLS implementation carries the connection.

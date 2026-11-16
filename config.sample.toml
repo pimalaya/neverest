@@ -3,6 +3,7 @@
 #retain = true				# the store keeps bodies, unset true with no target and false with targets
 #item.filter.since = "30d"		# the oldest mail listed: a duration, a date or an RFC 3339 instant
 #connections = 4			# connections per source for body downloads, sync -j overriding it
+
 #conflict.merger = "tcard merge {base} {local} {remote} --output {output}"	# what conflict resolve --interactive runs
 
 #store.root = "~/.local/state/neverest"	# the store, shared by every account naming the same root
@@ -30,25 +31,25 @@
 
 # Sync, the same keys under every backend table and msgraph domain
 #imap.collection.filter.include = ["INBOX", "Sent"]	# the collections synced, exclude = [...] the ones skipped, all otherwise
-#imap.collection.create = true		# a collection created on one side is created here
-#imap.collection.delete = false		# a collection gone on one side is deleted here
-#imap.collection.rename = true		# a frontend may rename a collection, unset false when one-way
-#imap.collection.capped = false		# the server lists at most a number of items, so what it leaves out is kept
-#imap.flag.update = true		# flag changes are pushed here
-#imap.item.create = true		# items are created here, with item.delete
-#imap.item.delete = false		# items are deleted here, with item.create
-#imap.item.update = true		# an item's body is edited in place, cards and events only
+#imap.collection.create = true				# a collection created on one side is created here
+#imap.collection.delete = false				# a collection gone on one side is deleted here
+#imap.collection.rename = true				# a frontend may rename a collection, unset false when one-way
+#imap.collection.capped = false				# the server lists at most a number of items, so what it leaves out is kept
+#imap.flag.update = true				# flag changes are pushed here
+#imap.item.create = true				# items are created here, with item.delete
+#imap.item.delete = false				# items are deleted here, with item.create
+#imap.item.update = true				# an item's body is edited in place, cards and events only
 
 # Network, the same keys under smtp, jmap, gmail, msgraph, gpeople, gcal, carddav and caldav
-#imap.tls.provider = "rustls"		# the build's first otherwise [native-tls]
-#imap.tls.rustls.crypto = "ring"	# the build's first otherwise [aws]
-#imap.tls.cert = "/path/to/cert.pem"	# a PEM certificate to trust
-#imap.alpn = ["imap"]			# the ALPN ids rustls offers, empty for none
+#imap.tls.provider = "rustls"			# the build's first otherwise [native-tls]
+#imap.tls.rustls.crypto = "ring"		# the build's first otherwise [aws]
+#imap.tls.cert = "/path/to/cert.pem"		# a PEM certificate to trust
+#imap.alpn = ["imap"]				# the ALPN ids rustls offers, empty for none
 #imap.proxy.url = "socks5h://localhost:1080"	# the proxy keys, for IMAP alone
 
 # SMTP, the send channel of queued messages, one per account
-#smtp.server = "smtp.example.org"	# implicit TLS on 465; smtp://host is cleartext on 25
-#smtp.starttls = false			# upgrade an smtp:// connection with STARTTLS
+#smtp.server = "smtp.example.org"		# implicit TLS on 465; smtp://host is cleartext on 25
+#smtp.starttls = false				# upgrade an smtp:// connection with STARTTLS
 #smtp.sasl.plain.username = "alice@example.org"	# as imap.sasl
 #smtp.sasl.plain.password.command = "exit 127"	# prints the password
 
@@ -68,30 +69,30 @@
 #gmail.units-per-minute = 6000		# the quota units spent over any 60 seconds
 
 # Microsoft Graph, one session for its domains, each a source
-#msgraph.user-id = "me"			# the mailbox owner [bob@example.org]
+#msgraph.user-id = "me"				# the mailbox owner [bob@example.org]
 #msgraph.auth.token.command = "exit 127"	# prints an OAuth 2.0 access token with each domain's scope
-#msgraph.mail = true			# the mail folders, or a table of the sync keys
-#msgraph.contacts = true		# the contact folders, scope Contacts.ReadWrite
-#msgraph.calendar = true		# the calendars, scope Calendars.ReadWrite
+#msgraph.mail = true				# the mail folders, or a table of the sync keys
+#msgraph.contacts = true			# the contact folders, scope Contacts.ReadWrite
+#msgraph.calendar = true			# the calendars, scope Calendars.ReadWrite
 
 # Google People and Google Calendar
 #gpeople.auth.token.command = "exit 127"	# prints an OAuth 2.0 access token, scope contacts
 #gcal.auth.token.command = "exit 127"		# prints an OAuth 2.0 access token, scope calendar
 
 # CardDAV
-#carddav.server = "dav.example.org"	# implicit https; the principal and home set are discovered
-#carddav.home = "https://dav.example.org/dav/addressbooks/alice/"	# the home set itself, nothing discovered
+#carddav.server = "dav.example.org"			# implicit https; the principal and home set are discovered
+#carddav.home = "https://dav.example.org/cards/"	# the home set itself, nothing discovered
 
-#carddav.auth.basic.username = "alice"	# HTTP Basic
+#carddav.auth.basic.username = "alice"			# HTTP Basic
 #carddav.auth.basic.password.command = "exit 127"	# prints the password
 
 #carddav.auth.bearer.token.command = "exit 127"	# prints a bearer token
 
 # CalDAV
-#caldav.server = "dav.example.org"	# implicit https; the principal and home set are discovered
-#caldav.home = "https://dav.example.org/dav/calendars/alice/"	# the home set itself, nothing discovered
+#caldav.server = "dav.example.org"			# implicit https; the principal and home set are discovered
+#caldav.home = "https://dav.example.org/calendars/"	# the home set itself, nothing discovered
 
-#caldav.auth.basic.username = "alice"	# HTTP Basic
+#caldav.auth.basic.username = "alice"			# HTTP Basic
 #caldav.auth.basic.password.command = "exit 127"	# prints the password
 
 #caldav.auth.bearer.token.command = "exit 127"	# prints a bearer token

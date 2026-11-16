@@ -1,5 +1,5 @@
 {
-  description = "CLI to synchronize PIM collections: mail, contact, calendar…";
+  description = "CLI to synchronize mails, contacts and calendars";
 
   inputs = {
     nixpkgs = {

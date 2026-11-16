@@ -94,7 +94,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   cargoTestFlags = [ "--bins" ];
 
   meta = {
-    description = "CLI to synchronize PIM collections: mail, contact, calendar…";
+    description = "CLI to synchronize mails, contacts and calendars";
     mainProgram = "neverest";
     homepage = "https://github.com/pimalaya/${finalAttrs.pname}";
     changelog = "${finalAttrs.meta.homepage}/releases/tag/${finalAttrs.src.tag}";

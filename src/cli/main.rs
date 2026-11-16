@@ -139,7 +139,7 @@ pub fn welcome<'a>(
 ) -> Welcome<'a> {
     Welcome {
         bin: "neverest",
-        intro: "Welcome to Neverest, the CLI to synchronize PIM collections.",
+        intro: "Welcome to Neverest, the CLI to synchronize mails, contacts and calendars.",
         path,
         config_paths,
         sample,

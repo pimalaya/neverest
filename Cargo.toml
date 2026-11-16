@@ -1,6 +1,6 @@
 [package]
 name = "neverest"
-description = "CLI to synchronize PIM collections: mail, contact, calendar…"
+description = "CLI to synchronize mails, contacts and calendars"
 version = "0.3.0"
 authors = ["Clément DOUIN (soywod) <clement.douin@posteo.net>"]
 rust-version = "1.89"

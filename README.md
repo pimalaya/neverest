@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./logo.svg" alt="Logo" width="128" height="128" />
   <h1>📫 Neverest</h1>
-  <p>CLI to synchronize PIM collections: mail, contact, calendar…</p>
+  <p>CLI to synchronize mails, contacts and calendars</p>
   <p>
     <a href="https://matrix.to/#/#pimalaya:matrix.org"><img alt="Matrix" src="https://img.shields.io/badge/chat-%23pimalaya-blue?style=flat&logo=matrix&logoColor=white"/></a>
     <a href="https://fosstodon.org/@pimalaya"><img alt="Mastodon" src="https://img.shields.io/badge/news-%40pimalaya-blue?style=flat&logo=mastodon&logoColor=white"/></a>

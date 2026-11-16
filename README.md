@@ -90,9 +90,9 @@ Neverest reads a TOML configuration you write, and never writes one. [config.sam
 
 A configuration is loaded from every existing path among the following, each one deep-merged on top of the ones before:
 
-- $XDG_CONFIG_HOME/neverest/config.toml
-- $HOME/.config/neverest/config.toml
-- $HOME/.neverestrc
+- `$XDG_CONFIG_HOME/neverest/config.toml`
+- `$HOME/.config/neverest/config.toml`
+- `$HOME/.neverestrc`
 
 Override the path with `-c <PATH>`, repeated to merge several files. `neverest account check` validates the accounts declared.
 

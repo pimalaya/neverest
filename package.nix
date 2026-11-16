@@ -20,7 +20,6 @@
 
 let
   nativeTls = builtins.elem "native-tls" buildFeatures;
-  vendored = builtins.elem "vendored" buildFeatures;
 
   sqlite' =
     if stdenv.hostPlatform.isWindows then
@@ -30,11 +29,16 @@ let
     else
       sqlite;
 
+  # The defaults carry `vendored`, which builds a SQLite from source, so the
+  # system library is linked only with the defaults off and `vendored` left
+  # out, as pimalaya/nix builds it.
+  systemSqlite = buildNoDefaultFeatures && !builtins.elem "vendored" buildFeatures;
+
 in
 rustPlatform.buildRustPackage (finalAttrs: {
   __structuredAttrs = true;
 
-  inherit buildNoDefaultFeatures;
+  inherit buildNoDefaultFeatures buildFeatures;
 
   pname = "neverest";
   version = "0.3.0";
@@ -47,20 +51,19 @@ rustPlatform.buildRustPackage (finalAttrs: {
     hash = "";
   };
 
-  env.OPENSSL_NO_VENDOR = !vendored;
+  # openssl should not be provided by vendors, not even on windows
+  env.OPENSSL_NO_VENDOR = 1;
 
   # pkg-config hands the linker libsqlite3 but no rpath, leaving a binary that
   # cannot find it: not in postInstall, which runs it, nor once installed.
-  env.NIX_LDFLAGS = lib.optionalString (!vendored) ("-rpath " + lib.getLib sqlite' + "/lib");
+  env.NIX_LDFLAGS = lib.optionalString systemSqlite ("-rpath " + lib.getLib sqlite' + "/lib");
 
   nativeBuildInputs = [
     pkg-config
     installShellFiles
   ];
 
-  buildInputs = lib.optional (!vendored) sqlite' ++ lib.optional (!vendored && nativeTls) openssl;
-
-  buildFeatures = buildFeatures ++ lib.optional vendored "vendored";
+  buildInputs = lib.optional systemSqlite sqlite' ++ lib.optional nativeTls openssl;
 
   postInstall =
     let

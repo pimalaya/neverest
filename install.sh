@@ -54,4 +54,12 @@ tar -xzf "$tmpdir/neverest.tgz" -C "$tmpdir"
 mkdir -p "$PREFIX/bin"
 cp -f -- "$tmpdir/$binary" "$PREFIX/bin/$binary"
 
+sample=share/doc/neverest/config.sample.toml
+
+if [ -f "$tmpdir/$sample" ]; then
+    echo "Installing sample configuration…"
+    mkdir -p "$PREFIX/share/doc/neverest"
+    cp -f -- "$tmpdir/$sample" "$PREFIX/$sample"
+fi
+
 die "$("$PREFIX/bin/$binary" --version) installed!" 0

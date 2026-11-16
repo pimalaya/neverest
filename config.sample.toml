@@ -1,579 +1,101 @@
-# ================================================================================
-# `neverest` configuration file.
-#
-# Loaded from every existing path among the following, each one deep-merged on
-# top of the ones before:
-#   - $XDG_CONFIG_HOME/neverest/config.toml
-#   - $HOME/.config/neverest/config.toml
-#   - $HOME/.neverestrc
-#
-# Override with `neverest -c <PATH>`, repeated to merge several files: the first
-# one is the base and the next ones are deep-merged on top of it. Each `-c`
-# takes one path, never split, and no environment variable is read.
-#
-# Every account shares ONE pimdir STORE, each fed by one or more named SOURCES,
-# each a remote. A backend written directly under the account
-# (`imap.server = …`) is sugar for a source named after its protocol; the
-# `sources` table at the bottom is what you reach for when you need two of one
-# protocol.
-#
-# Every command runs over EVERY ACCOUNT, one after the other, unless
-# `-a/--account` names some (repeatable). The store is locked for the whole
-# run, so two accounts of one store never sync at once: give an account that
-# needs its own schedule its own `store.root`.
-#
-# WHAT AN ACCOUNT DOES is its arity plus two flags, so there is no mode to name:
-#
-#   sources  targets  one-way  behaviour
-#   -------  -------  -------  ------------------------------------------------
-#         1        1    false  two-way mirror between the two remotes
-#         1        1     true  source overwrites target
-#         1        N     true  source overwrites each target (false is refused)
-#         N        0    false  each source merges two-way with the local store
-#         N        0     true  sources overwrite the store, local edits dropped
-#
-# Anything else is refused at load, naming the nearest legal shape. With no
-# target the local store is the destination, the offline replica everything
-# below is written for.
-#
-# Sources never meet: an item one holds crosses to the targets, never to another
-# source, so several sit side by side in one store for a frontend to union.
-# ================================================================================
-
 [accounts.example]
-
-# Make the sources authoritative: their side wins and the other's change is
-# DISCARDED rather than merged, so nothing is reported as a conflict. Turning it
-# on over an account that synced both ways is refused once; `neverest sync
-# --accept-mode` says you meant it.
-#one-way = false
-
-# Whether the store keeps bodies and is readable by a frontend, rather than only
-# the ledger of item spines and checkpoints it has to be in every mode. Unset
-# takes the destination's answer: true with no targets, false with targets. Set
-# it with targets to migrate AND keep a local copy.
-#retain = true
-
-# The oldest mail a sync lists, on its `Date` header: a duration back from
-# today (`30d`, `12w`, `6mo`, `1y`), a date (`2026-01-01`, midnight UTC) or an
-# RFC 3339 instant. Mail older than that is neither listed nor deleted: what a
-# wider sync stored stays, and widening it later lists only what it lacks.
-# Mail only: refused on an account syncing contacts or calendars. `neverest
-# sync --since <WHEN>` overrides it for one run.
-#item.filter.since = "30d"
-
-# --------------------------------------------------------------------------------
-# Per-source overview
-# --------------------------------------------------------------------------------
-#
-# Each source picks exactly one backend: `imap.*`, `jmap.*`, `gmail.*`,
-# `msgraph.*`, `carddav.*` or `caldav.*`. Its filter, permissions and pool size
-# live inside that backend table, a Graph source's in its domain's
-# (`msgraph.mail.*`, `msgraph.contacts.*`, `msgraph.calendar.*`):
-#   - `collection.filter`: which collections this source syncs
-#   - `collection.create`, `flag.update`, `item.update`: default true
-#   - `collection.delete`: default false; a collection one endpoint no
-#     longer lists is deleted on the other only when this is true, and a
-#     frontend may ask to delete one (a `collection-delete` intent) only
-#     then
-#   - `collection.rename`: whether a frontend may rename a collection (a
-#     `collection-rename` intent); unset, false on a `one-way` account,
-#     whose sources are copied rather than written to, true otherwise
-#   - `collection.capped`: default false; true when the server lists at most
-#     a number of what a collection holds, so what it leaves out is kept
-#   - `item.{create,delete}`: both required when the block is declared
-#   - `pool-size`: read by Microsoft Graph alone for now (default 3, never
-#     above the account's `connections`); IMAP opens `connections`
-#     (default 4), Gmail, Google Calendar, Google People and DAV one
-#
-# `item.update` gates in-place body edits, so it is inert for mail and
-# meaningful for CardDAV and CalDAV.
-
-# Which collections this source syncs. Pick exactly one variant; omit for `all`.
-imap.collection.filter = "all"
-#imap.collection.filter.include = ["INBOX", "Sent"]
-#imap.collection.filter.exclude = ["[Gmail]/All Mail", "Trash"]
-
-# --------------------------------------------------------------------------------
-# IMAP config
-# https://www.iana.org/go/rfc9051
-# --------------------------------------------------------------------------------
-
-# Bare authority (implicit `imaps://`), or a full `imap://` / `imaps://` URL.
-imap.server = "imap.fastmail.com"
-#imap.server = "imap.example.com:143"
-#imap.server = "imap://example.com:143"
-#imap.server = "imaps://example.com:993"
-
-# TLS and crypto providers, defaulting to the first available at runtime.
-#imap.tls.provider = "rustls"
-#imap.tls.provider = "native-tls"
-#imap.tls.rustls.crypto = "ring"
-#imap.tls.rustls.crypto = "aws"
-
-# Extra root certificate, PEM-encoded. The path is shell-expanded.
-#imap.tls.cert = "/path/to/custom/cert.pem"
-
-# Upgrade a cleartext `imap://` connection.
-#imap.starttls = false
-
-# Offered during the TLS handshake (rustls only). Defaults to ["imap"], `[]`
-# skips ALPN.
-#imap.alpn = ["imap"]
-#imap.alpn = []
-
-# Pick exactly one SASL mechanism. Omit the whole `sasl` table to skip
-# authentication (no `AUTHENTICATE` command sent).
-
-# ANONYMOUS: https://datatracker.ietf.org/doc/html/rfc4505
-#imap.sasl.anonymous.message = "neverest"
-
-# PLAIN: https://datatracker.ietf.org/doc/html/rfc4616
-imap.sasl.plain.username = "pimalaya@fastmail.org"
-imap.sasl.plain.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
-#imap.sasl.plain.password.command = "pass show example"
-
-# LOGIN: https://datatracker.ietf.org/doc/html/draft-murchison-sasl-login-00
-#imap.sasl.login.username = "user@example.com"
-#imap.sasl.login.password.raw = "***"
-
-# OAUTHBEARER (GS2 host and port derived from the server URL):
-# https://datatracker.ietf.org/doc/html/rfc7628
-#imap.sasl.oauthbearer.username = "user@example.com"
-#imap.sasl.oauthbearer.token.raw = "***"
-#imap.sasl.oauthbearer.token.command = ["ortie", "token", "show", "-a", "example"]
-
-# XOAUTH2: https://developers.google.com/gmail/imap/xoauth2-protocol
-#imap.sasl.xoauth2.username = "user@example.com"
-#imap.sasl.xoauth2.token.raw = "***"
-
-# SCRAM-SHA-256: https://datatracker.ietf.org/doc/html/rfc7677
-#imap.sasl.scram-sha-256.username = "user@example.com"
-#imap.sasl.scram-sha-256.password.raw = "***"
-
-# Force the RFC 4959 initial response on or off. Unset follows the advertised
-# SASL-IR capability, which Coremail (126.com, 163.com) advertises falsely: set
-# it to false there.
-#imap.sasl-ir = false
-
-# Send an RFC 2971 ID straight after authentication, as mail.qq.com and
-# Fastmail require. Each field set to true sends neverest's value (name,
-# version, vendor, support-url), false sends NIL; none at all sends `ID NIL`.
-#imap.id.auto = true
-#imap.id.fields.name = true
-#imap.id.fields.version = true
-
-# The proxy the connections go through, over the account's own `proxy` and the
-# all_proxy and https_proxy environment variables. Every backend table and
-# `smtp` take it.
-#imap.proxy.url = "socks5h://127.0.0.1:1080"
-#imap.proxy.username = "user"
-#imap.proxy.password.command = ["pass", "show", "proxy"]
-
-# Keep the server read-mostly, so a buggy sync cannot destroy its state.
-imap.collection.create = false
-imap.collection.delete = false
-imap.collection.rename = false
-imap.item.create = true
-imap.item.delete = false
-
-# Say so when the server lists at most a number of the messages a folder holds,
-# whatever it holds (Gmail over IMAP with "Limit IMAP folders to contain no
-# more than this many messages" set). A message such a listing leaves out is
-# then kept, and counted in the report under `Unlisted`, where it would be read
-# as deleted. Only a removal the server states itself then deletes: an IMAP
-# server states one with QRESYNC alone, which Gmail lacks, so a message deleted
-# there stays in the store while this is set. Every backend takes the key.
-#imap.collection.capped = true
-
-# Narrow the pool when the server's `LIMIT` advertises less than 8.
-#imap.pool-size = 8
-
-# --------------------------------------------------------------------------------
-# JMAP config (alternative to the IMAP block above)
-# https://www.iana.org/go/rfc8620
-# https://www.iana.org/go/rfc8621
-# --------------------------------------------------------------------------------
-#
-# This block parses, but no JMAP backend is compiled in yet, so a side
-# declaring it is refused when the sync opens it.
-
-# Bare authority (discovered through `GET /.well-known/jmap`) or session URL.
-#jmap.server = "fastmail.com"
-#jmap.server = "https://api.fastmail.com/jmap/session"
-
-# TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
-#jmap.tls.provider = "rustls"
-#jmap.tls.rustls.crypto = "ring"
-#jmap.tls.cert = "/path/to/custom/cert.pem"
-#jmap.alpn = ["http/1.1"]
-#jmap.alpn = []
-
-# Pick exactly one of `header`, `bearer`, `basic`.
-#jmap.auth.header.raw = "Bearer eyJhbGciOiJ..."
-#jmap.auth.header.command = "pass show fastmail-token"
-#jmap.auth.bearer.token.raw = "***"
-#jmap.auth.bearer.token.command = ["ortie", "token", "show", "-a", "fastmail-api"]
-#jmap.auth.basic.username = "user@example.com"
-#jmap.auth.basic.password.raw = "***"
-#jmap.auth.basic.password.command = "pass show fastmail"
-
-#jmap.pool-size = 4
-
-# --------------------------------------------------------------------------------
-# Gmail config (alternative to the IMAP / JMAP blocks above)
-# https://developers.google.com/gmail/api
-# --------------------------------------------------------------------------------
-#
-# User labels plus INBOX, SENT, DRAFT, SPAM and TRASH are collections, keyed by
-# label name like on IMAP. UNREAD, STARRED and IMPORTANT are flags. A delete
-# removes the label (from INBOX it archives), only one from TRASH is permanent.
-# The token needs the https://mail.google.com/ scope. The API host is fixed,
-# so only the owner, TLS and the credential are configurable.
-#gmail.user-id = "me"
-#gmail.tls.provider = "rustls"
-#gmail.tls.rustls.crypto = "ring"
-#gmail.tls.cert = "/path/to/custom/cert.pem"
-#gmail.alpn = ["http/1.1"]
-#gmail.alpn = []
-
-# Bearer tokens only. Refreshing one is the command's job, typically ortie.
-#gmail.auth.token.raw = "***"
-#gmail.auth.token.command = ["ortie", "token", "show", "-a", "gmail"]
-
-#gmail.item.create = true
-#gmail.item.delete = false
-#gmail.pool-size = 4
-
-# Messages are read through Gmail's HTTP batch endpoint, paced below the quota.
-# Most reads per batch (1 to 100): Gmail runs them side by side and refuses past
-# its per-user concurrency limit, measured nil at 10, 1.2 % at 25, 19 % at 50. A
-# batch with a read refused for concurrency or rate, failed transiently or left
-# unanswered halves the next, down to one read; each full batch answered whole
-# doubles it back up to this ceiling, so another API client on the mailbox costs
-# throughput rather than repeated refusals.
-#gmail.batch-size = 10
-# Batches in flight across the source's connections. Above 1, refusals grow
-# (two batches of 50 side by side: a third to two thirds refused); each refusal
-# is waited out, so it trades latency for quota and pays only with small batches.
-#gmail.batches-in-flight = 1
-# Quota units spent over any 60 seconds, a read counting 5. 6,000 is the
-# per-user quota a Google project gets; raise it only if yours grants more.
-#gmail.units-per-minute = 6000
-
-# --------------------------------------------------------------------------------
-# Microsoft Graph config (alternative to the blocks above)
-# https://learn.microsoft.com/en-us/graph/api/resources/mail-api-overview
-# --------------------------------------------------------------------------------
-#
-# One `msgraph` table holds the session and names the domains it syncs, each a
-# source of its own: `msgraph.mail` the mail folders (the source `msgraph`),
-# `msgraph.contacts` the contact folders (`msgraph-contacts`) and
-# `msgraph.calendar` the calendars (`msgraph-calendar`). Name one at least:
-# `= true` takes its defaults, a table of its keys sets them. Under
-# `sources.<name>`, an `msgraph` table names one domain, the source keeping
-# `<name>`.
-
-# The API host is fixed, so only the owner, TLS, the proxy and the credential
-# are configurable, once for every domain.
-#msgraph.user-id = "me"
-#msgraph.tls.provider = "rustls"
-#msgraph.tls.rustls.crypto = "ring"
-#msgraph.tls.cert = "/path/to/custom/cert.pem"
-#msgraph.alpn = ["http/1.1"]
-#msgraph.alpn = []
-#msgraph.proxy.url = "socks5h://localhost:1080"
-
-# Bearer tokens only: neverest runs no OAuth flow. The command runs once a run,
-# typically ortie serving a cached, auto-refreshed token. It needs the scope of
-# every domain the table names.
-#msgraph.auth.token.raw = "***"
-#msgraph.auth.token.command = ["ortie", "token", "show", "-a", "msgraph"]
-
-# Mail folders, each a collection. Graph takes an added message in Drafts alone,
-# and no edit of a message's body.
-#msgraph.mail = true
-#msgraph.mail.collection.filter.include = ["Inbox", "Sent Items"]
-#msgraph.mail.item.create = true
-#msgraph.mail.item.delete = false
-# Graph serves four requests at once a mailbox, a `$batch`'s among them.
-#msgraph.mail.pool-size = 3
-
-# Contact folders, exposed as address books, the default Contacts folder as
-# `contacts`. The token needs the `Contacts.ReadWrite` scope. Contacts push
-# creates, updates and deletes; an edit made on Graph since the last sync is
-# refused and picked up by the next run. A card keeps its vCard UID on Graph,
-# in an extended property.
-#msgraph.contacts = true
-#msgraph.contacts.item.create = true
-#msgraph.contacts.item.delete = false
-
-# Calendars, each a collection, a recurring series and its exceptions one item.
-# The token needs the `Calendars.ReadWrite` scope. Every run lists each calendar
-# in full. A series pushes its exceptions through its instances, and a floating
-# time is anchored in UTC, Graph stating no zone for a calendar.
-#msgraph.calendar = true
-
-# --------------------------------------------------------------------------------
-# Google config (contacts and calendars, not mail)
-# https://developers.google.com/people  https://developers.google.com/calendar
-# --------------------------------------------------------------------------------
-
-# Google contacts through the People API: every connection syncs as one
-# address book, `contacts`. The token needs the `contacts` scope.
-#gpeople.auth.token.command = ["ortie", "token", "show", "-a", "google"]
-#gpeople.tls.provider = "rustls"
-#gpeople.alpn = ["http/1.1"]
-
-# Google calendars through the Calendar API: each calendar of the user's list
-# is a collection, a recurring series with its modified instances one item.
-# The token needs the `calendar` scope. A series pushes its modified instances
-# through its instances, and a floating time is anchored in the calendar's zone.
-#gcal.auth.token.command = ["ortie", "token", "show", "-a", "google"]
-
-# --------------------------------------------------------------------------------
-# CardDAV config (contacts, not mail)
-
-# https://www.iana.org/go/rfc6352
-# --------------------------------------------------------------------------------
-
-# A CardDAV side syncs **contacts**, so it pairs with another contacts side or
-# with the store alone, never with a mailbox. Requires the `carddav` cargo
-# feature, in the default set. The URL is the entry point only: the principal
-# and home set are discovered, each address book a collection.
-#
-# Bare authority (implicit `https://`), or a full `http://` / `https://` URL.
-#carddav.server = "dav.example.org"
-#carddav.server = "dav.example.org:8443"
-#carddav.server = "https://dav.example.org/dav/"
-
-# Or the address book home set itself, a full URL: nothing is discovered and
-# `server` may be left out (Google's lists no principal neverest can walk to).
-#carddav.home = "https://www.googleapis.com/carddav/v1/principals/<email>/lists/"
-
-# Pick exactly one of `basic` (the common case) or `bearer`, or `none` for a
-# server asking for no credential.
-#carddav.auth.basic.username = "user"
-#carddav.auth.basic.password.command = ["pass", "show", "example/dav"]
-#carddav.auth.bearer.token.command = ["ortie", "token", "show", "-a", "dav"]
-#carddav.auth = "none"
-
-# TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
-#carddav.tls.provider = "rustls"
-#carddav.alpn = ["http/1.1"]
-
-# Cards are mutable, unlike mail: `item.update` gates in-place edits, and a
-# conditional write reports a card edited on both sides as a conflict.
-#carddav.item.update = true
-#carddav.item.create = true
-#carddav.item.delete = false
-#carddav.pool-size = 4
-
-# --------------------------------------------------------------------------------
-# CalDAV config (calendar, not mail)
-# https://www.iana.org/go/rfc4791
-# --------------------------------------------------------------------------------
-
-# A CalDAV side syncs **calendar**, on exactly the terms the CardDAV block above
-# describes: same fields, same adapter underneath, built by the `caldav` cargo
-# feature, in the default set.
-#
-# The item is the calendar object **resource**, not the component: RFC 4791
-# keeps every component sharing a `UID` in one resource, so a recurring series
-# and its overrides are one item and an override is a body edit.
-#
-# Bare authority (implicit `https://`), or a full `http://` / `https://` URL.
-#caldav.server = "dav.example.org"
-#caldav.server = "dav.example.org:8443"
-#caldav.server = "https://dav.example.org/dav/"
-
-# Or the calendar home set itself, a full URL: nothing is discovered and
-# `server` may be left out.
-#caldav.home = "https://dav.example.org/dav/calendars/user/"
-
-# Pick exactly one of `basic` (the common case) or `bearer`, or `none` for a
-# server asking for no credential.
-#caldav.auth.basic.username = "user"
-#caldav.auth.basic.password.command = ["pass", "show", "example/dav"]
-#caldav.auth.bearer.token.command = ["ortie", "token", "show", "-a", "dav"]
-#caldav.auth = "none"
-
-# TLS mirrors the imap.tls block above. ALPN defaults to ["http/1.1"].
-#caldav.tls.provider = "rustls"
-#caldav.alpn = ["http/1.1"]
-
-# Calendar resources are mutable, like cards: `item.update` gates in-place
-# edits, and a conditional write reports an event edited on both sides as a
-# conflict.
-#caldav.item.update = true
-#caldav.item.create = true
-#caldav.item.delete = false
-#caldav.pool-size = 4
-
-# --------------------------------------------------------------------------------
-# Conflict options
-# --------------------------------------------------------------------------------
-
-# Every run three-way merges a conflicted card or event against the base the
-# last sync agreed on, and clears the conflict when nothing collided. Both
-# sides setting one field two ways parks the item, and the run exits 3.
-#
-# Neverest raises no notification of its own: `--json` carries `conflicts`,
-# what this run marked, and `outstandingConflicts`, what the store holds.
-# Testing the first notifies on entry, once, with no state to keep:
-#
-#   neverest sync --json | jq -e '.conflicts | length > 0' >/dev/null \
-#     && notify-send "neverest" "an item needs a decision"
-
-# The interactive merger `conflict resolve --interactive` hands a collision
-# to. UNSET by default, and never reached from a sync.
-#
-# The four paths are appended git-mergetool style: base, the two sides, then
-# the path to write. A command naming {base}, {local}, {remote} or {output} is
-# substituted instead, which is what a tool taking its output as a flag needs.
-#conflict.merger = "tcard merge {base} {local} {remote} --output {output}"
-#conflict.merger = "tcal merge {base} {local} {remote} --output {output}"
-#
-# A tool taking the four in order needs nothing but its own name:
-#conflict.merger = "my-merge-tool"
-#
-# Taken only on a zero exit with the output written, and only when it is a
-# body of that item: one no parser reads and one stating another UID are
-# refused. A decision is refused when the store saw a newer remote revision.
-
-# --------------------------------------------------------------------------------
-# Store options
-# --------------------------------------------------------------------------------
-
-# Where pimdir.db and `objects/` live. Defaults to neverest/ under the
-# platform's state location ($XDG_STATE_HOME, else ~/.local/state, on Linux
-# and the BSDs, ~/Library/Application Support on macOS, %LOCALAPPDATA% on
-# Windows), the one store every account naming no root shares, each
-# collection grouped under its account. Accounts naming one root share that
-# store; an account naming its own syncs on a schedule of its own. A frontend
-# reads one account of a shared store through its own account key
-# (`pimdir.account` in himalaya).
-#store.root = "~/.local/state/neverest-example"
-
-# What the store keeps is `retain`, at the top of this account. Dropping it from
-# true to false does NOT delete the bodies already stored: they stay,
-# unreferenced, until an explicit `pimdir gc` or `neverest sync --reset`.
-#
-# CAUTION: with `retain = true` and a target, the store is a backup rather than a
-# cache, and `neverest sync --reset --force` drops the account's part of it
-# along with the rest of its collections.
-
-# The store never truly deletes: an item whose last binding vanishes is retained,
-# hidden but kept with its body. This is how long before a sync reclaims it: an
-# integer of seconds, or a number plus `s`, `m`, `h`, `d` or `w`. UNSET never
-# purges, `0` purges at once, `sync --no-purge` skips one run, `pimdir`
-# restores retained items. It is this account's alone: another account of the
-# store keeps its own delay.
-#store.purge-after = "90d"
-
-# The longest a sync refreshes the store's search index, which frontends query:
-# a large first build spreads over several runs, or `neverest index` builds it
-# whole. An integer of seconds or a number and its unit; `0` turns the refresh
-# off; a build without the `search` feature ignores it.
-#store.index-timeout = "60s"
-#store.index-timeout = 60
-
-# The proxy every endpoint of the account goes through unless its own table
-# names one (see `imap.proxy`). Unset, the all_proxy and https_proxy environment
-# variables are read.
-#proxy.url = "http://proxy.example.org:3128"
-
-# BACKUP RECIPE: a read-only source plus no purge, so a remote expunge cannot
-# lose anything. The item stays in the store, restorable, until you purge on
-# purpose:
-#
-#   imap.item.delete = false
-#   imap.collection.delete = false
-#   # store.purge-after left unset
-
-# --------------------------------------------------------------------------------
-# Submission send channel (SMTP)
-# --------------------------------------------------------------------------------
-
-# The server a source's queued `submit` intents are sent through at the start of
-# every sync. A frontend enqueues one through the store's action queue; there is
-# no reserved Outbox collection. A source either sends by itself (Graph, through
-# sendMail) or needs this, and AT MOST ONE per account may declare it.
-#
-# An SMTP 4xx leaves the intent pending for the next run, a 5xx parks it.
-# Sending is at-least-once, so `Message-ID` deduplication is the provider's job.
-#
-# The block mirrors the `imap` one above field for field: a bare authority
-# (implicit `smtps://`) or a full URL, the same `tls` table, one `sasl`
-# mechanism.
-#smtp.server = "smtp.fastmail.com"
-#smtp.server = "smtps://smtp.fastmail.com:465"
-#smtp.server = "smtp://smtp.example.com:587"
-#smtp.starttls = true
-
-# TLS mirrors the imap.tls block above.
-#smtp.tls.provider = "rustls"
-#smtp.tls.rustls.crypto = "ring"
-#smtp.tls.cert = "/path/to/custom/cert.pem"
-
-# Offered during the TLS handshake (rustls only). Defaults to ["smtp"], `[]`
-# skips ALPN.
-#smtp.alpn = ["smtp"]
-#smtp.alpn = []
-
-# Pick exactly one SASL mechanism, spelled as under `imap.sasl`. Omit the whole
-# `sasl` table for an unauthenticated relay, which stops after EHLO and sends no
-# AUTH at all.
-#smtp.sasl.anonymous.message = "neverest"
-#smtp.sasl.plain.username = "pimalaya@fastmail.org"
-#smtp.sasl.plain.password.command = ["pass", "show", "pimalaya/fastmail-imap-pop-smtp"]
-#smtp.sasl.login.username = "user@example.com"
-#smtp.sasl.login.password.raw = "***"
-#smtp.sasl.oauthbearer.username = "user@example.com"
-#smtp.sasl.oauthbearer.token.command = ["ortie", "token", "show", "-a", "example"]
-#smtp.sasl.xoauth2.username = "user@example.com"
-#smtp.sasl.xoauth2.token.raw = "***"
-#smtp.sasl.scram-sha-256.username = "user@example.com"
-#smtp.sasl.scram-sha-256.password.raw = "***"
-
-# --------------------------------------------------------------------------------
-# Named sources (the explicit form)
-# --------------------------------------------------------------------------------
-#
-# Everything above is the sugar: `imap.server` is `sources.imap.imap.server`,
-# the source taking its protocol as its name. The two spellings are the same
-# configuration, source id included.
-#
-# Reach for the explicit table when you need two sources of one protocol. The
-# map key is the source name, which is the pimdir source id every binding it
-# owns is recorded under: RENAMING ONE ORPHANS THEM. `targets` is the same map.
-#
-# MIGRATE, one way: the source is the truth and the target is made to match it.
-# Anything changed on the target alone is overwritten on the next run.
-#
-#   [accounts.migrate]
-#   one-way = true
-#   sources.old.imap.server = "imap.old-provider.com"
-#   sources.old.imap.sasl.plain.username = "user@old-provider.com"
-#   sources.old.imap.sasl.plain.password.command = "pass show old"
-#   targets.new.imap.server = "imap.new-provider.com"
-#   targets.new.imap.sasl.plain.username = "user@new-provider.com"
-#   targets.new.imap.sasl.plain.password.command = "pass show new"
-#
-# MIRROR, two ways: drop `one-way` and the same pair keeps each other in step.
-# Two authoritative remotes can genuinely disagree, so a divergence is reported
-# as a conflict rather than resolved.
-#
-# SIDE BY SIDE: several sources and no target, caching into one store without
-# ever writing to each other. This is the default, so it is what you get by
-# saying nothing.
-#
-#   [accounts.personal]
-#   sources.fastmail.imap.server = "imap.fastmail.com"
-#   sources.fastmail.imap.sasl.plain.username = "user@fastmail.com"
-#   sources.fastmail.imap.sasl.plain.password.command = "pass show fastmail"
-#   sources.gmail.imap.server = "imap.gmail.com"
-#   sources.gmail.imap.sasl.xoauth2.username = "user@gmail.com"
-#   sources.gmail.imap.sasl.xoauth2.token.command = ["ortie", "token", "show", "-a", "gmail"]
-#
-# `neverest sync --source <name>` narrows a run to the named sources.
+#one-way = false			# the sources win and the other side's changes are discarded, never merged
+#retain = true				# the store keeps bodies, unset true with no target and false with targets
+#item.filter.since = "30d"		# the oldest mail listed: a duration, a date or an RFC 3339 instant
+#connections = 4			# connections per source for body downloads, sync -j overriding it
+#conflict.merger = "tcard merge {base} {local} {remote} --output {output}"	# what conflict resolve --interactive runs
+
+#store.root = "~/.local/state/neverest"	# the store, shared by every account naming the same root
+#store.purge-after = "90d"		# when a retained item is reclaimed, unset never and 0 at once
+#store.index-timeout = "60s"		# the longest a sync refreshes the search index, 0 never
+
+#proxy.url = "socks5h://localhost:1080"	# a socks5, socks5h or http proxy for every endpoint
+#proxy.username = "alice"		# its username
+#proxy.password.command = "exit 127"	# prints its password
+
+# IMAP
+#imap.server = "imap.example.org"	# implicit TLS on 993; imap://host is cleartext on 143
+#imap.starttls = false			# upgrade an imap:// connection with STARTTLS
+#imap.sasl-ir = false			# inline the credentials, unset following SASL-IR, false for Coremail
+#imap.id.auto = false			# send ID once signed in, as QQ Mail and Fastmail want
+#imap.id.fields.name = true		# what ID sends: true neverest's value, false NIL
+#imap.pool-size = 8			# narrow the pool below a server's LIMIT
+
+#imap.sasl.plain.username = "alice@example.org"	# PLAIN; login and scram-sha-256 take the same keys
+#imap.sasl.plain.password.command = "exit 127"	# prints the password
+#imap.sasl.plain.password.raw = "secret"	# the password itself
+
+#imap.sasl.xoauth2.username = "alice@example.org"	# XOAUTH2; oauthbearer takes the same keys
+#imap.sasl.xoauth2.token.command = "exit 127"		# prints an OAuth 2.0 access token
+
+# Sync, the same keys under every backend table and msgraph domain
+#imap.collection.filter.include = ["INBOX", "Sent"]	# the collections synced, exclude = [...] the ones skipped, all otherwise
+#imap.collection.create = true		# a collection created on one side is created here
+#imap.collection.delete = false		# a collection gone on one side is deleted here
+#imap.collection.rename = true		# a frontend may rename a collection, unset false when one-way
+#imap.collection.capped = false		# the server lists at most a number of items, so what it leaves out is kept
+#imap.flag.update = true		# flag changes are pushed here
+#imap.item.create = true		# items are created here, with item.delete
+#imap.item.delete = false		# items are deleted here, with item.create
+#imap.item.update = true		# an item's body is edited in place, cards and events only
+
+# Network, the same keys under smtp, jmap, gmail, msgraph, gpeople, gcal, carddav and caldav
+#imap.tls.provider = "rustls"		# the build's first otherwise [native-tls]
+#imap.tls.rustls.crypto = "ring"	# the build's first otherwise [aws]
+#imap.tls.cert = "/path/to/cert.pem"	# a PEM certificate to trust
+#imap.alpn = ["imap"]			# the ALPN ids rustls offers, empty for none
+#imap.proxy.url = "socks5h://localhost:1080"	# the proxy keys, for IMAP alone
+
+# SMTP, the send channel of queued messages, one per account
+#smtp.server = "smtp.example.org"	# implicit TLS on 465; smtp://host is cleartext on 25
+#smtp.starttls = false			# upgrade an smtp:// connection with STARTTLS
+#smtp.sasl.plain.username = "alice@example.org"	# as imap.sasl
+#smtp.sasl.plain.password.command = "exit 127"	# prints the password
+
+# JMAP, parsed but not built yet
+#jmap.server = "https://api.fastmail.com/jmap/session"	# the session URL, or a host serving /.well-known/jmap
+
+#jmap.auth.bearer.token.command = "exit 127"	# prints a bearer token
+
+#jmap.auth.basic.username = "alice@example.org"	# HTTP Basic
+#jmap.auth.basic.password.command = "exit 127"	# prints the password
+
+# Gmail
+#gmail.user-id = "me"			# the mailbox owner [alice@example.org]
+#gmail.auth.token.command = "exit 127"	# prints an OAuth 2.0 access token, scope https://mail.google.com/
+#gmail.batch-size = 10			# reads per batch request, 1 to 100
+#gmail.batches-in-flight = 1		# batches at once across the source's connections
+#gmail.units-per-minute = 6000		# the quota units spent over any 60 seconds
+
+# Microsoft Graph, one session for its domains, each a source
+#msgraph.user-id = "me"			# the mailbox owner [bob@example.org]
+#msgraph.auth.token.command = "exit 127"	# prints an OAuth 2.0 access token with each domain's scope
+#msgraph.mail = true			# the mail folders, or a table of the sync keys
+#msgraph.contacts = true		# the contact folders, scope Contacts.ReadWrite
+#msgraph.calendar = true		# the calendars, scope Calendars.ReadWrite
+
+# Google People and Google Calendar
+#gpeople.auth.token.command = "exit 127"	# prints an OAuth 2.0 access token, scope contacts
+#gcal.auth.token.command = "exit 127"		# prints an OAuth 2.0 access token, scope calendar
+
+# CardDAV
+#carddav.server = "dav.example.org"	# implicit https; the principal and home set are discovered
+#carddav.home = "https://dav.example.org/dav/addressbooks/alice/"	# the home set itself, nothing discovered
+
+#carddav.auth.basic.username = "alice"	# HTTP Basic
+#carddav.auth.basic.password.command = "exit 127"	# prints the password
+
+#carddav.auth.bearer.token.command = "exit 127"	# prints a bearer token
+
+# CalDAV
+#caldav.server = "dav.example.org"	# implicit https; the principal and home set are discovered
+#caldav.home = "https://dav.example.org/dav/calendars/alice/"	# the home set itself, nothing discovered
+
+#caldav.auth.basic.username = "alice"	# HTTP Basic
+#caldav.auth.basic.password.command = "exit 127"	# prints the password
+
+#caldav.auth.bearer.token.command = "exit 127"	# prints a bearer token
+
+# Named sources and targets, for two endpoints of one protocol
+#sources.work.imap.server = "imap.work.example.org"	# a source named work; renaming it orphans what it synced
+#targets.backup.imap.server = "imap.backup.example.org"	# a target, the same keys, see the table in the README

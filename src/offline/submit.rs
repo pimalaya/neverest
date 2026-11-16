@@ -900,7 +900,7 @@ mod tests {
     use io_pimdir::client::blobs::{PimdirBlobStage, PimdirBlobs};
 
     use super::*;
-    use crate::config::SmtpConfig;
+    use crate::config::smtp::SmtpConfig;
 
     /// What the sink captured: the envelope command lines and the DATA payload.
     struct Captured {

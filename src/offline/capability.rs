@@ -20,7 +20,10 @@ use io_pimdir::capability::{
     PimdirCapability, PimdirSupport,
 };
 
-use crate::config::{SourceBackendConfig, SourceConfig, server_url};
+use crate::{
+    config::source::{SourceBackendConfig, SourceConfig},
+    server::server_url,
+};
 
 /// A backend's support of one capability, its rights aside.
 type Support = (PimdirSupport, Option<&'static str>);

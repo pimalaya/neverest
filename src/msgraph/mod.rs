@@ -5,7 +5,7 @@
 //! flag and delete pushes, sendMail.
 //!
 //! It is opened with a ready-made OAuth 2.0 bearer token resolved from the
-//! side's [`crate::config::MsgraphAuthConfig`] secret command; neverest runs no
+//! side's [`crate::config::msgraph::MsgraphAuthConfig`] secret command; neverest runs no
 //! OAuth flow itself, sign-in and refresh living in an external tool.
 
 pub mod client;

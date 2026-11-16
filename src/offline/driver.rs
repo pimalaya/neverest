@@ -72,8 +72,11 @@ use crate::{
     account::{Account, SourceAccount},
     client::{Client, Pool, Renamed, WrittenItem},
     config::{
-        AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceBackendConfig,
-        SourceConfig, SourcePermissions,
+        AccountConfig,
+        filter::CollectionFilter,
+        mode::AccountMode,
+        permissions::{CollectionPermissions, SourcePermissions},
+        source::{SourceBackendConfig, SourceConfig},
     },
     error::{Failure, layout_error, pimdir_error},
     item::{collection::Collection, flag::Flag},
@@ -14838,8 +14841,12 @@ mod graph_one_table {
         account::{MsgraphAccount, SourceAccount, SourceAccountBackend},
         client::{Client, Pool},
         config::{
-            AccountConfig, CollectionPermissions, FlagSourcePermissions, ItemSourcePermissions,
-            SourceBackendConfig, SourcePermissions,
+            AccountConfig,
+            permissions::{
+                CollectionPermissions, FlagSourcePermissions, ItemSourcePermissions,
+                SourcePermissions,
+            },
+            source::SourceBackendConfig,
         },
         msgraph::client::{GraphClient, GraphKind, SizeHints},
         scripted::Step,

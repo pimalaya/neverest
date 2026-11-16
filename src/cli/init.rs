@@ -23,7 +23,7 @@ use crate::{
         sync::{LOCK_TIMEOUT, wait_store_lock},
     },
     client,
-    config::{AccountConfig, AccountMode, Config},
+    config::{AccountConfig, Config, mode::AccountMode},
     error::{ErrorCode, Failure, chain},
     offline::{driver, state::StoreState},
 };

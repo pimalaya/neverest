@@ -23,7 +23,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use log::warn;
 use serde::{Deserialize, Serialize};
 
-use crate::{config::AccountMode, error::layout_error, offline::local};
+use crate::{config::mode::AccountMode, error::layout_error, offline::local};
 
 /// The current layout: source ids `<account>/<source>`, collection ids
 /// `<account>/<source>/<name>`, kind on the row, one sidecar entry per

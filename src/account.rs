@@ -61,20 +61,24 @@ use secrecy::SecretString;
 use url::Url;
 
 #[cfg(feature = "smtp")]
-use crate::config::SmtpConfig;
+use crate::config::smtp::SmtpConfig;
+use crate::config::{
+    AccountConfig,
+    proxy::ProxyConfig,
+    source::{SourceBackendConfig, SourceConfig},
+};
+#[cfg(any(feature = "carddav", feature = "caldav"))]
+use crate::dav::client::DavKind;
+use crate::error::{ErrorCode, Failure};
+#[cfg(feature = "msgraph")]
+use crate::msgraph::client::{GraphKind, SizeHints};
 #[cfg(any(
     feature = "imap",
     feature = "smtp",
     feature = "carddav",
     feature = "caldav"
 ))]
-use crate::config::server_url;
-use crate::config::{AccountConfig, ProxyConfig, SourceBackendConfig, SourceConfig};
-#[cfg(any(feature = "carddav", feature = "caldav"))]
-use crate::dav::client::DavKind;
-use crate::error::{ErrorCode, Failure};
-#[cfg(feature = "msgraph")]
-use crate::msgraph::client::{GraphKind, SizeHints};
+use crate::server::server_url;
 use crate::throttle::Throttle;
 
 /// An account's endpoints, resolved once for the run.
@@ -285,6 +289,15 @@ impl SourceAccountBackend {
     ) -> Result<Self> {
         // NOTE: the backend's own proxy first, then the account's, then the
         // environment's, read when a connection opens.
+        #[cfg(any(
+            feature = "imap",
+            feature = "msgraph",
+            feature = "carddav",
+            feature = "caldav",
+            feature = "gpeople",
+            feature = "gcal",
+            feature = "gmail"
+        ))]
         let proxy = |resolver: &mut SecretResolver| {
             ProxyConfig::resolve(&[config.proxy(), account_proxy], resolver)
         };
@@ -712,56 +725,6 @@ mod build_tests {
 
 #[cfg(test)]
 mod connection_tests {
-    use pimalaya_config::secret::SecretResolver;
-    use pimalaya_stream::proxy::Proxy;
-
-    use crate::config::ProxyConfig;
-
-    fn proxy(toml: &str) -> ProxyConfig {
-        toml::from_str(toml).unwrap()
-    }
-
-    /// The table closest to the connection names the proxy, the account's
-    /// next; none reads the environment when the connection opens.
-    #[test]
-    fn the_closest_proxy_wins_and_none_reads_the_environment() {
-        let mut resolver = SecretResolver::new();
-        let own = proxy(r#"url = "socks5h://127.0.0.1:1080""#);
-        let account = proxy(r#"url = "http://proxy.example.org:3128""#);
-
-        let resolved = ProxyConfig::resolve(&[Some(&own), Some(&account)], &mut resolver);
-        assert!(matches!(
-            resolved.unwrap(),
-            Proxy::Socks5 { port: 1080, .. }
-        ));
-
-        let resolved = ProxyConfig::resolve(&[None, Some(&account)], &mut resolver);
-        assert!(matches!(resolved.unwrap(), Proxy::Http { port: 3128, .. }));
-
-        let resolved = ProxyConfig::resolve(&[None, None], &mut resolver);
-        assert!(matches!(resolved.unwrap(), Proxy::System));
-    }
-
-    /// A password with no username is refused, a username alone sent with
-    /// an empty password.
-    #[test]
-    fn a_proxy_password_needs_a_username() {
-        let mut resolver = SecretResolver::new();
-        let config = proxy("url = \"http://p.example.org:3128\"\npassword.raw = \"pw\"");
-        let err = ProxyConfig::resolve(&[Some(&config)], &mut resolver).unwrap_err();
-        assert!(err.to_string().contains("requires a username"), "{err}");
-
-        let config = proxy("url = \"http://p.example.org:3128\"\nusername = \"user\"");
-        let resolved = ProxyConfig::resolve(&[Some(&config)], &mut resolver).unwrap();
-        let Proxy::Http {
-            auth: Some(auth), ..
-        } = resolved
-        else {
-            panic!("an authenticated HTTP proxy");
-        };
-        assert_eq!(auth.user, "user");
-    }
-
     /// A DAV table's `home` is where the session starts, its `server` the
     /// entry point otherwise, and one of the two is required.
     #[cfg(any(feature = "carddav", feature = "caldav"))]
@@ -788,7 +751,7 @@ mod connection_tests {
     fn the_imap_id_sends_the_fields_asked_for() {
         use io_imap::types::core::NString;
 
-        use crate::{config::ImapIdConfig, imap::client::auto_id};
+        use crate::{config::imap::ImapIdConfig, imap::client::auto_id};
 
         let off: ImapIdConfig = toml::from_str("fields.name = true").unwrap();
         assert!(auto_id(&off).unwrap().is_none());

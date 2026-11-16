@@ -136,6 +136,19 @@ mod kind;
 mod msgraph;
 mod notice;
 mod offline;
+#[cfg(any(
+    feature = "imap",
+    feature = "smtp",
+    feature = "carddav",
+    feature = "caldav",
+    feature = "msgraph",
+    feature = "gpeople",
+    feature = "gcal",
+    feature = "gmail"
+))]
+mod proxy;
+#[cfg(any(feature = "imap", feature = "smtp"))]
+mod sasl;
 #[cfg(all(
     test,
     any(
@@ -148,8 +161,20 @@ mod offline;
     )
 ))]
 mod scripted;
+mod server;
 mod sync;
 mod throttle;
+#[cfg(any(
+    feature = "imap",
+    feature = "smtp",
+    feature = "carddav",
+    feature = "caldav",
+    feature = "msgraph",
+    feature = "gpeople",
+    feature = "gcal",
+    feature = "gmail"
+))]
+mod tls;
 #[cfg(any(feature = "search", feature = "gcal", feature = "msgraph"))]
 mod zone;
 

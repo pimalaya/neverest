@@ -26,7 +26,7 @@ use pimalaya_cli::printer::Printer;
 
 use crate::{
     cli::{exit::Exit, init, queue},
-    config::{AccountConfig, CollectionFilter, Config},
+    config::{AccountConfig, Config, filter::CollectionFilter},
     error::{Failure, pimdir_error},
     offline::{
         driver::{self, Bodies, DownloadOrder, Pacing},

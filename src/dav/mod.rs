@@ -9,4 +9,5 @@
 //! extension a new resource is named with ([`client::DavKind`]). These are the
 //! mutable-content backends, the ones exercising the revision machinery.
 
+pub mod auth;
 pub mod client;

@@ -28,7 +28,7 @@ use io_pimdir::client::{
 use log::{debug, info, warn};
 
 use crate::{
-    config::StoreConfig, error::ErrorCode, sync::report::IndexRefresh, zone::floating_zone,
+    config::store::StoreConfig, error::ErrorCode, sync::report::IndexRefresh, zone::floating_zone,
 };
 
 /// How long a refresh may run after a run a frontend waits on: a drain, a

@@ -32,7 +32,7 @@ use pimalaya_stream::{proxy::Proxy, tls::Tls};
 #[cfg(test)]
 use url::Url;
 
-use crate::{account::ImapAccount, config::ImapIdConfig};
+use crate::{account::ImapAccount, config::imap::ImapIdConfig};
 
 /// Live IMAP client wrapping the io-imap session.
 ///

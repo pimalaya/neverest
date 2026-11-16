@@ -36,7 +36,6 @@ use std::{
     collections::{BTreeMap, HashSet},
     io::{Read, Write},
     sync::Arc,
-    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -57,22 +56,20 @@ use io_pimdir::summary::calendar;
 use jiff::{Timestamp, civil::DateTime, tz::TimeZone};
 use log::{debug, trace, warn};
 use pimalaya_cli::error::CodedError;
-use pimalaya_stream::{
-    proxy::Proxy,
-    stream::{Stream, TlsConnectOptions},
-    tls::Tls,
-};
 use secrecy::ExposeSecret;
-use url::Url;
 
 use crate::{
     account::GoogleAccount,
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
     error::{ErrorCode, names_the_request},
+    http::open_tls,
     item::{collection::Collection, flag::Flag},
     kind::event::{self, OccurrenceId, Occurrences, OriginalStart},
     offline::invitation::{Partstat, Refusal, occurrence_window},
-    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, google_code},
+    throttle::{
+        GoogleAnswer, GoogleError, GoogleSession, Pick, Reopen, Request, Throttle, google_code,
+        google_send,
+    },
     zone::{self, UTC},
 };
 
@@ -97,14 +94,8 @@ fn asks_meeting(event: &GcalEvent) -> bool {
 
 /// The live Google Calendar session of one side.
 pub struct GcalClient {
-    inner: GcalClientStd,
-    /// The TLS configuration, kept for stream reopens.
-    tls: Tls,
-    /// The proxy, kept for stream reopens.
-    proxy: Proxy,
-    /// Whether the server allowed reusing the stream after the last
-    /// exchange; when false the next operation reopens it.
-    alive: bool,
+    /// The Calendar session, reopening its stream as it dies.
+    session: GoogleSession<GcalClientStd>,
     /// The source's back-off, shared by its connections.
     throttle: Arc<Throttle>,
     /// The account's own address, its primary calendar's id, read once
@@ -124,29 +115,22 @@ impl GcalClient {
         let GoogleAccount { token, tls, proxy } = account;
         // NOTE: the stream is opened here, io-gcal's own connect taking no
         // proxy.
-        let stream = open_stream(tls, proxy).context("Cannot connect to Google Calendar")?;
+        let stream =
+            open_tls(GCAL_API_BASE, tls, proxy).context("Cannot connect to Google Calendar")?;
         let inner = GcalClientStd::new(stream, token.expose_secret());
+        let (tls, proxy) = (tls.clone(), proxy.clone());
+        let reopen: Reopen<GcalClientStd> = Box::new(move |gcal| {
+            gcal.set_stream(open_tls(GCAL_API_BASE, &tls, &proxy)?);
+            Ok(())
+        });
 
         Ok(Self {
-            inner,
-            tls: tls.clone(),
-            proxy: proxy.clone(),
-            alive: true,
+            session: GoogleSession::new("calendar", inner, reopen),
             throttle,
             owner: None,
             issued: HashSet::new(),
             floating_zone: zone::floating_zone(),
         })
-    }
-
-    /// Reopens the stream to the Calendar endpoint, keeping the credential.
-    fn reconnect(&mut self) -> Result<()> {
-        debug!("reopening the calendar stream");
-
-        let stream = open_stream(&self.tls, &self.proxy)?;
-        self.inner.set_stream(stream);
-        self.alive = true;
-        Ok(())
     }
 
     /// Runs one Calendar operation, reopening the stream first when the
@@ -179,34 +163,10 @@ impl GcalClient {
         mut run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
     ) -> Result<T, GcalClientStdError> {
         let throttle = Arc::clone(&self.throttle);
-        let waits = GoogleWaits::new();
-        throttle.call(
-            1,
-            || {
-                if !self.alive
-                    && let Err(err) = self.reconnect()
-                {
-                    warn!("cannot reopen the calendar stream: {err:#}");
-                }
-
-                let out = run(&mut self.inner)?;
-                self.alive = out.keep_alive;
-                Ok(out.response)
-            },
-            |err| match err {
-                GcalClientStdError::Send(GcalSendError::Api(err)) => {
-                    waits.throttled(request, &google_answer(err))
-                }
-                _ => None,
-            },
-            |message| {
-                GcalClientStdError::Send(GcalSendError::Api(GcalApiError {
-                    status: 429,
-                    message,
-                    ..Default::default()
-                }))
-            },
-        )
+        let pick: Pick<Self, GcalClientStd, GcalClientStdError> = |client| Ok(&mut client.session);
+        google_send(self, pick, &throttle, request, 1, |client| {
+            run(client).map(|out| (out.response, out.keep_alive))
+        })
     }
 
     /// Lists the calendars of the user's calendar list, keyed by id and
@@ -1022,27 +982,35 @@ fn names_occurrence(instance: &GcalEvent, recurrence_id: &OccurrenceId) -> bool 
     instant.is_some_and(|instant| recurrence_id.starts_at(instant, zone))
 }
 
-/// Opens a TLS stream to the Calendar endpoint through `proxy`.
-fn open_stream(tls: &Tls, proxy: &Proxy) -> Result<Stream> {
-    let url = Url::parse(GCAL_API_BASE).context("Cannot parse the Calendar API base URL")?;
-    let host = url
-        .host_str()
-        .context("Calendar API base URL has no host")?;
-    let opts = TlsConnectOptions {
-        tls: tls.clone(),
-        proxy: proxy.clone(),
-        ..Default::default()
-    };
-    let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    Ok(stream)
+impl GoogleError for GcalClientStdError {
+    fn broke(&self) -> bool {
+        matches!(self, Self::Io(_))
+    }
+
+    fn answer(&self) -> Option<GoogleAnswer<'_>> {
+        match self {
+            Self::Send(GcalSendError::Api(err)) => Some(google_answer(err)),
+            _ => None,
+        }
+    }
+
+    fn throttled(message: String) -> Self {
+        Self::Send(GcalSendError::Api(GcalApiError {
+            status: 429,
+            message,
+            ..Default::default()
+        }))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use io_gcal::v3::rest::events::{GcalEventAttendee, GcalEventDateTime};
 
     use super::*;
+    use crate::scripted::{Server, Step, json};
 
     /// An instance whose original start is `original`, of a series in
     /// `zone`.
@@ -1188,29 +1156,21 @@ mod tests {
         assert_eq!(revision(&[event("lunch", None, "\"7\"")]), "\"7\"");
     }
 
-    /// A stream answering one canned response and keeping what was written.
-    struct Recorded {
-        answer: Vec<u8>,
-        written: Arc<std::sync::Mutex<Vec<u8>>>,
-    }
-
-    impl Read for Recorded {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = self.answer.len().min(buf.len());
-            buf[..n].copy_from_slice(&self.answer[..n]);
-            self.answer.drain(..n);
-            Ok(n)
-        }
-    }
-
-    impl Write for Recorded {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.written.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
+    /// A session over the connections `server` opens, backing off by
+    /// `throttle`.
+    fn over(server: &Server, throttle: Throttle) -> GcalClient {
+        let opener = server.clone();
+        let reopen: Reopen<GcalClientStd> = Box::new(move |gcal| {
+            gcal.set_stream(opener.open()?);
             Ok(())
+        });
+        let inner = GcalClientStd::new(server.open().unwrap(), "token");
+        GcalClient {
+            session: GoogleSession::new("calendar", inner, reopen),
+            throttle: Arc::new(throttle),
+            owner: None,
+            issued: HashSet::new(),
+            floating_zone: UTC,
         }
     }
 
@@ -1237,22 +1197,10 @@ mod tests {
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nRetry-After: 0\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
-            let mut client = GcalClient {
-                inner: GcalClientStd::new(
-                    Recorded {
-                        answer: answer.into_bytes(),
-                        written: Arc::default(),
-                    },
-                    "token",
-                ),
-                tls: Tls::default(),
-                proxy: Proxy::None,
-                alive: true,
-                throttle: Arc::new(Throttle::new("gcal").waiting(Duration::ZERO)),
-                owner: None,
-                issued: HashSet::new(),
-                floating_zone: UTC,
-            };
+            let mut client = over(
+                &Server::replying([answer]),
+                Throttle::new("gcal").waiting(Duration::ZERO),
+            );
 
             let err = client
                 .add_item_stream("c1", EVENT.as_bytes())
@@ -1275,28 +1223,32 @@ mod tests {
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
             body.len()
         );
-        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let stream = Recorded {
-            answer: answer.into_bytes(),
-            written: Arc::clone(&written),
-        };
-        let mut client = GcalClient {
-            inner: GcalClientStd::new(stream, "token"),
-            tls: Tls::default(),
-            proxy: Proxy::None,
-            alive: true,
-            throttle: Arc::new(Throttle::new("gcal")),
-            owner: None,
-            issued: HashSet::new(),
-            floating_zone: UTC,
-        };
+        let server = Server::replying([answer]);
+        let mut client = over(&server, Throttle::new("gcal"));
 
         let calendars = client.list_collections().unwrap();
 
         assert_eq!(calendars.len(), 1);
-        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
-        let request = written.lines().next().unwrap_or_default().to_owned();
+        let request = server.lines()[0].clone();
         assert!(request.contains("showHidden=true"), "{request}");
+    }
+
+    /// A stream an exchange failed on is in no state to carry the next one:
+    /// the next request goes over a new connection.
+    #[test]
+    fn a_stream_that_failed_mid_exchange_is_reopened() {
+        let body = r#"{"items":[{"id":"c1","summary":"Work"}]}"#;
+        let server = Server::new(vec![
+            vec![Step::Reset],
+            vec![Step::Reply(json("200 OK", body))],
+        ]);
+        let mut client = over(&server, Throttle::new("gcal"));
+
+        client.list_collections().expect_err("the stream reset");
+        let calendars = client.list_collections().expect("a new connection");
+
+        assert_eq!(calendars.len(), 1);
+        assert_eq!(server.requests().len(), 2, "{:?}", server.requests());
     }
 
     /// An event deleted between its listing and its read is gone: failing
@@ -1310,59 +1262,13 @@ mod tests {
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
-            let mut client = GcalClient {
-                inner: GcalClientStd::new(
-                    Recorded {
-                        answer: answer.into_bytes(),
-                        written: Arc::default(),
-                    },
-                    "token",
-                ),
-                tls: Tls::default(),
-                proxy: Proxy::None,
-                alive: true,
-                throttle: Arc::new(Throttle::new("gcal")),
-                owner: None,
-                issued: HashSet::new(),
-                floating_zone: UTC,
-            };
+            let mut client = over(&Server::replying([answer]), Throttle::new("gcal"));
 
             let err = client
                 .get_item_stream("c1", "e1", Vec::new())
                 .expect_err("no event to read");
 
             assert!(Gone::is(&err), "{status}: {err:#}");
-        }
-    }
-
-    /// A session answering each request with the next of `answers`, whole,
-    /// recording what it was sent.
-    struct Answering {
-        answers: std::collections::VecDeque<Vec<u8>>,
-        current: Vec<u8>,
-        written: Arc<std::sync::Mutex<Vec<u8>>>,
-    }
-
-    impl Read for Answering {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if self.current.is_empty() {
-                self.current = self.answers.pop_front().unwrap_or_default();
-            }
-            let n = self.current.len().min(buf.len());
-            buf[..n].copy_from_slice(&self.current[..n]);
-            self.current.drain(..n);
-            Ok(n)
-        }
-    }
-
-    impl Write for Answering {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.written.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
         }
     }
 
@@ -1383,24 +1289,8 @@ mod tests {
             answer("410 Gone", r#"{"error":{"code":410,"message":"Gone"}}"#),
             answer("200 OK", r#"{"items":[],"nextSyncToken":"t2"}"#),
         ];
-        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let mut client = GcalClient {
-            inner: GcalClientStd::new(
-                Answering {
-                    answers: answers.map(String::into_bytes).into(),
-                    current: Vec::new(),
-                    written: Arc::clone(&written),
-                },
-                "token",
-            ),
-            tls: Tls::default(),
-            proxy: Proxy::None,
-            alive: true,
-            throttle: Arc::new(Throttle::new("gcal")),
-            owner: None,
-            issued: HashSet::new(),
-            floating_zone: UTC,
-        };
+        let server = Server::replying(answers);
+        let mut client = over(&server, Throttle::new("gcal"));
 
         client.enumerate("c1", None).unwrap();
         assert!(client.issued.contains("t1"));
@@ -1408,9 +1298,9 @@ mod tests {
 
         assert!(listed.complete, "listed whole again");
         assert_eq!(listed.checkpoint.as_deref(), Some(&b"t2"[..]));
-        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
-        let requests: Vec<&str> = written
+        let requests: Vec<String> = server
             .lines()
+            .into_iter()
             .filter(|line| line.starts_with("GET "))
             .collect();
         assert_eq!(requests.len(), 3, "{requests:?}");
@@ -1424,7 +1314,7 @@ mod tests {
 
     /// A session answering `answers` in order, each a status and a JSON
     /// body, and what it was sent.
-    fn answering(answers: &[(&str, &str)]) -> (GcalClient, Arc<std::sync::Mutex<Vec<u8>>>) {
+    fn answering(answers: &[(&str, &str)]) -> (GcalClient, Server) {
         let answers = answers.iter().map(|(status, body)| {
             let headers = match body.is_empty() {
                 true => String::new(),
@@ -1435,42 +1325,8 @@ mod tests {
             };
             format!("HTTP/1.1 {status}\r\n{headers}\r\n{body}").into_bytes()
         });
-        let written = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let client = GcalClient {
-            inner: GcalClientStd::new(
-                Answering {
-                    answers: answers.collect(),
-                    current: Vec::new(),
-                    written: Arc::clone(&written),
-                },
-                "token",
-            ),
-            tls: Tls::default(),
-            proxy: Proxy::None,
-            alive: true,
-            throttle: Arc::new(Throttle::new("gcal")),
-            owner: None,
-            issued: HashSet::new(),
-            floating_zone: UTC,
-        };
-        (client, written)
-    }
-
-    /// The request lines of what a session was sent, in order.
-    fn request_lines(written: &[u8]) -> Vec<String> {
-        String::from_utf8_lossy(written)
-            .split("\r\n")
-            .filter(|line| line.ends_with(" HTTP/1.1"))
-            .map(|line| {
-                // NOTE: a request line follows the body of the one before.
-                let start = ["GET /", "POST /", "PUT /", "PATCH /", "DELETE /"]
-                    .iter()
-                    .filter_map(|method| line.rfind(method))
-                    .max()
-                    .unwrap_or(0);
-                line[start..].trim_end_matches(" HTTP/1.1").to_owned()
-            })
-            .collect()
+        let server = Server::replying(answers);
+        (over(&server, Throttle::new("gcal")), server)
     }
 
     /// A daily series of four from 2026-11-23 at 13:00 UTC, the second
@@ -1501,7 +1357,7 @@ mod tests {
     #[test]
     fn a_series_lands_with_its_moved_occurrence() {
         let master = r#"{"id":"S","etag":"\"1\"","iCalUID":"series","recurrence":["RRULE:FREQ=DAILY;COUNT=4"]}"#;
-        let (mut client, written) = answering(&[
+        let (mut client, server) = answering(&[
             ("200 OK", master),
             ("200 OK", INSTANCE),
             (
@@ -1519,8 +1375,7 @@ mod tests {
 
         assert_eq!(created.id, "S");
         assert_eq!(created.revision.as_deref(), Some(r#""1" "3""#));
-        let written = written.lock().unwrap().clone();
-        let requests = request_lines(&written);
+        let requests = server.lines();
         let methods: Vec<&str> = requests
             .iter()
             .map(|request| request.split_once(' ').unwrap().0)
@@ -1536,7 +1391,7 @@ mod tests {
             "{}",
             requests[2]
         );
-        let written = String::from_utf8_lossy(&written).into_owned();
+        let written = server.written(0);
         let update = &written[written.find("PUT ").unwrap()..];
         assert!(update.contains("2026-11-24T15:00:00"), "{update}");
     }
@@ -1565,7 +1420,7 @@ mod tests {
             END:VCALENDAR\r\n";
         let master = r#"{"id":"S","etag":"\"1\"","iCalUID":"weekly"}"#;
         let instance = r#"{"items":[{"id":"S_20261221T090000Z","recurringEventId":"S","originalStartTime":{"dateTime":"2026-12-21T09:00:00Z"},"etag":"\"2\"","start":{"dateTime":"2026-12-21T09:00:00Z"},"end":{"dateTime":"2026-12-21T10:00:00Z"}}]}"#;
-        let (mut client, written) = answering(&[
+        let (mut client, server) = answering(&[
             ("200 OK", master),
             ("200 OK", instance),
             (
@@ -1579,7 +1434,7 @@ mod tests {
         let created = client.add_item_stream("c1", series.as_bytes()).unwrap();
 
         assert_eq!(created.id, "S");
-        let requests = request_lines(&written.lock().unwrap());
+        let requests = server.lines();
         assert!(
             requests[2].starts_with("PUT ") && requests[2].contains("/events/S_20261221T090000Z"),
             "{requests:#?}"
@@ -1590,7 +1445,7 @@ mod tests {
     /// series back, coded `unsupported`.
     #[test]
     fn a_series_whose_override_finds_no_occurrence_is_taken_back() {
-        let (mut client, written) = answering(&[
+        let (mut client, server) = answering(&[
             ("200 OK", r#"{"id":"S","etag":"\"1\""}"#),
             ("200 OK", r#"{"items":[]}"#),
             ("204 No Content", ""),
@@ -1600,7 +1455,7 @@ mod tests {
 
         let failure = crate::error::Failure::of(&err);
         assert_eq!(failure.code, Some(ErrorCode::Unsupported), "{err:#}");
-        let requests = request_lines(&written.lock().unwrap());
+        let requests = server.lines();
         let last = requests.last().unwrap();
         assert!(
             last.starts_with("DELETE ") && last.contains("/events/S"),
@@ -1622,7 +1477,7 @@ mod tests {
             SUMMARY:Floating\r\n\
             END:VEVENT\r\n\
             END:VCALENDAR\r\n";
-        let (mut client, written) = answering(&[
+        let (mut client, server) = answering(&[
             ("200 OK", r#"{"id":"c1","timeZone":"Europe/Paris"}"#),
             ("200 OK", r#"{"id":"F","etag":"\"1\""}"#),
         ]);
@@ -1630,7 +1485,7 @@ mod tests {
         let created = client.add_item_stream("c1", floating.as_bytes()).unwrap();
 
         assert_eq!(created.revision, None);
-        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        let written = server.written(0);
         let import = &written[written.find("POST ").unwrap()..];
         assert!(import.contains("2026-11-26T10:00:00"), "{import}");
         assert!(import.contains("Europe/Paris"), "{import}");
@@ -1648,7 +1503,7 @@ mod tests {
             SUMMARY:Floating\r\n\
             END:VEVENT\r\n\
             END:VCALENDAR\r\n";
-        let (mut client, written) = answering(&[
+        let (mut client, server) = answering(&[
             ("200 OK", r#"{"id":"c1"}"#),
             ("200 OK", r#"{"id":"F","etag":"\"1\""}"#),
         ]);
@@ -1657,7 +1512,7 @@ mod tests {
         let created = client.add_item_stream("c1", floating.as_bytes()).unwrap();
 
         assert_eq!(created.revision, None);
-        let written = String::from_utf8_lossy(&written.lock().unwrap()).into_owned();
+        let written = server.written(0);
         let import = &written[written.find("POST ").unwrap()..];
         assert!(import.contains("2026-11-26T10:00:00"), "{import}");
         assert!(import.contains("America/New_York"), "{import}");

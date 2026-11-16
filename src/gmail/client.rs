@@ -67,13 +67,8 @@ use io_pimdir::{
     },
 };
 use log::{debug, trace, warn};
-use pimalaya_stream::{
-    proxy::Proxy,
-    stream::{Stream, TlsConnectOptions},
-    tls::Tls,
-};
+use pimalaya_stream::{proxy::Proxy, tls::Tls};
 use secrecy::{ExposeSecret, SecretString};
-use url::Url;
 
 use super::{
     batch::{self, Batcher, Read as ReadAs, Sizes},
@@ -85,12 +80,16 @@ use crate::{
         EnumEntry, Enumeration, Gone, Held, Listed, Renamed, StoredSize, WrittenItem, floor_of,
     },
     error::{ErrorCode, names_the_request},
+    http::open_tls,
     item::{
         collection::Collection,
         flag::{Flag, FlagOp, IanaFlag},
     },
     offline::invitation::Refusal,
-    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, google_code, rfc3339},
+    throttle::{
+        GoogleAnswer, GoogleError, GoogleSession, Pick, Reopen, Request, Throttle, google_code,
+        google_send, rfc3339,
+    },
 };
 
 /// Gmail system label marking an unread message; its absence means seen.
@@ -130,9 +129,6 @@ const BATCH_SIZE: usize = 1000;
 
 /// How many times an import's history is read before giving up on it.
 const IMPORT_ATTEMPTS: u32 = 3;
-
-/// How long a read on a Gmail stream waits for bytes.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The quota units a second the Gmail source holds itself to, across all its
 /// connections.
@@ -175,23 +171,19 @@ enum Host {
 
 /// The live Gmail session of one side.
 pub struct GmailClient {
-    inner: GmailClientStd,
+    /// The session to the API, reopening its stream as it dies.
+    inner: GoogleSession<GmailClientStd>,
     /// The session to the batch endpoint, opened at the first batch.
-    batch: Option<GmailClientStd>,
+    batch: Option<GoogleSession<GmailClientStd>>,
     /// The bearer token, kept to open the batch session.
     token: SecretString,
-    /// The TLS configuration, kept for stream reopens.
+    /// The TLS configuration, kept to open the batch session.
     tls: Tls,
-    /// The proxy, kept for stream reopens.
+    /// The proxy, kept to open the batch session.
     proxy: Proxy,
     /// Label name to label id, refreshed from the label listing when a name
     /// misses.
     labels: HashMap<String, String>,
-    /// Whether the server allowed reusing the stream after the last
-    /// exchange; when false the next operation reopens it.
-    alive: bool,
-    /// The same for the batch session.
-    batch_alive: bool,
     /// The source's pacing and back-off, shared by its connections.
     throttle: Arc<Throttle>,
     /// What the source's connections share for the run.
@@ -213,6 +205,11 @@ impl GmailClient {
         };
         let inner = GmailClientStd::connect(account.token.expose_secret(), options)
             .context("Cannot connect to Gmail")?;
+        let inner = GoogleSession::new(
+            "gmail",
+            inner,
+            reopen(&account.tls, &account.proxy, GMAIL_API_BASE),
+        );
 
         Ok(Self {
             inner,
@@ -221,43 +218,38 @@ impl GmailClient {
             tls: account.tls.clone(),
             proxy: account.proxy.clone(),
             labels: HashMap::new(),
-            alive: true,
-            batch_alive: false,
             throttle,
             run: Arc::clone(&account.run),
             flag_sets: None,
         })
     }
 
-    /// Reopens the stream to the Gmail endpoint, keeping the credential.
-    fn reconnect(&mut self) -> Result<()> {
-        debug!("reopening the gmail stream");
-        let stream = open_stream(&self.tls, &self.proxy, GMAIL_API_BASE)?;
-        self.inner.set_stream(stream);
-        self.alive = true;
-        Ok(())
+    /// The session to the API.
+    fn api_session(&mut self) -> Result<&mut GoogleSession<GmailClientStd>, GmailClientStdError> {
+        Ok(&mut self.inner)
     }
 
     /// The session to the batch endpoint, opened or reopened when the
     /// server closed it.
-    fn batch_session(&mut self) -> Result<&mut GmailClientStd, GmailClientStdError> {
-        if !self.batch_alive || self.batch.is_none() {
-            debug!("opening the gmail batch stream");
-            let stream = open_stream(&self.tls, &self.proxy, GMAIL_BATCH_URL)
-                .map_err(|err| GmailClientStdError::Io(io::Error::other(format!("{err:#}"))))?;
-            match &mut self.batch {
-                Some(session) => session.set_stream(stream),
-                None => {
-                    let options = GmailClientStdConnectOptions {
-                        tls: self.tls.clone(),
-                        proxy: self.proxy.clone(),
-                        user_id: self.inner.user_id.clone(),
-                    };
-                    let token = self.token.expose_secret();
-                    self.batch = Some(GmailClientStd::new(stream, token, options));
-                }
+    fn batch_session(&mut self) -> Result<&mut GoogleSession<GmailClientStd>, GmailClientStdError> {
+        let broken =
+            |err: anyhow::Error| GmailClientStdError::Io(io::Error::other(format!("{err:#}")));
+        match &mut self.batch {
+            Some(session) if !session.alive() => session.reopen().map_err(broken)?,
+            Some(_) => {}
+            None => {
+                debug!("opening the gmail batch stream");
+                let stream = open_tls(GMAIL_BATCH_URL, &self.tls, &self.proxy).map_err(broken)?;
+                let options = GmailClientStdConnectOptions {
+                    tls: self.tls.clone(),
+                    proxy: self.proxy.clone(),
+                    user_id: self.inner.client.user_id.clone(),
+                };
+                let token = self.token.expose_secret();
+                let client = GmailClientStd::new(stream, token, options);
+                let reopen = reopen(&self.tls, &self.proxy, GMAIL_BATCH_URL);
+                self.batch = Some(GoogleSession::new("gmail batch", client, reopen));
             }
-            self.batch_alive = true;
         }
         self.batch
             .as_mut()
@@ -270,7 +262,7 @@ impl GmailClient {
     ///
     /// The source's [`Throttle`] paces it and sends it again while Gmail
     /// throttles it (429, a 502 to 504, or a 403 rate limit), by the reason
-    /// Google gives ([`GoogleWaits`]). A request creating something goes
+    /// Google gives ([`google_send`]). A request creating something goes
     /// through [`create`](Self::create) instead.
     fn op<T>(
         &mut self,
@@ -301,50 +293,13 @@ impl GmailClient {
         mut run: impl FnMut(&mut GmailClientStd) -> Result<GmailSendOutput<T>, GmailClientStdError>,
     ) -> Result<T, GmailClientStdError> {
         let throttle = Arc::clone(&self.throttle);
-        let waits = GoogleWaits::new();
-        throttle.call(
-            units,
-            || {
-                let session = match host {
-                    Host::Api => {
-                        if !self.alive
-                            && let Err(err) = self.reconnect()
-                        {
-                            warn!("cannot reopen the gmail stream: {err:#}");
-                        }
-                        &mut self.inner
-                    }
-                    Host::Batch => self.batch_session()?,
-                };
-
-                let out = run(session);
-                let alive = match &out {
-                    Ok(out) => out.keep_alive,
-                    // NOTE: a stream that failed mid-exchange is in no state
-                    // to carry the next one.
-                    Err(GmailClientStdError::Io(_)) => false,
-                    Err(_) => true,
-                };
-                match host {
-                    Host::Api => self.alive = alive,
-                    Host::Batch => self.batch_alive = alive,
-                }
-                Ok(out?.response)
-            },
-            |err| match err {
-                GmailClientStdError::Send(GmailSendError::Api(err)) => {
-                    waits.throttled(request, &google_answer(err))
-                }
-                _ => None,
-            },
-            |message| {
-                GmailClientStdError::Send(GmailSendError::Api(GmailApiError {
-                    status: 429,
-                    message,
-                    ..Default::default()
-                }))
-            },
-        )
+        let pick: Pick<Self, GmailClientStd, GmailClientStdError> = match host {
+            Host::Api => Self::api_session,
+            Host::Batch => Self::batch_session,
+        };
+        google_send(self, pick, &throttle, request, units, |client| {
+            run(client).map(|out| (out.response, out.keep_alive))
+        })
     }
 
     /// Reads `ids` as `read` through batches ([`batch::read_all`]), handing
@@ -1416,7 +1371,7 @@ impl Batcher for LiveBatcher<'_> {
         ids: &[String],
         read: ReadAs,
     ) -> Result<Vec<GmailBatchResponse<GmailMessage>>> {
-        let user = self.client.inner.user_id.clone();
+        let user = self.client.inner.client.user_id.clone();
         // NOTE: each read is tagged by its index, whatever its id holds.
         let requests = ids
             .iter()
@@ -1496,20 +1451,34 @@ struct Changes {
     since: Instant,
 }
 
-/// Opens a TLS stream to the host of `url`, through `proxy`.
-fn open_stream(tls: &Tls, proxy: &Proxy, url: &str) -> Result<Stream> {
-    let url = Url::parse(url).with_context(|| format!("Cannot parse {url}"))?;
-    let host = url
-        .host_str()
-        .with_context(|| format!("{url} has no host"))?;
-    let opts = TlsConnectOptions {
-        tls: tls.clone(),
-        proxy: proxy.clone(),
-        ..Default::default()
-    };
-    let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
-    stream.set_read_timeout(Some(READ_TIMEOUT))?;
-    Ok(stream)
+impl GoogleError for GmailClientStdError {
+    fn broke(&self) -> bool {
+        matches!(self, Self::Io(_))
+    }
+
+    fn answer(&self) -> Option<GoogleAnswer<'_>> {
+        match self {
+            Self::Send(GmailSendError::Api(err)) => Some(google_answer(err)),
+            _ => None,
+        }
+    }
+
+    fn throttled(message: String) -> Self {
+        Self::Send(GmailSendError::Api(GmailApiError {
+            status: 429,
+            message,
+            ..Default::default()
+        }))
+    }
+}
+
+/// Gives a Gmail client a new stream to the host of `url`, through `proxy`.
+fn reopen(tls: &Tls, proxy: &Proxy, url: &'static str) -> Reopen<GmailClientStd> {
+    let (tls, proxy) = (tls.clone(), proxy.clone());
+    Box::new(move |gmail| {
+        gmail.set_stream(open_tls(url, &tls, &proxy)?);
+        Ok(())
+    })
 }
 
 /// Whether a Gmail answer in an error chain refused the change as it
@@ -1842,103 +1811,8 @@ fn decode_checkpoint(bytes: &[u8]) -> Option<String> {
 /// driver's.
 #[cfg(test)]
 pub(crate) mod scripted {
-    use std::io::{self, Read, Write};
-
     use super::*;
-
-    /// What answers a request once the scripted answers run out: its first
-    /// line in, the answer out.
-    type Responder = Box<dyn FnMut(&str) -> Vec<u8> + Send>;
-
-    /// A scripted Gmail session: each answer served whole to the read that
-    /// follows a request, each request's first line recorded; once the
-    /// answers run out, the responder answers, when one is set.
-    #[derive(Clone, Default)]
-    pub(crate) struct Wire {
-        answers: Arc<std::sync::Mutex<std::collections::VecDeque<Vec<u8>>>>,
-        responder: Arc<std::sync::Mutex<Option<Responder>>>,
-        requests: Arc<std::sync::Mutex<Vec<String>>>,
-        written: Arc<std::sync::Mutex<Vec<u8>>>,
-        current: Vec<u8>,
-        at: usize,
-    }
-
-    impl Wire {
-        pub(crate) fn answer(&self, answer: Vec<u8>) {
-            self.answers.lock().unwrap().push_back(answer);
-        }
-
-        /// Answers every request past the scripted answers by `responder`,
-        /// given the request's first line.
-        pub(crate) fn respond(&self, responder: impl FnMut(&str) -> Vec<u8> + Send + 'static) {
-            *self.responder.lock().unwrap() = Some(Box::new(responder));
-        }
-
-        pub(crate) fn requests(&self) -> Vec<String> {
-            self.requests.lock().unwrap().clone()
-        }
-
-        /// Everything written to the session, requests and bodies.
-        pub(crate) fn written(&self) -> String {
-            String::from_utf8_lossy(&self.written.lock().unwrap()).into_owned()
-        }
-
-        pub(crate) fn left(&self) -> usize {
-            self.answers.lock().unwrap().len()
-        }
-    }
-
-    impl Read for Wire {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            if self.at == self.current.len() {
-                let scripted = self.answers.lock().unwrap().pop_front();
-                self.current = match (scripted, self.responder.lock().unwrap().as_mut()) {
-                    (Some(answer), _) => answer,
-                    (None, Some(responder)) => {
-                        let requests = self.requests.lock().unwrap();
-                        responder(requests.last().map_or("", String::as_str))
-                    }
-                    (None, None) => Vec::new(),
-                };
-                self.at = 0;
-            }
-            let n = buf.len().min(self.current.len() - self.at);
-            buf[..n].copy_from_slice(&self.current[self.at..self.at + n]);
-            self.at += n;
-            Ok(n)
-        }
-    }
-
-    impl Write for Wire {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.written.lock().unwrap().extend_from_slice(buf);
-            let text = String::from_utf8_lossy(buf);
-            let line = text.lines().next().unwrap_or_default();
-            if ["GET ", "POST ", "DELETE ", "PUT ", "PATCH "]
-                .iter()
-                .any(|method| line.starts_with(method))
-            {
-                self.requests.lock().unwrap().push(line.to_owned());
-            }
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    pub(crate) fn json(status: &str, body: &str) -> Vec<u8> {
-        format!(
-            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-        .into_bytes()
-    }
-
-    pub(crate) fn ok(body: serde_json::Value) -> Vec<u8> {
-        json("200 OK", &body.to_string())
-    }
+    use crate::scripted::Server;
 
     /// A batch answer, its parts tagged by the index of their read.
     pub(crate) fn batch_answer(parts: &[(usize, &str, serde_json::Value)]) -> Vec<u8> {
@@ -1960,16 +1834,12 @@ pub(crate) mod scripted {
 
     /// A client over two scripted wires, the API's and the batch
     /// endpoint's, knowing the labels `INBOX` and `Work` (`Label_1`).
-    pub(crate) fn scripted() -> (GmailClient, Wire, Wire) {
-        let (api, batch) = (Wire::default(), Wire::default());
-        let options = || GmailClientStdConnectOptions {
-            tls: Tls::default(),
-            proxy: Proxy::None,
-            user_id: String::from("me"),
-        };
+    pub(crate) fn scripted() -> (GmailClient, Server, Server) {
+        let api = Server::new(vec![Vec::new()]);
+        let batch = Server::new(vec![Vec::new()]);
         let client = GmailClient {
-            inner: GmailClientStd::new(api.clone(), "token", options()),
-            batch: Some(GmailClientStd::new(batch.clone(), "token", options())),
+            inner: session("gmail", &api),
+            batch: Some(session("gmail batch", &batch)),
             token: SecretString::from(String::from("token")),
             tls: Tls::default(),
             proxy: Proxy::None,
@@ -1978,13 +1848,27 @@ pub(crate) mod scripted {
                 (String::from("Work"), String::from("Label_1")),
                 (String::from("TRASH"), String::from("TRASH")),
             ]),
-            alive: true,
-            batch_alive: true,
             throttle: Arc::new(Throttle::new("gmail")),
             run: Arc::new(GmailRun::new(Default::default())),
             flag_sets: None,
         };
         (client, api, batch)
+    }
+
+    /// A Gmail session named `name` over the connections `server` opens.
+    fn session(name: &'static str, server: &Server) -> GoogleSession<GmailClientStd> {
+        let options = GmailClientStdConnectOptions {
+            tls: Tls::default(),
+            proxy: Proxy::None,
+            user_id: String::from("me"),
+        };
+        let client = GmailClientStd::new(server.open().unwrap(), "token", options);
+        let opener = server.clone();
+        let reopen: Reopen<GmailClientStd> = Box::new(move |gmail| {
+            gmail.set_stream(opener.open()?);
+            Ok(())
+        });
+        GoogleSession::new(name, client, reopen)
     }
 }
 
@@ -1995,7 +1879,11 @@ mod tests {
 
     use super::scripted::*;
     use super::*;
-    use crate::{error::Failure, kind::mail::vectors::VECTORS};
+    use crate::{
+        error::Failure,
+        kind::mail::vectors::VECTORS,
+        scripted::{json, ok},
+    };
 
     #[test]
     fn a_created_label_nests_under_its_parent_by_name() {
@@ -2376,8 +2264,8 @@ mod tests {
         api.answer(listed(&[]));
         let work = page(client.enumerate("Work", &round(), held(&none)).unwrap());
 
-        assert_eq!(batch.requests().len(), 1, "one batch in all");
-        assert!(batch.requests()[0].starts_with("POST /batch/gmail/v1 "));
+        assert_eq!(batch.lines().len(), 1, "one batch in all");
+        assert!(batch.lines()[0].starts_with("POST /batch/gmail/v1"));
         let [entry] = &work.items[..] else {
             panic!("one member");
         };
@@ -2431,13 +2319,13 @@ mod tests {
         assert_eq!(ids, ["m1", "m3"]);
 
         let history: Vec<String> = api
-            .requests()
+            .lines()
             .into_iter()
             .filter(|line| line.contains("/history"))
             .collect();
         assert_eq!(history.len(), 1, "{history:?}");
         assert!(!history[0].contains("labelId"), "{}", history[0]);
-        assert_eq!(batch.requests().len(), 2, "m1 read once, m3 once");
+        assert_eq!(batch.lines().len(), 2, "m1 read once, m3 once");
         assert_eq!(api.left() + batch.left(), 0);
     }
 
@@ -2471,7 +2359,7 @@ mod tests {
         let mut enumerated = last.enumerated.expect("the label's ids");
         enumerated.sort();
         assert_eq!(enumerated, ["m1", "m9"]);
-        let requests = api.requests();
+        let requests = api.lines();
         let unfiltered = requests.last().expect("the enumeration");
         assert!(!unfiltered.contains("q="), "{requests:?}");
         assert_eq!(api.left(), 0, "{requests:?}");
@@ -2603,7 +2491,7 @@ mod tests {
         assert_eq!(head.checkpoint.as_deref(), Some(&b"120"[..]));
         assert!(!head.complete, "a head is no round page");
         assert!(head.cursor.is_none(), "and moves no cursor");
-        let history = api.requests();
+        let history = api.lines();
         assert!(history[0].contains("/history"), "{history:?}");
         assert!(history[0].contains("startHistoryId=100"), "{history:?}");
         assert_eq!(api.left() + batch.left(), 0);
@@ -2633,7 +2521,7 @@ mod tests {
         };
         let listed = client.enumerate("INBOX", &band, held(&none)).unwrap();
         assert!(matches!(listed, Listed::NoHead), "{listed:?}");
-        assert_eq!(api.requests().len(), 1, "only the expired history asked");
+        assert_eq!(api.lines().len(), 1, "only the expired history asked");
     }
 
     /// A page after a head never lists a member as it stood before the
@@ -2678,7 +2566,7 @@ mod tests {
         );
         assert_eq!(ids(&head), ["m1", "m3"]);
         assert_eq!(
-            batch.requests().len(),
+            batch.lines().len(),
             2,
             "m3 read again: the run's read predates the history"
         );
@@ -2709,7 +2597,7 @@ mod tests {
             "m1 and m4 left out, m3 as the head read it"
         );
         assert!(page.vanished.is_empty(), "a round page states no removal");
-        let reads = batch.requests();
+        let reads = batch.lines();
         assert_eq!(reads.len(), 4, "m1's labels and m4's metadata: {reads:?}");
         assert_eq!(api.left() + batch.left(), 0);
     }
@@ -2798,7 +2686,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(batch.requests().len(), 2, "the sizes, then the bodies");
+        assert_eq!(batch.lines().len(), 2, "the sizes, then the bodies");
         assert_eq!(bodies.len(), 2, "m5 is gone");
         assert_eq!(gone, ["m5"], "and answered gone");
         assert!(bodies["m4"].ends_with("Body of m4\r\n"));
@@ -2851,11 +2739,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(bodies.len(), 2);
-        assert_eq!(
-            batch.requests().len(),
-            2,
-            "the refused body read again alone"
-        );
+        assert_eq!(batch.lines().len(), 2, "the refused body read again alone");
         assert_eq!(
             client.run.batch_size.lock().unwrap().current(),
             2,
@@ -2877,7 +2761,7 @@ mod tests {
         // Started at the 2 the run holds: a full batch of two doubles it to 4,
         // and m5 alone, not a full batch, leaves it there. A read starting at
         // the ceiling would send all three, miss m5's answer and end at 2.
-        assert_eq!(batch.requests().len(), 4);
+        assert_eq!(batch.lines().len(), 4);
         assert_eq!(client.run.batch_size.lock().unwrap().current(), 4);
         assert_eq!(batch.left(), 0);
     }
@@ -2912,7 +2796,7 @@ mod tests {
 
         assert_eq!(bodies, ["m1", "m2"]);
         assert!(gone.is_empty());
-        let requests = batch.requests();
+        let requests = batch.lines();
         assert_eq!(requests.len(), 1, "the bodies alone: {requests:?}");
         assert_eq!(api.left() + batch.left(), 0);
     }
@@ -2943,11 +2827,11 @@ mod tests {
             .unwrap();
 
         assert_eq!(bodies, ["big", "small"]);
-        let alone = api.requests();
+        let alone = api.lines();
         assert_eq!(alone.len(), 1, "{alone:?}");
         assert!(alone[0].contains("/messages/big"), "{alone:?}");
         assert!(alone[0].contains("format=RAW"), "{alone:?}");
-        assert_eq!(batch.requests().len(), 1, "the small one by a batch");
+        assert_eq!(batch.lines().len(), 1, "the small one by a batch");
         assert_eq!(api.left() + batch.left(), 0);
     }
 
@@ -2981,7 +2865,7 @@ mod tests {
         let flagged = Flag::from_iana(IanaFlag::Flagged);
         client.update_flags(&["m1"], &[], &[flagged]).unwrap();
 
-        let written = api.written();
+        let written = api.written(0);
         let body = written.rsplit("\r\n\r\n").next().unwrap_or_default();
         let modify: serde_json::Value = serde_json::from_str(body).unwrap();
         assert_eq!(
@@ -3017,7 +2901,7 @@ mod tests {
         ));
         api.answer(gone());
         client.move_items("INBOX", "Work", &["m2", "m3"]).unwrap();
-        let requests = api.requests();
+        let requests = api.lines();
         assert!(requests[3].contains("batchModify"), "{requests:?}");
         assert!(requests[4].contains("/messages/m2/modify"), "{requests:?}");
         assert!(requests[5].contains("/messages/m3/modify"), "{requests:?}");

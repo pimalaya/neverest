@@ -1838,6 +1838,14 @@ The report SHALL list under `downloaded` the octets of bodies and listed meta ea
 ### Requirement: A request that creates is sent again only when unprocessed
 A request creating something (an uploaded or copied message, an event, a contact, a label, an imported message, a send, an invitation reply or cancel, a DAV create) SHALL be sent again on a 429 or a Google rate limit only, which a provider answers before acting, never on a 503 or another 5xx, after which it may have landed. A Graph body batch answered 500, 502 or 504 SHALL be sent again without making the source give up as throttled.
 
+### Requirement: A Google stream that failed is reopened
+A Gmail, Google Calendar or Google People request whose stream failed mid-exchange (an I/O error, a reset, an early EOF) SHALL mark the stream dead, so the next request opens a new one instead of writing to the broken one. The three share one request loop (src/throttle.rs `google_send`) carrying this rule with the throttling ones.
+
+#### Scenario: A reset between two requests
+- GIVEN a Google Calendar or Google People session whose connection is reset during a request
+- WHEN the next request is sent
+- THEN it goes out on a new connection and succeeds
+
 ### Requirement: A Graph connection is reused only after a whole answer
 A Graph session SHALL send its next request on the same connection only after an exchange that read a whole answer on a connection the server neither ended nor asked to close, and SHALL reopen a connection idle for more than 60 seconds, below the two minutes after which Graph closes one. Any other failure (a read that timed out, a reset, an answer cut short) SHALL drop the connection, so a late answer is never read as the next request's. A request that only reads (a `GET`, a `$batch` of gets) that met a reused connection already dead before any octet of its answer (reset, aborted, broken pipe, end of stream) SHALL be sent again once, on a new connection (RFC 9112 §9.3.1); a read that timed out SHALL NOT be sent again, nor SHALL a request that creates, sends or moves.
 

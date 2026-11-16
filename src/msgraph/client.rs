@@ -80,11 +80,7 @@ use io_pimdir::{
 };
 use log::{debug, trace, warn};
 use pimalaya_cli::error::CodedError;
-use pimalaya_stream::{
-    proxy::Proxy,
-    stream::{Stream, TlsConnectOptions},
-    tls::Tls,
-};
+use pimalaya_stream::{proxy::Proxy, tls::Tls};
 use secrecy::{ExposeSecret, SecretString};
 use url::Url;
 
@@ -92,6 +88,7 @@ use self::wire::{Connect, Exchange, Shared, Watched};
 use crate::{
     client::{Gone, Held, Listed, StoredSize, WrittenItem},
     error::{ErrorCode, names_the_request},
+    http::open_tls,
     item::{
         collection::Collection,
         flag::{Flag, IanaFlag},
@@ -191,16 +188,7 @@ impl GraphClient {
         throttle: Arc<Throttle>,
     ) -> Result<Self> {
         let connect: Connect = Box::new(move || {
-            let url =
-                Url::parse(MSGRAPH_API_BASE).context("Cannot parse the Graph API base URL")?;
-            let host = url.host_str().context("Graph API base URL has no host")?;
-            let opts = TlsConnectOptions {
-                tls: tls.clone(),
-                proxy: proxy.clone(),
-                ..Default::default()
-            };
-            let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
-            stream.set_read_timeout(Some(wire::READ_TIMEOUT))?;
+            let stream = open_tls(MSGRAPH_API_BASE, &tls, &proxy)?;
             Ok(Box::new(stream) as Box<dyn MsgraphStream>)
         });
 
@@ -1195,24 +1183,27 @@ impl GraphClient {
     /// knowing `folders` (name, id) already, for a test of another module
     /// driving a Graph mail source request by request.
     pub(crate) fn scripted(
-        scripts: Vec<Vec<scripted::Step>>,
+        scripts: Vec<Vec<crate::scripted::Step>>,
         folders: &[(&str, &str)],
-    ) -> (Self, scripted::Server) {
+    ) -> (Self, crate::scripted::Server) {
         Self::scripted_as(GraphKind::Mail, scripts, folders)
     }
 
     /// [`scripted`](Self::scripted), a session of `kind`.
     pub(crate) fn scripted_as(
         kind: GraphKind,
-        scripts: Vec<Vec<scripted::Step>>,
+        scripts: Vec<Vec<crate::scripted::Step>>,
         folders: &[(&str, &str)],
-    ) -> (Self, scripted::Server) {
-        let server = scripted::Server::new(scripts);
+    ) -> (Self, crate::scripted::Server) {
+        let server = crate::scripted::Server::new(scripts);
+        let opener = server.clone();
+        let connect: Connect =
+            Box::new(move || Ok(Box::new(opener.open()?) as Box<dyn MsgraphStream>));
         let mut client = Self::over(
             kind,
             &SecretString::from("token"),
             "me",
-            server.connect(),
+            connect,
             SizeHints::default(),
             Arc::new(Throttle::new("msgraph")),
         )
@@ -1222,13 +1213,6 @@ impl GraphClient {
         }
         (client, server)
     }
-}
-
-/// The scripted Graph server a test of another module drives a session
-/// over ([`GraphClient::scripted`]).
-#[cfg(test)]
-pub(crate) mod scripted {
-    pub(crate) use super::wire::fake::{Server, Step};
 }
 
 #[cfg(test)]
@@ -2267,21 +2251,11 @@ mod tests {
 
     // --- the connection ---------------------------------------------------
 
-    use super::wire::fake::{Server, Step};
+    use crate::scripted::{Server, Step};
 
     /// A session of `kind` over a scripted server, one script a connection.
     fn session_of(kind: GraphKind, scripts: Vec<Vec<Step>>) -> (GraphClient, Server) {
-        let server = Server::new(scripts);
-        let client = GraphClient::over(
-            kind,
-            &SecretString::from("token"),
-            "me",
-            server.connect(),
-            SizeHints::default(),
-            Arc::new(Throttle::new("msgraph")),
-        )
-        .unwrap();
-        (client, server)
+        GraphClient::scripted_as(kind, scripts, &[])
     }
 
     fn session(scripts: Vec<Vec<Step>>) -> (GraphClient, Server) {

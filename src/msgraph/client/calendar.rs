@@ -739,33 +739,16 @@ mod tests {
         },
     };
 
-    use std::sync::Arc;
-
-    use secrecy::SecretString;
-
     use super::*;
     use crate::{
         error::Failure,
-        msgraph::client::{
-            GraphKind, SizeHints,
-            scripted::{Server, Step},
-        },
-        throttle::Throttle,
+        msgraph::client::GraphKind,
+        scripted::{Server, Step},
     };
 
     /// A calendar session over a scripted server of one connection.
     fn session(script: Vec<Step>) -> (GraphClient, Server) {
-        let server = Server::new(vec![script]);
-        let client = GraphClient::over(
-            GraphKind::Calendar,
-            &SecretString::from("token"),
-            "me",
-            server.connect(),
-            SizeHints::default(),
-            Arc::new(Throttle::new("msgraph")),
-        )
-        .unwrap();
-        (client, server)
+        GraphClient::scripted_as(GraphKind::Calendar, vec![script], &[])
     }
 
     /// A daily series of four from 2026-11-23 at 13:00 UTC, the third

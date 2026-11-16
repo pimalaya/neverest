@@ -2066,10 +2066,8 @@ mod push_tests {
     use super::*;
     use crate::{
         account::{DavAccount, SourceAccount, SourceAccountBackend},
-        dav::client::{
-            DavClient, DavKind,
-            scripted::{Wire, answer, reply},
-        },
+        dav::client::{DavClient, DavKind},
+        scripted::{Server, answer, reply},
         throttle::Throttle,
     };
 
@@ -2082,7 +2080,7 @@ mod push_tests {
 
     /// The pool of a CalDAV source answering `replies`, its home set
     /// `/caldav/v2/alice%40g/`.
-    fn caldav(replies: Vec<String>) -> (Pool, Wire) {
+    fn caldav(replies: Vec<String>) -> (Pool, Server) {
         let (client, wire) = DavClient::scripted(DavKind::Cal, "/caldav/v2/alice%40g/", replies);
         let account = SourceAccount {
             backend: SourceAccountBackend::Dav(DavAccount {
@@ -2172,11 +2170,11 @@ mod push_tests {
         assert_eq!(
             wire.lines(),
             [
-                "MOVE /caldav/v2/alice%40g/tasks/t1.ics HTTP/1.1",
-                &format!("PUT {TARGET}/t1.ics HTTP/1.1"),
+                "MOVE /caldav/v2/alice%40g/tasks/t1.ics",
+                &format!("PUT {TARGET}/t1.ics"),
             ]
         );
-        let requests = wire.requests();
+        let requests = wire.sent();
         assert!(carries(&requests[0], "if-match: \"e1\""), "{}", requests[0]);
         assert!(
             carries(
@@ -2210,7 +2208,7 @@ mod push_tests {
 
         let (result, _, _) = push(&mut pool, blobs, superseding(hash));
 
-        let requests = wire.requests();
+        let requests = wire.sent();
         assert!(requests[1].starts_with("PUT "), "{}", requests[1]);
         assert!(
             !requests[1].to_ascii_lowercase().contains("\r\nif-match:"),
@@ -2249,12 +2247,12 @@ mod push_tests {
             assert_eq!(
                 wire.lines(),
                 [
-                    "MOVE /caldav/v2/alice%40g/tasks/t1.ics HTTP/1.1",
-                    &format!("PUT {TARGET}/t1.ics HTTP/1.1"),
+                    "MOVE /caldav/v2/alice%40g/tasks/t1.ics",
+                    &format!("PUT {TARGET}/t1.ics"),
                 ],
                 "{status}"
             );
-            assert!(carries(&wire.requests()[1], "if-none-match: *"));
+            assert!(carries(&wire.sent()[1], "if-none-match: *"));
             assert_eq!(result.outcome, PimdirPushOutcome::Accepted, "{status}");
             assert_eq!(result.revision.as_deref(), Some("n1"));
             assert!(rejected.is_empty(), "{status}");
@@ -2386,8 +2384,8 @@ mod hydrate_tests {
     use io_pimdir::client::PimdirStore;
 
     use super::*;
-    use crate::dav::client::{
-        DavClient, DavKind,
+    use crate::{
+        dav::client::{DavClient, DavKind},
         scripted::{answer, reply},
     };
 
@@ -2500,7 +2498,7 @@ mod hydrate_tests {
         let found: Vec<&PimdirHandle> = hydrated.items.iter().map(|item| &item.handle).collect();
         assert_eq!(found, handles.iter().collect::<Vec<_>>());
         assert!(hydrated.gone.is_empty());
-        assert_eq!(wire.lines(), ["REPORT /dav/cal/My%20Cal/ HTTP/1.1"]);
+        assert_eq!(wire.lines(), ["REPORT /dav/cal/My%20Cal/"]);
     }
 }
 

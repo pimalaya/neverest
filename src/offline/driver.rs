@@ -13787,10 +13787,11 @@ mod gmail_bodies {
         client::{Client, Pool},
         config::AccountConfig,
         gmail::{
-            client::scripted::{Wire, batch_answer, ok, scripted},
+            client::scripted::{batch_answer, scripted},
             run::GmailRun,
         },
         offline::progress::Progress,
+        scripted::{Server, ok},
         sync::event::SyncEvent,
         throttle::Throttle,
     };
@@ -13848,7 +13849,7 @@ mod gmail_bodies {
     }
 
     /// One connection to a scripted Gmail, its API and batch sessions.
-    pub(super) fn connection() -> (SourceCtx, Wire, Wire) {
+    pub(super) fn connection() -> (SourceCtx, Server, Server) {
         let (client, api, batch) = scripted();
         let config: AccountConfig = toml::from_str("gmail.auth.token.raw = \"x\"").unwrap();
         let perms = config.sources().unwrap()["gmail"].permissions();
@@ -13954,9 +13955,9 @@ mod gmail_bodies {
         let run = GoneBodies::default();
         hydrate(&mut store, &mut ctx, &collections, &run);
 
-        let requests = batch.requests();
+        let requests = batch.lines();
         assert_eq!(requests.len(), 2, "m1 and m2, then m3: {requests:?}");
-        assert!(api.requests().is_empty(), "nothing read alone");
+        assert!(api.lines().is_empty(), "nothing read alone");
         let inbox = bodies(&store, INBOX);
         let work = bodies(&store, WORK);
         assert!(inbox.iter().all(|(_, body)| body.is_some()), "{inbox:?}");
@@ -13967,7 +13968,7 @@ mod gmail_bodies {
         // NOTE: a second pass of the run plans nothing: m3 is owed nothing
         // more, and the wire, answering no more, would fail any request.
         hydrate(&mut store, &mut ctx, &collections, &run);
-        assert_eq!(batch.requests().len(), 2, "nothing asked again");
+        assert_eq!(batch.lines().len(), 2, "nothing asked again");
         assert_eq!(batch.left(), 0);
     }
 
@@ -14029,13 +14030,13 @@ mod gmail_bodies {
             &[INBOX.to_string()],
             &GoneBodies::default(),
         );
-        assert_eq!(batch.requests().len(), 1);
+        assert_eq!(batch.lines().len(), 1);
 
         store.write(vec![owed(WORK, "m1", 40)]).unwrap();
         let collections = vec![INBOX.to_string(), WORK.to_string()];
         hydrate(&mut store, &mut ctx, &collections, &GoneBodies::default());
 
-        assert_eq!(batch.requests().len(), 1, "no second download");
+        assert_eq!(batch.lines().len(), 1, "no second download");
         let inbox = bodies(&store, INBOX);
         let work = bodies(&store, WORK);
         assert!(work[0].1.is_some(), "{work:?}");
@@ -14102,7 +14103,7 @@ mod gmail_bodies {
             .map(|(handle, _)| handle)
             .collect();
         assert_eq!(held, ["ahead", "draft", "recent"]);
-        let requests = api.requests();
+        let requests = api.lines();
         let enumeration = requests.last().unwrap();
         assert!(enumeration.contains("/messages"), "{requests:?}");
         assert!(!enumeration.contains("q="), "no date filter: {requests:?}");
@@ -14182,8 +14183,8 @@ mod gmail_bodies {
             ctx.scope = scope;
             api.respond(inbox());
             sync_side(INBOX, &mut ctx, &mut store, &blobs, false, None).unwrap();
-            assert_eq!(batch.requests(), Vec::<String>::new());
-            requests = api.requests();
+            assert_eq!(batch.lines(), Vec::<String>::new());
+            requests = api.lines();
         }
 
         let coverage = store.list_coverage(INBOX).unwrap();
@@ -14215,8 +14216,9 @@ mod gmail_heads {
 
     use super::{gmail_bodies::connection, open_store, projection_view, sync_side};
     use crate::{
-        gmail::client::scripted::{Wire, batch_answer, json, ok},
+        gmail::client::scripted::batch_answer,
         offline::{Pager, Rest},
+        scripted::{Server, json, ok},
     };
 
     const INBOX: &str = "gmail/INBOX";
@@ -14319,7 +14321,7 @@ mod gmail_heads {
     fn sync(
         store: &mut PimdirSourceStore,
         pause: bool,
-        script: impl FnOnce(&Wire, &Wire),
+        script: impl FnOnce(&Server, &Server),
     ) -> (bool, Vec<Rested>, Vec<String>) {
         let (mut ctx, api, batch) = connection();
         script(&api, &batch);
@@ -14334,10 +14336,10 @@ mod gmail_heads {
             api.left() + batch.left(),
             0,
             "every answer asked for: {:?} {:?}",
-            api.requests(),
-            batch.requests()
+            api.lines(),
+            batch.lines()
         );
-        (paused, watch.rests, api.requests())
+        (paused, watch.rests, api.lines())
     }
 
     /// A store syncing the inbox whose round's first page landed: m2 and m1
@@ -14529,11 +14531,9 @@ mod graph_heads {
         account::{MsgraphAccount, SourceAccount, SourceAccountBackend},
         client::{Client, Pool},
         config::AccountConfig,
-        msgraph::client::{
-            GraphClient, GraphKind, SizeHints,
-            scripted::{Server, Step},
-        },
+        msgraph::client::{GraphClient, GraphKind, SizeHints},
         offline::{Pager, Rest},
+        scripted::{Server, Step},
         throttle::Throttle,
     };
 
@@ -14663,7 +14663,7 @@ mod graph_heads {
     }
 
     fn requests(server: &Server) -> Vec<String> {
-        server.requests().into_iter().flatten().collect()
+        server.lines()
     }
 
     fn context(client: GraphClient) -> SourceCtx {
@@ -14841,7 +14841,8 @@ mod graph_one_table {
             AccountConfig, CollectionPermissions, FlagSourcePermissions, ItemSourcePermissions,
             SourceBackendConfig, SourcePermissions,
         },
-        msgraph::client::{GraphClient, GraphKind, SizeHints, scripted::Step},
+        msgraph::client::{GraphClient, GraphKind, SizeHints},
+        scripted::Step,
         throttle::Throttle,
     };
 
@@ -15006,7 +15007,7 @@ mod graph_one_table {
             .into_iter()
             .map(|placement| placement.handle.0)
             .collect();
-        let requests = server.requests().into_iter().flatten().collect();
+        let requests = server.lines();
         (handles, requests)
     }
 

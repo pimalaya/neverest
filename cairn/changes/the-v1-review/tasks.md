@@ -73,10 +73,10 @@ exit 2;
 
 ## Phase 3: backend duplication and the suspected bug (A6)
 
-- [ ] 1. Lift msgraph's `fake::Server` (src/msgraph/client/wire.rs:200-375) into a crate-level `#[cfg(test)]` src/scripted.rs with per-connection `Step` scripts, gmail's optional responder, `requests()`, `lines()`, `json()`, `answer()`; replace gcal `Recorded`/`Answering`/`request_lines`, gpeople `Canned`/`Scripted`, dav `Replay`/`scripted::Wire`, gmail `scripted::Wire`. Test counts unchanged.
-- [ ] 2. Suspected bug: gcal and gpeople `send` return on `run(&mut self.inner)?` (src/gcal/client.rs:191, gpeople equivalent) before updating `alive`, so a stream that failed mid-exchange is never reopened; gmail sets `alive = false` on `Io` (src/gmail/client.rs:320-325). Write the test first: a scripted stream failing one exchange with an I/O error, the next request must reconnect. It must fail on today's gcal and gpeople. If it passes, drop the fix and record why.
-- [ ] 3. Factor the Google request loop (gcal :143-211, gpeople :95-184, gmail :233-345 core) into one generic function in src/throttle.rs carrying gmail's `Io` rule; the bug test passes.
-- [ ] 4. Factor TLS stream opening (gcal `open_stream` :1026, gpeople `reconnect` :98, gmail `open_stream` :1500, msgraph `connect` src/msgraph/client.rs:193) into one `open_tls(url, tls, proxy)` in src/http.rs, gated on the HTTP backend features.
+- [x] 1. Lift msgraph's `fake::Server` (src/msgraph/client/wire.rs:200-375) into a crate-level `#[cfg(test)]` src/scripted.rs with per-connection `Step` scripts, gmail's optional responder, `requests()`, `lines()`, `json()`, `answer()`; replace gcal `Recorded`/`Answering`/`request_lines`, gpeople `Canned`/`Scripted`, dav `Replay`/`scripted::Wire`, gmail `scripted::Wire`. Test counts unchanged.
+- [x] 2. Suspected bug: gcal and gpeople `send` return on `run(&mut self.inner)?` (src/gcal/client.rs:191, gpeople equivalent) before updating `alive`, so a stream that failed mid-exchange is never reopened; gmail sets `alive = false` on `Io` (src/gmail/client.rs:320-325). Write the test first: a scripted stream failing one exchange with an I/O error, the next request must reconnect. It must fail on today's gcal and gpeople. If it passes, drop the fix and record why.
+- [x] 3. Factor the Google request loop (gcal :143-211, gpeople :95-184, gmail :233-345 core) into one generic function in src/throttle.rs carrying gmail's `Io` rule; the bug test passes.
+- [x] 4. Factor TLS stream opening (gcal `open_stream` :1026, gpeople `reconnect` :98, gmail `open_stream` :1500, msgraph `connect` src/msgraph/client.rs:193) into one `open_tls(url, tls, proxy)` in src/http.rs, gated on the HTTP backend features.
 
 ## Phase 4: `sync` flags (D6)
 

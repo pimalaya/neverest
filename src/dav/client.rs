@@ -1191,11 +1191,12 @@ impl DavClient {
         kind: DavKind,
         home: &str,
         replies: Vec<String>,
-    ) -> (Self, scripted::Wire) {
+    ) -> (Self, crate::scripted::Server) {
         let base = Url::parse("https://dav.example.org/").unwrap();
-        let wire = scripted::Wire::new(replies);
+        let wire = crate::scripted::Server::replying(replies);
         let auth = WebdavAuth::None;
-        let mut inner = WebdavClientStd::new(wire.stream(), auth.clone(), base.clone());
+        let stream = wire.open().unwrap();
+        let mut inner = WebdavClientStd::new(stream, auth.clone(), base.clone());
         let home = Some(base.join(home).unwrap());
         match kind {
             DavKind::Card => inner.addressbook_home_set = home,
@@ -1213,118 +1214,6 @@ impl DavClient {
             throttle: Arc::new(Throttle::new("dav")),
         };
         (client, wire)
-    }
-}
-
-/// A scripted DAV server: one connection answering its requests from a
-/// script, in order, and recording each request written to it.
-#[cfg(test)]
-pub(crate) mod scripted {
-    use std::{
-        collections::VecDeque,
-        io::{self, Read, Write},
-        sync::{Arc, Mutex},
-    };
-
-    /// An answer of `status`, carrying `headers` and no body.
-    pub(crate) fn reply(status: &str, headers: &[(&str, &str)]) -> String {
-        answer(status, headers, "")
-    }
-
-    /// An answer of `status`, carrying `headers` and `body`.
-    pub(crate) fn answer(status: &str, headers: &[(&str, &str)], body: &str) -> String {
-        let headers: String = headers
-            .iter()
-            .map(|(name, value)| format!("{name}: {value}\r\n"))
-            .collect();
-        format!(
-            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\n\r\n{body}",
-            body.len()
-        )
-    }
-
-    #[derive(Default)]
-    struct State {
-        replies: VecDeque<Vec<u8>>,
-        out: VecDeque<u8>,
-        writing: Vec<u8>,
-        requests: Vec<String>,
-    }
-
-    /// The server's side of the connection.
-    #[derive(Clone, Default)]
-    pub(crate) struct Wire(Arc<Mutex<State>>);
-
-    impl Wire {
-        pub(crate) fn new(replies: Vec<String>) -> Self {
-            let wire = Self::default();
-            let mut state = wire.0.lock().unwrap();
-            state.replies = replies.into_iter().map(String::into_bytes).collect();
-            drop(state);
-            wire
-        }
-
-        pub(crate) fn stream(&self) -> Stream {
-            Stream(self.clone())
-        }
-
-        /// Every request written so far, head and body, in order.
-        pub(crate) fn requests(&self) -> Vec<String> {
-            let mut state = self.0.lock().unwrap();
-            flush(&mut state);
-            state.requests.clone()
-        }
-
-        /// The request line of each request, in order.
-        pub(crate) fn lines(&self) -> Vec<String> {
-            self.requests()
-                .iter()
-                .map(|request| request.lines().next().unwrap_or_default().to_owned())
-                .collect()
-        }
-    }
-
-    /// Closes the request being written once its answer is read.
-    fn flush(state: &mut State) {
-        if !state.writing.is_empty() {
-            let request = String::from_utf8_lossy(&state.writing).into_owned();
-            state.requests.push(request);
-            state.writing.clear();
-        }
-    }
-
-    pub(crate) struct Stream(Wire);
-
-    impl Read for Stream {
-        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            let mut state = (self.0).0.lock().unwrap();
-            flush(&mut state);
-            if state.out.is_empty() {
-                // NOTE: a script run dry ends the stream, as a server
-                // closing the connection.
-                let Some(reply) = state.replies.pop_front() else {
-                    return Ok(0);
-                };
-                state.out.extend(reply);
-            }
-            let n = buf.len().min(state.out.len());
-            for (slot, byte) in buf.iter_mut().zip(state.out.drain(..n)) {
-                *slot = byte;
-            }
-            Ok(n)
-        }
-    }
-
-    impl Write for Stream {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            let mut state = (self.0).0.lock().unwrap();
-            state.writing.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
     }
 }
 
@@ -1563,10 +1452,10 @@ mod tests {
         assert_eq!(takes_tasks(&set(&[])), None);
     }
 
-    use scripted::{answer, reply};
+    use crate::scripted::{Server, answer, reply};
 
     /// A calendar session over `replies`, its home set `/dav/cal/`.
-    fn calendars(replies: Vec<String>) -> (DavClient, scripted::Wire) {
+    fn calendars(replies: Vec<String>) -> (DavClient, Server) {
         DavClient::scripted(DavKind::Cal, "/dav/cal/", replies)
     }
 
@@ -1592,8 +1481,8 @@ mod tests {
 
         assert_eq!(moved.id, "t1.ics");
         assert_eq!(moved.revision.as_deref(), Some("m1"));
-        let requests = wire.requests();
-        assert_eq!(wire.lines(), ["MOVE /dav/cal/tasks/t1.ics HTTP/1.1"]);
+        let requests = wire.sent();
+        assert_eq!(wire.lines(), ["MOVE /dav/cal/tasks/t1.ics"]);
         let request = &requests[0];
         assert!(
             carries(
@@ -1690,7 +1579,7 @@ mod tests {
         let (mut dav, wire) = DavClient::scripted(DavKind::Card, "/dav/card/", Vec::new());
         let moved = dav.move_item("a", "b", "c1.vcf", None).unwrap();
         assert!(moved.is_none());
-        assert!(wire.requests().is_empty());
+        assert!(wire.sent().is_empty());
     }
 
     /// A relocation is a `MOVE`, never a create then a delete, which a
@@ -1701,7 +1590,7 @@ mod tests {
 
         dav.move_items("tasks", "work", &["t1.ics"]).unwrap();
 
-        assert_eq!(wire.lines(), ["MOVE /dav/cal/tasks/t1.ics HTTP/1.1"]);
+        assert_eq!(wire.lines(), ["MOVE /dav/cal/tasks/t1.ics"]);
     }
 
     /// A server with no `MOVE` (Google answers 404) has the item re-created
@@ -1721,10 +1610,10 @@ mod tests {
         assert_eq!(
             wire.lines(),
             [
-                "MOVE /dav/cal/tasks/t1.ics HTTP/1.1",
-                "GET /dav/cal/tasks/t1.ics HTTP/1.1",
-                "PUT /dav/cal/work/t1.ics HTTP/1.1",
-                "DELETE /dav/cal/tasks/t1.ics HTTP/1.1",
+                "MOVE /dav/cal/tasks/t1.ics",
+                "GET /dav/cal/tasks/t1.ics",
+                "PUT /dav/cal/work/t1.ics",
+                "DELETE /dav/cal/tasks/t1.ics",
             ]
         );
     }
@@ -1790,11 +1679,8 @@ mod tests {
         dav.move_items("/caldav/v2/x%40g/events", "events", &["t1.ics"])
             .unwrap();
 
-        let request = &wire.requests()[0];
-        assert_eq!(
-            wire.lines(),
-            ["MOVE /caldav/v2/x%40g/events/t1.ics HTTP/1.1"]
-        );
+        let request = &wire.sent()[0];
+        assert_eq!(wire.lines(), ["MOVE /caldav/v2/x%40g/events/t1.ics"]);
         assert!(
             carries(
                 request,
@@ -1886,8 +1772,8 @@ mod tests {
         assert_eq!(
             wire.lines()[1..],
             [
-                "PROPFIND /dav/cal/My%20Cal/ HTTP/1.1",
-                "PROPFIND /dav/cal/R%C3%A9unions/ HTTP/1.1"
+                "PROPFIND /dav/cal/My%20Cal/",
+                "PROPFIND /dav/cal/R%C3%A9unions/"
             ]
         );
         let ids: Vec<&str> = listed.items.iter().map(|item| item.id.as_str()).collect();
@@ -1940,7 +1826,7 @@ mod tests {
             assert_eq!(opened, found, "{kind}");
             assert_eq!(done, opened, "{kind}");
             assert_eq!(answered, gone, "{kind}");
-            let report = format!("REPORT {home}My%20Cal/ HTTP/1.1");
+            let report = format!("REPORT {home}My%20Cal/");
             assert_eq!(wire.lines(), [report], "{kind}");
         }
     }
@@ -1974,7 +1860,7 @@ mod tests {
                     .unwrap();
 
                 assert_eq!(written.id, format!("{key}.{extension}"), "{location}");
-                let put = format!("PUT {home}My%20Cal/t1.{extension} HTTP/1.1");
+                let put = format!("PUT {home}My%20Cal/t1.{extension}");
                 assert_eq!(wire.lines(), [put]);
             }
         }
@@ -1994,35 +1880,12 @@ mod tests {
         assert_eq!(moved.id, "r%C3%A9union%201.ics");
         assert_eq!(
             wire.lines(),
-            ["MOVE /dav/cal/My%20Cal/r%C3%A9union%201.ics HTTP/1.1"]
+            ["MOVE /dav/cal/My%20Cal/r%C3%A9union%201.ics"]
         );
-        let request = &wire.requests()[0];
+        let request = &wire.sent()[0];
         let destination = "destination: \
                            https://dav.example.org/dav/cal/R%C3%A9unions/r%C3%A9union%201.ics";
         assert!(carries(request, destination), "{request}");
-    }
-
-    /// A stream replaying one canned HTTP answer a read, discarding writes.
-    struct Replay(std::collections::VecDeque<Vec<u8>>);
-
-    impl Read for Replay {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let Some(answer) = self.0.pop_front() else {
-                return Ok(0);
-            };
-            buf[..answer.len()].copy_from_slice(&answer);
-            Ok(answer.len())
-        }
-    }
-
-    impl Write for Replay {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     /// A `sync-collection` answer listing `card`, truncated when
@@ -2056,7 +1919,7 @@ mod tests {
     fn replayed(answers: Vec<Vec<u8>>) -> DavClient {
         let server = Url::parse("https://dav.example.org/").unwrap();
         let inner = WebdavClientStd::from_parts(
-            Replay(answers.into()),
+            Server::replying(answers).open().unwrap(),
             WebdavAuth::None,
             server.clone(),
             None,

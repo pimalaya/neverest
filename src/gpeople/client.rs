@@ -17,7 +17,6 @@
 use std::{
     io::{Read, Write},
     sync::Arc,
-    time::Duration,
 };
 
 use anyhow::{Context, Result, bail};
@@ -31,20 +30,18 @@ use io_gpeople::v1::{
     send::{GPEOPLE_API_BASE, GpeopleApiError, GpeopleSendError, GpeopleSendOutput},
 };
 use log::{debug, trace, warn};
-use pimalaya_stream::{
-    proxy::Proxy,
-    stream::{Stream, TlsConnectOptions},
-    tls::Tls,
-};
 use secrecy::ExposeSecret;
-use url::Url;
 
 use crate::{
     account::GoogleAccount,
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
     error::{ErrorCode, names_the_request},
+    http::open_tls,
     item::{collection::Collection, flag::Flag},
-    throttle::{GoogleAnswer, GoogleWaits, Request, Throttle, google_code},
+    throttle::{
+        GoogleAnswer, GoogleError, GoogleSession, Pick, Reopen, Request, Throttle, google_code,
+        google_send,
+    },
 };
 
 /// The one collection a People account syncs: every connection.
@@ -59,14 +56,8 @@ const PAGE_SIZE: u32 = 1000;
 
 /// The live People session of one side.
 pub struct GpeopleClient {
-    inner: GpeopleClientStd,
-    /// The TLS configuration, kept for stream reopens.
-    tls: Tls,
-    /// The proxy, kept for stream reopens.
-    proxy: Proxy,
-    /// Whether the server allowed reusing the stream after the last
-    /// exchange; when false the next operation reopens it.
-    alive: bool,
+    /// The People session, reopening its stream as it dies.
+    session: GoogleSession<GpeopleClientStd>,
     /// The source's back-off, shared by its connections.
     throttle: Arc<Throttle>,
 }
@@ -82,32 +73,16 @@ impl GpeopleClient {
         let inner = GpeopleClientStd::connect(token.expose_secret(), options)
             .context("Cannot connect to Google People")?;
 
+        let (tls, proxy) = (tls.clone(), proxy.clone());
+        let reopen: Reopen<GpeopleClientStd> = Box::new(move |gpeople| {
+            gpeople.set_stream(open_tls(GPEOPLE_API_BASE, &tls, &proxy)?);
+            Ok(())
+        });
+
         Ok(Self {
-            inner,
-            tls: tls.clone(),
-            proxy: proxy.clone(),
-            alive: true,
+            session: GoogleSession::new("people", inner, reopen),
             throttle,
         })
-    }
-
-    /// Reopens the stream to the People endpoint, keeping the credential.
-    fn reconnect(&mut self) -> Result<()> {
-        debug!("reopening the people stream");
-
-        let url = Url::parse(GPEOPLE_API_BASE).context("Cannot parse the People API base URL")?;
-        let host = url.host_str().context("People API base URL has no host")?;
-        let opts = TlsConnectOptions {
-            tls: self.tls.clone(),
-            proxy: self.proxy.clone(),
-            ..Default::default()
-        };
-        let stream = Stream::connect_tls(host, url.port().unwrap_or(443), opts)?;
-        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-
-        self.inner.set_stream(stream);
-        self.alive = true;
-        Ok(())
     }
 
     /// Runs one People operation, reopening the stream first when the
@@ -142,34 +117,11 @@ impl GpeopleClient {
         ) -> Result<GpeopleSendOutput<T>, GpeopleClientStdError>,
     ) -> Result<T, GpeopleClientStdError> {
         let throttle = Arc::clone(&self.throttle);
-        let waits = GoogleWaits::new();
-        throttle.call(
-            1,
-            || {
-                if !self.alive
-                    && let Err(err) = self.reconnect()
-                {
-                    warn!("cannot reopen the people stream: {err:#}");
-                }
-
-                let out = run(&mut self.inner)?;
-                self.alive = out.keep_alive;
-                Ok(out.response)
-            },
-            |err| match err {
-                GpeopleClientStdError::Send(GpeopleSendError::Api(err)) => {
-                    waits.throttled(request, &google_answer(err))
-                }
-                _ => None,
-            },
-            |message| {
-                GpeopleClientStdError::Send(GpeopleSendError::Api(GpeopleApiError {
-                    status: 429,
-                    message,
-                    ..Default::default()
-                }))
-            },
-        )
+        let pick: Pick<Self, GpeopleClientStd, GpeopleClientStdError> =
+            |client| Ok(&mut client.session);
+        google_send(self, pick, &throttle, request, 1, |client| {
+            run(client).map(|out| (out.response, out.keep_alive))
+        })
     }
 
     /// Lists the one address book a People account has.
@@ -504,6 +456,27 @@ fn google_answer(err: &GpeopleApiError) -> GoogleAnswer<'_> {
     }
 }
 
+impl GoogleError for GpeopleClientStdError {
+    fn broke(&self) -> bool {
+        matches!(self, Self::Io(_))
+    }
+
+    fn answer(&self) -> Option<GoogleAnswer<'_>> {
+        match self {
+            Self::Send(GpeopleSendError::Api(err)) => Some(google_answer(err)),
+            _ => None,
+        }
+    }
+
+    fn throttled(message: String) -> Self {
+        Self::Send(GpeopleSendError::Api(GpeopleApiError {
+            status: 429,
+            message,
+            ..Default::default()
+        }))
+    }
+}
+
 /// Reads a whole vCard body as UTF-8 text.
 fn read_vcard(mut source: impl Read) -> Result<String> {
     let mut vcard = String::new();
@@ -515,9 +488,8 @@ fn read_vcard(mut source: impl Read) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Mutex};
-
     use super::*;
+    use crate::scripted::{Server, Step, json};
 
     /// People answers an expired sync token with a 400 as often as a 410
     /// (seen on CI, 2026-10-05), which restarts a full listing too.
@@ -540,26 +512,40 @@ mod tests {
         assert!(ensure_contacts("friends").is_err());
     }
 
-    /// A stream answering one canned response, discarding what is written.
-    struct Canned(Vec<u8>);
-
-    impl Read for Canned {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let n = self.0.len().min(buf.len());
-            buf[..n].copy_from_slice(&self.0[..n]);
-            self.0.drain(..n);
-            Ok(n)
+    /// A session over the connections `server` opens.
+    fn over(server: &Server) -> GpeopleClient {
+        let opener = server.clone();
+        let reopen: Reopen<GpeopleClientStd> = Box::new(move |gpeople| {
+            gpeople.set_stream(opener.open()?);
+            Ok(())
+        });
+        let inner = GpeopleClientStd::new(server.open().unwrap(), "token");
+        GpeopleClient {
+            session: GoogleSession::new("people", inner, reopen),
+            throttle: Arc::new(Throttle::new("gpeople")),
         }
     }
 
-    impl Write for Canned {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            Ok(buf.len())
-        }
+    /// A stream an exchange failed on is in no state to carry the next one:
+    /// the next request goes over a new connection.
+    #[test]
+    fn a_stream_that_failed_mid_exchange_is_reopened() {
+        let body = r#"{"resourceName":"people/c1","etag":"e1"}"#;
+        let server = Server::new(vec![
+            vec![Step::Reset],
+            vec![Step::Reply(json("200 OK", body))],
+        ]);
+        let mut client = over(&server);
 
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+        client
+            .get_item_stream(CONTACTS, "c1", Vec::new())
+            .expect_err("the stream reset");
+        let etag = client
+            .get_item_stream(CONTACTS, "c1", Vec::new())
+            .expect("a new connection");
+
+        assert_eq!(etag.as_deref(), Some("e1"));
+        assert_eq!(server.requests().len(), 2, "{:?}", server.requests());
     }
 
     /// A person deleted between its listing and its read is gone: failing
@@ -573,13 +559,7 @@ mod tests {
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
-            let mut client = GpeopleClient {
-                inner: GpeopleClientStd::new(Canned(answer.into_bytes()), "token"),
-                tls: Tls::default(),
-                proxy: Proxy::None,
-                alive: true,
-                throttle: Arc::new(Throttle::new("gpeople")),
-            };
+            let mut client = over(&Server::replying([answer]));
 
             let err = client
                 .get_item_stream(CONTACTS, "c1", Vec::new())
@@ -606,56 +586,12 @@ mod tests {
                 "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
-            let mut client = GpeopleClient {
-                inner: GpeopleClientStd::new(Canned(answer.into_bytes()), "token"),
-                tls: Tls::default(),
-                proxy: Proxy::None,
-                alive: true,
-                throttle: Arc::new(Throttle::new("gpeople")),
-            };
+            let mut client = over(&Server::replying([answer]));
 
             let err = client.delete_item("c1", None).expect_err("refused");
 
             let reason = crate::error::refusal(&err);
             assert_eq!(reason.is_some(), refused, "{status}: {err:#}");
-        }
-    }
-
-    /// A stream answering each request with the next scripted answer, and
-    /// keeping each request written to it.
-    struct Scripted {
-        answers: VecDeque<Vec<u8>>,
-        out: Vec<u8>,
-        writing: bool,
-        requests: Arc<Mutex<Vec<Vec<u8>>>>,
-    }
-
-    impl Read for Scripted {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            if self.writing {
-                self.writing = false;
-                self.out = self.answers.pop_front().unwrap_or_default();
-            }
-            let n = self.out.len().min(buf.len());
-            buf[..n].copy_from_slice(&self.out[..n]);
-            self.out.drain(..n);
-            Ok(n)
-        }
-    }
-
-    impl Write for Scripted {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let mut requests = self.requests.lock().unwrap();
-            if !self.writing {
-                self.writing = true;
-                requests.push(Vec::new());
-            }
-            requests.last_mut().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
         }
     }
 
@@ -675,20 +611,8 @@ mod tests {
             )
             .into_bytes()
         };
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let stream = Scripted {
-            answers: VecDeque::from([answer(held), answer(&held.replace("e1", "e2"))]),
-            out: Vec::new(),
-            writing: false,
-            requests: Arc::clone(&requests),
-        };
-        let mut client = GpeopleClient {
-            inner: GpeopleClientStd::new(stream, "token"),
-            tls: Tls::default(),
-            proxy: Proxy::None,
-            alive: true,
-            throttle: Arc::new(Throttle::new("gpeople")),
-        };
+        let server = Server::replying([answer(held), answer(&held.replace("e1", "e2"))]);
+        let mut client = over(&server);
 
         let current: GpeoplePerson = serde_json::from_str(held).unwrap();
         let vcard = current.to_vcard();
@@ -706,8 +630,7 @@ mod tests {
             .unwrap();
         assert_eq!(etag.as_deref(), Some("e2"));
 
-        let requests = requests.lock().unwrap();
-        let patch = String::from_utf8_lossy(&requests[1]);
+        let patch = server.sent()[1].clone();
         let (head, body) = patch.split_once("\r\n\r\n").unwrap();
         assert!(head.starts_with("PATCH "), "{head}");
         let sent: GpeoplePerson = serde_json::from_str(body).unwrap();

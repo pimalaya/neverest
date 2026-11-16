@@ -380,17 +380,9 @@ fn check_revision(id: &str, current: &MsgraphContact, if_match: Option<&str>) ->
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, sync::Arc};
+    use std::collections::BTreeSet;
 
-    use secrecy::SecretString;
-
-    use crate::{
-        msgraph::client::{
-            GraphKind, SizeHints,
-            scripted::{Server, Step},
-        },
-        throttle::Throttle,
-    };
+    use crate::{msgraph::client::GraphKind, scripted::Step};
 
     use super::*;
 
@@ -431,23 +423,15 @@ mod tests {
     /// account's too: left out of the listing, they would read as deleted.
     #[test]
     fn every_page_and_depth_of_contact_folders_is_listed() {
-        let server = Server::new(vec![vec![
+        let script = vec![
             folders(&["f1"], true),
             folders(&["f2"], false),
             folders(&["f1a"], false),
             folders(&[], false),
             folders(&["f1a1"], false),
             folders(&[], false),
-        ]]);
-        let mut client = GraphClient::over(
-            GraphKind::Contacts,
-            &SecretString::from("token"),
-            "me",
-            server.connect(),
-            SizeHints::default(),
-            Arc::new(Throttle::new("msgraph")),
-        )
-        .unwrap();
+        ];
+        let (mut client, _) = GraphClient::scripted_as(GraphKind::Contacts, vec![script], &[]);
 
         let listed: BTreeSet<String> = client
             .list_contact_folders()

@@ -15,6 +15,9 @@
 //! (a concurrency 429, a per-second rate) is gone within a second or two, a
 //! per-minute quota within a few seconds more, a daily quota not before
 //! Google's midnight, where the source gives up.
+//!
+//! The Google clients share one request loop ([`google_send`]): it reopens a
+//! dead stream first, and marks dead one that failed mid-exchange.
 
 // NOTE: each HTTP backend uses its part; a build leaving some out leaves
 // theirs unused.
@@ -40,7 +43,7 @@ use std::{
 };
 
 use chrono::{DateTime, Datelike, Days, NaiveDate, SecondsFormat, TimeZone, Utc, Weekday};
-use log::warn;
+use log::{debug, warn};
 
 use crate::error::ErrorCode;
 
@@ -451,6 +454,100 @@ impl GoogleWaits {
             GoogleRefusal::Daily => until_pacific_midnight(now),
         }
     }
+}
+
+/// Gives a Google session's client a new stream.
+pub type Reopen<C> = Box<dyn FnMut(&mut C) -> anyhow::Result<()> + Send>;
+
+/// A Google API session: a client over one stream, reopened before the next
+/// exchange once the last one left it unfit.
+pub struct GoogleSession<C> {
+    /// The API client.
+    pub client: C,
+    /// What the session is named in logs.
+    name: &'static str,
+    /// Whether the stream may carry the next exchange.
+    alive: bool,
+    reopen: Reopen<C>,
+}
+
+impl<C> GoogleSession<C> {
+    /// A session named `name` over the stream `client` holds, given a new
+    /// one by `reopen`.
+    pub fn new(name: &'static str, client: C, reopen: Reopen<C>) -> Self {
+        Self {
+            client,
+            name,
+            alive: true,
+            reopen,
+        }
+    }
+
+    /// Whether the stream may carry the next exchange.
+    pub fn alive(&self) -> bool {
+        self.alive
+    }
+
+    /// Gives the client a new stream.
+    pub fn reopen(&mut self) -> anyhow::Result<()> {
+        debug!("reopening the {} stream", self.name);
+        (self.reopen)(&mut self.client)?;
+        self.alive = true;
+        Ok(())
+    }
+}
+
+/// What [`google_send`] reads of the error a Google client fails with.
+pub trait GoogleError {
+    /// Whether the stream failed mid-exchange, leaving it unfit for the
+    /// next one.
+    fn broke(&self) -> bool;
+
+    /// The answer Google refused the request with, if it is one.
+    fn answer(&self) -> Option<GoogleAnswer<'_>>;
+
+    /// The refusal of a request the source gave up on, saying `message`.
+    fn throttled(message: String) -> Self;
+}
+
+/// The session a request runs over, picked out of its client's state.
+pub type Pick<S, C, E> = for<'a> fn(&'a mut S) -> Result<&'a mut GoogleSession<C>, E>;
+
+/// Runs one Google request of `request`, costing `units`, over the session
+/// `pick` takes out of `state`, paced and sent again by `throttle` while
+/// Google throttles it ([`GoogleWaits`]).
+///
+/// A dead stream is reopened first; one that failed mid-exchange is marked
+/// dead, as is one whose answer did not allow reusing it.
+pub fn google_send<S, C, T, E: GoogleError>(
+    state: &mut S,
+    pick: Pick<S, C, E>,
+    throttle: &Throttle,
+    request: Request,
+    units: u32,
+    mut run: impl FnMut(&mut C) -> Result<(T, bool), E>,
+) -> Result<T, E> {
+    let waits = GoogleWaits::new();
+    throttle.call(
+        units,
+        || {
+            let session = pick(state)?;
+            if !session.alive
+                && let Err(err) = session.reopen()
+            {
+                warn!("cannot reopen the {} stream: {err:#}", session.name);
+            }
+
+            let out = run(&mut session.client);
+            session.alive = match &out {
+                Ok((_, keep_alive)) => *keep_alive,
+                Err(err) => !err.broke(),
+            };
+            out.map(|(response, _)| response)
+        },
+        |err| waits.throttled(request, &err.answer()?),
+        E::throttled,
+    )
 }
 
 /// How many per-minute refusals in a row are waited a few seconds each

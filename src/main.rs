@@ -120,6 +120,13 @@ mod gcal;
 mod gmail;
 #[cfg(feature = "gpeople")]
 mod gpeople;
+#[cfg(any(
+    feature = "gcal",
+    feature = "gpeople",
+    feature = "gmail",
+    feature = "msgraph"
+))]
+mod http;
 #[cfg(feature = "imap")]
 mod imap;
 mod item;
@@ -129,6 +136,18 @@ mod kind;
 mod msgraph;
 mod notice;
 mod offline;
+#[cfg(all(
+    test,
+    any(
+        feature = "carddav",
+        feature = "caldav",
+        feature = "msgraph",
+        feature = "gcal",
+        feature = "gpeople",
+        feature = "gmail"
+    )
+))]
+mod scripted;
 mod sync;
 mod throttle;
 #[cfg(any(feature = "search", feature = "gcal", feature = "msgraph"))]

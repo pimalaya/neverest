@@ -81,6 +81,12 @@ const SYNC_ONLY: [&str; 16] = [
 /// locked once for the whole run; one that fails is reported and the next
 /// one runs.
 ///
+/// What an account does is the number of its sources and targets and its
+/// `one-way` flag: 1 source and 1 target mirror two-way, or the source
+/// overwrites the target with `one-way`; 1 source and N targets need
+/// `one-way`; N sources and no target merge each with the store two-way, or
+/// overwrite it with `one-way`. Anything else is refused at load.
+///
 /// A card or an event edited on both sides is merged against the base the
 /// last sync agreed on; one field set two ways parks the item for `conflict
 /// resolve`, and `--json` names it under each report's `conflicts`. A

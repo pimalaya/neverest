@@ -98,4 +98,4 @@
 
 # Named sources and targets, for two endpoints of one protocol
 #sources.work.imap.server = "imap.work.example.org"	# a source named work; renaming it orphans what it synced
-#targets.backup.imap.server = "imap.backup.example.org"	# a target, the same keys, see the table in the README
+#targets.backup.imap.server = "imap.backup.example.org"	# a target, the same keys, see sync --help

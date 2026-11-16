@@ -9,9 +9,6 @@
   </p>
 </div>
 
-> [!CAUTION]
-> Neverest is preparing its v1: expect breaking changes until it is released.
-
 ## Table of contents
 
 - [Features](#features)
@@ -37,45 +34,59 @@
 
 ## Installation
 
-### Pre-built binary
+<details>
+  <summary>Pre-built binary</summary>
 
-Neverest can be installed with the installer:
+  Neverest can be installed with the installer:
 
-*As root:*
+  *As root:*
 
-```sh
-curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | sudo sh
-```
+  ```sh
+  curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | sudo sh
+  ```
 
-*As a regular user:*
+  *As a regular user:*
 
-```sh
-curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | PREFIX=~/.local sh
-```
+  ```sh
+  curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | PREFIX=~/.local sh
+  ```
 
-Neverest v1 is not released yet, so the installer has nothing to fetch. Until then, check out the [releases](https://github.com/pimalaya/neverest/actions/workflows/releases.yml) GitHub workflow and look for the *Artifacts* section.
+  Neverest v1 is not released yet, so the installer has nothing to fetch. Until then, check out the [releases](https://github.com/pimalaya/neverest/actions/workflows/releases.yml) GitHub workflow and look for the *Artifacts* section.
+</details>
 
-### Cargo
+<details>
+  <summary>Cargo</summary>
 
-```sh
-cargo install --locked --git https://github.com/pimalaya/neverest.git
-```
+  ```sh
+  cargo install --locked --git https://github.com/pimalaya/neverest.git
+  ```
+</details>
 
-### Nix
+<details>
+  <summary>Nix</summary>
 
-```sh
-nix profile install github:pimalaya/neverest
-```
+  ```sh
+  nix profile install github:pimalaya/neverest
+  ```
+</details>
 
-### Sources
+<details>
+  <summary>Sources</summary>
 
-```sh
-git clone https://github.com/pimalaya/neverest
-cd neverest
-nix run
-```
+  Requires [Rust](https://www.rust-lang.org/tools/install) 1.89 or later:
+
+  ```sh
+  git clone https://github.com/pimalaya/neverest
+  cd neverest
+  cargo build --release --locked
+  ```
+
+  The binary lands at target/release/neverest.
+</details>
 
 ## Configuration
+
+Neverest reads a TOML configuration you write, and never writes one. [config.sample.toml](./config.sample.toml) holds one account, every line commented, one section per backend: yours to uncomment. Releases and packages ship it as share/doc/neverest/config.sample.toml.
 
 A configuration is loaded from every existing path among the following, each one deep-merged on top of the ones before:
 
@@ -83,31 +94,31 @@ A configuration is loaded from every existing path among the following, each one
 - $HOME/.config/neverest/config.toml
 - $HOME/.neverestrc
 
-Override the path with `-c <PATH>`. Repeat it to merge several files: the first one is the base and the next ones are deep-merged on top. The full field reference lives in [config.sample.toml](./config.sample.toml), installed as share/doc/neverest/config.sample.toml.
-
-Every account syncs through one pimdir store, at neverest/ under your state directory unless it names its own `store.root`. What an account does is the number of its `sources` and `targets` (a backend written under the account is a source named after it) and its `one-way` flag:
-
-| sources | targets | one-way | behaviour                                              |
-|---------|---------|---------|--------------------------------------------------------|
-| 1       | 1       | false   | two-way mirror between the two remotes                 |
-| 1       | 1       | true    | the source overwrites the target                       |
-| 1       | N       | true    | the source overwrites each target                      |
-| N       | 0       | false   | each source merges two-way with the local store        |
-| N       | 0       | true    | the sources overwrite the store, local edits dropped   |
-
-Anything else is refused at load. Neverest 1.0 reads no configuration or store of a 0.x release: write a new configuration from the sample and sync again.
+Override the path with `-c <PATH>`, repeated to merge several files. `neverest account check` validates the accounts declared.
 
 ## Usage
 
 Every command runs over every account unless `-a` names some, and explains its flags, exit codes and JSON output in its `--help`.
 
 ```sh
+# Check the configuration: every endpoint is opened, nothing is synced
 neverest account check
+
+# Preview the first sync, then run it: --init adds the accounts to the store
 neverest sync --init --dry-run
 neverest sync --init
+
+# Later runs sync what changed, everything or one collection of one account
+neverest sync
 neverest sync -a work --include-collection INBOX
+
+# Apply what himalaya, cardamum or calendula queued, offline
 neverest sync --queue-only
+
+# Build the store's search index whole, for a large first sync
 neverest sync --index-only
+
+# Settle what both sides changed differently
 neverest conflict list
 neverest conflict resolve <id> -a work --interactive
 ```

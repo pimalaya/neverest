@@ -47,7 +47,7 @@ use crate::{
     error::ErrorCode,
     flag::{Flag, FlagOp, IanaFlag},
     imap::client::{ImapClient, RoundUids},
-    offline::invitation::Refusal,
+    sync::invitation::Refusal,
 };
 
 impl ImapClient {

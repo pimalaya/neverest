@@ -23,7 +23,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use log::warn;
 use serde::{Deserialize, Serialize};
 
-use crate::{config::mode::AccountMode, error::layout_error, offline::local};
+use crate::{config::mode::AccountMode, error::layout_error, sync::local};
 
 /// The current layout: source ids `<account>/<source>`, collection ids
 /// `<account>/<source>/<name>`, kind on the row, one sidecar entry per
@@ -294,7 +294,7 @@ mod tests {
     use crate::{
         conflict::merger::SPAWNS,
         error::ErrorCode,
-        offline::{driver::create_store, state::*, submit::InFlight},
+        sync::{driver::create_store, state::*, submit::InFlight},
     };
 
     /// A save replaces the sidecar whole, by a rename over it, rather than

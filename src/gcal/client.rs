@@ -66,7 +66,7 @@ use crate::{
     error::{ErrorCode, names_the_request},
     flag::Flag,
     http::open_tls,
-    offline::invitation::{Partstat, Refusal, occurrence_window},
+    sync::invitation::{Partstat, Refusal, occurrence_window},
     throttle::{
         GoogleAnswer, GoogleError, GoogleSession, Pick, Reopen, Request, Throttle, google_code,
         google_send,

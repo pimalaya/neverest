@@ -54,7 +54,7 @@ use crate::{
     client::{EnumEntry, Enumeration, WrittenItem},
     collection::Collection,
     error::ErrorCode,
-    offline::invitation::{Partstat, Refusal, occurrence_window},
+    sync::invitation::{Partstat, Refusal, occurrence_window},
     zone::UTC,
 };
 

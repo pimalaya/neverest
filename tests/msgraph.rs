@@ -46,7 +46,7 @@ use crate::common::*;
 const LISTED: Duration = Duration::from_secs(60);
 
 /// Why a Graph source refuses an add outside Drafts, as neverest declares
-/// it (src/offline/capability.rs).
+/// it (src/sync/capability.rs).
 const GRAPH_DRAFTS_ONLY: &str = "Drafts only: Graph creates every MIME message as a draft";
 
 /// The messages of the folder `folder` (an id or a well-known name)

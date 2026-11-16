@@ -346,7 +346,7 @@ mod tests {
         feature = "gpeople",
         feature = "gcal"
     ))]
-    use crate::offline::storage::load_side;
+    use crate::sync::storage::load_side;
 
     /// The account a conflicted store is grouped under.
     const ACCOUNT: &str = "cards";

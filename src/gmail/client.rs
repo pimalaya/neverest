@@ -83,7 +83,7 @@ use crate::{
     error::{ErrorCode, names_the_request},
     flag::{Flag, FlagOp, IanaFlag},
     http::open_tls,
-    offline::invitation::Refusal,
+    sync::invitation::Refusal,
     throttle::{
         GoogleAnswer, GoogleError, GoogleSession, Pick, Reopen, Request, Throttle, google_code,
         google_send, rfc3339,

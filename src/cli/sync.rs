@@ -28,15 +28,13 @@ use crate::{
     cli::{exit::Exit, init, queue},
     config::{AccountConfig, Config, filter::CollectionFilter},
     error::{Failure, pimdir_error},
-    offline::{
+    sync::{
         driver::{self, Bodies, DownloadOrder, Pacing},
+        event::SyncEvent,
         local,
         progress::Progress,
-        state::StoreState,
-    },
-    sync::{
-        event::SyncEvent,
         report::{AccountSync, SyncOutput, SyncRunOutput},
+        state::StoreState,
     },
 };
 

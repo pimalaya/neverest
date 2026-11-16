@@ -20,7 +20,7 @@ use crate::{
         report::{ConflictListOutput, ConflictResolveOutput, ConflictShowOutput, ConflictSummary},
     },
     error::pimdir_error,
-    offline::{driver, state::StoreState},
+    sync::{driver, state::StoreState},
 };
 
 /// How many times a decision is recomputed against a moved remote before the
@@ -383,7 +383,7 @@ mod tests {
     use serde::Serialize;
 
     use super::*;
-    use crate::{conflict::merger::SPAWNS, offline::storage::load_side};
+    use crate::{conflict::merger::SPAWNS, sync::storage::load_side};
 
     /// The account the seeded store is grouped under.
     const ACCOUNT: &str = "cards";

@@ -1203,7 +1203,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::offline::{
+    use crate::sync::{
         remote::{Narrowing, keep_in_scope, snapshot},
         run_verb,
         storage::load_side,

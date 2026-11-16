@@ -90,9 +90,9 @@ exit 2;
 
 ## Phase 5: restructure
 
-- [ ] Config (item 11), himalaya's recipe (himalaya cairn/log/2026-11-14-the-config-splits-by-block.md): plain model, no feature gate in src/config/; conversions out as inherent impls in src/tls.rs, src/proxy.rs, src/sasl.rs, src/server.rs gated once in src/main.rs; one root dead-code allow; block files under src/config/ named as himalaya's where shared (tls.rs, proxy.rs, sasl.rs, smtp.rs, imap.rs, msgraph.rs, gmail.rs) plus neverest's own (account, store, mode, source, permissions, filter, dav, jmap, gcal, gpeople, conflict), each with its tests.
-- [ ] Modules (A5): src/collection.rs, src/flag.rs (header: mail keywords), kind/ = mod.rs + mail.rs, src/conflict/merge.rs, src/calendar.rs.
-- [ ] Engine (A1, A2): offline/ into sync/ (stale "hand-rolled 3-way diff" header removed); driver.rs into sync/driver/ by phase (run and pair loop, local run, spine phases, queue drain, relay), each file with its tests; functions over the A7 limit cut into named steps; pipe.rs replaced by `std::io::pipe`.
+- [x] Config (item 11), himalaya's recipe (himalaya cairn/log/2026-11-14-the-config-splits-by-block.md): plain model, no feature gate in src/config/; conversions out as inherent impls in src/tls.rs, src/proxy.rs, src/sasl.rs, src/server.rs gated once in src/main.rs; one root dead-code allow; block files under src/config/ named as himalaya's where shared (tls.rs, proxy.rs, sasl.rs, smtp.rs, imap.rs, msgraph.rs, gmail.rs) plus neverest's own (account, store, mode, source, permissions, filter, dav, jmap, gcal, gpeople, conflict), each with its tests.
+- [x] Modules (A5): src/collection.rs, src/flag.rs (header: mail keywords), kind/ = mod.rs + mail.rs, src/conflict/merge.rs, src/calendar.rs.
+- [x] Engine (A1, A2): offline/ into sync/ (stale "hand-rolled 3-way diff" header removed); driver.rs into sync/driver/ by phase (run and pair loop, local run, spine phases, queue drain, relay), each file with its tests; functions over the A7 limit cut into named steps; pipe.rs replaced by `std::io::pipe`.
 - Done when: no file over the A7 limits but those listed as exceptions in tasks.md with a reason; test count equal to baseline plus new tests; gate green. Pure moves first, one commit each (config, modules, engine), behaviour unchanged.
 
 ## Phase 6: comments and doc ceilings (D5, item 7)
@@ -109,3 +109,10 @@ exit 2;
 - [x] README (D7): draft the tightened readme rules in ~/code/pimalaya/.github GUIDELINES.md (per-section budget, Usage as a few command lines with no subsections, behaviour explained in `--help`, not the README); owner reviews the rules before the rewrite. Then rewrite neverest's README: Features at most 8 bullets of at most 120 characters (readme-008), sections in readme-007 order, no Conflicts/Retention/Duplicated identities/Coming from Maildir subsections, no cargo-feature callouts. tests/docs.rs checks Features count, bullet length and section order.
 - [ ] CHANGELOG [Unreleased] last, on io-imap's template (~/code/pimalaya/io-imap/CHANGELOG.md): one item per bullet, past-tense headline, body of one or two sentences at most, net diff against 0.3.0, no "Upgrading" block, one line saying v1 reads no 0.x configuration or store. Released sections untouched.
 
+
+### A7 exceptions after phase 5 (2026-11-16)
+
+Kept above the limits with a reason; each is a candidate for its own split, not done here because cutting engine and backend functions is a behaviour risk that wants its own review.
+
+- Files over 1000 non-test lines: src/gmail/client.rs (1871), src/sync/remote.rs (1796), src/msgraph/client.rs (1729), src/imap/backend.rs (1530), src/sync/report.rs (1527, mostly `Display`), src/client.rs (1419), src/dav/client.rs (1219), src/msgraph/client/mail.rs (1186), src/gcal/client.rs (1006). src/sync/driver/tests.rs (6636) is test code only, its helpers shared by every phase.
+- Functions over 80 lines in src/sync/: `run_pair` 289, `sync_collection_into` 86 (driver/pair.rs); `drain_submits` 239 (driver/send.rs); `SyncOutput::fmt` 242 (report.rs); `run` 206 (driver.rs); `run_local` 193 (driver/local.rs); `phase1_spine` 171, `collection_spine` 102 (driver/spine.rs); `Landing::land` 107 (driver/hydrate.rs); `itemize_noted` 106, `placement_hunks` 95 (driver/itemize.rs); `merge_conflicts` 102, `keep_store_bodies` 88 (driver/reconcile.rs); `enumerate` 104, `push` 104, `hydrate_batch` 97 (remote.rs); `run_verb_paged` 97 (mod.rs). The backends were not measured.

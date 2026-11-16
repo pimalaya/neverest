@@ -28,7 +28,7 @@ use io_pimdir::{
     },
 };
 
-use crate::offline::{invitation::Failure, states_unknown_version};
+use crate::sync::{invitation::Failure, states_unknown_version};
 
 /// What a collection intent asks for, decoded.
 #[derive(Clone, Debug)]

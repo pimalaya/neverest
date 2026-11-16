@@ -43,7 +43,7 @@ use crate::{
     collection::Collection,
     flag::Flag,
     kind::LinkId,
-    offline::invitation::Refusal,
+    sync::invitation::Refusal,
 };
 
 /// One page of a backend-neutral enumeration (pimdir SYNC §4).
@@ -53,7 +53,7 @@ use crate::{
 /// removals. A round of one page (no `cursor`) is the whole listing of a
 /// backend that does not page. Every entry carries what names it, read in
 /// the listing itself, unless the store already holds it or its kind is
-/// named by its body, which [`crate::offline::remote::PimRemote`] fetches.
+/// named by its body, which [`crate::sync::remote::PimRemote`] fetches.
 #[derive(Debug, Default)]
 pub struct Enumeration {
     /// The members the page answered with, in the server's own order.

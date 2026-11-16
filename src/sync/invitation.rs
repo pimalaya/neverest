@@ -26,7 +26,7 @@ use anyhow::anyhow;
 use io_pimdir::{client::PimdirStore, codec::PimdirAction};
 use serde::Deserialize;
 
-use crate::offline::states_unknown_version;
+use crate::sync::states_unknown_version;
 
 /// The queue action kind of an invitation reply.
 pub const REPLY: &str = "calendar-reply";

@@ -25,7 +25,7 @@ use crate::{
     client,
     config::{AccountConfig, Config, mode::AccountMode},
     error::{ErrorCode, Failure, chain},
-    offline::{driver, state::StoreState},
+    sync::{driver, state::StoreState},
 };
 
 /// Initializes every account, or those `-a` names, in the store it shares.

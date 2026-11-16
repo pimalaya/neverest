@@ -189,7 +189,7 @@ Every configured source SHALL be one source handle of the account's pimdir store
 A source syncing a kind other than `message/rfc822` SHALL be given no flag push right, whatever its `flag.update`: its backend carries no flags, so a flag the store alone holds on a card or a calendar item (`pimdir tag`, which reports it kept in the store only) is never pushed, never rejected, and kept local across runs. A mail source keeps `flag.update` as configured.
 
 #### Scenario: A store-only flag on a card
-- src/offline/driver.rs `a_store_only_flag_on_a_card_stays_local`: two runs push nothing and the flag stays.
+- src/sync/driver/tests.rs `a_store_only_flag_on_a_card_stays_local`: two runs push nothing and the flag stays.
 
 ### Requirement: A source retains every body when the store is a replica
 Where `retain` is true the sync SHALL hydrate every synced item to `Full`, the store being the app's offline copy. It SHALL pull before pushing so an edit the app staged locally stays pending and is reported rather than swallowed, and it SHALL open the store as the source it syncs so an app writing under the same id stages edits the sync pushes.
@@ -427,7 +427,7 @@ The subsequent sync of a drained collection pushes the resulting dirty state. An
 #### Scenario: A move queued over a card waiting for a decision
 - **GIVEN** a card in conflict and a `move` of it queued by a frontend
 - **WHEN** the queue is drained
-- **THEN** nothing is applied, the report lists the `move` parked with the diverging body's hash in its error, the card is still in its address book and the report still counts one item waiting for a decision (src/offline/driver.rs `a_queued_move_over_a_conflict_parks_and_the_decision_still_waits`)
+- **THEN** nothing is applied, the report lists the `move` parked with the diverging body's hash in its error, the card is still in its address book and the report still counts one item waiting for a decision (src/sync/driver/tests.rs `a_queued_move_over_a_conflict_parks_and_the_decision_still_waits`)
 
 ### Requirement: `sync` initializes, queues or indexes on a flag
 `sync` SHALL take three flags, and `drain` and `index` SHALL be no commands (D6 of the-v1-review):
@@ -1438,7 +1438,7 @@ The streamed tier reads a header prefix rather than the whole body, so it SHALL 
 #### Scenario: The mark of a downloaded body is its parts'
 - **GIVEN** a `multipart/mixed` message holding only an inline image, and a `multipart/signed` one holding an attachment two levels down
 - **WHEN** a sync downloads their bodies, or files them again in a second folder
-- **THEN** the first is marked as attaching nothing and the second as attaching, the store's write having walked each body once (tests/attachments.rs); the streamed summary itself names them as the whole message does and states no mark (src/offline/remote.rs `scan_tests`)
+- **THEN** the first is marked as attaching nothing and the second as attaching, the store's write having walked each body once (tests/attachments.rs); the streamed summary itself names them as the whole message does and states no mark (src/sync/remote.rs `scan_tests`)
 
 ### Requirement: Link id and summary are per-kind, resolved at one seam
 The cross-collection link id and the typed summary SHALL be produced by io-pimdir's derivation for the media type, selected from the source's declared kind at a single dispatch point. `message/rfc822` keeps the bare `Message-ID` identity with its `(subject, date, sender)` (`alt:`) fallback. `text/vcard` and `text/calendar` use the bare vCard / iCalendar `UID`, falling back to the content hash (`hash:`) for a body carrying no `UID`; an iCalendar `RECURRENCE-ID` SHALL NOT enter the link id, so a recurrence override stays the same item.

@@ -1,0 +1,331 @@
+//! # Run upkeep
+//!
+//! What a run does around its phases: the coverage, parked rows and conflicts
+//! its report counts, the retention sweep and the replica a dry run uses.
+
+use crate::sync::driver::*;
+
+/// Reports what one endpoint holds of a collection it just synced (pimdir
+/// SYNC §5): the last closed round's scope and when, and a round left open.
+pub(super) fn report_coverage(
+    store: &PimdirStore,
+    collection: &str,
+    ctx: &SourceCtx,
+    report: &mut SyncOutput,
+) {
+    let rows = match store.list_coverage(collection) {
+        Ok(rows) => rows,
+        Err(err) => {
+            warn!("cannot read the coverage of {collection}: {err}");
+            return;
+        }
+    };
+
+    for row in rows.into_iter().filter(|row| row.source == ctx.name) {
+        let (since, until, at) = match row.coverage {
+            Some(coverage) => (
+                coverage.scope.since,
+                coverage.scope.until,
+                Some(coverage.at),
+            ),
+            None => (None, None, None),
+        };
+        report.coverage.push(CollectionCoverage {
+            source: row.source,
+            collection: display_name(&ctx.namespace, collection).to_owned(),
+            since,
+            until,
+            at,
+            round: row.round.map(|round| OpenRound {
+                since: round.scope.since,
+                until: round.scope.until,
+                started_at: round.started_at,
+            }),
+        });
+    }
+}
+
+/// Surfaces the parked queue actions of the account's collections, once for
+/// the run.
+///
+/// A parked row belongs to its collection, not to a source, so reading it
+/// where the drain runs reports it once per source: an account syncing mail,
+/// contacts and calendar showed the same row three times. Every run
+/// re-reports them; another account's rows are its own run's to report.
+pub(super) fn report_parked(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
+    let owners = collection_accounts(store);
+    match store.parked_actions() {
+        Ok(parked) => {
+            let parked = parked.into_iter().filter(|action| {
+                owners
+                    .get(&action.collection)
+                    .is_some_and(|owner| owner == account)
+            });
+            for action in parked {
+                report.parked.push(ParkedQueueAction {
+                    id: action.id,
+                    collection: action.collection,
+                    kind: action.action,
+                    producer: action.producer,
+                    queued_at: action.created_at,
+                    attempts: action.attempts,
+                    code: None,
+                    error: action.error,
+                    sources: Vec::new(),
+                });
+            }
+        }
+        Err(err) => warn!("cannot list parked actions: {err}"),
+    }
+}
+
+/// Counts the decisions the store is holding, once for the run.
+///
+/// Read from the store rather than from the run's own tally: the engine says
+/// nothing about a placement it already parked, so a run itemizes only what it
+/// newly marked, which is why that tally cannot count what is waiting.
+pub(super) fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
+    match store.list_conflicts(Some(account)) {
+        Ok(conflicts) => report.outstanding_conflicts = conflicts.len(),
+        Err(err) => warn!("cannot count the conflicts waiting for a decision: {err}"),
+    }
+}
+
+/// Warns about the conflicts this run marked, one line per item.
+///
+/// Only what this run marked, which is the whole of the once-only rule: a
+/// five-minute schedule over one unresolved card warns once, not three hundred
+/// times a day. A `--json` caller notifies off `conflicts`, keeping no state.
+pub(super) fn warn_conflicts(report: &SyncOutput) -> usize {
+    for conflict in &report.conflicts {
+        warn!("{conflict}");
+    }
+
+    report.conflicts.len()
+}
+
+/// Reclaims the account's retained items older than `store.purge-after`,
+/// unset never.
+///
+/// It runs after the sync, so an item this run retired starts its delay rather
+/// than going with it, and it warns instead of failing. A purge only releases a
+/// body (pimdir STORAGE §5), so the collector runs here too, after a purge
+/// only: what nothing references any more, whichever account it was.
+pub(super) fn sweep_retained(
+    account_config: &AccountConfig,
+    store: &mut PimdirStore,
+    report: &mut SyncOutput,
+) {
+    let Some(cutoff) = account_config.store.purge_cutoff(Utc::now()) else {
+        return;
+    };
+
+    let items = purge_account(store, &cutoff);
+
+    let collected = match items {
+        0 => Default::default(),
+        _ => match store.collect_garbage() {
+            Ok(collected) => collected,
+            Err(err) => {
+                warn!("purged items but collected nothing: {err}");
+                Default::default()
+            }
+        },
+    };
+
+    if items > 0 {
+        info!(
+            "purged {items} retained item(s) older than {cutoff}, collected {} object(s), {} byte(s) reclaimed",
+            collected.objects, collected.bytes
+        );
+    }
+
+    report.purged = Some(PurgedItems {
+        items,
+        objects: collected.objects,
+        bytes: collected.bytes,
+    });
+}
+
+/// Purges the retained items of the account `store` is opened for whose
+/// retirement precedes `cutoff`, one at a time, answering how many.
+///
+/// Never another account's: the store's own sweep (`purge_retained_before`)
+/// is store-wide, and one account's delay would decide for every account
+/// sharing the store. A failure is warned about and skipped.
+fn purge_account(store: &mut PimdirStore, cutoff: &str) -> usize {
+    const PAGE: usize = 512;
+
+    let account = store.account().map(str::to_owned);
+    let collections = match store.list_collections_by_account(account.as_deref()) {
+        Ok(collections) => collections,
+        Err(err) => {
+            warn!("cannot list the collections to sweep: {err}");
+            return 0;
+        }
+    };
+
+    let mut purged = 0;
+    for collection in collections {
+        let mut after = None;
+        loop {
+            let page = match store.list_retained(&collection.id, after, PAGE) {
+                Ok(page) => page,
+                Err(err) => {
+                    warn!("cannot list the retained items of {}: {err}", collection.id);
+                    break;
+                }
+            };
+            let full = page.len() == PAGE;
+            after = page.last().map(|item| item.seq);
+
+            for item in page {
+                let retired = item.retention.as_ref().and_then(|at| at.at.as_deref());
+                if !retired.is_some_and(|at| at < cutoff) {
+                    continue;
+                }
+                match store.purge(&collection.id, item.seq) {
+                    Ok(true) => purged += 1,
+                    Ok(false) => {}
+                    Err(err) => warn!("cannot purge item {} of {}: {err}", item.seq, collection.id),
+                }
+            }
+
+            if !full {
+                break;
+            }
+        }
+    }
+
+    purged
+}
+
+/// The blob subdirectory of a pimdir store (pimdir STORAGE §5), shared by a
+/// dry run.
+pub(super) const BLOBS_DIR: &str = "objects";
+
+/// A throwaway replica of the pimdir store, removed however the run ends.
+///
+/// Built beside the real store, not under the temporary directory, so the two
+/// share a filesystem and the bodies are hardlinked rather than copied, which
+/// on a tmpfs also saves gigabytes. Only the blob tree is ever shared.
+pub(super) struct DryRunReplica {
+    /// Where the replica lives, which is the run's `work_dir`.
+    pub(super) dir: PathBuf,
+}
+
+impl DryRunReplica {
+    /// Clones the store at `real_dir` into a sibling directory.
+    ///
+    /// Whatever an earlier run left behind is cleared first: a panic aborts a
+    /// release build, running no destructor, so a leftover is a state this has
+    /// to meet rather than one it can rule out.
+    pub(super) fn new(real_dir: &Path) -> Result<Self> {
+        let parent = real_dir.parent().unwrap_or(Path::new("."));
+        let name = real_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| String::from("store"));
+        let prefix = format!(".{name}-dry-");
+
+        clear_stale_replicas(parent, &prefix);
+
+        // NOTE: the replica is a store, its user's alone (pimdir STORAGE §18),
+        // or its open refuses it as exposed.
+        let dir = parent.join(format!("{prefix}{}", process::id()));
+        modes::create_dir_all(&dir)
+            .with_context(|| format!("Create dry-run replica {} error", dir.display()))?;
+
+        if real_dir.exists() {
+            let start = Instant::now();
+            let mut counts = CloneCounts::default();
+            let blobs = real_dir.join(BLOBS_DIR);
+
+            clone_dir(real_dir, &dir, &blobs, &mut counts)
+                .with_context(|| format!("Clone {} for dry-run", real_dir.display()))?;
+
+            debug!(
+                "dry-run replica prepared in {:?} ({} linked, {} copied)",
+                start.elapsed(),
+                counts.linked,
+                counts.copied
+            );
+
+            // NOTE: a blob tree that could not be shared was read and written
+            // whole, the slow dry run this exists to avoid.
+            if counts.linked == 0 && counts.copied > 0 {
+                info!(
+                    "dry-run replica copied {} file(s), links unavailable",
+                    counts.copied
+                );
+            }
+        }
+
+        Ok(Self { dir })
+    }
+}
+
+impl Drop for DryRunReplica {
+    fn drop(&mut self) {
+        if let Err(err) = fs::remove_dir_all(&self.dir) {
+            warn!(
+                "cannot remove the dry-run replica {}: {err}",
+                self.dir.display()
+            );
+        }
+    }
+}
+
+/// What [`clone_dir`] did, for the line reporting it.
+#[derive(Default)]
+struct CloneCounts {
+    linked: usize,
+    copied: usize,
+}
+
+/// Removes the replicas of earlier runs, named by `prefix` under `dir`.
+///
+/// A directory that will not go is left with a warning: it costs disk, never
+/// correctness, the run about to start writing under a name of its own.
+fn clear_stale_replicas(dir: &Path, prefix: &str) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(prefix) {
+            continue;
+        }
+
+        let stale = entry.path();
+        match fs::remove_dir_all(&stale) {
+            Ok(()) => warn!("removed a dry-run replica an earlier run left behind"),
+            Err(err) => warn!("cannot remove {}: {err}", stale.display()),
+        }
+    }
+}
+
+/// Clones `src` into `dst`, hardlinking under `blobs` and copying the rest.
+///
+/// A link the filesystem refuses falls back to a copy, so the cost of
+/// misjudging a file is a slower dry run and never a corrupted store.
+fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> Result<()> {
+    modes::create_dir_all(dst)?;
+
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+
+        if entry.file_type()?.is_dir() {
+            clone_dir(&from, &to, blobs, counts)?;
+        } else if from.starts_with(blobs) && fs::hard_link(&from, &to).is_ok() {
+            counts.linked += 1;
+        } else {
+            fs::copy(&from, &to)?;
+            counts.copied += 1;
+        }
+    }
+
+    Ok(())
+}

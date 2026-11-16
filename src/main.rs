@@ -92,13 +92,10 @@
 //! decision the store moved out from under. Deciding is a command and never
 //! a run, so nothing there is reachable from a sync.
 //!
-//! [`offline`] is the sync engine: `mod` maps sources onto pimdir source
-//! ids, `state` records, per account, what the last run derived, `storage`
+//! [`sync`] is the sync engine: `mod` maps sources onto pimdir source ids,
+//! `state` records, per account, what the last run derived, `storage`
 //! projects and hydrates one source, `remote` implements io-pimdir's remote
 //! seam, `submit` holds the queued send, and `driver` builds the report.
-//!
-//! [`sync`] keeps the output types alone, the engine having moved to
-//! [`offline`].
 //!
 //! [`json_schema`] is the registry behind `neverest json-schema`: one entry
 //! per data command, mapping its invocation path to the schema of what it
@@ -139,7 +136,6 @@ mod kind;
 #[cfg(feature = "msgraph")]
 mod msgraph;
 mod notice;
-mod offline;
 #[cfg(any(
     feature = "imap",
     feature = "smtp",

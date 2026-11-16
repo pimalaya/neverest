@@ -23,7 +23,7 @@ use io_pimdir::{
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, named_params};
 
-use crate::offline::source_id;
+use crate::sync::source_id;
 
 /// The placements one side's coroutines see for a collection.
 ///

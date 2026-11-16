@@ -21,8 +21,11 @@ use crate::{
     cli::{exit::Exit, sync::try_store_lock},
     config::{AccountConfig, Config},
     error::{ErrorCode, Failure, chain},
-    offline::{driver, state::StoreState},
-    sync::report::{IndexRefresh, OverruledBody, SyncRunOutput},
+    sync::{
+        driver,
+        report::{IndexRefresh, OverruledBody, SyncRunOutput},
+        state::StoreState,
+    },
 };
 
 /// Drains the store of every account the run covers, or reports it busy.
@@ -136,7 +139,7 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Queue
     #[cfg_attr(not(feature = "search"), allow(unused_mut))]
     let mut index = None;
     #[cfg(feature = "search")]
-    crate::offline::index::after_run(dir, &first_config.store, true, &mut index);
+    crate::sync::index::after_run(dir, &first_config.store, true, &mut index);
 
     let mut mine: BTreeMap<String, QueueOutput> = ready
         .iter()

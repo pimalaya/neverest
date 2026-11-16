@@ -367,7 +367,7 @@ fn refusal_code(err: &Error) -> Option<ErrorCode> {
         #[cfg(feature = "msgraph")]
         crate::msgraph::client::refusal_code,
         #[cfg(feature = "smtp")]
-        crate::offline::submit::refusal_code,
+        crate::sync::submit::refusal_code,
     ];
 
     err.chain()

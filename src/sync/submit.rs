@@ -44,7 +44,7 @@ use crate::error::ErrorCode;
 use crate::error::Failure;
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::{GraphClient, SendMimeFailure};
-use crate::offline::{local, states_unknown_version};
+use crate::sync::{local, states_unknown_version};
 #[cfg(feature = "smtp")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};

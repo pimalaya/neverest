@@ -28,7 +28,7 @@ use crate::{
     collection::Collection,
     config::{AccountConfig, Config, mode::AccountMode, source::SourceConfig},
     error::{self, ErrorCode},
-    offline::{capability, driver},
+    sync::{capability, driver},
 };
 
 /// Probes every configured source before a real sync.
@@ -234,7 +234,7 @@ fn check_source(
         .as_ref()
         .and_then(|source| source.smtp.as_ref())
         .map(|smtp| {
-            let opened = crate::offline::submit::connect_smtp(smtp)
+            let opened = crate::sync::submit::connect_smtp(smtp)
                 .map(|mut session| {
                     let _ = io_smtp::client::SmtpClient::quit(&mut session);
                 })

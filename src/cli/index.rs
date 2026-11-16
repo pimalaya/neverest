@@ -19,8 +19,10 @@ use crate::{
     cli::exit::Exit,
     config::Config,
     error::pimdir_error,
-    offline::{driver, index},
-    sync::report::{IndexOutput, IndexRefresh, SyncRunOutput},
+    sync::{
+        driver, index,
+        report::{IndexOutput, IndexRefresh, SyncRunOutput},
+    },
     zone::floating_zone,
 };
 

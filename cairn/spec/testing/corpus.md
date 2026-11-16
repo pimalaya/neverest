@@ -1,3 +1,9 @@
+---
+cairn: spec
+capability: testing-corpus
+status: current
+---
+
 # The Google and Microsoft corpus: baseline counts
 
 The fake data already on the two test accounts (owner, 2026-11-15) is kept through the live testing campaign (.github/cairn/changes/live-testing-2026-11-15, step P7). These are its counts before any neverest sync of either account. N5 of each account and the campaign's close are read against them.

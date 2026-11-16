@@ -1,3 +1,9 @@
+---
+cairn: spec
+capability: testing-fastmail
+status: current
+---
+
 # neverest on Fastmail (one-way, pull-only): test report
 
 - neverest: v0.3.0 `+dav +gcal +gmail +gpeople +imap +msgraph +rustls-ring +search +smtp +vendored` (rev 59ca533, debug build of 2026-11-15, copied aside so concurrent builds could not change it)

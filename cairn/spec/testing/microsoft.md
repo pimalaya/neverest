@@ -1,3 +1,9 @@
+---
+cairn: spec
+capability: testing-microsoft
+status: current
+---
+
 # neverest on Microsoft Graph (two-way): test report
 
 - neverest: v0.3.0 (rev 59ca533, debug build of 2026-11-15, run from a frozen copy); pimdir CLI io-pimdir v0.13.0

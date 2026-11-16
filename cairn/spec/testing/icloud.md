@@ -1,3 +1,9 @@
+---
+cairn: spec
+capability: testing-icloud
+status: current
+---
+
 # neverest on iCloud (two-way): test report
 
 - neverest: v0.3.0 (rev 59ca533, debug build of 2026-11-15, run from a frozen copy); pimdir CLI io-pimdir v0.13.0

@@ -1,5 +1,11 @@
 ---
 cairn: spec
+capability: testing-README
+status: current
+---
+
+---
+cairn: spec
 capability: testing
 status: current
 ---

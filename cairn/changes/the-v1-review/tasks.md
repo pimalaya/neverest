@@ -97,9 +97,9 @@ exit 2;
 
 ## Phase 6: comments and doc ceilings (D5, item 7)
 
-- [ ] Remove every `//` comment line but `// SAFETY:` (886 at review time, 292 `NOTE:`). Per comment: narration goes; a real why (RFC quirk, provider trap, invariant) moves to the enclosing item's `///` within inline-002's ceiling, to a test named after the behaviour, or to the spec. Never bulk-move into `///`.
-- [ ] Trim `//!` paragraphs to four lines (inline-001) and `///` to one line plus at most three (inline-002), clap items in src/cli/ excepted (inline-006); main.rs keeps every section (header-004). src/error.rs:3-32's list of unmet io-pimdir codes moves to the spec.
-- [ ] Add tests/docs.rs (doc ceilings only, since D5 lets humans write `//`): it checks (a `//!` paragraph over four lines, a `///` block over 1 + blank + 3 outside src/cli/) and the README rules of phase 7.
+- [x] Remove every `//` comment line but `// SAFETY:` (886 at review time, 292 `NOTE:`). Per comment: narration goes; a real why (RFC quirk, provider trap, invariant) moves to the enclosing item's `///` within inline-002's ceiling, to a test named after the behaviour, or to the spec. Never bulk-move into `///`.
+- [x] Trim `//!` paragraphs to four lines (inline-001) and `///` to one line plus at most three (inline-002), clap items in src/cli/ excepted (inline-006); main.rs keeps every section (header-004). src/error.rs:3-32's list of unmet io-pimdir codes moves to the spec.
+- [x] Add tests/docs.rs (doc ceilings only, since D5 lets humans write `//`): it checks (a `//!` paragraph over four lines, a `///` block over 1 + blank + 3 outside src/cli/) and the README rules of phase 7.
 - Done when: `rg -n '^\s*//[^/!]' src tests | rg -v 'SAFETY:'` finds nothing; tests/docs.rs passes; gate green.
 
 ## Phase 7: user-facing docs

@@ -1,10 +1,11 @@
 //! # One Graph table
 //!
-//! The one `msgraph` table over a store the three Graph tables synced
-//! (cairn change graph-domains-share-one-table): each domain opens the
-//! source id the store holds its bindings under, so mail and contacts resume
-//! from their delta links and the calendar finds the event it bound, nothing
-//! created, read again or listed whole.
+//! The one `msgraph` table over a store the three Graph tables synced (cairn
+//! change graph-domains-share-one-table).
+//!
+//! Each domain opens the source id holding its bindings, so mail and contacts
+//! resume from their delta links and the calendar finds the event it bound,
+//! nothing created, read again or listed whole.
 
 use std::{
     collections::BTreeSet,
@@ -66,9 +67,8 @@ fn lone() -> serde_json::Value {
     })
 }
 
-/// Mail, contacts and calendar: a first round landing one item and
-/// leaving a delta link where the domain has one, then a run with
-/// nothing new.
+/// A first round landing one item and leaving a delta link where the domain
+/// has one, then a run with nothing new.
 fn domain(kind: GraphKind) -> Domain {
     let delta = |path: &str, token: &str| format!("{GRAPH}/{path}/delta?$deltatoken={token}");
     match kind {

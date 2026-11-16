@@ -3,19 +3,15 @@
 //! The calendar half of [`GraphClient`]: the user's calendars as
 //! collections, events as iCalendar through io-msgraph's `ical` projection.
 //!
-//! Graph's event delta only runs over a calendar view, a time window, and
-//! an event that leaves a sliding window would read as deleted and be
-//! deleted on every other source. So the enumeration lists a calendar's
-//! lone events and series masters in full every run, with no window, the
-//! master's `changeKey` as the revision; a full listing reports removals by
-//! absence. A series is one item, its exceptions read with it from the
-//! instances of its own date range.
+//! Graph's event delta runs only over a calendar view (a time window), and an
+//! event leaving a sliding window would read as deleted everywhere else. So
+//! each run lists a calendar's lone events and series masters in full, the
+//! master's `changeKey` as revision, removals by absence; a series is one item.
 //!
-//! Graph has no conditional write for events, so an `If-Match` from the
-//! engine is checked against the server's current revision right before
-//! the write. A series is written through its master, then each occurrence
-//! it sets apart through its instance: deleted when cancelled, patched when
-//! overridden. A create whose occurrences do not all land is deleted again.
+//! Graph has no conditional write for events, so an `If-Match` is checked
+//! against the server's revision right before the write. A series is written
+//! through its master, then each occurrence it sets apart through its
+//! instance; a create whose occurrences do not all land is deleted again.
 //!
 //! Graph stores no floating time and states no zone for a calendar: one is
 //! anchored in the user's zone ([`crate::zone`]) before the write, which then
@@ -191,6 +187,9 @@ impl GraphClient {
     }
 
     /// Reads an item: the event, and the exceptions of a series.
+    ///
+    /// Instances are listed with the projection's `$select`: the default one
+    /// leaves out `originalStart`, an exception's `RECURRENCE-ID`.
     fn series(&mut self, id: &str) -> Result<(MsgraphEvent, Vec<MsgraphEvent>)> {
         let master = self.event(id)?;
         if master.event_type != Some(MsgraphEventType::SeriesMaster) {
@@ -205,8 +204,6 @@ impl GraphClient {
 
         let params = MsgraphEventsListParams {
             top: Some(PAGE_SIZE),
-            // NOTE: an exception needs its originalStart for its
-            // RECURRENCE-ID, which the default listing leaves out.
             select: Some(MSGRAPH_EVENT_ICAL_SELECT),
             ..Default::default()
         };
@@ -243,9 +240,10 @@ impl GraphClient {
         Ok((master.to_ical_series(&exceptions), master.change_key))
     }
 
-    /// Streams the iCalendar objects of an id set, each committed with its
-    /// master's `changeKey`; answers the events Graph answered 404, gone
-    /// since they were listed.
+    /// Streams the iCalendar objects of an id set.
+    ///
+    /// Each is committed with its master's `changeKey`; answers the events
+    /// Graph answered 404, gone since they were listed.
     pub(super) fn fetch_events<S: Write>(
         &mut self,
         ids: &[&str],
@@ -288,10 +286,9 @@ impl GraphClient {
     /// Creates an event from an iCalendar object in a calendar, then the
     /// occurrences a series sets apart through their instances.
     ///
-    /// The event is read back with its stash: one whose UID did not survive
-    /// would read back under Graph's own `iCalUId`, a second event for every
-    /// other source, so it is deleted again and the write refused. So is a
-    /// series whose occurrences do not all land.
+    /// An event read back without its UID (under Graph's own `iCalUId`) would
+    /// be a second event for every other source: it is deleted again and the
+    /// write refused, as is a series whose occurrences do not all land.
     pub(super) fn add_event(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
         let (ical, anchored) = anchor(read_bytes(source)?, calendar, self.floating_zone)?;
         let occurrences = Occurrences::read(&ical)?;
@@ -337,9 +334,12 @@ impl GraphClient {
         })
     }
 
-    /// Replaces a series master from an iCalendar object, sending only what
-    /// changed against the server copy, which also serves the `If-Match`
-    /// check, then the occurrences it sets apart through their instances.
+    /// Replaces a series master from an iCalendar object, then the occurrences
+    /// it sets apart through their instances.
+    ///
+    /// Only what changed against the server copy is sent, that copy serving
+    /// the `If-Match` check too. A moved start or rule drops Graph's
+    /// cancellations, which are then sent again.
     pub(super) fn update_event(
         &mut self,
         id: &str,
@@ -362,7 +362,6 @@ impl GraphClient {
 
         let mut revision = updated.change_key;
         if !occurrences.is_empty() {
-            // NOTE: a moved start or rule drops Graph's cancellations.
             let held = match patch.start.is_unset() && patch.recurrence.is_unset() {
                 true => Occurrences::read(base.as_bytes())?.excluded,
                 false => Vec::new(),
@@ -375,12 +374,11 @@ impl GraphClient {
         Ok(revision.filter(|_| !asks_meeting(&patch) && !anchored))
     }
 
-    /// Writes the occurrences series `master` sets apart through their
-    /// instances: one cancelled is deleted, but one of `held`, which Graph
-    /// cancelled already, and one overridden patched ([`instance_patch`]).
+    /// Writes the occurrences `master` sets apart through their instances.
     ///
-    /// An override of an occurrence the series does not have is refused,
-    /// coded `unsupported`.
+    /// One cancelled is deleted, unless in `held` (Graph cancelled it
+    /// already); one overridden is patched ([`instance_patch`]). An override
+    /// of an occurrence the series lacks is refused, coded `unsupported`.
     fn write_occurrences(
         &mut self,
         master: &MsgraphEvent,
@@ -471,9 +469,10 @@ impl GraphClient {
     }
 
     /// The instance of series `master` whose original start `recurrence_id`
-    /// names, among the instances Graph lists two days either side of its
-    /// date: the same instant, else the value the projection writes for it
-    /// (the wall time in the series' zone, or a date).
+    /// names, among those Graph lists two days either side of its date.
+    ///
+    /// It matches by the same instant, else by the value the projection
+    /// writes for it (the wall time in the series' zone, or a date).
     fn instance(
         &mut self,
         master: &MsgraphEvent,
@@ -543,9 +542,8 @@ impl GraphClient {
             .with_context(|| format!("Reply to event {id} error"))
     }
 
-    /// Cancels a meeting the account organises, Graph sending the
-    /// cancellation to the attendees with `comment` (pimdir STORAGE Annex
-    /// B.2 `calendar.cancel`).
+    /// Cancels a meeting the account organises (pimdir STORAGE Annex B.2
+    /// `calendar.cancel`), Graph telling the attendees with `comment`.
     ///
     /// Graph refuses it (400) on an event the account does not organise.
     pub fn cancel_event(&mut self, id: &str, comment: Option<&str>) -> Result<()> {
@@ -621,11 +619,9 @@ fn unique(events: Vec<MsgraphEvent>) -> Result<Vec<MsgraphEvent>> {
 /// The windows a series' exceptions are read in, none longer than the five
 /// years Graph allows an instances listing (it answers 400 past them).
 ///
-/// A bounded series is read over its whole range. An open-ended one, as
-/// Birthdays are, is read within [`OPEN_SERIES_YEARS`] either side of
-/// `today`: one born in 1604, Outlook's year for a birthday without one,
-/// would otherwise take dozens of requests, and an exception that far back
-/// changes no occurrence anybody looks at.
+/// An open-ended series, whose `endDate` Graph fills with a sentinel, is read
+/// within [`OPEN_SERIES_YEARS`] of `today`: one born in 1604 (Outlook's year
+/// for a birthday without one) would take dozens of requests for nothing.
 fn series_windows(master: &MsgraphEvent, today: Date) -> Option<Vec<(String, String)>> {
     let (start, end) = master.recurrence.as_option()?.bounds()?;
     let (start, end) = match end {
@@ -680,13 +676,9 @@ fn asks_meeting(event: &MsgraphEvent) -> bool {
 /// The patch taking `instance` to the occurrence `document` holds, `None`
 /// when it holds nothing new.
 ///
-/// An occurrence Graph holds as its series has it is diffed against the
-/// series, `master`, so what the override leaves out stays as the series
-/// has it: a listed instance shows Graph's own free/busy, sensitivity and
-/// importance, which an override stating none would clear. Its times are
-/// diffed against the instance, the master starting elsewhere. An
-/// exception Graph holds is diffed against itself, so an override undoing
-/// one of its edits sends it.
+/// An occurrence diffs against `master` (its times against the instance): the
+/// listed instance shows Graph's own free/busy, sensitivity and importance,
+/// which a diff against it would clear. An exception diffs against itself.
 fn instance_patch(
     instance: &MsgraphEvent,
     document: &[u8],
@@ -708,9 +700,8 @@ fn instance_patch(
     Ok((patch != MsgraphEvent::default()).then_some(patch))
 }
 
-/// `ical` with its floating times anchored in `zone`, the user's, Graph
-/// stating no zone for a calendar, and whether it held any; `what` names
-/// the write in the log.
+/// `ical` with its floating times anchored in `zone`, the user's, and whether
+/// it held any; `what` names the write in the log.
 fn anchor(ical: Vec<u8>, what: &str, zone: &str) -> Result<(Vec<u8>, bool)> {
     if !calendar::has_floating(&ical)? {
         return Ok((ical, false));
@@ -851,10 +842,8 @@ mod tests {
         assert!(patch.contains("2026-11-24T15:00:00"), "{patch}");
     }
 
-    /// An override renaming an occurrence patches its subject alone: what
-    /// it leaves out stays as the series has it, never cleared because the
-    /// listed instance shows Graph's own importance, sensitivity and
-    /// free/busy.
+    /// An override renaming an occurrence patches its subject alone, never
+    /// clearing the importance, sensitivity and free/busy the instance shows.
     #[test]
     fn an_override_patches_what_it_changes_against_its_series() {
         let renamed = "BEGIN:VCALENDAR\r\n\
@@ -905,9 +894,8 @@ mod tests {
         }
     }
 
-    /// An override of an occurrence the series does not have takes the
-    /// series back: the write is refused, coded `unsupported`, and the
-    /// store keeps it for the next run rather than the master alone.
+    /// An override of an occurrence the series lacks takes the series back:
+    /// refused, coded `unsupported`, kept for the next run, not half-written.
     #[test]
     fn a_series_whose_override_finds_no_occurrence_is_taken_back() {
         let (mut client, server) = session(vec![
@@ -932,9 +920,8 @@ mod tests {
         assert!(requests.last().unwrap().starts_with("DELETE "));
     }
 
-    /// A floating time, which Graph cannot store, is anchored in the
-    /// user's zone, a floating 10:00 staying 10:00 where they read it, and
-    /// the write reports no revision, so the next sync reads it back.
+    /// A floating time is anchored in the user's zone (10:00 stays 10:00 where
+    /// they read it) and the write reports no revision, read back next sync.
     #[test]
     fn a_floating_time_is_anchored_in_the_users_zone() {
         let floating = "BEGIN:VCALENDAR\r\n\
@@ -1007,7 +994,6 @@ mod tests {
             ),
             [pair("2026-08-14", "2026-10-01")]
         );
-        // NOTE: twelve years, read in windows Graph accepts.
         assert_eq!(
             windows(
                 MsgraphRecurrenceRangeType::EndDate,
@@ -1020,8 +1006,6 @@ mod tests {
                 pair("2029-12-30", "2032-01-01"),
             ]
         );
-        // NOTE: Graph fills the endDate of a noEnd range with a sentinel;
-        // a birthday from 1604 is read around today, not since then.
         assert_eq!(
             windows(
                 MsgraphRecurrenceRangeType::NoEnd,

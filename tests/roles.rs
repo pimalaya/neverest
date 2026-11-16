@@ -1,6 +1,8 @@
+//! # Roles
+//!
 //! Collection roles recorded at sync, and `sync --declare-only`, against a
 //! local Stalwart (server A: IMAP on :143, HTTP and DAV on :8080), spawned
-//! via `tests/stalwart2.sh`. Ignored by default.
+//! via tests/stalwart2.sh. Ignored by default.
 //!
 //! What a frontend reads from the store to know the inbox, the sent folder
 //! or the default calendar (pimdir STORAGE §14), without asking the server.
@@ -20,6 +22,8 @@ const DAV: &str = "http://127.0.0.1:8080/dav";
 const USER: &str = "test@pimalaya.org";
 const PASS: &str = "P!malaya-test-2026";
 
+/// A later regular sync, narrowed by the filter, records the roles of what
+/// it syncs and leaves the other collections declared.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn a_declaration_records_every_folder_and_its_role_and_fetches_nothing() {
@@ -67,13 +71,13 @@ fn a_declaration_records_every_folder_and_its_role_and_fetches_nothing() {
         assert_eq!(reader.count_items(id).unwrap(), 0, "{id}: no item moves");
     }
 
-    // A regular sync, narrowed by the filter, records the roles of what it
-    // syncs and leaves the other collections declared.
     neverest(&["sync", "-a", "roles"], &config, &state);
     let after = self::roles(&store);
     assert_eq!(after, roles, "the same roles");
 }
 
+/// A second run reuses the looked-up default rather than asking again, and
+/// keeps it.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :8080 and --ignored"]
 fn a_declaration_records_the_default_calendar_the_server_states() {
@@ -95,8 +99,6 @@ fn a_declaration_records_the_default_calendar_the_server_states() {
         .collect();
     assert_eq!(defaults, ["roles/caldav/default"], "{roles:?}");
 
-    // The second run reuses the looked-up default rather than asking again,
-    // and keeps it.
     let sidecar = fs::read_to_string(store.join("local").join("neverest.json")).unwrap();
     assert!(sidecar.contains("looked_up_roles"), "{sidecar}");
     neverest(&["sync", "-a", "roles", "-m", "default"], &config, &state);

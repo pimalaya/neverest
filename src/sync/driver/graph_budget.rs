@@ -49,10 +49,10 @@ struct Graph {
     served: Mutex<Vec<(usize, Instant, Vec<String>)>>,
     /// When the throttled answer left.
     throttled: Mutex<Option<Instant>>,
-    /// The source's throttle, when a test watches it: a request
-    /// reaching the server after the throttled answer left is answered
-    /// only once the source gave up, so what a connection does after
-    /// the give-up does not hang on how the threads interleave.
+    /// The source's throttle, when a test watches it.
+    ///
+    /// A request reaching the server after the throttled answer left is
+    /// answered once the source gave up, so no outcome hangs on interleaving.
     gate: OnceLock<Arc<Throttle>>,
 }
 
@@ -72,10 +72,10 @@ fn reply(status: u16, body: &[u8], content_type: &str) -> Vec<u8> {
 
 impl Graph {
     /// Answers one request, `line` its request line.
+    ///
+    /// The clock is read under the lock the throttled answer is noted under,
+    /// so a request is after it exactly when it reached the server after it.
     fn serve(&self, connection: usize, line: &str, body: &[u8]) -> Vec<u8> {
-        // NOTE: read under the lock the throttled answer is noted
-        // under, so a request is after it exactly when it reached the
-        // server once that answer had left.
         let (at, late) = {
             let throttled = self.throttled.lock().unwrap();
             (Instant::now(), throttled.is_some())
@@ -205,9 +205,9 @@ impl Write for Wire {
     }
 }
 
-/// The budget a Graph mail source takes in a run of four connections,
-/// its clients over the fake, sharing one throttle and the sizes the
-/// listing stated for `ids`.
+/// The clients of a Graph mail source in a run of four connections.
+///
+/// Over the fake, sharing one throttle and the sizes listed for `ids`.
 fn clients(graph: &Arc<Graph>, ids: &[String]) -> (Vec<Client>, Arc<Throttle>) {
     clients_waiting(graph, ids, crate::throttle::MAX_WAIT)
 }
@@ -319,14 +319,11 @@ fn a_graph_source_runs_its_budget_side_by_side_and_no_more() {
     }
 }
 
-/// One connection's batch throttled for ten minutes gives the source up,
-/// and no connection sends anything after: those with batches left
-/// fail them at once, as phase 1's idle connections go on to the next.
+/// One connection's batch throttled for ten minutes gives the source up.
 ///
-/// A connection that read the throttle before the source gave up may
-/// have one request on its way when the throttled answer leaves; the
-/// fake answers such a request only once the source gave up, so a
-/// connection sending a second one would have sent it after the give-up.
+/// No connection sends anything after: those with batches left fail them at
+/// once. One request already on its way is answered after the give-up, so a
+/// second one would have been sent after it.
 #[test]
 fn a_throttle_on_one_connection_stops_every_connection() {
     let graph = Arc::new(Graph {
@@ -388,9 +385,10 @@ fn a_throttle_on_one_connection_stops_every_connection() {
     assert!(failed.into_inner() > 0, "the batches left failed at once");
 }
 
-/// `--max-wait` bounds a batch's own waits: a get Graph asks to wait
-/// three seconds, in a run waiting at most one, gives the source up
-/// rather than being sent again.
+/// `--max-wait` bounds a batch's own waits.
+///
+/// A get Graph asks to wait three seconds, in a run waiting at most one,
+/// gives the source up rather than being sent again.
 #[test]
 fn the_run_s_longest_wait_bounds_a_graph_batch() {
     let graph = Arc::new(Graph {

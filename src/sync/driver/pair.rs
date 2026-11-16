@@ -126,15 +126,13 @@ pub(super) fn run_targets(
         )?;
     }
 
-    // NOTE: every target listed, so what they and the source stated
-    // replaces the record, a calendar no longer stated dropping out.
     record_taskless(state, source_name, &taskless.listed);
     Ok(())
 }
 
-/// What the pairs of one source stated of tasks this run, as hub ids of
-/// its namespace: the record before the run, kept while a target is still
-/// to list, and what the listings of the pairs read.
+/// What the pairs of one source stated of tasks this run, as hub ids.
+///
+/// The record before the run is kept while a target is still to list.
 pub(super) struct PairTaskless {
     previous: BTreeSet<String>,
     listed: BTreeSet<String>,
@@ -149,14 +147,12 @@ impl PairTaskless {
     }
 }
 
-/// Records what one pair's listings state of tasks under the source, the
-/// source as syncing each hub collection of `common` ([`register_syncing`]),
-/// and declares the account again, before any item of the pair moves
-/// (pimdir STORAGE §15.6): a task in a hub calendar crosses to the target,
-/// so a calendar either endpoint keeps from tasks takes none. A target
-/// stays undeclared and unregistered. Until every target has listed, the
-/// record only grows, so a run stopping early drops nothing a target it
-/// did not reach stated. A dry run registers and declares nothing.
+/// Records what one pair's listings state of tasks, registers `common` and
+/// declares the account again, before any item of the pair moves.
+///
+/// A task in a hub calendar crosses, so a calendar either endpoint keeps from
+/// tasks takes none (pimdir STORAGE §15.6). Until every target has listed the
+/// record only grows, so a run stopping early drops nothing.
 pub(super) fn record_pair_listing(
     declaring: &Declaring<'_>,
     state: &mut AccountState,
@@ -179,6 +175,10 @@ pub(super) fn record_pair_listing(
 }
 
 /// One source against one target, propagation falling out of the shared hub.
+///
+/// Full hydration follows `retain`, never `relay`. Under `one-way` the target
+/// follows the source, so no side records a conflict. A collection deleted on
+/// both leaves the store, so one created again reads as new, not as deleted.
 #[allow(clippy::too_many_arguments)]
 fn run_pair(
     account_name: &str,
@@ -208,15 +208,11 @@ fn run_pair(
     let mut right_store = open_store(work_dir, &right_name, account_name)?;
     let blobs = left_store.blob_stage();
 
-    // NOTE: declared, not derived: `retain` says whether the store is a
-    // replica, and `relay` is only how a crossing gets there when it is not.
     let hydrate_full = mode.retain;
 
     let left_budget = connection_budget(&left_config, connections);
     let right_budget = connection_budget(&right_config, connections);
 
-    // NOTE: under `one-way` the source is the truth and the target follows, so
-    // neither side records a conflict; without it both are shared.
     let (left_authority, right_authority) = if mode.one_way {
         (Authority::Endpoint, Authority::Store)
     } else {
@@ -325,9 +321,6 @@ fn run_pair(
         } else {
             apply_collection_hunk(&hunk, &mut left, &mut right).err()
         };
-        // NOTE: gone from both endpoints, the collection leaves the store
-        // too, so one created again under its name later reads as new
-        // rather than as deleted on the other side.
         if !dry_run
             && error.is_none()
             && let CollectionHunk::Delete { collection, .. } = &hunk
@@ -356,12 +349,9 @@ fn run_pair(
     }
     let common: BTreeSet<String> = present_left.intersection(&present_right).cloned().collect();
 
-    // NOTE: every collection in the store and named first, so the source's
-    // registration and the declaration that follow the listing hold it.
     let mut syncing = Vec::with_capacity(common.len());
     for name in &common {
         let collection = hub_id(namespace, name);
-        // NOTE: its sync declares the kind again and reports a failure.
         let known = left_store.ensure_collection(&collection, media_type);
         declare_name(
             &left_store,
@@ -458,9 +448,6 @@ fn run_pair(
             warn!("{name} full hydration error: {err:#}");
             error = Some(Failure::of(&err));
         }
-        // NOTE: a body the full hydration fetched may settle a divergence by
-        // a side's policy (pimdir SYNC §6), after the collection itemized
-        // what its sync noted.
         itemize_noted(&mut left, report);
         itemize_noted(&mut right, report);
 
@@ -472,9 +459,9 @@ fn run_pair(
 
 /// Reconciles one collection until quiescent.
 ///
-/// The collection fills a report of its own, folded into the account's through
-/// [`SyncOutput::absorb`], the same fold the one-source path makes at its
-/// barrier. One fold keeps an arm from being dropped on just one path.
+/// Its own report is folded into the account's by [`SyncOutput::absorb`], the
+/// one-source path's fold, so no arm is dropped on one path; it is folded on
+/// failure too, what it reported before stopping having still happened.
 #[allow(clippy::too_many_arguments)]
 fn sync_collection(
     collection: &str,
@@ -514,14 +501,16 @@ fn sync_collection(
     itemize_noted(left, &mut report);
     itemize_noted(right, &mut report);
 
-    // NOTE: folded whether the collection reconciled or failed: what it
-    // reported before it stopped is still what happened.
     account.absorb(report);
 
     outcome
 }
 
 /// The body of [`sync_collection`], filling that collection's own report.
+///
+/// The opening round only pulls, so its events are the remotes' own rather
+/// than the echo of this run's writes, and no push clears a projection before
+/// `itemize` reads it.
 #[allow(clippy::too_many_arguments)]
 fn sync_collection_into(
     collection: &str,
@@ -536,9 +525,6 @@ fn sync_collection_into(
     progress: &CollectionProgress,
     report: &mut SyncOutput,
 ) -> Result<()> {
-    // NOTE: the opening round pulls and never pushes. Its events are then
-    // the remotes' own doing rather than the echo of a write this run just
-    // made, and no push clears a projection before `itemize` reads it.
     reconcile_pass(
         collection,
         left,
@@ -651,13 +637,9 @@ fn propagate(
 
 /// One reconcile round over both sides, answering whether either moved.
 ///
-/// A side's divergences are itemized right after its own merge, the engine's
-/// events being this pass's alone. A divergence between the endpoints
-/// themselves, both rewriting an item they agreed on or holding one identity
-/// under two bodies before they agreed on any, is the store's to record: it
-/// keeps the body they agreed on until every binding reconciled and parks
-/// the binding that diverged (pimdir SYNC §9), which the side's own merge
-/// then settles or reports.
+/// A side's divergences are itemized right after its own merge. A divergence
+/// between the endpoints themselves is the store's: it keeps the agreed body
+/// and parks the diverging binding (pimdir SYNC §9) for the side's merge.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_pass(
     collection: &str,

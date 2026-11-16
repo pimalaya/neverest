@@ -7,8 +7,10 @@ use io_pimdir::client::reader::PimdirReader;
 use super::*;
 
 /// A rename the server performed under a new id carries the collection
-/// and every one under it in the store, its siblings left alone, each
-/// named as its next listing names it; one keeping its id is renamed.
+/// and every one under it in the store; one keeping its id is renamed.
+///
+/// Siblings are left alone, each moved one named as its next listing
+/// names it.
 #[test]
 fn a_performed_rename_carries_the_collections_under_it() {
     let dir = tempfile::tempdir().unwrap();

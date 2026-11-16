@@ -8,11 +8,9 @@ use crate::sync::driver::*;
 /// Runs one side's sync, rekeying the collection first when its listing
 /// found the source renumbered every member (pimdir SYNC §4, §8).
 ///
-/// The listing fails before anything listed under the new handles lands; the
-/// rekey carries every placement onto them by link id, then the sync runs
-/// again. A rekey that fails leaves the stored checkpoint as it was, so the
-/// next run meets the renumbering again and rekeys then. Also answers whether
-/// `pager` paused the sync, its round left open.
+/// The rekey carries every placement onto the new handles by link id, then
+/// the sync runs again; a failed or parked rekey writes nothing, so the next
+/// run meets the renumbering again. Also answers whether `pager` paused it.
 pub(super) fn sync_side_rebuilding(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -26,8 +24,6 @@ pub(super) fn sync_side_rebuilding(
         Err(err) if err.downcast_ref::<Renumbered>().is_some() => {
             info!("handles of {collection} were renumbered, rebuilding the collection");
             let rekey = rebuild_collection(collection, ctx, store, blobs)?;
-            // NOTE: a parked rekey wrote nothing, so the collection stays
-            // under its old handles and is not listed again this run.
             if let Some(parked) = rekey.parked {
                 warn!(
                     "rebuilding {collection} would drop {} of {} items, parked",
@@ -65,11 +61,9 @@ impl fmt::Display for Renumbered {
 
 /// Drives the engine's rekey, returning its report.
 ///
-/// The rebuild batch drops every old handle as `Rekeyed`, which makes the
-/// store bump the collection's generation in the same transaction (pimdir
-/// SYNC §8), so "the ids you cached are void" commits with what voided them.
-/// A listing leaving most of the collection's items out parks the rekey,
-/// nothing written, unless the run accepts absences.
+/// Every old handle drops as `Rekeyed`, so the generation bump commits with
+/// what voided the cached ids (pimdir SYNC §8). A listing leaving most items
+/// out parks it, nothing written, unless the run accepts absences.
 fn rebuild_collection(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -120,6 +114,9 @@ pub(super) fn sync_verb_with(
 
 /// Runs one side's `sync` against its server and returns its report, and
 /// whether `pager` paused it.
+///
+/// The refusals and rejections it met are kept even when the pass fails: a
+/// later failure does not unlearn what the run saw.
 pub(super) fn sync_side(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -147,8 +144,6 @@ pub(super) fn sync_side(
         .with_capped(ctx.capped);
     let report = run_verb_paged(store, &mut remote, verb, pager);
     let renumbered = remote.rekey_asked();
-    // NOTE: kept whether the pass succeeded or not: a later failure does not
-    // unlearn a refusal the run already saw.
     let refused = remote.take_refused();
     let rejected = remote.take_rejected();
     ctx.refused.extend(refused);
@@ -171,13 +166,11 @@ pub(super) fn sync_side(
     Ok((report, paused))
 }
 
-/// The creates the engine says `collection`'s server rejected (pimdir SYNC
-/// §5) that no rejection or refusal the connector recorded names, each as a
-/// rejected `create`.
+/// The creates the engine says the server rejected (pimdir SYNC §5) that no
+/// recorded rejection or refusal names, each as a rejected `create`.
 ///
-/// The connector records every rejection it answers with its reason, so this
-/// names none today; it keeps a create a later path rejects silently from
-/// being pushed for ever unreported.
+/// None today, the connector naming every rejection; it keeps a create a
+/// later path rejects silently from being pushed for ever unreported.
 pub(super) fn unnamed_creates(
     report: &PimdirSyncReport,
     collection: &str,
@@ -216,9 +209,9 @@ pub(super) fn conflicted_placements(
 
 /// Merges what nobody disagreed about, leaving parked only what needs a person.
 ///
-/// Most divergence is not disagreement: one side changed a phone number and the
-/// other a note, and the base proves it. The remote body is only wanted, not
-/// held, so it is fetched first and never merged against nothing.
+/// Most divergence is not disagreement, as the base proves; the remote body is
+/// fetched first, never merged against nothing. A side the store decides gets
+/// its body restated instead, the pushing pass never revisiting the conflict.
 pub(super) fn resolve_conflicts(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -236,9 +229,6 @@ pub(super) fn resolve_conflicts(
         return Ok(0);
     }
 
-    // NOTE: the engine records a store-wins divergence as a conflict on a pass
-    // that cannot push, and the pushing pass never revisits it, so the store's
-    // body is restated here for that pass to push over the endpoint.
     if ctx.authority == Authority::Store {
         let options = ctx.upgrade_options();
         let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
@@ -279,21 +269,9 @@ pub(super) fn resolve_conflicts(
 
 /// Settles every divergence of a side the store decides on the store's body.
 ///
-/// Restating the held body is the decision `conflict resolve --prefer-local`
-/// takes: the conflict clears against the revision the endpoint holds, so the
-/// next pushing pass overwrites it. Nothing is merged, the endpoint's own edit
-/// being what `one-way` discards. The edit is the engine's own rather than an
-/// owner's through the queue, which a one-way account refuses.
-///
-/// The edit overrules (pimdir SYNC §7): the store keeps each body it discards,
-/// the endpoint's own edit among them, as a retained item, noted into
-/// `overruled` with the handle whose write settled it and the retained item's
-/// key. A diverging body nobody has read yet is fetched from `remote` first,
-/// as [`resolve_conflicts`] does for a merge, since the store refuses to
-/// overrule a body it cannot keep; one still unread after its fetch stays
-/// parked for a person. The fetch itself settles what it reads under
-/// `options` (pimdir SYNC §6), the side's `prefer-local` keeping the
-/// endpoint's body as the edit would, and such a divergence counts as kept.
+/// The edit overrules (pimdir SYNC §7) as `conflict resolve --prefer-local`
+/// does, each discarded body kept as a retained item noted in `overruled`. The
+/// store overrules no unread body, so it is fetched first or stays parked.
 pub(super) fn keep_store_bodies<R: PimdirRemote<Error = anyhow::Error>>(
     collection: &str,
     source: &str,
@@ -396,9 +374,10 @@ fn note_overruled(
     }
 }
 
-/// Fetches the diverging bodies of `handles`, which the store holds as
-/// wanted only, so a settle over them keeps what it discards; the fetch
-/// settles what it reads under `options` (pimdir SYNC §6).
+/// Fetches the diverging bodies of `handles`, held as wanted only.
+///
+/// A settle over them then keeps what it discards; the fetch settles what it
+/// reads under `options` (pimdir SYNC §6).
 pub(super) fn fetch_diverging<R: PimdirRemote<Error = anyhow::Error>>(
     collection: &str,
     source: &str,
@@ -423,9 +402,9 @@ pub(super) fn fetch_diverging<R: PimdirRemote<Error = anyhow::Error>>(
 
 /// The half of [`resolve_conflicts`] that reaches no server.
 ///
-/// Merges the placements whose three bodies the store holds and stages each
-/// result through the queue, the same path an owner's own edit takes, so a
-/// merged body is written exactly one way. What it cannot settle stays parked.
+/// Stages each merge through the queue as an owner's edit, matched on the
+/// local body so an edit made since parks. The producer opens before any blob
+/// write: its staging lock keeps a collector off a body no row pins yet.
 pub(super) fn merge_conflicts(
     collection: &str,
     kind: Kind,
@@ -434,9 +413,6 @@ pub(super) fn merge_conflicts(
     blobs: &PimdirBlobStage,
     store_dir: &Path,
 ) -> Result<usize> {
-    // NOTE: opened before the first blob write, its staging lock being what
-    // keeps a collector out of the window between a body reaching the blob
-    // tree and the queue row pinning it.
     let mut producer = PimdirProducer::open(store_dir, env!("CARGO_PKG_NAME"))
         .with_context(|| format!("Stage the merged conflicts of {collection}"))?;
     let mut staged = 0usize;
@@ -494,9 +470,6 @@ pub(super) fn merge_conflicts(
             continue;
         };
 
-        // NOTE: merged over the local side, so an edit that replaced it since
-        // parks rather than being dropped unmerged; it resolves the remote
-        // side it merged, and a conflict it never read parks it.
         producer
             .enqueue_with_body(collection, &body, |object| PimdirAction::Update {
                 seq,

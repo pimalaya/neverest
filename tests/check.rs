@@ -1,5 +1,7 @@
+//! # Check
+//!
 //! `neverest check` against a local Stalwart (server A: IMAP on :143, HTTP
-//! and DAV on :8080), spawned via `tests/stalwart2.sh`. Ignored by default.
+//! and DAV on :8080), spawned via tests/stalwart2.sh. Ignored by default.
 //!
 //! What a caller adding an account reads from a check: the collections
 //! with the default the server states, and what each source declares it
@@ -19,6 +21,7 @@ const DAV: &str = "http://127.0.0.1:8080/dav";
 const USER: &str = "test@pimalaya.org";
 const PASS: &str = "P!malaya-test-2026";
 
+/// Stalwart's scheduling inbox names the calendar it provisions.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :8080 and --ignored"]
 fn a_caldav_check_names_the_default_calendar_the_scheduling_inbox_states() {
@@ -26,7 +29,6 @@ fn a_caldav_check_names_the_default_calendar_the_scheduling_inbox_states() {
     let source = &report["sources"][0];
     let collections = source["collections"].as_array().expect("collections");
 
-    // NOTE: Stalwart's scheduling inbox names the calendar it provisions.
     let defaults: Vec<&Value> = collections
         .iter()
         .filter(|collection| collection["default"] == true)
@@ -113,9 +115,10 @@ fn closed_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// An endpoint that does not answer fails its row, not the check: every
-/// endpoint is still checked and printed, and the command exits 3 rather
-/// than printing a failure object. Runs without any server.
+/// An endpoint that does not answer fails its row, not the check.
+///
+/// Every endpoint is still checked and printed, and the command exits 3
+/// rather than printing a failure object. Runs without any server.
 #[test]
 fn a_check_names_every_endpoint_that_did_not_answer() {
     let tmp = tempfile::tempdir().expect("temp dir");

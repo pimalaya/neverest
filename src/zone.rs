@@ -1,10 +1,9 @@
 //! # The user's zone
 //!
-//! The zone a floating time is read in, `TZ` then the system's: the search
-//! index places floating times and dates in it (pimdir SEARCH §7, §8.1),
-//! and the Google Calendar and Graph sources anchor a floating time in it
-//! before a write when the calendar states no zone of its own, so the time
-//! a person reads stays the time they meant.
+//! The zone a floating time is read in, `TZ` then the system's. The search
+//! index places floating times and dates in it (pimdir SEARCH §7, §8.1); the
+//! Google Calendar and Graph sources anchor a floating time in it before a
+//! write to a calendar stating no zone, so a person reads the time they meant.
 
 use std::sync::OnceLock;
 

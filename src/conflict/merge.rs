@@ -4,11 +4,10 @@
 //! disagreements: one side changed a phone number and the other a note, and
 //! the base proves it by naming which side touched which field.
 //!
-//! Built in rather than configured, at build time too: it rides on the
+//! Built in rather than configured, even at build time: it rides on the
 //! mutable-content backends (`carddav`, `caldav`, `msgraph`, `gpeople`,
-//! `gcal`) rather than a feature of its own. Contacts are vcard-rs, calendars
-//! and tasks and journals ical-rs, and mail is immutable-content and reaches
-//! none of this.
+//! `gcal`). Contacts are vcard-rs, calendars, tasks and journals ical-rs;
+//! mail is immutable-content and reaches none of this.
 //!
 //! Because it cannot be swapped it is strictly conservative, resolving on an
 //! empty report and on nothing else: a merge nobody can replace has no
@@ -35,8 +34,9 @@ use vcard::tree::{cst::VcardCst, merge::VcardMerge};
 use crate::kind::Kind;
 
 /// What a three-way merge concluded about one conflicted item.
-// NOTE: a build without a mutable-content backend carries no such kind, so
-// mail is the only arm left and neither resolving variant is constructed.
+///
+/// A build without a mutable-content backend has mail as its only kind, so
+/// it constructs neither resolving variant.
 #[cfg_attr(
     not(any(
         feature = "carddav",
@@ -55,9 +55,8 @@ pub enum Merged {
     /// Both sides changed the same field, that many times over. No merge
     /// settles it, so the conflict parks for a person.
     Collided(usize),
-    /// The merge could not run at all, for the reason named: a body no parser
-    /// accepts, or a kind carrying no merge of its own. The conflict parks
-    /// untouched.
+    /// The merge could not run at all: a body no parser accepts, or a kind
+    /// carrying no merge of its own. The conflict parks untouched.
     Unmergeable(String),
 }
 
@@ -67,8 +66,6 @@ impl Kind {
     /// The ical merge names no attendee the right side speaks for (RFC 5546
     /// §3.2): neverest syncs a calendar rather than acting as one. Preferring
     /// left decides nothing here, a run merging only on an empty report.
-    // NOTE: without a mutable-content backend the mail arm is the whole match,
-    // and mail is immutable-content, so no side is ever read.
     #[cfg_attr(
         not(any(
             feature = "carddav",
@@ -121,8 +118,6 @@ impl Kind {
                 feature = "gcal"
             ))]
             Self::Ical => {
-                // NOTE: the stamps say when a side last wrote, not what
-                // anybody decided, so only the local side keeps them.
                 let remote_bytes = remote;
                 let base = without_stamps(base);
                 let remote = without_stamps(remote);
@@ -157,9 +152,11 @@ impl Kind {
 }
 
 /// The properties a calendar writer stamps on every write: when, and how
-/// many times, never what. A server rewrites them on its own (Graph moves
-/// `LAST-MODIFIED` when it sends a meeting's invitations, and carries no
-/// `SEQUENCE`), so two sides touching them is no disagreement.
+/// many times, never what.
+///
+/// A server rewrites them on its own (Graph moves `LAST-MODIFIED` when it
+/// sends invitations, and carries no `SEQUENCE`), so they are no
+/// disagreement: they say when a side wrote, and the local side keeps its.
 #[cfg(any(
     feature = "carddav",
     feature = "caldav",
@@ -280,9 +277,11 @@ fn sequences(body: &[u8]) -> Vec<(String, Option<u64>)> {
     found
 }
 
-/// The merged body with each component's `SEQUENCE` raised to the
-/// remote's where the remote counted further: a revision count only grows,
-/// and the stamps left the merge, so neither side's count is lost.
+/// The merged body with each component's `SEQUENCE` raised to the remote's
+/// where the remote counted further.
+///
+/// A revision count only grows and the stamps left the merge, so neither
+/// side's count is lost; a component the remote left alone keeps its bytes.
 #[cfg(any(
     feature = "carddav",
     feature = "caldav",
@@ -303,8 +302,6 @@ fn with_sequences_of(merged: &[u8], remote: &[u8]) -> Vec<u8> {
         return merged.to_vec();
     }
 
-    // NOTE: a component is rewritten only where the remote counted
-    // further, so a body the remote left alone keeps its bytes.
     let mut out = Vec::with_capacity(merged.len());
     let mut component: Vec<&[u8]> = Vec::new();
     let mut inside = false;
@@ -479,8 +476,9 @@ mod tests {
     }
 
     /// What MOA saw on Graph: a meeting created, then edited before the
-    /// next run, while Graph restamped its own copy on sending the
-    /// invitations. Only the summary was decided, by one side.
+    /// next run, while Graph restamped its own copy on sending invitations.
+    ///
+    /// Only the summary was decided, by one side.
     #[cfg(any(
         feature = "carddav",
         feature = "caldav",
@@ -548,7 +546,6 @@ mod tests {
             String::from_utf8(event(3, "Daily", "Room B")).unwrap()
         );
 
-        // NOTE: a real collision is still one.
         let remote = event(3, "Standup", "Room C");
         assert_eq!(
             Kind::Ical.merge(&base, &local, &remote),

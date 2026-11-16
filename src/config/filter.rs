@@ -22,22 +22,21 @@ pub struct ItemSyncConfig {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ItemFilter {
-    /// The floor of the scope a mail collection syncs under, on the `Date`
-    /// header: a duration back from today (`30d`, `12w`, `6mo`, `1y`), a
-    /// date (`2026-01-01`, midnight UTC) or an RFC 3339 instant.
+    /// The floor of the `Date` scope a mail collection syncs under: `30d`,
+    /// `12w`, `6mo`, `1y`, a date (midnight UTC) or an RFC 3339 instant.
     ///
-    /// Mail outside it is neither listed nor deleted: what an earlier,
-    /// wider sync stored stays. Mail only, refused on an account syncing
-    /// contacts or calendars. `sync --since` overrides it for one run.
+    /// Mail outside it is neither listed nor deleted: what a wider sync
+    /// stored stays. Refused beside contacts or calendars; `sync --since`
+    /// overrides it for one run.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<String>,
 }
 
-/// The RFC 3339 instant in UTC a scope floor `raw` names at `now`: a
-/// duration back from `now` (`30d`, `12w`, `6mo`, `1y`, or spelled out:
-/// `30 days`), taken to the start of its UTC day so a run resumes the
-/// round an earlier run of the same day opened; a date (`2026-01-01`) at
-/// midnight UTC; or an instant, normalised to UTC.
+/// The RFC 3339 instant in UTC a scope floor `raw` names at `now`.
+///
+/// A duration (`30d`, `30 days`) counts back to the start of its UTC day,
+/// so a run resumes the round an earlier run that day opened; a date is its
+/// midnight UTC; an instant is normalised to UTC.
 pub fn resolve_since(raw: &str, now: DateTime<Utc>) -> Result<String> {
     let raw = raw.trim();
     let format = |at: DateTime<Utc>| at.to_rfc3339_opts(SecondsFormat::Secs, true);
@@ -91,9 +90,10 @@ mod tests {
         DateTime::parse_from_rfc3339(instant).unwrap().to_utc()
     }
 
-    /// A duration counts back from today to the start of its UTC day, so
-    /// two runs of one day list one scope; a date is its midnight UTC, and
-    /// an instant is normalised to UTC.
+    /// A duration counts back from today to the start of its UTC day.
+    ///
+    /// So two runs of one day list one scope; a date is its midnight UTC,
+    /// and an instant is normalised to UTC.
     #[test]
     fn a_scope_floor_reads_as_a_duration_a_date_or_an_instant() {
         let now = at("2026-10-07T15:42:10+02:00");

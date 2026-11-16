@@ -1,11 +1,9 @@
 //! # Throttle
 //!
-//! What a source does when its provider says "not now": follow the wait the
-//! provider states, back off otherwise (bounded exponential, with jitter),
-//! and give up past a bound, the run keeping what it already wrote and
-//! naming the source in its report (`throttled`). One [`Throttle`] is shared
-//! by every connection a source opens, so once it gave up, the others stop
-//! asking too until the wait it noted is over.
+//! What a source does when its provider says "not now": follow the stated
+//! wait, else back off (bounded exponential, jitter), and give up past a
+//! bound, keeping what the run wrote. One [`Throttle`] is shared by a
+//! source's connections: once one gave up, all stop until its wait is over.
 //!
 //! It also paces a source whose provider meters requests (Gmail), by the
 //! second and over a sliding minute, holding it below the quota instead of
@@ -19,8 +17,6 @@
 //! The Google clients share one request loop ([`google_send`]): it reopens a
 //! dead stream first, and marks dead one that failed mid-exchange.
 
-// NOTE: each HTTP backend uses its part; a build leaving some out leaves
-// theirs unused.
 #![cfg_attr(
     not(all(
         feature = "msgraph",
@@ -55,9 +51,10 @@ const MAX_RETRIES: u32 = 5;
 /// none: 1, 2, 4, 8, then 16 seconds, about half a minute in all.
 const FIRST_WAIT: Duration = Duration::from_secs(1);
 
-/// The longest single wait by default (`sync --max-wait`). A provider asking
-/// for more (`Retry-After`) makes the source give up at once, rather than
-/// hold the run that long.
+/// The longest single wait by default (`sync --max-wait`).
+///
+/// A provider asking for more (`Retry-After`) makes the source give up at
+/// once, rather than hold the run that long.
 pub const MAX_WAIT: Duration = Duration::from_secs(120);
 
 /// A source's answer to throttling, shared by its connections.
@@ -167,11 +164,9 @@ impl Throttle {
     /// Runs `attempt`, paced at `units`, sending it again while `throttled`
     /// reads its error as the provider throttling.
     ///
-    /// `throttled` answers `None` for any other error, which is returned at
-    /// once, or the wait the provider stated, if any. Past [`MAX_RETRIES`],
-    /// or on a stated wait longer than its longest, the source gives up and
-    /// the last error is returned. While it has given up, `blocked` builds
-    /// the error returned without sending anything.
+    /// `throttled` answers the stated wait, or `None` for an error returned
+    /// at once. Past [`MAX_RETRIES`] or a stated wait over the longest, the
+    /// source gives up; while given up, `blocked` builds the error unsent.
     pub fn call<T, E>(
         &self,
         units: u32,
@@ -225,14 +220,15 @@ impl Throttle {
 /// sent again on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Request {
-    /// A read, a flag set, a move by id, a delete: sending it twice does what
-    /// sending it once does, so a 503, or a 502 or 504 from a gateway on the
-    /// way, is retried like a 429.
+    /// A read, a flag set, a move by id, a delete: idempotent.
+    ///
+    /// Sending it twice does what sending it once does, so a 503, or a 502 or
+    /// 504 from a gateway on the way, is retried like a 429.
     Idempotent,
-    /// A create, an upload, a send, an invitation: sent again only when the
-    /// provider refused it unprocessed (429, a Google rate limit), never on a
-    /// 503 or another 5xx, after which it may have landed already and a
-    /// second one would land a second copy.
+    /// A create, an upload, a send, an invitation: not idempotent.
+    ///
+    /// Sent again only when refused unprocessed (429, a Google rate limit),
+    /// never on a 5xx, after which it may have landed and a retry duplicates.
     Create,
 }
 
@@ -247,7 +243,8 @@ impl Request {
     }
 }
 
-/// The wait before retry `retry` (from 0) when the provider states none:
+/// The wait before retry `retry` (from 0) when the provider states none.
+///
 /// [`FIRST_WAIT`] doubled each time, capped at [`MAX_WAIT`], drawn between
 /// its half and its whole so connections throttled together spread out.
 fn backoff(retry: u32) -> Duration {
@@ -276,14 +273,14 @@ pub fn retry_after(value: &str) -> Option<Duration> {
 /// What a Google refusal asks of the source, read by its reason.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GoogleRefusal {
-    /// A per-user concurrency limit (`Too many concurrent requests for
-    /// user`), a per-second rate, a 502, 503 or 504: gone within a second or
-    /// two.
+    /// A concurrency limit, a per-second rate, a 502, 503 or 504.
+    ///
+    /// Gone within a second or two (`Too many concurrent requests for user`).
     Burst,
-    /// A per-minute quota (`Quota exceeded for quota metric 'Total Query
-    /// Cost' and limit 'Units per minute per user'`): a bucket refilling by
-    /// the second, waited a few seconds more each time, then to the next
-    /// minute.
+    /// A per-minute quota (`Units per minute per user`).
+    ///
+    /// A bucket refilling by the second, waited a few seconds more each
+    /// time, then to the next minute.
     Minute,
     /// A daily quota: nothing before Google's midnight lifts it, so the
     /// source gives up until then.
@@ -325,16 +322,11 @@ impl GoogleAnswer<'_> {
     }
 }
 
-/// How a Google answer throttles: `None` for any other answer, which is no
-/// reason to wait.
+/// How a Google answer throttles, `None` when it is no reason to wait.
 ///
-/// A 429, a 502, 503 or 504, or a 403 or 429 naming a rate limit by reason
-/// (`rateLimitExceeded`, `userRateLimitExceeded`, `quotaExceeded`,
-/// `RATE_LIMIT_EXCEEDED`) or by message, is a [`GoogleRefusal::Burst`],
-/// unless it names a per-minute quota ([`GoogleRefusal::Minute`]) or a
-/// daily one ([`GoogleRefusal::Daily`]). Gmail's per-minute refusal carries
-/// the reason `rateLimitExceeded`, like the concurrency one: only its
-/// wording tells them apart.
+/// A 429, 502, 503, 504, or a 403 naming a rate limit, is a burst unless it
+/// names a per-minute or daily quota. Gmail's per-minute refusal carries
+/// `rateLimitExceeded` like the concurrency one: only its wording differs.
 pub fn google_refusal(answer: &GoogleAnswer<'_>) -> Option<GoogleRefusal> {
     let text = answer.text();
     let squeezed = squeeze(&text);
@@ -365,9 +357,10 @@ pub fn google_refusal(answer: &GoogleAnswer<'_>) -> Option<GoogleRefusal> {
     }
 }
 
-/// The code of a Google refusal left after the waits: a 429, or a 403
-/// naming a rate limit or a quota ([`google_refusal`]), is `rate-limited`;
-/// any other 403 is `permission-denied`.
+/// The code of a Google refusal left after the waits.
+///
+/// A 429, or a 403 naming a rate limit or a quota ([`google_refusal`]), is
+/// `rate-limited`; any other 403 is `permission-denied`.
 pub fn google_code(answer: &GoogleAnswer<'_>) -> Option<ErrorCode> {
     match answer.status {
         429 => Some(ErrorCode::RateLimited),
@@ -377,10 +370,11 @@ pub fn google_code(answer: &GoogleAnswer<'_>) -> Option<ErrorCode> {
     }
 }
 
-/// Whether a text names one of Google's per-minute quotas, as Gmail's
-/// `Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per
-/// minute per user'` does, in its message or in its `ErrorInfo` metadata
-/// (`…PerMinutePerUser`); the older APIs' hundred seconds count alike.
+/// Whether a text names one of Google's per-minute quotas.
+///
+/// As Gmail's `Units per minute per user` does in its message, or
+/// `…PerMinutePerUser` in its `ErrorInfo`; the older APIs' hundred seconds
+/// count alike.
 pub fn names_minute_quota(text: &str) -> bool {
     let squeezed = squeeze(text);
     squeezed.contains("perminute") || squeezed.contains("per100seconds")
@@ -419,8 +413,10 @@ impl GoogleWaits {
     }
 
     /// Whether an answer of `request` throttles it, and the wait before it
-    /// is sent again, as [`Throttle::call`] takes it: a 502, 503 or 504
-    /// throttles an idempotent request only, a create maybe having landed.
+    /// is sent again, as [`Throttle::call`] takes it.
+    ///
+    /// A 502, 503 or 504 throttles an idempotent request only, a create maybe
+    /// having landed.
     pub fn throttled(
         &self,
         request: Request,
@@ -434,10 +430,11 @@ impl GoogleWaits {
         Some(Some(self.wait(refusal, stated, SystemTime::now())))
     }
 
-    /// The wait after `refusal` at `now`: the one the answer stated, else a
-    /// second or two after a burst, two to five seconds after a per-minute
-    /// refusal and the next minute after the fifth, and Google's next
-    /// midnight after a daily one.
+    /// The wait after `refusal` at `now`, the stated one first.
+    ///
+    /// Else a second or two after a burst, two to five seconds after a
+    /// per-minute refusal and the next minute after the fifth, and Google's
+    /// next midnight after a daily one.
     pub fn wait(
         &self,
         refusal: GoogleRefusal,
@@ -514,8 +511,7 @@ pub trait GoogleError {
 pub type Pick<S, C, E> = for<'a> fn(&'a mut S) -> Result<&'a mut GoogleSession<C>, E>;
 
 /// Runs one Google request of `request`, costing `units`, over the session
-/// `pick` takes out of `state`, paced and sent again by `throttle` while
-/// Google throttles it ([`GoogleWaits`]).
+/// `pick` takes out of `state`, paced and retried by `throttle`.
 ///
 /// A dead stream is reopened first; one that failed mid-exchange is marked
 /// dead, as is one whose answer did not allow reusing it.
@@ -560,10 +556,11 @@ pub fn burst_pause() -> Duration {
     Duration::from_millis(1_000 + jitter(1_001))
 }
 
-/// The wait after the `count`th per-minute refusal in a row: 2 s, then a
-/// second more each time up to 5 s, Gmail's quota being a bucket measured
-/// clearing within 2 s; past [`MINUTE_PAUSES`], until the next minute plus
-/// up to a second.
+/// The wait after the `count`th per-minute refusal in a row.
+///
+/// 2 s, then a second more each time up to 5 s, Gmail's bucket measured
+/// clearing within 2 s; past [`MINUTE_PAUSES`], the next minute plus up to a
+/// second.
 pub fn minute_pause(count: u32, now: SystemTime) -> Duration {
     if count > MINUTE_PAUSES {
         return until_next_minute(now) + Duration::from_millis(jitter(1_000));
@@ -583,6 +580,9 @@ pub fn until_next_minute(now: SystemTime) -> Duration {
 
 /// The wait from `now` to the next midnight in America/Los_Angeles, when
 /// Google resets its daily quotas.
+///
+/// That midnight takes the offset of the day it starts, both switches
+/// happening at 2 a.m.
 pub fn until_pacific_midnight(now: SystemTime) -> Duration {
     let at = DateTime::<Utc>::from(now);
     let local = (at + pacific_offset(at)).date_naive();
@@ -592,15 +592,14 @@ pub fn until_pacific_midnight(now: SystemTime) -> Duration {
     let Some(midnight) = next.and_hms_opt(0, 0, 0) else {
         return Duration::from_secs(86_400);
     };
-    // NOTE: at midnight the offset is the one of the day it starts, both
-    // switches happening at 2 a.m.
     let midnight = Utc.from_utc_datetime(&midnight) - pacific_offset_on(next);
     (midnight - at).to_std().unwrap_or_default()
 }
 
-/// The offset of America/Los_Angeles at `at`: daylight time from the second
-/// Sunday of March at 2 a.m. standard time to the first Sunday of November
-/// at 2 a.m. daylight time.
+/// The offset of America/Los_Angeles at `at`.
+///
+/// Daylight time from the second Sunday of March at 2 a.m. standard time to
+/// the first Sunday of November at 2 a.m. daylight time.
 fn pacific_offset(at: DateTime<Utc>) -> chrono::Duration {
     let year = at.year();
     let start = nth_sunday(year, 3, 2).and_then(|day| day.and_hms_opt(10, 0, 0));
@@ -682,8 +681,9 @@ impl Bucket {
     }
 }
 
-/// The units spent over the last sixty seconds, a sliding window, so no
-/// sixty seconds ever carry more than the budget, whichever minute the
+/// The units spent over the last sixty seconds, a sliding window.
+///
+/// No sixty seconds ever carry more than the budget, whichever minute the
 /// provider counts by.
 #[derive(Debug, Default)]
 struct MinuteBudget {
@@ -701,14 +701,12 @@ impl MinuteBudget {
         Self::default()
     }
 
-    /// Books `units` at the earliest instant from `now` at which the last
-    /// sixty seconds hold room for them under `limit`, and answers how long
-    /// from `now` that is.
+    /// Books `units` at the earliest instant the last sixty seconds hold room
+    /// for them under `limit`, answering how long from `now` that is.
     ///
-    /// Spends are booked in order, never one before the one booked ahead
-    /// of it, so concurrent takers queue. A spend larger than the whole
-    /// budget counts as the whole budget, waiting for an empty minute
-    /// rather than forever.
+    /// Booked in order, so concurrent takers queue. A spend over the whole
+    /// budget counts as the whole budget, waiting for an empty minute rather
+    /// than forever.
     fn reserve(&mut self, now: Instant, units: u32, limit: u32) -> Duration {
         let units = units.min(limit);
         let mut at = self.spent.back().map_or(now, |(last, _)| now.max(*last));
@@ -874,9 +872,10 @@ mod tests {
         assert_eq!(throttle.gave_up(), None);
     }
 
-    /// A Google refusal left after the waits is coded: a rate limit or a
-    /// quota by status or reason, any other 403 a matter of rights, and a
-    /// server failure not at all.
+    /// A Google refusal left after the waits is coded.
+    ///
+    /// A rate limit or a quota by status or reason, any other 403 a matter of
+    /// rights, and a server failure not at all.
     #[test]
     fn a_google_refusal_is_coded_by_status_and_reason() {
         let reasons = |status, reason: &str| {
@@ -1066,17 +1065,12 @@ mod tests {
             let now = SystemTime::from(DateTime::parse_from_rfc3339(instant).unwrap());
             rfc3339(now + until_pacific_midnight(now))
         };
-        // NOTE: daylight time, UTC-7.
         assert_eq!(at("2026-10-13T12:00:00Z"), "2026-10-14T07:00:00Z");
         assert_eq!(at("2026-10-14T06:59:59Z"), "2026-10-14T07:00:00Z");
         assert_eq!(at("2026-10-14T07:00:00Z"), "2026-10-15T07:00:00Z");
-        // NOTE: standard time, UTC-8.
         assert_eq!(at("2026-12-01T00:00:00Z"), "2026-12-01T08:00:00Z");
-        // NOTE: the night daylight time ends (2026-11-01): its midnight is
-        // still daylight, the next one standard.
         assert_eq!(at("2026-10-31T20:00:00Z"), "2026-11-01T07:00:00Z");
         assert_eq!(at("2026-11-01T12:00:00Z"), "2026-11-02T08:00:00Z");
-        // NOTE: the night daylight time starts (2026-03-08).
         assert_eq!(at("2026-03-08T12:00:00Z"), "2026-03-09T07:00:00Z");
         assert_eq!(at("2026-03-07T12:00:00Z"), "2026-03-08T08:00:00Z");
 
@@ -1193,8 +1187,9 @@ mod tests {
         assert!(throttled(Request::Create, 429, "Too many requests"));
     }
 
-    /// A gateway error is the way to the server failing, not the request: a
-    /// read is sent again on a 502 or a 504 as on a 503 (Google People
+    /// A gateway error is the way to the server failing, not the request.
+    ///
+    /// A read is sent again on a 502 or a 504 as on a 503 (Google People
     /// answered a listing 502 on 2026-10-29), a create never.
     #[test]
     fn a_gateway_error_is_waited_out_on_a_read() {

@@ -41,6 +41,8 @@ pub struct PercentGate(AtomicUsize);
 
 impl PercentGate {
     /// Whether `done` of `total` reaches a percent no call reached yet.
+    ///
+    /// The gate holds the last percent plus one, so 0% passes once too.
     pub fn passes(&self, done: usize, total: usize) -> bool {
         let percent = (done * 100).checked_div(total).unwrap_or(100);
 
@@ -49,7 +51,6 @@ impl PercentGate {
             return true;
         }
 
-        // NOTE: shifted by one, so 0% passes once too.
         self.0.fetch_max(percent + 1, Ordering::Relaxed) <= percent
     }
 }
@@ -66,7 +67,6 @@ mod tests {
         assert_eq!(passed.len(), 101);
         assert_eq!(passed.first(), Some(&1));
         assert_eq!(passed.last(), Some(&1000));
-        // NOTE: a thread lagging behind a later percent passes nothing.
         assert!(!gate.passes(10, 1000));
     }
 

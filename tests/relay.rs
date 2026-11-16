@@ -1,16 +1,17 @@
-//! End-to-end relay test against TWO local Stalwart IMAP servers (A :143, B
-//! :144), spawned via `tests/stalwart2.sh`. Ignored by default.
+//! # Relay
 //!
-//! Proves the two-source pass-through: a message on server A is relayed to
-//! server B by *streaming* it server-to-server, the pimdir store keeping only the
-//! spine: no body blob at rest. Steps:
-//!   1. Append a message to server A (via `curl` IMAP).
-//!   2. Sync A as a source into B as a target, the store retaining no body.
-//!   3. Assert server B has the message (via `curl` IMAP SEARCH).
-//!   4. Assert the relay account's store kept NO object blob (pure spine).
+//! End-to-end relay test against two local Stalwart IMAP servers (A :143,
+//! B :144), spawned via tests/stalwart2.sh. Ignored by default.
 //!
-//! Seeding/verifying uses `curl` rather than a local backend, since neverest no
-//! longer has one (it syncs remotes only).
+//! A message on A is streamed to B server-to-server, the store keeping only
+//! the spine, no body blob at rest:
+//!
+//! - append a message to A (`curl` IMAP APPEND);
+//! - sync A as a source into B as a target;
+//! - assert B has it (`curl` IMAP SEARCH);
+//! - assert the store kept no object blob.
+//!
+//! Seeding and checking use `curl`, since neverest syncs remotes only.
 //!
 //! Start the servers and run with:
 //! ```sh
@@ -50,7 +51,6 @@ fn relay_streams_a_to_b_without_retaining() {
     fs::create_dir_all(&state).unwrap();
     fs::write(&eml, message()).unwrap();
 
-    // 1. Seed server A with the message (IMAP APPEND via curl).
     let append = Command::new("curl")
         .args(["-fsS", "-T"])
         .arg(&eml)
@@ -63,7 +63,6 @@ fn relay_streams_a_to_b_without_retaining() {
         String::from_utf8_lossy(&append.stderr),
     );
 
-    // 2. Relay A ↔ B.
     let config_toml = format!(
         "[accounts.relay]\n\
          sources.left.imap.server = \"{A}\"\n\
@@ -79,7 +78,6 @@ fn relay_streams_a_to_b_without_retaining() {
     neverest(&["init", "-a", "relay"], &config, &state);
     neverest(&["sync", "-a", "relay"], &config, &state);
 
-    // 3. Server B now holds the message (IMAP SEARCH via curl).
     let search = Command::new("curl")
         .args([
             "-fsS",
@@ -99,7 +97,6 @@ fn relay_streams_a_to_b_without_retaining() {
         hits.trim(),
     );
 
-    // 4. The relay account's store kept only the spine — no object blob at rest.
     let objects = state.join("neverest").join("objects");
     let blobs = count_files(&objects);
     assert_eq!(

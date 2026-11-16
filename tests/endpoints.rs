@@ -1,35 +1,20 @@
-//! End-to-end test of an account with TWO CardDAV endpoints, against a local
-//! Radicale (`tests/radicale.sh`) holding two principals. Ignored by default.
+//! # Endpoints
 //!
-//! The one-endpoint run in tests/carddav.rs reconciles a store against a
-//! server. This one reconciles two servers with each other through the store,
-//! which is the mirror and migration case, and the three things that only
-//! happen there:
+//! An account with two CardDAV endpoints, against a local Radicale
+//! (tests/radicale.sh) holding two principals. Ignored by default.
 //!
-//!   1. A card both endpoints changed differently. Each of them agrees with its
-//!      own server, so only the pair disagrees, and the run must merge what
-//!      nobody disagreed about and park the rest rather than let one endpoint's
-//!      body land on the other.
-//!   2. Two servers that already hold the same card before the first sync. One
-//!      identity is one item, whichever endpoint the store reads first: minting
-//!      a second key for the second holder leaves two items neither server will
-//!      take.
-//!   3. Two servers holding one identity under two different bodies before the
-//!      first sync. There is no body they both came from, so no merge can
-//!      settle it, and the run must park rather than let the source's body
-//!      replace what the target already held.
-//!   4. The same divergence as the first, under an account declaring the
-//!      source authoritative. There is nothing to park then: `one-way = true`
-//!      is the answer to the question the other three ask a person.
+//! Two servers reconciled through the store, the mirror and migration case:
+//! each endpoint agrees with its own server and only the pair disagrees, so
+//! the run merges what nobody disagreed about and parks the rest, unless
+//! `one-way = true` answers the question the others ask a person.
 //!
 //! An account naming a source and a target keys the store under the source's
-//! name, so an address book reads as `a/<name>` here rather than as the
-//! `carddav/<name>` the direct-backend sugar of tests/carddav.rs uses.
+//! name: an address book reads as `a/<name>`, not the `carddav/<name>` of
+//! tests/carddav.rs.
 //!
-//! Each test owns an address book of its own on both principals and narrows the
-//! run to it, so neither meets what another seeded. They still run one at a
-//! time: every run lists both principals' homes, and Radicale answers 500 to a
-//! listing a sibling's book delete cuts through.
+//! Each test owns its address book on both principals, yet they run one at a
+//! time: every run lists both homes, and Radicale answers 500 to a listing a
+//! sibling's book delete cuts through.
 //!
 //! Start the server and run with:
 //! ```sh
@@ -99,6 +84,11 @@ fn noted_card(uid: &str, tel: &str, note: &str) -> String {
     )
 }
 
+/// A card changed on both endpoints merges, or parks, and never overwrites.
+///
+/// Disjoint fields merge onto both; the same field parks (exit 3), each
+/// endpoint keeping its edit over any number of reruns, until the conflict
+/// commands settle it.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
@@ -113,8 +103,6 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
     create_book(root, SOURCE, MERGE_BOOK);
     create_book(root, TARGET, MERGE_BOOK);
 
-    // Seeded on one endpoint only, so the first sync binds both cards on both:
-    // seeding both is the create collision the other test starts from.
     put(
         root,
         SOURCE,
@@ -132,9 +120,6 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
         "the seed crossed",
     );
 
-    // card-1 is edited on each endpoint in a field the other left alone, and
-    // card-2 in the same field on both. The first is not a disagreement and the
-    // three-way merge settles it; the second is, and no merge can.
     put(
         root,
         SOURCE,
@@ -152,8 +137,6 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
     put(root, SOURCE, MERGE_BOOK, "card-2", &card("card-2", "+2"));
     put(root, TARGET, MERGE_BOOK, "card-2", &card("card-2", "+3"));
 
-    // A run leaving the two endpoints divergent is not a success: it ends
-    // conflicted and names the item it parked.
     let report = sync(&config, &state, MERGE_BOOK, 3);
     assert!(
         report.contains(r#""outstandingConflicts":1"#),
@@ -164,7 +147,6 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
         "the parked item is named; report was:\n{report}",
     );
 
-    // The disjoint edits merged, so both endpoints carry both of them.
     for side in [SOURCE, TARGET] {
         let merged = get(side, MERGE_BOOK, "card-1");
         assert!(
@@ -173,8 +155,6 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
         );
     }
 
-    // The same-field collision parked, so each endpoint still holds its own
-    // edit and neither was overwritten by the other.
     assert!(
         get(SOURCE, MERGE_BOOK, "card-2").contains("TEL:+2"),
         "the source keeps its own card-2 edit",
@@ -184,8 +164,6 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
         "the target keeps its own card-2 edit",
     );
 
-    // Rerunning settles nothing on its own and overwrites nothing either: a
-    // parked divergence waits for a person, however many runs go by.
     let report = sync(&config, &state, MERGE_BOOK, 3);
     assert!(
         !report.contains(r#""kind":"update""#),
@@ -197,7 +175,6 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
         "both edits survive a rerun",
     );
 
-    // And it is a decision the conflict commands can find.
     let listed = neverest(
         &["conflict", "list", "-a", "div", "--json"],
         &config,
@@ -212,10 +189,9 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
 
 /// `one-way = true` answers a real divergence instead of parking it.
 ///
-/// The source is authoritative, so the difference the two-way account leaves
-/// for a person resolves in its favour: the target's own edit is overwritten,
-/// nothing is counted or listed as a conflict, the run exits 0, and the next
-/// one has nothing left to carry.
+/// The source wins: the target's edit is overwritten in the same run (the
+/// deciding body is hydrated before the pushes), no conflict is counted, the
+/// run exits 0, and the next one has nothing left to carry.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
@@ -225,8 +201,6 @@ fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
     let state = root.join("state");
     let config = root.join("config.toml");
     fs::create_dir_all(&state).unwrap();
-    // NOTE: the account is one TOML table and the flag belongs to it wherever
-    // it sits, so appending keeps one account helper for both directions.
     fs::write(&config, format!("{}one-way = true\n", account())).unwrap();
 
     create_book(root, SOURCE, AUTHORITY_BOOK);
@@ -248,9 +222,6 @@ fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
         "the seed crossed",
     );
 
-    // The same field set two ways, which is the divergence the two-way account
-    // parks: each endpoint agrees with its own server and only the pair
-    // disagrees.
     put(
         root,
         SOURCE,
@@ -266,8 +237,6 @@ fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
         &card("card-1", "+3"),
     );
 
-    // Declaring an authority is what removes the conflict rather than
-    // resolving it: the run has nothing to ask, so it ends on 0.
     let report = sync(&config, &state, AUTHORITY_BOOK, 0);
     assert!(
         report.contains(r#""outstandingConflicts":0"#),
@@ -278,9 +247,6 @@ fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
         "and names nothing parked; report was:\n{report}",
     );
 
-    // The overwrite lands in this run: the deciding side's body is hydrated
-    // before the pushing passes, so the target takes it without waiting for
-    // the run after.
     assert!(
         get(TARGET, AUTHORITY_BOOK, "card-1").contains("TEL:+2"),
         "the target takes the source's body, its own edit discarded",
@@ -291,8 +257,6 @@ fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
          authoritative",
     );
 
-    // Discarded means settled: a rerun writes nothing and asks nothing, rather
-    // than carrying the same overwrite again every run.
     let report = sync(&config, &state, AUTHORITY_BOOK, 0);
     assert!(
         !report.contains(r#""kind":"update""#),
@@ -316,6 +280,11 @@ fn a_one_way_account_overwrites_the_target_instead_of_parking_the_divergence() {
     );
 }
 
+/// A book deleted on one endpoint is deleted on the other, not recreated.
+///
+/// New on the source only, the first run creates it on the target, so both
+/// are known to hold it; made again later under the same name, it reads as
+/// new.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_book_deleted_on_one_endpoint_is_deleted_on_the_other_not_recreated() {
@@ -327,8 +296,6 @@ fn a_book_deleted_on_one_endpoint_is_deleted_on_the_other_not_recreated() {
     fs::create_dir_all(&state).unwrap();
     fs::write(&config, account()).unwrap();
 
-    // NOTE: new on the source only, so the first run creates it on the
-    // target, which is what makes both endpoints known to hold it.
     create_book(root, SOURCE, LIFECYCLE_BOOK);
     delete_book(TARGET, LIFECYCLE_BOOK);
     put(
@@ -347,7 +314,6 @@ fn a_book_deleted_on_one_endpoint_is_deleted_on_the_other_not_recreated() {
     );
     assert!(book_exists(TARGET, LIFECYCLE_BOOK));
 
-    // Deleted on the target: the delete crosses, the book is not made again.
     delete_book(TARGET, LIFECYCLE_BOOK);
     let report = sync(&config, &state, LIFECYCLE_BOOK, 0);
     assert!(
@@ -357,7 +323,6 @@ fn a_book_deleted_on_one_endpoint_is_deleted_on_the_other_not_recreated() {
     assert!(!book_exists(SOURCE, LIFECYCLE_BOOK));
     assert!(!book_exists(TARGET, LIFECYCLE_BOOK));
 
-    // Made again later under the same name, it reads as new.
     create_book(root, SOURCE, LIFECYCLE_BOOK);
     let report = sync(&config, &state, LIFECYCLE_BOOK, 0);
     assert!(
@@ -368,6 +333,11 @@ fn a_book_deleted_on_one_endpoint_is_deleted_on_the_other_not_recreated() {
     assert!(book_exists(TARGET, LIFECYCLE_BOOK));
 }
 
+/// Two endpoints holding one card before the first sync bind it to one item.
+///
+/// The mirror or migration start: whichever endpoint the store reads first, a
+/// second key minted for the second holder would leave two items neither
+/// server takes.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
@@ -382,8 +352,6 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
     create_book(root, SOURCE, BIND_BOOK);
     create_book(root, TARGET, BIND_BOOK);
 
-    // The same card on both servers before the store has read either of them,
-    // which is what a mirror or a migration starts from.
     put(root, SOURCE, BIND_BOOK, "card-1", &card("card-1", "+1"));
     put(root, TARGET, BIND_BOOK, "card-1", &card("card-1", "+1"));
 
@@ -409,7 +377,6 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
         "and only one; store held:\n{items}",
     );
 
-    // Bound on both endpoints means the run has nothing left to do.
     let report = sync(&config, &state, BIND_BOOK, 0);
     assert!(
         report.contains(r#""itemPatch":[]"#),
@@ -417,6 +384,12 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
     );
 }
 
+/// One identity under two bodies on two unread servers parks, never
+/// overwrites.
+///
+/// With no common base, only a person picks a winner: the run leaves both
+/// servers as found and names the divergence once, and either decision then
+/// reaches both endpoints with neither body lost.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite() {
@@ -431,9 +404,6 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
     create_book(root, SOURCE, SEED_BOOK);
     create_book(root, TARGET, SEED_BOOK);
 
-    // One identity, two bodies, on two servers the store has never read: there
-    // is no body they both came from, so the three-way merge has no base and
-    // nothing but a person can pick a winner.
     for uid in ["card-1", "card-2"] {
         put(root, SOURCE, SEED_BOOK, uid, &card(uid, "+1"));
         put(root, TARGET, SEED_BOOK, uid, &card(uid, "+9"));
@@ -441,8 +411,6 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
 
     neverest(&["init", "-a", "div"], &config, &state, 0);
 
-    // The first run must leave both servers exactly as it found them, and say
-    // so: a divergence nobody chose to lose is not an update.
     let report = sync(&config, &state, SEED_BOOK, 3);
     assert!(
         report.contains(r#""outstandingConflicts":2"#),
@@ -469,8 +437,6 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
         );
     }
 
-    // Rerunning settles nothing and overwrites nothing either, and names the
-    // divergence once rather than once per run.
     let report = sync(&config, &state, SEED_BOOK, 3);
     assert!(
         !report.contains(r#""kind":"update""#) && none(&report, "conflicts"),
@@ -481,9 +447,6 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
         "the target's body survives a rerun",
     );
 
-    // Both are decisions the conflict commands can find and settle, either way
-    // round: the local body is the one the store holds, which the source
-    // contributed, and the remote body is the target's own.
     let listed = neverest(
         &["conflict", "list", "-a", "div", "--json"],
         &config,
@@ -513,8 +476,6 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
         0,
     );
 
-    // One run then carries each decision to both endpoints, and neither of the
-    // two bodies was lost on the way to it.
     sync(&config, &state, SEED_BOOK, 0);
     for side in [SOURCE, TARGET] {
         assert!(
@@ -528,8 +489,7 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
     }
 }
 
-/// The id `conflict list --json` gave the divergence of `handle`, which is what
-/// `conflict resolve` addresses it by.
+/// The id `conflict list --json` gave the divergence of `handle`.
 fn conflict_id(listing: &str, handle: &str) -> String {
     let listed: serde_json::Value = serde_json::from_str(listing).expect("conflict listing");
 
@@ -544,8 +504,9 @@ fn conflict_id(listing: &str, handle: &str) -> String {
         .to_owned()
 }
 
-/// The account every test runs: one source and one target, each a principal of
-/// the same Radicale, keeping a local copy of what crosses.
+/// The account every test runs: a source and a target, one principal each.
+///
+/// It keeps a local copy of what crosses.
 fn account() -> String {
     format!(
         "[accounts.div]\n\
@@ -561,12 +522,11 @@ fn account() -> String {
     )
 }
 
-/// Recreates a principal's address book, so a run starts from an empty one
-/// whatever the previous run left behind.
+/// Recreates a principal's address book, so a run starts from an empty one.
 ///
-/// Radicale does not create a collection on a member write (it answers the PUT
-/// with a 409), and the container keeps its storage between runs, so the book is
-/// deleted and made again with an explicit extended `MKCOL`.
+/// Radicale answers a member PUT into a missing collection with 409 and keeps
+/// its storage between runs, so the book is deleted and made again with an
+/// extended `MKCOL`.
 fn create_book(root: &Path, user: &str, book: &str) {
     let output = Command::new("curl")
         .args(["-sS", "-o", "/dev/null", "-X", "DELETE"])
@@ -680,8 +640,7 @@ fn sync(config: &Path, state: &Path, book: &str, code: i32) -> String {
     )
 }
 
-/// The store's live items for an address book, as the `pimdir` CLI renders
-/// them.
+/// The store's live items for an address book, as `pimdir` renders them.
 fn store_items(state: &Path, book: &str) -> String {
     let store = state.join("neverest");
     let output = pimdir_cli()
@@ -699,8 +658,9 @@ fn store_items(state: &Path, book: &str) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// Runs neverest and checks it ended on `code`, 2 being a run that reconciled
-/// and left a decision waiting.
+/// Runs neverest and checks it ended on `code`.
+///
+/// 3 is a run that reconciled and left a decision waiting.
 fn neverest(args: &[&str], config: &Path, state: &Path, code: i32) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
         .args(["-c", &config.to_string_lossy()])

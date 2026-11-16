@@ -1,36 +1,19 @@
-//! End-to-end CardDAV test against a local Radicale (`tests/radicale.sh`).
+//! # CardDAV
+//!
+//! End-to-end CardDAV test against a local Radicale (tests/radicale.sh).
 //! Ignored by default.
 //!
-//! This is the run that exercises what mail structurally cannot. Mail bodies
-//! are immutable, so until a DAV backend existed the revision plumbing (ETags,
-//! conditional writes), the conflict path and the retention of a mutable item
-//! were only ever driven by a fake remote. Here they meet a server:
+//! Mail bodies are immutable, so this is where revisions (ETags, conditional
+//! writes), the conflict path and the retention of a mutable item meet a
+//! server: two seeded cards land keyed by `UID`, a server edit is re-fetched,
+//! a server delete is retained, and a run with nothing changed is quiescent.
 //!
-//!   1. Seed two cards on the server (`curl` PUT), sync, and check the store
-//!      holds both, keyed by their vCard `UID`.
-//!   2. Edit one card **on the server**, sync, and check the store followed
-//!      the new body (the ETag moved, so the item is re-fetched).
-//!   3. Delete a card on the server, sync, and check it is **retained**, not
-//!      lost: the local copy and its body survive an upstream expunge.
-//!   4. Sync again with nothing changed and check the run is quiescent, which
-//!      is what proves a retained row is invisible to the merge rather than
-//!      re-derived on every run.
+//! The three runs after it play a frontend staging an edit through
+//! [`PimdirProducer`] while the server changes the same card (one source, no
+//! target, `retain` on): disjoint fields merge, the same field parks until a
+//! person resolves it, and an unreadable body is reported unmergeable.
 //!
-//! The three runs after it are the offline replica's own conflict path: one
-//! source, no target, `retain` on by default, and a **frontend** queueing an
-//! edit into the store while the server independently changes the same card.
-//! Nothing but a frontend produces that shape, so the test plays one, staging
-//! its edit through [`PimdirProducer`] exactly as himalaya would rather than
-//! through a second endpoint:
-//!
-//!   5. Disjoint fields merge, and the merged body reaches the server.
-//!   6. The same field on both sides parks, survives a rerun untouched, and
-//!      converges only once a person resolves it.
-//!   7. A body no parser reads is reported unmergeable rather than counted as
-//!      a collision nobody had.
-//!
-//! Each run owns an address book of its own and narrows the sync to it, so a
-//! run never meets what another seeded.
+//! Each run owns an address book of its own and narrows the sync to it.
 //!
 //! Start the server and run with:
 //! ```sh
@@ -98,6 +81,11 @@ fn noted_card(uid: &str, tel: &str, note: &str) -> String {
     )
 }
 
+/// A CardDAV side syncs, follows a server edit and retains a server delete.
+///
+/// Dry runs name what they would fetch: a DAV link id resolves only at `Full`,
+/// so upgrading the probe would land every body and read "already in sync",
+/// and a content change keeps the hub level, so a plan keyed on it skips it.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
@@ -108,18 +96,12 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
     fs::create_dir_all(&state).unwrap();
     fs::write(&config, account(ACCOUNT)).unwrap();
 
-    // 1. Two cards in a fresh address book, then a first sync.
     create_book(root, BOOK);
     put(root, BOOK, "card-1", &card("card-1", "Jane Doe"));
     put(root, BOOK, "card-2", &card("card-2", "John Doe"));
 
     neverest(&["init", "-a", ACCOUNT], &config, &state, 0);
 
-    // A dry run over a store that has never synced must name the cards it
-    // would fetch. A DAV kind resolves its link id only at `Full`, so
-    // upgrading the probe would download every body to print a plan and leave
-    // the placements looking complete, which reported an empty patch and
-    // "already in sync" for an account holding nothing.
     let plan = neverest(
         &["sync", "-a", ACCOUNT, "-m", BOOK, "-d", "--json"],
         &config,
@@ -143,13 +125,8 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
         "the summary carries the display name; store held:\n{items}",
     );
 
-    // 2. An in-place edit on the server: the ETag moves, so the sync must
-    //    re-fetch the body rather than trust what it cached.
     put(root, BOOK, "card-1", &card("card-1", "Jane Rewritten"));
 
-    // The re-fetch is reportable. A content change drops the stale object
-    // while the hub keeps the level the item had reached, so a plan keyed on
-    // the level would call an item whose body is about to be re-fetched done.
     let plan = neverest(
         &["sync", "-a", ACCOUNT, "-m", BOOK, "-d", "--json"],
         &config,
@@ -169,7 +146,6 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
         "the edited body reached the store; store held:\n{items}",
     );
 
-    // 3. A server-side delete is retained, never lost.
     delete(BOOK, "card-2");
     sync(&config, &state, ACCOUNT, BOOK, 0);
 
@@ -193,8 +169,6 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
         "the deleted card is retained, not lost; retained listing:\n{retained}",
     );
 
-    // 4. Nothing changed since: a retained row must be invisible to the merge,
-    //    not re-derived (which would re-upload it, forever).
     let report = sync(&config, &state, ACCOUNT, BOOK, 0);
     assert!(
         !report.contains("\"card-2\""),
@@ -202,10 +176,10 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
     );
 }
 
-/// Proves the offline replica's happy conflict path end to end: a frontend
-/// queues a note change while the server changes the phone number, and one
-/// run merges the two and carries the merged body back to the server, with
-/// nothing left waiting for a person.
+/// A queued edit and a server edit of different fields merge in one run.
+///
+/// The frontend changes the note, the server the phone number; the merged
+/// body goes back to the server, nothing left waiting for a person.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_queued_edit_and_a_server_edit_of_different_fields_merge_and_reach_the_server() {
@@ -227,8 +201,6 @@ fn a_queued_edit_and_a_server_edit_of_different_fields_merge_and_reach_the_serve
     neverest(&["init", "-a", REPLICA], &config, &state, 0);
     sync(&config, &state, REPLICA, MERGE_BOOK, 0);
 
-    // The frontend's half: an edit staged into the queue against the body the
-    // store just agreed on, which is the base the merge will read.
     queue_update(
         &state,
         REPLICA,
@@ -236,7 +208,6 @@ fn a_queued_edit_and_a_server_edit_of_different_fields_merge_and_reach_the_serve
         "card-1",
         &noted_card("card-1", "+1", "new"),
     );
-    // And the server's half, in a field the frontend left alone.
     put(
         root,
         MERGE_BOOK,
@@ -259,10 +230,10 @@ fn a_queued_edit_and_a_server_edit_of_different_fields_merge_and_reach_the_serve
     );
 }
 
-/// Proves the residual case parks rather than overwrites: the frontend and
-/// the server both set the phone number, the run ends conflicted without
-/// touching the server's body, a rerun changes nothing, and only a person's
-/// `--prefer-local` converges it.
+/// A queued edit and a server edit of the same field park, never overwrite.
+///
+/// The run ends conflicted without touching the server's body, a rerun
+/// changes nothing, and only a person's `--prefer-local` converges it.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_queued_edit_and_a_server_edit_of_the_same_field_park_until_a_person_decides() {
@@ -298,7 +269,6 @@ fn a_queued_edit_and_a_server_edit_of_the_same_field_park_until_a_person_decides
         &noted_card("card-1", "+3", "old"),
     );
 
-    // A run that leaves a decision waiting is neither a success nor a failure.
     let report = sync(&config, &state, REPLICA, COLLIDE_BOOK, 3);
     assert!(
         report.contains(r#""outstandingConflicts":1"#),
@@ -325,7 +295,6 @@ fn a_queued_edit_and_a_server_edit_of_the_same_field_park_until_a_person_decides
         "the server still holds its own body, unoverwritten",
     );
 
-    // A parked divergence waits for a person, however many runs go by.
     let report = sync(&config, &state, REPLICA, COLLIDE_BOOK, 3);
     assert!(
         !report.contains(r#""kind":"update""#),
@@ -336,7 +305,6 @@ fn a_queued_edit_and_a_server_edit_of_the_same_field_park_until_a_person_decides
         "the server's body survives a rerun",
     );
 
-    // The decision, then the run that carries it.
     let id = conflict_id(&listed, "card-1.vcf");
     neverest(
         &["conflict", "resolve", "-a", REPLICA, &id, "--prefer-local"],
@@ -353,15 +321,10 @@ fn a_queued_edit_and_a_server_edit_of_the_same_field_park_until_a_person_decides
     );
 }
 
-/// Proves an unreadable body is reported for what it is rather than counted
-/// as a disagreement nobody had: the item parks, the run names it unmergeable,
-/// and it never reads as a same-field collision.
+/// An unreadable body parks as unmergeable, never as a same-field collision.
 ///
-/// NOTE: the unreadable body is the queued one rather than the server's.
-/// Radicale validates on PUT and answers 400 to every malformed card, so no
-/// body a parser refuses can be planted through its HTTP API; the merge's
-/// `unparsed` arm names whichever of the three sides failed, so which one it
-/// is does not change what is under test.
+/// The queued body is the unreadable one: Radicale answers 400 to a malformed
+/// PUT, and the merge's `unparsed` arm names whichever side failed anyway.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_body_no_parser_reads_is_reported_unmergeable_rather_than_collided() {
@@ -437,20 +400,19 @@ fn account(name: &str) -> String {
     )
 }
 
-/// The address book of `account` as the store keys it: pimdir groups a
-/// collection under the id of the source that syncs it, the account then the
-/// source name, which for the direct-backend sugar is the protocol name.
+/// The address book of `account` as the store keys it.
+///
+/// Account, source, then book; for the direct-backend sugar the source name
+/// is the protocol name.
 fn collection(account: &str, book: &str) -> String {
     format!("{account}/carddav/{book}")
 }
 
-/// Stages an edit of one card into the store's action queue, the way a
-/// frontend does it: the body lands in the blob tree first, then the action
-/// pinning it is appended, so a collector never runs between the two.
+/// Stages an edit of one card into the action queue, as a frontend does.
 ///
-/// This is the half of a single-endpoint conflict no server can produce, and
-/// io-pimdir is neverest's own dependency, so the test writes it directly
-/// rather than pretending a second endpoint is a frontend.
+/// The body lands first, then the action pinning it, standing over whatever
+/// the item holds; no server can produce this half of a single-endpoint
+/// conflict, so the test writes it through io-pimdir directly.
 fn queue_update(state: &Path, account: &str, book: &str, link_id: &str, body: &str) {
     let dir = store_dir(state);
     let collection = collection(account, book);
@@ -462,7 +424,6 @@ fn queue_update(state: &Path, account: &str, book: &str, link_id: &str, body: &s
         .unwrap_or_else(|| panic!("no item {link_id} in {collection}"));
     drop(reader);
 
-    // NOTE: no body was read, the edit standing over whatever the item holds.
     let mut producer = PimdirProducer::open(&dir, "carddav-test").expect("open the store to stage");
     producer
         .enqueue_with_body(&collection, body.as_bytes(), |object| {
@@ -610,15 +571,17 @@ fn store_items(state: &Path, account: &str, book: &str) -> String {
     )
 }
 
-/// Where the account's pimdir store lives under the run's state directory,
-/// the one every account naming no root shares.
+/// The account's store under the run's state directory.
+///
+/// Every account naming no root shares it.
 fn store_dir(state: &Path) -> PathBuf {
     state.join("neverest")
 }
 
-/// Runs the `pimdir` operator CLI against the run's store. It is the
-/// observation tool for everything the sync did not print, retention above
-/// all, and it comes from the io-pimdir crate rather than from neverest.
+/// Runs the `pimdir` operator CLI against the run's store.
+///
+/// It observes what the sync did not print, retention above all, and comes
+/// from io-pimdir rather than from neverest.
 fn pimdir(state: &Path, args: &[&str]) -> String {
     let store = store_dir(state);
     let output = pimdir_cli()

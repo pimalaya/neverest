@@ -3,33 +3,29 @@
 //! [`GmailClient`] wraps io-gmail's std client behind the adapter surface the
 //! sync engine needs, syncing `message/rfc822` over the Gmail REST API.
 //!
-//! Gmail holds one message carrying a set of labels, which is pimdir's one
-//! item filed in several collections. The collections are the user labels
-//! plus [`SYSTEM_COLLECTIONS`], keyed and named by the label name, the way
-//! IMAP exposes them, so a Gmail endpoint meets an IMAP one on the same
-//! account. `UNREAD`, `STARRED` and `IMPORTANT` are flags, never collections,
-//! and the categories are left out: they partition `INBOX`.
+//! A message carries a set of labels, pimdir's one item in several collections:
+//! the user labels plus [`SYSTEM_COLLECTIONS`], named as IMAP shows them, so
+//! Gmail meets IMAP on one account. `UNREAD`, `STARRED` and `IMPORTANT` are
+//! flags; the categories, partitioning `INBOX`, are left out.
 //!
-//! A handle is the Gmail message id, stable across labels, so no handle-space
-//! rebuild ever happens. `enumerate` carries the mailbox `historyId` as the
-//! checkpoint: a full round lists the label's ids (plus three id-only listings
-//! for the flags), a delta round projects on the label the mailbox history,
-//! read once a run, and an expired history id (HTTP 404) restarts a full
-//! round. While a round is open, a run resuming it lists its delta head
-//! first (pimdir SYNC §4): the same projection from the round's history id,
-//! so what arrives during a long round shows before it closes; the label's
-//! later pages read what the head touched anew.
+//! A handle is the Gmail message id, stable across labels, so no rekey ever
+//! happens. The checkpoint is the mailbox `historyId`: a full round lists the
+//! label's ids (plus three id-only flag listings), a delta projects the mailbox
+//! history on the label, and an expired history id (404) restarts.
+//!
+//! A run resuming an open round lists its delta head first (pimdir SYNC §4),
+//! the same projection from the round's history id, so arrivals show before it
+//! closes; the label's later pages read what the head touched anew.
 //!
 //! Messages are read through Gmail's HTTP batch endpoint, a batch of a few
-//! reads at a time across the source ([`super::batch`]), paced by the units
-//! its reads cost; a message read under one label is not read again under
-//! another in the same run ([`super::run`]).
+//! reads at a time across the source ([`super::batch`]), paced by the units its
+//! reads cost; a message read under one label is not read again under another
+//! in the same run ([`super::run`]).
 //!
 //! Pushes are label changes: a delete removes the collection's label (from
-//! `INBOX` it archives), a move swaps two labels, and only a delete from
-//! `TRASH` is permanent. A message gone already counts as done. An append
-//! goes through `messages.import`, whose answered id is checked before it is
-//! trusted.
+//! `INBOX` it archives), a move swaps two, and only a delete from `TRASH` is
+//! permanent. A message gone counts as done. An append goes through
+//! `messages.import`, its answered id checked before it is trusted.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
@@ -131,11 +127,9 @@ const IMPORT_ATTEMPTS: u32 = 3;
 /// The quota units a second the Gmail source holds itself to, across all its
 /// connections.
 ///
-/// Gmail meters each user at 250 units a second, `messages.list` and
-/// `messages.get` costing 5 each: about 50 reads a second, batched or not, a
-/// batch counting each request it carries. 200 is 40 reads a second, a margin
-/// below the quota rather than a run of refusals at it. The minute's budget
-/// ([`super::run::UNITS_PER_MINUTE`]) is what binds a long run.
+/// Gmail meters a user at 250 units a second, a `messages.get` costing 5,
+/// batched or not: 200 is 40 reads a second, a margin below the quota. The
+/// minute's budget ([`super::run::UNITS_PER_MINUTE`]) binds.
 pub const UNITS_PER_SECOND: f64 = 200.0;
 
 /// What one `messages.get` costs, a batch costing it for each read.
@@ -186,9 +180,9 @@ pub struct GmailClient {
     throttle: Arc<Throttle>,
     /// What the source's connections share for the run.
     run: Arc<GmailRun>,
-    /// The flag sets of the last label and query a round page read, and
-    /// when, kept for the run so the next page lists them again for
-    /// nothing.
+    /// The flag sets of the last label and query a round page read, and when.
+    ///
+    /// Kept for the run so the next page does not list them again for nothing.
     flag_sets: Option<((String, Option<String>), Instant, FlagSets)>,
 }
 
@@ -254,14 +248,12 @@ impl GmailClient {
             .ok_or_else(|| GmailClientStdError::Io(io::Error::other("no gmail batch session")))
     }
 
-    /// Runs one Gmail operation costing `units` of quota, reopening the
-    /// stream first when the server closed it, and records the new
-    /// keep-alive hint.
+    /// Runs one Gmail operation costing `units` of quota, reopening a closed
+    /// stream first and recording the new keep-alive hint.
     ///
-    /// The source's [`Throttle`] paces it and sends it again while Gmail
-    /// throttles it (429, a 502 to 504, or a 403 rate limit), by the reason
-    /// Google gives ([`google_send`]). A request creating something goes
-    /// through [`create`](Self::create) instead.
+    /// The source's [`Throttle`] paces it and resends it while Gmail throttles
+    /// it (429, 502 to 504, a 403 rate limit), by Google's reason
+    /// ([`google_send`]); creations go through [`create`](Self::create).
     fn op<T>(
         &mut self,
         units: u32,
@@ -270,9 +262,10 @@ impl GmailClient {
         self.send(Host::Api, Request::Idempotent, units, run)
     }
 
-    /// Runs one Gmail request that creates something (a label, an imported
-    /// message): sent again on a refusal Gmail answers before doing anything
-    /// (429, a rate limit), never on a 5xx, after which it may exist.
+    /// Runs one Gmail request that creates something (a label, an import).
+    ///
+    /// Sent again on a refusal Gmail answers before doing anything (429, a rate
+    /// limit), never on a 5xx, after which it may exist.
     fn create<T>(
         &mut self,
         units: u32,
@@ -395,8 +388,10 @@ impl GmailClient {
     }
 
     /// Creates the label `name` under `parent`, the top level when `None`,
-    /// unless a label already goes by that name, and answers the collection
-    /// name it is listed under (pimdir Annex B.2 `collection-create`).
+    /// answering the collection name it is listed under.
+    ///
+    /// An existing label of that name is answered as is (pimdir Annex B.2
+    /// `collection-create`).
     pub fn create_child_label(&mut self, parent: Option<&str>, name: &str) -> Result<String> {
         let label = child_label(parent, name)?;
         self.list_labels()?;
@@ -449,15 +444,12 @@ impl GmailClient {
         Ok(())
     }
 
-    /// Renames the label `label` to `name` under the parent it has, every
-    /// label nested under it following, the deepest first, and answers what
-    /// it is then (pimdir Annex B.2 `collection-rename`).
+    /// Renames the label `label` to `name` under its parent, its nested labels
+    /// following, answering what it is then (pimdir Annex B.2).
     ///
-    /// Gmail nests a label by its name, so the labels under it are renamed
-    /// one by one; a run cut between two resumes from what is left. One
-    /// already so named, or gone where the new name stands, is success; a
-    /// system label, a sibling already named `name` and a label gone with
-    /// nothing in its place are refused.
+    /// Gmail nests by name, so nested labels go one by one, deepest first, a
+    /// cut run resuming from the old names; names match ignoring case. Done
+    /// already is success; a system label, a taken name or one gone is refused.
     pub fn rename_label(&mut self, label: &str, name: &str) -> Result<Renamed> {
         let refused = |why: String| Err(anyhow::Error::new(Refusal(why)));
 
@@ -485,8 +477,6 @@ impl GmailClient {
             .map(|(name, id)| (name.clone(), id.clone()))
             .collect();
         match (held(&self.labels, label), held(&self.labels, &target)) {
-            // NOTE: Gmail matches names ignoring case, so a rename changing
-            // the case alone finds the label itself under the new name.
             (Some(held), Some(other)) if held != other => {
                 return refused(format!("Gmail label {target} already exists"));
             }
@@ -496,8 +486,6 @@ impl GmailClient {
             _ => {}
         }
 
-        // NOTE: the deepest first, so a cut run leaves every label it did
-        // not reach under the old name, where the next attempt finds it.
         nested.sort_by_key(|(name, _)| std::cmp::Reverse(name.matches('/').count()));
         if let Some(id) = held(&self.labels, label) {
             nested.push((label.to_owned(), id));
@@ -518,11 +506,11 @@ impl GmailClient {
         Ok(renamed)
     }
 
-    /// Deletes the label `label`, unless a label is nested under it (pimdir
-    /// Annex B.2 `collection-delete`). Its messages keep their other labels,
-    /// in All Mail at least: Gmail deletes no message with a label.
+    /// Deletes the label `label` (pimdir Annex B.2 `collection-delete`).
     ///
-    /// One already gone is success; a system label is refused.
+    /// Refused with a label nested under it or as a system label; one already
+    /// gone is success. Its messages keep their other labels, All Mail at
+    /// least: Gmail deletes no labelled message.
     pub fn delete_label(&mut self, label: &str) -> Result<()> {
         if is_system(label) {
             return Err(anyhow::Error::new(Refusal(format!(
@@ -554,19 +542,12 @@ impl GmailClient {
         Ok(())
     }
 
-    /// Lists one page of a label (pimdir SYNC §4).
+    /// Lists one page of a label (pimdir SYNC §4), no band head: Gmail dates
+    /// no label change.
     ///
-    /// A delta projects on the label the mailbox history since the
-    /// checkpoint's history id, read once a run, an expired one (HTTP 404)
-    /// being a rejected checkpoint. A round lists the label newest first,
-    /// [`ROUND_PAGE_SIZE`] ids a page under the scope's `after:` (two days
-    /// below `since`, a superset of the scope on `Date`), never a band's
-    /// `before:` ([`floor_of`]), its cursor the page token; its first page
-    /// carries the profile's history id, read before the listing, so what
-    /// lands during the round is the next delta's, or the head's of a run
-    /// resuming it. A delta head is the delta from the round's history id,
-    /// an expired one rejecting the head; Gmail dates no label change, so
-    /// it lists no band head.
+    /// A delta projects the history since the checkpoint, an expired id
+    /// rejecting it; a round lists newest first, [`ROUND_PAGE_SIZE`] ids a page
+    /// under `after:` ([`floor_of`]).
     pub fn enumerate(
         &mut self,
         collection: &str,
@@ -610,10 +591,10 @@ impl GmailClient {
         }
     }
 
-    /// The head of an open round (pimdir SYNC §4): the label's changes
-    /// since `checkpoint`, answered as a delta, with the history id Gmail
-    /// holds now. What it touched is recorded for the run, so the label's
-    /// later pages read it anew rather than as it stood before the head.
+    /// The head of an open round (pimdir SYNC §4): the label's changes since
+    /// `checkpoint` as a delta, with the history id Gmail holds now.
+    ///
+    /// What it touched is recorded, so later pages read it anew.
     fn delta_head(
         &mut self,
         collection: &str,
@@ -652,13 +633,9 @@ impl GmailClient {
 
     /// One page of a round over `scope`, from its start or from `token`.
     ///
-    /// The members the store binds are named by their binding and flagged
-    /// from the label's flag listings; the others by their metadata, read in
-    /// batches, or kept from another label's listing this run, then flagged
-    /// as the bound ones are. A message read here that no longer carries
-    /// the label is left out; one a head of the label touched this run is
-    /// read again unless the run read it since the head, its labels then
-    /// deciding its membership and flags.
+    /// Bound and kept members are flagged from this label's listings, the rest
+    /// read; one a head touched is read after the head, one gone left out, and
+    /// a narrowed last page hands all the label's ids.
     fn round_page(
         &mut self,
         collection: &str,
@@ -705,10 +682,6 @@ impl GmailClient {
         };
 
         let run = Arc::clone(&self.run);
-        // NOTE: a message a head of this label touched is read no earlier
-        // than the head, so the page never lists it as it stood before a
-        // removal the head stated, whatever Gmail's page token lists (pimdir
-        // SYNC §4).
         let head = run.head(label);
         let since = head.as_ref().map(|head| head.at);
         let touched = |id: &str| head.as_ref().is_some_and(|head| head.touched.contains(id));
@@ -738,9 +711,6 @@ impl GmailClient {
         }
 
         let mut items = Vec::with_capacity(bound.len() + kept.len() + unread.len());
-        // NOTE: a message kept from another label's listing names itself by
-        // its headers, but its flags may have moved since: they are read
-        // from this label's listings, as a bound one's are.
         if !bound.is_empty() || !kept.is_empty() {
             let flags = self.flag_sets(label, query.as_deref(), since)?;
             items.extend(bound.into_iter().map(|id| {
@@ -754,10 +724,6 @@ impl GmailClient {
             }));
         }
 
-        // NOTE: a message read since the listing that no longer carries the
-        // label left it meanwhile, and one gone (404) is gone: both are left
-        // out, absent from the round as they are from the label. A round
-        // page states no removal.
         let mut left = Vec::new();
         for (id, holds, message) in fresh {
             settle(label, id, holds, &message, &mut items, &mut left);
@@ -788,13 +754,6 @@ impl GmailClient {
             trace!("left: {left:?}");
         }
 
-        // NOTE: `after:` reads the arrival, so it misses an undated draft
-        // received before the window and a message whose `Date` runs ahead
-        // of its arrival: a narrowed round's last page hands every id of the
-        // label, which no date filter narrowed (pimdir SYNC §4, §5), ids
-        // alone, PAGE_SIZE a listing, read after the page's own. A band
-        // round hands it too, a narrowed round handing none finding no
-        // member absent.
         let narrowed = query.is_some();
         let enumerated = match narrowed && page.next_page_token.is_none() {
             true => Some(
@@ -823,9 +782,10 @@ impl GmailClient {
         }))
     }
 
-    /// The flag-like labels of a label's messages under `query`, as three
-    /// id-only listings read once a run rather than one get a message, and
-    /// again when read before `since`, the label's head.
+    /// The flag-like labels of a label's messages under `query`.
+    ///
+    /// Three id-only listings read once a run rather than one get a message,
+    /// and again when read before `since`, the label's head.
     fn flag_sets(
         &mut self,
         label: &str,
@@ -898,12 +858,11 @@ impl GmailClient {
         }
     }
 
-    /// Reads the history since `start`, paged, returning the records and
-    /// the mailbox history id the next round starts from: the mailbox's
-    /// whole history, or `label`'s.
+    /// Reads the history since `start`, paged: the mailbox's whole, or
+    /// `label`'s.
     ///
-    /// The error comes back unwrapped, so the caller can tell an expired
-    /// history id (404) from any other failure.
+    /// Answers the records and the history id the next round starts from; the
+    /// error comes back unwrapped, telling an expired history id (404) apart.
     fn history(
         &mut self,
         label: Option<&str>,
@@ -968,12 +927,9 @@ impl GmailClient {
 
     /// Folds a label's changes into a delta.
     ///
-    /// History records are increments, not state, so every changed message's
-    /// current labels are read before it is reported, in batches: its labels
-    /// alone for one the store binds, its metadata for one it does not, which
-    /// names it, unless another label read it since the history was. Still
-    /// carrying the label, it is an item with its flags; otherwise or gone,
-    /// it vanished.
+    /// Records are increments, not state, so each changed message is read again
+    /// (its labels, or its metadata when unbound): still labelled, it is an
+    /// item; otherwise or gone, it vanished.
     fn delta_round(
         &mut self,
         collection: &str,
@@ -1050,14 +1006,12 @@ impl GmailClient {
         Ok(summaries)
     }
 
-    /// Streams the bodies of an id set, by batches of raw reads, each body
-    /// written to its sink as its batch lands, and answers the ids gone
-    /// since they were listed.
+    /// Streams the bodies of an id set by batches of raw reads, each written to
+    /// its sink as its batch lands, answering the ids gone since listed.
     ///
-    /// A batch holds about [`batch::RAW_BATCH_BYTES`] by the sizes the run
-    /// read with the metadata, else those the store records (`stored`), a
-    /// message past [`batch::ALONE_BYTES`] being read alone; a size neither
-    /// knows comes from a minimal read first.
+    /// Sizes come from the run's metadata reads, else the store (`stored`),
+    /// else a minimal read; a batch holds about [`batch::RAW_BATCH_BYTES`], one
+    /// past [`batch::ALONE_BYTES`] alone.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         ids: &[&str],
@@ -1069,8 +1023,6 @@ impl GmailClient {
         let mut sizes: HashMap<String, u64> = HashMap::with_capacity(ids.len());
         let mut unknown = Vec::new();
         for id in ids {
-            // NOTE: the run's own read first, which also drops it from the
-            // run's cache, then the store's, a resumed hydration's.
             match run
                 .take_size(id)
                 .or_else(|| stored(id).filter(|size| *size > 0))
@@ -1146,9 +1098,9 @@ impl GmailClient {
     /// Imports a message into a label with its flags, keeping its own date
     /// and `Message-ID`, and returns the id it really got.
     ///
-    /// `import` may answer an id that 404s, so the answer is checked, and
-    /// on a miss the message is found again by `hint` (its `Message-ID`)
-    /// among the ones the label's history added since the call.
+    /// `import` may answer an id that 404s, so the answer is checked; on a miss
+    /// the message is found by `hint`, a derived `Message-ID` compared as it
+    /// stands, among what the label's history added since the call.
     pub fn add_item_stream(
         &mut self,
         collection: &str,
@@ -1212,7 +1164,6 @@ impl GmailClient {
             }
         }
 
-        // NOTE: the hint is a derived id already, compared as it stands.
         let Some(hint) = hint.filter(|hint| !hint.is_empty()) else {
             bail!(
                 "Gmail answered import id {answered}, which does not exist, and the message has no Message-ID to find it by"
@@ -1250,9 +1201,10 @@ impl GmailClient {
         )
     }
 
-    /// Deletes one message from a label by removing that label, which
-    /// archives when it is `INBOX`; from `TRASH` it is deleted for good. A
-    /// message gone already is deleted.
+    /// Deletes one message from a label by removing that label.
+    ///
+    /// From `INBOX` it archives, from `TRASH` it deletes for good; a message
+    /// gone already is deleted.
     pub fn delete_item(&mut self, collection: &str, id: &str) -> Result<()> {
         let label = self.label_id(collection)?;
 
@@ -1286,9 +1238,10 @@ impl GmailClient {
             .with_context(|| format!("Move messages from {from} to {to} error"))
     }
 
-    /// Adds `add` and removes `remove` as `UNREAD`, `STARRED` and
-    /// `IMPORTANT` label changes, in one modify naming only the labels
-    /// they map to; flags with no Gmail label are dropped.
+    /// Adds `add` and removes `remove` as `UNREAD`, `STARRED` and `IMPORTANT`
+    /// label changes.
+    ///
+    /// One modify names only the labels they map to; flags with no label drop.
     pub fn update_flags(&mut self, ids: &[&str], add: &[Flag], remove: &[Flag]) -> Result<()> {
         let (mut labels_add, mut labels_remove) = label_patch(add, FlagOp::Add);
         let (more_add, more_remove) = label_patch(remove, FlagOp::Remove);
@@ -1362,15 +1315,16 @@ struct LiveBatcher<'c> {
 }
 
 impl Batcher for LiveBatcher<'_> {
-    /// One batch to the batch endpoint, through the source's gate (one
-    /// batch in flight by default) and paced by the units of all its reads.
+    /// One batch to the batch endpoint, through the source's gate (one batch in
+    /// flight by default) and paced by the units of all its reads.
+    ///
+    /// Each read is tagged by its index, whatever its id holds.
     fn batch(
         &mut self,
         ids: &[String],
         read: ReadAs,
     ) -> Result<Vec<GmailBatchResponse<GmailMessage>>> {
         let user = self.client.inner.client.user_id.clone();
-        // NOTE: each read is tagged by its index, whatever its id holds.
         let requests = ids
             .iter()
             .enumerate()
@@ -1479,9 +1433,10 @@ fn reopen(tls: &Tls, proxy: &Proxy, url: &'static str) -> Reopen<GmailClientStd>
     })
 }
 
-/// Whether a Gmail answer in an error chain refused the change as it
-/// stands, its status naming the request ([`names_the_request`]); a rate
-/// limit is told apart by [`crate::error::refusal`].
+/// Whether a Gmail answer in an error chain refused the change as it stands.
+///
+/// Its status names the request ([`names_the_request`]); a rate limit is told
+/// apart by [`crate::error::refusal`].
 pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
     match cause.downcast_ref::<GmailClientStdError>() {
         Some(GmailClientStdError::Send(GmailSendError::Api(err))) => names_the_request(err.status),
@@ -1518,9 +1473,10 @@ fn raw_body(id: &str, mut message: GmailMessage) -> Result<Vec<u8>> {
     decode_raw(&raw).map_err(|err| anyhow!("Decode raw message {id} error: {err}"))
 }
 
-/// Keeps a message read at `at` for the rest of the run: whole when it
-/// carries another label synced as a collection, which will list it too,
-/// else its size alone, for its body read.
+/// Keeps a message read at `at` for the rest of the run.
+///
+/// Whole when it carries another label synced as a collection, which will list
+/// it too, else its size alone, for its body read.
 fn keep(
     run: &GmailRun,
     shared: &HashSet<String>,
@@ -1606,11 +1562,11 @@ fn named_entry(id: &str, message: &GmailMessage) -> EnumEntry {
     }
 }
 
-/// The search narrowing a listing to a scope's floor: `after:`
-/// [`SCOPE_MARGIN_DAYS`] below `since`, in epoch seconds, which Gmail reads
-/// as an instant rather than its own midnight. Never `before:`, which reads
-/// the arrival too ([`floor_of`]). A superset of the messages whose `Date`
-/// is in scope, which the local check decides.
+/// The search narrowing a listing to a scope's floor.
+///
+/// `after:` [`SCOPE_MARGIN_DAYS`] below `since`, in epoch seconds read as an
+/// instant, never `before:`, which reads the arrival ([`floor_of`]): a superset
+/// of the scope by `Date`.
 fn scope_query(scope: &PimdirScope) -> Option<String> {
     let since = DateTime::parse_from_rfc3339(scope.since.as_deref()?).ok()?;
     let at = since.checked_sub_signed(chrono::Duration::days(SCOPE_MARGIN_DAYS))?;
@@ -1638,9 +1594,10 @@ fn system_role(id: &str) -> Option<&'static str> {
     }
 }
 
-/// The label a `collection-create` asks Gmail for: `name` under `parent`,
-/// Gmail nesting a label by its name (`Parent/Child`). A system label
-/// takes no child, and a name holding `/` would nest by itself.
+/// The label a `collection-create` asks Gmail for: `name` under `parent`.
+///
+/// Gmail nests a label by its name (`Parent/Child`); a system label takes no
+/// child, and a name holding `/` would nest by itself.
 fn child_label(parent: Option<&str>, name: &str) -> Result<GmailLabel> {
     if name.trim().is_empty() || name.contains('/') {
         return Err(anyhow::Error::new(Refusal(format!(
@@ -1683,9 +1640,10 @@ fn lookup_label(labels: &HashMap<String, String>, name: &str) -> Option<String> 
         .map(|(_, id)| id.clone())
 }
 
-/// Whether a message carrying `label_ids` is a member of `label`'s
-/// collection: a spam or trashed message is one of `SPAM` or `TRASH` only,
-/// as the listings exclude it everywhere else.
+/// Whether a message carrying `label_ids` is a member of `label`'s collection.
+///
+/// A spam or trashed message is one of `SPAM` or `TRASH` only, as the listings
+/// exclude it everywhere else.
 fn belongs(label_ids: &[String], label: &str) -> bool {
     let has = |id: &str| label_ids.iter().any(|l| l == id);
     has(label) && (label == SPAM || label == TRASH || !(has(SPAM) || has(TRASH)))
@@ -1778,12 +1736,9 @@ fn label_of(flag: &Flag) -> Option<(&'static str, bool)> {
 
 /// What names a message read as metadata (pimdir STORAGE Annex A.1).
 ///
-/// The headers a summary reads are laid out as the header block they came
-/// from, each from its first entry, a folded value unfolded there, and
-/// read by io-pimdir's own derivation, the one a body is read with, so
-/// both tiers agree byte-for-byte. The size is Gmail's estimate and the
-/// attachment mark the top-level `Content-Type`'s, both restated from the
-/// body at the `Full` tier.
+/// The headers a summary reads are laid out as their header block, each from
+/// its first entry, unfolded, and read by io-pimdir's body derivation, so both
+/// tiers agree. Size and attachment mark are Gmail's, restated at `Full`.
 fn message_meta(message: &GmailMessage) -> PimdirDerivation {
     let mut header = String::new();
     for name in batch::SUMMARY_HEADERS {
@@ -2038,9 +1993,11 @@ mod tests {
         assert_eq!(summary.size, Some(2048));
     }
 
-    /// A message is named off its metadata headers as its body would name
-    /// it (pimdir STORAGE Annex A.1, vectors/summaries.json): a commented
-    /// `Message-ID`, a folded `Subject` and a field stated twice among them.
+    /// A message is named off its metadata headers as its body would name it
+    /// (pimdir STORAGE Annex A.1, vectors/summaries.json).
+    ///
+    /// A commented `Message-ID`, a folded `Subject` and a field stated twice
+    /// among them.
     #[test]
     fn a_metadata_get_is_keyed_as_the_vectors_state() {
         for vector in &VECTORS {
@@ -2089,9 +2046,11 @@ mod tests {
         assert_eq!(decode_checkpoint(&[0xff, 0xfe]), None);
     }
 
-    /// A listed message is named by its metadata: the `Date` header, never
-    /// Gmail's `internalDate`, the flags of its labels, and the attachment
-    /// mark from the top-level `Content-Type`, both ways.
+    /// A listed message is named by its metadata.
+    ///
+    /// The `Date` header, never Gmail's `internalDate`, the flags of its
+    /// labels, and the attachment mark from the top-level `Content-Type`, both
+    /// ways.
     #[test]
     fn a_listed_message_is_named_by_its_metadata() {
         let message: GmailMessage = serde_json::from_str(
@@ -2139,10 +2098,10 @@ mod tests {
         assert_eq!(summary.date, None);
     }
 
-    /// The search reaches two days below the scope, in epoch seconds Gmail
-    /// reads as instants, its own midnights being Pacific, and never caps
-    /// a band: `before:` reads the arrival, which may lie long after the
-    /// `Date`.
+    /// The search reaches two days below the scope and never caps a band.
+    ///
+    /// Epoch seconds are instants, Gmail's own midnights being Pacific;
+    /// `before:` reads the arrival, which may lie long after the `Date`.
     #[test]
     fn a_scope_narrows_the_listing_with_a_margin() {
         assert_eq!(scope_query(&PimdirScope::unbounded()), None);
@@ -2233,9 +2192,10 @@ mod tests {
         }
     }
 
-    /// A message under two labels is read once a run: the second label's
-    /// listing names it from what the first read, its flags from its own
-    /// flag listings.
+    /// A message under two labels is read once a run.
+    ///
+    /// The second label's listing names it from what the first read, its flags
+    /// from its own flag listings (another client read it since).
     #[test]
     fn a_message_under_two_labels_is_read_once() {
         let (mut client, api, batch) = scripted();
@@ -2256,7 +2216,6 @@ mod tests {
             serde_json::json!({ "emailAddress": "user@example.org", "historyId": "501" }),
         ));
         api.answer(listed(&["m1"]));
-        // NOTE: read since, by another client.
         api.answer(listed(&[]));
         api.answer(listed(&["m1"]));
         api.answer(listed(&[]));
@@ -2327,10 +2286,11 @@ mod tests {
         assert_eq!(api.left() + batch.left(), 0);
     }
 
-    /// A band round narrowed by `after:` hands, on its last page, every id
-    /// of the label listed with no query, as a scoped round does (pimdir
-    /// SYNC §4, §5): a narrowed round handing none finds no member absent,
-    /// so a delete in the band would go unseen (pimdir vectors 160, 161).
+    /// A band round narrowed by `after:` hands every id of the label on its
+    /// last page, as a scoped round does (pimdir SYNC §4, §5).
+    ///
+    /// A narrowed round handing none finds no member absent, so a delete in the
+    /// band would go unseen (pimdir vectors 160, 161).
     #[test]
     fn a_band_round_hands_the_label_s_ids_on_its_last_page() {
         let (mut client, api, _) = scripted();
@@ -2385,9 +2345,11 @@ mod tests {
         }
     }
 
-    /// A write Gmail answers with a status naming the request (400, a 403
-    /// for rights) is refused as it stands; a stale base (409, 412) and a
-    /// rate limit (a 403 naming one) stay rejected (pimdir SYNC §4).
+    /// A write Gmail answers with a status naming the request is refused.
+    ///
+    /// A 400 or a 403 for rights is refused as it stands; a stale base (409,
+    /// 412) and a rate limit (a 403 naming one) stay rejected (pimdir SYNC
+    /// §4).
     #[test]
     fn a_write_refused_as_it_stands_is_told_by_its_status() {
         let invalid = r#"{"error":{"code":400,"message":"Invalid id value","errors":[{"reason":"invalidArgument"}]}}"#;
@@ -2454,9 +2416,11 @@ mod tests {
         ids
     }
 
-    /// A delta head lists what changed in the label since the round's
-    /// history id, as a delta does: an arrival named by its metadata, a
-    /// deletion stated at once, and the history id Gmail holds now.
+    /// A delta head lists what changed in the label since the round's history
+    /// id, as a delta does.
+    ///
+    /// An arrival named by its metadata, a deletion stated at once, and the
+    /// history id Gmail holds now.
     #[test]
     fn a_head_lists_the_label_since_the_round_began() {
         let (mut client, api, batch) = scripted();
@@ -2522,15 +2486,16 @@ mod tests {
         assert_eq!(api.lines().len(), 1, "only the expired history asked");
     }
 
-    /// A page after a head never lists a member as it stood before the
-    /// head: what the head touched is read again unless read since, its
-    /// labels deciding, and a member read without the label is left out.
+    /// A page after a head never lists a member as it stood before the head.
+    ///
+    /// What it touched is read again unless read since (m3, read before it),
+    /// its labels deciding; m1 and m4, off the label but still in the page
+    /// token's list, are left out.
     #[test]
     fn a_page_after_a_head_reads_what_it_touched_anew() {
         let (mut client, api, batch) = scripted();
         let held_ids = HashSet::from([String::from("m1"), String::from("m2")]);
 
-        // NOTE: read under Work earlier in the run, before the head.
         let m3 = serde_json::from_value(metadata("m3", &["INBOX", "Label_1"])).unwrap();
         client.run.keep(&m3, true, Instant::now());
 
@@ -2569,8 +2534,6 @@ mod tests {
             "m3 read again: the run's read predates the history"
         );
 
-        // NOTE: since the head, m1 and m4 left the inbox, and the page token
-        // lists them still.
         api.answer(ok(serde_json::json!({
             "messages": [{ "id": "m1" }, { "id": "m2" }, { "id": "m3" }, { "id": "m4" }]
         })));
@@ -2696,8 +2659,11 @@ mod tests {
         serde_json::json!({ "id": id, "raw": encode_raw(source.as_bytes()) })
     }
 
-    /// The batch size lives on the run: a concurrency refusal a read meets
-    /// cuts it there, and the next read of the source starts from it.
+    /// The batch size lives on the run: a concurrency refusal a read meets cuts
+    /// it there, and the next read of the source starts from it.
+    ///
+    /// From 2, a full batch of two doubles it to 4 and m5 alone leaves it; a
+    /// read starting at the ceiling would send all three, miss m5 and end at 2.
     #[test]
     fn a_refusal_cuts_the_size_the_run_shares() {
         let (mut client, _, batch) = scripted();
@@ -2756,9 +2722,6 @@ mod tests {
             )
             .unwrap();
         assert_eq!(bodies.len(), 5);
-        // Started at the 2 the run holds: a full batch of two doubles it to 4,
-        // and m5 alone, not a full batch, leaves it there. A read starting at
-        // the ceiling would send all three, miss m5's answer and end at 2.
         assert_eq!(batch.lines().len(), 4);
         assert_eq!(client.run.batch_size.lock().unwrap().current(), 4);
         assert_eq!(batch.left(), 0);
@@ -2852,9 +2815,11 @@ mod tests {
         assert!(!Gone::is(&err), "another refusal is no gone: {err:#}");
     }
 
-    /// A push removing `\Flagged` from a message listed seen and flagged
-    /// names only `STARRED` (pimdir SYNC §4): another client marking it
-    /// unread or important after the listing keeps it so.
+    /// A push removing `\Flagged` from a message listed seen and flagged names
+    /// only `STARRED` (pimdir SYNC §4).
+    ///
+    /// Another client marking it unread or important after the listing keeps it
+    /// so.
     #[test]
     fn a_flag_push_names_only_the_labels_it_changes() {
         let (mut client, api, _) = scripted();
@@ -2873,6 +2838,8 @@ mod tests {
     }
 
     /// A write on a message gone already has nothing left to do.
+    ///
+    /// A batch modify answered 404 is done again one by one.
     #[test]
     fn a_write_on_a_message_gone_converges() {
         let gone = || {
@@ -2892,7 +2859,6 @@ mod tests {
             .update_flags(&["m1"], &[Flag::from_iana(IanaFlag::Flagged)], &[])
             .unwrap();
 
-        // NOTE: a batch modify answered 404 is done again one by one.
         api.answer(gone());
         api.answer(ok(
             serde_json::json!({ "id": "m2", "labelIds": ["Label_1"] }),

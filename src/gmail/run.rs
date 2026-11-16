@@ -4,12 +4,10 @@
 //! settings and the gate its batches go through, the metadata and sizes it
 //! already read, and the mailbox history it read once.
 //!
-//! Gmail holds one message under several labels, each a collection, so the
-//! listing of each label meets the same message again. The run reads it
-//! once: a message read under one label, carrying others, is kept until
-//! they list it, and the history is read once for the mailbox, then
-//! projected on each label. Every cache is bounded, the oldest entries
-//! leaving first, a miss costing one read more, never a wrong answer.
+//! Gmail files one message under several labels, each a collection, so the
+//! run reads it once: kept until its other labels list it, the history read
+//! once and projected on each label. Every cache is bounded, oldest first
+//! out, a miss costing one more read, never a wrong answer.
 //!
 //! A head listed on a label (pimdir SYNC §4) is recorded with what it
 //! touched, so the label's later pages read those messages anew rather
@@ -27,10 +25,11 @@ use io_gmail::v1::{
     rest::{history::GmailHistory, messages::GmailMessage},
 };
 
-/// The reads one batch carries by default: Gmail runs them side by side,
-/// and its per-user concurrency limit is what binds. Measured on
-/// 2026-10-10, batches of 10 sent one after another drew no refusal in
-/// 2,250 reads, 25 drew 1.2 % and 50 drew 19 %.
+/// The reads one batch carries by default.
+///
+/// Gmail runs them side by side, so its per-user concurrency limit binds: on
+/// 2026-10-10, sequential batches of 10 drew no refusal in 2,250 reads, 25
+/// drew 1.2 % and 50 drew 19 %.
 pub const BATCH_SIZE: usize = 10;
 
 /// The batches in flight at once across the source's connections by
@@ -39,12 +38,9 @@ pub const BATCHES_IN_FLIGHT: usize = 1;
 
 /// The quota units the source spends over any sixty seconds by default.
 ///
-/// Gmail bills a `messages.get` 5 units (measured on 2026-10-10, the
-/// refusal naming the quota it counted against), and a Google project gets
-/// 6,000 units a minute a user (read in the console of MOA's project on
-/// 2026-10-09): 1,200 reads a minute. Google documents 20 units a read and
-/// 15,000 a minute; the units counted here are the ones billed, and a
-/// refusal past the quota is waited out all the same.
+/// Gmail bills a `messages.get` 5 units (2026-10-10) and grants 6,000 units
+/// a minute a user (console, 2026-10-09): 1,200 reads. Google documents 20
+/// and 15,000; the billed units count, a refusal past them waited out.
 pub const UNITS_PER_MINUTE: u32 = 6_000;
 
 /// The most messages whose metadata waits for their other labels.
@@ -77,6 +73,9 @@ impl Default for GmailSettings {
 impl GmailSettings {
     /// The settings `gmail.batch-size`, `gmail.batches-in-flight` and
     /// `gmail.units-per-minute` give, their defaults where absent.
+    ///
+    /// A minute's units below one batch's cost are refused: no batch would
+    /// pass.
     pub fn new(
         batch_size: Option<usize>,
         batches_in_flight: Option<usize>,
@@ -96,8 +95,6 @@ impl GmailSettings {
         if settings.batches_in_flight == 0 {
             bail!("gmail.batches-in-flight is 0, it takes 1 or more");
         }
-        // NOTE: a minute's budget below one batch would never let a batch
-        // through whole.
         let floor = super::client::MESSAGE_GET_UNITS * settings.batch_size as u32;
         if settings.units_per_minute < floor {
             bail!(
@@ -157,9 +154,10 @@ impl GmailRun {
         }
     }
 
-    /// Records a head listed on `label`, begun at `at`, which touched
-    /// `touched`: the label's later pages read them again, no earlier than
-    /// the latest head.
+    /// Records a head on `label`, begun at `at`, that touched `touched`.
+    ///
+    /// The label's later pages read them again, no earlier than the latest
+    /// head.
     pub fn headed(&self, label: &str, at: Instant, touched: impl IntoIterator<Item = String>) {
         let mut heads = lock(&self.heads);
         let headed = heads.entry(label.to_owned()).or_insert_with(|| Headed {
@@ -195,12 +193,13 @@ impl GmailRun {
 
     /// Keeps a message read at `at`, as `metadata` when it carries its
     /// headers, while another collection may list it.
+    ///
+    /// A later read without headers never replaces one with them.
     pub fn keep(&self, message: &GmailMessage, metadata: bool, at: Instant) {
         if let Some(size) = message.size_estimate {
             lock(&self.sizes).insert(message.id.clone(), size);
         }
         let mut metas = lock(&self.metas);
-        // NOTE: labels read later do not replace the headers read before.
         if !metadata && metas.get(&message.id).is_some_and(|seen| seen.metadata) {
             return;
         }
@@ -237,12 +236,11 @@ impl GmailRun {
         })
     }
 
-    /// Runs `with` over the mailbox history since `start`, read from
-    /// Gmail by `read` unless this run already read it from `start` or
-    /// earlier.
+    /// Runs `with` over the mailbox history since `start`, read by `read`.
     ///
-    /// The lock is held while `read` runs, so the source's connections read
-    /// it once.
+    /// Gmail is read unless this run already read from `start` or earlier; the
+    /// lock is held while `read` runs, so the source's connections read it
+    /// once.
     pub fn history<T, E>(
         &self,
         start: &str,
@@ -308,6 +306,9 @@ impl<V> Bounded<V> {
         }
     }
 
+    /// Inserts `value` under `key`, the oldest leaving past the cap.
+    ///
+    /// Keys removed stay in the order until they outnumber the entries.
     fn insert(&mut self, key: String, value: V) {
         if self.entries.insert(key.clone(), value).is_none() {
             self.order.push_back(key);
@@ -318,8 +319,6 @@ impl<V> Bounded<V> {
             };
             self.entries.remove(&oldest);
         }
-        // NOTE: keys removed leave their place in the order behind, swept
-        // here once they outnumber the entries.
         if self.order.len() > 2 * self.cap.max(self.entries.len()) {
             let entries = &self.entries;
             self.order.retain(|key| entries.contains_key(key));
@@ -415,10 +414,9 @@ impl History {
     /// The changes of `label` past `start`: the ids to read again, in
     /// first-seen order, and the ids deleted for good.
     ///
-    /// A message belongs to the label's changes when the record names the
-    /// label, or when the collection holds it (`held`), whatever the
-    /// record names; an arrival naming no label at all is read too. Reading
-    /// one too many costs a read; missing one would lose its change.
+    /// A message belongs to them when the record names the label, when the
+    /// collection holds it (`held`), or when it arrives naming no label: one
+    /// too many costs a read, one missed would lose its change.
     pub fn project(
         &self,
         label: &str,

@@ -33,18 +33,9 @@ impl<'a> SendSide<'a> {
 
 /// Performs the queue's `submit` intents, which the store's drain leaves alone.
 ///
-/// A sent intent is acknowledged with a receipt, releasing its body's pin, so a
-/// producer reads it applied rather than withdrawn; a permanent failure parks
-/// the row with its error, one whose outcome is unknown parks it unconfirmed
-/// (pimdir STORAGE §15.2, io-pimdir `unconfirm_action`), never to be sent
-/// again, and a transient one leaves it pending. With no channel they stay
-/// pending, never parked, another build being able to send.
-///
-/// Each attempt is counted, and the intent marked in flight
-/// ([`submit::InFlight`]), before its first byte leaves: a producer reading
-/// the row mid-send sees the attempt, and a run killed mid-send leaves the
-/// mark, so the next one parks that intent as unconfirmed instead of sending
-/// it again. The mark is cleared once the outcome is in the store.
+/// Sent is acknowledged, a permanent failure or an unknown outcome parked
+/// (pimdir STORAGE §15.2), a transient one left pending. The attempt is marked
+/// in flight first ([`submit::InFlight`]), so a killed run never resends it.
 pub(super) fn drain_submits(
     account_config: &AccountConfig,
     account: &Account,
@@ -65,9 +56,6 @@ pub(super) fn drain_submits(
     let Some(intents) = park_interrupted(store, &in_flight, intents, report) else {
         return;
     };
-    // NOTE: an intent naming another source is that source's to send, on its
-    // own run (pimdir STORAGE §15.6); one whose payload does not decode names
-    // none, and is sent here to be parked as malformed.
     let sender = sending_source(account_config, sides);
     let intents: Vec<_> = intents
         .into_iter()
@@ -81,9 +69,6 @@ pub(super) fn drain_submits(
         return;
     }
     info!("performing {} queued submit intent(s)", intents.len());
-    // NOTE: a provider filing what it sends (Gmail, Graph) answers a copy
-    // by itself; any other gets it as an `add`, queued once sent (pimdir
-    // STORAGE Annex B.2).
     let files_copy = sender.as_ref().is_some_and(|sender| {
         account_config
             .sources()
@@ -117,8 +102,6 @@ pub(super) fn drain_submits(
                 return;
             }
             Err(Unopened::Refused(failure)) => {
-                // NOTE: nothing was attempted, so no attempt is counted:
-                // the producer reads the rows as never tried.
                 for intent in &intents {
                     report
                         .submitted
@@ -130,9 +113,6 @@ pub(super) fn drain_submits(
 
         let mut sent = 0;
         let mut copies = 0;
-        // NOTE: why the run stops attempting, once it must: an outcome it
-        // could not record keeps its mark, which the next intent's would
-        // overwrite.
         let mut halted: Option<String> = None;
         for intent in &intents {
             if let Some(why) = halted.as_deref().or(channel.stopped()) {
@@ -159,8 +139,6 @@ pub(super) fn drain_submits(
                 }
             };
 
-            // NOTE: counted and marked before the first byte leaves; a row
-            // whose attempt cannot be recorded is not sent.
             let marked = store
                 .fail_action(intent.id, None)
                 .map_err(|err| format!("cannot record the attempt: {err}"))
@@ -183,10 +161,6 @@ pub(super) fn drain_submits(
             let (recorded, outcome) = match submit::deliver(&mut channel, outgoing) {
                 Ok(()) => {
                     let copy = intent.copy().filter(|_| !files_copy);
-                    // NOTE: both leave the intent's receipt with no seq: the
-                    // copy is not in the store yet, a queued `add` of its
-                    // own or one the provider files for the next sync
-                    // (pimdir STORAGE §15.5).
                     let acknowledged = match &copy {
                         Some(collection) => {
                             let action = PimdirAction::Add {
@@ -224,16 +198,11 @@ pub(super) fn drain_submits(
                     let reason = failure.reason();
                     let (parked, unconfirmed) = (failure.parks(), failure.unconfirmed());
                     warn!("submit intent #{} failed: {reason}", intent.id);
-                    // NOTE: the attempt is counted already, so a transient
-                    // failure records nothing more.
                     let recorded = !parked
                         || match park_submit(store, intent.id, &failure) {
                             Ok(()) => true,
                             Err(err) => {
                                 warn!("cannot park submit intent #{}: {err}", intent.id);
-                                // NOTE: a refused message may be sent again
-                                // and refused again; an unconfirmed one must
-                                // not be, which the mark sees to.
                                 !unconfirmed
                             }
                         };
@@ -285,9 +254,10 @@ pub(super) fn drain_submits(
     }
 }
 
-/// Parks the `submit` intent `id` for `failure`: unconfirmed when its
-/// outcome is unknown, under the prefix the store reserves and writes
-/// itself (pimdir STORAGE §13, §15.2), with its error otherwise.
+/// Parks the `submit` intent `id` for `failure`, with its error.
+///
+/// One whose outcome is unknown is parked unconfirmed instead, under the
+/// prefix the store reserves and writes itself (pimdir STORAGE §13, §15.2).
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 fn park_submit(
     store: &mut PimdirSourceStore,
@@ -301,8 +271,9 @@ fn park_submit(
     unconfirm_submit(store, id, &failure.detail())
 }
 
-/// Parks the `submit` intent `id` as unconfirmed, `detail` saying why. A
-/// row gone since has nothing left to send again.
+/// Parks the `submit` intent `id` as unconfirmed, `detail` saying why.
+///
+/// A row gone since has nothing left to send again.
 fn unconfirm_submit(
     store: &mut PimdirSourceStore,
     id: i64,
@@ -314,13 +285,11 @@ fn unconfirm_submit(
     Ok(())
 }
 
-/// Parks the intent an earlier run left in flight as unconfirmed, and returns
-/// the others, still to send.
+/// Parks the intent an earlier run left in flight, returning the others.
 ///
-/// That run was stopped between counting the attempt and recording its
-/// outcome: the message may have left, so it is never sent again on its
-/// own. `None` when the intent could not be parked, the run then sending
-/// nothing, so the mark stays for the next.
+/// That run stopped between the attempt and its outcome, so the message may
+/// have left. `None` when it could not be parked, the mark staying for the
+/// next run; a mark is renamed whole, so an unreadable one names nothing.
 pub(super) fn park_interrupted(
     store: &mut PimdirSourceStore,
     in_flight: &submit::InFlight,
@@ -328,16 +297,12 @@ pub(super) fn park_interrupted(
     report: &mut SyncOutput,
 ) -> Option<Vec<submit::SubmitIntent>> {
     let Some(left) = in_flight.left() else {
-        // NOTE: a mark is renamed into place whole, so one that does not
-        // read names nothing.
         if let Err(err) = in_flight.end() {
             warn!("cannot clear an unreadable in-flight mark: {err}");
         }
         return Some(intents);
     };
 
-    // NOTE: an intent no longer pending was acknowledged or parked before
-    // the run stopped, its outcome recorded.
     if let Some(index) = intents.iter().position(|intent| intent.id == left) {
         let intent = intents.remove(index);
         let detail = submit::unconfirmed_detail("a run stopped while handing it over");

@@ -35,12 +35,10 @@ use crate::{
 /// run performing the queued intents alone or declaring the collections.
 pub const QUICK: Duration = Duration::from_secs(2);
 
-/// Refreshes the index of the store rooted at `dir` after a run, for at
-/// most the account's `store.index-timeout`, or [`QUICK`] when `quick`,
-/// and says what it did in `report`.
+/// Refreshes the index of the store at `dir` after a run, for at most
+/// `store.index-timeout` ([`QUICK`] when `quick`), reporting in `report`.
 ///
-/// Nothing runs when the timeout is zero, which turns the refresh off. A
-/// failure is reported, never raised.
+/// A zero timeout turns the refresh off. A failure is reported, never raised.
 pub fn after_run(dir: &Path, config: &StoreConfig, quick: bool, report: &mut Option<IndexRefresh>) {
     let mut timeout = config.index_timeout();
     if timeout.is_zero() {
@@ -75,9 +73,8 @@ pub fn after_run(dir: &Path, config: &StoreConfig, quick: bool, report: &mut Opt
     *report = Some(refreshed);
 }
 
-/// Folds the store's change feed into `index` until it is current or
-/// `timeout` passes, `None` folding all of it, reading floating times in
-/// `zone`.
+/// Folds the store's change feed into `index` until current or `timeout`
+/// (`None` folding it all), reading floating times in `zone`.
 pub fn refresh(
     index: &mut PimdirIndex,
     timeout: Option<Duration>,
@@ -198,9 +195,8 @@ mod tests {
         assert_eq!(found(dir.path(), "quarterly"), 2, "{refreshed:?}");
     }
 
-    /// An index of another shape, which an earlier build left and a
-    /// frontend refuses to query, is rebuilt by the next refresh and
-    /// reported as a whole fold, not as a failure.
+    /// An index of another shape, which a frontend refuses to query, is
+    /// rebuilt and reported as a whole fold, not as a failure.
     #[test]
     fn an_index_of_another_shape_is_rebuilt_by_the_next_refresh() {
         let dir = tempfile::tempdir().unwrap();
@@ -234,9 +230,8 @@ mod tests {
             .unwrap();
     }
 
-    /// An index a later draft of the search format wrote is refused and
-    /// left as it is (pimdir SEARCH §2): the refusal is reported with its
-    /// code, the run standing, and a later neverest still reads it.
+    /// An index of a later search draft is refused with its code and left as
+    /// it is (pimdir SEARCH §2), the run standing, for a later neverest.
     #[test]
     fn an_index_of_a_later_draft_is_refused_and_left() {
         let dir = tempfile::tempdir().unwrap();

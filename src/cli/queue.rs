@@ -29,6 +29,9 @@ use crate::{
 };
 
 /// Drains the store of every account the run covers, or reports it busy.
+///
+/// Never waits for the lock: a sync holding the store drains it itself, at
+/// its start or at the next run.
 pub fn run(
     printer: &mut impl Printer,
     config_paths: &[PathBuf],
@@ -67,8 +70,6 @@ pub fn run(
             continue;
         }
 
-        // NOTE: never waits: a sync holding the store drains it itself,
-        // at its start or at the next run.
         let lock = try_store_lock(&dir)
             .with_context(|| format!("Acquire the lock of the store at {}", dir.display()))?;
         let Some(_lock) = lock else {
@@ -97,15 +98,16 @@ pub fn run(
     Ok(exit)
 }
 
-/// Declares the sources of `accounts` as a sync does before its drain, then
-/// drains the store at `dir` once, telling each account the rows of its own
-/// collections. An account that cannot be declared fails alone.
+/// Declares the sources of `accounts` as a sync does, then drains the store
+/// at `dir` once; an account that cannot be declared fails alone.
+///
+/// Declaring reads the configuration and the calendars the last listing
+/// stated take no tasks (pimdir STORAGE §15.6). A drain performs no intent,
+/// so no row it reports is unconfirmed. The index refreshes once, briefly.
 fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<QueueOutput>> {
     let mut outputs = Vec::new();
     let mut ready = Vec::new();
 
-    // NOTE: from the configuration and the calendars the last listing
-    // stated take no tasks (pimdir STORAGE §15.6), as a sync does.
     for (name, account_config) in accounts {
         let declared = account_config.namespaced(&name).and_then(|namespaced| {
             let mode = namespaced.mode()?;
@@ -134,8 +136,6 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Queue
 
     let mut drained = driver::drain_store(&mut store);
 
-    // NOTE: briefly, a frontend waiting on the drain; once, the index
-    // being the store's.
     #[cfg_attr(not(feature = "search"), allow(unused_mut))]
     let mut index = None;
     #[cfg(feature = "search")]
@@ -182,8 +182,6 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Queue
                 sources: Vec::new(),
             }),
             PimdirActionStatus::Pending { .. } => output.waiting += 1,
-            // NOTE: a drain performs no intent, so it leaves none
-            // unconfirmed, and a bare id names no other store.
             PimdirActionStatus::Unconfirmed { .. }
             | PimdirActionStatus::Reset
             | PimdirActionStatus::Unknown => {}
@@ -386,8 +384,10 @@ mod tests {
     use crate::cli::queue::*;
 
     /// A drained or parked row is keyed `row`, as himalaya's `pimdir queue
-    /// list` keys it, and a parked one carries its producer, when it was
-    /// queued and how often it was tried.
+    /// list` keys it.
+    ///
+    /// A parked one carries its producer, when it was queued and how often
+    /// it was tried.
     #[test]
     fn a_drain_keys_its_rows_row() {
         let mut output = QueueOutput::new(String::from("work"));

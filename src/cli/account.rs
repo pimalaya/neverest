@@ -97,9 +97,8 @@ fn row(name: String, account: &AccountConfig) -> AccountRow {
 mod tests {
     use crate::cli::account::*;
 
-    /// An account lists every backend table it writes, its sources' and
-    /// targets', once each, `smtp` for its send channel, and is a default
-    /// one: a command naming no `-a` runs over it.
+    /// An account lists every backend table it writes once, `smtp` for its
+    /// send channel, and is a default one: a bare command runs over it.
     #[test]
     fn an_account_lists_the_backends_its_endpoints_write() {
         let account: AccountConfig = toml::from_str(

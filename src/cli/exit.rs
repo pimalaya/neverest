@@ -10,14 +10,9 @@ use crate::sync::report::{SyncOutput, SyncRunOutput};
 
 /// How a command ended, beyond the success or failure its `Result` carries.
 ///
-/// Two partial outcomes exist beyond success: 3 for a run that reconciled
-/// and left something behind for a person, 4 for a run that could not do
-/// all its work, a rerun picking it up. Failing instead would stop the
-/// other ten thousand items over one duplicated phone number, and would
-/// loop forever under a supervisor restarting on failure.
-///
-/// Ordered by how far from success: a run over several accounts ends the
-/// way its furthest one did.
+/// 3 for a run that left something for a person, 4 for one that could not
+/// do all its work. Failing instead would stop ten thousand items over one
+/// duplicated phone number, and loop under a supervisor restarting on it.
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum Exit {
     /// The command did what it was asked and left nothing waiting.
@@ -51,9 +46,8 @@ impl From<&SyncOutput> for Exit {
 }
 
 impl From<&SyncRunOutput> for Exit {
-    /// A run over several accounts ends the way its furthest account did, an
-    /// account that failed or found its store busy leaving the run
-    /// incomplete.
+    /// A run ends the way its furthest account did, an account that failed
+    /// or found its store busy leaving it incomplete.
     fn from(run: &SyncRunOutput) -> Self {
         run.accounts
             .iter()
@@ -66,13 +60,12 @@ impl From<&SyncRunOutput> for Exit {
     }
 }
 
+/// Exits 3 or 4: 1 is a failed command, which exits through
+/// `ErrorReport::eval` before this runs, and 2 a refused command line.
 impl From<Exit> for ExitCode {
     fn from(exit: Exit) -> Self {
         match exit {
             Exit::Success => ExitCode::SUCCESS,
-            // NOTE: 1 belongs to a failed command, which exits through
-            // `ErrorReport::eval` before this conversion runs, and 2 to a
-            // refused command line, which never reaches it.
             Exit::Conflicted => ExitCode::from(EXIT_PARTIAL as u8),
             Exit::Incomplete => ExitCode::from(EXIT_PARTIAL as u8 + 1),
         }
@@ -299,9 +292,10 @@ mod tests {
         );
     }
 
-    /// A listing that parked a mass absence waits for a person to confirm
-    /// it, a rerun alone parking again: the round it left open makes the
-    /// run no less complete, another one still does.
+    /// A parked mass absence waits for a person, a rerun alone parking it.
+    ///
+    /// The round it left open does not make the run incomplete; another
+    /// open round still does.
     #[test]
     fn a_parked_absence_waits_for_a_person() {
         use crate::sync::report::{CollectionCoverage, OpenRound, ParkedAbsence};

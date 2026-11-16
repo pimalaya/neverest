@@ -1,21 +1,20 @@
-//! End-to-end stand-ins for the attachments of synced mail, against a local
-//! Stalwart IMAP server (A :143), spawned via `tests/stalwart2.sh` (or
-//! `tests/stalwart.sh`). Ignored by default.
+//! # Attachments
 //!
-//! io-pimdir records, in the transaction writing a message's body, a file
-//! holding no body per part disposed as an attachment, in the account's
-//! attachments collection, referenced from the message (pimdir STORAGE
-//! §14.3). Every body neverest lands goes through that write, so:
-//!   1. A sync storing bodies, primed or not, over one connection or
-//!      several, leaves one stand-in per attachment (two attachments, none
-//!      for an inline image, one in a nested multipart), named, typed and
-//!      sized, each referenced by its message; and each message carries the
-//!      attachment mark its parts give, the streamed body walked.
-//!   2. A second sync writes nothing new, and the same message filed in a
-//!      second folder stands for its attachments once.
-//!   3. A body left owed by a run stopped after its listing records its
-//!      stand-ins in the run that lands it, an arrival's under
-//!      `--bodies listed` before the backlog's.
+//! Stand-ins for the attachments of synced mail, against a local Stalwart
+//! IMAP server (A :143), spawned via tests/stalwart2.sh (or
+//! tests/stalwart.sh). Ignored by default.
+//!
+//! Writing a body, io-pimdir records a bodiless file per attachment part in
+//! the account's attachments collection, referenced from the message
+//! (pimdir STORAGE §14.3). Every body neverest lands goes through it, so:
+//!
+//! - a sync storing bodies, primed or not, over one connection or several,
+//!   leaves one named, typed and sized stand-in per attachment (none for an
+//!   inline image, one in a nested multipart), and the attachment mark;
+//! - a second sync writes nothing new, and the message filed in a second
+//!   folder stands for its attachments once;
+//! - a body a stopped run left owed records its stand-ins in the run that
+//!   lands it, an arrival's under `--bodies listed` before the backlog's.
 //!
 //! ```sh
 //! ./tests/stalwart2.sh
@@ -40,8 +39,10 @@ use io_pimdir::{
 const SERVER: &str = "imap://127.0.0.1:143";
 const CRED: &str = "test@pimalaya.org:P!malaya-test-2026";
 
-/// Fillers of the hydrated-later test, large enough that the run can be
-/// stopped between the listing and the one batch of their bodies.
+/// Fillers of the hydrated-later test.
+///
+/// Enough that the run can be stopped between the listing and the one batch
+/// of their bodies; appended a few a command, under the request size.
 const FILLERS: usize = 30;
 const FILLER_BODY: usize = 2 * 1024 * 1024;
 
@@ -204,9 +205,10 @@ fn mark(
     }
 }
 
-/// Asserts the stand-ins of the four seeded messages (and of `late` when
-/// `late` is set): one per attachment, as the walk of each body describes
-/// it, referenced by its message, in the account's attachments collection.
+/// Asserts the stand-ins of the four seeded messages, and of `late` if set.
+///
+/// One per attachment, as the walk of each body describes it, referenced by
+/// its message, in the account's attachments collection.
 fn assert_stand_ins(store: &Path, account: &str, folder: &str, messages: &Messages, late: bool) {
     let mut expected: Vec<(&str, String, &str, &str, &str)> = vec![
         ("two", messages.two(), "2", "a.pdf", "application/pdf"),
@@ -300,10 +302,11 @@ fn assert_stand_ins(store: &Path, account: &str, folder: &str, messages: &Messag
     }
 }
 
-/// A sync storing the bodies, primed, by pages over four connections, or
-/// after the listing over one, stands for each attachment once; a second
-/// sync writes nothing new, and the message filed again in another folder
-/// adds no stand-in.
+/// A synced body stands for each attachment once, however it was stored.
+///
+/// Primed, by pages over four connections, or after the listing over one; a
+/// second sync writes nothing new, and a copy in another folder is linked,
+/// not fetched (io-pimdir states the held row's mark, Annex A.1).
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn a_synced_body_stands_for_its_attachments() {
@@ -341,8 +344,6 @@ fn a_synced_body_stands_for_its_attachments() {
         assert_eq!(stand_ins(&store, account), before, "{account}: nothing new");
     }
 
-    // NOTE: the same body under a second folder is held already in the
-    // account, so it is linked, not fetched, and walks nothing.
     imap_in(&folder, &format!("UID COPY 1:* {copies}"));
     for account in ["primed", "paged", "after"] {
         let config = root.join(format!("{account}.toml"));
@@ -354,9 +355,6 @@ fn a_synced_body_stands_for_its_attachments() {
             before,
             "{account}: a body filed again stands for nothing new",
         );
-        // NOTE: the copy's row takes the mark of the row holding its body:
-        // io-pimdir links a body the account holds without fetching it and
-        // states the held row's size, mark and invitation (Annex A.1).
         assert_eq!(
             held(&store, account, &copies),
             (4, 4),
@@ -374,9 +372,11 @@ fn a_synced_body_stands_for_its_attachments() {
     imap(&format!("DELETE {copies}"));
 }
 
-/// Bodies a run left owed, stopped once its listing landed, stand for
-/// their attachments in the run landing them: an arrival's first under
-/// `--bodies listed`, the backlog's in the full run after.
+/// A body a stopped run left owed stands for its attachments when it lands.
+///
+/// Over one connection the listing lands first, then every body largest
+/// first, so a run stopped in between owes them all; an arrival lands first
+/// under `--bodies listed`, the backlog in the full run after.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn a_body_landing_later_stands_for_its_attachments_then() {
@@ -387,7 +387,6 @@ fn a_body_landing_later_stands_for_its_attachments_then() {
     };
     let folder = format!("AttachLater{}", messages.id);
     imap(&format!("CREATE {folder}"));
-    // NOTE: a few a command, under the server's request size.
     let fillers: Vec<String> = (0..FILLERS).map(|n| messages.filler(n)).collect();
     for chunk in fillers.chunks(5) {
         append_all(&folder, chunk.iter().cloned());
@@ -400,9 +399,6 @@ fn a_body_landing_later_stands_for_its_attachments_then() {
     let config = write_config(root, "later", std::slice::from_ref(&folder));
     let store = root.join("later");
 
-    // NOTE: over one connection the listing lands first, then one batch
-    // of every body, the largest first: stopped in between, every body is
-    // owed.
     let mut first = Command::new(env!("CARGO_BIN_EXE_neverest"))
         .args(["-c", &config.to_string_lossy()])
         .args(["sync", "-a", "later", "-j", "1", "--prime", "0"])

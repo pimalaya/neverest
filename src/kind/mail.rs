@@ -9,22 +9,19 @@
 //! differently across tiers and a message with no `Message-ID` splits in
 //! two, re-fetched every sync and stored twice.
 //!
-//! The `Meta` tier is each connector's own: one whose source serves the
-//! header fields raw hands them to io-pimdir's `derive_meta`, the reading
-//! a body gets, and this crate parses no field itself. A source serving a
-//! field decoded alone names its member from that value, which stands
-//! until the body is read (Annex A.1).
+//! The `Meta` tier is each connector's own: one serving raw header fields
+//! hands them to io-pimdir's `derive_meta`, the reading a body gets, and this
+//! crate parses no field itself. A source serving a field decoded alone
+//! names its member from that value until the body is read (Annex A.1).
 
 use io_pimdir::summary::{PimdirDerivation, mail};
 
 /// The `Full`-tier derivation: the summary a listing names, read off a raw
 /// message's headers.
 ///
-/// `raw` is only the header prefix the stream captured, so the octet count is
-/// restated from `size` and the attachment mark is left unknown: no part is
-/// walked here. The store's write walks each body entering it, once, and
-/// states the mark and the invitation over this summary, or takes them from a
-/// row already holding the body (pimdir STORAGE Annex A.1, §14.3).
+/// `raw` is only the header prefix the stream captured, so the octet count
+/// is restated from `size` and the attachment mark left unknown: the store
+/// states it and the invitation once per body (pimdir STORAGE A.1, §14.3).
 pub fn parse_body(raw: &[u8], size: u64) -> PimdirDerivation {
     let mut derivation = mail::derive(raw);
 
@@ -37,9 +34,10 @@ pub fn parse_body(raw: &[u8], size: u64) -> PimdirDerivation {
 }
 
 /// The pimdir summary vectors a connector's reading is held to (pimdir
-/// vectors/summaries.json, STORAGE Annex A.1): the fixtures another parser
-/// reads another way, copied under tests/vectors/fixtures with what the
-/// vectors state for each.
+/// vectors/summaries.json, STORAGE Annex A.1).
+///
+/// The fixtures another parser reads another way, copied under
+/// tests/vectors/fixtures with what the vectors state for each.
 #[cfg(all(test, any(feature = "imap", feature = "gmail", feature = "msgraph")))]
 #[cfg_attr(
     not(all(feature = "imap", feature = "gmail", feature = "msgraph")),
@@ -187,8 +185,10 @@ pub(crate) mod vectors {
         }
 
         /// Each field's name and value in document order, as a source
-        /// listing header fields in JSON serves them: the value trimmed
-        /// at both ends, the line breaks of a folded one kept.
+        /// listing header fields in JSON serves them.
+        ///
+        /// The value is trimmed at both ends; a folded one keeps its line
+        /// breaks.
         pub(crate) fn fields(&self) -> Vec<(String, String)> {
             let header = str::from_utf8(self.header()).expect("an ASCII header block");
             let mut fields: Vec<(String, String)> = Vec::new();

@@ -4,17 +4,15 @@
 //! media type it is. io-pimdir and the [`crate::client`] seam are
 //! kind-agnostic; exactly four things are not, and three of them live here.
 //!
-//! The link id is an item's stable cross-collection identity, the summary the
-//! typed row a reader lists from without fetching a body (pimdir STORAGE
-//! Annex A), the sort key its place in the collection's natural order (STORAGE
-//! §9.3), and the merge the three-way reconciliation in
-//! [`crate::conflict::merge`].
+//! The link id is an item's stable cross-collection identity, the summary
+//! the typed row a reader lists without a body (pimdir STORAGE Annex A), the
+//! sort key its place in the natural order (STORAGE §9.3), and the merge the
+//! three-way reconciliation in [`crate::conflict::merge`].
 //!
 //! The first three are io-pimdir's derivations, reached through
 //! [`Kind::parse_body`]. A kind with a cheap server-side summary tier (mail)
-//! is named there by its connector, through the same derivation where the
-//! source serves the header fields raw, and **the two tiers MUST agree
-//! byte-for-byte** there: see [`mail`].
+//! is also named by its connector, through the same derivation over raw
+//! header fields; **the two tiers MUST agree byte-for-byte** (see [`mail`]).
 //!
 //! An enum rather than a trait: the set of kinds is closed and small, there
 //! is one dispatch point, and a trait would buy dispatch nobody needs.
@@ -262,8 +260,6 @@ impl Kind {
             };
         };
 
-        // NOTE: the last separator, not the first: a `Message-ID` may legally
-        // carry a `#` (RFC 5322 `atext`) and a handle may not.
         let (hint, mint) = minted.rsplit_once(MINT_SEPARATOR).unwrap_or(("", minted));
 
         LinkId {
@@ -276,9 +272,8 @@ impl Kind {
     /// `hash:`), which no server has heard of.
     ///
     /// A stated identity beginning like a derived key is filed with one
-    /// leading `esc:` (pimdir STORAGE §9), which the server never heard of
-    /// either: it is named without it, as [`PimdirLinkId::stated`] does,
-    /// also for the key a mint carries.
+    /// leading `esc:` (pimdir STORAGE §9), which no server heard of either:
+    /// it is named without it, as [`PimdirLinkId::stated`] does, minted too.
     fn hint(self, key: &str) -> Option<&str> {
         let fallback = match self {
             Self::Mail => "alt:",
@@ -409,8 +404,9 @@ mod tests {
     }
 
     /// A stated identity beginning like a derived key is filed escaped
-    /// (pimdir STORAGE §9) and named to the server without its escape,
-    /// minted or not; a derived key names none.
+    /// (pimdir STORAGE §9) and named to the server without its escape.
+    ///
+    /// So is a minted one; a derived key names none.
     #[test]
     fn an_escaped_key_names_its_stated_identity() {
         let escaped = PimdirLinkId::from_hint("alt:a@example.org");

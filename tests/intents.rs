@@ -1,3 +1,5 @@
+//! # Intents
+//!
 //! `sync --intents-only` and the fate of a queued send, against a scripted
 //! SMTP server on a local port and an IMAP source nothing listens for.
 //!
@@ -35,9 +37,10 @@ use io_pimdir::{
 };
 use serde_json::Value;
 
-/// Held by each test for its whole run: a child another test spawns holds
-/// every lock this process holds until its exec, so a store opened here
-/// beside a spawn reads as owned.
+/// Held by each test for its whole run.
+///
+/// A child another test spawns holds every lock this process holds until its
+/// exec, so a store opened here beside a spawn reads as owned.
 static SPAWNS: Mutex<()> = Mutex::new(());
 
 /// Waits for the other tests, whatever a sibling that panicked left.
@@ -151,9 +154,10 @@ struct Fixture {
 }
 
 impl Fixture {
-    /// An account whose IMAP source nothing listens for, sending through
-    /// `smtp_port`, authenticated when `auth` says so; its store holds
-    /// `imap/Sent` and nothing else.
+    /// An account whose IMAP source nothing listens for, sending via SMTP.
+    ///
+    /// It sends through `smtp_port`, authenticated when `auth` says so; its
+    /// store holds `imap/Sent` and nothing else, as `init` then a sync leave.
     fn new(smtp_port: u16, auth: bool) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let state = tmp.path().join("state");
@@ -187,8 +191,6 @@ impl Fixture {
             state,
         };
 
-        // NOTE: the store and its sidecar naming the account, as `init`
-        // leaves them, then the collection.
         let local = PimdirStore::open(fixture.store())
             .unwrap()
             .local_dir()
@@ -258,7 +260,6 @@ impl Fixture {
             String::from_utf8_lossy(&output.stdout),
             stderr(&output),
         );
-        // NOTE: the last line, after the events a sync prints.
         let stdout = String::from_utf8_lossy(&output.stdout);
         let result: Value =
             serde_json::from_str(stdout.lines().last().unwrap_or_default()).expect("a JSON result");
@@ -286,8 +287,10 @@ fn chain(row: &Value) -> String {
 const BODY: &[u8] =
     b"From: a@example.org\r\nTo: b@example.org\r\nSubject: intents-only\r\n\r\nhello\r\n";
 
-/// The message leaves through the SMTP channel alone: the source, whose
-/// server is down, is never opened, and no collection is listed.
+/// The message leaves through the SMTP channel alone.
+///
+/// The source, whose server is down, is never opened, no collection is
+/// listed, and the Sent copy is in the store at once, pushed by the next sync.
 #[test]
 fn intents_only_sends_through_smtp_without_opening_the_source() {
     let _serial = serialized();
@@ -309,7 +312,6 @@ fn intents_only_sends_through_smtp_without_opening_the_source() {
         fixture.status(id),
         PimdirActionStatus::Applied { seq: None, .. }
     ));
-    // NOTE: the copy is in the store at once, pushed by the next sync.
     assert_eq!(report["drained"][0]["collection"], SENT, "{report}");
     let held = PimdirReader::open(fixture.store())
         .unwrap()
@@ -318,9 +320,10 @@ fn intents_only_sends_through_smtp_without_opening_the_source() {
     assert_eq!(held.len(), 1, "{report}");
 }
 
-/// A message read whole by a server that hung up before its verdict may
-/// have been delivered: parked unconfirmed, under `unconfirmed: `, never
-/// sent again.
+/// A send without a verdict may have been delivered: parked, never resent.
+///
+/// The server read it whole then hung up; the row parks under
+/// `unconfirmed: `, and the next run, sending nothing, still exits 3 over it.
 #[test]
 fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
     let _serial = serialized();
@@ -341,8 +344,6 @@ fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
     };
     assert_eq!(error, format!("unconfirmed: {detail}"));
 
-    // NOTE: the next run has nothing to send, the server being gone, and
-    // still exits 3 over the parked send waiting for a person.
     let report = fixture.intents_only(3);
     assert_eq!(report["submitted"], serde_json::json!([]), "{report}");
     assert_eq!(report["unreached"], serde_json::json!([]), "{report}");
@@ -351,10 +352,11 @@ fn a_send_without_a_verdict_is_parked_as_unconfirmed() {
 
 /// A run stopped mid-send leaves its mark: the next one parks that send
 /// as unconfirmed rather than sending it again.
+///
+/// Nothing listens, so a run trying to send would name the server unreached.
 #[test]
 fn a_send_a_stopped_run_was_handing_over_is_never_sent_again() {
     let _serial = serialized();
-    // NOTE: nothing listens: a run trying to send would name it unreached.
     let fixture = Fixture::new(closed_port(), false);
     let id = fixture.queue_send(BODY, false);
     fs::write(fixture.local().join("submitting"), format!("{id}\n")).unwrap();
@@ -486,9 +488,10 @@ fn intents_only_refuses_a_collection_filter() {
     );
 }
 
-/// While the server holds its verdict, the attempt is already counted and
-/// the send marked in flight: a caller killing the run then reads the row
-/// as attempted, and the next run never sends it again.
+/// The attempt is counted and marked in flight before the verdict.
+///
+/// A caller killing the run while the server holds its verdict then reads the
+/// row as attempted, and the next run never sends it again.
 #[test]
 fn the_attempt_is_counted_and_marked_before_the_message_leaves() {
     let _serial = serialized();
@@ -525,9 +528,10 @@ fn the_attempt_is_counted_and_marked_before_the_message_leaves() {
     ));
 }
 
-/// A run killed while the server holds its verdict, as a caller does at
-/// its deadline, leaves the row attempted and marked: the next run parks
-/// it as unconfirmed and sends nothing.
+/// A run killed while the server holds its verdict never sends it again.
+///
+/// Killed as a caller does at its deadline, it leaves the row attempted and
+/// marked: the next run parks it as unconfirmed and sends nothing.
 #[test]
 fn a_run_killed_mid_send_never_sends_the_message_again() {
     let _serial = serialized();

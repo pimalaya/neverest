@@ -1,33 +1,28 @@
 //! # Microsoft Graph client
 //!
-//! [`GraphClient`] wraps the std blocking io-msgraph client behind the same
-//! adapter surface as the IMAP backend, with the folder name map and the
-//! connection it watches and reopens ([`wire`]): never reused past a minute
-//! idle or after an exchange it did not read whole, a read sent again once
-//! when a reused connection was found dead before answering.
+//! [`GraphClient`] wraps the std blocking io-msgraph client with the folder
+//! name map and a watched connection ([`wire`]): never reused past a minute
+//! idle or after an exchange not read whole, a read sent again once when a
+//! reused connection was found dead before answering.
 //!
 //! Bodies come in JSON batches bounded in octets by the sizes the listings
 //! state ([`SizeHints`]), each committed as soon as it is decoded. A flag
 //! set, a move or a delete on an item gone from the server counts as done;
 //! a copy of it stays an error.
 //!
-//! `enumerate` lists mail as [`mail`] describes: a folder-wide message delta
-//! link as the engine's opaque checkpoint (HTTP 410 means an expired link and
-//! restarts a round), the mail of a scope listed by its `sentDateTime`.
-//! Folders are listed two levels deep, named `Parent/Child`; deeper nesting
-//! is not replicated.
+//! `enumerate` lists mail as [`mail`] describes: a folder-wide delta link as
+//! the opaque checkpoint (HTTP 410 restarts a round), a scope listed by
+//! `sentDateTime`. Folders are listed two levels deep, named `Parent/Child`;
+//! deeper nesting is not replicated.
 //!
 //! Push scope is honest: flag changes, deletes, moves and copies push, an
 //! append lands in Drafts only (Graph creates every MIME message as a draft)
 //! and mailbox mutations are rejected.
 //!
-//! Graph message ids are mutable across folder moves (no immutable-id support,
-//! which would change the ids stores already bind), so a moved message is
-//! listed by its new folder under a new id. A copy reports that id; a move
-//! leaves it to the target's next enumeration, whose fetch lands the pending
-//! create by its `Message-ID`, as after an IMAP `MOVE`. A delta reset never
-//! changes handle identity, so no handle-space rebuild follows, unlike the
-//! IMAP UIDVALIDITY path.
+//! Graph message ids change on a folder move (immutable ids would change the
+//! ids stores already bind): a copy reports the new id, a move leaves it to
+//! the target's next enumeration, landing the pending create by `Message-ID`
+//! as after an IMAP `MOVE`. A delta reset never changes handle identity.
 //!
 //! One client serves one [`GraphKind`], the way one DAV adapter serves
 //! CardDAV and CalDAV: a mail session speaks folders and messages, a
@@ -156,9 +151,10 @@ pub struct GraphClient {
     received_expands: bool,
     /// The id of the well-known Drafts folder, resolved on the first append.
     drafts: Option<String>,
-    /// Whether the stream may carry the next exchange: the last one read a
-    /// whole answer and the server kept the connection. When false the next
-    /// operation reopens it.
+    /// Whether the stream may carry the next exchange.
+    ///
+    /// True when the last one read a whole answer and the server kept the
+    /// connection; when false the next operation reopens it.
     alive: bool,
     /// Whether the stream carried an exchange already, so the server may
     /// have closed it while it idled.
@@ -173,9 +169,10 @@ pub struct GraphClient {
 }
 
 impl GraphClient {
-    /// Opens the TLS connection to the Graph API with the given bearer token,
-    /// scoped to the `user` mailbox owner (`me` or a user id), for one kind.
-    /// `sizes` is shared by every connection of the source.
+    /// Opens the TLS connection to the Graph API for one kind.
+    ///
+    /// Scoped to the `user` mailbox owner (`me` or a user id) with the bearer
+    /// `token`; `sizes` is shared by every connection of the source.
     pub fn connect(
         kind: GraphKind,
         token: &SecretString,
@@ -247,8 +244,7 @@ impl GraphClient {
     ///
     /// The source's [`Throttle`] sends it again while Graph throttles it
     /// (429, 503), backing off: io-msgraph keeps no `Retry-After` but in a
-    /// batch's answers. A request creating something goes through
-    /// [`create`](Self::create) instead.
+    /// batch's answers. Creations go through [`create`](Self::create).
     fn op<T>(
         &mut self,
         run: impl FnMut(&mut MsgraphClientStd) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
@@ -256,9 +252,10 @@ impl GraphClient {
         self.send(Request::Idempotent, false, run)
     }
 
-    /// Runs one Graph request that creates or sends something: sent again on
-    /// a 429 alone, which Graph answers before doing anything, never on a
-    /// 503, after which the message, the copy or the event may exist.
+    /// Runs one Graph request that creates or sends something.
+    ///
+    /// Sent again on a 429 alone, which Graph answers before doing anything,
+    /// never on a 503, after which the message, copy or event may exist.
     fn create<T>(
         &mut self,
         run: impl FnMut(&mut MsgraphClientStd) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
@@ -267,6 +264,7 @@ impl GraphClient {
     }
 
     /// Runs one Graph request of `request`, as [`op`](Self::op) describes.
+    ///
     /// `reads` vouches that a request other than a `GET` reads only (a
     /// `$batch` of gets), so it may be sent again on a dead connection.
     fn send<T>(
@@ -300,12 +298,11 @@ impl GraphClient {
         )
     }
 
-    /// Runs one exchange on a connection fit for it ([`wire`]): one the last
-    /// exchange left unfit (a failure short of a whole answer, a connection
-    /// the server ended or asked to close), or that idled past
-    /// [`wire::IDLE`], is reopened first. A request that only reads, met
-    /// by a reused connection already dead, is sent again once on a new
-    /// one; never one that timed out, nor one that writes.
+    /// Runs one exchange on a connection fit for it ([`wire`]).
+    ///
+    /// A connection left unfit by the last exchange or idle past [`wire::IDLE`]
+    /// is reopened first. A read met by a reused connection already dead is
+    /// sent again once on a new one; never one that timed out, nor a write.
     fn exchange<T>(
         &mut self,
         reads: bool,
@@ -313,8 +310,6 @@ impl GraphClient {
             &mut MsgraphClientStd,
         ) -> Result<MsgraphSendOutput<T>, MsgraphClientStdError>,
     ) -> Result<T, MsgraphClientStdError> {
-        // NOTE: cleared before a reopen too, so a reopen that fails leaves
-        // no earlier attempt's record behind.
         wire::begin(&self.exchange);
         if self.alive && self.reused && self.used.elapsed() > wire::IDLE {
             debug!(
@@ -348,9 +343,10 @@ impl GraphClient {
         self.attempt(run)
     }
 
-    /// Runs `run` once on the current stream and settles what it left of
-    /// the connection: fit for the next exchange only after a whole answer
-    /// on a stream the server neither ended nor asked to close.
+    /// Runs `run` once on the current stream and settles the connection.
+    ///
+    /// It stays fit for the next exchange only after a whole answer on a
+    /// stream the server neither ended nor asked to close.
     fn attempt<T>(
         &mut self,
         run: &mut impl FnMut(
@@ -389,9 +385,10 @@ impl GraphClient {
         }
     }
 
-    /// Lists one page of a collection: a page of a mail round or a mail
-    /// delta ([`mail`]), or a whole contacts delta or calendar listing.
-    /// `held` is what the store binds of a mail folder.
+    /// Lists one page of a collection.
+    ///
+    /// A page of a mail round or delta ([`mail`]), or a whole contacts delta
+    /// or calendar listing; `held` is what the store binds of a mail folder.
     pub fn enumerate(
         &mut self,
         collection: &str,
@@ -403,8 +400,6 @@ impl GraphClient {
             .map(|checkpoint| checkpoint.0.as_slice());
         match self.kind {
             GraphKind::Mail => {
-                // NOTE: what the run keeps of the folder is taken out for
-                // the listing, which borrows the session as its wire.
                 let mut folder = self.kept.remove(collection).unwrap_or_default();
                 let listed = mail::enumerate(self, &mut folder, collection, request, held);
                 self.sizes.note(folder.sizes.drain(..));
@@ -435,10 +430,11 @@ impl GraphClient {
         }
     }
 
-    /// Streams the bodies of an id set into a sink `open`ed and `done` per
-    /// item, `done` receiving the revision on contacts, and answers the ids
-    /// Graph answered 404, gone since they were listed. `sizes` is what the
-    /// store records of each message.
+    /// Streams the bodies of an id set into sinks `open`ed and `done` per item.
+    ///
+    /// `done` receives the revision on contacts; `sizes` is what the store
+    /// records of each message. Answers the ids Graph answered 404, gone
+    /// since they were listed.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         collection: &str,
@@ -529,9 +525,10 @@ impl GraphClient {
             .collect())
     }
 
-    /// The collection a new item goes to when none is named: the default
-    /// calendar (`isDefaultCalendar`), the default Contacts folder; none for
-    /// mail, whose folders have roles instead. A check-only probe.
+    /// The collection a new item goes to when none is named.
+    ///
+    /// The default calendar (`isDefaultCalendar`), the default Contacts
+    /// folder; none for mail, whose folders have roles. A check-only probe.
     pub fn default_collection(&mut self) -> Result<Option<String>> {
         match self.kind {
             GraphKind::Mail => Ok(None),
@@ -540,10 +537,11 @@ impl GraphClient {
         }
     }
 
-    /// The role each mail folder states, by folder name: one well-known
-    /// folder lookup per role, the answered id matched to the listing. A
-    /// well-known folder the mailbox does not have (often `archive`) is
-    /// skipped. A check-only probe; no role on contacts or calendars.
+    /// The role each mail folder states, by folder name.
+    ///
+    /// One well-known folder lookup per role, matched to the listing by id;
+    /// one the mailbox lacks (often `archive`) is skipped. A check-only
+    /// probe; no role on contacts or calendars.
     pub fn mailbox_roles(&mut self) -> Result<BTreeMap<String, String>> {
         if self.kind != GraphKind::Mail {
             return Ok(BTreeMap::new());
@@ -631,10 +629,10 @@ impl GraphClient {
         lookup_folder(&self.folders, name).with_context(|| format!("Unknown Graph folder {name}"))
     }
 
-    /// What names each of a message-id set, one summary get a message, its
-    /// header fields selected and its size expanded. The `Meta` tier is an
-    /// upgrade a frontend asks for now and then, every listed member
-    /// arriving named.
+    /// What names each of a message-id set, one summary get a message.
+    ///
+    /// Header fields selected, size expanded: the `Meta` tier is an upgrade
+    /// a frontend asks for now and then, every listed member arriving named.
     fn fetch_metas(
         &mut self,
         _mailbox: &str,
@@ -651,19 +649,11 @@ impl GraphClient {
         Ok(metas)
     }
 
-    /// Streams the bodies of a message-id set, each committed as soon as it
-    /// is decoded, in requests planned by the size Graph states for each
-    /// ([`plan`]): JSON batches of up to [`MSGRAPH_BATCH_MAX_REQUESTS`] raw
-    /// MIME gets and [`BATCH_BYTES`] stated, a message past [`ALONE_BYTES`]
-    /// or of no stated size read alone. A size neither the listings of the
-    /// run nor the store (`stored`) state is asked for first, twenty ids a
-    /// batch, when more than one message lacks one.
+    /// Streams the bodies of a message-id set in batches [`plan`] bounds.
     ///
-    /// Answers the messages Graph answered 404, gone since they were
-    /// listed. A body still missing after [`batch_get`](Self::batch_get)'s
-    /// retries, refused for another reason, or failing alone, is left out:
-    /// the caller fetches every handle the fetch did not answer one by
-    /// one, which surfaces its error.
+    /// A size comes from the run's listings, then the store (`stored`), else
+    /// is asked first; answers the 404s. A body still missing is left out:
+    /// the caller reads each unanswered handle alone, surfacing its error.
     fn fetch_messages<S: Write>(
         &mut self,
         _mailbox: &str,
@@ -674,8 +664,6 @@ impl GraphClient {
     ) -> Result<Vec<String>> {
         let user = user_path(&self.inner.user_id)?;
 
-        // NOTE: the session's own size first, which also takes it out of
-        // the shared hints, then the store's, a resumed hydration's.
         let mut sizes: HashMap<&str, u64> = ids
             .iter()
             .filter_map(|id| {
@@ -747,9 +735,10 @@ impl GraphClient {
         Ok(gone)
     }
 
-    /// The size Graph states for each of `ids`, read twenty a batch with
-    /// the id alone; a message stating none, or a batch that failed, is
-    /// left out (read alone), and one Graph answers 404 is added to `gone`.
+    /// The size Graph states for each of `ids`, read twenty a batch.
+    ///
+    /// A message stating none, or a batch that failed, is left out (read
+    /// alone); one Graph answers 404 is added to `gone`.
     fn stated_sizes<'a>(
         &mut self,
         user: &str,
@@ -788,19 +777,11 @@ impl GraphClient {
         sizes
     }
 
-    /// Sends the gets of `ids` (at most [`MSGRAPH_BATCH_MAX_REQUESTS`]) in
-    /// one JSON batch, each at the URL `url` builds for its id, its body
-    /// read by `decode` and handed to `deliver` before the next is read, so
-    /// a batch holds no more than its answer and one decoded body.
+    /// Sends the gets of `ids` in one JSON batch, each body to `deliver`.
     ///
-    /// A request Graph throttles (429, or a common 5xx) is sent again in a
-    /// later batch once its own `Retry-After` is over (else after a back-off
-    /// doubling from a second), at most [`BATCH_RETRY_ROUNDS`] times; still
-    /// throttled then, or asking to wait more than the source's longest wait
-    /// (`sync --max-wait`),
-    /// it is answered under `retry`, and a throttle (429, 503) gives the
-    /// source up until its wait is over, every connection stopping with it.
-    /// A 404 is answered under `gone`; any other refusal is left out.
+    /// A throttled get (429, 5xx) goes again after its `Retry-After`, up to
+    /// [`BATCH_RETRY_ROUNDS`] or `sync --max-wait`, then lands in `retry`, a
+    /// 429/503 giving the source up until its wait ends; 404s land in `gone`.
     fn batch_get<'a, T>(
         &mut self,
         ids: &[&'a str],
@@ -822,8 +803,6 @@ impl GraphClient {
             .collect();
 
         while !pending.is_empty() {
-            // NOTE: a source that gave up sends nothing until its wait is
-            // over, what is left going to the next run.
             if self.throttle.blocked().is_some() {
                 break;
             }
@@ -869,9 +848,6 @@ impl GraphClient {
                 let wait = stated.unwrap_or_else(|| Duration::from_secs(1 << item.sent.min(6)));
                 item.sent += 1;
                 if item.sent > BATCH_RETRY_ROUNDS || wait > self.throttle.max_wait() {
-                    // NOTE: a request Graph failed to serve (500, 502, 504)
-                    // is retried the same, but is no throttle: the source
-                    // goes on.
                     if throttled {
                         self.throttle.give_up(SystemTime::now() + wait);
                     }
@@ -905,10 +881,9 @@ impl GraphClient {
     /// Adds and removes flags: `\Seen` is `isRead`, `\Flagged` the
     /// follow-up status.
     ///
-    /// The patch names only the properties a flag of `add` or `remove`
-    /// maps to, so one the server changed since the listing keeps its
-    /// value; a change naming none sends nothing. `\Draft` is read-only on
-    /// Graph and other keywords have no equivalent, both ignored.
+    /// The patch names only what `add` and `remove` map to, so a property the
+    /// server changed since the listing keeps its value. `\Draft` is
+    /// read-only on Graph and other keywords have no equivalent: ignored.
     pub fn update_flags(&mut self, ids: &[&str], add: &[Flag], remove: &[Flag]) -> Result<()> {
         if self.kind != GraphKind::Mail {
             bail!(
@@ -935,11 +910,9 @@ impl GraphClient {
 
     /// Uploads a message into the Drafts folder, then sets its flags.
     ///
-    /// Graph creates every MIME message as a draft, so an append anywhere
-    /// else is refused rather than filed there as a draft. The upload
-    /// ignores flags, so `\Seen` and `\Flagged` are patched in after; a
-    /// failed patch is only warned about, the message being created, and the
-    /// next enumeration reports the flags it holds.
+    /// Graph creates every MIME message as a draft, so an append elsewhere is
+    /// refused. The upload ignores flags, so they are patched in after; a
+    /// failed patch is only warned about, the next enumeration reporting them.
     fn add_message(
         &mut self,
         mailbox: &str,
@@ -990,14 +963,9 @@ impl GraphClient {
 
     /// Moves messages into the folder `to`.
     ///
-    /// Graph answers each move with the message's new id, which is only
-    /// logged: the target's next enumeration lists the message under it, and
-    /// the fetch naming it lands the move's pending create there (pimdir
-    /// SYNC §5, §6), as after an IMAP `MOVE`.
-    ///
-    /// A message gone from the server counts as moved: a 404 is told from a
-    /// destination Graph no longer knows by reading the message, the
-    /// destination being resolved from the folder listing first.
+    /// The new id is only logged: the target's next listing lands the pending
+    /// create (pimdir SYNC §5, §6), as after an IMAP `MOVE`. A message gone
+    /// counts as moved, a 404 told from an unknown destination by a read.
     pub fn move_messages(&mut self, to: &str, ids: &[&str]) -> Result<()> {
         if self.kind != GraphKind::Mail {
             bail!(
@@ -1101,22 +1069,14 @@ impl GraphClient {
 
     /// Sends raw MIME through sendMail, which files the message in Sent itself.
     ///
-    /// A `POST` that creates: never sent again on a dead connection
-    /// ([`exchange`](Self::exchange)), sent again only on a 429, which Graph
-    /// answers before doing anything ([`create`](Self::create)). The client
-    /// error comes back unwrapped, so the caller can read the HTTP status off
-    /// it, with whether the request had gone whole and no answer was read
-    /// whole ([`Exchange::written`]): an answer cut short counts as none.
-    /// sendMail derives the recipients from the MIME headers (Bcc included),
-    /// so envelope recipients beyond the headers are lost.
+    /// A creation, sent again on a 429 alone ([`create`](Self::create)); the
+    /// client error comes back unwrapped, its status readable. sendMail takes
+    /// the recipients from the MIME headers: other envelope ones are lost.
     pub fn send_mime(&mut self, raw: &[u8]) -> Result<(), SendMimeFailure> {
         let error = match self.create(|client| client.mail_send_mime(raw)) {
             Ok(_) => return Ok(()),
             Err(error) => error,
         };
-        // NOTE: the record is the last attempt's, cleared before a reopen
-        // that failed. A status or a redirect is a verdict; an answer that
-        // did not parse may be a 2xx, so it is none.
         let verdict = matches!(
             &error,
             MsgraphClientStdError::Send(
@@ -1133,8 +1093,10 @@ impl GraphClient {
 pub struct SendMimeFailure {
     /// The client error, its status read off it.
     pub error: MsgraphClientStdError,
-    /// Whether the request had been written whole and no answer read whole:
-    /// the message may have been taken.
+    /// Whether the request went whole and no answer was read whole.
+    ///
+    /// The message may have been taken. A status or a redirect is an answer;
+    /// one that did not parse may be a 2xx, so it counts as none.
     pub unanswered: bool,
 }
 
@@ -1155,8 +1117,6 @@ fn get_requests(ids: &[&str], url: impl Fn(&str) -> String) -> Vec<MsgraphBatchR
         .collect()
 }
 
-/// The raw MIME gets of a batch, each request id being the index of its
-/// message id in `ids`.
 /// A mail session over the connections `connect` opens, for a test of
 /// another module driving several connections of one source.
 #[cfg(test)]
@@ -1177,8 +1137,9 @@ impl GraphClient {
         )
     }
 
-    /// A mail session over a scripted server, one script a connection,
-    /// knowing `folders` (name, id) already, for a test of another module
+    /// A mail session over a scripted server, one script a connection.
+    ///
+    /// It knows `folders` (name, id) already, for a test of another module
     /// driving a Graph mail source request by request.
     pub(crate) fn scripted(
         scripts: Vec<Vec<crate::scripted::Step>>,
@@ -1226,8 +1187,9 @@ fn raw_requests(user: &str, ids: &[&str]) -> Vec<MsgraphBatchRequest> {
     get_requests(ids, |id| format!("/{user}/messages/{id}/$value"))
 }
 
-/// The most octets of stated message size one batch of bodies asks for:
-/// its answer, base64 and JSON, about a third more, is held whole while it
+/// The most octets of stated message size one batch of bodies asks for.
+///
+/// Its answer, base64 and JSON, about a third more, is held whole while it
 /// is read, then each body decoded in turn.
 const BATCH_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -1238,15 +1200,17 @@ const ALONE_BYTES: u64 = 1024 * 1024;
 /// beyond, a message is planned as one of no stated size.
 const MAX_SIZE_HINTS: usize = 100_000;
 
-/// The `$expand` asking Graph for the MAPI message size
-/// (`PidTagMessageSize`, `Integer 0x0E08`), the size Exchange states for a
+/// The `$expand` asking Graph for the MAPI message size.
+///
+/// `PidTagMessageSize` (`Integer 0x0E08`), the size Exchange states for a
 /// message as IMAP's `RFC822.SIZE` does (io-msgraph `fa73f04`).
 pub(super) const SIZE_EXPAND: &str =
     "singleValueExtendedProperties($filter=id eq 'Integer 0x0E08')";
 
-/// The sizes a source's listings stated, by message id, until its bodies
-/// are planned: shared by every connection opened from the source, since
-/// the connection listing a folder is rarely the one downloading it.
+/// The sizes a source's listings stated, by message id, until bodies plan.
+///
+/// Shared by every connection opened from the source, since the connection
+/// listing a folder is rarely the one downloading it.
 #[derive(Clone, Debug, Default)]
 pub struct SizeHints(Arc<Mutex<HashMap<String, u64>>>);
 
@@ -1288,10 +1252,10 @@ enum Fetch<'a> {
     Alone(&'a str),
 }
 
-/// Plans the bodies of `ids` by the size `size` states for each, in their
-/// order: batches of at most [`MSGRAPH_BATCH_MAX_REQUESTS`] gets and
-/// [`BATCH_BYTES`] stated, a message past [`ALONE_BYTES`] or of no stated
-/// size read alone where it comes.
+/// Plans the bodies of `ids`, in order, by the size `size` states for each.
+///
+/// Batches of at most [`MSGRAPH_BATCH_MAX_REQUESTS`] gets and [`BATCH_BYTES`]
+/// stated; a message past [`ALONE_BYTES`] or of no stated size read alone.
 fn plan<'a>(ids: &[&'a str], size: impl Fn(&str) -> Option<u64>) -> Vec<Fetch<'a>> {
     let mut plan = Vec::new();
     let mut batch: Vec<&str> = Vec::new();
@@ -1357,10 +1321,11 @@ struct BatchAnswer<'a> {
 /// What one batch answered beyond what it delivered.
 #[derive(Debug, Default, PartialEq)]
 struct Answered<'a> {
-    /// The ids Graph throttled, to send again, in request order, each with
-    /// the `Retry-After` it stated and whether it was a throttle (429,
-    /// 503) rather than a failure (500, 502, 504): only a throttle gives
-    /// the source up.
+    /// The ids Graph throttled, to send again, in request order.
+    ///
+    /// Each with its `Retry-After` and whether it was a throttle (429, 503)
+    /// rather than a failure (500, 502, 504): only a throttle gives up the
+    /// source.
     retry: Vec<(&'a str, Option<Duration>, bool)>,
     /// The ids Graph answered 404, gone since they were listed.
     gone: Vec<&'a str>,
@@ -1394,12 +1359,11 @@ fn read_raw_responses<'a>(
     (bodies, answered)
 }
 
-/// Reads the responses of a batch of gets sent for `ids`, matched by
-/// request id (Graph answers in any order), one at a time: a 2xx body is
-/// read by `decode` and handed to `deliver`, its JSON dropped before the
-/// next is read; a throttled request is kept to retry with its own
-/// `Retry-After`, a 404 named gone; any other answer, or a body `decode`
-/// refuses, is left out.
+/// Reads the responses of a batch of gets, matched by request id.
+///
+/// Graph answers in any order. A 2xx body goes through `decode` to `deliver`
+/// before the next is read; a throttle is kept to retry, a 404 named gone,
+/// anything else left out.
 fn read_responses<'a, T>(
     ids: &[&'a str],
     responses: MsgraphBatchResponses,
@@ -1523,7 +1487,8 @@ pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
     send.api().is_some_and(|err| names_the_request(err.status))
 }
 
-/// The code of a Graph refusal in an error chain: Graph's
+/// The code of a Graph refusal in an error chain.
+///
 /// `ErrorQuotaExceeded` or a 507 is `quota-exceeded`, a 429 left after the
 /// waits `rate-limited`, a 403 `permission-denied`.
 pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
@@ -1540,9 +1505,10 @@ pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<
     }
 }
 
-/// Names the listed folders whose id a well-known lookup answered with, by
-/// the role it states. A well-known folder outside the listing (deeper than
-/// two levels) names nothing.
+/// Names the listed folders a well-known lookup answered, by role.
+///
+/// A well-known folder outside the listing (deeper than two levels) names
+/// nothing.
 fn roles_by_id(
     folders: &[(String, String)],
     stated: &[(String, &str)],
@@ -1638,10 +1604,11 @@ fn flags_delta(add: &[Flag], remove: &[Flag]) -> Option<MsgraphMessage> {
     })
 }
 
-/// The author-claimed date of a delta row: `sentDateTime`, Graph's reading
-/// of the `Date` header, which pimdir's mail `date` column holds (STORAGE
-/// Annex A.1). Never `receivedDateTime`, the server's arrival time: absent
-/// or unparseable, the date is `None` (a `NULL` column), as a missing `Date`.
+/// The author-claimed date of a delta row: `sentDateTime`, Graph's `Date`.
+///
+/// pimdir's mail `date` column holds it (STORAGE Annex A.1). Never
+/// `receivedDateTime`, the arrival: absent or unparseable, the date is
+/// `None`, as a missing `Date`.
 fn message_date(message: &MsgraphMessage) -> Option<DateTime<FixedOffset>> {
     let raw = message.sent_date_time.as_deref()?;
     DateTime::parse_from_rfc3339(raw).ok()
@@ -1662,14 +1629,10 @@ const SUMMARY_FIELDS: [&str; 9] = [
 
 /// What names a row at the `Meta` tier (pimdir STORAGE Annex A.1).
 ///
-/// A row listing its header fields is named off them, each from its first
-/// entry, by the derivation a body is read with. A row listing none is
-/// named from `internetMessageId`, read as a `Message-ID` field is, and
-/// from the subject, the date and the addresses Graph decodes itself,
-/// which stand as it states them until the body is read.
+/// A row listing its header fields is named off them as a body would be.
+/// One listing none is named from `internetMessageId` and the fields Graph
+/// decodes itself, which stand until the body is read.
 fn message_meta(message: &MsgraphMessage) -> PimdirDerivation {
-    // NOTE: the MAPI size, when the read expanded it; else none, filled
-    // from the blob length at the `Full` tier.
     let size = message_size(message).filter(|size| *size > 0);
 
     let fields = &message.internet_message_headers;
@@ -1706,10 +1669,7 @@ fn message_meta(message: &MsgraphMessage) -> PimdirDerivation {
         date: message_date(message)
             .map(|date| date.to_utc().to_rfc3339_opts(SecondsFormat::Secs, true)),
         size,
-        // NOTE: Graph states the mark itself (pimdir STORAGE Annex A.1),
-        // which the walk of the parts replaces once the body is in.
         attachment: message.has_attachments,
-        // NOTE: read with the body alone, never off a row.
         invitation: None,
         to: to.into_iter().flatten().map(address).collect(),
         cc: cc.into_iter().flatten().map(address).collect(),
@@ -1742,10 +1702,10 @@ mod tests {
         kind::mail::{parse_body, vectors::VECTORS},
     };
 
-    /// An add Graph cannot make, into a folder other than Drafts, is coded
-    /// `unsupported`, as the store's gate codes the same write refused at
-    /// enqueue, sends nothing, and is refused as it stands (pimdir SYNC
-    /// §4): the store holds it rather than appending it every run.
+    /// An add outside Drafts is coded `unsupported` and sends nothing.
+    ///
+    /// Coded as the store's gate codes it at enqueue, and refused as it
+    /// stands (pimdir SYNC §4): the store holds it rather than retrying.
     #[test]
     fn an_add_outside_drafts_is_unsupported() {
         let (mut client, _server) =
@@ -1857,9 +1817,10 @@ mod tests {
         assert_eq!(summary.size, None, "Graph exposes no RFC 5322 size");
     }
 
-    /// `internetMessageId` is read as a `Message-ID` field is (pimdir
-    /// STORAGE Annex A.1, vectors/summaries.json): a comment around the id
-    /// is no part of the key, and an id stated without brackets is one.
+    /// `internetMessageId` is read as a `Message-ID` field is.
+    ///
+    /// pimdir STORAGE Annex A.1, vectors/summaries.json: a comment around
+    /// the id is no part of the key, and an id stated without brackets is one.
     #[test]
     fn a_row_is_keyed_by_its_message_id_as_the_vectors_state() {
         for vector in VECTORS.iter().filter(|vector| vector.message_id.is_some()) {
@@ -1883,9 +1844,10 @@ mod tests {
         }
     }
 
-    /// A row as a read selecting the header fields answers it: `fields` as
-    /// name and value pairs in their order, repeated names kept, beside
-    /// members Graph decodes itself, which here state another message.
+    /// A row as a read selecting the header fields answers it.
+    ///
+    /// `fields` as name and value pairs in their order, repeated names kept,
+    /// beside members Graph decodes itself, which here state another message.
     fn headed_row(fields: &[(String, String)]) -> serde_json::Value {
         let headers: Vec<serde_json::Value> = fields
             .iter()
@@ -1901,9 +1863,10 @@ mod tests {
         })
     }
 
-    /// A row listing its header fields is named off them as its body would
-    /// name it (pimdir STORAGE Annex A.1, vectors/summaries.json), each
-    /// field from its first entry, whatever Graph decodes beside them.
+    /// A row listing its header fields is named off them as its body would be.
+    ///
+    /// pimdir STORAGE Annex A.1, vectors/summaries.json: each field from its
+    /// first entry, whatever Graph decodes beside them.
     #[test]
     fn a_row_listing_its_header_fields_is_named_as_the_vectors_state() {
         for vector in &VECTORS {
@@ -1914,9 +1877,10 @@ mod tests {
         }
     }
 
-    /// On a row listing its header fields the size and the attachment mark
-    /// stay Graph's own, the top-level `Content-Type` making the mark only
-    /// where Graph states none.
+    /// A row listing its header fields keeps Graph's size and attachment mark.
+    ///
+    /// The top-level `Content-Type` makes the mark only where Graph states
+    /// none.
     #[test]
     fn a_row_listing_its_header_fields_keeps_the_size_and_the_mark_graph_states() {
         let fields = [
@@ -2247,8 +2211,6 @@ mod tests {
         assert_eq!(answer.retry, [("m0", None, false), ("m1", None, true)]);
     }
 
-    // --- the connection ---------------------------------------------------
-
     use crate::scripted::{Server, Step};
 
     /// A session of `kind` over a scripted server, one script a connection.
@@ -2284,9 +2246,10 @@ mod tests {
 
     const GET_INBOX: &str = "GET /v1.0/me/mailFolders/inbox";
 
-    /// Graph closed the connection while it idled: a `GET` meeting its end
-    /// of stream, or a reset, before any byte of an answer goes again once,
-    /// on a new connection.
+    /// Graph closed the connection while it idled.
+    ///
+    /// A `GET` meeting its end of stream, or a reset, before any byte of an
+    /// answer goes again once, on a new connection.
     #[test]
     fn a_get_on_a_connection_closed_while_it_idled_is_sent_again_once() {
         for dead in [Step::Close, Step::Reset] {
@@ -2302,7 +2265,8 @@ mod tests {
         }
     }
 
-    /// Sent again once only: a second dead connection fails the request.
+    /// Sent again once only: a second dead connection fails the request, and
+    /// is not reused.
     #[test]
     fn a_get_is_sent_again_once_only() {
         let (mut client, server) = session(vec![
@@ -2315,7 +2279,6 @@ mod tests {
         assert!(get_inbox(&mut client).is_err());
         assert_eq!(lines(&server).len(), 2);
 
-        // NOTE: the failed connection is not reused.
         get_inbox(&mut client).unwrap();
         assert_eq!(lines(&server).len(), 3);
     }
@@ -2371,8 +2334,9 @@ mod tests {
         assert_eq!(lines(&server)[1], ["POST /v1.0/$batch"]);
     }
 
-    /// A read that timed out may be a server still at work on the request:
-    /// it is not sent again, and the connection, whose answer may still
+    /// A read that timed out may be a server still at work on the request.
+    ///
+    /// It is not sent again, and the connection, whose answer may still
     /// come, is not reused.
     #[test]
     fn a_timed_out_read_is_not_sent_again_and_its_connection_is_dropped() {
@@ -2417,9 +2381,10 @@ mod tests {
         assert_eq!(lines(&server), [vec![GET_INBOX], vec![GET_INBOX]]);
     }
 
-    /// A refusal is a whole answer, which keeps the connection; an answer
-    /// read to the end of the stream, or one closing the connection,
-    /// does not.
+    /// A refusal is a whole answer, which keeps the connection.
+    ///
+    /// An answer read to the end of the stream, or one closing the
+    /// connection, does not.
     #[test]
     fn a_connection_is_reused_only_after_a_whole_answer() {
         let (mut client, server) = session(vec![
@@ -2447,11 +2412,10 @@ mod tests {
         );
     }
 
-    // --- a flag push names only what it changes ---------------------------
-
-    /// A push removing `\Flagged` from a message listed seen and flagged
-    /// patches the follow-up status alone (pimdir SYNC §4): another client
-    /// marking it unread after the listing keeps it unread.
+    /// A push removing `\Flagged` patches the follow-up status alone.
+    ///
+    /// pimdir SYNC §4: another client marking the message unread after the
+    /// listing keeps it unread.
     #[test]
     fn a_flag_push_patches_only_what_it_changes() {
         let (mut client, server) = session(vec![vec![Step::ok(serde_json::json!({ "id": "m1" }))]]);
@@ -2479,8 +2443,6 @@ mod tests {
 
         assert!(server.requests().iter().all(Vec::is_empty));
     }
-
-    // --- a write on an item gone converges --------------------------------
 
     /// A flag set, a move or a delete on a message gone from the server
     /// counts as done; a copy of it stays an error.
@@ -2545,8 +2507,6 @@ mod tests {
             assert!(lines(&server)[0][1].starts_with("GET "));
         }
     }
-
-    // --- bodies by batches bounded in bytes -------------------------------
 
     /// Batches hold at most twenty gets and 4 MiB stated, in the order
     /// asked; a message over 1 MiB, or of no stated size, is read alone.
@@ -2617,9 +2577,10 @@ mod tests {
         })
     }
 
-    /// The sizes the listing stated plan the batches; a lone message of no
-    /// stated size is read alone, without asking its size, as one past a
-    /// mebibyte, where it comes; every body is committed byte for byte.
+    /// The sizes the listing stated plan the batches.
+    ///
+    /// A lone message of no stated size is read alone, without asking its
+    /// size, as one past a mebibyte; every body is committed byte for byte.
     #[test]
     fn bodies_follow_the_sizes_the_listing_stated() {
         let body = |id: &str| format!("Subject: {id}\r\n\r\nbody of {id}").into_bytes();
@@ -2779,8 +2740,6 @@ mod tests {
             Step::ok(bodies),
         ]]);
 
-        // NOTE: m0 and m3 state no size, so theirs are asked first; m0 is
-        // gone there, m1 in the body batch, m4 read alone (past 1 MiB).
         let stored = |id: &str| match id {
             "m1" | "m2" => Some(100),
             "m4" => Some(2 * 1024 * 1024),
@@ -2856,10 +2815,10 @@ mod tests {
         }
     }
 
-    /// A write Graph answers with a status naming the request (400, a 403
-    /// for rights) is refused as it stands, on mail, contacts and events
-    /// alike; a stale base (409, 412) and a quota (`ErrorQuotaExceeded`)
-    /// stay rejected (pimdir SYNC §4).
+    /// A write answered 400, or 403 for rights, is refused as it stands.
+    ///
+    /// On mail, contacts and events alike; a stale base (409, 412) and a
+    /// quota (`ErrorQuotaExceeded`) stay rejected (pimdir SYNC §4).
     #[test]
     fn a_write_refused_as_it_stands_is_told_by_its_status() {
         let cases = [
@@ -2890,9 +2849,10 @@ mod tests {
         }
     }
 
-    /// Each throttled get of a batch waits its own `Retry-After`: one asking
-    /// for no wait goes in the next batch at once, one asking for a second
-    /// in the batch after, alone.
+    /// Each throttled get of a batch waits its own `Retry-After`.
+    ///
+    /// One asking for no wait goes in the next batch at once, one asking for
+    /// a second in the batch after, alone.
     #[test]
     fn a_throttled_get_waits_its_own_retry_after() {
         let first = serde_json::json!({ "responses": [
@@ -2946,8 +2906,9 @@ mod tests {
         assert!(batches[2].contains("/me/messages/m2/$value"));
     }
 
-    /// A get asking to wait longer than neverest does is not sent again:
-    /// the source gives up until the wait is over, and every get left goes
+    /// A get asking to wait longer than neverest does is not sent again.
+    ///
+    /// The source gives up until the wait is over, and every get left goes
     /// to the next run.
     #[test]
     fn a_throttled_get_asking_too_long_a_wait_gives_the_source_up() {
@@ -3052,10 +3013,10 @@ mod tests {
         assert!(!requests[2].contains("%24expand="), "{}", requests[2]);
     }
 
-    /// A band head lists the folder by arrival, newest first, from the
-    /// instant asked, with the summary and the size `$expand`; refused, it
-    /// asks again without the `$expand`, and the session no longer asks
-    /// for it.
+    /// A band head refused its size `$expand` asks again without it.
+    ///
+    /// It lists by arrival, newest first, from the instant asked, with the
+    /// summary; the session no longer asks for the `$expand` after.
     #[test]
     fn a_head_refusing_the_size_expand_is_asked_without_it() {
         let page = || Step::ok(serde_json::json!({ "value": [] }));
@@ -3095,10 +3056,10 @@ mod tests {
         assert!(!requests[2].contains("%24expand="), "{}", requests[2]);
     }
 
-    /// Every read naming a member selects its header fields (pimdir
-    /// STORAGE Annex A.1): a band page, a listing by arrival, a
-    /// whole-folder delta, a summary batch and a summary read by id, which
-    /// names the member off them. The pass closing a round under a scope
+    /// Every read naming a member selects its header fields (STORAGE A.1).
+    ///
+    /// A band page, a listing by arrival, a whole-folder delta, a summary
+    /// batch and a summary read by id; the pass closing a round under a scope
     /// names none, and selects none.
     #[test]
     fn every_read_naming_a_member_selects_its_header_fields() {
@@ -3195,9 +3156,10 @@ mod tests {
         assert_eq!(lines(&server), [vec![SEND_MAIL]], "a 503 is not sent again");
     }
 
-    /// A send written whole on a connection that then ends, with no answer
-    /// or with one cut short, may have been taken: never sent again, and
-    /// told unanswered.
+    /// A send written whole, then cut off unanswered, may have been taken.
+    ///
+    /// The connection ends with no answer or one cut short: never sent
+    /// again, and told unanswered.
     #[test]
     fn a_send_written_whole_and_not_answered_whole_is_unanswered() {
         let cut = Step::Reply(b"HTTP/1.1 202 Acc".to_vec());

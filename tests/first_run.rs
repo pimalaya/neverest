@@ -1,10 +1,9 @@
 //! # First run
 //!
-//! The built binary run with and without a configuration, its stdin closed
-//! and its stderr a pipe, so it answers as a script sees it: the help when a
-//! configuration exists, the missing configuration otherwise, never the
-//! welcome, which only a person at a terminal meets. Runs without any
-//! server.
+//! The built binary run with and without a configuration, stdin closed and
+//! stderr a pipe, as a script sees it: the help when a configuration exists,
+//! the missing configuration otherwise, never the welcome, which only a
+//! person at a terminal meets. Runs without any server.
 
 use std::{
     fs,
@@ -174,6 +173,9 @@ fn an_unknown_account_names_the_ones_the_configuration_holds() {
 
 /// `-c` is the flag every Pimalaya CLI shares: one path a flag, the first
 /// the base and the next merged on top.
+///
+/// Neither account is initialized, which a drain reports per account and
+/// exits 4 for.
 #[test]
 fn repeated_config_paths_merge_in_order() {
     let (home, base) = home(None);
@@ -187,8 +189,6 @@ fn repeated_config_paths_merge_in_order() {
     );
     let stdout = text(&output.stdout);
 
-    // NOTE: neither account is initialized, which a drain reports per
-    // account and exits 4 for.
     assert_eq!(output.status.code(), Some(4), "{stdout}");
     let json: Value = serde_json::from_str(&stdout).unwrap();
     let names: Vec<&str> = json["queue"]

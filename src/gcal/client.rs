@@ -4,18 +4,15 @@
 //! sync engine needs, projecting events onto iCalendar through io-gcal's
 //! `ical` feature.
 //!
-//! The calendars of the user's calendar list are the collections. One item
-//! is one recurring series with its modified instances, or one lone event,
-//! keyed by the series' event id, the way a CalDAV resource holds a whole
-//! series: Google returns a modified instance as an event of its own,
-//! pointing at its series through `recurringEventId`.
+//! The user's calendar list gives the collections. An item is a lone event
+//! or a series with its modified instances, keyed by the series' event id as
+//! a CalDAV resource holds a whole series: Google returns a modified instance
+//! as its own event, pointing at the series through `recurringEventId`.
 //!
-//! `enumerate` drives the events listing with a sync token as the engine's
-//! opaque checkpoint; an expired token (HTTP 410) restarts a full listing.
-//! An item's revision joins the etags of the series and of its instances,
-//! so an edit to any one of them moves it. A resumed listing only sees the
-//! events that changed, so its revision for a series is partial; it still
-//! differs from the stored one, and the body read records the whole one.
+//! `enumerate` lists events from a sync token, the engine's opaque
+//! checkpoint; an expired one (HTTP 410) restarts a full listing. A revision
+//! joins the etags of a series and its instances, so any edit moves it; a
+//! resumed listing's is partial but still differs, the body read stores it.
 //!
 //! An update and a delete are checked against that joined revision, then
 //! guarded natively by the series event's own etag. A series is written
@@ -26,11 +23,10 @@
 //! else the user's ([`crate::zone`]), before the write, which then reports
 //! no revision, so the next sync reads the event back.
 //!
-//! A new event the account organises and whose attendees are to be told
-//! is inserted with its UID as `iCalUID`, which Google keeps and announces;
-//! any other is imported, which keeps the UID and notifies nobody. The
-//! invitation intents patch the account's own attendee, or delete the
-//! meeting it organises, both with `sendUpdates=all`.
+//! A new event the account organises with attendees to tell is inserted
+//! with its UID as `iCalUID`, which Google keeps and announces; any other is
+//! imported, keeping the UID and notifying nobody. Invitation intents patch
+//! the account's attendee or delete its meeting, with `sendUpdates=all`.
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -112,10 +108,10 @@ pub struct GcalClient {
 
 impl GcalClient {
     /// Opens the TLS connection to the Calendar API with a bearer token.
+    ///
+    /// The stream is opened here, io-gcal's own connect taking no proxy.
     pub fn connect(account: &GoogleAccount, throttle: Arc<Throttle>) -> Result<Self> {
         let GoogleAccount { token, tls, proxy } = account;
-        // NOTE: the stream is opened here, io-gcal's own connect taking no
-        // proxy.
         let stream =
             open_tls(GCAL_API_BASE, tls, proxy).context("Cannot connect to Google Calendar")?;
         let inner = GcalClientStd::new(stream, token.expose_secret());
@@ -148,8 +144,10 @@ impl GcalClient {
     }
 
     /// Runs one Calendar request creating an event, which may invite its
-    /// attendees: sent again on a refusal Google answers before doing
-    /// anything (429, a rate limit), never on a 5xx.
+    /// attendees.
+    ///
+    /// Sent again on a refusal Google answers before doing anything (429, a
+    /// rate limit), never on a 5xx.
     fn create<T>(
         &mut self,
         run: impl FnMut(&mut GcalClientStd) -> Result<GcalSendOutput<T>, GcalClientStdError>,
@@ -183,6 +181,9 @@ impl GcalClient {
     }
 
     /// Lists the calendars, and names the primary one.
+    ///
+    /// Hidden ones are listed too: still the account's, left out they would
+    /// read as deleted.
     fn calendars(&mut self) -> Result<(Vec<Collection>, Option<String>)> {
         let mut collections = Vec::new();
         let mut primary = None;
@@ -191,8 +192,6 @@ impl GcalClient {
         loop {
             let params = GcalCalendarListListParams {
                 page_token: page_token.as_deref(),
-                // NOTE: a calendar hidden in the UI is still the account's,
-                // and left out it would read as deleted.
                 show_hidden: true,
                 ..Default::default()
             };
@@ -231,15 +230,15 @@ impl GcalClient {
 
     /// Enumerates a calendar, incrementally from the checkpoint's sync
     /// token when it holds one and the token has not expired.
+    ///
+    /// A full listing reports removals by absence, only a resumed one names
+    /// them. Some calendars (a public holiday one) refuse a token seconds
+    /// after issuing it: their way, not a fault, so said at debug.
     pub fn enumerate(&mut self, calendar: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
         let token = cursor.and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
         let (events, complete, next) = match token {
             None => self.list(calendar, None)?,
             Some(token) => match self.list(calendar, Some(&token)) {
-                // NOTE: Google refuses some calendars a token seconds after
-                // issuing it (a public holiday calendar), the request being
-                // the one that issued it: said at debug, as the calendar's
-                // way rather than a fault.
                 Err(err) if is_expired(&err) && self.issued.contains(&token) => {
                     debug!(
                         "calendar sync token of {calendar} refused as soon as issued, listing it whole"
@@ -274,8 +273,6 @@ impl GcalClient {
             .map(|(id, events)| EnumEntry::bare(id, Default::default(), Some(revision(&events))))
             .collect();
 
-        // NOTE: a full listing reports removals by absence; only a resumed
-        // one names them.
         if complete {
             vanished.clear();
         }
@@ -289,10 +286,11 @@ impl GcalClient {
         })
     }
 
-    /// Pages through a calendar's events, series and their modified
-    /// instances rather than expanded occurrences, deleted ones included,
-    /// returning the events, whether the listing was full, and the next
-    /// sync token.
+    /// Pages through a calendar's events, series and modified instances
+    /// rather than expanded occurrences, deleted ones included.
+    ///
+    /// Returns the events, whether the listing was full, and the next sync
+    /// token.
     fn list(
         &mut self,
         calendar: &str,
@@ -425,15 +423,12 @@ impl GcalClient {
         Ok(Some(revision))
     }
 
-    /// Creates an event from an iCalendar object, then the occurrences a
-    /// series overrides through their instances.
+    /// Creates an event from an iCalendar object, then the overrides of a
+    /// series, deleting it again when they do not all land.
     ///
-    /// One carrying no UID is inserted, Google minting it. One carrying a
-    /// UID keeps it as the event's `iCalUID`, so it matches its copy on
-    /// another source: inserted with it when the resource is scheduled and
-    /// the account organises it, Google then inviting the attendees, and
-    /// imported otherwise, which notifies nobody (pimdir STORAGE Annex B.1).
-    /// A series whose overrides do not all land is deleted again.
+    /// A UID stays the `iCalUID`: a scheduled event the account organises is
+    /// inserted, Google setting its organizer and inviting, any other
+    /// imported, telling nobody (pimdir STORAGE Annex B.1). No UID: inserted.
     pub fn add_item_stream(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
         let (ical, anchored) = self.anchor(calendar, read_ical(source)?)?;
         let occurrences = Occurrences::read(&ical)?;
@@ -444,8 +439,6 @@ impl GcalClient {
         let has_uid = event.ical_uid.as_deref().is_some_and(|uid| !uid.is_empty());
         let invites = has_uid && calendar::scheduled(&ical) && self.organises(calendar, &event)?;
         let created = if invites {
-            // NOTE: on an insert the organizer is Google's to set: the
-            // calendar the event lands on.
             event.organizer = None;
             let params = GcalEventInsertParams {
                 send_updates: Some(GcalSendUpdates::All),
@@ -558,9 +551,12 @@ impl GcalClient {
         Ok(organizer.eq_ignore_ascii_case(&owner))
     }
 
-    /// Replaces a series event from an iCalendar object, merged onto the
-    /// server copy so the fields iCalendar does not model survive, then the
+    /// Replaces a series event from an iCalendar object, then the
     /// occurrences it overrides through their instances.
+    ///
+    /// Merged onto the server copy so fields iCalendar does not model
+    /// survive. Attendees are notified unless the resource marks them for the
+    /// client or for nobody (pimdir STORAGE Annex B.1).
     pub fn update_item_stream(
         &mut self,
         calendar: &str,
@@ -578,8 +574,6 @@ impl GcalClient {
         check_revision(id, &events, if_match)?;
         let current = events.remove(0);
 
-        // NOTE: the attendees are notified unless the resource marks them
-        // for the client or for nobody (pimdir STORAGE Annex B.1).
         let send_updates = match calendar::scheduled(&ical) {
             true => GcalSendUpdates::All,
             false => GcalSendUpdates::None,
@@ -708,8 +702,7 @@ impl GcalClient {
     }
 
     /// The instance of series `id` whose original start `recurrence_id`
-    /// names ([`names_occurrence`]), among the instances Google lists two
-    /// days either side of its date.
+    /// names ([`names_occurrence`]), looked for two days either side.
     fn instance(
         &mut self,
         calendar: &str,
@@ -774,8 +767,9 @@ impl GcalClient {
     }
 
     /// Cancels a meeting the account organises, Google telling its
-    /// attendees (pimdir STORAGE Annex B.2 `calendar.cancel`). Google sends
-    /// its own notice, which carries no comment.
+    /// attendees (pimdir STORAGE Annex B.2 `calendar.cancel`).
+    ///
+    /// Google sends its own notice, which carries no comment.
     pub fn cancel(&mut self, calendar: &str, id: &str) -> Result<()> {
         let current = self
             .op(|gcal| gcal.event_get(calendar, id, None, None))
@@ -812,8 +806,9 @@ impl GcalClient {
 }
 
 /// The patch answering an invitation: the attendee list with the account's
-/// own entry answered, refused when the account is no attendee or
-/// organises the event.
+/// own entry answered.
+///
+/// Refused when the account is no attendee or organises the event.
 fn reply_patch(
     current: &GcalEvent,
     partstat: Partstat,
@@ -907,8 +902,9 @@ fn is_missing(err: &anyhow::Error) -> bool {
 }
 
 /// Whether a Calendar answer in an error chain refused the change as it
-/// stands, its status naming the request ([`names_the_request`]); a rate
-/// limit is told apart by [`crate::error::refusal`].
+/// stands, its status naming the request ([`names_the_request`]).
+///
+/// A rate limit is told apart by [`crate::error::refusal`].
 pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
     match cause.downcast_ref::<GcalClientStdError>() {
         Some(GcalClientStdError::Send(GcalSendError::Api(err))) => names_the_request(err.status),
@@ -944,13 +940,12 @@ fn read_ical(mut source: impl Read) -> Result<Vec<u8>> {
     Ok(ical)
 }
 
-/// Whether `instance` is the occurrence `recurrence_id` names, by its
-/// original start: the same date, the same instant, or for a wall time of
-/// no zone known the time Google writes or the one the series' zone shows.
+/// Whether `instance` is the occurrence `recurrence_id` names by its
+/// original start: the same date, the same instant, or a zoneless wall time.
 ///
-/// Google writes an original start in the zone a listing asks for, the
-/// calendar's by default, so a wall time compared as written misses an
-/// occurrence of a series in another zone.
+/// That wall time matches the one Google writes or the series' zone shows:
+/// Google writes in the listing's zone, the calendar's by default, so one
+/// compared as written misses an occurrence of a series in another zone.
 fn names_occurrence(instance: &GcalEvent, recurrence_id: &OccurrenceId) -> bool {
     let Some(original) = &instance.original_start_time else {
         return false;
@@ -1050,7 +1045,6 @@ mod tests {
         assert!(!names(&timed, "20261006T080000", None));
         assert!(!names(&timed, "20261013T090000", None));
 
-        // NOTE: listed in UTC, an occurrence of a series in Paris.
         let utc = GcalEventDateTime {
             date_time: Some("2026-12-21T09:00:00Z".into()),
             ..Default::default()
@@ -1176,8 +1170,10 @@ mod tests {
     }
 
     /// An event Google refuses as it stands (its 400 on a time it cannot
-    /// read, as a floating one) is refused for good; a duplicate id (409)
-    /// and a rate limit (429) stay rejected (pimdir SYNC §4).
+    /// read, as a floating one) is refused for good.
+    ///
+    /// A duplicate id (409) and a rate limit (429) stay rejected (pimdir SYNC
+    /// §4).
     #[test]
     fn an_event_refused_as_it_stands_is_told_by_its_status() {
         const EVENT: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
@@ -1252,9 +1248,10 @@ mod tests {
         assert_eq!(server.requests().len(), 2, "{:?}", server.requests());
     }
 
-    /// An event deleted between its listing and its read is gone: failing
-    /// instead, it would fail the fetch of its calendar in every run until
-    /// a listing took it away.
+    /// An event deleted between its listing and its read is gone.
+    ///
+    /// Failing instead, it would fail the fetch of its calendar in every run
+    /// until a listing took it away.
     #[test]
     fn an_event_missing_from_its_read_is_gone() {
         for status in ["404 Not Found", "410 Gone"] {
@@ -1273,10 +1270,10 @@ mod tests {
         }
     }
 
-    /// The listing resuming from a sync token asks what the listing that
-    /// issued it asked, the token aside, so a token Google refuses at once
-    /// is the calendar's doing: the calendar is listed whole again, the
-    /// token remembered as issued this run.
+    /// A resumed listing asks what the listing that issued its token asked.
+    ///
+    /// So a token Google refuses at once is the calendar's doing: the
+    /// calendar is listed whole again, the token remembered as issued.
     #[test]
     fn a_resumed_listing_asks_what_issued_its_token() {
         let answer = |status: &str, body: &str| {
@@ -1465,8 +1462,9 @@ mod tests {
     }
 
     /// A floating time, which Google cannot store, is anchored in the zone
-    /// the calendar states, and the write reports no revision, so the next
-    /// sync reads it back.
+    /// the calendar states.
+    ///
+    /// The write reports no revision, so the next sync reads it back.
     #[test]
     fn a_floating_time_is_anchored_in_the_calendars_zone() {
         let floating = "BEGIN:VCALENDAR\r\n\

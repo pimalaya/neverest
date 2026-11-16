@@ -166,11 +166,11 @@ fn first_page_landed(dir: &Path) -> PimdirSourceStore {
     store
 }
 
-/// A message arriving while the round is open lands at the next run,
-/// before the round's next page, from the history since the round
-/// began; it survives the round's close, which takes the head's
-/// history id as the source's checkpoint, the next delta listing from
-/// it (pimdir vector 62).
+/// An arrival while the round is open lands next run before the round's next
+/// page (pimdir vector 62).
+///
+/// It comes from the history since the round began and survives the close,
+/// which takes the head's history id as the source's next checkpoint.
 #[test]
 fn a_head_lands_an_arrival_the_round_keeps() {
     let dir = tempfile::tempdir().unwrap();
@@ -277,7 +277,6 @@ fn an_expired_head_restarts_the_round() {
             "historyId": "600"
         })));
         api.answer(listed(&["m9", "m3", "m2", "m1"], None));
-        // NOTE: the flag listings of the bound m1 and m2.
         api.answer(listed(&[], None));
         api.answer(listed(&[], None));
         api.answer(listed(&[], None));

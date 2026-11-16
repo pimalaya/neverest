@@ -4,10 +4,9 @@
 //! store, and the report a run prints ([`hunk`], [`report`]).
 //!
 //! One [`PimdirSourceStore`] handle per source over the same files: `load`
-//! projects that source's view of the shared hub and `write` absorbs the
-//! engine's writes back, so items, flags and deletions cross sources with no
-//! cross-merge. A hub collection id is `<namespace>/<name>`, the namespace
-//! being the source id (`<account>/<source>`), so sources meet only inside it.
+//! projects its view of the hub, `write` absorbs the engine's writes back,
+//! so items, flags and deletions cross sources with no cross-merge. Sources
+//! meet only inside the namespace of a hub collection id, their source id.
 
 pub mod capability;
 pub mod collection;
@@ -42,9 +41,8 @@ use pimalaya_cli::signal::Shutdown;
 /// The shutdown a sync polls, once `sync` installed it.
 static SHUTDOWN: OnceLock<Shutdown> = OnceLock::new();
 
-/// Makes the first SIGINT or SIGTERM ask the run to stop rather than end
-/// the process, so it prints what it did (pimalaya-cli
-/// `signal::Shutdown`).
+/// Makes the first SIGINT or SIGTERM ask the run to stop rather than end the
+/// process, so it prints what it did (pimalaya-cli `signal::Shutdown`).
 pub fn install_shutdown() -> Result<()> {
     if SHUTDOWN.get().is_none() {
         let _ = SHUTDOWN.set(Shutdown::install()?);
@@ -53,32 +51,30 @@ pub fn install_shutdown() -> Result<()> {
     Ok(())
 }
 
-/// Whether a termination signal asked the run to stop: the loops start no
-/// new collection, batch or account, and the account's report reads as
-/// interrupted.
+/// Whether a termination signal asked the run to stop.
+///
+/// The loops start no new collection, batch or account, and the account's
+/// report reads as interrupted.
 pub fn stopping() -> bool {
     SHUTDOWN.get().is_some_and(Shutdown::is_requested)
 }
 
-/// The pimdir source id of an endpoint as the store sees it, verbatim: its
-/// configured name behind its account's, `<account>/<name>`
+/// The pimdir source id of an endpoint, verbatim `<account>/<name>`
 /// ([`crate::config::AccountConfig::namespaced`]).
 ///
-/// The axis that distinguishes each source's bindings of one shared item. It
-/// is the configured names and nothing derived, so renaming a source or an
-/// account orphans its bindings rather than quietly rebinding them.
+/// The axis telling each source's bindings of one shared item apart; nothing
+/// derived, so renaming a source or an account orphans its bindings rather
+/// than quietly rebinding them.
 pub fn source_id(name: &str) -> PimdirSourceId {
     PimdirSourceId(name.to_string())
 }
 
-/// Whether the payload of the queued intent `kind` states a version this
-/// neverest holds no schema for (pimdir STORAGE §15.3): an integer `v` other
-/// than the one it reads.
+/// Whether the payload of the queued intent `kind` states an integer `v`
+/// this neverest holds no schema for (pimdir STORAGE §15.3).
 ///
-/// Such a row is left pending and untouched, for a neverest that knows the
-/// version: it is read no further, never performed and never parked. A
-/// payload stating no `v`, or one that is no integer, names no version to
-/// wait for and is malformed instead.
+/// Such a row is left pending and untouched for a neverest that knows the
+/// version, never performed nor parked; a missing or non-integer `v` names
+/// no version to wait for and is malformed instead.
 pub fn states_unknown_version(kind: &str, payload: &str) -> bool {
     codec::payload_outcome(kind, payload) == PimdirPayloadOutcome::Unknown
 }
@@ -110,9 +106,10 @@ where
 pub enum Rest {
     /// The listing asks for its next page.
     Go,
-    /// The verb stops where it stands, every page it listed committed: the
-    /// store holds what a run killed there would leave, a round left open
-    /// with its cursor, which the next sync of the collection resumes.
+    /// The verb stops where it stands, every page it listed committed.
+    ///
+    /// The store holds what a kill there would leave, a round open at its
+    /// cursor, which the next sync of the collection resumes.
     Pause,
 }
 
@@ -129,15 +126,11 @@ pub enum Paged<T, C> {
 /// nothing it loaded outlives the next page (the sync coroutine reloads what
 /// a page names), so another verb may write the collection there.
 pub trait Pager {
-    /// The listing is about to ask for a page, or the verb completed.
+    /// The listing is about to ask for `next`, or the verb completed (`None`).
     ///
-    /// `landed` names the members of the page enumerated last, whose write
-    /// has committed, and is empty before the first page. `resumed` is true
-    /// once, before the head or the first page of a round an earlier run
-    /// left open.
-    /// `next` is the listing about to be asked for, `None` once the verb
-    /// completed. Answering [`Rest::Pause`] there stops the verb before it
-    /// asks; on completion the answer is ignored.
+    /// `landed` names the committed page enumerated last; `resumed` is true
+    /// once, before a round an earlier run left open (only such a round lists
+    /// a head, pimdir SYNC §5); [`Rest::Pause`] stops the verb before it asks.
     fn at_rest(
         &mut self,
         store: &mut PimdirSourceStore,
@@ -156,6 +149,9 @@ pub trait Pager {
 
 /// [`run_verb`], telling `pager` each time a page of the listing has landed,
 /// and stopping where it answers [`Rest::Pause`].
+///
+/// A page is written whole, its pushes settled, before the coroutine asks
+/// again, so dropping the coroutine there leaves what a kill would.
 pub fn run_verb_paged<R, C, T, E>(
     store: &mut PimdirSourceStore,
     remote: &mut R,
@@ -169,8 +165,6 @@ where
     C: PimdirCoroutine<Yield = PimdirYield, Return = Result<T, E>>,
 {
     let mut arg: Option<PimdirArg> = None;
-    // NOTE: the page enumerated last, landed by the next enumerate or by the
-    // completion: a page is written whole before the coroutine asks again.
     let mut page: Option<(PimdirCollectionId, Vec<PimdirHandle>)> = None;
     let mut first = true;
 
@@ -199,8 +193,6 @@ where
                 request,
             }) => {
                 if let Some(pager) = pager.as_deref_mut() {
-                    // NOTE: a run resuming an open round lists its head
-                    // first, which only an open round has (pimdir SYNC §5).
                     let resumed = first
                         && matches!(
                             request.listing,
@@ -210,10 +202,6 @@ where
                             } | PimdirListing::Head(_)
                         );
                     let landed = page.take().map(|(_, landed)| landed).unwrap_or_default();
-                    // NOTE: the page enumerated last is written whole, its
-                    // pushes settled, before the coroutine asks again, so
-                    // dropping the coroutine here leaves what a kill there
-                    // would: the round open at its cursor.
                     let next = Some(&request.listing);
                     if pager.at_rest(store, &collection, landed, resumed, next) == Rest::Pause {
                         return Ok(Paged::Paused(coroutine));

@@ -23,9 +23,10 @@ source_config! {
         /// server on a trusted network.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub server: Option<String>,
-        /// The address book home set, as a full URL: the session lists its
-        /// collections there and discovers nothing, `server` then being
-        /// ignored.
+        /// The address book home set, as a full URL.
+        ///
+        /// The session lists its collections there and discovers nothing,
+        /// `server` then being ignored.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub home: Option<String>,
         /// How the connection is secured.
@@ -60,9 +61,10 @@ source_config! {
         /// server on a trusted network.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub server: Option<String>,
-        /// The calendar home set, as a full URL: the session lists its
-        /// collections there and discovers nothing, `server` then being
-        /// ignored.
+        /// The calendar home set, as a full URL.
+        ///
+        /// The session lists its collections there and discovers nothing,
+        /// `server` then being ignored.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub home: Option<String>,
         /// How the connection is secured.

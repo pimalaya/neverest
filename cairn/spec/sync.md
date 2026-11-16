@@ -2134,7 +2134,7 @@ A conflict resolution, a merge and a one-way overwrite SHALL state the body they
 A change whose body is missing from the store or does not hash to its name SHALL be withheld, the placement staying as it was (pimdir STORAGE §7, SYNC §5), and the run SHALL report it under `unreadable` with the side, the collection and the count, and SHALL exit 3: the store needs a repair a rerun does not make.
 
 ### Requirement: A body a policy overruled is kept and reported
-A body a policy did not adopt, kept by the store as a retained item (pimdir SYNC §9), SHALL be reported under `overruled` with the collection and the retained item's key, and either the side and the item's handle on it, for a body a side's write or a mutation settled, or the queue row (`action`), for one the drain kept aside applying a queued action, in a sync and in `drain`. It SHALL be a warning and SHALL NOT change the exit code: the policy decided as configured.
+A body a policy did not adopt, kept by the store as a retained item (pimdir SYNC §9), SHALL be reported under `overruled` with the collection and the retained item's key, and either the side and the item's handle on it, for a body a side's write or a mutation settled, or the queue row (`action`), for one the drain kept aside applying a queued action, in a sync and in `sync --queue-only`. It SHALL be a warning and SHALL NOT change the exit code: the policy decided as configured.
 
 ### Requirement: A one-way overwrite keeps the body it discards
 A one-way account overwriting a target's own edit SHALL keep the target's body as a retained item and SHALL report it under `overruled`: `one-way` discards the target's change from its server, never from the store. A target body the store holds as wanted only SHALL be fetched before the overwrite settles it, the store refusing to overrule a body nobody read (`conflict-unread`); the fetch itself settles it by the target's `prefer-local` (see "A fetched divergence settles by the endpoint's policy"), and one still unread after its fetch SHALL stay parked, never failing the run.
@@ -2413,3 +2413,24 @@ A sync report SHALL list the hunks it applied under `collectionPatch` and `itemP
 - GIVEN an account whose collections are in sync
 - WHEN `neverest sync --json` reports it
 - THEN its row reads `account` and its `report` reads `collectionPatch: []` and `itemPatch: []`, with no `account`, `collection` or `item` key
+
+### Requirement: The rules the code's comments carried
+The rules below were kept in inline comments until the-v1-review removed every `//` comment (D5); they are behaviour, so they live here.
+
+- A Graph mail round widening the coverage SHALL list the missing band from that band's floor (by `sentDateTime`), `Date` deciding what belongs to the band, and SHALL keep the stored delta link.
+- A member a Graph band head named, and the store did not bind when the run began, SHALL NOT be treated as held: the pass reads its summary so the round's last page lists it again; only a member a band page listed this run, marks unchanged, is left out.
+- A failed Graph reopen SHALL leave no earlier attempt's exchange record: the record is cleared before the reopen, which the "unanswered" verdict of a send depends on.
+- A DAV `MOVE` SHALL be retried as a create is: a 503 is never resent, the target possibly existing, a 429 is.
+- Debug builds SHALL read `NEVEREST_IMAP_NO_QRESYNC`, treating the server as lacking QRESYNC so tests reach band heads against a QRESYNC server; release builds SHALL NOT read it.
+- Gmail SHALL match label names ignoring case: a rename changing only the case finds its own label under the new name, which is no conflict.
+- A queued collection or calendar intent whose payload does not decode names no source: it SHALL go to a side of its collection's namespace (for a calendar intent, the side binding the item), which parks it as malformed.
+- On an account syncing its source alone, a collection a delete intent removed from the server SHALL leave the store too, unless a row still queued on it keeps it.
+- The `Abandoned` outcome comes only from an `Abandon`, which no neverest command stages (pimdir SYNC §7); it SHALL only be logged.
+- Gmail SHALL stay on one connection until a second one beside a batch is measured against its per-user concurrency; Google Calendar and People meter the whole account, and DAV gains nothing in parallel.
+- Phase 2 hydration plans SHALL be read once phase 1 is over, so a body a landed page kept or found gone is not downloaded again; bodies settled by policy while landing are drained from each connection's notes after phase 2.
+- Landing bodies SHALL take a collection's gate before the applying lock, one collection at a time, so no applier holds two gates.
+- A conflict resolution SHALL settle only the divergence it showed: its queued update's `resolves` names the remote revision shown and no other, so a conflict never seen parks the edit (pimdir STORAGE §15.3).
+- A short multiget batch SHALL NOT count as done: its missing members are fetched one by one.
+- A sync state row with no checkpoint SHALL read as no sync state, and reading then writing a checkpoint SHALL run in one transaction.
+- A dry run SHALL NOT upgrade a probe to `Full` to name what it would fetch (a DAV kind resolves its link id only at `Full`), nor key its plan on the hub level (a content change drops the stale object while the hub keeps the level).
+- The io-pimdir error codes neverest never meets are left out of its codes: `index-busy` (answered as busy), `index-missing`, `index-outdated` and `index-query-only` (a query client's), `index-zone-unknown` (neverest states only zones its database names), `cutoff-invalid` and `scope-invalid` (neverest writes the shapes the store holds), `store-reset` (a row is named by its bare id), `action-not-intent` (only a `submit` is parked unconfirmed), `backup-occupied` (no backup is taken) and `conflict-unread` (the one-way overwrite fetches the unread body, an item still unread staying parked).

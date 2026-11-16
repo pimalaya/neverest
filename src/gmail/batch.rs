@@ -1,17 +1,14 @@
 //! # Gmail batched reads
 //!
 //! Reads many messages through Gmail's HTTP batch endpoint, a batch at a
-//! time: Gmail answers each read of a batch on its own, so some may land
-//! while others are refused (a 429 for concurrency, a 403 for a quota) or
-//! gone (404). [`read_all`] hands each message to its caller once, puts a
-//! refused read back at the head of the next batch after a short pause, and
-//! gives the source up on a daily quota.
+//! time. Gmail answers each read on its own, landed, refused (429, 403) or
+//! gone (404): [`read_all`] hands each message over once, puts a refused
+//! read back at the next batch's head and gives up on a daily quota.
 //!
-//! The batches adapt their size after lieer's: a batch with a read refused
-//! for concurrency or rate, failed transiently or left unanswered cuts the
-//! size to half the reads it carried, down to one read, and a full batch
-//! answered with no refusal doubles it back, up to `gmail.batch-size`
-//! ([`BatchSize`]).
+//! The batch size adapts after lieer's ([`BatchSize`]): a read refused for
+//! concurrency or rate, failed transiently or unanswered halves it, down to
+//! one read, and a full batch with no refusal doubles it back, up to
+//! `gmail.batch-size`.
 //!
 //! The sender is the [`Batcher`] trait, so the reads can be counted and
 //! refused without a network.
@@ -161,20 +158,9 @@ pub type Sizes<'a> = &'a dyn Fn(&str) -> u64;
 /// How many reads the next batch carries, adapted after lieer's Gmail
 /// batches (gauteh/lieer `remote.py`, `get_messages`).
 ///
-/// It starts at the configured ceiling. A batch with a read answered
-/// [`Inner::Busy`] (a concurrency or rate refusal, a transient failure or a
-/// missing answer) cuts it to half the reads that batch carried, down to
-/// one read; a full batch answered with no refusal at all doubles it, up to
-/// the ceiling. Unlike lieer, a per-minute quota refusal leaves it alone:
-/// the pacing charges that quota by the read, so a smaller batch would only
-/// slow the run, and the minute's waits answer it.
-///
-/// The size is shared by a source's connections for the run. A batch
-/// adapts from the size it was sent at, not the size in force when it
-/// lands: batches built before a refusal and answered after it cut the size to
-/// half their own at most, rather than halving it again each, and only a
-/// batch sent at the size in force grows it, so a late landing does not
-/// undo a fresh halving.
+/// A minute-quota refusal leaves it alone, unlike lieer: the pacing charges
+/// that quota by the read. Shared by a source's connections, it adapts from
+/// the size a batch was sent at, so late batches neither halve nor regrow it.
 #[derive(Debug, Eq, PartialEq)]
 pub struct BatchSize {
     ceiling: usize,
@@ -202,9 +188,10 @@ impl BatchSize {
         self.current = self.current.min((sent / 2).max(1));
     }
 
-    /// Doubles the size after a full batch of `sent` reads answered with no
-    /// refusal, when it was sent at the size in force; a batch sent before
-    /// a change, or cut short by its bytes, proves nothing about it.
+    /// Doubles the size after a full batch of `sent` reads with no refusal.
+    ///
+    /// Only a batch sent at the size in force counts: one sent before a change,
+    /// or cut short by its bytes, proves nothing about it.
     fn landed(&mut self, sent: usize) {
         if sent == self.current {
             self.current = (self.current * 2).min(self.ceiling);
@@ -217,18 +204,12 @@ fn size_lock(size: &Mutex<BatchSize>) -> std::sync::MutexGuard<'_, BatchSize> {
     size.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Reads every message of `ids` as `read`, handing each to `each` once,
-/// `None` for one gone: batches of at most `batch_size`'s current size
-/// ([`BatchSize`]) sent one after another; for a raw read, a batch holds
-/// about [`RAW_BATCH_BYTES`] by the sizes `sizes` names, and a message past
-/// [`ALONE_BYTES`] is read alone.
+/// Reads every message of `ids` as `read`, handing each to `each` once, `None`
+/// for one gone, in batches of [`BatchSize`]'s current size.
 ///
-/// A read refused for concurrency or rate is put back at the head of the
-/// next batch, sent after a second or two; one refused a per-minute quota
-/// likewise after two to five seconds, then the next minute. A daily quota
-/// gives the source up until Google's midnight, and a read refused
-/// [`MAX_TRIES`] times gives it up for the last wait: the read fails, what
-/// `each` took staying taken.
+/// A raw batch holds about [`RAW_BATCH_BYTES`], one past [`ALONE_BYTES`] alone.
+/// A refused read heads the next batch, one wait a batch; a daily quota or
+/// [`MAX_TRIES`] refusals fail it, what `each` took staying taken.
 pub fn read_all<B: Batcher>(
     batcher: &mut B,
     read: Read,
@@ -315,8 +296,6 @@ pub fn read_all<B: Batcher>(
                 }
             }
         }
-        // NOTE: one wait a batch refused for the minute, however many of its
-        // reads were, growing while the batches after it are refused too.
         if minute {
             let wait = waits.wait(GoogleRefusal::Minute, None, SystemTime::now());
             pause = pause.max(wait);
@@ -509,6 +488,7 @@ mod tests {
         drive(batch, &batch_answer(parts)).unwrap().response
     }
 
+    /// An id with no part in the answer (e5) is busy.
     #[test]
     fn an_inner_answer_is_read_gone_busy_minute_daily_or_failed() {
         let parts = [
@@ -520,7 +500,6 @@ mod tests {
             ("g7", "401 Unauthorized", "{}".into()),
             ("h8", "503 Service Unavailable", "{}".into()),
         ];
-        // NOTE: e5 has no part in the answer at all.
         let ids = ["a1", "b2", "c3", "d4", "e5", "f6", "g7", "h8"];
         let taken: BTreeMap<String, String> = batched(&ids, Read::Metadata, &parts)
             .into_iter()
@@ -903,9 +882,8 @@ mod tests {
         );
     }
 
-    /// Several connections share the size: batches built at 10 before one
-    /// is refused, then answered after it, must neither halve it again each
-    /// nor grow it back.
+    /// Batches built at 10 before a shared refusal and answered after it
+    /// neither halve the size again each nor grow it back.
     #[test]
     fn a_batch_adapts_from_the_size_it_was_sent_at() {
         let mut size = BatchSize::new(10);
@@ -944,10 +922,9 @@ mod tests {
         assert!(batcher.batches.iter().all(|(_, ids)| !ids.is_empty()));
     }
 
+    /// m000 halves the size to 5, then m010's minute refusal keeps it there.
     #[test]
     fn a_minute_refusal_leaves_the_batch_size_alone() {
-        // m000 halves the size to 5, then m010's minute refusal must keep it
-        // there rather than double it back.
         let mut batcher = FakeBatcher {
             refusals: [
                 ("m000".to_string(), vec![Answer::Concurrency]),
@@ -1062,8 +1039,9 @@ mod tests {
     }
 
     /// Another connection's refusal cuts the shared size to 5 while this
-    /// read's batch of 10 is in flight; this batch, refused too, cuts it to
-    /// half of its own 10 at most, so the next carries 5, not 2.
+    /// read's batch of 10 is in flight.
+    ///
+    /// Refused too, this batch cuts it to half its own 10 at most: next is 5.
     #[test]
     fn a_batch_refused_after_another_cut_does_not_halve_again() {
         let size = std::sync::Arc::new(sized(10));
@@ -1092,8 +1070,9 @@ mod tests {
     }
 
     /// Another connection's refusal cuts the shared size to 5 while this
-    /// read's batch of 10 is in flight; this batch then lands whole, but it
-    /// was sent at 10, so it leaves the size at 5.
+    /// read's batch of 10 is in flight.
+    ///
+    /// This batch lands whole, but sent at 10 it leaves the size at 5.
     #[test]
     fn a_batch_landing_after_another_cut_does_not_grow_the_size() {
         let size = std::sync::Arc::new(sized(10));

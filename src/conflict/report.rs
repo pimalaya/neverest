@@ -120,8 +120,9 @@ pub struct ConflictShowOutput {
 }
 
 impl ConflictShowOutput {
-    /// Takes the three bodies as stored, typed by the collection's media
-    /// type. Every kind reaching a conflict is text: mail alone is
+    /// Takes the three bodies as stored, typed by the collection's media type.
+    ///
+    /// Every kind reaching a conflict is text: mail alone is
     /// immutable-content, and it reaches none of this.
     pub fn new(conflict: &Conflict, sides: Sides) -> Self {
         let body =
@@ -159,12 +160,12 @@ impl ConflictBody {
     }
 }
 
+/// Lossy on bytes: a person reads this to decide, while `--json` and the
+/// store keep the bytes.
 impl fmt::Display for ConflictBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Text(text) => writeln!(f, "{}", text.trim_end()),
-            // NOTE: a person reads this to decide; --json and the store
-            // keep the bytes.
             Self::Bytes(bytes) => {
                 writeln!(f, "(not UTF-8, invalid sequences shown as U+FFFD)")?;
                 let text = String::from_utf8_lossy(&bytes.data);
@@ -218,8 +219,10 @@ pub enum ConflictResolveOutput {
         /// the one the interactive merger wrote.
         side: String,
         /// What a source supports in part that the next run's push relies
-        /// on (pimdir STORAGE §15.6): an event's attendees notified by the
-        /// provider's rules rather than the event's own, for one.
+        /// on (pimdir STORAGE §15.6).
+        ///
+        /// An event's attendees notified by the provider's rules rather than
+        /// the event's own, for one.
         partial: Vec<PartialCapability>,
     },
     /// The merger aborted, by exiting non-zero or by leaving its output
@@ -334,8 +337,7 @@ mod tests {
     }
 
     /// A settled divergence names what a source supports in part as rows a
-    /// program reads, its source as the configuration names it, where each
-    /// was a sentence.
+    /// program reads, its source as the configuration names it.
     #[test]
     fn a_partial_capability_prints_as_a_row() {
         use io_pimdir::capability::PimdirPartial;

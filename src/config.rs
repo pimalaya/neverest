@@ -57,9 +57,10 @@ macro_rules! source_config {
             /// Connection pool size override; the default is per backend.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub pool_size: Option<usize>,
-            /// The proxy this source's connections go through, falling back
-            /// to the account's, then to the `all_proxy` and `https_proxy`
-            /// environment variables.
+            /// The proxy this source's connections go through.
+            ///
+            /// Falls back to the account's, then to the `all_proxy` and
+            /// `https_proxy` environment variables.
             #[serde(default, skip_serializing_if = "Option::is_none")]
             pub proxy: Option<$crate::config::proxy::ProxyConfig>,
         }
@@ -169,10 +170,10 @@ impl TomlConfig for Config {
 }
 
 impl Config {
-    /// Loads `Config` from `config_paths`, failing when none exists with
-    /// pimalaya-config's [`ConfigMissingError`], naming the path looked for
-    /// and the sample to start from, which `main` meets a person with as the
-    /// welcome.
+    /// Loads `Config` from `config_paths`.
+    ///
+    /// Fails when none exists with [`ConfigMissingError`], naming the path
+    /// and the sample to start from, which `main` shows as the welcome.
     ///
     /// [`ConfigMissingError`]: pimalaya_config::toml::ConfigMissingError
     pub fn load(config_paths: &[PathBuf]) -> Result<Config> {
@@ -243,11 +244,9 @@ fn join(names: &[&String]) -> String {
 
 /// Per-account configuration: named sources over one pimdir store.
 ///
-/// An account is one hub of a store it may share with others, its
-/// collections grouped under its name. A source's name makes its pimdir
-/// source id, `<account>/<name>`, so renaming one orphans its bindings, and
-/// a backend written under the account is sugar for a source named after
-/// it.
+/// An account is one hub of a store it may share. A source's name makes its
+/// pimdir source id, `<account>/<name>`, so renaming one orphans its
+/// bindings; a backend written under the account is sugar named after it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct AccountConfig {
@@ -290,9 +289,10 @@ pub struct AccountConfig {
     /// Direct-backend sugar: a Gmail source named after its protocol.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gmail: Option<GmailConfig>,
-    /// Direct-backend sugar: a Graph source a domain the table names, each
-    /// named as the table it had before (`msgraph`, `msgraph-contacts`,
-    /// `msgraph-calendar`).
+    /// Direct-backend sugar: a Graph source per domain the table names.
+    ///
+    /// Each is named as the table it had before (`msgraph`,
+    /// `msgraph-contacts`, `msgraph-calendar`).
     #[serde(
         default,
         deserialize_with = "msgraph_sugar",
@@ -325,7 +325,6 @@ pub struct AccountConfig {
     /// How a run announces a content conflict it could not merge away.
     #[serde(default)]
     pub conflict: ConflictConfig,
-    // TODO: item-level sync filters (date range, sender, subject).
     /// Item-level sync options.
     #[serde(default)]
     pub item: ItemSyncConfig,
@@ -414,10 +413,11 @@ impl AccountConfig {
         !self.sources.contains_key(name)
     }
 
-    /// The backend tables the account writes, its sources' and its
-    /// targets', sugar and named alike, each once in [`BACKENDS`] order,
-    /// `smtp` for a send channel. Read off the tables alone, so an account
-    /// a command would refuse lists too.
+    /// The backend tables the account writes, each once in [`BACKENDS`]
+    /// order, `smtp` for a send channel.
+    ///
+    /// Read off the tables alone, so an account a command would refuse lists
+    /// too.
     pub fn backends(&self) -> Vec<&'static str> {
         let sugar = [
             self.imap.as_ref().map(|_| "imap"),
@@ -454,15 +454,12 @@ impl AccountConfig {
         Ok(endpoints)
     }
 
-    /// This account as the store sees it: every endpoint keyed by its
-    /// pimdir source id, `<account>/<name>`, the sugar folded into
-    /// `sources`.
+    /// This account as the store sees it: every endpoint keyed by its pimdir
+    /// source id, `<account>/<name>`, the sugar folded into `sources`.
     ///
-    /// A store shared by several accounts holds their source ids and
-    /// collection ids side by side, each unique store-wide (pimdir STORAGE
-    /// §4.3, §9.2), so two accounts each holding the `imap` sugar must not
-    /// both bind `imap`. Every collection id derives from a source id,
-    /// so namespacing the source namespaces the collection too.
+    /// Source ids are unique store-wide (pimdir STORAGE §4.3, §9.2), so two
+    /// accounts holding the `imap` sugar must not both bind `imap`; a
+    /// collection id derives from its source id, so it follows.
     pub fn namespaced(&self, account: &str) -> Result<Self> {
         let id = |(name, source): (String, SourceConfig)| (format!("{account}/{name}"), source);
 
@@ -537,7 +534,8 @@ impl AccountConfig {
     /// declaring what its backend cannot honour, two senders.
     ///
     /// Run by every command that opens an account, so a bad configuration is
-    /// refused before a connection rather than halfway through a sync.
+    /// refused before a connection rather than halfway through a sync, the
+    /// mode's refusals included.
     pub fn validate(&self) -> Result<()> {
         let sources = self.sources()?;
 
@@ -560,8 +558,6 @@ impl AccountConfig {
             );
         }
 
-        // NOTE: called for its refusals: `check` and the sync read the same
-        // mode.
         self.mode()?;
 
         if let Some(since) = &self.item.filter.since {
@@ -586,15 +582,12 @@ impl AccountConfig {
         Ok(())
     }
 
-    /// The scope a run syncs mail under (pimdir SYNC §5): from `since`, the
-    /// run's `--since`, when given, else from `item.filter.since`; unbounded
-    /// without either.
+    /// The scope a run syncs mail under (pimdir SYNC §5): from `since` (the
+    /// run's `--since`), else `item.filter.since`, else unbounded.
     ///
     /// A scope bounds mail by its `Date` and nothing else, so one is refused
-    /// by the key it came from when an endpoint the run syncs (a source of
-    /// `only`, every source when empty, or a target) holds contacts or
-    /// calendars: CardDAV, CalDAV, Google People and Calendar, Graph
-    /// contacts and calendars.
+    /// by the key it came from when an endpoint the run syncs (`only`'s
+    /// sources, or all, and the targets) holds contacts or calendars.
     pub fn scope(
         &self,
         since: Option<&str>,
@@ -1083,8 +1076,10 @@ mod tests {
     }
 
     /// Every path key expands once, at deserialize, so no call site can read
-    /// a literal `./~/…` directory. A document re-serialized after that
-    /// carries the expansion and reloads to the same value.
+    /// a literal `./~/…` directory.
+    ///
+    /// A re-serialized document carries the expansion and reloads the same;
+    /// an absent key never reaches the deserializer, so stays absent.
     #[test]
     fn a_tilde_path_is_expanded_at_deserialize() {
         let home = dirs::home_dir().unwrap();
@@ -1098,15 +1093,12 @@ mod tests {
         let reloaded: TlsConfig = toml::from_str(&toml::to_string(&tls).unwrap()).unwrap();
         assert_eq!(reloaded.cert, tls.cert);
 
-        // NOTE: an absent key never reaches the deserializer, so it stays
-        // absent rather than expanding an empty path.
         let tls: TlsConfig = toml::from_str("").unwrap();
         assert_eq!(tls.cert, None);
     }
 
     /// A path key expands environment variables too, as every other
-    /// Pimalaya path does through pimalaya-config, where the tilde alone
-    /// used to.
+    /// Pimalaya path does through pimalaya-config.
     #[test]
     fn a_variable_in_a_path_is_expanded_at_deserialize() {
         let home = PathBuf::from(std::env::var("HOME").unwrap());
@@ -1118,9 +1110,10 @@ mod tests {
         assert_eq!(tls.cert, Some(home.join("ca.pem")));
     }
 
-    /// The keys the sibling CLIs read and neverest did not load: a DAV home
-    /// set with no server and no credential, the IMAP `SASL-IR` and `ID`
-    /// quirks, and a proxy at the account, under a backend and its channel.
+    /// The keys the sibling CLIs read and neverest did not load.
+    ///
+    /// A DAV home set with no server and no credential, the IMAP `SASL-IR`
+    /// and `ID` quirks, and a proxy at the account, a backend and a channel.
     #[test]
     fn the_family_connection_keys_load() {
         let account: AccountConfig = toml::from_str(
@@ -1272,6 +1265,8 @@ mod tests {
 
     /// A key an earlier neverest read, `default` included, is refused as
     /// unknown at whatever level it sits.
+    ///
+    /// Refused as the file parses, so an account no command opens is too.
     #[test]
     fn a_key_this_version_does_not_read_is_refused() {
         let mut missed = Vec::new();
@@ -1392,8 +1387,6 @@ mod tests {
                 "unknown field `mailbox`",
             ),
         ] {
-            // NOTE: refused as the file is parsed, so an account no command
-            // opens is refused too.
             let err = match toml::from_str::<AccountConfig>(document) {
                 Ok(_) => String::from("parsed"),
                 Err(err) => err.to_string(),
@@ -1436,8 +1429,10 @@ mod tests {
     }
 
     /// Checks config.sample.toml: one `[accounts.example]` table and no
-    /// other, parsed as written, then once per rank with every line
-    /// uncommented and that rank's value of each field.
+    /// other, parsed as written.
+    ///
+    /// Then once per rank, every line uncommented and set to that rank's
+    /// value of each field.
     #[test]
     fn the_sample_configuration_parses_with_each_variant() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/config.sample.toml");
@@ -1590,10 +1585,11 @@ mod tests {
         if replaces { values.max(2) } else { values }
     }
 
-    /// The sample at `rank`, every line uncommented: each field set once,
-    /// to its value of that rank, the last when it has fewer. A replacing
-    /// paragraph stays out at rank 1 and takes the place of the one above
-    /// it from rank 2.
+    /// The sample at `rank`, every line uncommented.
+    ///
+    /// Each field is set once, to its value of that rank, the last when it
+    /// has fewer. A replacing paragraph stays out at rank 1 and takes the
+    /// place of the one above it from rank 2.
     fn sample_variant(paragraphs: &[Vec<SampleLine>], rank: usize) -> String {
         let mut dropped = vec![false; paragraphs.len()];
 

@@ -44,12 +44,12 @@
 //!
 //! Every account shares one store (`<state base>/neverest/`, or the
 //! `store.root` accounts name), each one hub within it, its collections
-//! grouped under its name. An account is not one collection space either: a
-//! pimdir source id is `<account>/<source>` and a hub collection id
-//! `<account>/<source>/<name>`, so two accounts holding a source of one
-//! name, mail and contacts under one account, or two providers cached side
-//! by side, never meet. It is derived, never configured, and stripped back
-//! off before any wire call and in what a report names.
+//! grouped under its name.
+//!
+//! Nor is an account one collection space: a source id is
+//! `<account>/<source>` and a hub collection id `<account>/<source>/<name>`,
+//! so same-named sources of two accounts, kinds or providers never meet.
+//! Derived, never configured, it is stripped before any wire call or report.
 //!
 //! One run covers every account, or those `-a` names, one after the other
 //! under the store's one lock (pimdir allows one owner process a store).
@@ -82,10 +82,9 @@
 //! it carries a code of its own back to `main`.
 //!
 //! [`config`] is the TOML schema and [`account`] its runtime counterpart,
-//! the endpoints with every secret already resolved, which [`client`], the
-//! kind-neutral backend seam, opens a connection from. [`collection`] and
-//! [`flag`] are the vocabulary above that seam, [`kind`] the per-media-type
-//! derivations.
+//! secrets resolved, which [`client`], the kind-neutral backend seam, opens
+//! a connection from. [`collection`] and [`flag`] are the vocabulary above
+//! that seam, [`kind`] the per-media-type derivations.
 //!
 //! [`conflict`] is the other end of that merge: the divergences it could not
 //! settle, the decision a person makes about one, and the guard refusing a
@@ -198,6 +197,11 @@ use crate::{
     error::ErrorCode,
 };
 
+/// Parses and runs the command, then decides its outcome in this one place.
+///
+/// A sync streams its events, piped too, for a status bar reading them as
+/// they come; a person missing a configuration meets the welcome, a script
+/// or a JSON caller the error.
 fn main() -> ExitCode {
     let cli = parse::<Cli>();
     let mut printer = StdoutPrinter::new(&cli.json);
@@ -205,22 +209,14 @@ fn main() -> ExitCode {
         notice::silence();
     }
 
-    // NOTE: a sync prints its events to a pipe too, a status bar reading
-    // them as they come.
     if matches!(cli.command, Some(cli::main::Command::Sync(_))) {
         printer = printer.streaming();
     }
 
     let config_paths = cli.config.paths.clone();
     let result = execute(&mut printer, cli);
-
-    // NOTE: the outcome that is neither success nor failure comes back here
-    // rather than exiting inside a subcommand, so one place decides it.
-    // NOTE: a server refusal under the failure reaches its code.
     let result = result.map_err(error::coded);
 
-    // A person missing a configuration meets the welcome, a script or a
-    // JSON caller the error.
     if let Err(err) = &result
         && let Some(missing) = err.downcast_ref::<ConfigMissingError>()
         && is_wanted(&printer)

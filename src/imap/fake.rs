@@ -1,10 +1,9 @@
 //! # Fake IMAP server
 //!
-//! A scripted IMAP4rev1 server on a local socket, for the connector tests:
-//! one mailbox whose `UIDVALIDITY`, modseq and messages a test sets, and
-//! which answers the commands the [backend](crate::imap::backend) sends. It
-//! greets `PREAUTH` with its capabilities, so a client opens with no
-//! credential, and records every command line it reads.
+//! A scripted IMAP4rev1 server on a local socket for the connector tests:
+//! one mailbox a test sets, answering what the [backend](crate::imap::backend)
+//! sends. It greets `PREAUTH`, so a client opens with no credential, and
+//! records every command line it reads.
 
 use std::{
     collections::BTreeMap,
@@ -199,9 +198,10 @@ impl FakeImap {
     }
 }
 
-/// The commands a server refuses: its next write, once, every search for
-/// the messages with no `Date`, and what an `ENABLE` asks when it enables
-/// nothing.
+/// The commands a server refuses.
+///
+/// Its next write, once, every search for the messages with no `Date`, and
+/// what an `ENABLE` asks when it enables nothing.
 struct Refusals<'a> {
     write: &'a Mutex<Option<&'static str>>,
     undated: &'a Mutex<Option<&'static str>>,
@@ -209,6 +209,10 @@ struct Refusals<'a> {
 }
 
 /// Serves one connection until the client leaves.
+///
+/// An `APPEND` literal is read and dropped, with no `APPENDUID`. A fault cuts
+/// a reply after its first row, found by its closing `)`: no fake body ends a
+/// line so.
 fn serve(
     stream: TcpStream,
     qresync: bool,
@@ -244,9 +248,6 @@ fn serve(
         };
         commands.lock().unwrap().push(command.to_owned());
 
-        // NOTE: a synchronising literal (an `APPEND`'s message) is asked
-        // for, read and dropped: the fake files nothing and answers no
-        // `APPENDUID`, as a server without UIDPLUS does.
         if let Some(octets) = literal_of(command) {
             let mut literal = vec![0; octets];
             let mut rest = String::new();
@@ -289,7 +290,6 @@ fn serve(
             true => fault.lock().unwrap().take(),
             false => None,
         };
-        // NOTE: a row ends on its closing `)`, no fake body ending a line so.
         let first = reply
             .windows(3)
             .position(|window| window == b")\r\n")
@@ -330,6 +330,8 @@ fn literal_of(command: &str) -> Option<usize> {
 }
 
 /// The untagged lines answering `command`.
+///
+/// A `UID SEARCH` matches everything unless its criterion is a `Message-ID`.
 fn answer(command: &str, mailbox: &mut FakeMailbox, headers: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
     let upper = command.to_ascii_uppercase();
     let mut out = Vec::new();
@@ -352,7 +354,6 @@ fn answer(command: &str, mailbox: &mut FakeMailbox, headers: &BTreeMap<u32, Vec<
             .as_bytes(),
         );
     } else if upper.starts_with("UID SEARCH") {
-        // NOTE: every criterion but a `Message-ID` one matches everything.
         let header = upper
             .find("HEADER MESSAGE-ID ")
             .map(|at| command[at + 18..].trim_matches('"'));

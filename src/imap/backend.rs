@@ -84,9 +84,10 @@ impl ImapClient {
     }
 
     /// The role each mailbox states, by mailbox name: the SPECIAL-USE
-    /// attributes of the `LIST` rows (RFC 6154), and `INBOX` (RFC 3501
-    /// §5.1). A check-only probe: the shared [`Collection`] stays free of
-    /// protocol data.
+    /// attributes of the `LIST` rows (RFC 6154), and `INBOX` (RFC 3501 §5.1).
+    ///
+    /// A check-only probe: the shared [`Collection`] stays free of protocol
+    /// data.
     pub fn mailbox_roles(&mut self) -> Result<BTreeMap<String, String>> {
         let reference: ImapMailbox<'static> = ""
             .try_into()
@@ -107,19 +108,9 @@ impl ImapClient {
 
     /// Lists one page of a mailbox (pimdir SYNC §4).
     ///
-    /// A delta reads what changed since the checkpoint's modseq through a
-    /// QRESYNC `SELECT`; a server without QRESYNC answers the first page of
-    /// a round instead. Any listing meeting a `UIDVALIDITY` other than the
-    /// one the store bound its handles under answers [`Listed::Rekey`]. A
-    /// round lists the scope newest first, [`PAGE_SIZE`] UIDs a page, its
-    /// cursor the lowest UID listed and the highest UID the round found
-    /// when it opened; its first page carries the checkpoint taken at the
-    /// `SELECT`, so what moves during the round is its heads' or the next
-    /// delta's, and its last page lists again what arrived since it opened.
-    ///
-    /// A head lists what changed while the round is open: a delta head the
-    /// QRESYNC delta from a checkpoint, a band head what `SEARCH SINCE`
-    /// dates from the round's opening less two days.
+    /// A delta is a QRESYNC `SELECT` from the checkpoint, else a round's first
+    /// page; a round lists newest first, [`PAGE_SIZE`] UIDs a page. A
+    /// `UIDVALIDITY` the store did not bind under answers [`Listed::Rekey`].
     pub fn enumerate(
         &mut self,
         mailbox: &str,
@@ -186,10 +177,12 @@ impl ImapClient {
         }
     }
 
-    /// The QRESYNC delta from `(UIDVALIDITY, modseq)`: the messages changed
-    /// since, the meta read for the ones the store does not bind, the UIDs
-    /// vanished, and the checkpoint the server holds now. `None` when the
-    /// `UIDVALIDITY` moved, its UIDs naming other messages.
+    /// The QRESYNC delta from `(UIDVALIDITY, modseq)`, `None` when the
+    /// `UIDVALIDITY` moved.
+    ///
+    /// It answers the messages changed, the meta of the ones the store does not
+    /// bind (all of them under a head's newer `UIDVALIDITY`), the UIDs vanished
+    /// and the server's checkpoint now.
     fn qresync_delta(
         &mut self,
         mailbox: &str,
@@ -212,8 +205,6 @@ impl ImapClient {
             .collect();
         let vanished = held_vanished(&data.vanished_earlier, held);
 
-        // NOTE: a head's checkpoint may be newer than the store's, whose
-        // handles then name what an older `UIDVALIDITY` numbered.
         let trusted = trusts(held, uid_validity);
         let unheld: Vec<u32> = changed
             .iter()
@@ -232,12 +223,11 @@ impl ImapClient {
         Ok(Some(page))
     }
 
-    /// The band head of an open round: every message the server dates
-    /// from `since` less two days by its arrival (`UID SEARCH SINCE`, its
-    /// `INTERNALDATE`), read now as a round's page reads it (pimdir SYNC
-    /// §4). It states no removal and carries no checkpoint; a message moved
-    /// in keeps its arrival and waits for the round's last page. An instant
-    /// it cannot read lists none.
+    /// The band head of an open round (pimdir SYNC §4).
+    ///
+    /// Every message `UID SEARCH SINCE` dates from `since` less two days, read
+    /// as a page reads it, stating no removal nor checkpoint; a message moved
+    /// in waits for the last page. An instant it cannot read lists none.
     fn band_head(&mut self, mailbox: &str, since: &str, held: &Held<'_>) -> Result<Listed> {
         let Some(day) = imap_day(since, -2) else {
             debug!("no band head of {mailbox} from {since}, not an RFC 3339 instant");
@@ -278,6 +268,10 @@ impl ImapClient {
     }
 
     /// One page of a round over `scope`, from its start or from `cursor`.
+    ///
+    /// `EXISTS` may be left out, so only `EXISTS 0` states it empty. A cursor
+    /// under an old `UIDVALIDITY` restarts the round; the last page lists again
+    /// the arrivals above its top UID, every UID if narrowed.
     fn round_page(
         &mut self,
         mailbox: &str,
@@ -302,15 +296,12 @@ impl ImapClient {
         self.mark_selected(mailbox);
         let uid_validity = select.uid_validity.map(|v| v.get()).unwrap_or(0);
         let highest_mod_seq = select.highest_mod_seq.unwrap_or(0);
-        // NOTE: a server may leave `EXISTS` out, which says nothing of the size.
         let empty = select.exists == Some(0);
 
         if renumbered(held, uid_validity) {
             debug!("UIDVALIDITY of {mailbox} moved, naming a rekey");
             return Ok(Listed::Rekey);
         }
-        // NOTE: the store already rekeyed under the new `UIDVALIDITY`, so
-        // only the round's cursor names the old one.
         if let Some(cursor) = cursor
             && cursor.uid_validity != uid_validity
         {
@@ -334,8 +325,6 @@ impl ImapClient {
                 .collect(),
             None => self.search_round(scope, None, below, empty)?,
         };
-        // NOTE: the highest UID the round found when it opened bounds what
-        // arrived since, UIDs only ever growing under one `UIDVALIDITY`.
         let top = match cursor {
             Some(cursor) => cursor.top,
             None => left.first().copied().unwrap_or(0),
@@ -359,10 +348,6 @@ impl ImapClient {
             });
         }
 
-        // NOTE: a band head stamps nothing, so the last page of a round
-        // lists again every message that arrived since the round opened,
-        // read after this page's `SELECT` (pimdir SYNC §4); a round of one
-        // page found them already.
         if next.is_none() && cursor.is_some() {
             page_uids.extend(self.search_round(scope, Some(top), None, empty)?);
             page_uids.sort_unstable_by(|a, b| b.cmp(a));
@@ -371,12 +356,6 @@ impl ImapClient {
 
         let (items, bytes) = self.list_uids(&page_uids, uid_validity, held)?;
 
-        // NOTE: a date filter misses what the server dates otherwise than
-        // the store, so a narrowed round's last page hands every UID of the
-        // mailbox, which no date filter narrowed (pimdir SYNC §4, §5), read
-        // after the page's listing: a message arrived since is in it and
-        // absent from nothing. A band round hands it too, a narrowed round
-        // handing none finding no member absent.
         let narrowed = narrows(scope);
         let enumerated = match narrowed && next.is_none() {
             true => Some(self.search_all(empty)?),
@@ -411,11 +390,11 @@ impl ImapClient {
         Ok(uids.into_iter().map(|uid| uid.get().to_string()).collect())
     }
 
-    /// What a UID set names, read now: the flags of the messages the store
-    /// binds under this `UIDVALIDITY`, the meta of the others, and the
-    /// header octets read. A UID the mailbox no longer holds is answered
-    /// nothing and left out (RFC 9051 §6.4.9), so a page never lists a
-    /// message a head stated removed.
+    /// What a UID set names, read now, and the header octets read.
+    ///
+    /// The flags of what the store binds under this `UIDVALIDITY`, the meta of
+    /// the rest; a UID gone is answered nothing (RFC 9051 §6.4.9), so a page
+    /// never lists a message a head stated removed.
     fn list_uids(
         &mut self,
         uids: &[u32],
@@ -436,12 +415,12 @@ impl ImapClient {
         Ok((entries(rows, metas), bytes))
     }
 
-    /// The UIDs of a round, highest first: every message, or the ones
-    /// `SENTSINCE` and `SENTBEFORE` keep with a day's margin around the
-    /// scope (the server compares dates, not instants, in its own zone) and,
-    /// by a search of their own, the ones with no `Date`, above `above` and
-    /// below `below` when given. None when the `SELECT` stated the mailbox
-    /// `empty`.
+    /// The UIDs of a round, highest first, above `above` and below `below`,
+    /// none when the `SELECT` stated the mailbox `empty`.
+    ///
+    /// A scope narrows by `SENTSINCE`/`SENTBEFORE` with a day's margin, plus a
+    /// search for the undated, never asked again once refused (iCloud). `n:*`
+    /// matches the top UID even below `n` (RFC 9051 §9), hence the filter.
     fn search_round(
         &mut self,
         scope: &PimdirScope,
@@ -468,8 +447,6 @@ impl ImapClient {
             let Some(from) = above.checked_add(1) else {
                 return Ok(Vec::new());
             };
-            // NOTE: `n:*` matches the highest UID even below `n` (RFC 9051
-            // §9), which the filter below drops.
             let range: SequenceSet = format!("{from}:*")
                 .as_str()
                 .try_into()
@@ -492,12 +469,6 @@ impl ImapClient {
         let found = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
         let mut uids = rows_of("SEARCH", found)?;
 
-        // NOTE: a message with no `Date` is in every scope, and `SENTSINCE`
-        // matches none: it is searched for apart. A server refusing that
-        // search (iCloud answers `NO [UNAVAILABLE]`) cannot tell, and is not
-        // asked again on this connection: the round lists its dated mail,
-        // which costs no absence, an undated member being found absent by
-        // the enumeration (`UID SEARCH ALL`) alone.
         if narrowed && !self.undated_refused {
             let field = AString::try_from("Date").map_err(|_| anyhow!("Invalid IMAP field"))?;
             let empty = AString::try_from("").map_err(|_| anyhow!("Invalid IMAP value"))?;
@@ -550,10 +521,11 @@ impl ImapClient {
         Ok(rows)
     }
 
-    /// What names each of a UID set, read in one `UID FETCH (UID FLAGS
-    /// RFC822.SIZE BODY.PEEK[HEADER.FIELDS (…)])` a page: the header fields
-    /// Annex A reads, `Content-Type` for the attachment mark, and no
-    /// `BODYSTRUCTURE`. Answers the metas by UID and the header octets read.
+    /// What names each of a UID set, by one header-fields `UID FETCH` a page.
+    ///
+    /// It reads Annex A's fields and `Content-Type` for the attachment mark, no
+    /// `BODYSTRUCTURE`, and answers the metas by UID and the header octets
+    /// read.
     fn fetch_metas(&mut self, uids: &[u32]) -> Result<(BTreeMap<u32, Meta>, u64)> {
         let mut metas = BTreeMap::new();
         let mut bytes = 0;
@@ -593,10 +565,12 @@ impl ImapClient {
         Ok(())
     }
 
-    /// What names each of a UID set, read off the header fields a listing
-    /// reads ([`meta_names`]), never off an `ENVELOPE`, the server's own
-    /// parse: a member is named one way whichever request reads it (pimdir
-    /// STORAGE Annex A.1). Targeted, never a whole-mailbox `1:*` sweep.
+    /// What names each of a UID set, read off the header fields
+    /// ([`meta_names`]).
+    ///
+    /// Never off an `ENVELOPE`, the server's own parse: a member is named one
+    /// way whichever request reads it (pimdir STORAGE Annex A.1). Targeted,
+    /// never a whole-mailbox `1:*` sweep.
     pub fn fetch_summaries(
         &mut self,
         mailbox: &str,
@@ -650,9 +624,10 @@ impl ImapClient {
         Ok(())
     }
 
-    /// Adds `add` to and removes `remove` from a UID set's flags in
-    /// `mailbox`, a `+FLAGS` then a `-FLAGS` store, each skipped when it
-    /// names nothing: a flag named in neither stays as the server holds it.
+    /// Adds `add` to and removes `remove` from a UID set's flags in `mailbox`.
+    ///
+    /// A `+FLAGS` then a `-FLAGS` store, each skipped when empty: a flag named
+    /// in neither stays as the server holds it.
     pub fn update_flags(
         &mut self,
         mailbox: &str,
@@ -670,13 +645,11 @@ impl ImapClient {
     }
 
     /// Streams a UID set's bodies in one batched `UID FETCH … (BODY.PEEK[])`,
-    /// and answers the UIDs the server answered nothing for: a `UID FETCH`
-    /// ignores a UID the mailbox no longer holds (RFC 9051 §6.4.9), so a
-    /// command that completes leaves out exactly the messages gone.
+    /// answering the UIDs the server answered nothing for.
     ///
-    /// One SELECT and one FETCH for the whole set, and no body lands in memory
-    /// whole. Named apart from the inner `fetch_bodies_stream` reached through
-    /// `Deref`, which it would otherwise recurse into.
+    /// A `UID FETCH` ignores a UID gone (RFC 9051 §6.4.9), so a completed one
+    /// leaves out exactly those. Named apart from the inner
+    /// `fetch_bodies_stream` reached through `Deref`, lest it recurse.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         mailbox: &str,
@@ -705,8 +678,10 @@ impl ImapClient {
     }
 
     /// Leaves the connection fit for the next command after a batched body
-    /// fetch failed with `err`: kept after a tagged `NO` or `BAD`, whose
-    /// answer was read whole, opened again after any other failure.
+    /// fetch failed with `err`.
+    ///
+    /// Kept after a tagged `NO` or `BAD`, whose answer was read whole, opened
+    /// again after any other failure.
     pub fn recover(&mut self, err: &anyhow::Error) -> Result<()> {
         let imap = err
             .chain()
@@ -739,11 +714,9 @@ impl ImapClient {
 
     /// Appends `len` octets streamed from `source` to `mailbox` with `flags`.
     ///
-    /// Returns the appended UID from the UIDPLUS APPENDUID response, falling
-    /// back to a UID SEARCH on `message_id` where the server lacks UIDPLUS.
-    /// `None` when the server took the message without saying which it is
-    /// and the search names none: the append is accepted all the same
-    /// (pimdir SYNC §4), and the next listing names the member.
+    /// Answers the UID from UIDPLUS `APPENDUID`, else a `UID SEARCH` on
+    /// `message_id`; `None` when neither names it, the append accepted all the
+    /// same (pimdir SYNC §4) and the next listing naming the member.
     pub fn add_message_stream(
         &mut self,
         mailbox: &str,
@@ -795,10 +768,11 @@ impl ImapClient {
 
     /// The UID of a message of `mailbox` stating `message_id` (bare, without
     /// its angle brackets), `None` when it holds none.
+    ///
+    /// `HEADER` matches substrings, so the brackets keep `a@x` off `<a@x.y>`.
     pub fn find_message(&mut self, mailbox: &str, message_id: &str) -> Result<Option<String>> {
         self.select_cached(mailbox)?;
 
-        // NOTE: HEADER matches substrings: brackets keep `a@x` off `<a@x.y>`.
         let field =
             AString::try_from("Message-ID").map_err(|_| anyhow!("Invalid IMAP search header"))?;
         let value = AString::try_from(format!("<{message_id}>"))
@@ -833,9 +807,10 @@ impl ImapClient {
         Ok(())
     }
 
-    /// The name a mailbox `name` takes under `parent`: the two joined by
-    /// the hierarchy delimiter the parent's `LIST` row states. A server
-    /// with a flat namespace (no delimiter) nests nothing.
+    /// The name a mailbox `name` takes under `parent`.
+    ///
+    /// The two joined by the delimiter the parent's `LIST` row states; a flat
+    /// namespace (no delimiter) nests nothing.
     pub fn child_mailbox(&mut self, parent: &str, name: &str) -> Result<String> {
         let reference: ImapMailbox<'static> = ""
             .try_into()
@@ -903,9 +878,8 @@ impl ImapClient {
             .collect())
     }
 
-    /// Renames `mailbox` to `name` under the parent it has, the mailboxes
-    /// under it following (RFC 9051 §6.3.6), and answers what it is then
-    /// (pimdir Annex B.2 `collection-rename`).
+    /// Renames `mailbox` to `name` under its parent, its children following
+    /// (RFC 9051 §6.3.6), answering what it is then (pimdir Annex B.2).
     ///
     /// One already so named, or gone where the new name stands, is success;
     /// `INBOX`, a sibling already named `name`, a name holding the delimiter
@@ -940,11 +914,12 @@ impl ImapClient {
         }
     }
 
-    /// Deletes `mailbox` with its messages, unless a mailbox stands under it
-    /// (pimdir Annex B.2 `collection-delete`): a server deleting it then
-    /// keeps it as a `\Noselect` container (RFC 9051 §6.3.5), half done.
+    /// Deletes `mailbox` with its messages (pimdir Annex B.2
+    /// `collection-delete`).
     ///
-    /// One already gone is success; `INBOX` is refused.
+    /// Refused while a mailbox stands under it, a server then keeping it as a
+    /// `\Noselect` container (RFC 9051 §6.3.5), half done. One already gone is
+    /// success; `INBOX` is refused.
     pub fn delete_named_mailbox(&mut self, mailbox: &str) -> Result<()> {
         if mailbox.eq_ignore_ascii_case("INBOX") {
             return Err(anyhow::Error::new(Refusal(String::from(
@@ -969,11 +944,8 @@ impl ImapClient {
     /// Deletes one message: marks it `\Deleted`, then `UID EXPUNGE`s that
     /// UID alone (RFC 4315, built into IMAP4rev2).
     ///
-    /// A plain `EXPUNGE` would remove every message any client marked
-    /// `\Deleted` in the mailbox, so a server offering neither UIDPLUS nor
-    /// IMAP4rev2 gets no delete at all: the push fails, io-pimdir keeps it,
-    /// and no `\Deleted` flag is left behind, the capability being read
-    /// before anything is stored.
+    /// A plain `EXPUNGE` would remove what any client marked `\Deleted`, so a
+    /// server offering neither fails the push before any flag is stored.
     pub fn delete_message(&mut self, mailbox: &str, id: &str) -> Result<()> {
         if !self.supports_uid_expunge() {
             bail!(
@@ -998,12 +970,11 @@ impl ImapClient {
     }
 }
 
-/// Whether an IMAP completion in an error chain refused the change as it
-/// stands (pimdir SYNC §4): a `NO` naming a rule the change breaks, the
-/// message the server cannot parse (`PARSE`), one too large for it
-/// (`TOOBIG`, RFC 7889), a write it can never do (`CANNOT`) or one the
-/// account may not make (`NOPERM`, RFC 5530 §3). A `NO` naming none, a
-/// `BAD` or a code naming a state that passes (`OVERQUOTA`, `INUSE`,
+/// Whether an IMAP completion in an error chain refused the change as it stands
+/// (pimdir SYNC §4).
+///
+/// A `NO` naming `PARSE`, `TOOBIG` (RFC 7889), `CANNOT` or `NOPERM` (RFC 5530
+/// §3) does; a bare `NO`, a `BAD` or a passing state (`OVERQUOTA`, `INUSE`,
 /// `UNAVAILABLE`) cannot tell, and stays a rejection.
 pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
     let Some(status) = cause
@@ -1025,9 +996,9 @@ pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
     }
 }
 
-/// The code of an IMAP refusal in an error chain: a completion naming
-/// `NOPERM` is `permission-denied`, one naming `OVERQUOTA`
-/// `quota-exceeded` (RFC 5530 §3).
+/// The code of an IMAP refusal in an error chain (RFC 5530 §3).
+///
+/// `NOPERM` is `permission-denied`, `OVERQUOTA` `quota-exceeded`.
 pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
     let status = cause.downcast_ref::<ImapClientError>()?.status()?;
 
@@ -1040,8 +1011,9 @@ pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<
     }
 }
 
-/// The name `mailbox` takes renamed `name`: under the parent it has, joined
-/// by `delimiter`, at the top on a flat namespace. A blank name, or one
+/// The name `mailbox` takes renamed `name`, under the parent it has.
+///
+/// Joined by `delimiter`, at the top on a flat namespace; a blank name, or one
 /// holding the delimiter, which would nest by itself, is refused.
 fn renamed_mailbox(mailbox: &str, name: &str, delimiter: Option<char>) -> Result<String> {
     if name.trim().is_empty() || delimiter.is_some_and(|delimiter| name.contains(delimiter)) {
@@ -1137,8 +1109,9 @@ fn apply_status(mailbox: &mut Collection, items: Vec<StatusDataItem>) {
     }
 }
 
-/// How many UIDs one page of a round lists (pimdir SYNC §4): the flags,
-/// the size and a few header fields are under a kilobyte a message, half a
+/// How many UIDs one page of a round lists (pimdir SYNC §4).
+///
+/// Flags, size and a few header fields are under a kilobyte a message, half a
 /// megabyte a response, short enough to resume cheaply.
 pub(crate) const PAGE_SIZE: usize = 500;
 
@@ -1183,9 +1156,10 @@ fn data_of<T>(command: &str, output: ImapOutput<T>) -> T {
     output.data
 }
 
-/// The rows a listing `command` answered, refused when a line of the
-/// response was skipped, or decoded in part, for not decoding: read short,
-/// it states removals.
+/// The rows a listing `command` answered.
+///
+/// Refused when a response line was skipped or decoded in part: read short, it
+/// would state removals.
 fn rows_of<T>(command: &str, output: ImapOutput<T>) -> Result<T> {
     for alert in &output.alerts {
         warn!("server sent an alert: {alert}");
@@ -1322,8 +1296,7 @@ fn imap_day(instant: &str, shift: i64) -> Option<ImapDate> {
 }
 
 /// Where a round stands: the `UIDVALIDITY` it lists under, the lowest UID
-/// it listed, and the highest UID it found when it opened, above which
-/// every UID arrived since.
+/// listed, and the highest UID found at opening, above which all arrived.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RoundCursor {
     uid_validity: u32,
@@ -1358,9 +1331,10 @@ fn decode_cursor(bytes: &[u8]) -> Option<RoundCursor> {
     }
 }
 
-/// The `(UIDVALIDITY, modseq)` a QRESYNC `SELECT` lists from: `None` for a
-/// server without QRESYNC, bytes that are no checkpoint, or a checkpoint
-/// with no `UIDVALIDITY` or no modseq (a mailbox without `CONDSTORE`).
+/// The `(UIDVALIDITY, modseq)` a QRESYNC `SELECT` lists from.
+///
+/// `None` without QRESYNC, for bytes that are no checkpoint, or for one with no
+/// `UIDVALIDITY` or modseq (a mailbox without `CONDSTORE`).
 fn qresync_position(checkpoint: &[u8], qresync: bool) -> Option<(NonZeroU32, u64)> {
     let (validity, modseq) = decode_checkpoint(checkpoint)?;
     let validity = NonZeroU32::new(validity)?;
@@ -1369,8 +1343,8 @@ fn qresync_position(checkpoint: &[u8], qresync: bool) -> Option<(NonZeroU32, u64
 
 /// The handles the store binds among the `VANISHED (EARLIER)` UID ranges.
 ///
-/// A handle the store does not bind names nothing to remove, and the ranges
-/// are never expanded: a server may announce `1:4294967295`.
+/// A handle the store does not bind names nothing to remove; the ranges, which
+/// may overlap, are never expanded: a server may announce `1:4294967295`.
 fn held_vanished(ranges: &[RangeInclusive<NonZeroU32>], held: &Held<'_>) -> Vec<String> {
     let uids: BTreeMap<u32, &String> = held
         .handles
@@ -1378,7 +1352,6 @@ fn held_vanished(ranges: &[RangeInclusive<NonZeroU32>], held: &Held<'_>) -> Vec<
         .filter_map(|handle| Some((handle.parse().ok()?, handle)))
         .collect();
 
-    // NOTE: ranges may overlap, the set keeps each handle once.
     let vanished: BTreeSet<&String> = ranges
         .iter()
         .flat_map(|range| uids.range(range.start().get()..=range.end().get()))
@@ -1388,19 +1361,19 @@ fn held_vanished(ranges: &[RangeInclusive<NonZeroU32>], held: &Held<'_>) -> Vec<
     vanished.into_iter().cloned().collect()
 }
 
-/// Whether the store's handles name what `uid_validity` numbers: a handle
-/// names what the store binds only under the `UIDVALIDITY` its checkpoint
-/// was made under.
+/// Whether the store's handles name what `uid_validity` numbers.
+///
+/// They do only under the `UIDVALIDITY` its checkpoint was made under.
 fn trusts(held: &Held<'_>, uid_validity: u32) -> bool {
     held.checkpoint
         .and_then(checkpoint_uid_validity)
         .is_some_and(|validity| validity == uid_validity)
 }
 
-/// Whether the store bound its handles under another `UIDVALIDITY` than
-/// `uid_validity`, every one of them then void (pimdir SYNC §4, §8). A store
-/// holding no checkpoint, a rekey's own listing among them, bound none it
-/// could tell.
+/// Whether the store bound its handles under another `UIDVALIDITY`.
+///
+/// Every one of them is then void (pimdir SYNC §4, §8). A store holding no
+/// checkpoint, a rekey's own listing among them, bound none it could tell.
 fn renumbered(held: &Held<'_>, uid_validity: u32) -> bool {
     held.checkpoint
         .and_then(checkpoint_uid_validity)
@@ -1645,10 +1618,11 @@ mod tests {
         }
     }
 
-    /// A write the server refuses as it stands, a `NO` naming a rule the
-    /// change breaks (`CANNOT`, `PARSE`, `NOPERM`), is refused for good;
-    /// one naming a quota or a passing state, a bare `NO` and a `BAD`
-    /// cannot tell, and stay rejected (pimdir SYNC §4).
+    /// A write refused as it stands is refused for good, one that may land not.
+    ///
+    /// A `NO` naming a rule the change breaks (`CANNOT`, `PARSE`, `NOPERM`) is
+    /// refused; a quota or passing state, a bare `NO` and a `BAD` stay
+    /// rejected.
     #[test]
     fn a_write_refused_as_it_stands_is_told_from_one_that_may_land() {
         let cases = [
@@ -1739,9 +1713,10 @@ mod tests {
         assert_eq!(answers, rekeys);
     }
 
-    /// A round whose cursor predates a rekey the store already made
-    /// restarts, and a rekey's own round, the store holding no checkpoint
-    /// for it, lists the new UIDs.
+    /// A round whose cursor predates a rekey the store already made restarts.
+    ///
+    /// A rekey's own round, the store holding no checkpoint for it, lists the
+    /// new UIDs.
     #[test]
     fn a_rekeyed_store_lists_the_new_uids() {
         let server = renumbered(false);
@@ -1807,8 +1782,11 @@ mod tests {
         }
     }
 
-    /// A row of a listing that does not decode is no message gone: the
-    /// page fails, where one read without the row would state it removed.
+    /// A row of a listing that does not decode is no message gone: the page
+    /// fails, where one read without the row would state it removed.
+    ///
+    /// The row carries a flag `a]b`, `]` being no atom character (RFC 9051
+    /// §9).
     #[test]
     fn a_listing_row_that_does_not_decode_fails_the_page() {
         let message = |uid, flags: &[&str]| FakeMessage {
@@ -1820,7 +1798,6 @@ mod tests {
             FakeMailbox {
                 uid_validity: 2,
                 highest_mod_seq: 9,
-                // NOTE: `]` is no atom character (RFC 9051 §9).
                 messages: vec![message(7, &[]), message(8, &["a]b"])],
                 states_exists: true,
             },
@@ -1852,11 +1829,11 @@ mod tests {
         }
     }
 
-    /// A round a scope narrows by `SENTSINCE` states it on its page, and
-    /// its last page hands every UID by `UID SEARCH ALL` (pimdir SYNC §4,
-    /// §5), a band round as well, so a delete in the band is still found
-    /// (pimdir vectors 160, 161); a round over the whole mailbox states
-    /// neither.
+    /// A round a scope narrows states it on its page, and its last page hands
+    /// every UID by `UID SEARCH ALL` (pimdir SYNC §4, §5).
+    ///
+    /// A band round too, so a delete in the band is found (pimdir vectors 160,
+    /// 161); a whole-mailbox round states neither, its own search being `ALL`.
     #[test]
     fn a_narrowed_round_hands_every_uid_on_its_last_page() {
         let server = FakeImap::start(
@@ -1910,21 +1887,15 @@ mod tests {
                 .iter()
                 .filter(|line| line.eq_ignore_ascii_case("UID SEARCH ALL"))
                 .count();
-            // NOTE: the whole mailbox's round searches `ALL` itself, a
-            // narrowed one for its enumeration.
             assert_eq!(all, 1, "{case}: {sent:?}");
         }
     }
 
-    /// A server refusing the search for the messages with no `Date`, as
-    /// iCloud answers it `NO [UNAVAILABLE] Unexpected exception`, still
-    /// lists a scoped round and a band by `SENTSINCE` and `SENTBEFORE`: the
-    /// round goes on, and the connection asks no more.
     /// A server advertising QRESYNC and enabling nothing (iCloud answers
-    /// `ENABLE CONDSTORE QRESYNC` a bare `OK`) reports no change to a
-    /// QRESYNC `SELECT`: the delta reads it as one without QRESYNC, listing
-    /// the mailbox again, so a message arrived since the checkpoint lands
-    /// rather than the checkpoint moving past it.
+    /// `ENABLE` a bare `OK`) reports no change to a QRESYNC `SELECT`.
+    ///
+    /// The delta reads it as one without QRESYNC, listing the mailbox again, so
+    /// an arrival since the checkpoint lands rather than being skipped.
     #[test]
     fn a_delta_lists_an_arrival_where_qresync_is_not_enabled() {
         let server = FakeImap::start(
@@ -1972,6 +1943,11 @@ mod tests {
         );
     }
 
+    /// A server refusing the undated search, as iCloud answers it `NO
+    /// [UNAVAILABLE] Unexpected exception`, still lists a scoped round.
+    ///
+    /// The round and a band go on by `SENTSINCE` and `SENTBEFORE`, and the
+    /// connection asks no more.
     #[test]
     fn a_round_goes_on_when_the_undated_search_is_refused() {
         let server = FakeImap::start(
@@ -2097,10 +2073,12 @@ mod tests {
         }
     }
 
-    /// A listed message is named off its header fields, as its body would
-    /// name it: the `Date` header (never the server's arrival), the size the
-    /// server states, and the attachment mark from the top-level
-    /// `Content-Type`, both ways, with no `BODYSTRUCTURE`.
+    /// A listed message is named off its header fields, as its body would name
+    /// it.
+    ///
+    /// The `Date` header (never the arrival), the size the server states, and
+    /// the attachment mark from the top-level `Content-Type`, no
+    /// `BODYSTRUCTURE`.
     #[test]
     fn a_listed_message_is_named_by_its_header_fields() {
         let mixed = "Message-ID: <a@example.org>\r\n\
@@ -2128,10 +2106,11 @@ mod tests {
         assert_eq!(named.date, None, "no Date header, no date");
     }
 
-    /// A message fetched at the `Meta` tier is named as its body would name
-    /// it (pimdir STORAGE Annex A.1, vectors/summaries.json): off its header
-    /// fields, a commented `Message-ID`, a folded `Subject` and a word in a
-    /// charset that decodes nothing among them, never off an `ENVELOPE`.
+    /// A message fetched at the `Meta` tier is named as its body would name it
+    /// (pimdir STORAGE Annex A.1, vectors/summaries.json).
+    ///
+    /// Off its header fields, never an `ENVELOPE`: a commented `Message-ID`, a
+    /// folded `Subject` and a word in an undecodable charset among them.
     #[test]
     fn a_message_fetched_alone_is_keyed_as_the_vectors_state() {
         let server = FakeImap::start(
@@ -2180,9 +2159,10 @@ mod tests {
         assert!(meta_from(row).is_none());
     }
 
-    /// The resume cursor carries the `UIDVALIDITY`, the lowest UID listed
-    /// and the highest UID the round found; one written before the last
-    /// reads it as 0, and anything else is no cursor at all.
+    /// The resume cursor carries the `UIDVALIDITY`, the lowest UID listed and
+    /// the highest UID the round found.
+    ///
+    /// One written before the last reads it as 0; anything else is no cursor.
     #[test]
     fn a_round_cursor_round_trips_and_rejects_garbage() {
         let cursor = RoundCursor {
@@ -2244,9 +2224,10 @@ mod tests {
         assert_eq!(held_vanished(&[range(4, 8)], &held), Vec::<String>::new());
     }
 
-    /// The store's handles are trusted only under the `UIDVALIDITY` its
-    /// checkpoint names: a round or a head under a newer one reads every
-    /// message's meta anew.
+    /// The store's handles are trusted only under its checkpoint's
+    /// `UIDVALIDITY`.
+    ///
+    /// A round or a head under a newer one reads every message's meta anew.
     #[test]
     fn handles_are_trusted_under_the_store_s_uidvalidity_only() {
         let handles = std::collections::HashSet::from(["3".to_owned()]);
@@ -2270,9 +2251,10 @@ mod tests {
         assert_eq!(day.as_ref().to_string(), "2026-10-11");
     }
 
-    /// `SENTSINCE` and `SENTBEFORE` compare dates in the server's own zone,
-    /// so the search reaches a day below the floor and two above the
-    /// ceiling, the `Date` deciding afterwards.
+    /// `SENTSINCE` and `SENTBEFORE` compare dates in the server's own zone.
+    ///
+    /// So the search reaches a day below the floor and two above the ceiling,
+    /// the `Date` deciding afterwards.
     #[test]
     fn a_scope_narrows_the_search_with_a_day_of_margin() {
         let since = imap_day("2026-10-01T00:00:00Z", -1).unwrap();
@@ -2282,9 +2264,10 @@ mod tests {
         assert!(imap_day("last week", -1).is_none());
     }
 
-    /// A flag push names only what it changes (pimdir SYNC §4): a flag
-    /// another client set after the listing survives a push removing
-    /// another one.
+    /// A flag push names only what it changes (pimdir SYNC §4).
+    ///
+    /// A message listed seen and flagged, then answered by another client,
+    /// keeps `\Answered` through a push removing `\Flagged`.
     #[test]
     fn a_flag_the_server_added_after_the_listing_survives_a_push() {
         let server = FakeImap::start(
@@ -2302,7 +2285,6 @@ mod tests {
         );
         let mut client = ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
 
-        // NOTE: listed as seen and flagged; another client answers it.
         server.set_flags(1, &["\\Seen", "\\Flagged", "\\Answered"]);
         let flagged = Flag::from_iana(IanaFlag::Flagged);
         client

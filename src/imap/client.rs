@@ -90,9 +90,11 @@ impl ImapClient {
         })
     }
 
-    /// Opens the IMAP connection (proxy, TCP/TLS/STARTTLS, greeting, SASL,
-    /// then the `ID` the account asks for), the ALPN identifiers riding its
-    /// [`Tls`].
+    /// Opens the IMAP connection: proxy, TCP/TLS, greeting, SASL, `ID`.
+    ///
+    /// QRESYNC counts only once `ENABLED` names it: iCloud advertises it,
+    /// answers a bare OK, then reports no change. Debug builds drop it under
+    /// `NEVEREST_IMAP_NO_QRESYNC`, for band-head tests.
     pub fn open(account: &ImapAccount) -> Result<Self> {
         let opening = account.clone();
         let opts = ImapClientStdConnectOptions {
@@ -107,9 +109,6 @@ impl ImapClient {
             },
         };
         let (inner, mut capabilities) = Inner::connect(&account.server, opts)?;
-        // NOTE: a debug build can be told to read the server as one without
-        // QRESYNC, which the integration tests take to list band heads
-        // against a server offering it; a release build never reads it.
         if cfg!(debug_assertions) && std::env::var_os("NEVEREST_IMAP_NO_QRESYNC").is_some() {
             capabilities.retain(|capability| *capability != Capability::QResync);
         }
@@ -128,9 +127,6 @@ impl ImapClient {
                 Atom::try_from("QRESYNC").expect("`QRESYNC` is a valid IMAP atom"),
             );
             let caps = Vec1::try_from(vec![condstore, qresync]).expect("two is non-empty");
-            // NOTE: a server may advertise QRESYNC and enable nothing (iCloud
-            // answers a bare OK): its QRESYNC `SELECT` then reports no
-            // change, so only an `ENABLED` naming it is taken.
             let enabled = client.inner.enable(caps)?.unwrap_or_default();
             client.qresync = enabled
                 .iter()
@@ -142,9 +138,10 @@ impl ImapClient {
         Ok(client)
     }
 
-    /// Drops the connection and opens it again as it first opened, nothing
-    /// selected; the UIDs a round has left are kept, and what the server
-    /// refused to search.
+    /// Reopens the connection as it first opened, nothing selected.
+    ///
+    /// The UIDs a round has left are kept, and what the server refused to
+    /// search.
     pub fn reconnect(&mut self) -> Result<()> {
         let mut fresh = Self::open(&self.opening)?;
         fresh.round = self.round.take();
@@ -198,9 +195,10 @@ impl ImapClient {
     }
 }
 
-/// Whether `capabilities` hold UIDPLUS or IMAP4rev2, both of which carry
-/// `UID EXPUNGE`. imap-types names no IMAP4rev2 variant, so it is read as
-/// the atom, case-insensitively (RFC 9051 §7.2.2).
+/// Whether `capabilities` carry `UID EXPUNGE` (UIDPLUS or IMAP4rev2).
+///
+/// imap-types names no IMAP4rev2 variant, so the atom is matched
+/// case-insensitively (RFC 9051 §7.2.2).
 fn supports_uid_expunge(capabilities: &[Capability<'_>]) -> bool {
     capabilities.iter().any(|capability| {
         *capability == Capability::UidPlus

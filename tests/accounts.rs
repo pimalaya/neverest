@@ -1,3 +1,5 @@
+//! # Accounts
+//!
 //! Every account shares one store, and `-a` filters the accounts a command
 //! runs over. No server: a CalDAV endpoint is a local stub answering the
 //! discovery `init` makes, or a closed port.
@@ -21,9 +23,10 @@ use std::{
 use io_pimdir::client::{PimdirStore, reader::PimdirReader};
 use serde_json::Value;
 
-/// Held by each test for its whole run: a child another test spawns holds
-/// every lock this process holds until its exec, so a store opened here
-/// beside a spawn reads as owned.
+/// Held by each test for its whole run.
+///
+/// A child another test spawns holds every lock this process holds until its
+/// exec, so a store opened here beside a spawn reads as owned.
 static SPAWNS: Mutex<()> = Mutex::new(());
 
 /// Waits for the other tests, whatever a sibling that panicked left.
@@ -37,9 +40,9 @@ fn closed_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// A CalDAV server answering every request with the principal and the
-/// calendar home set, enough for `neverest init` to open the endpoint;
-/// answers its port.
+/// A CalDAV server answering its port, enough for `neverest init`.
+///
+/// Every request gets the principal and the calendar home set.
 fn home_set_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -167,9 +170,10 @@ impl Fixture {
     }
 }
 
-/// Every account naming no root is initialized into one store, the
-/// neverest directory itself, and a second `init` leaves them as they
-/// are.
+/// Every account naming no root is initialized into one store.
+///
+/// That store is the neverest directory itself, and a second `init` leaves
+/// the accounts as they are.
 #[test]
 fn every_account_is_initialized_into_one_store() {
     let _serial = serialized();
@@ -203,10 +207,11 @@ fn every_account_is_initialized_into_one_store() {
     assert_eq!(again["accounts"][0]["alreadyInitialized"], true, "{again}");
 }
 
-/// A run covers every account, one after the other: one that cannot run
-/// is reported with its error, the next one still runs, and the run exits
-/// 3. Its events and its report name an endpoint as the configuration
-/// does.
+/// A run covers every account, one after the other.
+///
+/// One that cannot run is reported with its error, the next one still runs,
+/// and the run exits 3. Events and report name an endpoint as the
+/// configuration does.
 #[test]
 fn a_run_covers_every_account_and_reports_each_apart() {
     let _serial = serialized();
@@ -240,9 +245,10 @@ fn a_run_covers_every_account_and_reports_each_apart() {
     assert_eq!(started[0]["total"], 2);
 }
 
-/// Text mode prints the run's progress as plain lines on stderr, with no
-/// escape sequence, and leaves stdout to the result; `--json` prints no
-/// such line.
+/// Text mode prints the run's progress as plain lines on stderr.
+///
+/// No escape sequence, stdout left to the result; `--json` prints no such
+/// line.
 #[test]
 fn a_text_run_prints_plain_lines_on_stderr() {
     let _serial = serialized();
@@ -263,9 +269,10 @@ fn a_text_run_prints_plain_lines_on_stderr() {
     assert!(!stderr.contains("Syncing account"), "{stderr}");
 }
 
-/// The stores an earlier neverest kept per account are refused before
-/// anything is created, naming each and the order that keeps their queued
-/// writes, never a delete.
+/// Stores an earlier neverest kept per account are refused up front.
+///
+/// Nothing is created; the refusal names each store and the order that keeps
+/// their queued writes, never a delete.
 #[test]
 fn stores_kept_per_account_are_refused_before_anything_is_created() {
     let _serial = serialized();
@@ -401,9 +408,10 @@ fn turning_one_way_on_is_refused_until_accepted() {
     assert!(again["accounts"][0]["report"].is_object(), "{again}");
 }
 
-/// `sync --init` initializes the accounts that are not and says which, an
-/// initialized one left as it is; without it the uninitialized one fails,
-/// naming both remedies.
+/// `sync --init` initializes the accounts that are not and says which.
+///
+/// An initialized one is left as it is; without the flag the uninitialized
+/// one fails, naming both remedies.
 #[test]
 fn sync_init_initializes_what_is_not_then_syncs() {
     let _serial = serialized();

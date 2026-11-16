@@ -1,23 +1,19 @@
 //! # Graph connection
 //!
-//! What a [`GraphClient`](super::GraphClient) knows of the one HTTP/1.1
-//! connection it runs its requests over. Graph closes a connection it left
-//! idle after about two minutes, and an answer that comes late, or that was
-//! not read to its end, would be read as the next request's: so the stream
-//! is watched ([`Watched`]), recording what each exchange wrote and whether
-//! any byte of its answer came, and the session drops a connection whose
-//! last exchange failed in any way but a whole answer, one that idled past
-//! [`IDLE`], or one the server ended.
+//! What a [`GraphClient`](super::GraphClient) knows of its one HTTP/1.1
+//! connection, watched ([`Watched`]) so that a late or unread answer is never
+//! read as the next request's.
 //!
-//! A request that met a reused connection already dead (reset, broken pipe,
-//! end of stream before any byte of an answer) never reached the server: a
-//! read is sent again once on a new connection (RFC 9112 section 9.3.1). A
-//! read that timed out may be a server still at work, and is never sent
-//! again; nor is a request that creates, sends or moves.
+//! The session drops a connection whose last exchange failed short of a whole
+//! answer, that idled past [`IDLE`] (Graph closes one after about two
+//! minutes), or that the server ended.
 //!
-//! The record also says whether a request went whole ([`Exchange::written`]):
-//! a `sendMail` failing past that point with no status may have been
-//! delivered, one failing before it was not.
+//! A reused connection found dead before any octet of an answer never reached
+//! the server: a read is sent again once (RFC 9112 section 9.3.1). A read that
+//! timed out, or a request that creates, sends or moves, never is.
+//!
+//! [`Exchange::written`] says whether a request went whole: a `sendMail`
+//! failing past that point with no status may have been delivered.
 
 use std::{
     io::{self, ErrorKind, Read, Write},
@@ -42,9 +38,8 @@ pub(super) type Connect = Box<dyn FnMut() -> anyhow::Result<Box<dyn MsgraphStrea
 pub(super) struct Exchange {
     /// The first octets the exchange wrote: its request line's method.
     head: Vec<u8>,
-    /// Whether the request went whole: the exchange asked for its answer,
-    /// the stream flushed. From then on the server may have acted on it,
-    /// whatever comes back or fails to.
+    /// Whether the request went whole (answer asked for, stream flushed): from
+    /// then on the server may have acted on it, whatever comes back.
     written: bool,
     /// Whether any octet of an answer came.
     heard: bool,
@@ -58,9 +53,10 @@ impl Exchange {
         self.head.starts_with(b"GET ")
     }
 
-    /// Whether the request was written whole and flushed before the
-    /// exchange read: a failure past it, with no status read, cannot tell
-    /// a request the server never acted on from one it did.
+    /// Whether the request was written whole and flushed before the read.
+    ///
+    /// A failure past it, with no status read, cannot tell a request the
+    /// server never acted on from one it did.
     pub(super) fn written(&self) -> bool {
         self.written
     }
@@ -81,6 +77,10 @@ impl Exchange {
 pub(super) type Shared = Arc<Mutex<Exchange>>;
 
 /// A stream recording what its exchange wrote and read.
+///
+/// The first read flushes the request, so a TLS layer holding its tail fails
+/// before it counts as written. The head is kept even when a write fails on a
+/// connection already closed.
 pub(super) struct Watched<S> {
     inner: S,
     exchange: Shared,
@@ -94,9 +94,6 @@ impl<S> Watched<S> {
 
 impl<S: Read + Write> Read for Watched<S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        // NOTE: the first read of an exchange follows its whole request;
-        // flushed first, so a TLS layer holding the tail fails here, the
-        // request not written whole.
         let written = self
             .exchange
             .lock()
@@ -119,8 +116,6 @@ impl<S: Read + Write> Read for Watched<S> {
 
 impl<S: Write> Write for Watched<S> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // NOTE: the head is what the exchange meant to send, kept even when
-        // the write fails on a connection already closed.
         {
             let mut exchange = self.exchange.lock().unwrap_or_else(|err| err.into_inner());
             if exchange.head.is_empty() {
@@ -145,9 +140,10 @@ pub(super) fn read<T>(exchange: &Shared, f: impl FnOnce(&Exchange) -> T) -> T {
     f(&exchange.lock().unwrap_or_else(|err| err.into_inner()))
 }
 
-/// Whether an exchange that failed with `err` read its answer whole, which
-/// leaves the connection fit for the next one: an answer Graph refused (its
-/// error envelope), one that did not parse, a redirect.
+/// Whether an exchange that failed with `err` read its answer whole.
+///
+/// That leaves the connection fit for the next one: an answer Graph refused
+/// (its error envelope), one that did not parse, a redirect.
 pub(super) fn answered(err: &MsgraphClientStdError) -> bool {
     matches!(
         err,
@@ -159,10 +155,11 @@ pub(super) fn answered(err: &MsgraphClientStdError) -> bool {
     )
 }
 
-/// Whether `err` is a connection found dead before its answer began: reset,
-/// aborted, a broken pipe, or the end of the stream (an I/O error, or the
-/// HTTP exchange meeting it) with no octet of an answer read. Never a read
-/// that timed out, which may be a server still at work on the request.
+/// Whether `err` is a connection found dead before any octet of an answer.
+///
+/// Reset, aborted, a broken pipe or the end of the stream; never a timed-out
+/// read, the server maybe still at work. An HTTP failure counts by the
+/// stream's end, io-http's own error not being linked here.
 pub(super) fn died(err: &MsgraphClientStdError, exchange: &Exchange) -> bool {
     if exchange.heard() {
         return false;
@@ -176,9 +173,6 @@ pub(super) fn died(err: &MsgraphClientStdError, exchange: &Exchange) -> bool {
                 | ErrorKind::UnexpectedEof
                 | ErrorKind::NotConnected
         ),
-        // NOTE: io-msgraph names no HTTP failure but through io-http's own
-        // error, which this crate does not link for Graph: the stream says
-        // the exchange met its end.
         MsgraphClientStdError::Send(MsgraphSendError::Send(_)) => exchange.ended(),
         _ => false,
     }

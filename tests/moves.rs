@@ -1,12 +1,12 @@
-//! End-to-end move test against a local Stalwart IMAP server (A :143), spawned
-//! via `tests/stalwart2.sh`. Ignored by default.
+//! # Moves
 //!
-//! A move staged through the store must land once in its target. The run scans
-//! its collections over several connections; were their pushes to overlap, the
-//! target would upload the message while the source relocated it, and the
-//! target would hold it twice (pimdir SYNC §5). The race does not lose every
-//! time, so the message bounces between two mailboxes for several runs, each
-//! checked on the server and in the store.
+//! End-to-end move test against a local Stalwart IMAP server (A :143),
+//! spawned via tests/stalwart2.sh. Ignored by default.
+//!
+//! A staged move must land once in its target: were the pushes of two
+//! connections to overlap, the target would upload it while the source
+//! relocated it, holding it twice (pimdir SYNC §5). The race does not lose
+//! every time, so the message bounces between two mailboxes for many runs.
 //!
 //! ```sh
 //! ./tests/stalwart2.sh
@@ -122,10 +122,12 @@ fn a_move_is_delivered_once() {
     imap(&format!("DELETE {right}"));
 }
 
-/// A move staged through the store lands once whichever of its two
-/// collections a run syncs first, each run naming one alone
-/// (`--include-collection`, as a caller syncing what a watcher reported
-/// does): the source alone, then the target alone, and the other way round.
+/// A staged move lands once whichever of its two collections a run syncs
+/// first.
+///
+/// Each run names one alone (`--include-collection`, as a caller syncing what
+/// a watcher reported): the source first, then the target first, twice each
+/// way, the message bouncing between the two.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn a_move_is_delivered_once_by_runs_naming_one_collection() {
@@ -181,8 +183,6 @@ fn a_move_is_delivered_once_by_runs_naming_one_collection() {
     neverest(&["init", "-a", "halves"], &config);
     neverest(&["sync", "-a", "halves"], &config);
 
-    // NOTE: the source first, then the target first, and once more each
-    // way, the message bouncing between the two.
     let mut from_first = true;
     let (mut from, mut to) = (left.clone(), right.clone());
     for bounce in 1..=4 {

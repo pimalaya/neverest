@@ -188,9 +188,11 @@ pub struct SourceAccount {
 }
 
 impl SourceAccount {
-    /// Resolves one endpoint, so endpoints naming one command spawn it once,
-    /// its throttle waiting at most `max_wait` at once. `proxy` is the
-    /// account's, which a table naming none goes through.
+    /// Resolves one endpoint, so endpoints naming one command spawn it once.
+    ///
+    /// Its throttle waits at most `max_wait` at once, and paces Gmail, which
+    /// meters each user by the second and the minute; other providers are
+    /// followed only when they refuse. `proxy` is the account's.
     fn resolve_with(
         name: &str,
         config: &SourceConfig,
@@ -209,9 +211,6 @@ impl SourceAccount {
             .transpose()
             .with_context(|| format!("Resolve the send credentials of {name}"))?;
 
-        // NOTE: Gmail meters each user by the second and by the minute, so
-        // it is paced as well; every other provider is only followed when
-        // it refuses.
         #[cfg(feature = "gmail")]
         let throttle = match &backend {
             SourceAccountBackend::Gmail(gmail) => Throttle::paced_per_minute(
@@ -270,6 +269,9 @@ pub enum SourceAccountBackend {
 impl SourceAccountBackend {
     /// Resolves a backend configuration, refusing one this build cannot
     /// open rather than letting it fail at connect.
+    ///
+    /// Its proxy is its own, else `account_proxy`, else the environment's,
+    /// read when a connection opens.
     #[cfg_attr(
         not(any(
             feature = "imap",
@@ -287,8 +289,6 @@ impl SourceAccountBackend {
         account_proxy: Option<&ProxyConfig>,
         resolver: &mut SecretResolver,
     ) -> Result<Self> {
-        // NOTE: the backend's own proxy first, then the account's, then the
-        // environment's, read when a connection opens.
         #[cfg(any(
             feature = "imap",
             feature = "msgraph",
@@ -412,8 +412,9 @@ impl SourceAccountBackend {
 }
 
 /// The failure of a source whose backend this build leaves out, coded
-/// `backend-not-built` and naming the cargo feature: its table loads, so
-/// one file serves every build.
+/// `backend-not-built` and naming the cargo feature.
+///
+/// Its table still loads, so one file serves every build.
 fn backend_not_built(feature: &str) -> anyhow::Error {
     let message = format!(
         "This build leaves out the `{feature}` backend, rebuild with `--features {feature}`"
@@ -566,9 +567,8 @@ impl SmtpAccount {
         Self::resolve_with(config, None, &mut SecretResolver::new())
     }
 
-    /// Resolves a send channel, spawning nothing when it shares its
-    /// source's credential, through its own proxy, else `proxy`, the
-    /// account's.
+    /// Resolves a send channel, spawning nothing when it shares its source's
+    /// credential, through its own proxy, else `proxy`, the account's.
     fn resolve_with(
         config: &SmtpConfig,
         proxy: Option<&ProxyConfig>,
@@ -621,7 +621,6 @@ mod tests {
         let path = temp_dir().join(format!("neverest-resolve-once-{}", process::id()));
         let _ = fs::remove_file(&path);
 
-        // NOTE: counts its own runs, one byte per spawn, and prints a secret.
         let command = format!("printf x >> {path}; printf s3cr3t", path = path.display());
 
         let config: AccountConfig = toml::from_str(&format!(

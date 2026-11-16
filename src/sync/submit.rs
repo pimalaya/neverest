@@ -14,17 +14,17 @@
 //! collection is the producer's choice, every collection's queue being scanned.
 //!
 //! ```json
-//! {"from":"a@x.org","object":"<hash>","rcpts":["b@y.org","c@y.org"],"subject":"hi","v":1}
+//! {"from":"a@x.org","object":"<hash>","rcpts":["b@y.org","c@y.org"],
+//!  "subject":"hi","v":1}
 //! ```
 //!
-//! Submission is at-most-once on its own: a message handed over whole with no
-//! verdict back is *unconfirmed*, parked under the prefix pimdir reserves for
-//! an intent whose outcome is unknown ([`UNCONFIRMED`], pimdir STORAGE §15.2)
+//! Submission is at-most-once: a message handed over whole with no verdict
+//! back is *unconfirmed*, parked under [`UNCONFIRMED`] (pimdir STORAGE §15.2)
 //! and never sent again by any run, since a second send may deliver it twice.
-//! The run marks the intent it is handing over ([`InFlight`]) before the first
-//! byte leaves, so a run killed mid-send leaves the mark, and the next run
-//! parks that intent as unconfirmed instead of sending it again. Only a
-//! person, through the producer, sends an unconfirmed message again.
+//!
+//! The run marks the intent it hands over ([`InFlight`]) before the first
+//! byte leaves, so the next run parks as unconfirmed one a killed run left
+//! mid-send. Only a person, through the producer, sends one again.
 //!
 //! A build with no send channel skips the intents, leaving them pending rather
 //! than parked, since another build can perform them.
@@ -100,9 +100,8 @@ impl SubmitIntent {
     /// The decoded envelope, read by io-pimdir's [`PimdirSubmit`].
     ///
     /// A payload that does not decode is a permanent failure: no later run
-    /// decodes it any better. A native sender (Graph) reads the addresses
-    /// out of the MIME body itself, yet decodes the payload all the same so
-    /// a broken one parks.
+    /// decodes it better. Graph reads the addresses from the MIME body, yet
+    /// decodes the payload all the same so a broken one parks.
     pub fn envelope(&self) -> Result<PimdirSubmit, SubmitFailure> {
         PimdirSubmit::from_payload(&self.payload)
             .map_err(|err| SubmitFailure::permanent(anyhow!("Malformed submit payload: {err}")))
@@ -137,10 +136,9 @@ impl SubmitIntent {
 
 /// How a failed submission is dispositioned.
 ///
-/// The distinction is the whole point of putting submission in the queue: a
-/// transient failure keeps the intent, a permanent one stops re-sending
-/// forever while keeping the row queryable, and an unconfirmed one stops it
-/// too, the message having perhaps left.
+/// The distinction is why submission sits in the queue: a transient failure
+/// keeps the intent, a permanent one stops re-sending but stays queryable,
+/// and an unconfirmed one stops it too, the message having perhaps left.
 #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
 #[derive(Debug)]
 pub enum SubmitFailure {
@@ -149,9 +147,8 @@ pub enum SubmitFailure {
     Transient(anyhow::Error),
     /// Park: no run does better; the row keeps its error (5xx, bad payload).
     Permanent(anyhow::Error),
-    /// Park, never resend: the message went whole and no verdict came back,
-    /// or the provider answered with an error a gateway gives after the
-    /// work was done. It may have been delivered.
+    /// Park, never resend: the message went whole with no verdict, or a
+    /// gateway error came after the work was done. It may have been sent.
     Unconfirmed(anyhow::Error),
 }
 
@@ -179,9 +176,8 @@ impl SubmitFailure {
         }
     }
 
-    /// What the store records of the failure: its error, behind
-    /// [`unconfirmed_detail`]'s words for an unconfirmed one, which the
-    /// store parks under [`UNCONFIRMED`] itself.
+    /// What the store records: the error, behind [`unconfirmed_detail`]'s
+    /// words for an unconfirmed one, which it parks under [`UNCONFIRMED`].
     pub fn detail(&self) -> String {
         match self {
             Self::Unconfirmed(err) => unconfirmed_detail(&format!("{err:#}")),
@@ -250,11 +246,9 @@ impl Disposition {
 /// An SMTP failure by its reply (RFC 5321 §4.2.1), `None` when no reply
 /// came, and whether the data's final `.` had been written whole.
 ///
-/// A 5yz reply refuses the message for good, unless it names a sending limit,
-/// and a 4yz one asks for it later; both are a verdict, so the message was
-/// not taken. Without a reply, a failure before the final `.` left the
-/// transaction unfinished, which the server discards; after it, the server
-/// may have taken the message.
+/// A 5yz reply refuses for good unless it names a sending limit, a 4yz asks
+/// for later: a verdict either way. With no reply, a failure before the final
+/// `.` leaves a transaction the server discards; after it, maybe taken.
 #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
 pub fn smtp_disposition(reply: Option<(u16, &str)>, handed_over: bool) -> Disposition {
     match reply {
@@ -293,10 +287,9 @@ fn names_a_sending_limit(text: &str) -> bool {
 /// A Graph `sendMail` failure by its HTTP status, `None` when no answer was
 /// read, and whether the request had gone whole with no answer yet.
 ///
-/// 400, 403, 404, 413 and 422 refuse the message; 401 (an expired token),
-/// 408 and 429 refuse it unprocessed, for later; 500, 502, 503 and 504 may
-/// come from a gateway after the work was done. Any other 4xx refuses it,
-/// any other status leaves it for later.
+/// 401 (an expired token), 408 and 429 refuse it unprocessed, for later;
+/// 500, 502, 503 and 504 may come from a gateway after the work was done;
+/// any other 4xx refuses it, any other status leaves it for later.
 #[cfg_attr(not(feature = "msgraph"), allow(dead_code))]
 pub fn graph_disposition(status: Option<u16>, unanswered: bool) -> Disposition {
     match status {
@@ -312,10 +305,9 @@ pub fn graph_disposition(status: Option<u16>, unanswered: bool) -> Disposition {
 
 /// Every pending `submit` intent in the store, in queue order.
 ///
-/// The drain skips the kinds pimdir does not define (they read back as
-/// [`PimdirAction::Unknown`]), so this reads exactly what it left behind.
-/// One stating a version this neverest does not know is left out, so it
-/// stays pending and untouched (pimdir STORAGE §15.3).
+/// The drain skips kinds pimdir does not define (read back as
+/// [`PimdirAction::Unknown`]), so this reads exactly what it left; one of an
+/// unknown version stays pending and untouched (pimdir STORAGE §15.3).
 pub fn pending(store: &PimdirStore) -> Result<Vec<SubmitIntent>> {
     let rows = store
         .list_pending_actions()
@@ -350,12 +342,9 @@ pub fn pending(store: &PimdirStore) -> Result<Vec<SubmitIntent>> {
 /// The mark of the intent a run is handing over, a file of the store's
 /// local/ (pimdir STORAGE §3).
 ///
-/// Written durably before the first byte of a message leaves and removed
-/// once its outcome is in the store, so a run killed in between (a caller's
-/// deadline) leaves it behind: the next run reads it and parks that intent
-/// as unconfirmed rather than sending it again. It is neverest's
-/// bookkeeping, not part of the pimdir format, and one intent at a time is
-/// handed over.
+/// Written durably before the first byte leaves and removed once the outcome
+/// is stored, so the next run parks as unconfirmed an intent a killed run
+/// left. Neverest's own, outside the pimdir format; one intent at a time.
 #[derive(Clone, Debug)]
 pub struct InFlight {
     /// The store directory, whose local/ holds the mark.
@@ -569,12 +558,11 @@ pub fn prepare(blobs: &PimdirBlobs, intent: &SubmitIntent) -> Result<Outgoing, S
     Ok(Outgoing { submit, bytes })
 }
 
-/// Hands one message over through `channel`.
+/// Hands one message over through `channel`, never logging its content.
 ///
-/// The payload provides the SMTP envelope, the pinned blob the raw bytes.
-/// Message content is never logged. A failure leaving the session unusable,
-/// or a refusal for a sending limit, [`stops`](SendChannel::stopped) the
-/// channel, and a stopped channel attempts nothing.
+/// A failure leaving the session unusable (no reply, or a 421 closing it,
+/// RFC 5321 §4.2.2) or a sending-limit refusal
+/// [`stops`](SendChannel::stopped) the channel, which then attempts nothing.
 #[cfg(any(feature = "smtp", feature = "msgraph"))]
 pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), SubmitFailure> {
     if let Some(why) = channel.stopped() {
@@ -598,8 +586,6 @@ pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), 
                 return Ok(());
             };
             let reply = reply_of(&failed.error);
-            // NOTE: a reply leaves the session usable, io-smtp resetting the
-            // transaction, but a 421, which closes it (RFC 5321 §4.2.2).
             let usable = reply.is_some_and(|(code, _)| code != 421);
             let disposition = smtp_disposition(reply, failed.handed_over);
             let error = anyhow!(failed.error).context("SMTP submission error");
@@ -641,17 +627,12 @@ struct SmtpHandOverError {
     handed_over: bool,
 }
 
-/// Runs the `MAIL FROM`, `RCPT TO` and `DATA` exchange over the session's
-/// stream, noting when the data's final `.` is written whole.
+/// Runs the `MAIL FROM`, `RCPT TO` and `DATA` exchange, noting when the
+/// final `.` is written whole, which io-smtp's own driver cannot say.
 ///
-/// io-smtp's own driver cannot say where a failure fell, which is what
-/// tells a message never handed over from one perhaps taken. Every command
-/// is one write: `MAIL FROM`, one `RCPT TO` a recipient, `DATA`, then the
-/// dot-stuffed data ending with its `.` line, so the data is the write
-/// numbered `rcpts + 2` from zero, unless `DATA` was refused, which io-smtp
-/// follows with an `RSET` there. The default options remove the `Bcc`
-/// field before `DATA`, the envelope alone carrying its recipients
-/// (RFC 5322 §3.6.3).
+/// Each command is one flushed write (a buffering TLS layer fails before the
+/// `.` counts), the data being write `rcpts + 2` unless a refused `DATA` puts
+/// an `RSET` there. Default options drop `Bcc` (RFC 5322 §3.6.3).
 #[cfg(feature = "smtp")]
 fn hand_over_smtp(
     stream: &mut (impl io::Read + io::Write),
@@ -670,7 +651,6 @@ fn hand_over_smtp(
 
     loop {
         match send.resume(arg.take()) {
-            // NOTE: no recipient is skipped, so none comes back refused.
             SmtpCoroutineState::Complete(Ok(_)) => return Ok(()),
             SmtpCoroutineState::Complete(Err(err)) => return Err(failed(err.into(), handed_over)),
             SmtpCoroutineState::Yielded(SmtpYield::WantsRead) => {
@@ -680,15 +660,10 @@ fn hand_over_smtp(
                 arg = Some(&buf[..n]);
             }
             SmtpCoroutineState::Yielded(SmtpYield::WantsWrite(bytes)) => {
-                // NOTE: flushed, so a TLS layer buffering the tail reports
-                // its failure here: a write or a flush that fails leaves
-                // the final `.` unsent, and the server drops a transaction
-                // whose data never ended (RFC 5321 §4.1.1.4).
                 stream
                     .write_all(&bytes)
                     .and_then(|()| stream.flush())
                     .map_err(|err| failed(err.into(), handed_over))?;
-                // NOTE: the `RSET` of a refused `DATA` is written at this place.
                 handed_over |= writes == data_write && bytes.ends_with(b".\r\n");
                 writes += 1;
             }
@@ -696,9 +671,8 @@ fn hand_over_smtp(
     }
 }
 
-/// The code of an SMTP refusal in an error chain: a 5yz reply naming a
-/// sending limit is `quota-exceeded`, any other refused `RCPT TO`
-/// `recipient-refused`.
+/// The code of an SMTP refusal in an error chain: `quota-exceeded` for a 5yz
+/// naming a sending limit, `recipient-refused` for another refused `RCPT TO`.
 #[cfg(feature = "smtp")]
 pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
     let err = cause.downcast_ref::<SmtpClientError>()?;
@@ -845,6 +819,7 @@ mod dispositions {
         assert_eq!(graph_disposition(None, false), Disposition::Transient);
     }
 
+    /// The store writes the prefix itself, so the detail it is handed has none.
     #[test]
     fn an_unconfirmed_failure_reads_under_the_reserved_prefix() {
         let failure = Disposition::Unconfirmed.with(anyhow!("Reached unexpected EOF"));
@@ -853,7 +828,6 @@ mod dispositions {
         let reason = failure.reason();
         assert!(reason.starts_with("unconfirmed: "), "{reason}");
         assert!(reason.ends_with("Reached unexpected EOF"), "{reason}");
-        // NOTE: the store writes the prefix, so what it is handed has none.
         assert_eq!(unconfirmed_reason(&failure.detail()), reason);
         assert!(!failure.detail().starts_with(UNCONFIRMED));
 
@@ -998,9 +972,8 @@ mod tests {
         (port, rx)
     }
 
-    /// Stages a body and returns the intent pinning it, sent from `a@x.org`
-    /// to `rcpts` under the payload himalaya writes
-    /// ([`PimdirSubmit::to_action`]).
+    /// Stages a body and returns the intent pinning it, from `a@x.org` to
+    /// `rcpts`, under himalaya's payload ([`PimdirSubmit::to_action`]).
     fn stage_intent(stage: &PimdirBlobStage, id: i64, rcpts: &[&str], body: &[u8]) -> SubmitIntent {
         let object = stage.stage_body(body).expect("stage body");
         let submit = PimdirSubmit {
@@ -1122,6 +1095,7 @@ mod tests {
         assert!(!failure.unconfirmed());
     }
 
+    /// A refused body ends its transaction, so no `RSET` follows it.
     #[test]
     fn a_refusal_for_a_sending_limit_stops_the_channel() {
         let dir = tempfile::tempdir().unwrap();
@@ -1143,7 +1117,6 @@ mod tests {
 
         let captured = captured.recv().unwrap();
         assert_eq!(captured.data, b"body\r\n", "the second never left");
-        // NOTE: a refused body ends its transaction, nothing is left to reset.
         assert_eq!(
             captured.commands,
             ["MAIL FROM:<a@x.org>", "RCPT TO:<b@y.org>"]
@@ -1190,7 +1163,6 @@ mod tests {
         assert!(channel.stopped().is_some(), "the session is gone");
         assert_eq!(captured.recv().unwrap().data, b"body\r\n");
 
-        // NOTE: the next message is not attempted on a lost session.
         let next = stage_intent(&stage, 2, &["b@y.org"], b"body");
         let failure = send_one(&mut channel, blobs, &next).expect_err("not attempted");
         assert!(
@@ -1294,9 +1266,10 @@ mod tests {
             .handed_over
     }
 
-    /// The transaction reset after a refused `DATA` command is written
-    /// where the data would be: a connection lost under it handed nothing
-    /// over, and parking the message as perhaps delivered would lose it.
+    /// The `RSET` after a refused `DATA` is written where the data would be:
+    /// a connection lost under it handed nothing over.
+    ///
+    /// Parking the message as perhaps delivered would lose it.
     #[test]
     fn a_reset_cut_short_after_a_refused_data_command_handed_nothing_over() {
         let accepted = ["250 ok\r\n", "250 ok\r\n", "354 go\r\n"];
@@ -1374,9 +1347,10 @@ mod tests {
         );
     }
 
-    /// A payload naming a body, as one written before the message became
-    /// the row's body alone (pimdir STORAGE Annex B.2), is malformed and
-    /// parks: the payload and the row could name two messages.
+    /// A payload naming a body, as written before the message became the
+    /// row's body alone (pimdir STORAGE Annex B.2), parks as malformed.
+    ///
+    /// The payload and the row could name two messages.
     #[test]
     fn a_payload_naming_a_body_parks() {
         let dir = tempfile::tempdir().unwrap();
@@ -1396,6 +1370,7 @@ mod tests {
         assert!(failure.parks() && !failure.unconfirmed(), "{failure:?}");
     }
 
+    /// A line break in an address is refused: it would add a command.
     #[test]
     fn envelope_addresses_map_to_smtp_paths() {
         assert!(matches!(reverse_path("").unwrap(), SmtpReversePath::Null));
@@ -1405,7 +1380,6 @@ mod tests {
         };
         assert_eq!(mailbox.local_part.as_ref(), "a");
         assert!(smtp_mailbox("no-domain").is_err());
-        // NOTE: a line break in an address would add a command to the session.
         assert!(smtp_mailbox("a@x.org>\r\nRCPT TO:<c@z.org").is_err());
     }
 
@@ -1457,13 +1431,13 @@ mod tests {
         SmtpAccount::resolve(&config).expect("resolve sink")
     }
 
+    /// A server gone mid-authentication answered nothing: it is unreached.
     #[test]
     fn refused_credentials_are_not_an_unreached_server() {
         let port = spawn_auth_sink("535 5.7.8 authentication failed\r\n");
         let err = connect_smtp(&authenticated_account(port)).expect_err("credentials refused");
         assert_eq!(open_failure(&err), OpenFailure::Refused, "{err:#}");
 
-        // NOTE: a server gone mid-authentication answered nothing.
         let port = spawn_auth_sink("");
         let err = connect_smtp(&authenticated_account(port)).expect_err("session cut");
         assert_eq!(open_failure(&err), OpenFailure::Unreached, "{err:#}");

@@ -1,31 +1,13 @@
-//! End-to-end test of one account holding several kinds at once, against a
-//! local Stalwart (`tests/stalwart2.sh`, server A) and a local Radicale
-//! (`tests/radicale.sh`). Ignored by default.
+//! # Several kinds
 //!
-//! Every other live test drives one kind. An account may declare mail and
-//! contacts side by side over one store, and that is where the per-kind
-//! dispatch is decided rather than assumed:
+//! One account holding mail and contacts over one store, against a local
+//! Stalwart (tests/stalwart2.sh, server A) and a local Radicale
+//! (tests/radicale.sh). Ignored by default.
 //!
-//!   1. One run carries both. The report is account-wide, so a mailbox and an
-//!      address book reconciled in the same breath both reach it.
-//!   2. The collections stay keyed apart. A store keys a collection under the
-//!      id of the source that syncs it, so a mailbox and an address book
-//!      never meet however alike their names are.
-//!   3. The dispatch is right. Contacts have mutable bodies, so a card that
-//!      moved on both sides parks and waits for a person; mail bodies are
-//!      immutable, so its axis is flags and deletes and a server-side change
-//!      to either simply applies.
-//!   4. The exit code answers the parked item and nothing else. A run that
-//!      reconciled its mail and parked a card is neither a success nor a
-//!      failure, whichever kind the parked item belongs to.
-//!
-//! The mail work is made on the server, flags and a delete being the only
-//! axis mail has. The card divergence is made the way a frontend makes one,
-//! by staging an edit through the store's queue while the server takes an
-//! edit of its own: two sides moving away from a body they agreed on.
-//!
-//! The account owns a mailbox and an address book of its own and narrows the
-//! run to both, so it meets nothing another test seeded.
+//! One run carries both in one report, the collections keyed apart. Mail's
+//! axis is flags and deletes, which apply (a delete retained); a card edited
+//! in the store and on the server parks untouched, and the run exits 3
+//! whichever kind the parked item belongs to.
 //!
 //! Start the servers and run with:
 //! ```sh
@@ -104,9 +86,6 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
     fs::create_dir_all(&state).unwrap();
     fs::write(&config, account()).unwrap();
 
-    // 1. A mailbox holding two messages and an address book holding one card,
-    //    both of this account's own, then a first run that agrees on all
-    //    three: the base every later divergence is measured against.
     create_mailbox();
     append(root, KEPT);
     append(root, GONE);
@@ -120,20 +99,13 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
     assert_eq!(links(&store, MAIL_COLLECTION).len(), 2, "both messages");
     assert_eq!(links(&store, CARD_COLLECTION).len(), 1, "the card");
 
-    // 2. Mail's own axis: a flag set on one message and the other expunged,
-    //    both on the server. Neither is a body change, mail having none.
     imap("STORE 1 +Flags \\Flagged");
     imap("STORE 2 +Flags \\Deleted");
     imap("EXPUNGE");
 
-    // 3. The contacts axis: the card edited on the server while the store
-    //    holds an edit of its own, staged through the queue the way a
-    //    frontend stages one. Neither side can be dropped for the other.
     edit_card_in_store(&store, &card("+2"));
     put(root, &card("+3"));
 
-    // 4. One run, both kinds. It reconciled what it could and left one item
-    //    waiting, which is exactly what exit code 3 says.
     let report = sync(&config, &state, 3);
     assert!(
         report.contains(r#""outstandingConflicts":1"#),
@@ -158,8 +130,6 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
         "along with the removal the server made; report was:\n{report}",
     );
 
-    // 5. The card parked. Mail never reaches this path: its bodies are
-    //    immutable, so a divergence of content cannot arise there at all.
     let listed = neverest(
         &["conflict", "list", "-a", ACCOUNT, "--json"],
         &config,
@@ -179,15 +149,11 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
         "named by its handle on the CardDAV source: {listed}",
     );
 
-    // Parked means untouched: the server keeps its own body and the run
-    // pushed neither side over the other.
     assert!(
         get(CARD).contains("TEL:+3"),
         "the CardDAV server keeps its own edit",
     );
 
-    // 6. The mail dispatch, on the axis mail does have. The flag change
-    //    applied, and the expunge retained the item rather than losing it.
     let reader = PimdirReader::open(&store).expect("open the store");
     let kept = reader
         .list_items(MAIL_COLLECTION, None, 10)
@@ -211,8 +177,6 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
         "and is retained rather than lost",
     );
 
-    // 7. The two collections never met, however alike a mailbox and an
-    //    address book are named: each holds its own items and nothing else.
     let collections: Vec<String> = reader
         .list_collections()
         .expect("list the store collections")
@@ -262,9 +226,10 @@ fn sync(config: &Path, state: &Path, code: i32) -> String {
     )
 }
 
-/// Stages a body for the card through the store's queue, exactly as a
-/// frontend stages an edit: the blob durably in the tree first, then the
-/// queue row naming it, which the next run drains before it reconciles.
+/// Stages a body for the card through the store's queue, as a frontend does.
+///
+/// The blob is durable in the tree first, then the queue row naming it,
+/// which the next run drains before it reconciles.
 fn edit_card_in_store(store: &Path, body: &str) {
     let reader = PimdirReader::open(store).expect("open the store");
     let card = reader

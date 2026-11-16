@@ -15,9 +15,10 @@
 //! A collection one endpoint lists and the other does not is created on the
 //! other, unless the store knows both held it: then it was deleted, and the
 //! delete crosses only where the other allows collection deletes, which it
-//! does not by default. The itemized report lists the cross-side copies, flags
-//! and deletes a run plans, plus what its opening pull-only round found the
-//! servers had already done.
+//! does not by default.
+//!
+//! The itemized report lists the cross-side copies, flags and deletes a run
+//! plans, plus what its opening pull-only round found the servers had done.
 
 mod collections;
 mod hydrate;
@@ -202,9 +203,11 @@ pub fn refuse_former_stores(dir: &Path) -> Result<()> {
     )))
 }
 
-/// Refuses, as a whole and writing nothing, a store no account of this
-/// neverest can run over: laid out as an earlier neverest kept it, or at
-/// another format version. A store not created yet passes.
+/// Refuses, writing nothing, a store no account of this neverest can run over.
+///
+/// That is one laid out as an earlier neverest kept it, or at another format
+/// version; one not created yet passes. A reader takes no lock and writes
+/// nothing, so a dry run checks the store as a real run does.
 pub fn check_store(dir: &Path) -> Result<()> {
     refuse_former_stores(dir)?;
 
@@ -212,8 +215,6 @@ pub fn check_store(dir: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // NOTE: a reader takes no lock and writes nothing, so a dry run checks
-    // the store as a real run does.
     if let Err(err) = PimdirReader::open(dir) {
         return Err(store_refusal(dir, err));
     }
@@ -222,12 +223,11 @@ pub fn check_store(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Creates the store at `dir`, its user's alone (pimdir STORAGE §18), with
-/// its sidecar holding no account yet and no send in flight: a mark left by
-/// a store moved away names nothing here.
+/// Creates the store at `dir`, its user's alone (pimdir STORAGE §18).
 ///
-/// The sidecar is written in the same act as the database, so a database
-/// with none only ever describes a store an earlier neverest wrote.
+/// Its sidecar holds no account and no send in flight, so a mark a moved store
+/// left names nothing here; it is written with the database, so a database
+/// without one only ever describes a store an earlier neverest wrote.
 pub fn create_store(dir: &Path) -> Result<()> {
     PimdirStore::open(dir)
         .map_err(|err| store_refusal(dir, err))
@@ -284,11 +284,9 @@ pub(crate) fn open_store(dir: &Path, source: &str, account: &str) -> Result<Pimd
 
 /// A store refused for what it is, with its remedy.
 ///
-/// A store opens under its own format version alone, never migrated (pimdir
-/// STORAGE §6): one an earlier neverest wrote is reinstalled, so the refusal
-/// names the order that keeps its queued writes (sync it with that neverest
-/// first, then move it away, the store being every account's); one a newer
-/// neverest wrote is good, so the refusal names the upgrade.
+/// A store opens under its own format version, never migrated (pimdir STORAGE
+/// §6): one an earlier neverest wrote is synced by it then moved away, which
+/// keeps its queued writes; one a newer neverest wrote calls for an upgrade.
 fn store_refusal(dir: &Path, err: PimdirError) -> anyhow::Error {
     match err {
         err @ PimdirError::Version { .. } if written_earlier(&err) => {
@@ -309,10 +307,11 @@ fn store_refusal(dir: &Path, err: PimdirError) -> anyhow::Error {
 }
 
 /// Whether a store refused for its format version was written by an earlier
-/// draft than this neverest's: one naming no version (every draft before
-/// storage-draft-08), or a draft numbered below
-/// [`FORMAT_VERSION`](io_pimdir::sql::FORMAT_VERSION). Any other, a later
-/// draft or a release, is a newer neverest's.
+/// draft than this neverest's.
+///
+/// That is one naming no version (every draft before storage-draft-08) or a
+/// draft below [`FORMAT_VERSION`](io_pimdir::sql::FORMAT_VERSION); a later
+/// draft or a release is a newer neverest's.
 fn written_earlier(err: &PimdirError) -> bool {
     let PimdirError::Version { found } = err else {
         return false;
@@ -412,13 +411,14 @@ struct SourceCtx {
     scope: PimdirScope,
     /// Whether the run only plans, downloading no body.
     dry_run: bool,
-    /// Whether the run confirmed the absences its listings find, so a
-    /// listing leaving most of a collection out drops it rather than parks
-    /// (pimdir SYNC §5, §8).
+    /// Whether the run confirmed the absences its listings find.
+    ///
+    /// A listing leaving most of a collection out then drops it rather than
+    /// parks (pimdir SYNC §5, §8).
     accept_absences: bool,
-    /// Whether the source caps what it lists of a collection, by its
-    /// configuration, which every page of its rounds then states (pimdir
-    /// SYNC §4, §5).
+    /// Whether the configuration caps what the source lists of a collection.
+    ///
+    /// Every page of its rounds then states the cap (pimdir SYNC §4, §5).
     capped: bool,
     /// What its syncs reported beyond their events, drained by
     /// [`itemize_noted`].
@@ -461,9 +461,10 @@ impl SourceCtx {
         }
     }
 
-    /// How an upgrade on the side settles a divergence whose body it fetches
-    /// (pimdir SYNC §6): by the policy of the side's pushing sync, a dry run
-    /// or a side that writes nothing back pushing nothing.
+    /// How an upgrade on the side settles a divergence whose body it fetches.
+    ///
+    /// By the policy of the side's pushing sync (pimdir SYNC §6), a dry run or
+    /// a side that writes nothing back pushing nothing.
     fn upgrade_options(&self) -> PimdirUpgradeOptions {
         PimdirUpgradeOptions::from(&self.sync_options(!self.dry_run && self.writable()))
     }
@@ -471,24 +472,9 @@ impl SourceCtx {
 
 /// Runs the whole account sync and returns the report.
 ///
-/// An account is one hub and one mode (see [`AccountConfig::mode`]). With no
-/// target a source is reconciled against the store the app reads; with targets,
-/// against each of them. Sources never see each other, their ids differing.
-///
-/// Under `declare_only`, each source lists every collection it holds and the
-/// store records its kind, name and role, the filter aside, and no item
-/// moves: what a client reads to offer the collections it could sync.
-///
-/// Under `intents_only`, the run drains the queue and performs what
-/// frontends queued (collection intents, sends, calendar intents), opening
-/// an endpoint only for an intent that needs it, then stops: it lists no
-/// collection, pushes no other write and fetches nothing.
-///
-/// `account_config` is the account as the store sees it
-/// ([`AccountConfig::namespaced`]). `drained` is what the store's drain
-/// applied on the account's collections when the caller ran it, after every
-/// account of its run was readied ([`prepare`]); without it, the run
-/// declares and drains by itself, on its replica under `dry_run`.
+/// Sources sync against the store, or each target ([`AccountConfig::mode`]).
+/// `declare_only` records collections and moves no item, `intents_only` does
+/// the queued intents only; a `drained` of `None` declares and drains here.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     account_name: impl Into<String>,
@@ -522,8 +508,6 @@ pub fn run(
     }
 
     let real_dir = store_dir(account_config)?;
-    // NOTE: held for the whole run: dropping it removes the replica, so an
-    // early return cannot leave one behind.
     let dry_replica = dry_run.then(|| DryRunReplica::new(&real_dir)).transpose()?;
     let work_dir = match &dry_replica {
         Some(replica) => replica.dir.clone(),
@@ -541,23 +525,15 @@ pub fn run(
         ..Default::default()
     };
 
-    // NOTE: before any endpoint is opened.
     state.check_mode(&mode, accept_mode)?;
 
     match drained {
         Some(drained) => report.absorb(drained),
         None => {
-            // NOTE: before any credential is read, a declaration coming from
-            // the configuration alone (pimdir STORAGE §15.6).
             if !dry_run {
                 declare(&work_dir, &account_name, account_config, &mode, &state)?;
             }
 
-            // NOTE: once, before any credential is read or any endpoint
-            // opened, so a run that cannot reach its servers still applies
-            // what frontends queued, which they then read back. A
-            // declaration moves no item, so it leaves the queue alone but
-            // for the collection intents, whose result it lists.
             if !declare_only {
                 let first = running
                     .first()
@@ -569,8 +545,6 @@ pub fn run(
         }
     }
 
-    // NOTE: every credential the run needs, read once rather than per
-    // connection.
     let account = Account::resolve_waiting(account_config, pacing.max_wait)?;
 
     for source_name in &running {
@@ -629,15 +603,11 @@ pub fn run(
             )
         };
 
-        // NOTE: sources share nothing but the store file, so one broken remote
-        // is no reason to leave the others unsynced.
         if let Err(err) = outcome {
             note_source_failure(source_name, err, &mut report);
         }
     }
 
-    // NOTE: once for the run, targets included: a source that gave up shares
-    // its throttle with every connection opened from it.
     for (source, until) in account.throttled() {
         report.throttled.push(ThrottledSource {
             source,
@@ -648,9 +618,6 @@ pub fn run(
         report.downloaded.push(SourceDownload { source, bytes });
     }
 
-    // NOTE: once for the run: the parked rows and the outstanding conflicts
-    // belong to the account's collections, and a per-source read would
-    // report each of them once a source.
     match PimdirStore::open(&work_dir) {
         Ok(store) => {
             report_parked(&store, &account_name, &mut report);
@@ -664,14 +631,10 @@ pub fn run(
     if !dry_run {
         state.record_mode(&mode, accept_mode);
 
-        // NOTE: again, so a calendar met for the first time this run takes
-        // the intents its source performs there (pimdir STORAGE §15.6).
         if let Err(err) = declare(&work_dir, &account_name, account_config, &mode, &state) {
             warn!("cannot declare what the sources hold after the run: {err:#}");
         }
 
-        // NOTE: a run performing the queued intents alone purges nothing,
-        // being one a frontend waits on.
         if !no_purge && !intents_only {
             let sweeper = running
                 .first()
@@ -680,16 +643,11 @@ pub fn run(
             sweep_retained(account_config, &mut store, &mut report);
         }
 
-        // NOTE: last, over everything the run wrote. A frontend waits on a
-        // run performing intents or declaring collections, which refreshes
-        // briefly.
         #[cfg(feature = "search")]
         let quick = intents_only || declare_only;
         #[cfg(feature = "search")]
         crate::sync::index::after_run(&work_dir, &account_config.store, quick, &mut report.index);
 
-        // NOTE: the other accounts' entries as this run read them, the runs
-        // of one store following one another under its lock.
         sidecar.accounts.insert(account_name, state);
         sidecar.save(&work_dir)?;
     }
@@ -697,14 +655,11 @@ pub fn run(
     Ok(report)
 }
 
-/// Readies one account of a run before the store's drain: refused when
-/// `init` never stamped it or when its mode would discard what the last run
-/// kept, unless `accept_mode`, then declared (pimdir STORAGE §15.6) from the
-/// configuration and its sidecar entry alone, reading no credential and
-/// opening no endpoint.
+/// Readies one account of a run before the store's drain.
 ///
-/// `config` is the account as the store sees it
-/// ([`AccountConfig::namespaced`]).
+/// Refused when `init` never stamped it or its mode would discard what the
+/// last run kept (unless `accept_mode`), then declared (pimdir STORAGE §15.6)
+/// from the configuration and sidecar alone, reading no credential.
 pub fn prepare(dir: &Path, account: &str, config: &AccountConfig, accept_mode: bool) -> Result<()> {
     let mode = config.mode()?;
     let state = StoreState::load(dir)?.account(account)?;
@@ -712,10 +667,11 @@ pub fn prepare(dir: &Path, account: &str, config: &AccountConfig, accept_mode: b
     declare(dir, account, config, &mode, &state)
 }
 
-/// Drains the store's queue once, every account's (pimdir STORAGE §15.2),
-/// and shares out by account what it applied: the collections rows landed
-/// on, the bodies an action kept aside. A row on a collection grouped under
-/// no account is applied and reported nowhere.
+/// Drains the store's queue once, every account's (pimdir STORAGE §15.2).
+///
+/// What it applied is shared out by account: the collections rows landed on,
+/// the bodies an action kept aside. A row on a collection grouped under no
+/// account is applied and reported nowhere.
 pub(crate) fn drain_store(store: &mut PimdirSourceStore) -> BTreeMap<String, SyncOutput> {
     let mut drained = SyncOutput::default();
     drain_queues(store, &mut drained);
@@ -758,11 +714,11 @@ pub(crate) fn collection_accounts(store: &PimdirStore) -> HashMap<String, String
     }
 }
 
-/// Declares what every source of the account can do (pimdir STORAGE §15.6),
-/// replacing what an earlier run or configuration declared: what its
-/// backend and rights allow, and `calendar.component.vtodo` `none`
-/// source-wide where its provider or a target's keeps tasks apart, else on
-/// the calendars its last listings stated take no tasks, which `state` keeps.
+/// Declares what every source of the account can do (pimdir STORAGE §15.6).
+///
+/// Replaces earlier declarations with what its backend and rights allow, and
+/// `calendar.component.vtodo` `none` source-wide where a provider keeps tasks
+/// apart, else on the calendars its last listings (`state`) took no tasks on.
 pub(crate) fn declare(
     dir: &Path,
     account: &str,
@@ -790,8 +746,6 @@ pub(crate) fn declare(
         let Some(source) = sources.get(name) else {
             continue;
         };
-        // NOTE: a collection keyed in the source's namespace is on its
-        // server, synced yet or only declared (`sync --declare-only`).
         let namespace = format!("{name}/");
         let mut held = Vec::new();
         let mut fixed = BTreeSet::new();
@@ -813,8 +767,6 @@ pub(crate) fn declare(
         let paired = !mode.targets.is_empty();
         let mut capabilities = capability::declaration(source, mode.one_way, paired, &held, &fixed);
         capability::drafts_only(source, &mut capabilities, &drafts);
-        // NOTE: a source-wide `none` already covers every calendar, and an
-        // undeclared source gets no row, which would refuse all it lacks.
         match capability::vtodo_wide(source, &targets) {
             Some(wide) => capabilities.push(wide),
             None if capabilities.is_empty() => {}
@@ -868,11 +820,12 @@ pub enum DownloadOrder {
 
 impl DownloadOrder {
     /// Whether `a` downloads before `b`; a stable sort keeps ties in order.
+    ///
+    /// Dates are one fixed RFC 3339 shape in UTC, so their strings sort as the
+    /// instants do, and `None` sorts below any date, hence last.
     fn compare(self, a: &HydrateTarget, b: &HydrateTarget) -> CmpOrdering {
         match self {
             Self::Largest => b.size.cmp(&a.size),
-            // NOTE: one fixed RFC 3339 shape in UTC, so the strings sort as
-            // the instants do; `None` sorts below any date, hence last.
             Self::Newest => b.date.cmp(&a.date),
         }
     }
@@ -884,40 +837,40 @@ pub enum Bodies {
     /// Every body the store still lacks, whichever run listed its item.
     #[default]
     All,
-    /// Only the bodies of the items this run listed, the others staying
-    /// owed for a later run: an arrival is readable at once, never behind
-    /// the bodies an earlier run left.
+    /// Only the bodies of the items this run listed, the others left owed.
+    ///
+    /// An arrival is then readable at once, never behind an earlier backlog.
     Listed,
 }
 
-/// How many of each collection's newest bodies `--prime` downloads by
-/// default under `--download-order newest`: what a reader sees of a
-/// mailbox before scrolling, the first chunk the Android client shows.
+/// How many newest bodies of each collection `--prime` downloads by default.
+///
+/// Under `--download-order newest`: what a reader sees of a mailbox before
+/// scrolling, the first chunk the Android client shows.
 pub const DEFAULT_PRIME: usize = 50;
 
-/// How a run orders and paces its work, never how much of it there is:
-/// whatever the pacing, a run that ends has listed every page and
-/// downloaded every body its collections owe ([`Bodies::Listed`] aside).
+/// How a run orders and paces its work, never how much of it there is.
+///
+/// Whatever the pacing, a run that ends has listed every page and downloaded
+/// every body its collections owe ([`Bodies::Listed`] aside).
 #[derive(Clone, Copy, Debug)]
 pub struct Pacing {
     /// The order bodies download in.
     pub order: DownloadOrder,
-    /// Under a positive count, every collection first lists its newest page
-    /// and downloads that many of its newest bodies, before any collection
-    /// lists a second page; 0 lists each collection whole in turn.
+    /// How many newest bodies each collection downloads before any lists a
+    /// second page; 0 lists each collection whole in turn.
     pub prime: usize,
     /// Which owed bodies the run downloads.
     pub bodies: Bodies,
-    /// The longest a source waits on a throttling provider before giving
-    /// up for the run.
+    /// How long a source waits on a throttling provider before giving up.
     pub max_wait: std::time::Duration,
 }
 
 impl Pacing {
-    /// The pacing of a run, `prime` defaulting by the order: on under
-    /// `newest`, the order a caller picks to show mail early, off under
-    /// `largest`, the fastest whole run, which priming would only slow by
-    /// a store read a collection.
+    /// The pacing of a run, `prime` defaulting by the order.
+    ///
+    /// On under `newest`, the order a caller picks to show mail early; off
+    /// under `largest`, the fastest whole run, which priming only slows.
     pub fn new(
         order: DownloadOrder,
         prime: Option<usize>,

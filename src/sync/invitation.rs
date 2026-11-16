@@ -7,7 +7,7 @@
 //! ```json
 //! {"v":1,"source":"gcal","seq":42,"partstat":"ACCEPTED","comment":"See you"}
 //! {"v":1,"source":"msgraph-calendar","seq":42,"comment":"Postponed"}
-//! {"v":1,"source":"gcal","seq":42,"partstat":"DECLINED","recurrence_id":"20261006T090000"}
+//! {"v":1,"source":"gcal","seq":42,"recurrence_id":"20261006T090000"}
 //! ```
 //!
 //! A `recurrence_id` limits it to one occurrence of a series, named by its
@@ -16,11 +16,9 @@
 //! parks the row.
 //!
 //! An intent addresses one item of the collection it is anchored on, by
-//! `seq`, or by `link_id` while the item is still the producer's pending
-//! `add`. The source it names performs it on the item it binds, and the
-//! effect comes back with the next sync: the new `PARTSTAT`, or the
-//! removal. Like a submission, it is at-least-once: a crash between the
-//! provider's answer and the acknowledgement performs it again.
+//! `seq`, or by `link_id` while it is the producer's pending `add`. The
+//! source named performs it, the effect (the new `PARTSTAT`, the removal)
+//! back with the next sync. At least once: a crash before the ack redoes it.
 
 use anyhow::anyhow;
 use io_pimdir::{client::PimdirStore, codec::PimdirAction};
@@ -146,9 +144,8 @@ impl InvitationIntent {
         self.payload().ok().and_then(|payload| payload.seq)
     }
 
-    /// The occurrence it is limited to, by its `RECURRENCE-ID` value in the
-    /// form of the series' `DTSTART` (`YYYYMMDD` or
-    /// `YYYYMMDDTHHMMSS[Z]`), `None` for the whole series.
+    /// The occurrence it is limited to, by `RECURRENCE-ID` in the series'
+    /// `DTSTART` form (`YYYYMMDD` or `YYYYMMDDTHHMMSS[Z]`), `None` for all.
     pub fn occurrence(&self) -> Result<Option<String>, Failure> {
         let Some(recurrence_id) = self.payload()?.recurrence_id else {
             return Ok(None);
@@ -180,9 +177,10 @@ impl InvitationIntent {
     }
 }
 
-/// The window an occurrence named by `recurrence_id` is looked for in, as
-/// RFC 3339 instants: two days either side of its date, wider than any
-/// zone's offset. `None` for a value without a date.
+/// The window, as RFC 3339 instants, the occurrence `recurrence_id` names is
+/// looked for in, `None` for a value without a date.
+///
+/// Two days either side of its date, wider than any zone's offset.
 #[cfg(any(feature = "gcal", feature = "msgraph"))]
 pub fn occurrence_window(recurrence_id: &str) -> Option<(String, String)> {
     use jiff::{Span, civil::Date};
@@ -221,10 +219,9 @@ impl Failure {
 
     /// Classifies a provider failure by the HTTP status in its chain.
     ///
-    /// A [`Refusal`] and a 4xx are permanent, the provider refusing this
-    /// intent again, except the statuses saying come back later or read
-    /// again (408, 412, 429); a 5xx, a transport error or no status at all
-    /// is transient.
+    /// A [`Refusal`] and a 4xx are permanent, but the statuses saying come
+    /// back later or read again (408, 412, 429); a 5xx, a transport error or
+    /// no status at all is transient.
     pub fn classify(err: anyhow::Error) -> Self {
         if err.chain().any(|cause| cause.is::<Refusal>()) {
             return Self::Permanent(err);
@@ -270,10 +267,9 @@ fn http_status(err: &anyhow::Error) -> Option<u16> {
 
 /// Every pending calendar intent in the store, in queue order.
 ///
-/// The drain leaves the kinds pimdir does not apply itself (they read back
-/// as [`PimdirAction::Unknown`]), so this reads exactly what it skipped.
-/// One stating a version this neverest does not know is left out, so it
-/// stays pending and untouched (pimdir STORAGE §15.3).
+/// The drain skips kinds pimdir does not apply ([`PimdirAction::Unknown`]),
+/// so this reads exactly those; one stating a version this neverest does not
+/// know stays pending and untouched (pimdir STORAGE §15.3).
 pub fn pending(store: &PimdirStore) -> anyhow::Result<Vec<InvitationIntent>> {
     let rows = store
         .list_pending_actions()

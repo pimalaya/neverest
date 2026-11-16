@@ -409,9 +409,10 @@ mod tests {
         assert!(master.contains("RRULE:FREQ=DAILY"), "{master}");
     }
 
-    /// An occurrence is named by when it starts: a date, a wall time read
-    /// in its `TZID`, a UTC stamp, or a wall time in no zone known, read in
-    /// the series' zone.
+    /// An occurrence is named by when it starts.
+    ///
+    /// A date, a wall time read in its `TZID`, a UTC stamp, or a wall time in
+    /// no zone known, read in the series' zone.
     #[test]
     fn an_occurrence_starts_at_the_instant_its_zone_reads() {
         let nine_utc: Timestamp = "2026-12-21T09:00:00Z".parse().unwrap();

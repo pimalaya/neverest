@@ -37,9 +37,10 @@ pub struct CollectionSourceConfig {
     #[serde(default, skip_serializing_if = "is_default")]
     pub delete: bool,
     /// Whether a frontend may rename a collection on this source, through
-    /// the queue. Unset, it reads the account's `one-way`: false on a
-    /// one-way account, whose sources are copied rather than written to,
-    /// true otherwise.
+    /// the queue.
+    ///
+    /// Unset, false on a `one-way` account, whose sources are copied rather
+    /// than written to, true otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rename: Option<bool>,
     /// Collection-name filter for this source.
@@ -195,8 +196,9 @@ mod tests {
         assert!(perms.item.update);
     }
 
-    /// A collection is deleted on a server only where the user asked for it:
-    /// absence is the only signal IMAP and DAV leave, and a listing may drop
+    /// A collection is deleted on a server only where the user asked for it.
+    ///
+    /// Absence is the only signal IMAP and DAV leave, and a listing may drop
     /// a collection nobody deleted (pimdir SYNC §5).
     #[test]
     fn a_collection_delete_is_granted_only_when_asked_for() {

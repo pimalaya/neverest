@@ -40,6 +40,9 @@ pub struct InitCommand {}
 
 impl InitCommand {
     /// Initializes the accounts the run covers, store by store.
+    ///
+    /// Nothing can refuse a first `one-way` run, so the report of what each
+    /// account will do stands in for a confirmation.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -53,16 +56,17 @@ impl InitCommand {
             false => Exit::Success,
         };
 
-        // NOTE: nothing can refuse a first `one-way` run, so saying what each
-        // account will do stands in for a confirmation.
         printer.out(InitRunOutput { accounts: outputs })?;
         Ok(exit)
     }
 }
 
 /// Initializes `selected` store by store, in the order `-a` and the
-/// configuration give: one that could not be initialized is reported, the
-/// others still are. What `init` and `sync --init` run.
+/// configuration give; what `init` and `sync --init` run.
+///
+/// One that could not be initialized is reported, the others still are. A
+/// directory holding the per-account stores of an earlier neverest is
+/// refused before anything is created.
 pub fn initialize(selected: Vec<(String, AccountConfig)>) -> Result<Vec<InitOutput>> {
     let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
     for (name, account_config) in selected {
@@ -72,8 +76,6 @@ pub fn initialize(selected: Vec<(String, AccountConfig)>) -> Result<Vec<InitOutp
         let dir = driver::store_dir(&account_config)?;
         stores.entry(dir).or_default().push((name, account_config));
     }
-    // NOTE: before anything is created: a directory holding the stores
-    // an earlier neverest kept per account is refused as it is.
     for dir in stores.keys() {
         driver::check_store(dir)?;
     }
@@ -86,8 +88,6 @@ pub fn initialize(selected: Vec<(String, AccountConfig)>) -> Result<Vec<InitOutp
     let mut outputs = Vec::new();
 
     for (dir, accounts) in stores {
-        // NOTE: io-pimdir restricts the directory to its user when it
-        // creates the store in it (pimdir STORAGE §18).
         fs::create_dir_all(&dir).with_context(|| format!("Create store dir {}", dir.display()))?;
         let lock = wait_store_lock(&dir, LOCK_TIMEOUT)
             .with_context(|| format!("Acquire the lock of the store at {}", dir.display()))?;
@@ -122,9 +122,11 @@ pub fn initialize(selected: Vec<(String, AccountConfig)>) -> Result<Vec<InitOutp
 }
 
 /// Opens every endpoint of `account`, then adds it to the store at `dir`,
-/// creating the store when there is none. An account initialized already
-/// is left as it is: its store may hold work no server has. `opened` gets
-/// each endpoint as it opens, so a failure still names those it reached.
+/// creating the store when there is none.
+///
+/// An initialized account is left as it is: its store may hold work no
+/// server has. `opened` names each endpoint reached, even on failure. The
+/// state is stamped so the first sync compares against what `init` opened.
 fn init(
     dir: &Path,
     name: &str,
@@ -157,8 +159,6 @@ fn init(
         driver::create_store(dir)?;
         crate::notice::print("Created the store");
     }
-    // NOTE: stamped here, so the first sync compares against what `init`
-    // opened rather than against nothing.
     StoreState::stamp(dir, name, &mode)
         .with_context(|| format!("Stamp store state {}", dir.display()))?;
 

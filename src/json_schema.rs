@@ -1,10 +1,8 @@
 //! # JSON Schema registry
 //!
-//! Maps a CLI-invocation key, the command path joined with hyphens and
-//! prefixed `neverest-`, to the JSON Schema of that command's `--json`
-//! payload, and to the schema of the events it prints before it.
-//! [`JsonSchemaCommand`] writes one file per entry. The `neverest-error` key
-//! describes the failure object instead.
+//! Maps a command path key (`neverest-account-list`) to the JSON Schema of
+//! its `--json` payload and of the events it prints before it, which
+//! `json-schema` writes one file each; `neverest-error` is the failure.
 //!
 //! `check`, the hidden former name of `account check`, keeps its
 //! `neverest-check` key beside `neverest-account-check`.
@@ -12,8 +10,6 @@
 //! Every entry is unconditional: the backends are feature-gated but the
 //! output shapes are not, so a build with no backend describes the same
 //! payloads as one with all of them.
-//!
-//! [`JsonSchemaCommand`]: pimalaya_cli::clap::commands::json_schema::JsonSchemaCommand
 
 use pimalaya_cli::{
     account::AccountListOutput, clap::commands::json_schema::JsonSchemaRegistry, error::ErrorReport,
@@ -29,9 +25,8 @@ use crate::{
 /// Builds the command-to-schema registry consumed by `json-schema <DIR>`.
 ///
 /// Each result value describes the type the command hands to the printer,
-/// each event value the type of the events it prints before.
-/// `neverest-error` describes the failure object every command prints
-/// instead.
+/// each event value the type of the events it prints before, and
+/// `neverest-error` the failure object every command prints instead.
 pub fn registry() -> JsonSchemaRegistry {
     let mut registry = JsonSchemaRegistry::new("neverest", env!("CARGO_PKG_VERSION"));
 
@@ -61,8 +56,9 @@ mod tests {
     /// `neverest` shows the help.
     const SILENT: &[&str] = &["neverest"];
 
-    /// Every runnable command is described, and every key names one: a
-    /// renamed subcommand cannot leave a schema nobody can ask for, nor a
+    /// Every runnable command is described, and every key names one.
+    ///
+    /// A renamed subcommand cannot leave a schema nobody can ask for, nor a
     /// new one print undescribed data.
     #[test]
     fn the_registry_matches_the_command_tree() {

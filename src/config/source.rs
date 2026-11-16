@@ -191,9 +191,10 @@ impl SourceBackendConfig {
         }
     }
 
-    /// The id of the source the sugar builds from this backend: its table,
-    /// and for a Graph domain the table it had before the domains shared
-    /// one, so a store keeps every binding.
+    /// The id of the source the sugar builds from this backend: its table.
+    ///
+    /// A Graph domain keeps the table it had before the domains shared one,
+    /// so a store keeps every binding.
     pub fn sugar_name(&self) -> &'static str {
         match self {
             Self::MsgraphContacts(_) => "msgraph-contacts",

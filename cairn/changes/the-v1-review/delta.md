@@ -9,6 +9,9 @@ Folded into cairn/spec/sync.md phase by phase, as each lands.
 
 ## ADDED Requirements
 
+### Requirement: The rules the code's comments carried
+Phase 6: the behaviour rules the removed `//` comments held, gathered from the five purge groups.
+
 ### Requirement: A Google stream that failed is reopened
 Phase 3: gcal and gpeople reused a stream that failed mid-exchange (confirmed by test on the old code); the shared loop marks it dead as gmail did.
 

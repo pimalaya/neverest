@@ -1,12 +1,9 @@
 //! # Owner state directory
 //!
-//! The subdirectory local/ of a store, which pimdir reserves for the state
-//! of its owner (pimdir STORAGE §3, §6): the format never defines what it
-//! holds, a reader and a producer ignore it, the collector never walks it
-//! and a backup copies it with the store. neverest keeps there what it
-//! owns beside the store: its sidecar, its sync.lock and the mark of the
-//! send it is handing over, and no file of its own anywhere else in the
-//! store directory.
+//! The subdirectory local/ of a store, which pimdir reserves for its owner
+//! (pimdir STORAGE §3, §6): readers, producers and the collector ignore it,
+//! a backup copies it. neverest keeps there its sidecar, its sync.lock and
+//! the mark of the send it hands over, and nothing elsewhere in the store.
 //!
 //! The directory is its user's alone, created `0700`, and every file
 //! neverest creates in it `0600` (pimdir STORAGE §18): io-pimdir refuses to

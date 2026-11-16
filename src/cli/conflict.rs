@@ -182,8 +182,7 @@ impl ConflictResolveCommand {
     ///
     /// Nothing holds the store open across the decision: io-pimdir's owner
     /// lock lives on the handle, so keeping one would refuse every sync of
-    /// that store while a person sits in an editor, which is the very window
-    /// the staleness guard was written for.
+    /// that store while a person sits in an editor, the guard's very window.
     fn resolve(
         &self,
         printer: &mut impl Printer,
@@ -348,8 +347,8 @@ fn read(name: &str, dir: &Path) -> Result<PimdirReader> {
         .with_context(|| format!("Read the store of account {name}"))
 }
 
-// NOTE: its one test settles a card, which a build without a contacts
-// backend cannot parse.
+/// Its one test settles a card, which a build without a contacts backend
+/// cannot parse.
 #[cfg(all(
     test,
     any(
@@ -477,10 +476,9 @@ mod tests {
     /// A sync runs while a person is in the merger, and the decision they
     /// come back with is recomputed against what arrived.
     ///
-    /// The whole point of the staleness guard, and it was unreachable: the
-    /// command held io-pimdir's owner lock for its entire life, so the only
-    /// thing that can move a conflict revision, a sync of that store, was
-    /// refused while the merger was up. The merger here is that sync.
+    /// The command once held the owner lock for its life, refusing the sync
+    /// that moves a conflict revision. The probe takes owner.lock itself:
+    /// io-pimdir counts owning handles per process, so `open` would succeed.
     #[cfg(unix)]
     #[test]
     fn a_store_written_under_the_merger_sends_the_decision_back_for_another_look() {
@@ -523,10 +521,6 @@ mod tests {
             thread::spawn(move || {
                 await_file(&entered);
 
-                // NOTE: the lock itself, not the handle: io-pimdir counts
-                // owning handles per process, so a second `open` here would
-                // succeed off that count. This is what another process contends
-                // for.
                 let owner = fs::File::options()
                     .read(true)
                     .write(true)
@@ -537,7 +531,6 @@ mod tests {
                     .expect("the store is unowned while the merger runs");
                 drop(owner);
 
-                // NOTE: what no sync could do while the merger was up.
                 let mut store = PimdirStore::open(&dir)
                     .expect("a store the merger does not own")
                     .for_account(ACCOUNT)

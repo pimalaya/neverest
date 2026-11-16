@@ -33,11 +33,11 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// A configuration in `home` of two accounts: `a`, an IMAP source on a
-/// local port nothing listens on with its send channel, and `b`, a JMAP
-/// source no build opens.
+/// A configuration in `home` of two accounts.
+///
+/// `a` is an IMAP source with its send channel on a port bound then dropped,
+/// so closed when the run connects; `b` is a JMAP source no build opens.
 fn configuration(home: &Path) -> String {
-    // NOTE: bound then dropped, so the port is closed when the run connects.
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()

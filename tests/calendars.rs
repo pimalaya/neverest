@@ -1,31 +1,21 @@
-//! End-to-end test of the **iCalendar** half of the three-way merge, against a
-//! local Radicale (`tests/radicale.sh`) holding two principals. Ignored by
+//! # Calendars
+//!
+//! End-to-end test of the iCalendar half of the three-way merge, against a
+//! local Radicale (tests/radicale.sh) holding two principals. Ignored by
 //! default.
 //!
-//! tests/endpoints.rs drives the same two-endpoint account through a merge, a
-//! collision and a resolution, but every body it exchanges is a vCard, so
-//! `Kind::Ical` and the ical-rs merge it dispatches to have never run against a
-//! server. These three do exactly that, and add the rule no card can state:
+//! tests/endpoints.rs exchanges only vCards, so these run `Kind::Ical` and
+//! its ical-rs merge against a server, and add the rule no card can state:
 //!
-//!   1. Disjoint edits on two endpoints merge. One event, one endpoint moving
-//!      its `SUMMARY` and the other its `LOCATION`, is not a disagreement, and
-//!      both edits must reach both servers.
-//!   2. A same-field collision parks and is never overwritten. Two endpoints
-//!      setting the same `SUMMARY` differently is a disagreement no merge
-//!      settles, so the run ends conflicted, leaves each server holding its own
-//!      body however many reruns go by, and waits for `conflict resolve`.
-//!   3. A recurring series and its overrides are one item. RFC 4791 §4.1 keeps
-//!      every component sharing a `UID` in one calendar object resource, so a
-//!      master `VEVENT` carrying an `RRULE` and its `RECURRENCE-ID` override
-//!      are one item, and a merge over them must keep both components rather
-//!      than key on the component and mint two.
+//! - disjoint edits (one `SUMMARY`, one `LOCATION`) merge onto both servers;
+//! - a same-field collision parks, each server keeping its body over any
+//!   number of reruns, until `conflict resolve`;
+//! - a series and its `RECURRENCE-ID` override sharing a `UID` are one item
+//!   (RFC 4791 §4.1), and a merge keeps both components.
 //!
 //! An account naming a source and a target keys the store under the source's
-//! name, so a calendar reads as `a/<name>` here rather than as the
-//! `caldav/<name>` the direct-backend sugar of tests/caldav.rs uses.
-//!
-//! Each test owns a calendar of its own on both principals and narrows the run
-//! to it, so the three run side by side and none meets what the others seeded.
+//! name: a calendar reads as `a/<name>`, not the `caldav/<name>` of
+//! tests/caldav.rs. Each test owns its calendar on both principals.
 //!
 //! Start the server and run with:
 //! ```sh
@@ -71,10 +61,10 @@ fn event(uid: &str, summary: &str, location: &str) -> String {
     )
 }
 
-/// A weekly series and one override of it in the **same** resource, which is
-/// what RFC 4791 §4.1 requires of components sharing a `UID`. `summary` is the
-/// master's and `location` the override's, so two endpoints can each edit a
-/// field in a different component of one item.
+/// A weekly series and one override in one resource (RFC 4791 §4.1).
+///
+/// `summary` is the master's and `location` the override's, so two endpoints
+/// can each edit a field in a different component of one item.
 fn series(uid: &str, summary: &str, location: &str) -> String {
     format!(
         "BEGIN:VCALENDAR\r\n\
@@ -102,9 +92,10 @@ fn series(uid: &str, summary: &str, location: &str) -> String {
     )
 }
 
-/// Proves the ical three-way merge runs end to end: an event each endpoint
-/// edited in a field the other left alone merges, both edits reach both
-/// servers, and the run ends clean with nothing waiting.
+/// Disjoint edits of one event on two endpoints merge into one event.
+///
+/// Each endpoint edits a field the other left alone: the base settles it,
+/// both edits reach both servers, and the run ends clean with nothing waiting.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn disjoint_edits_on_two_calendar_endpoints_merge_into_one_event() {
@@ -118,8 +109,6 @@ fn disjoint_edits_on_two_calendar_endpoints_merge_into_one_event() {
     create_calendar(root, SOURCE, MERGE_CAL);
     create_calendar(root, TARGET, MERGE_CAL);
 
-    // Seeded on one endpoint only, so the first sync binds the event on both
-    // and leaves the store holding the body both sides then edit from.
     put(
         root,
         SOURCE,
@@ -135,8 +124,6 @@ fn disjoint_edits_on_two_calendar_endpoints_merge_into_one_event() {
         "the seed crossed to the target",
     );
 
-    // One endpoint moves the summary, the other the location. Neither touched
-    // what the other did, so the base settles it and no person is needed.
     put(
         root,
         SOURCE,
@@ -166,7 +153,6 @@ fn disjoint_edits_on_two_calendar_endpoints_merge_into_one_event() {
         );
     }
 
-    // And the merged body is one event, not one per contributor.
     let items = store_items(&state, MERGE_CAL);
     assert_eq!(
         items.matches(r#""linkId""#).count(),
@@ -175,10 +161,11 @@ fn disjoint_edits_on_two_calendar_endpoints_merge_into_one_event() {
     );
 }
 
-/// Proves a disagreement over one calendar field parks instead of resolving:
-/// the run ends conflicted and names it, each server keeps its own body over
-/// any number of reruns, and a `conflict resolve` decision converges both
-/// endpoints on the next run.
+/// A disagreement over one calendar field parks instead of resolving.
+///
+/// The base says both sides moved the summary: the run ends conflicted, each
+/// server keeps its body over any number of reruns, and a `conflict resolve`
+/// decision converges both endpoints on the next run.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites() {
@@ -203,8 +190,6 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
     neverest(&["init", "-a", "cal"], &config, &state, 0);
     sync(&config, &state, CLASH_CAL, 0);
 
-    // The same field, set two ways. There is a base, and it says both sides
-    // moved the summary, which is the residual no merge settles.
     put(
         root,
         SOURCE,
@@ -240,8 +225,6 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
          replaced",
     );
 
-    // Rerunning settles nothing on its own and overwrites nothing either: a
-    // parked divergence waits for a person, however many runs go by.
     let report = sync(&config, &state, CLASH_CAL, 3);
     assert!(
         !report.contains(r#""kind":"update""#),
@@ -253,8 +236,6 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
         "both edits survive a rerun",
     );
 
-    // It is a decision the conflict commands can find and settle, and the
-    // local body is the one the store holds, which the source contributed.
     let listed = neverest(
         &["conflict", "list", "-a", "cal", "--json"],
         &config,
@@ -270,7 +251,6 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
         0,
     );
 
-    // One run then carries the decision to both endpoints.
     sync(&config, &state, CLASH_CAL, 0);
     for side in [SOURCE, TARGET] {
         assert!(
@@ -281,10 +261,11 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
     }
 }
 
-/// Proves the item is the calendar object **resource** rather than the
-/// component (RFC 4791 §4.1): a master `VEVENT` and its `RECURRENCE-ID`
-/// override sharing a `UID` are one item, an edit to each component from a
-/// different endpoint merges, and no component is dropped on the way.
+/// The item is the calendar object resource, not the component (RFC 4791).
+///
+/// A master and its override sharing a `UID` are one item, and an edit to
+/// each from another endpoint merges in its own component: keying on the
+/// `UID` alone would fold the override into the master and lose one edit.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_recurring_series_and_its_override_stay_one_item_through_a_merge() {
@@ -309,8 +290,6 @@ fn a_recurring_series_and_its_override_stay_one_item_through_a_merge() {
     neverest(&["init", "-a", "cal"], &config, &state, 0);
     sync(&config, &state, SERIES_CAL, 0);
 
-    // Two components, one UID, one resource: the store must hold one item,
-    // keyed by that UID, not one per component.
     let items = store_items(&state, SERIES_CAL);
     assert!(
         items.contains(r#""linkId":"series-1""#),
@@ -322,15 +301,12 @@ fn a_recurring_series_and_its_override_stay_one_item_through_a_merge() {
         "a series and its override are ONE item; store held:\n{items}",
     );
 
-    // The whole resource crossed, override included.
     let crossed = get(TARGET, SERIES_CAL, "series-1");
     assert!(
         crossed.contains("RRULE:FREQ=WEEKLY") && crossed.contains("RECURRENCE-ID:20260914T090000Z"),
         "both components crossed to the target; it held:\n{crossed}",
     );
 
-    // One endpoint edits the master, the other the override. Different
-    // components, different fields: nobody disagreed.
     put(
         root,
         SOURCE,
@@ -369,9 +345,6 @@ fn a_recurring_series_and_its_override_stay_one_item_through_a_merge() {
             "{side} still holds both components; it held:\n{merged}",
         );
 
-        // Each edit landed in the component it was made in, rather than
-        // anywhere in the resource: a merge keying on the UID alone would fold
-        // the override into the master and lose one of the two.
         let master = component(&merged, "RRULE:FREQ=WEEKLY");
         assert!(
             master.contains("SUMMARY:Stand-up weekly") && master.contains("LOCATION:Room A"),

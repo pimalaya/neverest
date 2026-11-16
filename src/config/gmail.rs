@@ -32,15 +32,11 @@ source_config! {
         /// How the Gmail session authenticates.
         pub auth: GmailAuthConfig,
         /// The most message reads one HTTP batch carries, 10 by default,
-        /// from 1 to 100: a batch with a read Gmail refuses for concurrency
-        /// or rate, fails transiently or leaves unanswered halves the next,
-        /// down to one read, and each full batch answered whole doubles it
-        /// back up to this ceiling.
+        /// from 1 to 100.
         ///
-        /// Gmail runs the reads of a batch side by side and refuses past
-        /// its per-user concurrency limit: measured on 2026-10-10, batches
-        /// of 10 sent one after another drew no refusal in 2,250 reads, 25
-        /// drew 1.2 % and 50 drew 19 %.
+        /// A refused or failed read halves the next batch, a whole one
+        /// doubles it back. Gmail runs a batch's reads side by side: on
+        /// 2026-10-10, 10 drew no refusal in 2,250 reads, 25 1.2 %, 50 19 %.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub batch_size: Option<usize>,
         /// How many batches the source's connections may have in flight at

@@ -1,3 +1,5 @@
+//! # Google
+//!
 //! Live plumbing tests against Google: Gmail, People and Calendar, on the
 //! Pimalaya Workspace user. Ignored by default.
 //!
@@ -6,13 +8,12 @@
 //! of one account against one collection (see tests/common), one pushing
 //! what the other pulls through its delta round.
 //!
-//! Every label, message, card and event a run creates is named
-//! `neverest-live-<millis>` and deleted however the run ends. A calendar
-//! test works in its own long-lived calendar,
-//! `pimalaya-live-neverest-<purpose>`, created when absent and never
-//! deleted, since Google caps the calendars a user may create a day. Run
-//! with a service account key holding domain-wide delegation for the scopes
-//! below:
+//! Everything a run creates is named `neverest-live-<millis>` and deleted
+//! however the run ends. A calendar test works in its own calendar,
+//! `pimalaya-live-neverest-<purpose>`, never deleted, since Google caps the
+//! calendars a user may create a day.
+//!
+//! Run with a service account key holding domain-wide delegation:
 //!
 //! ```sh
 //! GOOGLE_SERVICE_ACCOUNT_KEY_FILE=key.json \
@@ -78,7 +79,6 @@ fn a_gmail_label_syncs_both_ways() {
         .response
         .id;
 
-    // Every copy of the run's message, whichever labels it kept.
     let messages = || {
         let query = format!("rfc822msgid:{label}@pimalaya.org");
         let params = GmailMessagesListParams {
@@ -157,9 +157,10 @@ fn a_gmail_label_syncs_both_ways() {
     );
 }
 
-/// A message sent to oneself over Gmail's IMAP and SMTP, its copy asked in
-/// Sent, which Gmail's SMTP files itself: the inbox copy stays unread, and
-/// Sent holds the message once.
+/// A message sent to oneself over Gmail's IMAP and SMTP lands once in Sent.
+///
+/// Its copy is asked in Sent, which Gmail's SMTP files itself: the inbox copy
+/// stays unread, and Sent holds the message once.
 #[test]
 #[ignore = "live: needs a Google service account key"]
 #[cfg(all(feature = "gmail", feature = "imap", feature = "smtp"))]
@@ -273,6 +274,9 @@ fn a_message_sent_to_oneself_over_gmail_smtp_stays_unread() {
 }
 
 /// A card crosses both ways through the one People address book.
+///
+/// Only a failed run leaves a card behind, and the search index the cleanup
+/// reads may lag behind it.
 #[test]
 #[ignore = "live: needs a Google service account key"]
 #[cfg(feature = "gpeople")]
@@ -282,8 +286,6 @@ fn google_contacts_sync_both_ways() {
     with_cleanup(
         || round_trip("gpeople", "", &token, "contacts", card),
         || {
-            // NOTE: only a failed run leaves a card behind, and the
-            // search index may lag behind it.
             let mut client = GpeopleClientStd::connect(
                 &token,
                 GpeopleClientStdConnectOptions {
@@ -434,8 +436,10 @@ fn meeting(uid: &str, marker: &str, organizer: &str, attendee: &str) -> String {
     )
 }
 
-/// The test's own calendar for `purpose`, emptied before the run, then
-/// emptied with every copy of the run's events however the run ends.
+/// The test's own calendar for `purpose`, emptied before and after the run.
+///
+/// After, every copy of the run's events goes too, the invitation's copy on
+/// the attendee's primary calendar included, however the run ends.
 #[cfg(feature = "gcal")]
 fn with_google_calendar(token: &str, purpose: &str, uid: &str, body: impl FnOnce(&str)) {
     use io_gcal::v3::rest::events::list::GcalEventsListParams;
@@ -449,7 +453,6 @@ fn with_google_calendar(token: &str, purpose: &str, uid: &str, body: impl FnOnce
         || {
             clear_google_calendar(token, &calendar);
             let mut client = connect();
-            // NOTE: the invitation's copy on the attendee's own calendar.
             let params = GcalEventsListParams {
                 ical_uid: Some(uid),
                 ..Default::default()
@@ -498,9 +501,10 @@ fn delete_mail_about(uid: &str) {
     }
 }
 
-/// A meeting added through the store keeps its UID and invites its
-/// attendee, a reply to it is refused since the account organises it, and a
-/// cancel removes it.
+/// A meeting added through the store keeps its UID and invites its attendee.
+///
+/// A reply to it is refused since the account organises it, and a cancel
+/// removes it.
 #[test]
 #[ignore = "live: needs a Google service account key"]
 #[cfg(feature = "gcal")]
@@ -578,9 +582,10 @@ fn a_google_meeting_is_invited_to_and_cancelled() {
     });
 }
 
-/// An event added through the store with `X-PIMDIR-ONLINE-MEETING:TRUE`
-/// gets a Google Meet: the store reads it back as a `CONFERENCE`, the
-/// request property gone (pimdir STORAGE Annex B.1).
+/// An event asking `X-PIMDIR-ONLINE-MEETING:TRUE` gets a Google Meet.
+///
+/// The store reads it back as a `CONFERENCE`, the request property gone
+/// (pimdir STORAGE Annex B.1).
 #[test]
 #[ignore = "live: needs a Google service account key"]
 #[cfg(feature = "gcal")]
@@ -633,6 +638,9 @@ fn a_google_meet_is_created_with_its_event() {
 
 /// An invitation the calendar attends is answered: the reply reaches
 /// Google and its `PARTSTAT` comes back with the next sync.
+///
+/// The organizer is the Workspace user and the attendee the test's own
+/// calendar, so the reply stays in the domain.
 #[test]
 #[ignore = "live: needs a Google service account key"]
 #[cfg(feature = "gcal")]
@@ -644,8 +652,6 @@ fn a_google_invitation_is_answered() {
     let subject = google_subject();
 
     with_google_calendar(&token, "invitation", &uid, |calendar| {
-        // NOTE: the organizer is the Workspace user and the attendee the
-        // test's own calendar, so the reply stays in the domain.
         let invitation = meeting(&uid, "invitation", &subject, calendar);
         let event = GcalEvent::from_ical(invitation.as_bytes()).expect("project the invitation");
         GcalClientStd::connect(&token, GcalClientStdConnectOptions::default())
@@ -682,9 +688,10 @@ fn a_google_invitation_is_answered() {
     });
 }
 
-/// Sends a People request the cleanup makes on its own, outside neverest's
-/// throttle, again after a 429: Google's per-minute quota on contact reads,
-/// which the run's syncs may have spent, lifts within the next minute.
+/// Sends a cleanup's own People request, again after a 429.
+///
+/// It runs outside neverest's throttle, and Google's per-minute quota on
+/// contact reads, which the syncs may have spent, lifts within a minute.
 #[cfg(feature = "gpeople")]
 fn patiently<T>(
     mut send: impl FnMut() -> Result<T, GpeopleClientStdError>,

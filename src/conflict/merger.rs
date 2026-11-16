@@ -39,8 +39,10 @@ const PLACEHOLDERS: [&str; 4] = ["{base}", "{local}", "{remote}", "{output}"];
 const UNWRITTEN: &[u8] = b"";
 
 /// Held exclusively by a test whose merger spawns, shared by one releasing a
-/// store and owning it again: a child holds the test process's locks until
-/// its exec, so a store owned again beside a spawn is refused as owned.
+/// store and owning it again.
+///
+/// A child holds the test process's locks until its exec, so a store owned
+/// again beside a spawn is refused as owned.
 #[cfg(test)]
 pub(crate) static SPAWNS: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
@@ -121,14 +123,14 @@ impl<'a> Merger<'a> {
         Ok(Some(body))
     }
 
-    /// Builds the command the four paths reach the merger through: appended
-    /// positionally, or substituted where the configuration named where each
-    /// one goes.
+    /// Builds the command the four paths reach the merger through.
+    ///
+    /// Appended positionally, or substituted where the configuration named
+    /// each one. A shell line gets them quoted, or a path holding a space
+    /// would split in two; an argv needs no quoting.
     fn command(&self) -> Command {
         match self.command {
             CommandConfig::Shell(line) => {
-                // NOTE: a shell line is a line, so a path holding a space
-                // becomes two arguments unless it is quoted here.
                 let paths = self.paths(quote);
 
                 match substitute(line, &paths) {
@@ -137,8 +139,6 @@ impl<'a> Merger<'a> {
                 }
             }
             CommandConfig::Argv { program, args } => {
-                // NOTE: no shell in between, so a path is one argument whatever
-                // it holds.
                 let paths = self.paths(|path| path.display().to_string());
 
                 let mut command = Command::new(program);
@@ -225,8 +225,10 @@ mod tests {
     }
 
     /// A merger that refuses, and one that exits zero without writing, are
-    /// the same answer. Taking the second as a decision would discard a side
-    /// every time somebody quit an editor.
+    /// the same answer.
+    ///
+    /// Taking the second as a decision would discard a side every time
+    /// somebody quit an editor.
     #[cfg(unix)]
     #[test]
     fn a_merger_that_aborts_or_writes_nothing_yields_no_body() {

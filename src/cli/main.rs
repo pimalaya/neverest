@@ -88,10 +88,9 @@ pub enum Command {
 impl Command {
     /// Runs the subcommand over the accounts `-a` names, or every one.
     ///
-    /// The flag is global and declared once, on [`Cli`], as in every other
-    /// pimalaya CLI: the accounts are a property of the invocation. Sync
-    /// and init have an outcome beyond succeeding or failing, so they return
-    /// their own [`Exit`]; every other works or errors.
+    /// `-a` is global, declared once on [`Cli`]: the accounts are a property
+    /// of the invocation. Sync and init have an outcome beyond succeeding or
+    /// failing, so they return their own [`Exit`]; every other works or not.
     pub fn execute(
         self,
         printer: &mut (impl Printer + Send),
@@ -115,9 +114,10 @@ impl Command {
 
 /// Meets a bare `neverest`: the help when a configuration exists, the
 /// missing configuration otherwise, which a person meets as the welcome.
+///
+/// A broken file counts as a configuration, its error left to the first
+/// command reading it.
 pub fn meet_bare_invocation(config_paths: &[PathBuf]) -> Result<()> {
-    // NOTE: a broken file counts as a configuration, its error left to
-    // the first command reading it.
     if let Err(err) = Config::load(config_paths)
         && err.is::<ConfigMissingError>()
     {
@@ -128,8 +128,9 @@ pub fn meet_bare_invocation(config_paths: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
-/// The welcome a person meets when no configuration exists at `path`:
-/// the commands creating it from `sample`, the shipped sample
+/// The welcome a person meets when no configuration exists at `path`.
+///
+/// The commands creating it from `sample`, the shipped sample
 /// configuration, or downloading it without one, then `account check`.
 pub fn welcome<'a>(
     path: &'a Path,

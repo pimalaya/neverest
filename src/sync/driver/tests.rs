@@ -52,9 +52,10 @@ fn a_store_a_newer_neverest_wrote_asks_for_an_upgrade() {
     assert!(!err.contains("--reset"), "{err}");
 }
 
-/// A store refused for its version is an earlier neverest's when it
-/// names no version, as every draft before storage-draft-08 wrote it,
-/// or an earlier draft; a later draft or a release is a newer one's.
+/// A refused store with no version or an earlier draft is an earlier
+/// neverest's; a later draft or a release is a newer one's.
+///
+/// Every draft before storage-draft-08 wrote no version.
 #[test]
 fn a_store_version_tells_an_earlier_neverest_from_a_newer_one() {
     let refused = |found: Option<&str>| PimdirError::Version {
@@ -106,9 +107,10 @@ fn listed(roles: &[(&str, Option<&str>)]) -> Vec<Collection> {
         .collect()
 }
 
-/// A listing carrying its roles asks nothing more, and a lookup the
-/// listing needs is asked once per collection set, reused while the
-/// set holds, asked again when it moves.
+/// A listing carrying its roles asks nothing more.
+///
+/// A lookup the listing needs is asked once per collection set, reused
+/// while the set holds, asked again when it moves.
 #[test]
 fn roles_a_listing_lacks_are_looked_up_once_per_collection_set() {
     let mut state = AccountState::default();
@@ -151,9 +153,10 @@ fn roles_a_listing_lacks_are_looked_up_once_per_collection_set() {
 }
 
 /// Every account naming no root shares one store, `neverest/` under the
-/// platform base, one shape everywhere so a store stays addressable by
-/// the same relative path whichever platform wrote it, and `store.root`
-/// still overrides the whole thing, for its account.
+/// platform base, which `store.root` overrides for its account.
+///
+/// One shape everywhere keeps a store addressable by the same relative
+/// path whichever platform wrote it.
 #[test]
 fn the_default_store_root_is_shared_under_a_platform_base() {
     let dir = default_root().unwrap();
@@ -213,9 +216,10 @@ fn a_dry_run_replica_shares_the_bodies_and_copies_the_rest() {
     );
 }
 
-/// A dry run's replica of a store opens as one: a store is its user's
-/// alone (pimdir STORAGE §18), so a replica made under the umask was
-/// refused as exposed and no dry run ran.
+/// A dry run's replica of a store opens as one.
+///
+/// A store is its user's alone (pimdir STORAGE §18), so a replica made
+/// under the umask was refused as exposed and no dry run ran.
 #[test]
 fn a_dry_run_replica_opens_as_a_store() {
     let root = tempfile::tempdir().unwrap();
@@ -228,9 +232,10 @@ fn a_dry_run_replica_opens_as_a_store() {
 }
 
 /// A dry run's replica carries the store's local/, neverest's own state
-/// (pimdir STORAGE §3): the account reads initialized there, and the
-/// replica still opens as a store, its local/ its user's alone, which
-/// io-pimdir asks of one before its owner opens it.
+/// (pimdir STORAGE §3), so the account reads initialized there.
+///
+/// The replica still opens: io-pimdir asks a local/ its user's alone
+/// before its owner opens it.
 #[test]
 fn a_dry_run_replica_carries_the_owners_state() {
     let root = tempfile::tempdir().unwrap();
@@ -368,10 +373,11 @@ fn a_drain_applies_an_action_as_the_source_of_its_collection() {
     );
 }
 
-/// A parked row belongs to the store, and is reported once however many
-/// drains ran: reading the parked rows where the drain runs reported one
-/// row per drain, so an account syncing three kinds showed the same warning
-/// three times.
+/// A parked row belongs to the store and is reported once, by its
+/// collection's account.
+///
+/// Read where each drain runs, an account syncing three kinds showed the
+/// same warning three times.
 #[test]
 fn a_parked_action_is_reported_once_however_many_drains_ran() {
     let dir = tempfile::tempdir().unwrap();
@@ -404,12 +410,15 @@ fn a_parked_action_is_reported_once_however_many_drains_ran() {
     assert_eq!(report.parked.len(), 1);
     assert_eq!(report.parked[0].producer, "himalaya");
 
-    // NOTE: a parked row is its collection's account's to report.
     let mut other = SyncOutput::default();
     report_parked(&store, "b", &mut other);
     assert!(other.parked.is_empty());
 }
 
+/// The pre-sync drain applies queued actions and reports parked ones.
+///
+/// A drained `Add` reads `Created`, a create the next sync owes the
+/// source: read as `Dirty`, it stranded every queued create.
 #[test]
 fn the_pre_sync_drain_applies_queued_actions_and_reports_parked_ones() {
     let dir = tempfile::tempdir().unwrap();
@@ -470,9 +479,6 @@ fn the_pre_sync_drain_applies_queued_actions_and_reports_parked_ones() {
 
     let placements = load_side(&store, "left/INBOX").unwrap();
     assert_eq!(placements.len(), 1);
-    // NOTE: a drained `Add` is a create the next sync owes the source. It
-    // read `Dirty` until the engine's a-bound-create-is-still-a-create,
-    // the shape that stranded every queued create.
     assert_eq!(placements[0].status, PimdirStatus::Created);
     assert!(placements[0].base.is_none());
     assert_eq!(
@@ -632,8 +638,9 @@ fn a_rekey_carries_state_by_link_id_and_bumps_the_generation_once() {
     assert_eq!(stored_checkpoint_uid_validity(&store, "INBOX"), Some(2));
 }
 
-/// A sync meeting a renumbered mailbox rekeys it before listing it: the
-/// message moves to its new UID with the flag staged on it, nothing is
+/// A sync meeting a renumbered mailbox rekeys it before listing it.
+///
+/// The message moves to its new UID with its staged flag, nothing is
 /// dropped as deleted, and the flag is pushed to the new UID.
 #[test]
 #[cfg(feature = "imap")]
@@ -861,10 +868,11 @@ fn pushed_to_imap(
     (server, results.remove(0))
 }
 
-/// A create its server took without naming the message is delivered:
-/// the run reports it waiting for the listing that names it, and the
-/// next run appends nothing again, where a rejected append was sent
-/// again by every run (pimdir SYNC §4, §5).
+/// A create its server took without naming the message is delivered.
+///
+/// The run reports it waiting for the listing that names it and the next
+/// one appends nothing, where a rejected append was sent again by every
+/// run (pimdir SYNC §4, §5).
 #[test]
 #[cfg(feature = "imap")]
 fn a_create_appended_without_a_uid_waits_and_is_not_appended_again() {
@@ -940,12 +948,11 @@ fn a_create_appended_without_a_uid_waits_and_is_not_appended_again() {
     assert!(!text.contains("Warnings"), "waiting is no warning: {text}");
 }
 
-/// A create the server refuses as it stands (an IMAP `NO [CANNOT]`) is
-/// refused, not rejected: the store records the refusal on its binding
-/// and holds the change, so the next run appends nothing and reports
-/// it again, its hunk taken back (pimdir SYNC §4, §5, vectors 162,
-/// 163). A `NO` naming a quota is rejected and appended again by the
-/// next run, the account's state outliving the change.
+/// A create refused as it stands (IMAP `NO [CANNOT]`) is held, not
+/// rejected: the next run appends nothing and reports it again.
+///
+/// Pimdir SYNC §4, §5, vectors 162, 163. A `NO` naming a quota is
+/// rejected and appended again, the account's state outliving the change.
 #[test]
 #[cfg(feature = "imap")]
 fn a_create_refused_as_it_stands_is_held_and_reported() {
@@ -1055,8 +1062,7 @@ fn a_create_refused_as_it_stands_is_held_and_reported() {
 }
 
 /// A member named apart from a create of its side holding its identity
-/// is reported once, as a warning, whatever the passes that met it
-/// (pimdir SYNC §5, §6).
+/// is warned once, whatever the passes that met it (pimdir SYNC §5, §6).
 #[test]
 #[cfg(feature = "imap")]
 fn a_member_named_apart_from_its_create_is_reported_once() {
@@ -1088,10 +1094,11 @@ fn a_member_named_apart_from_its_create_is_reported_once() {
     assert!(text.contains("kept apart"), "{text}");
 }
 
-/// A source configured as capped states it on every page of a round
-/// (pimdir SYNC §4, §5): the ten bound messages its listing leaves out,
-/// under the half that parks, are kept and counted in the report, where
-/// the same listing of a source not capped drops them.
+/// A capped source states it on every page of a round (pimdir SYNC §4,
+/// §5).
+///
+/// The ten bound messages its listing leaves out, under the half that
+/// parks, are kept and counted, where an uncapped source drops them.
 #[test]
 #[cfg(feature = "imap")]
 fn a_capped_source_keeps_what_its_listing_leaves_out() {
@@ -1173,8 +1180,10 @@ fn a_remove_relocating_its_member_says_so() {
 }
 
 /// A remove whose target already holds the identity deletes the member
-/// rather than filing it there a second time, and states no relocation,
-/// so the target's create stays pending (pimdir SYNC §4, §5).
+/// rather than filing it twice.
+///
+/// It states no relocation, so the target's create stays pending (pimdir
+/// SYNC §4, §5).
 #[test]
 #[cfg(feature = "imap")]
 fn a_remove_into_a_target_holding_the_identity_deletes() {
@@ -1191,9 +1200,10 @@ fn a_remove_into_a_target_holding_the_identity_deletes() {
     assert_eq!(server.sent("UID EXPUNGE"), ["UID EXPUNGE 7"]);
 }
 
-/// A remove under a minted key never asks its target: the target held
-/// the identity before the move, which proves no delivery (pimdir SYNC
-/// §4).
+/// A remove under a minted key never asks its target.
+///
+/// The target held the identity before the move, which proves no delivery
+/// (pimdir SYNC §4).
 #[test]
 #[cfg(feature = "imap")]
 fn a_remove_under_a_minted_key_relocates_unasked() {
@@ -1209,10 +1219,11 @@ fn a_remove_under_a_minted_key_relocates_unasked() {
     assert_eq!(server.sent("UID MOVE"), ["UID MOVE 7 Archive"]);
 }
 
-/// An append the server takes without naming the message, which no
-/// search finds either, is accepted with no handle: the engine records
-/// the create delivered and the next listing lands it, where a rejection
-/// had it appended again (pimdir SYNC §4).
+/// An append taken without a UID, which no search finds either, is
+/// accepted with no handle.
+///
+/// The create is delivered and the next listing lands it, where a
+/// rejection had it appended again (pimdir SYNC §4).
 #[test]
 #[cfg(feature = "imap")]
 fn an_append_answered_no_uid_is_accepted_with_no_handle() {
@@ -1233,9 +1244,10 @@ fn an_append_answered_no_uid_is_accepted_with_no_handle() {
     assert!(!result.relocated);
 }
 
-/// A create holding no body, pending or delivered, names no member of
-/// its server yet (pimdir SYNC §2): its provisional handle is owed no
-/// body fetch, which no server could answer.
+/// A create holding no body names no member of its server yet.
+///
+/// Pending or delivered, its provisional handle is owed no body fetch,
+/// which no server could answer (pimdir SYNC §2).
 #[test]
 #[cfg(feature = "imap")]
 fn a_create_naming_no_member_is_owed_no_body_fetch() {
@@ -1289,9 +1301,10 @@ fn a_create_naming_no_member_is_owed_no_body_fetch() {
     assert_eq!(plans[0].1.len(), 25, "the bound members are still owed");
 }
 
-/// An IMAP side over `server`, accepting absences when `accept`, and a
-/// store binding 25 messages of its inbox under `UIDVALIDITY` 1, UIDs 1
-/// to 25, the checkpoint `checkpoint` when given.
+/// An IMAP side over `server` and a store binding 25 inbox messages.
+///
+/// Absences are accepted when `accept`; the bindings sit under
+/// `UIDVALIDITY` 1, UIDs 1 to 25, with `checkpoint` when given.
 #[cfg(feature = "imap")]
 fn bound_imap_inbox(
     dir: &Path,
@@ -1408,9 +1421,10 @@ fn live_inbox(store: &PimdirSourceStore) -> usize {
         .count()
 }
 
-/// A round listing one of 25 bound messages parks (pimdir SYNC §5):
-/// nothing is dropped and the report names the absence, which makes
-/// the run wait for a person; `--accept-absences` drops them.
+/// A round listing one of 25 bound messages parks (pimdir SYNC §5).
+///
+/// Nothing is dropped and the report names the absence, waiting for a
+/// person; `--accept-absences` drops them.
 #[test]
 #[cfg(feature = "imap")]
 fn a_round_missing_most_of_the_inbox_parks_until_accepted() {
@@ -1451,10 +1465,11 @@ fn a_round_missing_most_of_the_inbox_parks_until_accepted() {
     assert!(report.absences.is_empty());
 }
 
-/// A renumbered mailbox whose new listing holds one of 25 bound
-/// messages parks its rebuild (pimdir SYNC §8): the store keeps its old
-/// handles and checkpoint, the sync ends without listing it and the
-/// report names the rebuild; `--accept-absences` rebuilds it.
+/// A renumbered mailbox listing one of 25 bound messages parks its
+/// rebuild (pimdir SYNC §8).
+///
+/// The store keeps its old handles and checkpoint and the report names
+/// the rebuild; `--accept-absences` rebuilds it.
 #[test]
 #[cfg(feature = "imap")]
 fn a_rebuild_missing_most_of_the_inbox_parks_until_accepted() {
@@ -1586,6 +1601,10 @@ fn no_collection_name_is_reserved() {
     assert_eq!(filtered, BTreeSet::from([String::from("Outbox")]));
 }
 
+/// A collection is named without the namespace that addresses it.
+///
+/// A CalDAV listing names it by its `DAV:displayname`; a source with
+/// nothing to say leaves the bare id, the IMAP mailbox or DAV segment.
 #[test]
 fn a_collection_is_named_without_the_namespace_that_addresses_it() {
     let dir = tempfile::tempdir().unwrap();
@@ -1597,8 +1616,6 @@ fn a_collection_is_named_without_the_namespace_that_addresses_it() {
             .unwrap()
     };
 
-    // NOTE: what a CalDAV server answers, the id being the path
-    // segment and the name the `DAV:displayname` beside it.
     let dav = BTreeMap::from([(String::from("ED99C7C8"), String::from("Work"))]);
     store
         .ensure_collection("caldav/ED99C7C8", "text/calendar")
@@ -1609,8 +1626,6 @@ fn a_collection_is_named_without_the_namespace_that_addresses_it() {
     assert_eq!(named.id, "caldav/ED99C7C8", "the address keeps its prefix");
     assert_eq!(named.name, "Work", "the label carries neither");
 
-    // NOTE: a source with nothing to say leaves the bare id, which is
-    // the mailbox name on IMAP and the path segment on DAV.
     let silent = BTreeMap::from([(String::from("Archives"), String::new())]);
     store
         .ensure_collection("caldav/Archives", "text/calendar")
@@ -1810,8 +1825,11 @@ fn queue_task(dir: &Path, collection: &str) -> Result<PimdirEnqueued, PimdirErro
 }
 
 /// A calendar whose server keeps it from tasks refuses one at the gate,
-/// before it is queued and pushed (pimdir STORAGE §15.6), from what the
-/// listing stated and the sidecar kept for the next declaration.
+/// before it is queued and pushed (pimdir STORAGE §15.6).
+///
+/// The refusal comes from what the listing stated and the sidecar kept
+/// for the next declaration; a later listing replaces what the earlier
+/// one stated.
 #[test]
 fn an_events_only_calendar_refuses_a_task_before_it_is_queued() {
     let dir = tempfile::tempdir().unwrap();
@@ -1875,7 +1893,6 @@ fn an_events_only_calendar_refuses_a_task_before_it_is_queued() {
     assert!(reader.accepts_vtodo("caldav/any").unwrap());
     drop(reader);
 
-    // NOTE: a later listing replaces what the earlier one stated.
     let mut state = state;
     let stated = taskless_ids("caldav", &listed([None, Some(true), None]));
     record_taskless(&mut state, "caldav", &stated);
@@ -1957,10 +1974,10 @@ fn a_google_or_graph_calendar_refuses_a_task_before_it_is_queued() {
     }
 }
 
-/// A Graph mail source takes an add in its Drafts folder alone: it
-/// declares `mail.message.add` full there and none elsewhere, so a
-/// frontend adding a message to another folder is refused at the gate,
-/// before it is queued, rather than rejected by every sync after.
+/// A Graph mail source takes an add in its Drafts folder alone.
+///
+/// It declares `mail.message.add` there only, so an add elsewhere is
+/// refused at the gate rather than rejected by every sync after.
 #[test]
 fn a_graph_source_takes_an_add_in_its_drafts_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -1968,7 +1985,6 @@ fn a_graph_source_takes_an_add_in_its_drafts_alone() {
         .unwrap()
         .for_account("live")
         .for_source("msgraph");
-    // NOTE: a message bound in each folder, so the source syncs both.
     for collection in ["msgraph/Drafts", "msgraph/Archive"] {
         store
             .ensure_collection(collection, "message/rfc822")
@@ -2024,9 +2040,10 @@ fn a_graph_source_takes_an_add_in_its_drafts_alone() {
     add("msgraph/Drafts").expect("an add in Drafts is queued");
 }
 
-/// Gmail keeps no keyword but `$Important`, the IMPORTANT label: a
-/// frontend setting another is refused at the gate rather than queued
-/// and dropped by the push, and `$Important` passes with no warning.
+/// Gmail keeps no keyword but `$Important`, the IMPORTANT label.
+///
+/// Another is refused at the gate rather than queued and dropped by the
+/// push, and `$Important` passes with no warning.
 #[test]
 fn a_gmail_source_refuses_any_keyword_but_important_at_the_gate() {
     let dir = tempfile::tempdir().unwrap();
@@ -2087,9 +2104,11 @@ fn a_gmail_source_refuses_any_keyword_but_important_at_the_gate() {
     assert!(important.partial.is_empty(), "{:?}", important.partial);
 }
 
-/// A task in a hub calendar crosses to the target, so a calendar the
-/// target's server keeps from tasks refuses one, under the source's
-/// declaration: the target stays undeclared.
+/// A calendar the target's server keeps from tasks refuses one.
+///
+/// A task in a hub calendar crosses to the target, so the refusal stands
+/// under the source's declaration, the target undeclared; until every
+/// target listed, the record keeps what the earlier run stated.
 #[test]
 fn a_target_s_events_only_calendar_refuses_a_task_before_it_is_queued() {
     let dir = tempfile::tempdir().unwrap();
@@ -2141,8 +2160,6 @@ fn a_target_s_events_only_calendar_refuses_a_task_before_it_is_queued() {
         "a target stays undeclared"
     );
 
-    // NOTE: until every target listed, the record keeps what the
-    // earlier run stated.
     let known = BTreeSet::from([String::from("caldav/events"), "caldav/gone".into()]);
     assert_eq!(state.taskless["caldav"], known);
 }
@@ -2182,8 +2199,6 @@ fn a_calendar_met_mid_run_is_gated_from_its_first_item_sync() {
         config: &config,
         mode: &mode,
     };
-    // NOTE: the declaration before the drain, from a sidecar that never
-    // met the calendar.
     let mut state = AccountState::default();
     declare(dir.path(), "live", &config, &mode, &state).unwrap();
 
@@ -2261,9 +2276,10 @@ fn record_local(dir: &Path, state: &mut AccountState, listed: &[Collection]) {
 }
 
 /// A calendar listed and not synced yet refuses a task right after the
-/// listing: the source is recorded as syncing it, with no checkpoint,
-/// so its declaration holds there (pimdir STORAGE §15.6). A calendar
-/// outside the home set is one whose id is its path.
+/// listing.
+///
+/// The source syncs it with no checkpoint, so its declaration holds
+/// (pimdir STORAGE §15.6); one outside the home set has its path as id.
 #[test]
 fn a_listed_calendar_refuses_a_task_before_its_first_sync() {
     let dir = tempfile::tempdir().unwrap();
@@ -2338,9 +2354,10 @@ fn a_listing_keeps_the_checkpoint_a_source_holds() {
     );
 }
 
+/// A target's events-only calendar refuses a task from the listing on.
+///
 /// A pair records its source as syncing the collections it is about to
-/// sync, so a target's events-only calendar refuses a task from the
-/// listing on; the target stays unrecorded and undeclared.
+/// sync; the target stays unrecorded and undeclared.
 #[test]
 fn a_pair_s_listed_calendar_refuses_a_task_before_its_first_sync() {
     let dir = tempfile::tempdir().unwrap();
@@ -2441,9 +2458,9 @@ fn the_retention_sweep_runs_only_when_a_delay_is_configured() {
 
 /// A purged item's body actually leaves the disk.
 ///
-/// A purge releases a reference, it does not reclaim bytes, and the store
-/// collects nothing by itself (pimdir STORAGE §5). Without a collector here
-/// a backup store grows without bound while reporting reclaimed bytes.
+/// A purge releases a reference, not bytes, and the store collects nothing
+/// (pimdir STORAGE §5), so a backup store grew while reporting reclaimed
+/// bytes. A `0s` delay purges strictly before a millisecond cutoff.
 #[test]
 fn the_sweep_collects_the_bodies_the_purge_released() {
     let dir = tempfile::tempdir().unwrap();
@@ -2493,9 +2510,6 @@ fn the_sweep_collects_the_bodies_the_purge_released() {
         .unwrap();
     assert!(body.is_file(), "retention keeps the body");
 
-    // NOTE: a `0s` delay purges what was retained strictly before a cutoff
-    // carrying milliseconds, so an item dropped and swept within one of
-    // them is not old enough to go.
     thread::sleep(std::time::Duration::from_millis(5));
 
     let mut store = PimdirStore::open(dir.path()).unwrap();
@@ -2568,9 +2582,10 @@ fn retire(dir: &Path, account: &str, collection: &str, body: &[u8]) {
         .unwrap();
 }
 
-/// An account's `store.purge-after` decides for its own retained items
-/// alone: the store's sweep is store-wide, and one account's `"0"` would
-/// empty the trash of every account sharing the store.
+/// An account's `store.purge-after` decides for its own retained items.
+///
+/// The store's sweep is store-wide, so one account's `"0"` would empty
+/// the trash of every account sharing the store.
 #[test]
 fn one_account_s_delay_purges_its_own_retained_items_alone() {
     let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
@@ -2990,11 +3005,11 @@ fn card_divergence(store: &PimdirSourceStore, blobs: &PimdirBlobStage) -> Vec<Ca
         .collect()
 }
 
-/// Both endpoints rewrite a card they agreed on, each pass pulling
-/// only, as a reconcile's first pass does: the store keeps the body
-/// they agreed on and records the divergence itself (pimdir SYNC §9),
-/// so the merge reads all three bodies and settles disjoint edits.
-/// What neverest's own snapshot of the shared bodies did before.
+/// A card both endpoints rewrote merges against the body they agreed on.
+///
+/// Each pass pulling only, as a reconcile's first does, the store keeps
+/// that body and records the divergence (pimdir SYNC §9), so the merge
+/// reads all three bodies and settles disjoint edits.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 #[test]
 fn a_card_both_endpoints_rewrote_diverges_against_their_agreed_body() {
@@ -3041,9 +3056,9 @@ fn a_card_both_endpoints_rewrote_diverges_against_their_agreed_body() {
 }
 
 /// Two endpoints holding one card under two bodies before they ever
-/// agreed park it with no ancestor (pimdir SYNC §6): neither body is
-/// taken over the other. What neverest's own reading of the hub's
-/// conflict flag did before.
+/// agreed park it with no ancestor (pimdir SYNC §6).
+///
+/// Neither body is taken over the other.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 #[test]
 fn a_card_two_endpoints_never_agreed_on_parks_with_no_ancestor() {
@@ -3126,12 +3141,11 @@ fn a_side_the_store_decides_keeps_the_store_body_against_the_endpoint() {
     );
 }
 
-/// The fetch of a diverging body settles it by the side's policy
-/// (pimdir SYNC §6): a one-way target's `prefer-local` keeps the store's
-/// body, owed to the target, and the target's own as a retained item,
-/// which the upgrade reports overruled. Under the default options, as
-/// every upgrade ran before, the fetch settles nothing and the item
-/// stays parked.
+/// The fetch of a diverging body settles it by the side's policy (pimdir
+/// SYNC §6); under the default options it settles nothing and parks.
+///
+/// A one-way target's `prefer-local` keeps the store's body, owed to the
+/// target, and the target's own as a retained item reported overruled.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 #[test]
 fn a_fetched_divergence_settles_by_the_side_s_policy() {
@@ -3207,11 +3221,11 @@ fn a_fetched_divergence_settles_by_the_side_s_policy() {
     }
 }
 
-/// A one-way overwrite discards the target's own edit, which the store
-/// keeps as a retained item and the run reports as overruled: the
-/// target's body leaves its server, never the store. The source moved
-/// the card both endpoints agreed on, the target edited it meanwhile,
-/// and the target's pull, which may not push, parked the divergence.
+/// A one-way overwrite keeps the target's own edit as a retained item,
+/// reported overruled: the body leaves its server, never the store.
+///
+/// The source moved an agreed card, the target edited it meanwhile, and
+/// the target's pull, which may not push, parked the divergence.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 #[test]
 fn a_one_way_overwrite_keeps_the_target_body_as_a_retained_item() {
@@ -3285,9 +3299,10 @@ fn a_one_way_overwrite_keeps_the_target_body_as_a_retained_item() {
 }
 
 /// A target edit listed with no body is fetched before the one-way
-/// overwrite settles it, so the store keeps it as a retained item: the
-/// store refuses to overrule a body nobody has read, and the run takes
-/// that as a fetch owed, never as a failure.
+/// overwrite settles it, so the store keeps it as a retained item.
+///
+/// The store refuses to overrule a body nobody has read, and the run
+/// takes that as a fetch owed, never as a failure.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 #[test]
 fn a_one_way_overwrite_fetches_an_unread_target_body_before_keeping_it() {
@@ -3398,8 +3413,9 @@ fn a_conflict_the_engine_marked_survives_the_report_merge() {
 
 /// Both sides setting the same field is the residue no merge settles.
 ///
-/// It stays parked and is counted from the store, which is the number the
-/// run's own exit code answers with 2.
+/// It stays parked and is counted from the store, the number the run's
+/// exit code answers with 2; the printed account report is asserted, the
+/// collection's alone having let the arm go missing.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 #[test]
 fn a_same_field_collision_parks_and_is_still_counted() {
@@ -3441,8 +3457,6 @@ fn a_same_field_collision_parks_and_is_still_counted() {
     .unwrap();
     assert_eq!(collection.conflicts.len(), 1);
 
-    // NOTE: a worker fills the collection's report, the account's is
-    // printed: asserting the first alone is how the arm went missing.
     let mut report = SyncOutput::default();
     report.absorb(collection);
     assert_eq!(report.conflicts.len(), 1);
@@ -3478,9 +3492,6 @@ fn two_colliding_fields_park_the_item_and_the_count_reads_past_one() {
     let mut store = store_with_conflict(dir.path(), &base, &local, &remote);
     let blobs = store.blob_stage();
 
-    // NOTE: a second item diverging the same way, over the same three
-    // bodies: the report prints a number, and one item cannot tell a
-    // count from a flag.
     store
         .write(vec![PimdirWriteOp::UpsertPlacement(PimdirPlacement {
             collection: PimdirCollectionId("contacts".into()),
@@ -3745,9 +3756,10 @@ fn a_second_run_over_an_unresolved_conflict_announces_nothing() {
 }
 
 /// A queued `move` of an item in conflict is parked, never applied
-/// (pimdir SYNC §7, STORAGE §15.2): the report names the row and the
-/// diverging body, the card stays where it stood and its decision
-/// still waits.
+/// (pimdir SYNC §7, STORAGE §15.2).
+///
+/// The report names the row and the diverging body, the card stays where
+/// it stood and its decision still waits.
 #[test]
 fn a_queued_move_over_a_conflict_parks_and_the_decision_still_waits() {
     let dir = tempfile::tempdir().unwrap();
@@ -4054,8 +4066,6 @@ fn a_conflict_on_each_endpoint_is_named_once_across_a_convergence_loop() {
             "the engine parked the left side on pass {pass}",
         );
 
-        // NOTE: what the run's own merge does to a divergence it settles,
-        // so the next pass genuinely marks this one again.
         settle_as_the_merge_would(&mut left);
         left_remote
             .items
@@ -4081,8 +4091,6 @@ fn a_conflict_on_each_endpoint_is_named_once_across_a_convergence_loop() {
         "and one announcement per item entering conflict",
     );
 
-    // NOTE: a later run: both are parked already, so the engine says
-    // nothing.
     let mut later = SyncOutput::default();
     for (store, remote, side) in [
         (&mut left, &mut left_remote, "left"),
@@ -4167,9 +4175,6 @@ fn a_server_delete_is_named_once_on_each_endpoint() {
         ..Default::default()
     };
 
-    // NOTE: a listing naming no member parks any absence (pimdir SYNC
-    // §5, §8), an emptied address book reading as a failing server
-    // until a person accepts it.
     let parked = run_verb(
         &mut left,
         &mut left_remote,
@@ -4329,8 +4334,10 @@ fn a_side_that_may_not_delete_keeps_the_tombstone() {
 }
 
 /// A flag on a card or a calendar item is the store's alone (a `pimdir
-/// tag`): it is never pushed, so the backend rejects nothing and warns
-/// nothing on every run, and the flag stays. Mail keeps the right.
+/// tag`); mail keeps the right.
+///
+/// It is never pushed, so the backend rejects and warns nothing on every
+/// run, and the flag stays.
 #[test]
 fn a_store_only_flag_on_a_card_stays_local() {
     let perms = SourcePermissions {
@@ -4719,9 +4726,10 @@ fn relayed(store: &PimdirStore) -> Vec<String> {
         .collect()
 }
 
-/// A relay appends only where the target's listing is closed (pimdir
-/// SYNC §5): before the target closed a round, or while one is open,
-/// the store cannot tell whether it already holds the message.
+/// A relay appends only where the target's listing is closed.
+///
+/// Before the target closed a round, or while one is open, the store
+/// cannot tell whether it already holds the message (pimdir SYNC §5).
 #[test]
 fn a_relay_waits_for_the_target_to_close_a_round() {
     let never = tempfile::tempdir().unwrap();
@@ -4869,11 +4877,11 @@ fn queue_submit(dir: &Path, collection: &str, source: &str) {
         .unwrap();
 }
 
-/// An intent stating a version this neverest does not know is read no
-/// further: no performer lists it, so it is neither performed nor
-/// parked as malformed, and it stays pending and untouched for a
-/// neverest that knows it (pimdir STORAGE §15.3). One stating no
-/// version names none to wait for, and is still listed, to be parked.
+/// An intent of a version this neverest does not know stays pending and
+/// untouched for one that knows it (pimdir STORAGE §15.3).
+///
+/// No performer lists it, so it is neither performed nor parked as
+/// malformed; one stating no version is still listed, to be parked.
 #[test]
 fn an_intent_of_an_unknown_version_stays_pending() {
     let dir = tempfile::tempdir().unwrap();
@@ -4906,8 +4914,6 @@ fn an_intent_of_an_unknown_version_stays_pending() {
     assert_eq!(store.list_pending_actions().unwrap().len(), 3, "untouched");
     assert!(store.parked_actions().unwrap().is_empty());
 
-    // NOTE: a producer enqueues no such payload, so it is read here as
-    // a row another writer left.
     for payload in [r#"{"source":"imap"}"#, r#"{"v":"2","source":"imap"}"#] {
         assert!(
             !crate::sync::states_unknown_version(submit::SUBMIT, payload),
@@ -4916,12 +4922,11 @@ fn an_intent_of_an_unknown_version_stays_pending() {
     }
 }
 
-/// A send an earlier run left in flight is parked unconfirmed, the
-/// state pimdir reserves for an intent whose outcome is unknown
-/// (pimdir STORAGE §15.2): its producer reads `Unconfirmed` with what
-/// neverest recorded, where a prefix of neverest's own read as any
-/// parked row; the report states it under the reserved prefix, and the
-/// mark is cleared.
+/// A send an earlier run left in flight is parked unconfirmed, pimdir's
+/// state for an unknown outcome (STORAGE §15.2), and its mark cleared.
+///
+/// Its producer reads `Unconfirmed` with what neverest recorded, where a
+/// prefix of neverest's own read as any parked row.
 #[test]
 fn an_interrupted_send_is_parked_unconfirmed() {
     use io_pimdir::client::producer::PimdirActionStatus;
@@ -5356,8 +5361,6 @@ fn one_identity_under_two_hrefs_mirrors_as_two_items_and_settles() {
         "the other is minted on the href it came from",
     );
 
-    // NOTE: the run the user complained about: the same full listing,
-    // nothing left to say.
     let second = spine(&mut store, &mut remote, "caldav/agenda");
     assert!(
         second.item_patch.is_empty(),
@@ -5376,9 +5379,10 @@ fn one_identity_under_two_hrefs_mirrors_as_two_items_and_settles() {
     );
 }
 
-/// What a create delivers by names the hunk: a frontend's compose is an
-/// add, a staged copy is a copy from its origin, and a body the other
-/// side holds is a copy across.
+/// What a create delivers by names the hunk.
+///
+/// A frontend's compose is an add, a staged copy is a copy from its
+/// origin, and a body the other side holds is a copy across.
 #[test]
 fn a_create_is_named_by_what_delivers_it() {
     let created = |origin: Option<PimdirOrigin>| PimdirPlacement {
@@ -5585,9 +5589,11 @@ fn batch(collection: &str, handles: &[&str]) -> HydrateBatch {
     }
 }
 
-/// The download order is the caller's: largest first by default, the
-/// fastest whole run, or newest first, so that on a large account today's
-/// mail does not wait behind years of large attachments.
+/// The download order is the caller's: largest first by default, or
+/// newest first.
+///
+/// Largest first is the fastest whole run; newest first keeps today's
+/// mail from waiting behind years of large attachments.
 #[test]
 fn bodies_download_largest_or_newest_first() {
     let plans: Vec<CollectionPlan> = vec![
@@ -5674,6 +5680,8 @@ fn newest_first_interleaves_collections_by_batch() {
 
 /// A mail source answering rounds in scripted pages, newest first, its
 /// cursor the index of the next page.
+///
+/// A band round carries no checkpoint, the store's staying the source's.
 struct PagedRemote {
     /// Each page's members, as `(handle, Date header)`.
     pages: Vec<Vec<(&'static str, Option<&'static str>)>>,
@@ -5758,8 +5766,6 @@ impl PimdirRemote for PagedRemote {
             .collect();
         let next = (index + 1 < self.pages.len())
             .then(|| PimdirCursor((index + 1).to_string().into_bytes()));
-        // NOTE: a band round carries no checkpoint, the one the store
-        // holds staying the source's.
         let checkpoint = (index == 0 && !band).then(|| PimdirCheckpoint(b"modseq-1".to_vec()));
 
         Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::page(
@@ -5855,8 +5861,10 @@ fn pages() -> Vec<Vec<(&'static str, Option<&'static str>)>> {
 }
 
 /// A round broken between two pages keeps what landed and resumes from
-/// its cursor; its last page infers no delete out of scope, and nothing
-/// pushes a delete nobody staged.
+/// its cursor.
+///
+/// Its last page infers no delete out of scope, and nothing pushes a
+/// delete nobody staged.
 #[test]
 fn an_interrupted_round_resumes_from_its_cursor() {
     let dir = tempfile::tempdir().unwrap();
@@ -5934,11 +5942,10 @@ fn a_refused_cursor_restarts_the_round() {
     );
 }
 
-/// A widening on a source whose checkpoint is bound to no scope (IMAP,
-/// Gmail) lists the band its coverage lacks by a date filter that
-/// misses mail of no usable date: IMAP's `SENTSINCE` a garbled `Date`,
-/// Gmail's `after:` a message with no `Date` received outside the band.
-/// The band round infers no delete of either (io-pimdir `ff28408`).
+/// A band round infers no delete of mail its date filter cannot list.
+///
+/// IMAP's `SENTSINCE` misses a garbled `Date`, Gmail's `after:` a message
+/// with no `Date` received outside the band (io-pimdir `ff28408`).
 #[test]
 fn a_band_round_keeps_the_undated_mail_it_does_not_list() {
     let dir = tempfile::tempdir().unwrap();
@@ -6086,9 +6093,10 @@ fn bodied(store: &PimdirSourceStore) -> BTreeSet<String> {
         .collect()
 }
 
-/// Each page is told once written, the last one when the sync completes,
-/// and a body applied there survives the pages that land after it, the
-/// last one's whole-collection merge included.
+/// Each page is told once written, the last one when the sync completes.
+///
+/// A body applied there survives the pages that land after it, the last
+/// one's whole-collection merge included.
 #[test]
 fn a_landed_page_is_told_at_rest_and_its_bodies_stay() {
     let dir = tempfile::tempdir().unwrap();
@@ -6119,9 +6127,10 @@ fn a_landed_page_is_told_at_rest_and_its_bodies_stay() {
     );
 }
 
-/// A round resumed is told so before its first page, and its page feed
-/// then queues the bodies the earlier run's pages still owe, newest first
-/// across the account, beside each page landed after.
+/// A round resumed is told so before its first page.
+///
+/// Its page feed then queues the bodies the earlier run's pages still
+/// owe, newest first across the account, beside each page landed after.
 #[test]
 fn a_resumed_round_feeds_what_its_earlier_pages_owe() {
     let dir = tempfile::tempdir().unwrap();
@@ -6233,10 +6242,10 @@ fn paused_sync(
     }
 }
 
-/// A pager pausing a round leaves the store as a run killed after its
-/// first page does (see `an_interrupted_round_resumes_from_its_cursor`):
-/// the page landed, the round open at its cursor. A round resumed is
-/// paused before it asks anything, and the next sync left to page
+/// A paused round leaves the store as a run killed after its first page
+/// does: the page landed, the round open at its cursor.
+///
+/// A resumed round pauses before it asks anything and the next sync
 /// resumes from the cursor and closes it; a delta is never paused.
 #[test]
 fn a_paused_round_stands_where_a_killed_one_would() {
@@ -6294,10 +6303,11 @@ fn spine_job(index: usize, pass: Pass) -> Job {
     Job::Spine { index, pass }
 }
 
-/// Priming lists the first page of every collection, in the run's order,
-/// each followed by its newest bodies, before any collection lists a
-/// second page; the fill waits for the last primed body too, other
-/// bodies downloading meanwhile.
+/// Priming lists every first page, each followed by its newest bodies,
+/// before any second page.
+///
+/// Pages go in the run's order; the fill waits for the last primed body
+/// too, other bodies downloading meanwhile.
 #[test]
 fn every_first_page_and_its_newest_bodies_come_before_any_second_page() {
     let work = Work::new(DownloadOrder::Newest, 3, true);
@@ -6517,9 +6527,10 @@ fn priming_defaults_by_the_download_order() {
     assert_eq!(pacing(DownloadOrder::Largest, Some(10)), 10);
 }
 
-/// A create the engine says its server rejected is reported once: by
-/// the connector's own record, with its reason, else as a rejected
-/// `create`.
+/// A create the engine says its server rejected is reported once.
+///
+/// The connector's own record names it with its reason, else it reads as
+/// a rejected `create`.
 #[test]
 fn a_rejected_create_is_named_once() {
     let report = PimdirSyncReport {
@@ -6551,9 +6562,10 @@ fn a_rejected_create_is_named_once() {
     assert_eq!(named, [("c\u{1}1", "create")]);
 }
 
-/// A queued edit a collection's policy settles against another body
-/// keeps the loser as a retained item, and the run names it by its row:
-/// nothing else reports a body kept aside while the queue was applied.
+/// A queued edit a policy settles against another body keeps the loser
+/// as a retained item, which the run names by its row.
+///
+/// Nothing else reports a body kept aside while the queue was applied.
 #[test]
 fn a_body_the_drain_kept_aside_is_reported() {
     let dir = tempfile::tempdir().unwrap();

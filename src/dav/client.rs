@@ -4,27 +4,23 @@
 //! adapter surface as the IMAP and Graph backends, serving CardDAV (RFC 6352)
 //! and CalDAV (RFC 4791) alike.
 //!
-//! One adapter serves both because they differ only in the home set they
-//! discover, the collection they list and the extension a new resource is
-//! named with ([`DavKind`]). This is the mutable-content side of the sync,
-//! where the ETag and `If-Match` plumbing built for mail is finally exercised.
+//! One adapter serves both, since they differ only in the home set they
+//! discover, the collection they list and a new resource's extension
+//! ([`DavKind`]). This is the mutable-content side of the sync, where the ETag
+//! and `If-Match` plumbing built for mail is exercised.
 //!
-//! Three shapes differ from the mail backends: collections are keyed by their
-//! path segment under the home set, as the server served it, else by their
-//! path, starting with a slash (io-webdav's id), a display name being
-//! optional, mutable and free to collide;
-//! items resolve at `Full` only, a `sync-collection` REPORT carrying hrefs and
-//! ETags but never a `UID`; flags are known-empty rather than unknown.
+//! Three shapes differ from the mail backends: a collection is keyed by its
+//! path segment under the home set as served, else by its path (a display name
+//! is optional, mutable and free to collide); items resolve at `Full` only, a
+//! report carrying no `UID`; flags are known-empty, not unknown.
 //!
 //! Enumeration is RFC 6578 where the server implements it: a rejected token
-//! ([`WebdavSyncCollectionError::InvalidSyncToken`]) is answered with a fresh
-//! full report, and a truncated one (§3.6) is drained by running it again from
-//! the token it returned.
+//! ([`WebdavSyncCollectionError::InvalidSyncToken`]) gets a fresh full report,
+//! and a truncated one (§3.6) is drained from the token it returned.
 //!
-//! That report is an extension, though, and a server implementing none of it
-//! refuses with the RFC 3253 §3.6 `DAV:supported-report` precondition. Such a
-//! collection is listed with a `PROPFIND` instead, which yields the same ids
-//! and ETags with no token, rather than not syncing at all.
+//! A server implementing none of it refuses with the RFC 3253 §3.6
+//! `DAV:supported-report` precondition: such a collection is listed by
+//! `PROPFIND`, the same ids and ETags with no token, rather than not synced.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -127,8 +123,9 @@ pub struct DavClient {
 
 impl DavClient {
     /// Opens the session and discovers the home set, so a misconfigured URL or
-    /// credential fails here rather than at the first enumeration. A home
-    /// set the account names is taken as it is, nothing discovered.
+    /// credential fails here rather than at the first enumeration.
+    ///
+    /// A home set the account names is taken as it is, nothing discovered.
     pub fn connect(account: &DavAccount, throttle: Arc<Throttle>) -> Result<Self> {
         let DavAccount {
             kind,
@@ -178,15 +175,9 @@ impl DavClient {
 
     /// Runs one WebDAV exchange, reopening a connection the server had closed.
     ///
-    /// io-webdav holds a single stream, so an HTTP/1.0 or `Connection: close`
-    /// peer breaks the exchange after an answer; a client from `connect`
-    /// resends it once on a fresh connection itself, and this reopens one
-    /// should that fail too. Only an end-of-stream failure retries, never an
-    /// applied write.
-    ///
-    /// The source's [`Throttle`] also sends it again while the server
-    /// throttles it (429, 503). A request creating a resource goes through
-    /// [`op_create`](Self::op_create) instead.
+    /// io-webdav holds one stream, which an HTTP/1.0 or `Connection: close`
+    /// peer breaks after an answer: only that end-of-stream failure retries,
+    /// never an applied write. The [`Throttle`] resends on 429, 503.
     fn op<T>(
         &mut self,
         run: impl FnMut(&mut WebdavClientStd) -> Result<T, WebdavClientStdError>,
@@ -194,9 +185,10 @@ impl DavClient {
         self.send(Request::Idempotent, run)
     }
 
-    /// Runs one WebDAV exchange creating a resource or a collection: sent
-    /// again on a 429 alone, which a server answers before applying
-    /// anything, never on a 503, after which the resource may exist.
+    /// Runs one WebDAV exchange creating a resource or a collection.
+    ///
+    /// Sent again on a 429 alone, answered before anything is applied, never on
+    /// a 503, after which the resource may exist.
     fn op_create<T>(
         &mut self,
         run: impl FnMut(&mut WebdavClientStd) -> Result<T, WebdavClientStdError>,
@@ -250,13 +242,11 @@ impl DavClient {
 
     /// Lists every collection of this session's kind.
     ///
-    /// Counts are never reported: DAV has no cheap total, and paying a full
-    /// enumeration per collection to render one number is not a trade this
-    /// makes.
+    /// Counts are never reported: DAV has no cheap total. A collection's id is
+    /// its key, its display name free to collide, change or be absent; the name
+    /// still shows, falling back to the key (often a server's UUID).
     pub fn list_collections(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         let kind = self.kind;
-        // NOTE: by key, the display name and whether the server states the
-        // collection takes tasks.
         let collections: BTreeMap<String, (Option<String>, Option<bool>)> = match kind {
             DavKind::Card => self.op(WebdavClientStd::list_addressbooks).map(|books| {
                 books
@@ -280,10 +270,6 @@ impl DavClient {
         }
         .with_context(|| format!("Cannot list the {kind} collections"))?;
 
-        // NOTE: the id is the key (the path segment, or the path of one
-        // outside the home set), a display name being free to collide, to
-        // change and to be absent; it is still what the collection is called,
-        // and servers routinely make the segment a UUID.
         Ok(collections
             .into_iter()
             .map(|(id, (display, takes_tasks))| Collection {
@@ -302,10 +288,8 @@ impl DavClient {
     /// The collection a new item goes to when none is named, by id.
     ///
     /// For CalDAV, the calendar the scheduling inbox names as
-    /// `schedule-default-calendar-URL` (RFC 6638 §9.2), when the server
-    /// gives it; a server without scheduling answers none. CardDAV names
-    /// no default address book. A check-only probe: a failed lookup is no
-    /// default, never an error.
+    /// `schedule-default-calendar-URL` (RFC 6638 §9.2), if any; CardDAV names
+    /// none. A check-only probe: a failed lookup is no default, never an error.
     pub fn default_collection(&mut self) -> Result<Option<String>> {
         if self.kind == DavKind::Card {
             return Ok(None);
@@ -431,9 +415,9 @@ impl DavClient {
 
     /// Enumerates through `sync-collection`, its token the engine's checkpoint.
     ///
-    /// RFC 6578 is an extension, so a server may refuse the REPORT with the RFC
-    /// 3253 §3.6 `DAV:supported-report` precondition; the collection is listed
-    /// instead, which without the fallback would be unsyncable.
+    /// RFC 6578 is an extension: a collection refused with the RFC 3253 §3.6
+    /// `DAV:supported-report` precondition is listed instead, its checkpoint
+    /// empty, which reads back as no cursor.
     pub fn enumerate(&mut self, collection: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
         if !has_sync_collection(self.reports(collection)) {
             debug!(
@@ -445,8 +429,6 @@ impl DavClient {
                 .with_context(|| format!("Cannot list {collection}"));
         }
 
-        // NOTE: an empty checkpoint is the listing fallback's, meaning no
-        // cursor.
         let token = cursor
             .filter(|cursor| !cursor.is_empty())
             .map(String::from_utf8_lossy)
@@ -476,9 +458,10 @@ impl DavClient {
         }
     }
 
-    /// The reports the server advertises for a collection, read from the
-    /// `supported-report-set` io-webdav caches while listing, under the id
-    /// [`webdav_id`] gives the key.
+    /// The reports the server advertises for a collection.
+    ///
+    /// Read from the `supported-report-set` io-webdav caches while listing,
+    /// under the id [`webdav_id`] gives the key.
     fn reports(&self, collection: &str) -> Option<&BTreeSet<String>> {
         let id = webdav_id(collection);
         match self.kind {
@@ -503,9 +486,9 @@ impl DavClient {
 
     /// One full `PROPFIND` listing, for a server with no `sync-collection`.
     ///
-    /// It carries no token, so every run lists the whole collection. A
-    /// `PROPFIND` rather than the query report: a query filter is evaluated by
-    /// parsing every resource, so one unparsable resource fails the listing.
+    /// No token, so every run lists it whole, a truncated one incomplete lest
+    /// members left out read as deleted. Not the query report: its filter
+    /// parses every resource, one unparsable failing all.
     fn list(&mut self, collection: &str) -> Result<Enumeration, WebdavClientStdError> {
         let opts = WebdavSyncCollectionOptions { fallback: true };
         let delta = self.sync_collection(collection, None, opts)?;
@@ -520,8 +503,6 @@ impl DavClient {
         Ok(Enumeration {
             items: delta.changed.into_iter().map(entry).collect(),
             vanished: Vec::new(),
-            // NOTE: a partial snapshot read as complete deletes members left
-            // out.
             complete: !delta.truncated,
             checkpoint: Some(Vec::new()),
             ..Default::default()
@@ -551,9 +532,6 @@ impl DavClient {
             vanished.extend(delta.vanished.iter().map(|href| href_id(href)));
             truncated = delta.truncated;
 
-            // NOTE: a truncated answer without a token cannot be followed,
-            // and listing again from the start would cut it at the same
-            // place: the checkpoint stays the one the listing started from.
             if truncated && delta.sync_token.is_none() {
                 break;
             }
@@ -581,8 +559,10 @@ impl DavClient {
 
     /// Batch-fetches bodies in one multiget round-trip, routing each into the
     /// sink the caller opens for it.
-    /// Answers the ids the server said are gone. Each row is named by the id
-    /// [`href_id`] reads from its href, as the enumeration names members.
+    ///
+    /// Answers the ids the server said are gone (404, 410), named by
+    /// [`href_id`] as the enumeration names members; any other unreadable row
+    /// stays unanswered, for the caller's lone read to report.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         collection: &str,
@@ -626,9 +606,6 @@ impl DavClient {
             done(&id, etag.as_deref(), sink)?;
         }
 
-        // A row the server answered missing is gone, as a lone read finding
-        // it so; any other unreadable row stays unanswered, for the caller's
-        // lone read to report what it is.
         let mut gone = Vec::new();
         for entry in unreadable {
             match entry.status {
@@ -738,13 +715,9 @@ impl DavClient {
 
     /// Moves resources between collections.
     ///
-    /// Each goes by a server-side `MOVE` (see [`move_item`](Self::move_item)),
-    /// which keeps its `UID` in one place: Fastmail, holding one `UID` per
-    /// account, refuses a create at the target while the source holds it.
-    /// Where the server has no `MOVE`, and for CardDAV, which io-webdav moves
-    /// nothing of, the resource is re-created at the target and deleted from
-    /// the source; the delete only runs once the create was accepted, so a
-    /// failure leaves the resource where it was.
+    /// Each goes by `MOVE` ([`move_item`](Self::move_item)): Fastmail refuses a
+    /// create while the source holds the `UID`. Else it is re-created at the
+    /// target, the source deleted once that is accepted.
     pub fn move_items(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
         for id in ids {
             if self.move_item(from, to, id, None)?.is_some() {
@@ -768,12 +741,9 @@ impl DavClient {
     /// Moves one resource into `to` server side, keeping its id (WebDAV
     /// `MOVE`, RFC 4918 §9.9, `Overwrite: F`), gated on `if_match`.
     ///
-    /// Answers the moved resource and the ETag the server gave it, if any, or
-    /// `None` when this server cannot move it: CardDAV, which io-webdav moves
-    /// nothing of, and a server answering the `MOVE` 405, 501 or 404, the last
-    /// being Google's answer for a member it holds (pimdir SYNC §4). Any
-    /// other refusal is an error, a duplicate `UID` among them
-    /// ([`is_duplicate_uid`]).
+    /// Answers the moved resource and its ETag, or `None` when the server
+    /// cannot move it: CardDAV, a 405, 501 or 404 (Google's for a held member,
+    /// pimdir SYNC §4). Other refusals err, [`is_duplicate_uid`] among them.
     pub fn move_item(
         &mut self,
         from: &str,
@@ -785,7 +755,6 @@ impl DavClient {
             return Ok(None);
         }
 
-        // NOTE: a create at the target, which a 503 may have applied.
         match self.op_create(|dav| dav.move_item(from, id, to, if_match)) {
             Ok(moved) => Ok(Some(WrittenItem {
                 id: served_segment(&moved.href).to_owned(),
@@ -802,9 +771,11 @@ impl DavClient {
         }
     }
 
-    /// Rejected: DAV has no flags. The enumeration reports every member as
-    /// known-empty, and a flag kept in the store only is never pushed, the
-    /// flag right being withheld for a kind other than mail.
+    /// Rejected: DAV has no flags.
+    ///
+    /// The enumeration reports every member known-empty, and a flag kept only
+    /// in the store is never pushed, the flag right withheld for non-mail
+    /// kinds.
     pub fn update_flags(&mut self, _ids: &[&str], _add: &[Flag], _remove: &[Flag]) -> Result<()> {
         bail!("{} has no flags (store not supported)", self.kind)
     }
@@ -876,10 +847,11 @@ const SCHEDULE_DEFAULT_CALENDAR_URL: WebdavProperty = WebdavProperty {
     local: "schedule-default-calendar-URL",
 };
 
-/// The key a listing gives the collection at `path` under the home set
-/// path `home`, as [`listed_key`] keys a calendar: its last segment directly
-/// under the home set, as served, else its path, starting with a slash
-/// (Google lists every calendar as `/caldav/v2/<calendar>/events/`).
+/// The key a listing gives the collection at `path` under the home set `home`,
+/// as [`listed_key`] keys a calendar.
+///
+/// Its last segment directly under the home set, as served, else its path with
+/// a leading slash (Google lists calendars as `/caldav/v2/<calendar>/events/`).
 fn collection_key(home: &str, path: &str) -> Option<String> {
     let key = listed_key(collection_id(home, path), path);
     (!key.trim_matches('/').is_empty()).then_some(key)
@@ -898,9 +870,9 @@ fn listed_key(id: String, href: &str) -> String {
     }
 }
 
-/// The id io-webdav lists the collection keyed `key` under, which keys
-/// what it caches of it: a segment decoded as its listing decodes one, any
-/// other key as it stands.
+/// The id io-webdav lists the collection keyed `key` under, keying its cache.
+///
+/// A segment is decoded as its listing decodes one, any other key kept.
 fn webdav_id(key: &str) -> String {
     match key.contains(['/', '?', '#']) {
         true => key.to_owned(),
@@ -908,9 +880,9 @@ fn webdav_id(key: &str) -> String {
     }
 }
 
-/// The last path segment of `href` as the server served it, its query and
-/// fragment dropped: the id io-webdav 0.9.1 read from an href, before it
-/// decoded one.
+/// The last path segment of `href` as served, query and fragment dropped.
+///
+/// It is the id io-webdav 0.9.1 read from an href, before it decoded one.
 fn served_segment(href: &str) -> &str {
     let path = href.split(['?', '#']).next().unwrap_or(href);
     path.trim_end_matches('/')
@@ -937,14 +909,12 @@ fn entry(change: WebdavSyncChange) -> EnumEntry {
     }
 }
 
-/// The addressing id of a member href: its last non-empty path segment,
-/// as io-webdav addresses resources, in the one spelling of it
-/// [`canonical_segment`] gives.
+/// The addressing id of a member href: its last non-empty path segment, in the
+/// one spelling [`canonical_segment`] gives.
 ///
-/// A server is free to spell a segment's octets literally or
-/// percent-encoded: Stalwart lists `urn:uuid:x.vcf`, created under that
-/// name, as `urn%3Auuid%3Ax.vcf`, which read as a second resource and
-/// duplicated the item.
+/// A server may spell octets literally or encoded: Stalwart lists
+/// `urn:uuid:x.vcf` as `urn%3Auuid%3Ax.vcf`, which once read as a second
+/// resource and duplicated the item.
 fn href_id(href: &str) -> String {
     let segment = href
         .trim_end_matches('/')
@@ -954,14 +924,12 @@ fn href_id(href: &str) -> String {
     canonical_segment(segment)
 }
 
-/// One spelling for every way of writing a segment neverest names: an
-/// encoded unreserved octet decoded (RFC 3986 §6.2.2.2), a literal `:`
-/// encoded, and every escape in upper case.
+/// One spelling for a segment: an encoded unreserved octet decoded (RFC 3986
+/// §6.2.2.2), a literal `:` encoded, every escape upper case.
 ///
-/// The colon goes encoded rather than literal: a relative reference whose
-/// first segment carries one reads as a scheme (RFC 3986 §4.2), and
-/// io-webdav reading `urn:uuid:x.vcf` back got a 404. Any other escape, a
-/// `/` or a space, stays encoded, decoding it would name another resource.
+/// A colon in a relative reference's first segment reads as a scheme (RFC 3986
+/// §4.2): io-webdav got a 404 reading `urn:uuid:x.vcf` back. Other escapes
+/// (`/`, space) stay encoded, decoding would name another resource.
 fn canonical_segment(segment: &str) -> String {
     let mut canonical = String::with_capacity(segment.len());
     let mut rest = segment;
@@ -1014,10 +982,11 @@ fn resource_id(kind: DavKind, link: LinkId<'_>, body: &[u8]) -> String {
     format!("{name}.{extension}")
 }
 
-/// Keeps a `UID` addressable as one path segment: a `UID` is free-form text
-/// and may legally carry a `/` or a space, neither of which survives being
-/// spliced into a URL path. A `:` is kept, encoded as [`canonical_segment`]
-/// spells it, so a `urn:uuid:` stays recognisable.
+/// Keeps a `UID` addressable as one path segment.
+///
+/// A `UID` is free-form and may carry a `/` or a space, which no URL path
+/// survives. A `:` stays, encoded as [`canonical_segment`] spells it, so a
+/// `urn:uuid:` stays recognisable.
 fn sanitize(uid: &str) -> String {
     uid.chars()
         .map(|char| match char {
@@ -1050,11 +1019,11 @@ fn is_connection_closed(err: &WebdavClientStdError) -> bool {
     }
 }
 
-/// The HTTP status an exchange failed with, wherever it surfaces, which
-/// [`Request::retries`] reads as a throttle or not: 429, or 503 (RFC 9110
-/// §15.6.4) for an idempotent exchange.
+/// The HTTP status an exchange failed with, wherever it surfaces.
 ///
-/// io-webdav keeps no `Retry-After`, so the wait is neverest's back-off.
+/// [`Request::retries`] reads 429, or 503 for an idempotent exchange (RFC 9110
+/// §15.6.4), as a throttle; io-webdav keeps no `Retry-After`, so the wait is
+/// neverest's back-off.
 fn throttle_status(err: &WebdavClientStdError) -> Option<u16> {
     refused(err).map(|(status, _)| status)
 }
@@ -1077,11 +1046,9 @@ fn refused(err: &WebdavClientStdError) -> Option<(u16, &str)> {
 
 /// The code of a DAV refusal in an error chain.
 ///
-/// A 507, or a body naming `quota-not-exceeded` (RFC 4331 §6), is
-/// `quota-exceeded`; a 429 left after the waits `rate-limited`; a 403
-/// `permission-denied` when its body names `need-privileges` (RFC 3744
-/// §7.1.1) or no precondition at all. Any other 403 names a precondition
-/// the written body failed (RFC 4791 §5.3.2), no matter of rights.
+/// A 507 or `quota-not-exceeded` (RFC 4331 §6) is `quota-exceeded`, a 429 past
+/// the waits `rate-limited`, a 403 naming `need-privileges` (RFC 3744 §7.1.1)
+/// or nothing `permission-denied`, any other a failed precondition.
 pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<ErrorCode> {
     let (status, body) = refused(cause.downcast_ref::<WebdavClientStdError>()?)?;
 
@@ -1096,11 +1063,11 @@ pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<
     }
 }
 
-/// Whether a DAV answer in an error chain refused the change as it stands
-/// (pimdir SYNC §4): a status naming the request ([`names_the_request`]),
-/// a precondition the written body failed (RFC 4791 §5.3.2) or a write the
-/// account may not make. A duplicate `UID` is caught before, with its own
-/// report entry.
+/// Whether a DAV answer in an error chain refused the change as it stands.
+///
+/// A status naming the request ([`names_the_request`]), a failed precondition
+/// (RFC 4791 §5.3.2) or a forbidden write (pimdir SYNC §4); a duplicate `UID`
+/// is caught before, with its own report entry.
 pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
     cause
         .downcast_ref::<WebdavClientStdError>()
@@ -1123,10 +1090,10 @@ fn http_status(err: &WebdavClientStdError) -> Option<u16> {
     }
 }
 
-/// Whether a `MOVE` was answered as one the server cannot do (pimdir SYNC
-/// §4): not allowed there (405), not implemented (501), or the member not
-/// found (404), Google's answer for a member it holds. A duplicate `UID` is
-/// another variant, never one of these.
+/// Whether a `MOVE` was answered as one the server cannot do (pimdir SYNC §4).
+///
+/// Not allowed (405), not implemented (501), or not found (404), Google's
+/// answer for a member it holds; a duplicate `UID` is never one of these.
 fn is_unsupported_move(err: &WebdavClientStdError) -> bool {
     matches!(http_status(err), Some(405 | 501 | 404))
 }
@@ -1149,9 +1116,10 @@ pub fn is_duplicate_uid(err: &anyhow::Error) -> bool {
     })
 }
 
-/// Whether a calendar takes tasks by its `supported-calendar-component-set`
-/// (RFC 4791 §5.2.3): `None` for no set stated, which takes any component,
-/// else whether the set names `VTODO`.
+/// Whether a calendar takes tasks, by its `supported-calendar-component-set`.
+///
+/// `None` for no set stated, taking any component (RFC 4791 §5.2.3), else
+/// whether the set names `VTODO`.
 fn takes_tasks(components: &BTreeSet<String>) -> Option<bool> {
     if components.is_empty() {
         return None;
@@ -1185,9 +1153,10 @@ fn is_invalid_sync_token(err: &WebdavClientStdError) -> bool {
 
 #[cfg(test)]
 impl DavClient {
-    /// A session of `kind` over a scripted server answering `replies` in
-    /// order, its home set `home` already discovered, for a test of this
-    /// module or another driving a DAV source request by request.
+    /// A session of `kind` over a scripted server answering `replies` in order.
+    ///
+    /// Its home set `home` is already discovered; the server URL is a port
+    /// nothing listens on, should a script run dry and the session reconnect.
     pub(crate) fn scripted(
         kind: DavKind,
         home: &str,
@@ -1206,8 +1175,6 @@ impl DavClient {
         let client = Self {
             kind,
             inner,
-            // NOTE: a port nothing listens on, should a test run its script
-            // dry and the session reconnect.
             server: Url::parse("http://127.0.0.1:1/").unwrap(),
             tls: Tls::default(),
             auth,
@@ -1223,9 +1190,10 @@ mod tests {
     use super::*;
     use crate::error::Failure;
 
-    /// A configured home set is where the session lists, nothing being
-    /// discovered: the server here accepts the connection and never
-    /// answers, so a discovery request would hang or fail.
+    /// A configured home set is where the session lists, nothing discovered.
+    ///
+    /// The server here accepts the connection and never answers, so a discovery
+    /// request would hang or fail.
     #[test]
     fn a_configured_home_set_is_taken_without_discovery() {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1245,6 +1213,7 @@ mod tests {
         assert_eq!(client.inner.principal_url, None);
     }
 
+    /// io-webdav decodes an escaped segment; the key stays the segment served.
     #[test]
     fn a_default_calendar_url_is_keyed_as_a_listing_keys_it() {
         let home = "/dav/cal/test%40pimalaya.org/";
@@ -1255,7 +1224,6 @@ mod tests {
         assert_eq!(collection_key("/cal", "/cal/work").as_deref(), Some("work"));
         assert_eq!(collection_key("/cal/", "/"), None);
 
-        // NOTE: io-webdav decodes these two; the key stays the segment.
         assert_eq!(
             collection_key("/cal/", "/cal/My%20Cal/").as_deref(),
             Some("My%20Cal")
@@ -1266,9 +1234,11 @@ mod tests {
         );
     }
 
-    /// A calendar outside the home set is keyed by its path, as io-webdav
-    /// lists it: Google names every calendar `events` under its own path, so
-    /// a last segment would make the default calendar any of them.
+    /// A calendar outside the home set is keyed by its path, as io-webdav lists
+    /// it.
+    ///
+    /// Google names every calendar `events` under its own path, so a last
+    /// segment would make the default calendar any of them.
     #[test]
     fn a_default_calendar_outside_the_home_set_is_keyed_by_its_path() {
         let home = "/caldav/v2/alice%40g/";
@@ -1296,6 +1266,9 @@ mod tests {
 
     /// A `UID` a server lists encoded is the resource neverest created under
     /// it, not a second one.
+    ///
+    /// A literal colon names it too; an escaped `/`, space or `%` stays
+    /// encoded, decoding it naming another resource or none.
     #[test]
     fn an_encoded_colon_names_the_resource_created_with_it() {
         let created = resource_id(DavKind::Card, stated("urn:uuid:4fbe8971-0bc3"), b"");
@@ -1307,14 +1280,12 @@ mod tests {
             href_id("/dav/card/test/default/urn%3auuid%3a4fbe8971-0bc3.vcf"),
             created
         );
-        // NOTE: a server listing the colon literally names it too.
         assert_eq!(
             href_id("/dav/card/test/default/urn:uuid:4fbe8971-0bc3.vcf"),
             created
         );
         assert_eq!(href_id("/books/card%2D1%2Evcf"), "card-1.vcf");
 
-        // NOTE: decoding these would name another resource, or none.
         assert_eq!(href_id("/books/a%2fb.vcf"), "a%2Fb.vcf");
         assert_eq!(href_id("/books/a%20b.vcf"), "a%20b.vcf");
         assert_eq!(href_id("/books/100%25.vcf"), "100%25.vcf");
@@ -1525,9 +1496,11 @@ mod tests {
         assert!(is_duplicate_uid(&err), "{err:#}");
     }
 
-    /// A refused write is coded by its status and the precondition its
-    /// body names: a 403 naming none, or `need-privileges`, is a matter of
-    /// rights, one naming what the body failed is not.
+    /// A refused write is coded by its status and the precondition its body
+    /// names.
+    ///
+    /// A 403 naming none, or `need-privileges`, is a matter of rights; one
+    /// naming what the body failed is not.
     #[test]
     fn a_refused_write_is_coded_by_its_status_and_precondition() {
         let error = |body: &str| {
@@ -1632,9 +1605,10 @@ mod tests {
         assert!(dav.delete_item("tasks", "t1.ics", Some("\"e1\"")).is_err());
     }
 
-    /// A collection key or a member id that would address the server root,
-    /// the home set or a parent of either, as another source's store may
-    /// hand one over, is refused before any request is written.
+    /// An id climbing out of its collection is refused before any request.
+    ///
+    /// A key or member id addressing the server root, the home set or a parent
+    /// of either, as another source's store may hand over, sends nothing.
     #[test]
     fn an_id_climbing_out_of_its_collection_sends_nothing() {
         let accepted = || vec![reply("201 Created", &[]), reply("204 No Content", &[])];
@@ -1722,12 +1696,11 @@ mod tests {
         )
     }
 
-    /// A listed collection is keyed by the segment its server served, the
-    /// key io-webdav 0.9.1 gave (`My%20Cal`), never by the id io-webdav
-    /// decodes it to (`My Cal`): a raw `My Cal` or `Réunions` keeps its
-    /// spelling too, a key of its own. The reports a collection advertises
-    /// are found under its key: no `sync-collection` here, so it is listed
-    /// by `PROPFIND`, no REPORT tried first.
+    /// A listed collection is keyed by the segment its server served.
+    ///
+    /// That is io-webdav 0.9.1's key (`My%20Cal`), never the decoded id (`My
+    /// Cal`), a raw `My Cal` or `Réunions` kept too. Its reports are under its
+    /// key: no `sync-collection`, so `PROPFIND` lists it.
     #[test]
     fn a_listed_collection_is_keyed_by_the_segment_served() {
         let calendar = "<d:resourcetype><d:collection/><c:calendar/></d:resourcetype>\
@@ -1781,10 +1754,10 @@ mod tests {
         assert_eq!(ids, ["r%C3%A9union%201.ics"]);
     }
 
-    /// A multiget answers each body, and each member gone, under the id
-    /// [`href_id`] reads from the href served, as the enumeration names
-    /// the member: an escape kept (`a%20b.ics`, which io-webdav decodes),
-    /// and a raw space or non-ASCII byte kept raw.
+    /// A multiget answers each body, and each member gone, under [`href_id`].
+    ///
+    /// As the enumeration names members: an escape kept (`a%20b.ics`, which
+    /// io-webdav decodes), a raw space or non-ASCII byte kept raw.
     #[test]
     fn a_multiget_answers_each_member_under_the_segment_served() {
         for (kind, home, data) in [
@@ -1832,9 +1805,10 @@ mod tests {
         }
     }
 
-    /// A member the server names on create (a `Location`) keeps the id its
-    /// segment gave io-webdav 0.9.1: an escape kept (io-webdav decodes it),
-    /// a raw space or non-ASCII byte kept raw, a query dropped.
+    /// A member the server names on create (a `Location`) keeps its segment.
+    ///
+    /// As io-webdav 0.9.1 read it: an escape kept (io-webdav decodes it), a raw
+    /// space or non-ASCII byte kept raw, a query dropped.
     #[test]
     fn a_created_member_keeps_the_segment_its_location_served() {
         for (kind, home) in [(DavKind::Cal, "/dav/cal/"), (DavKind::Card, "/dav/card/")] {
@@ -1953,9 +1927,10 @@ mod tests {
         assert_eq!(listed.checkpoint.as_deref(), Some(last.as_bytes()));
     }
 
-    /// A truncated answer with no token cannot be followed: the listing
-    /// ends there, incomplete, and is never restarted from its start; the
-    /// checkpoint stays the one it started from.
+    /// A truncated answer with no token ends the listing there, incomplete.
+    ///
+    /// Restarting would cut it at the same place, so the checkpoint stays the
+    /// one it started from.
     #[test]
     fn a_truncated_answer_without_a_token_ends_the_listing() {
         let answers = (0..MAX_SYNC_ROUNDS)
@@ -1988,9 +1963,10 @@ mod tests {
         assert_eq!(listed.checkpoint.as_deref(), Some(&b"t1"[..]));
     }
 
-    /// An answer that is not one whole multistatus (a gateway's page, a cut
-    /// document, an empty body) fails the listing: read as a listing of
-    /// nothing, it would state every member removed.
+    /// An answer that is no whole multistatus fails the listing.
+    ///
+    /// A gateway's page, a cut document or an empty body, read as a listing of
+    /// nothing, would state every member removed.
     #[test]
     fn an_answer_that_is_no_whole_multistatus_fails_the_listing() {
         let page = "<html><body>Sign in</body></html>";

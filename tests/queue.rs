@@ -1,10 +1,12 @@
+//! # Queue
+//!
 //! What a frontend queued is applied before any endpoint is opened, by
 //! `neverest sync --queue-only` or at the start of a sync, so the frontend
 //! reads its own writes back offline.
 //!
 //! The first tests need no server: the CalDAV endpoint is a closed port.
 //! The last one pushes the drained event to a local Stalwart (HTTP and
-//! DAV on :8080, `tests/stalwart2.sh`) and is ignored by default:
+//! DAV on :8080, tests/stalwart2.sh) and is ignored by default:
 //! ```sh
 //! ./tests/stalwart2.sh
 //! cargo test --test queue -- --ignored --test-threads=1
@@ -34,9 +36,10 @@ use io_pimdir::{
 };
 use serde_json::Value;
 
-/// Held by each test for its whole run: a child another test spawns holds
-/// every lock this process holds until its exec, so a store opened here
-/// beside a spawn reads as owned.
+/// Held by each test for its whole run.
+///
+/// A child another test spawns holds every lock this process holds until its
+/// exec, so a store opened here beside a spawn reads as owned.
 static SPAWNS: Mutex<()> = Mutex::new(());
 
 /// Waits for the other tests, whatever a sibling that panicked left.
@@ -117,9 +120,10 @@ impl Fixture {
         self.state.join("neverest")
     }
 
-    /// A store holding the calendar, made without any server: the store
-    /// and its sidecar naming the account, as `init` leaves them, then the
-    /// collection.
+    /// A store holding the calendar, made without any server.
+    ///
+    /// The store and its sidecar naming the account, as `init` leaves them,
+    /// then the collection.
     fn offline_store(&self) {
         let local = PimdirStore::open(self.store())
             .unwrap()
@@ -192,7 +196,6 @@ impl Fixture {
             String::from_utf8_lossy(&output.stdout),
             stderr(&output),
         );
-        // NOTE: the last document, after the events a sync prints.
         serde_json::Deserializer::from_slice(&output.stdout)
             .into_iter()
             .last()
@@ -305,9 +308,10 @@ fn restamp_store(fixture: &Fixture, version: &str) {
         .unwrap();
 }
 
-/// A store a newer neverest wrote fails the command with the code io-pimdir
-/// gives the refusal, so a caller tells a version from any other failure,
-/// and the message asks for an upgrade, never a reset.
+/// A store a newer neverest wrote fails with the code io-pimdir gives it.
+///
+/// A caller tells a version from any other failure, and the message asks for
+/// an upgrade, never a reset.
 #[test]
 fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
     let _serial = serialized();
@@ -323,11 +327,11 @@ fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
     assert!(!error.contains("--reset"), "{failure}");
 }
 
-/// A store an earlier neverest wrote, the draft-11 one of io-pimdir 0.13
-/// included, is refused, never migrated (pimdir STORAGE §6): the message
-/// names the reinstall, syncing with that neverest first so no queued
-/// write is lost, then moving the store directory away, every account's
-/// store being one, then the rebuild, and never says to delete it.
+/// A store an earlier neverest wrote is refused, never migrated.
+///
+/// Draft-11 of io-pimdir 0.13 included (pimdir STORAGE §6): the message says
+/// to sync with that neverest first, move the one store directory away, then
+/// rebuild, and never to delete it.
 #[test]
 fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
     let _serial = serialized();
@@ -349,9 +353,10 @@ fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
     assert!(!error.to_lowercase().contains("delete "), "{failure}");
 }
 
-/// A pimdir.db another program wrote is never taken for a store: the
-/// command fails with `store-foreign`, so a caller tells a misplaced
-/// `store.root` from a store to repair, and the database stays as it was.
+/// A pimdir.db another program wrote fails as `store-foreign`, untouched.
+///
+/// A caller tells a misplaced `store.root` from a store to repair; the file
+/// is the user's own, so the refusal is the database's, not its mode's.
 #[test]
 fn a_database_another_program_wrote_fails_as_foreign() {
     let _serial = serialized();
@@ -366,8 +371,6 @@ fn a_database_another_program_wrote_fails_as_foreign() {
         .execute("CREATE TABLE notes (body TEXT)", [])
         .unwrap();
     drop(foreign);
-    // NOTE: the user's own file, so the refusal is the database's and not
-    // its mode's (pimdir STORAGE §18).
     restrict(&db);
 
     let failure = fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 1);
@@ -380,9 +383,10 @@ fn a_database_another_program_wrote_fails_as_foreign() {
     assert_eq!(tables, 1, "the database is left as it was");
 }
 
-/// The id a drain gives an event is the one it keeps once the sync has
-/// pushed it and fetched it back: a frontend showing it at once shows
-/// the same item later.
+/// The id a drain gives an event survives its push and fetch back.
+///
+/// A frontend showing it at once shows the same item later; a second store
+/// of the same server lists it.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :8080 and --ignored"]
 fn a_drained_event_keeps_its_id_across_the_push() {
@@ -399,12 +403,10 @@ fn a_drained_event_keeps_its_id_across_the_push() {
         .as_i64()
         .expect("the created item's id");
 
-    // NOTE: the first sync pushes it, the second fetches it back.
     fixture.json(&["--json", "sync", "-a", ACCOUNT, "-m", "default"], 0);
     fixture.json(&["--json", "sync", "-a", ACCOUNT, "-m", "default"], 0);
     assert_eq!(fixture.seqs_of(&uid), vec![seq]);
 
-    // A second store of the same server lists it: it was pushed.
     let other = Fixture::new(&server, USER, PASS);
     other.json(&["--json", "init", "-a", ACCOUNT], 0);
     other.json(&["--json", "sync", "-a", ACCOUNT, "-m", "default"], 0);
@@ -443,9 +445,10 @@ fn an_unreachable_endpoint_is_named_in_the_report() {
     );
 }
 
-/// A server answering every request 503 is waited out a bounded number of
-/// times, then the source gives up: the report names it under `throttled`
-/// with until when, and the run exits 4. About half a minute of back-off.
+/// A server answering 503 is waited out a bounded number of times.
+///
+/// The source then gives up: the report names it under `throttled` with
+/// until when, and the run exits 4. About half a minute of back-off.
 #[test]
 fn a_throttling_server_is_named_in_the_report() {
     let _serial = serialized();
@@ -480,9 +483,9 @@ fn a_throttling_server_is_named_in_the_report() {
     );
 }
 
-/// A CalDAV server answering every request with the principal and the
-/// calendar home set, enough for `neverest init` to open the endpoint;
-/// answers its port.
+/// A CalDAV server answering its port, enough for `neverest init`.
+///
+/// Every request gets the principal and the calendar home set.
 fn home_set_server() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -518,9 +521,10 @@ fn home_set_server() -> u16 {
     port
 }
 
-/// `neverest init` under the usual umask 022 makes a store its readers
-/// open: one another user can read is refused as `store-exposed` by every
-/// profile (pimdir STORAGE §18), a frontend's reader included.
+/// `neverest init` under the usual umask 022 makes a store its readers open.
+///
+/// One another user can read is refused as `store-exposed` by every profile
+/// (pimdir STORAGE §18), a frontend's reader included.
 #[cfg(unix)]
 #[test]
 fn init_makes_a_store_its_readers_open() {

@@ -153,14 +153,9 @@ pub struct SyncOutput {
     /// The endpoints the run could not open: a server it could not reach, or
     /// one refusing the connection or its credentials.
     ///
-    /// Each also reads as a failed `*` scan in the collection patch, the run
-    /// exiting 4; this names it for a program. A collection that failed to
-    /// read on an endpoint that opened never lands here.
-    ///
-    /// A source's SMTP channel is named `<source>.smtp`, and only when the
-    /// server could not be reached: one refusing the credentials fails each
-    /// queued `submit` under `submitted` instead, not parked. It has no `*`
-    /// scan, but still makes the run exit 4.
+    /// Each exits 4 and fails its `*` scan; a collection failing on an opened
+    /// endpoint never lands here. A source's SMTP channel, `<source>.smtp`,
+    /// has no scan and lands unreachable only: bad credentials fail each send.
     pub unreached: Vec<UnreachedEndpoint>,
     /// The sources that gave up after their provider throttled them (HTTP
     /// 429, 503, a Google rate limit) past the waits neverest takes.
@@ -169,61 +164,55 @@ pub struct SyncOutput {
     /// after `until` picks up the rest.
     pub throttled: Vec<ThrottledSource>,
     /// What each source's collections are known to hold once the run ends
-    /// (pimdir SYNC §5): the scope of the last round that closed and when,
-    /// and the round still open, if one is.
+    /// (pimdir SYNC §5): the last closed round's scope and time, and any open.
     ///
-    /// A round left open was interrupted (a failure, a throttled provider,
-    /// a stopped run): the run is incomplete (exit 4), and the next one
-    /// resumes it.
+    /// A round left open was interrupted (a failure, a throttled provider, a
+    /// stopped run): the run is incomplete (exit 4), the next one resumes it.
     pub coverage: Vec<CollectionCoverage>,
     /// The octets each source received this run: the bodies and the meta
     /// of its listings, not the protocol around them.
     pub downloaded: Vec<SourceDownload>,
     /// The collections whose last convergence pass still moved something:
-    /// the run stopped before they settled, so it is incomplete (exit 4)
-    /// and a rerun goes on.
+    /// the run is incomplete (exit 4) and a rerun goes on.
     pub unsettled: Vec<String>,
     /// Whether a termination signal stopped the run before it reconciled
     /// everything: it is incomplete (exit 4) and a rerun goes on.
     pub interrupted: bool,
-    /// The listings that found most of what a collection held gone, or that
-    /// named no member while the collection held some, and so dropped
-    /// nothing (pimdir SYNC §5, §8; counted as warnings).
+    /// The listings that found most of a collection gone, or no member where
+    /// it held some, and so dropped nothing (pimdir SYNC §5, §8; warnings).
     ///
-    /// Read as a truncated or emptied answer until a person confirms it
-    /// with `sync --accept-absences`: a rerun alone parks again, so the run
-    /// waits for a person (exit 3), its round left open not counting as
-    /// incomplete.
+    /// Read as truncated until confirmed with `sync --accept-absences`: a
+    /// rerun parks again, so the run waits for a person (exit 3), its open
+    /// round not counting as incomplete.
     pub absences: Vec<ParkedAbsence>,
     /// The changes withheld because the body they upload was missing from
-    /// the store or did not match its name (pimdir STORAGE §7; counted as
-    /// warnings). The store needs a repair a rerun does not make, so the
-    /// run waits for a person (exit 3).
+    /// the store or did not match its name (pimdir STORAGE §7; warnings).
+    ///
+    /// A rerun makes no repair, so the run waits for a person (exit 3).
     pub unreadable: Vec<UnreadableBodies>,
-    /// The bodies a policy did not adopt, each kept as a retained item
-    /// (pimdir SYNC §9; counted as warnings): settling a side's write, or
-    /// applying a queued action.
+    /// The bodies a policy did not adopt settling a side's write or applying
+    /// a queued action, each kept as a retained item (pimdir SYNC §9).
     pub overruled: Vec<OverruledBody>,
     /// The pushes a side's server gave no outcome for, left pending: a
     /// rerun pushes them again, so the run is incomplete (exit 4).
     pub unanswered: Vec<UnansweredPushes>,
     /// The creates the last pass of each collection left waiting rather
-    /// than pushing them, each with its reason (pimdir SYNC §5). They are
-    /// no warning and change no exit code: a later listing, a wider scope
-    /// or its body lands each.
+    /// than pushing them, each with its reason (pimdir SYNC §5).
+    ///
+    /// No warning, no exit code: a later listing, a wider scope or its body
+    /// lands each.
     pub waiting: Vec<WaitingCreate>,
-    /// The members a listing named apart from a create of their own side
-    /// holding their identity, their summaries disagreeing (pimdir SYNC
-    /// §5, §6; counted as warnings): another message under the same
-    /// `Message-ID`, or the create's own, read otherwise by its server,
-    /// which the item then holds twice.
+    /// The members a listing named apart from a create of their side holding
+    /// their identity, summaries disagreeing (pimdir SYNC §5, §6; warnings).
+    ///
+    /// Another message under the same `Message-ID`, or the create's own read
+    /// otherwise by its server, which the item then holds twice.
     pub disagreed: Vec<DisagreedMember>,
-    /// The members a source configured as capped did not list in a round
-    /// that closed, counted per collection and kept (pimdir SYNC §5). They
-    /// are no warning and change no exit code: a capped source lists the
-    /// same part of a collection at every round. The engine counts there a
-    /// narrowed round handing no enumeration too, which every narrowed
-    /// round of neverest hands.
+    /// The members a capped source did not list in a closed round, counted
+    /// per collection and kept (pimdir SYNC §5).
+    ///
+    /// No warning, no exit code: a capped source lists the same part at every
+    /// round. Every narrowed round of neverest counts here too.
     pub unlisted: Vec<UnlistedMembers>,
     /// What the run did to the store's search index (pimdir SEARCH), `null`
     /// in a dry run and in a build without the `search` feature.
@@ -237,13 +226,10 @@ pub struct SyncOutput {
 impl SyncOutput {
     /// Folds a collection-scoped report into this account-wide one.
     ///
-    /// Every arm a collection can fill travels: merging back only the item
-    /// patch loses the warning block the conflict notification fires from.
-    /// The name, dry-run flag, sweep and outstanding count are account-wide.
+    /// Every field is named, so a new one fails to compile here rather than
+    /// silently stop travelling, as the parked conflicts once did. The name,
+    /// dry-run flag, sweep and outstanding count are account-wide.
     pub fn absorb(&mut self, other: Self) {
-        // NOTE: every field is named, none elided, so a field added to the
-        // report is a compile error here rather than an arm that silently
-        // stops travelling: that is how the parked conflicts went missing.
         let Self {
             account: _,
             dry_run: _,
@@ -302,9 +288,8 @@ impl SyncOutput {
         self.interrupted |= interrupted;
     }
 
-    /// Names every endpoint as the account's configuration does, rather than
-    /// by the source id the store keys it under, `<account>/<name>`: the
-    /// report already names its account.
+    /// Names every endpoint as the configuration does rather than by its
+    /// store source id, `<account>/<name>`: the report names its account.
     pub fn name_endpoints(&mut self) {
         let prefix = format!("{}/", self.account);
         let mut endpoints: Vec<&mut String> = Vec::new();
@@ -359,15 +344,9 @@ impl SyncOutput {
 
     /// Whether the run left work no rerun clears, which the exit code answers.
     ///
-    /// A divergence waiting for a decision, a duplicate `UID` the other side
-    /// will not take, a write a remote rejected, a change it refused as it
-    /// stands (held until the item changes), a send or an intent parked
-    /// (refused for good, or possibly delivered) and a queued action the
-    /// store holds parked are one class: waiting until a person acts, and
-    /// none of them a failure of the run. So are a listing that parked a
-    /// mass absence or an emptied collection, which a person confirms, and
-    /// a change withheld over a body the store cannot serve, which a person
-    /// repairs: a rerun alone meets each again.
+    /// A pending decision, a refused `UID`, a rejected or refused write, a
+    /// parked send, intent or action, a parked absence and an unservable body
+    /// wait for a person, none a run failure: a rerun alone meets each again.
     pub fn left_waiting(&self) -> bool {
         self.outstanding_conflicts > 0
             || !self.absences.is_empty()
@@ -380,13 +359,12 @@ impl SyncOutput {
             || self.intents.iter().any(|entry| entry.parked)
     }
 
-    /// Whether the run left work a rerun picks up: a source it could not
-    /// scan, a hunk it could not apply, a send or an intent that failed
-    /// without parking, a source that gave up throttled, a collection that
-    /// had not settled, a push its server answered nothing for. An
-    /// unreachable server reads this way, and only this way, a run with
-    /// nothing to do never carrying an error. A send channel that did not
-    /// open is named in `unreached` alone, having no collection to scan.
+    /// Whether the run left work a rerun picks up, as an unreachable server
+    /// reads: a run with nothing to do never carries an error.
+    ///
+    /// An unscanned source, an unapplied hunk, a failed send or intent not
+    /// parked, a throttled source, an unsettled collection, an unanswered
+    /// push; a send channel that did not open is in `unreached` alone.
     pub fn incomplete(&self) -> bool {
         self.interrupted
             || !self.throttled.is_empty()
@@ -414,9 +392,8 @@ impl SyncOutput {
 }
 
 impl SyncOutput {
-    /// Whether `coverage`'s round is open because its listing parked a
-    /// mass absence or an emptied collection: it waits for a person, not
-    /// for a rerun.
+    /// Whether `coverage`'s round is open because its listing parked a mass
+    /// absence or an emptied collection: it waits for a person, not a rerun.
     fn parks(&self, coverage: &CollectionCoverage) -> bool {
         self.absences.iter().any(|parked| {
             parked.side == coverage.source && parked.collection == coverage.collection
@@ -424,9 +401,8 @@ impl SyncOutput {
     }
 }
 
-/// A listing that found most of what a collection held gone, or that named
-/// no member while the collection held some, and dropped nothing (pimdir
-/// SYNC §5, §8).
+/// A listing that found most of a collection gone, or no member where it
+/// held some, and dropped nothing (pimdir SYNC §5, §8).
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ParkedAbsence {
@@ -616,9 +592,8 @@ impl fmt::Display for WaitingCreate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum WaitReason {
-    /// Its date lies outside the run's scope, and it may be its own
-    /// arrival, which no page of that scope lists: it waits for a round
-    /// over a scope holding it.
+    /// Its date lies outside the run's scope, and no page of that scope lists
+    /// its arrival: it waits for a round over a scope holding it.
     OutOfScope,
     /// The server took it already, without a listing naming the member
     /// yet: it waits for the page that names it.
@@ -842,7 +817,8 @@ impl UnreachedEndpoint {
     }
 }
 
-/// One create refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC 6352 §6.3.2).
+/// One create refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC 6352
+/// §6.3.2).
 ///
 /// Not about the duplicate, which the store mirrors as two items, but about
 /// the write that could not land, retried and re-reported every run. Giving
@@ -875,11 +851,9 @@ impl fmt::Display for RefusedDuplicate {
 /// One change a remote refused as it stands, this run or a run before
 /// (pimdir SYNC §4, §5).
 ///
-/// The store records the refusal on the item's binding and holds the
-/// change while it stands, pushing nothing: the same change would be
-/// refused again. Changing the item (an edit, a flag, a move into a
-/// collection the source takes) pushes it anew, and removing it withdraws
-/// it. Reported by every run while it stands.
+/// Held on the item's binding while it stands, pushing nothing, since the
+/// same change would be refused again; changing the item (an edit, a flag, a
+/// move) pushes it anew, removing it withdraws it. Reported by every run.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RefusedChange {
@@ -924,8 +898,7 @@ pub struct RejectedWrite {
     /// `set-flags`.
     pub action: String,
     /// The item error: the item's handle on that side as `id`, then the
-    /// refusal's code, outermost message and causes, the backend's own
-    /// reason among them.
+    /// refusal's code, outermost message and causes (the backend's reason).
     #[serde(flatten)]
     pub failure: ItemError<ErrorCode>,
 }
@@ -1049,11 +1022,9 @@ impl fmt::Display for ParkedQueueAction {
 
 /// One submit intent attempted this run.
 ///
-/// Acknowledged when `error` is `None`, its queue row dropped and the body's
-/// pin released; parked when the failure is permanent or its outcome
-/// unknown, pending otherwise. A parked unconfirmed one carries an `error`
-/// beginning `unconfirmed: `, the prefix pimdir reserves for it (STORAGE
-/// §13), as its parked row does.
+/// Acknowledged when `error` is `None` (row dropped, pin released); parked
+/// when permanent or of unknown outcome, then with an `error` beginning
+/// `unconfirmed: ` (pimdir STORAGE §13); pending otherwise.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitEntry {
@@ -1073,12 +1044,11 @@ pub struct SubmitEntry {
     pub sources: Vec<String>,
     /// Whether the failure parked the row rather than leaving it pending.
     pub parked: bool,
-    /// Whether the message may have been delivered despite the failure:
-    /// handed over whole with no verdict back, or answered by a gateway
-    /// error, or left mid-send by a run that stopped. Such a row is parked
-    /// unconfirmed (pimdir STORAGE §15.2) and never sent again on its own:
-    /// its producer reads that state, and a person retries or withdraws it.
-    /// False on success and on a failure that certainly delivered nothing.
+    /// Whether the message may have been delivered despite the failure (no
+    /// verdict, a gateway error, a stopped run), false otherwise.
+    ///
+    /// Such a row is parked unconfirmed (pimdir STORAGE §15.2), never sent
+    /// again on its own: a person retries or withdraws it.
     pub unconfirmed: bool,
 }
 
@@ -1254,6 +1224,8 @@ impl<H> PatchEntry<H> {
 }
 
 impl fmt::Display for SyncOutput {
+    /// Prints what is worth a line: a collection covered whole prints none,
+    /// nor an index refresh with nothing to fold (a failed one is a warning).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f)?;
 
@@ -1327,8 +1299,6 @@ impl fmt::Display for SyncOutput {
             writeln!(f)?;
         }
 
-        // NOTE: a collection covered whole is the usual case, and says
-        // nothing worth a line.
         let bounded: Vec<&CollectionCoverage> = self
             .coverage
             .iter()
@@ -1350,8 +1320,6 @@ impl fmt::Display for SyncOutput {
             writeln!(f)?;
         }
 
-        // NOTE: a refresh with nothing to fold says nothing worth a line, and
-        // a failed one is a warning.
         if let Some(index) = &self.index
             && index.error.is_none()
             && (index.folded > 0 || index.behind > 0 || index.busy)

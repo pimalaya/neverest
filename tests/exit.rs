@@ -1,11 +1,12 @@
 //! # Exit contract
 //!
-//! The built binary's exit statuses beyond success and failure: a command
-//! line the grammar refuses exits 2, its failure object coded
-//! `usage-invalid` under `--json`; a standard command missing its argument
-//! fails like any other command; a check that printed its report with an
-//! endpoint down exits 3, and a drain that left an account undrained exits
-//! 4. Runs without any server: the endpoint down is a closed local port.
+//! The built binary's exit statuses beyond success and failure. Runs
+//! without any server: the endpoint down is a closed local port.
+//!
+//! A command line the grammar refuses exits 2, coded `usage-invalid` under
+//! `--json`; a standard command missing its argument fails like any other;
+//! a check that printed its report with an endpoint down exits 3, and a
+//! drain that left an account undrained exits 4.
 
 use std::{
     fs,
@@ -35,10 +36,11 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
 }
 
-/// A configuration in `home` of one account, `a`, whose IMAP source sits
-/// on a local port nothing listens on, its store under `home`.
+/// A configuration in `home` of one account `a`, its store under `home`.
+///
+/// Its IMAP source sits on a port bound then dropped, so closed when the run
+/// connects.
 fn closed_port_account(home: &Path) -> String {
-    // NOTE: bound then dropped, so the port is closed when the run connects.
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -138,9 +140,10 @@ fn a_failed_check_prints_its_report_and_exits_3() {
     assert!(!stderr.contains('\u{1b}'), "{stderr}");
 }
 
-/// An account `init` could not open carries its failure as every report
-/// row does: the outermost message in `error`, its causes in `sources`,
-/// and the endpoints it opened under `opened`.
+/// An account `init` could not open carries its failure as every row does.
+///
+/// The outermost message in `error`, its causes in `sources`, and the
+/// endpoints it opened under `opened`.
 #[test]
 fn a_failed_init_carries_its_causes_apart() {
     let home = TempDir::new().unwrap();

@@ -1,5 +1,7 @@
-//! End-to-end delete test against a local Stalwart IMAP server (:143), spawned
-//! via `tests/stalwart.sh`. Ignored by default.
+//! # Deletes
+//!
+//! End-to-end delete test against a local Stalwart IMAP server (:143),
+//! spawned via tests/stalwart.sh. Ignored by default.
 //!
 //! A delete staged through the store removes that message alone. A plain
 //! `EXPUNGE` would also remove every message another client marked `\Deleted`
@@ -51,7 +53,6 @@ fn a_delete_expunges_its_message_alone() {
     neverest(&["init", "-a", "deletes"], &config);
     neverest(&["sync", "-a", "deletes"], &config);
 
-    // Another client marks the kept message `\Deleted` and leaves it there.
     let kept_seq = server_seqs(&mailbox, &kept);
     assert_eq!(kept_seq.len(), 1, "the kept message is on the server");
     imap_in(

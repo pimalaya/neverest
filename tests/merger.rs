@@ -1,30 +1,16 @@
-//! End-to-end test of the external merger contract, against a local Radicale
-//! (`tests/radicale.sh`) holding two principals. Ignored by default.
+//! # Merger
+//!
+//! The external merger contract, against a local Radicale
+//! (tests/radicale.sh) holding two principals. Ignored by default.
 //!
 //! `conflict.merger` hands a parked divergence to a program of the person's
-//! choosing, and everything about that hand-off happens outside the process:
-//! the argv order, the shell quoting of the exported paths, and the two ways
-//! a merger says no. The in-process tests drive a `Merger` value directly, so
-//! none of it had ever crossed a real fork against a real divergence:
+//! choosing, so the argv order, the shell quoting of the exported paths and
+//! the two ways a merger says no only show across a real fork, which the
+//! in-process tests of `Merger` never cross.
 //!
-//!   1. The four paths arrive base, local, remote, output, under a directory
-//!      whose name holds a space, and the body the merger writes is the one
-//!      that lands and reaches both servers.
-//!   2. A merger exiting non-zero settles nothing, having written its output
-//!      or not: the divergence stays parked and both bodies stay untouched.
-//!   3. A merger exiting zero without writing settles nothing either, which
-//!      is what a bare quit in an editor looks like.
-//!   4. A merger naming `{output}` is substituted rather than appended, so a
-//!      tool whose output is a flag is not handed four trailing paths.
-//!
-//! The divergence is a real one, driven over two CardDAV endpoints the way
-//! tests/endpoints.rs does: one card, edited in the same field on each
-//! principal over a body they both came from, which is the shape that has a
-//! base to export and no winner a run can pick.
-//!
-//! Each test owns an address book of its own on both principals and narrows
-//! the run to it, so the four run side by side and none meets what another
-//! seeded.
+//! The divergence is real, over two CardDAV endpoints as in
+//! tests/endpoints.rs. Each test owns its address book on both principals,
+//! so the four run side by side.
 //!
 //! Start the server and run with:
 //! ```sh
@@ -83,6 +69,11 @@ fn printf_card(tel: &str) -> String {
 /// card at a path, which is what tells the three exported bodies apart.
 const TEL: &str = "#!/bin/sh\ntel() { sed -n 's/^TEL://p' \"$1\" | tr -d '\\r'; }\n";
 
+/// The four paths arrive in order, and the merger's body is what lands.
+///
+/// Bodies are told apart by content (base the first sync's, local the
+/// source's, remote the target's) under a directory holding a space; the
+/// composed body, neither side, then reaches both servers.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_merger_is_handed_base_local_remote_output_and_its_body_is_the_one_that_lands() {
@@ -91,10 +82,6 @@ fn a_merger_is_handed_base_local_remote_output_and_its_body_is_the_one_that_land
     let log = root.join("argv.log");
     let script = root.join("order.sh");
 
-    // The three bodies are read by their content rather than by their name, so
-    // the log proves the order and not just the arity: base is the body the
-    // first sync agreed on, local the one the store took from the source, and
-    // remote the target's own.
     fs::write(
         &script,
         format!(
@@ -149,9 +136,6 @@ fn a_merger_is_handed_base_local_remote_output_and_its_body_is_the_one_that_land
         "the decision is taken from the merger's output; it said:\n{settled}",
     );
 
-    // The body the merger composed is neither side, so finding it on both
-    // servers proves the run pushed what it took back rather than a side it
-    // could have picked on its own.
     sync(&parked, ORDER_BOOK, 0);
     for side in [SOURCE, TARGET] {
         assert!(
@@ -161,6 +145,10 @@ fn a_merger_is_handed_base_local_remote_output_and_its_body_is_the_one_that_land
     }
 }
 
+/// A merger exiting non-zero settles nothing, even with a good body written.
+///
+/// Taking it would settle a divergence on the word of a tool that said it
+/// had failed.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_merger_exiting_non_zero_settles_nothing_whatever_it_wrote() {
@@ -168,8 +156,6 @@ fn a_merger_exiting_non_zero_settles_nothing_whatever_it_wrote() {
     let root = tmp.path();
     let script = root.join("refuse.sh");
 
-    // Writes a perfectly good body and then refuses. Taking it would settle a
-    // divergence on the word of a tool that said it had failed.
     fs::write(
         &script,
         format!(
@@ -189,6 +175,9 @@ fn a_merger_exiting_non_zero_settles_nothing_whatever_it_wrote() {
     assert_untouched(&parked, REFUSE_BOOK);
 }
 
+/// A merger exiting zero without writing settles nothing either.
+///
+/// That is what quitting an editor without saving looks like.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_merger_exiting_zero_without_writing_settles_nothing_either() {
@@ -196,8 +185,6 @@ fn a_merger_exiting_zero_without_writing_settles_nothing_either() {
     let root = tmp.path();
     let script = root.join("quit.sh");
 
-    // What quitting an editor without saving looks like from the outside: the
-    // three bodies read, the output left alone, and a zero exit.
     fs::write(&script, "#!/bin/sh\ncat \"$1\" \"$2\" \"$3\" > /dev/null\n").unwrap();
 
     let parked = park(root, QUIT_BOOK, &format!("\"sh {}\"", script.display()));
@@ -210,6 +197,10 @@ fn a_merger_exiting_zero_without_writing_settles_nothing_either() {
     assert_untouched(&parked, QUIT_BOOK);
 }
 
+/// A merger naming `{output}` gets it substituted, not four paths appended.
+///
+/// A tool whose output is a flag would otherwise get nine arguments and
+/// write nothing where it was told to.
 #[test]
 #[ignore = "requires a Radicale instance (./tests/radicale.sh) on :5232 and --ignored"]
 fn a_merger_naming_its_output_placeholder_is_substituted_rather_than_appended() {
@@ -218,9 +209,6 @@ fn a_merger_naming_its_output_placeholder_is_substituted_rather_than_appended() 
     let log = root.join("argv.log");
     let script = root.join("flag.sh");
 
-    // A tool whose output is a flag rather than the last argument. Appending
-    // the four paths on top would hand it nine arguments and write nothing
-    // where it was told to.
     fs::write(
         &script,
         format!(
@@ -293,9 +281,9 @@ const TMP_DIR: &str = "tmp dir";
 
 /// Parks a real content divergence in `book` and returns what settles it.
 ///
-/// One card, seeded on the source and crossed by a first sync, then set to a
-/// value of its own on each principal: both sides moved away from a body they
-/// agreed on, which is the only shape with a base to export.
+/// One card crossed by a first sync, then set apart on each principal: both
+/// sides moved away from a body they agreed on, the only shape with a base
+/// to export and no winner a run can pick.
 fn park(root: &Path, book: &str, merger: &str) -> Parked {
     let state = root.join("state");
     let config = root.join("config.toml");
@@ -364,8 +352,10 @@ fn resolve(parked: &Parked) -> String {
     )
 }
 
-/// Asserts a merger settled nothing: the divergence is still waiting and each
-/// endpoint still holds the body it went in with.
+/// Asserts a merger settled nothing.
+///
+/// The divergence still waits, each endpoint keeps its body, and a run over
+/// it still exits 3: an abandoned merger changes no exit code.
 fn assert_untouched(parked: &Parked, book: &str) {
     let listed = neverest(
         &["conflict", "list", "-a", ACCOUNT, "--json"],
@@ -387,13 +377,12 @@ fn assert_untouched(parked: &Parked, book: &str) {
         "the target keeps its own edit",
     );
 
-    // And a run over it is still a run that left something waiting, which is
-    // what a supervisor reads: an abandoned merger changes no exit code.
     sync(parked, book, 3);
 }
 
-/// The account every test runs: one source and one target, each a principal
-/// of the same Radicale, settling divergences through `merger`.
+/// The account every test runs, settling divergences through `merger`.
+///
+/// One source and one target, each a principal of the same Radicale.
 fn account(merger: &str) -> String {
     format!(
         "[accounts.{ACCOUNT}]\n\
@@ -418,12 +407,11 @@ fn sync(parked: &Parked, book: &str, code: i32) -> String {
     )
 }
 
-/// Recreates a principal's address book, so a run starts from an empty one
-/// whatever the previous run left behind.
+/// Recreates a principal's address book, so a run starts from an empty one.
 ///
-/// Radicale does not create a collection on a member write (it answers the PUT
-/// with a 409), and the container keeps its storage between runs, so the book
-/// is deleted and made again with an explicit extended `MKCOL`.
+/// Radicale answers a member PUT into a missing collection with 409 and keeps
+/// its storage between runs, so the book is deleted and made again with an
+/// extended `MKCOL`.
 fn create_book(root: &Path, user: &str, book: &str) {
     let output = Command::new("curl")
         .args(["-sS", "-o", "/dev/null", "-X", "DELETE"])

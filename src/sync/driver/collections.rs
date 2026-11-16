@@ -52,11 +52,11 @@ pub(super) fn declare_name(
     }
 }
 
-/// The role each collection of `listed` states, by id: what the listing
-/// carries, plus what [`Client::lookup_roles`] answers for a backend whose
-/// listing does not, asked again only when the source's collection set
-/// moved since it was last asked (kept in the sidecar). `None` when a
-/// lookup failed: the roles recorded stay as they are rather than cleared.
+/// The role each collection of `listed` states, by id.
+///
+/// A listing carrying none takes [`Client::lookup_roles`], asked again only
+/// once the source's collection set moved (kept in the sidecar). `None` when
+/// a lookup failed: the recorded roles stay rather than being cleared.
 pub(super) fn stated_roles(
     lookup: impl FnOnce() -> Result<Option<BTreeMap<String, String>>>,
     source: &str,
@@ -116,9 +116,10 @@ pub(super) fn record_taskless(state: &mut AccountState, source: &str, taskless: 
     }
 }
 
-/// Records the role a source states for a collection, or clears one it no
-/// longer states. Only from the source, never from a name; nothing keys on
-/// it, so a failure costs a role and never a sync, and is logged.
+/// Records the role a source states for a collection, or clears it.
+///
+/// Only from the source, never from a name; nothing keys on it, so a failure
+/// costs a role and never a sync, and is logged.
 pub(super) fn declare_role(store: &PimdirSourceStore, collection: &str, role: Option<&str>) {
     if let Err(err) = store.set_collection_role(collection, role) {
         warn!("cannot record the role of {collection} as {role:?}: {err}");
@@ -149,11 +150,9 @@ type DiffSide<'a> = (&'a str, &'a CollectionPermissions);
 
 /// Three-way collection diff, gated by each side's permissions.
 ///
-/// A collection one side lists and the other does not is new on the first,
-/// and created on the other, unless the store knows both held it
-/// (`held_by_both`, the base): then the other deleted it, and the delete
-/// crosses instead. A delete the remaining side forbids leaves it there,
-/// never created again where it was deleted.
+/// A collection one side lists is created on the other, unless the store
+/// knows both held it (`held_by_both`, the base): then the delete crosses
+/// instead, or, where forbidden, leaves it there, never created again.
 pub(super) fn diff_collections(
     left: &BTreeSet<String>,
     right: &BTreeSet<String>,
@@ -199,9 +198,10 @@ pub(super) fn diff_collections(
     hunks
 }
 
-/// The listed collections, among `names`, that the store knows both
-/// endpoints held: the base of the three-way collection diff, read from the
-/// sources holding a binding or a checkpoint in each (pimdir SYNC §5).
+/// The listed collections that the store knows both endpoints held.
+///
+/// The base of the three-way collection diff, read from the sources holding
+/// a binding or a checkpoint in each (pimdir SYNC §5).
 pub(super) fn held_by_both<'a>(
     store: &PimdirSourceStore,
     namespace: &str,

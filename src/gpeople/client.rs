@@ -8,11 +8,10 @@
 //! contact under the user's connections, and a contact group is a label a
 //! person carries any number of, not a folder.
 //!
-//! `enumerate` drives the connections listing with a sync token as the
-//! engine's opaque checkpoint. A resumed listing reports what changed, a
-//! deleted person carrying `metadata.deleted`; an expired token (HTTP 410)
-//! restarts a full listing. The person's `etag` is the revision, and People
-//! enforces it on update, the etag riding the body.
+//! `enumerate` lists connections from a sync token, the engine's opaque
+//! checkpoint: a resumed listing reports changes, a deleted person carrying
+//! `metadata.deleted`; an expired token (HTTP 410) restarts a full listing.
+//! The `etag` is the revision, People enforcing it on update via the body.
 
 use std::{
     io::{Read, Write},
@@ -99,9 +98,10 @@ impl GpeopleClient {
         self.send(Request::Idempotent, run)
     }
 
-    /// Runs one People request creating a contact: sent again on a refusal
-    /// Google answers before doing anything (429, a rate limit), never on a
-    /// 503, after which the contact may exist.
+    /// Runs one People request creating a contact.
+    ///
+    /// Sent again on a refusal Google answers before doing anything (429, a
+    /// rate limit), never on a 503, after which the contact may exist.
     fn create<T>(
         &mut self,
         run: impl FnMut(&mut GpeopleClientStd) -> Result<GpeopleSendOutput<T>, GpeopleClientStdError>,
@@ -396,8 +396,9 @@ fn ensure_contacts(collection: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether a listing failed on an expired sync token: HTTP 410, or the 400
-/// People answers as often, naming the expired token
+/// Whether a listing failed on an expired sync token.
+///
+/// HTTP 410, or the 400 People answers as often, naming the expired token
 /// (`FAILED_PRECONDITION`, `EXPIRED_SYNC_TOKEN`).
 fn is_expired(err: &anyhow::Error) -> bool {
     err.chain().any(
@@ -427,8 +428,9 @@ fn names_expired_token(text: &str) -> bool {
 }
 
 /// Whether a People answer in an error chain refused the change as it
-/// stands, its status naming the request ([`names_the_request`]); a rate
-/// limit is told apart by [`crate::error::refusal`].
+/// stands, its status naming the request ([`names_the_request`]).
+///
+/// A rate limit is told apart by [`crate::error::refusal`].
 pub(crate) fn refuses(cause: &(dyn std::error::Error + 'static)) -> bool {
     match cause.downcast_ref::<GpeopleClientStdError>() {
         Some(GpeopleClientStdError::Send(GpeopleSendError::Api(err))) => {
@@ -549,9 +551,10 @@ mod tests {
         assert_eq!(server.requests().len(), 2, "{:?}", server.requests());
     }
 
-    /// A person deleted between its listing and its read is gone: failing
-    /// instead, it would fail the fetch of the address book in every run
-    /// until a listing took it away.
+    /// A person deleted between its listing and its read is gone.
+    ///
+    /// Failing instead, it would fail the fetch of the address book in every
+    /// run until a listing took it away.
     #[test]
     fn a_person_missing_from_its_read_is_gone() {
         for status in ["404 Not Found", "410 Gone"] {
@@ -571,8 +574,9 @@ mod tests {
     }
 
     /// A write People answers with a status naming the request (400) is
-    /// refused as it stands; a stale base (409, 412) stays rejected (pimdir
-    /// SYNC §4).
+    /// refused as it stands.
+    ///
+    /// A stale base (409, 412) stays rejected (pimdir SYNC §4).
     #[test]
     fn a_write_refused_as_it_stands_is_told_by_its_status() {
         let cases = [
@@ -596,9 +600,11 @@ mod tests {
         }
     }
 
-    /// An update replaces each masked field whole: built from the vCard
-    /// alone, it would erase the second organization and the data of
-    /// another client, neither of which a vCard shows.
+    /// An update replaces each masked field whole.
+    ///
+    /// Built from the vCard alone, it would erase the second organization
+    /// and another client's data, neither shown in a vCard; a line People
+    /// has no field for is stashed in `clientData`.
     #[test]
     fn an_update_keeps_what_the_vcard_cannot_show() {
         let held = r#"{"resourceName":"people/c1","etag":"e1",
@@ -621,7 +627,6 @@ mod tests {
             vcard.contains("Engineer") && !vcard.contains("Initech"),
             "{vcard}"
         );
-        // NOTE: a line People has no field for is stashed in `clientData`.
         let edited = vcard
             .replace("Engineer", "Director")
             .replace("END:VCARD", "X-PET:Rex\r\nEND:VCARD");

@@ -15,10 +15,9 @@ const GRAPH_CONNECTIONS: usize = 3;
 
 /// How many connections a side may open, each one worker of the run.
 ///
-/// IMAP takes `connections`, the account's or the run's. Microsoft Graph
-/// takes its `pool-size`, else [`GRAPH_CONNECTIONS`], never more than
-/// `connections`, so `--connections 1` serialises any source. Every other
-/// HTTP backend keeps one.
+/// IMAP takes `connections`, Microsoft Graph its `pool-size` (else
+/// [`GRAPH_CONNECTIONS`]) capped by `connections`. Others keep one: Gmail
+/// beside a batch was never measured, Google meters the whole account.
 pub(super) fn connection_budget(config: &SourceConfig, connections: usize) -> usize {
     let connections = connections.max(1);
     match &config.backend {
@@ -29,15 +28,7 @@ pub(super) fn connection_budget(config: &SourceConfig, connections: usize) -> us
             .pool_size()
             .unwrap_or(GRAPH_CONNECTIONS)
             .clamp(1, connections),
-        // NOTE: Gmail stays on one connection. Its batches pass one at a time
-        // across the source (`GmailRun::enter`), and its pace and minute
-        // budget are shared through the throttle, but a listing page or a
-        // lone read on a second connection would run beside a batch, Gmail
-        // binding per-user concurrency, and that was never measured: the
-        // arm to widen once it is.
         SourceBackendConfig::Gmail(_) => 1,
-        // NOTE: Google Calendar and People meter the account as a whole,
-        // and a DAV server is no faster for being asked twice.
         _ => 1,
     }
 }
@@ -55,9 +46,10 @@ pub(super) struct HydrateTarget {
     pub(super) date: Option<String>,
 }
 
-/// One hydrate batch: the collection it is read from, and the bodies
-/// fetched together, each with the size the store records (0 when it
-/// records none), which a backend reading by size plans its reads with.
+/// One hydrate batch: a collection and the bodies fetched together.
+///
+/// Each body carries the size the store records (0 for none), which a backend
+/// reading by size plans its reads with.
 #[derive(Debug, PartialEq)]
 pub(super) struct HydrateBatch {
     pub(super) collection: String,
@@ -82,11 +74,9 @@ impl HydrateBatch {
 
 /// The bodies the servers answered gone this run, by collection.
 ///
-/// They are owed nothing more: no later batch of the run asks for them
-/// again, phase 2 included. The store keeps each member as it is until
-/// the next listing of its collection takes it away (pimdir SYNC §5), so
-/// a member gone is never fetched in a loop, and never dropped on the
-/// word of a body read alone.
+/// No later batch of the run asks for them again. The store keeps each until
+/// the next listing drops it (pimdir SYNC §5), so a gone body is never
+/// fetched in a loop, nor dropped on the word of a body read alone.
 #[derive(Default)]
 pub(super) struct GoneBodies(Mutex<HashMap<String, HashSet<String>>>);
 
@@ -135,18 +125,12 @@ pub(super) struct Landing<'a> {
 }
 
 impl Landing<'_> {
-    /// Downloads `batch` on `ctx`'s connection and raises each body to
-    /// `Full` in every collection owing it, answering how many bodies came
-    /// over the network.
+    /// Downloads `batch` and raises each body to `Full` where it is owed,
+    /// answering how many bodies came over the network.
     ///
-    /// On a source whose handles are account-wide, every collection of
-    /// the source is read for the batch's handles first: a handle one of
-    /// them holds a body for is served from that body, the others are
-    /// downloaded once, and each body lands in every collection holding
-    /// its handle without one. A body the server answers gone is recorded
-    /// for each collection owing it ([`GoneBodies`]) and asked for no more
-    /// in the run. Only a failed download is an error; a write that fails
-    /// is warned about, its bodies left for the next run.
+    /// Account-wide handles are downloaded once, or served from a collection
+    /// holding them. A collection's gate is taken before `applying`, one
+    /// collection at a time, so no applier ever holds two gates.
     pub(super) fn land(
         &self,
         ctx: &mut SourceCtx,
@@ -198,7 +182,6 @@ impl Landing<'_> {
         for (handle, hash) in placed.stored {
             match stored_item(self.kind, self.blobs.blobs(), handle.clone(), hash) {
                 Ok(Some(item)) => items.push(item),
-                // NOTE: left owed, for the next batch or run to download.
                 Ok(None) => debug!("the stored body of {} is gone", handle.as_str()),
                 Err(err) => warn!("cannot serve {} from the store: {err:#}", handle.as_str()),
             }
@@ -236,9 +219,6 @@ impl Landing<'_> {
             if landed.is_empty() {
                 continue;
             }
-            // NOTE: the gate first, the order every applier takes them in:
-            // the collection's spine may be mid-page. One collection at a
-            // time, so no applier ever holds two gates.
             let _gate = self
                 .gates
                 .and_then(|gates| gates.get(place.as_str()))
@@ -345,14 +325,9 @@ impl Placed {
 
 /// Phase 2, hydrating every body through one global work-stealing pool.
 ///
-/// A batched fetch stays within one selected collection, so bodies are chunked
-/// per collection and the batches queued in the chosen order across the
-/// account. A worker steals the next, idling at no collection edge, each
-/// on its own connection and store handle, the writes serialised.
-/// Each batch is raised to `Full` as soon as it is fetched, so its bodies are
-/// readable at once and an interrupted run keeps them. On a source whose
-/// handles are account-wide (`shared`), a body is downloaded once for
-/// every collection holding it ([`Landing::land`]).
+/// A batched fetch stays within one collection, so bodies are chunked per
+/// collection and queued across the account; each batch is raised to `Full`
+/// once fetched, so an interrupted run keeps it.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn phase2_hydrate(
     source: &str,
@@ -415,14 +390,9 @@ pub(super) fn phase2_hydrate(
 
 /// Chunks each collection's bodies into batches, queued in `order`.
 ///
-/// The order holds within a collection and, by each batch's first body (its
-/// largest or its newest), across the account, ties going to the
-/// collection the run takes first (`plans` comes in the run's order).
-/// Under a positive `prime`, each collection's `prime` newest bodies come
-/// ahead of every other body, so what a first pass could not download is
-/// downloaded first. Under `shared`, a handle names one item across the
-/// collections (Gmail): it is planned once, under the first collection
-/// listing it, primed when any of them primes it.
+/// Each collection's `prime` newest bodies come first, then `order` across
+/// the account, ties to the collection the run takes first. Under `shared`
+/// (Gmail) a handle is planned once, under the first collection listing it.
 pub(super) fn hydrate_batches(
     plans: Vec<CollectionPlan>,
     order: DownloadOrder,
@@ -430,8 +400,6 @@ pub(super) fn hydrate_batches(
     shared: bool,
 ) -> Vec<HydrateBatch> {
     let mut names = Vec::with_capacity(plans.len());
-    // NOTE: each body's tier, 0 for a collection's primed ones, and its
-    // collection's rank.
     let mut tiered: Vec<(u8, usize, HydrateTarget)> = Vec::new();
     let mut planned: HashMap<String, usize> = HashMap::new();
     for (rank, (collection, mut targets)) in plans.into_iter().enumerate() {
@@ -452,7 +420,6 @@ pub(super) fn hydrate_batches(
     }
     drop(planned);
 
-    // NOTE: stable, so ties keep a collection's newest-first order.
     tiered.sort_by(|(tier_a, rank_a, a), (tier_b, rank_b, b)| {
         rank_a
             .cmp(rank_b)
@@ -479,10 +446,9 @@ pub(super) fn hydrate_batches(
 /// Runs `batches` over one worker per connection, each landing its batch
 /// before taking the next.
 ///
-/// Fetches overlap across the workers; `land` serialises its writes. A
-/// landing error (its download failed) stops the pool and fails the run,
-/// every batch landed before it staying in the store; a write that fails
-/// is warned about by `land`, its batch left for the next run.
+/// A landing error (a failed download) stops the pool and fails the run,
+/// the batches landed before it kept; `land` only warns on a failed write,
+/// its batch left for the next run.
 pub(super) fn hydrate_pool<W: Send>(
     workers: &mut [W],
     batches: Vec<HydrateBatch>,
@@ -526,10 +492,8 @@ pub(super) fn hydrate_pool<W: Send>(
 
 /// Raises one fetched batch to `Full`, serving its bodies from the batch.
 ///
-/// The retained store then holds each body for the app to read offline. A
-/// handle the batch lacks is fetched through `fallback`. A divergence whose
-/// body the batch brings is settled under `options` (pimdir SYNC §6), the
-/// report naming each body it kept and did not adopt.
+/// A handle the batch lacks is fetched through `fallback`. A divergence whose
+/// body the batch brings is settled under `options` (pimdir SYNC §6).
 pub(super) fn apply_batch<R: PimdirRemote<Error = anyhow::Error>>(
     store: &mut PimdirSourceStore,
     fallback: R,

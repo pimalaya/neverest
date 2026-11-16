@@ -7,10 +7,9 @@ use crate::sync::driver::*;
 
 /// A side's permissions as io-pimdir's push rights for the kind it syncs.
 ///
-/// Only mail carries flags on the wire: a flag on a card or a calendar item
-/// is the store's alone (a `pimdir tag`, kept in the store only), so the
-/// right is withheld and the engine keeps it local rather than pushing a
-/// change the backend rejects on every run.
+/// Only mail carries flags on the wire: a flag on a card or calendar item is
+/// the store's alone, so the right is withheld rather than pushing a change
+/// the backend rejects on every run.
 pub(super) fn push_rights(perms: &SourcePermissions, media_type: &str) -> PimdirPushRights {
     PimdirPushRights {
         flags: perms.flag.update && media_type == "message/rfc822",
@@ -20,10 +19,10 @@ pub(super) fn push_rights(perms: &SourcePermissions, media_type: &str) -> Pimdir
     }
 }
 
-/// Where a collection's role puts it in the run: what a reader opens
-/// first, first. The inbox (or a default calendar or address book), then
-/// sent mail and drafts, every other collection by name, the all-mail
-/// archive that repeats them, then junk, and the trash last.
+/// Where a collection's role puts it in the run, what a reader opens first.
+///
+/// Inbox (or a default calendar or address book), sent, drafts, the rest by
+/// name, the all-mail archive repeating them, junk, then trash.
 fn role_rank(role: Option<&str>) -> u8 {
     match role {
         Some("inbox" | "default") => 0,
@@ -54,9 +53,9 @@ pub(super) fn run_order(
 
 /// The local, one-source sync, run as two account-wide phases.
 ///
-/// Spine, then hydrate, each account-wide, so the connection pool
-/// stays saturated end to end rather than idling at collection boundaries. The
-/// store is the single local copy the app reads, so nothing crosses.
+/// Both phases run account-wide so the pool never idles at a collection edge,
+/// the hydrate plans read after the spine so nothing landed is fetched again.
+/// With no target, `one-way` discards what was staged locally.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_local(
     account_name: &str,
@@ -80,14 +79,11 @@ pub(super) fn run_local(
     let source = source_name.to_string();
     let source_filter = source_config.collection().filter.clone();
 
-    // NOTE: a declaration lists and fetches nothing, one connection is enough.
     let workers = if declare_only {
         1
     } else {
         connection_budget(&source_config, connections)
     };
-    // NOTE: with no target the store is the destination: `one-way` discards
-    // what was staged locally, leaving it off merges the two.
     let authority = if mode.one_way {
         Authority::Endpoint
     } else {
@@ -163,8 +159,6 @@ pub(super) fn run_local(
         &listed,
         state,
     );
-    // NOTE: a failed lookup leaves the recorded roles alone, and the run
-    // orders by those the listing states.
     let roles = stated.clone().unwrap_or_else(|| {
         listed
             .iter()
@@ -200,7 +194,6 @@ pub(super) fn run_local(
         return Ok(());
     }
 
-    // NOTE: a dry run lists every page to plan the run, and downloads none.
     let pacing = Pacing {
         prime: if dry_run { 0 } else { pacing.prime },
         ..pacing
@@ -229,8 +222,6 @@ pub(super) fn run_local(
         return Ok(());
     }
 
-    // NOTE: read once phase 1 is over, so a body a landed page's hydration
-    // kept is not downloaded again, nor one it found gone.
     let plans = hydrate_plans(&stores[0], source_name, &spined, listed_log.as_ref(), &gone)?;
     let hydrated = phase2_hydrate(
         source_name,
@@ -243,9 +234,6 @@ pub(super) fn run_local(
         &gone,
         progress,
     );
-    // NOTE: a body a connection landed may settle a divergence by the
-    // source's policy (pimdir SYNC §6), noted on that connection: the spines
-    // itemized what they noted, this drains what the landings did after.
     for ctx in &mut ctxs {
         itemize_noted(ctx, report);
     }
@@ -269,10 +257,11 @@ impl Declaring<'_> {
         }
     }
 
-    /// Records `source` as syncing `collections` from their listing on
-    /// ([`register_syncing`]), so the declaration that follows holds there
-    /// before their first checkpoint, a failure logged: the first item sync
-    /// still records it.
+    /// Records `source` as syncing `collections` from their listing on.
+    ///
+    /// The declaration that follows then holds before their first checkpoint
+    /// ([`register_syncing`]); a failure is logged, the first item sync
+    /// records it.
     pub(super) fn register(&self, source: &str, collections: &[String]) {
         match register_syncing(self.dir, source, collections) {
             Ok(0) => {}
@@ -294,14 +283,11 @@ pub(super) struct Listing<'a> {
     pub(super) roles: Option<&'a BTreeMap<String, String>>,
 }
 
-/// Records what a local listing discovered before any item of it moves:
-/// the kind, name and role of each collection kept, the calendars the
-/// server states take no tasks, kept for every later declaration (the one
-/// before the next run's drain included, which lists nothing), the source
-/// as syncing each collection kept ([`register_syncing`]), then the
-/// declaration again, so a calendar met for the first time is gated from
-/// the listing on rather than from its first item sync or the end of the
-/// run (pimdir STORAGE §15.6). A dry run registers and declares nothing.
+/// Records what a local listing discovered before any item of it moves.
+///
+/// Each kept collection's kind, name and role and the taskless calendars,
+/// then the source registered and declared again, so a calendar met first is
+/// gated from its listing on (pimdir STORAGE §15.6), dry runs aside.
 pub(super) fn record_listing(
     store: &PimdirSourceStore,
     declaring: &Declaring<'_>,
@@ -332,15 +318,12 @@ pub(super) fn record_listing(
     Ok(())
 }
 
-/// Performs what frontends queued for one source and, in a paired account,
-/// its targets, syncing nothing: the collection intents, the sends and
-/// the calendar intents, as a full run does before it lists anything.
+/// Performs what frontends queued for one source and its targets, syncing
+/// nothing: collection intents, sends and calendar intents.
 ///
-/// An endpoint is opened only when one of these needs its session: an
-/// intent it performs on its server, or a send through its native channel
-/// (Graph). A send through an `smtp` table opens that channel alone, so a
-/// message leaves while the source's own server is down. An endpoint that
-/// does not open is reported unreached and the others still perform theirs.
+/// An endpoint opens only when an intent or a native send (Graph) needs its
+/// session, so an `smtp` send leaves while the source's server is down. One
+/// that does not open is reported unreached; the others still run theirs.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn run_intents(
     account_name: &str,
@@ -353,7 +336,6 @@ pub(super) fn run_intents(
     work_dir: &Path,
     report: &mut SyncOutput,
 ) -> Result<()> {
-    // NOTE: a target binds its source's namespace, as in a paired sync.
     let names: Vec<&str> = std::iter::once(source_name)
         .chain(mode.targets.iter().map(String::as_str))
         .collect();
@@ -394,7 +376,6 @@ pub(super) fn run_intents(
         report,
     );
 
-    // NOTE: `opened` keeps the order of `names`, so one walk pairs them.
     let mut open = opened.iter_mut().peekable();
     let mut sides: Vec<SendSide<'_>> = Vec::with_capacity(names.len());
     for &name in &names {
@@ -425,11 +406,9 @@ pub(super) fn run_intents(
 /// The endpoints among `names` whose session a queued intent needs, the
 /// drains picking their performer as they do.
 ///
-/// A collection intent or a calendar intent needs the endpoint it names,
-/// or, naming none (a producer predating pimdir STORAGE §15.6), the first
-/// endpoint of its namespace; an unnamed calendar intent may need any of
-/// them, the one binding its item being known only once they are open. A
-/// send needs the sending endpoint only when it sends natively.
+/// An intent needs the endpoint it names, else its namespace's first (a
+/// producer predating pimdir STORAGE §15.6); an unnamed calendar intent may
+/// need any. A send needs the sending endpoint only when it sends natively.
 pub(super) fn wanted_sides(
     store: &PimdirStore,
     account_config: &AccountConfig,

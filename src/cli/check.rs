@@ -54,9 +54,8 @@ use crate::{
 pub struct CheckCommand {}
 
 impl CheckCommand {
-    /// Opens every endpoint of every account the run covers and reports what
-    /// answered, then the accounts its stores hold that no configuration
-    /// names.
+    /// Opens every endpoint of the accounts the run covers and reports what
+    /// answered, then the store accounts no configuration names.
     pub fn execute(
         self,
         printer: &mut impl Printer,
@@ -83,9 +82,6 @@ impl CheckCommand {
         let failed = report.accounts.iter().any(CheckOutput::failed);
         printer.out(report)?;
 
-        // NOTE: the report names every endpoint's outcome, so a failed one
-        // ends the command with the partial-outcome status rather than a
-        // failure object.
         if failed {
             return Err(PartialOutcome::default().into());
         }
@@ -95,14 +91,14 @@ impl CheckCommand {
 }
 
 /// Opens every endpoint `account_config` declares and reports what answered.
+///
+/// Every credential is resolved up front, so a check costs one unlock per
+/// password command rather than one per endpoint.
 fn check_account(name: &str, account_config: &AccountConfig) -> Result<CheckOutput> {
     info!("checking account {name}");
 
     let mode = account_config.mode()?;
 
-    // NOTE: every credential at once, so a check costs one unlock per
-    // password command rather than one per endpoint. One that fails fails
-    // its endpoint's row alone.
     let account = Account::resolve(account_config)?;
 
     let endpoints = account_config.endpoints()?;
@@ -125,10 +121,11 @@ fn check_account(name: &str, account_config: &AccountConfig) -> Result<CheckOutp
     })
 }
 
-/// The accounts the stores `selected` uses hold collections of and no
-/// configured account sharing that store names, by store: what renaming an
-/// account's key leaves behind. Read without a lock and never written; a
-/// store that does not read is skipped with a warning.
+/// By store, the accounts holding collections there that no configured
+/// account sharing it names: what renaming an account's key leaves behind.
+///
+/// Read without a lock and never written; a store that does not read is
+/// skipped with a warning.
 fn orphans(config: &Config, selected: &[(String, AccountConfig)]) -> Vec<OrphanAccount> {
     let stores: BTreeSet<PathBuf> = selected
         .iter()
@@ -172,8 +169,9 @@ fn orphans(config: &Config, selected: &[(String, AccountConfig)]) -> Vec<OrphanA
     orphans
 }
 
-/// What a sync declares `endpoint` can do, from the configuration alone:
-/// every Annex B capability of its kind and the source-wide
+/// What a sync declares `endpoint` can do, from the configuration alone.
+///
+/// Every Annex B capability of its kind and the source-wide
 /// `calendar.component.vtodo` row, its provider's or a target's (pimdir
 /// STORAGE §15.6). A target is written to, never declared, as in a sync.
 fn declared(
@@ -205,9 +203,10 @@ fn declared(
     capabilities
 }
 
-/// Opens the endpoint and lists its collections with the role each states
-/// on the server, then opens its SMTP channel, if it declares one, up to
-/// authentication. A failure lands in the row, never ends the check.
+/// Opens the endpoint and lists its collections with the role each states,
+/// then opens its SMTP channel, if any, up to authentication.
+///
+/// A failure lands in the row, never ends the check.
 fn check_source(
     label: &str,
     config: &SourceConfig,
@@ -227,8 +226,6 @@ fn check_source(
         Err(err) => crate::notice::print(format!("Source {label} failed ({err:#})")),
     }
 
-    // NOTE: nothing is sent: the session is opened, upgraded and
-    // authenticated, then quit.
     #[cfg(feature = "smtp")]
     let smtp = source
         .as_ref()
@@ -530,8 +527,7 @@ mod tests {
     use crate::{cli::check::*, conflict::merger::SPAWNS};
 
     /// A store holding the collections of an account no configured account
-    /// sharing it names is reported, its collections left where they are:
-    /// renaming an account's key is all it takes to leave them behind.
+    /// sharing it names is reported, its collections left where they are.
     #[test]
     fn a_check_names_the_accounts_a_store_holds_and_no_configuration_names() {
         let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
@@ -582,9 +578,10 @@ mod tests {
     }
 
     /// The source-wide `calendar.component.vtodo` row a sync declares is
-    /// reported with the Annex B ones: a Google or Graph calendar source, and
-    /// a source copied to a Google target, take no task; a target lists
-    /// nothing.
+    /// reported with the Annex B ones.
+    ///
+    /// A Google or Graph calendar source, and a source copied to a Google
+    /// target, take no task; a target lists nothing.
     #[test]
     fn a_check_reports_the_calendars_that_take_no_tasks() {
         let declared = declared_by("gcal.auth.token.raw = \"token\"");

@@ -26,8 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::{config::mode::AccountMode, error::layout_error, sync::local};
 
 /// The current layout: source ids `<account>/<source>`, collection ids
-/// `<account>/<source>/<name>`, kind on the row, one sidecar entry per
-/// account.
+/// `<account>/<source>/<name>`, kind on the row, one entry per account.
 ///
 /// Layout 0 is the unnamespaced ancestor, layout 1 the store an earlier
 /// neverest kept per account; neither is read.
@@ -91,16 +90,17 @@ pub struct AccountState {
     /// Set once the user accepted the mode, so the refusal stops coming back.
     #[serde(default, skip_serializing_if = "is_false")]
     pub mode_accepted: bool,
-    /// The roles a source's listing does not carry, looked up when its
-    /// collection set last moved ([`crate::client::Client::lookup_roles`]),
-    /// by source.
+    /// The roles a source's listing does not carry, by source.
+    ///
+    /// Looked up when its collection set last moved
+    /// ([`crate::client::Client::lookup_roles`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub looked_up_roles: BTreeMap<String, LookedUpRoles>,
-    /// The calendars a source's last listing stated take no tasks (their
-    /// `supported-calendar-component-set` leaving VTODO out), as hub ids,
-    /// by source: declared `calendar.component.vtodo` `none` there (pimdir
-    /// STORAGE §15.6) by every declaration, the one before the drain opening
-    /// no endpoint.
+    /// The calendars, as hub ids by source, whose last listing left VTODO
+    /// out of their `supported-calendar-component-set`.
+    ///
+    /// Declared `calendar.component.vtodo` `none` (pimdir STORAGE §15.6) by
+    /// every declaration, the one before the drain opening no endpoint.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub taskless: BTreeMap<String, BTreeSet<String>>,
 }
@@ -118,11 +118,9 @@ pub struct LookedUpRoles {
 impl StoreState {
     /// Reads the sidecar, refusing a store this version cannot read.
     ///
-    /// A store directory holding a pimdir.db but no sidecar, a sidecar
-    /// beside its database, where an earlier neverest kept it, or one of an
-    /// earlier layout, was written by an earlier neverest: every collection
-    /// would be looked up under a key nothing wrote to, and the sync would
-    /// report a healthy run over an empty replica.
+    /// A store an earlier neverest wrote (a database and no sidecar, a
+    /// sidecar beside it, an earlier layout) would read every collection
+    /// under a key nothing wrote to: a healthy run over an empty replica.
     pub fn load(dir: &Path) -> Result<Self> {
         let path = Self::path(dir);
 
@@ -143,8 +141,8 @@ impl StoreState {
         let raw =
             fs::read_to_string(&path).with_context(|| format!("Read {} error", path.display()))?;
 
-        // NOTE: the layout first, an earlier sidecar being of another shape
-        // than this one parses.
+        /// The layout alone, read first: an earlier sidecar is of another
+        /// shape than [`StoreState`].
         #[derive(Deserialize)]
         struct Layout {
             #[serde(default)]
@@ -219,8 +217,7 @@ impl StoreState {
 
 impl AccountState {
     /// Refuses a run whose mode would discard what the previous one kept,
-    /// unless `accepted`, the run's `--accept-mode`, or an earlier run's,
-    /// says the user knows.
+    /// unless this run's `--accept-mode` (`accepted`) or an earlier one's.
     ///
     /// Only turning `one-way` on destroys anything, and the first run does it,
     /// so there is no second chance to ask; softer changes only warn. Other
@@ -297,10 +294,8 @@ mod tests {
         sync::{driver::create_store, state::*, submit::InFlight},
     };
 
-    /// A save replaces the sidecar whole, by a rename over it, rather than
-    /// rewriting it in place, where a crash leaves a torn file the next run
-    /// refuses: the file after a save is another one, and nothing is left
-    /// beside it.
+    /// A save renames a new sidecar over the old: rewritten in place, a crash
+    /// would leave a torn file the next run refuses.
     #[test]
     #[cfg(unix)]
     fn a_save_replaces_the_sidecar_whole() {
@@ -327,10 +322,8 @@ mod tests {
             .collect()
     }
 
-    /// The sidecar is the owner's own state: it is kept under the store's
-    /// local/, the one place pimdir leaves an owner in a store directory
-    /// (pimdir STORAGE §3), its user's alone, and nothing of neverest's
-    /// stands beside the store's files.
+    /// The sidecar sits under local/, the one place pimdir leaves its owner
+    /// in a store directory (pimdir STORAGE §3), and is its user's alone.
     #[test]
     #[cfg(unix)]
     fn the_sidecar_is_kept_under_local() {
@@ -345,9 +338,8 @@ mod tests {
         assert_eq!(mode, 0o600);
     }
 
-    /// A sidecar beside the database is where an earlier neverest kept it:
-    /// the store is refused as that neverest's, never read as one holding
-    /// no account.
+    /// A sidecar beside the database, where an earlier neverest kept it, is
+    /// refused as that neverest's, never read as a store of no account.
     #[test]
     fn a_sidecar_beside_the_database_is_refused_as_an_earlier_layout() {
         let dir = tempfile::tempdir().unwrap();
@@ -403,9 +395,8 @@ mod tests {
         assert_refused_as_earlier(StoreState::load(dir.path()).unwrap_err());
     }
 
-    /// A store created as `init` creates it, its sidecar written with its
-    /// database, reads as this layout, and an account stamped in it as
-    /// initialized; a send an earlier store had in flight is cleared.
+    /// A store created as `init` does, sidecar and database together, reads
+    /// as this layout; a send an earlier store had in flight is cleared.
     #[test]
     fn a_created_store_is_not_taken_for_an_earlier_one() {
         let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
@@ -487,7 +478,6 @@ mod tests {
             .to_string();
         assert!(err.contains("--accept-mode"), "got {err}");
 
-        // NOTE: the run the refusal names, which records the answer.
         state.check_mode(&mode(1, 1, true, false), true).unwrap();
     }
 

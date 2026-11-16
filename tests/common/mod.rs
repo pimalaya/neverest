@@ -1,3 +1,5 @@
+//! # Live suite helpers
+//!
 //! What the live suites share: tokens minted from the environment, a
 //! [`Replica`] (one neverest client with its own store) and the round trip
 //! every mutable-content backend runs ([`round_trip`]).
@@ -11,6 +13,7 @@
 //! delegation, inline in `GOOGLE_SERVICE_ACCOUNT_KEY` or at the path
 //! `GOOGLE_SERVICE_ACCOUNT_KEY_FILE`, acting as
 //! `GOOGLE_SERVICE_ACCOUNT_SUBJECT` (`google@pimalaya.org` by default).
+//!
 //! Microsoft tokens are app-only, minted from `MSGRAPH_TENANT_ID`,
 //! `MSGRAPH_CLIENT_ID` and `MSGRAPH_CLIENT_SECRET`, acting on
 //! `MSGRAPH_USER_ID` (`microsoft@pimalaya.onmicrosoft.com` by default).
@@ -80,9 +83,10 @@ const THROTTLED_RUNS: u32 = 3;
 /// within a minute or two, a longer stated wait is a quota no test outlasts.
 const THROTTLED_WAIT: Duration = Duration::from_secs(150);
 
-/// The wait until the last source a run's `--json` report names as
-/// `throttled` may send again, a second more, `None` when it names none or
-/// one that waits longer than [`THROTTLED_WAIT`].
+/// The wait until the last `throttled` source of a `--json` report may send.
+///
+/// A second more; `None` when the report names none or one that waits longer
+/// than [`THROTTLED_WAIT`].
 fn throttled_wait(report: &str) -> Option<Duration> {
     fn untils<'a>(value: &'a serde_json::Value, found: &mut Vec<&'a str>) {
         match value {
@@ -192,9 +196,9 @@ impl Replica {
         json_report(&result).to_string()
     }
 
-    /// Syncs the collection `key` under the scope from `since` (a date),
-    /// which must succeed with nothing left to decide, and answers its
-    /// report.
+    /// Syncs the collection `key` from `since` (a date), answering its report.
+    ///
+    /// The run must succeed with nothing left to decide.
     pub fn sync_since(&self, key: &str, since: &str) -> String {
         let (_, result) = self.run(
             &["sync", "-a", ACCOUNT, "-m", key, "--since", since, "--json"],
@@ -219,15 +223,11 @@ impl Replica {
         (code, stdout)
     }
 
-    /// Runs neverest as [`run`](Self::run) does, waiting out a provider
-    /// that throttled it, and answers its result line and how long it
-    /// waited.
+    /// Runs neverest as [`run`](Self::run), waiting out a throttling provider.
     ///
-    /// A run a provider throttled past what it waits itself ends incomplete
-    /// (4), naming the source and when it may send again, and a rerun picks
-    /// it up, as a supervisor's would: the test waits until then and runs
-    /// it again, [`THROTTLED_RUNS`] times at most, rather than failing on
-    /// Google's per-minute quotas. Any other incomplete run fails.
+    /// A throttled run ends incomplete (4) naming when it may send again; the
+    /// test reruns then, [`THROTTLED_RUNS`] times at most, as a supervisor
+    /// would (Google's per-minute quotas). Any other incomplete run fails.
     fn run_waiting(&self, args: &[&str], codes: &[i32]) -> (i32, String, Duration) {
         let mut waited = Duration::ZERO;
         let mut reruns = 0;
@@ -244,7 +244,6 @@ impl Replica {
 
             let code = output.status.code().unwrap_or(-1);
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            // NOTE: the last line, after the events a sync prints.
             let result = stdout.lines().last().unwrap_or_default().to_owned();
 
             if code == 4
@@ -276,18 +275,18 @@ impl Replica {
 
     /// Syncs until a run ends settled and `check` holds on the store.
     ///
-    /// A provider acknowledges a write before every read reflects it, and
-    /// may touch an item on its own (Exchange bumps an event's change key
-    /// after creating it), which parks a push until the next run merges it.
-    /// A wait out of a throttled run moves the deadline as far.
+    /// A provider acks a write before every read reflects it and may touch an
+    /// item itself (Exchange bumps a new event's change key), parking a push
+    /// until the next run; a throttled wait moves the deadline as far.
     pub fn sync_until(&self, key: &str, what: &str, check: impl FnMut(&Self) -> bool) {
         self.sync_until_with(key, what, &[], check);
     }
 
-    /// Syncs as [`sync_until`](Self::sync_until) does a collection whose
-    /// last member goes: a round listing it empty parks the absence (pimdir
-    /// SYNC §5), so each run confirms it with `--accept-absences`, as the
-    /// person who emptied it does.
+    /// Syncs as [`sync_until`](Self::sync_until) a collection losing its last
+    /// member.
+    ///
+    /// A round listing it empty parks the absence (pimdir SYNC §5), so each
+    /// run confirms it with `--accept-absences`, as the person emptying it.
     pub fn sync_until_emptied(&self, key: &str, what: &str, check: impl FnMut(&Self) -> bool) {
         self.sync_until_with(key, what, &["--accept-absences"], check);
     }
@@ -361,8 +360,9 @@ impl Replica {
         self.try_add(key, body, flags).expect("enqueue the action");
     }
 
-    /// Stages a creation as [`add`](Self::add) does, answering the store's
-    /// refusal (a capability the source declares `none`) where `add`
+    /// Stages a creation as [`add`](Self::add), answering a refusal instead.
+    ///
+    /// The store refuses a capability the source declares `none`, where `add`
     /// panics.
     pub fn try_add(&self, key: &str, body: &str, flags: &[&str]) -> Result<(), PimdirError> {
         self.try_enqueue_body(key, body, |hash| PimdirAction::Add {
@@ -443,10 +443,11 @@ impl Replica {
         report["intents"].as_array().cloned().unwrap_or_default()
     }
 
-    /// Syncs once as [`sync_intents`](Self::sync_intents) does, for an
-    /// intent removing the collection's last member (a cancelled meeting):
-    /// the run's round lists the collection empty, which parks unless the
-    /// run confirms it (pimdir SYNC §5), as the person cancelling does.
+    /// Syncs once as [`sync_intents`](Self::sync_intents), emptying the
+    /// collection.
+    ///
+    /// For an intent removing the last member (a cancelled meeting): the empty
+    /// listing parks unless the run confirms it (pimdir SYNC §5).
     pub fn sync_intents_emptied(&self, key: &str) -> Vec<serde_json::Value> {
         let args = [
             "sync",
@@ -462,10 +463,11 @@ impl Replica {
         report["intents"].as_array().cloned().unwrap_or_default()
     }
 
-    /// Syncs once, expecting an intent to park, a run that then waits for
-    /// a person (exit 3), and returns the report's `intents` entries. The
-    /// parked rows are then cancelled, as the person settling them does, so
-    /// the next run has nothing left to decide.
+    /// Syncs once, expecting an intent to park, and returns its `intents`.
+    ///
+    /// The run waits for a person (exit 3); the parked rows are then
+    /// cancelled, as the person settling them does, so the next run has
+    /// nothing left to decide.
     pub fn sync_parked_intents(&self, key: &str) -> Vec<serde_json::Value> {
         let (_, stdout) = self.run(&["sync", "-a", ACCOUNT, "-m", key, "--json"], &[3]);
         let report = json_report(&stdout);
@@ -537,10 +539,9 @@ fn known(flags: &[&str]) -> PimdirFlags {
 
 /// The round trip of a mutable-content backend over its collection `key`.
 ///
-/// `body(uid, marker)` renders the item. One replica adds it and the other
-/// pulls it, that one edits the body it pulled, as a frontend does, and the
-/// first pulls the edit. A fresh replica reads it in a full round, then the
-/// first removes it and the other sees it go.
+/// `body(uid, marker)` renders the item. One replica adds it, the other pulls
+/// and edits it, the first pulls the edit; a fresh replica reads it in a full
+/// round, then the first removes it and the other sees it go.
 pub fn round_trip(
     backend: &str,
     extra: &str,
@@ -587,8 +588,9 @@ pub fn round_trip(
     });
 }
 
-/// Runs `body`, then `cleanup` whichever way `body` went, and only then
-/// re-raises a panic `body` may have raised, so a failed run leaves nothing
+/// Runs `body`, then `cleanup` whichever way `body` went.
+///
+/// Only then is a panic of `body` re-raised, so a failed run leaves nothing
 /// behind on the live account.
 pub fn with_cleanup(body: impl FnOnce(), cleanup: impl FnOnce()) {
     let outcome = panic::catch_unwind(AssertUnwindSafe(body));
@@ -750,9 +752,10 @@ pub fn flags(item: &PimdirItem) -> BTreeSet<String> {
     item.flags.known().cloned().unwrap_or_default()
 }
 
-/// The `pimdir` operator CLI built from the io-pimdir Cargo.lock locks, which
-/// tests/pimdir.sh installs: one built from a checkout may read the store
-/// another way than the library neverest writes it with.
+/// The `pimdir` operator CLI tests/pimdir.sh builds at the locked io-pimdir.
+///
+/// One built from a checkout may read the store another way than the library
+/// neverest writes it with.
 pub fn pimdir_cli() -> Command {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let lock = fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");

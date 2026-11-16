@@ -4,32 +4,16 @@
 //! to act on, printed as `code` beside the message under `--json`.
 //!
 //! The message stays for humans and may be reworded at any time; the code
-//! is the contract. A failure with no code prints as before, with no `code`
-//! field. The mechanism (`CodedError`, `code_of`, the report) lives in
-//! `pimalaya_cli::error`; only the vocabulary is neverest's.
+//! is the contract. The mechanism (`CodedError`, `code_of`, the report)
+//! lives in `pimalaya_cli::error`; only the vocabulary is neverest's.
 //!
-//! A store failure takes the code io-pimdir gives it (`PimdirError::code`),
-//! spelled the same, so a caller reading every pimdir app reads one
-//! vocabulary. Those neverest cannot meet are left out: `index-busy`, which
-//! the indexer answers as busy; `index-missing`, `index-outdated` and
-//! `index-query-only`, which answer a query client, which neverest never
-//! is; `index-zone-unknown`, neverest stating only a zone its time zone
-//! database named; `cutoff-invalid`, neverest writing its purge cutoff as
-//! the store stamps; `scope-invalid`, neverest writing a scope bound in the
-//! one shape the store holds; `store-reset`, neverest naming a queue row by
-//! its bare id, never by a handle another store answered; `action-not-intent`,
-//! neverest parking unconfirmed a `submit` alone; `backup-occupied`, neverest
-//! taking no backup; and `conflict-unread`, which the one-way overwrite
-//! answers by fetching the unread body, an item still unread after it
-//! staying parked.
+//! A store failure takes io-pimdir's code, spelled the same, but the codes
+//! neverest cannot meet, listed in cairn/spec/sync.md. One store code is
+//! neverest's own, `store-layout`, which no pimdir profile refuses.
 //!
-//! One store code is neverest's own, `store-layout`: a store laid out as
-//! an earlier neverest kept it, which no pimdir profile refuses.
-//!
-//! A server's refusal takes a code of the vocabulary Himalaya shares,
-//! `permission-denied`, `quota-exceeded`, `rate-limited` and
-//! `recipient-refused`, read from the typed error of the protocol that
-//! answered it. A report row failing carries it as a [`Failure`].
+//! A server's refusal takes a code of the vocabulary Himalaya shares, read
+//! from the typed error of the protocol that answered it. A report row
+//! failing carries it as a [`Failure`].
 
 use anyhow::Error;
 use io_pimdir::client::PimdirError;
@@ -54,32 +38,37 @@ use serde::Serialize;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum ErrorCode {
-    /// The server refused the request to the account: an HTTP 403 that is
-    /// no rate limit and, on DAV, names no precondition but
-    /// `need-privileges` (RFC 3744 §7.1.1), or an IMAP `NOPERM` (RFC 5530).
+    /// The server refused the request to the account.
+    ///
+    /// An HTTP 403 that is no rate limit and, on DAV, names no precondition
+    /// but `need-privileges` (RFC 3744 §7.1.1), or an IMAP `NOPERM` (RFC
+    /// 5530).
     PermissionDenied,
-    /// The write or the send would exceed the account's quota: an HTTP 507,
-    /// a DAV `quota-not-exceeded` (RFC 4331 §6), an IMAP `OVERQUOTA` (RFC
-    /// 9208), Graph's `ErrorQuotaExceeded`, an SMTP reply naming a sending
-    /// limit.
+    /// The write or the send would exceed the account's quota.
+    ///
+    /// An HTTP 507, a DAV `quota-not-exceeded` (RFC 4331 §6), an IMAP
+    /// `OVERQUOTA` (RFC 9208), Graph's `ErrorQuotaExceeded`, an SMTP reply
+    /// naming a sending limit.
     QuotaExceeded,
     /// The server still throttled the request past the waits neverest
     /// takes: an HTTP 429, or a Google rate limit or daily quota.
     RateLimited,
-    /// The SMTP server refused a recipient of a send (RFC 5321 §3.3), so
-    /// the message reached nobody: io-smtp offers none after the first
+    /// The SMTP server refused a recipient of a send (RFC 5321 §3.3).
+    ///
+    /// The message reached nobody: io-smtp offers none after the first
     /// refused.
     RecipientRefused,
-    /// The store is of another format version than neverest's (pimdir
-    /// STORAGE §4.2, §6), never migrated: one an earlier neverest wrote is
-    /// synced by that neverest until nothing is queued, then its directory
-    /// moved away; one a newer neverest wrote asks for an upgrade.
+    /// The store is of another format version (pimdir STORAGE §4.2, §6).
+    ///
+    /// Never migrated: one an earlier neverest wrote is synced by that
+    /// neverest until nothing is queued, then its directory moved away; one
+    /// a newer neverest wrote asks for an upgrade.
     StoreVersion,
-    /// The store is laid out as an earlier neverest kept it, never
-    /// migrated: one store per account under the neverest directory, a
-    /// sidecar of an earlier shape, or a database with none. Each such
-    /// store is synced by that neverest until nothing is queued, then moved
-    /// away.
+    /// The store is laid out as an earlier neverest kept it, never migrated.
+    ///
+    /// One store per account, a sidecar of an earlier shape, or a database
+    /// with none: each is synced by that neverest until nothing is queued,
+    /// then moved away.
     StoreLayout,
     /// The store has no schema yet: a sync creates it.
     StoreUncreated,
@@ -106,9 +95,10 @@ pub enum ErrorCode {
     /// Another user can read or write the store, or a link stands where a
     /// lock file belongs (pimdir STORAGE §18): restrict it to its user.
     StoreExposed,
-    /// A lock file of the store was removed or replaced while neverest
-    /// held it (pimdir STORAGE §8), so another process may own the store:
-    /// nothing more was written, and the next run takes the lock anew.
+    /// A store lock file was replaced while held (pimdir STORAGE §8).
+    ///
+    /// Another process may own the store: nothing more was written, and the
+    /// next run takes the lock anew.
     LockReplaced,
     /// A queued action's payload is malformed (pimdir STORAGE §15.3): its
     /// producer wrote what no schema reads.
@@ -122,9 +112,10 @@ pub enum ErrorCode {
     /// The SQLite neverest was built with has no full-text search: a
     /// `vendored` build bundles one that has.
     IndexFts5Missing,
-    /// The search index is of another shape, or of a later version, than
-    /// neverest's (pimdir SEARCH §2), left as it is: one of its shape at an
-    /// earlier version is rebuilt instead.
+    /// The search index is of another shape or a later version (SEARCH §2).
+    ///
+    /// It is left as it is: one of its shape at an earlier version is
+    /// rebuilt instead.
     IndexVersion,
     /// No account has a name `-a` gives.
     AccountMissing,
@@ -276,24 +267,18 @@ pub fn code(err: &Error) -> Option<ErrorCode> {
     code_of(err).or_else(|| refusal_code(err))
 }
 
-/// `err` as the report reads it: the server refusal's code under it
-/// carried by an innermost coded error, its messages kept (see
-/// [`with_code`]).
+/// `err` as the report reads it: the server refusal's code under it carried
+/// by an innermost coded error, its messages kept (see [`with_code`]).
 pub fn coded(err: Error) -> Error {
     with_code(err, refusal_code)
 }
 
-/// The reason a server refused a change for good, as it stands, `err`'s
-/// messages joined, `None` when nothing in its chain says so (pimdir SYNC
-/// §4): the push is then rejected, the change pushed again by the next run.
+/// The reason a server refused a change for good, `err`'s messages joined,
+/// `None` when nothing in its chain says so (pimdir SYNC §4).
 ///
-/// A change is refused by a coded `unsupported` (a rule the change breaks,
-/// which neverest states before any request: Graph's append outside
-/// Drafts, an override a provider takes through no instance) or by a
-/// protocol's refusal naming the request ([`names_the_request`], an IMAP
-/// `NO` naming the change). A quota exceeded or a rate limit is never
-/// one: the account's state, not the change's, which the same change
-/// outlives, and the engine would hold it for good.
+/// A coded `unsupported` or a refusal naming the request refuses it, else
+/// the next run pushes it again. A quota or a rate limit never does: the
+/// account's state, not the change's, which a refusal would hold for good.
 pub fn refusal(err: &Error) -> Option<String> {
     if matches!(
         code(err),
@@ -324,9 +309,10 @@ pub fn refusal(err: &Error) -> Option<String> {
     refused.then(|| format!("{err:#}"))
 }
 
-/// Whether an HTTP status names the request itself (pimdir SYNC §4): any
-/// from 400 to 499 but those naming the credentials (401, 407), a state
-/// that passes (408, 423, 425, 429) or a stale base (409, 412).
+/// Whether an HTTP status names the request itself (pimdir SYNC §4).
+///
+/// Any from 400 to 499 but those naming the credentials (401, 407), a
+/// state that passes (408, 423, 425, 429) or a stale base (409, 412).
 #[cfg_attr(
     not(any(
         feature = "carddav",
@@ -349,9 +335,8 @@ type Refuses = fn(&(dyn std::error::Error + 'static)) -> bool;
 /// A reader of one protocol's typed errors, coding the refusals it knows.
 type Refusal = fn(&(dyn std::error::Error + 'static)) -> Option<ErrorCode>;
 
-/// The code of the server refusal `err`'s chain carries, read from the
-/// typed error of the protocol that answered it: the first cause a
-/// protocol codes.
+/// The code of the server refusal `err`'s chain carries: the first cause
+/// the typed error of the protocol that answered it codes.
 fn refusal_code(err: &Error) -> Option<ErrorCode> {
     let refusals: &[Refusal] = &[
         #[cfg(any(feature = "carddav", feature = "caldav"))]
@@ -396,9 +381,8 @@ mod tests {
         assert!(format!("{err:#}").contains("write lock"), "{err:#}");
     }
 
-    /// A status from 400 to 499 names the request, but those naming the
-    /// credentials, a passing state or a stale base (pimdir SYNC §4); a
-    /// server failure never does.
+    /// A 4xx names the request but for credentials, a passing state or a
+    /// stale base (pimdir SYNC §4); a server failure never does.
     #[test]
     fn a_status_names_the_request_but_a_few() {
         for status in [400, 403, 404, 405, 410, 413, 415, 422] {
@@ -411,9 +395,8 @@ mod tests {
         }
     }
 
-    /// A rule the change breaks, coded `unsupported`, refuses it as it
-    /// stands, under any context; a quota or a rate limit never does, and
-    /// an uncoded failure cannot tell.
+    /// A coded `unsupported` refuses under any context; a quota or a rate
+    /// limit never does, and an uncoded failure cannot tell.
     #[test]
     fn an_unsupported_change_is_refused_and_a_quota_is_not() {
         let unsupported = Error::new(CodedError::new(

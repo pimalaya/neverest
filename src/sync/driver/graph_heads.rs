@@ -1,10 +1,11 @@
 //! # Graph round heads
 //!
-//! Band heads of a Graph mail round (pimdir SYNC §4, §5), through the
-//! driver over a scripted Graph: a run resuming an open round lists what
-//! Graph received since two days before the round began, before its next
-//! page, and the round's last page lists that again after the delta link,
-//! so an arrival shows at once and survives the round's close.
+//! Band heads of a Graph mail round (pimdir SYNC §4, §5), through the driver
+//! over a scripted Graph.
+//!
+//! A run resuming an open round first lists what Graph received since two
+//! days before the round began, and the round's last page lists that again
+//! after the delta link, so an arrival shows at once and survives the close.
 
 use std::{
     collections::BTreeSet,
@@ -139,9 +140,10 @@ fn arrivals(ids: &[&str]) -> Step {
     Step::ok(serde_json::json!({ "value": value }))
 }
 
-/// One sync of the inbox over a fresh run whose one connection answers
-/// `script`, pausing before the round's next page when `pause`: whether
-/// it paused, its rests and the request lines it sent.
+/// One sync of the inbox over a run whose one connection answers `script`.
+///
+/// Pauses before the round's next page when `pause`; returns whether it
+/// paused, its rests and the request lines it sent.
 fn sync(
     store: &mut PimdirSourceStore,
     pause: bool,
@@ -224,10 +226,11 @@ fn head_filter(store: &PimdirSourceStore) -> String {
     format!("%24filter=receivedDateTime+ge+{}", from.replace(':', "%3A"))
 }
 
-/// A message arriving while the round is open lands at the next run,
-/// before the round's next page, from the head; the round's last page
-/// lists the head again after the delta link, so it survives the
-/// round's close (pimdir vector 65).
+/// An arrival while the round is open lands next run from the head, before
+/// the round's next page (pimdir vector 65).
+///
+/// The round's last page lists the head again after the delta link, so the
+/// arrival survives the round's close.
 #[test]
 fn a_band_head_lands_an_arrival_the_round_keeps() {
     let dir = tempfile::tempdir().unwrap();
@@ -280,16 +283,13 @@ fn a_band_head_lands_an_arrival_the_round_keeps() {
     );
 }
 
-/// What a head named and Graph no longer holds when the round's last
-/// page lists the head again is found absent when the round closes;
-/// what it still holds is kept (pimdir vector 66).
+/// What a head named and Graph no longer holds at the round's last page is
+/// found absent at the close, the rest kept (pimdir vector 66).
 #[test]
 fn the_last_page_decides_what_a_band_head_named() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = first_page_landed(dir.path());
 
-    // NOTE: the run stops after the head, the round's next page left
-    // for the next run.
     let (paused, _, requests) = sync(&mut store, true, vec![arrivals(&["m9", "m8"])]);
     assert!(paused);
     assert_eq!(requests.len(), 1, "the head alone");

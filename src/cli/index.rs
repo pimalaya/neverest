@@ -77,11 +77,12 @@ pub fn run(
 
 /// Builds the index of the store at `dir`, which `accounts` use, until it
 /// is current, or until another indexer is found holding it.
+///
+/// Takes no sync.lock: the build may take long, and a sync meeting it
+/// reports the index busy rather than waiting for it.
 fn build(dir: &Path, accounts: Vec<String>) -> Result<IndexOutput> {
     let store = dir.display();
 
-    // NOTE: no sync.lock: the build may take long, and a sync meeting it
-    // reports the index busy rather than waiting for it.
     crate::notice::print(format!("Building the search index of {store}"));
     let mut built = IndexRefresh::default();
     let mut index = match PimdirIndex::open(dir) {

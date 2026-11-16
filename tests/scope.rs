@@ -1,24 +1,17 @@
+//! # Scope
+//!
 //! End-to-end scoped mail sync against a local Stalwart IMAP server (:143),
-//! spawned via `tests/stalwart.sh`. Ignored by default.
+//! spawned via tests/stalwart.sh. Ignored by default.
 //!
 //! A scope bounds a mail collection by the `Date` header (pimdir SYNC §5):
 //! the server narrows the listing with `SENTSINCE`, a day of margin below
-//! the floor, and the `Date` decides. Every message here is appended today,
-//! so its arrival says nothing: one dated 2020, one dated in the future, one
-//! with no `Date` at all. Steps:
-//!   1. Sync under `item.filter.since = "30d"`: the recent, the future and
-//!      the undated messages are stored, the 2020 one is not.
-//!   2. Widen with `--since 2019-01-01`: the 2020 message comes, the band
-//!      below the coverage alone being listed.
-//!   3. Narrow back: nothing is deleted, neither in the store nor on the
-//!      server, absence meaning deleted only in scope.
-//!   4. Delete the 2020 message on the server: its removal applies, out of
-//!      scope as it is, and nothing else moves.
-//!   5. A round of three pages killed after its first page resumes and
-//!      lands every message once.
-//!   6. A round of four pages lands its first bodies before its last page
-//!      lists; killed then, it keeps its pages and bodies, and the next run
-//!      fetches only the rest.
+//! the floor, and the `Date` decides. Messages are appended today, so only
+//! their `Date` (2020, the future, none) tells:
+//!
+//! - under `item.filter.since = "30d"` all but the 2020 one are stored;
+//! - `--since 2019-01-01` brings it, the band below the coverage alone listed;
+//! - narrowing back deletes nothing, absence meaning deleted only in scope;
+//! - its delete on the server applies, out of scope as it is.
 //!
 //! ```sh
 //! ./tests/stalwart.sh
@@ -216,10 +209,11 @@ fn an_interrupted_round_resumes_and_lands_every_message_once() {
 /// Four pages of 500 UIDs: a page's bodies land while later pages list.
 const LARGE: usize = 1_600;
 
-/// A page's bodies download as soon as it lands, on the connections the
-/// listing leaves idle, so the first mail is readable while the round still
-/// lists; a run stopped then keeps every page and every body it landed, and
-/// the next fetches only the rest.
+/// A page's bodies land before its round closes.
+///
+/// They download on the connections the listing leaves idle, so the first
+/// mail is readable while the round lists; a run stopped then keeps every
+/// page and body it landed, and the next fetches only the rest.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
 fn a_page_s_bodies_land_before_its_round_closes() {

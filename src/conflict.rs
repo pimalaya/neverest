@@ -80,9 +80,10 @@ pub struct Conflict {
 /// person some minutes to make, which is what the guard exists to notice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Applied {
-    /// The chosen body was staged as an edit and drained, so the item is no
-    /// longer conflicted. Carries the capabilities a source supports in
-    /// part that the edit relies on.
+    /// The chosen body was staged as an edit and drained, the item settled.
+    ///
+    /// Carries the capabilities a source supports in part that the edit
+    /// relies on.
     Resolved(Vec<PartialCapability>),
     /// The store has observed a newer remote revision than the decision was
     /// computed against, so nothing was pushed. Carries what it holds now.
@@ -154,9 +155,9 @@ impl Conflict {
 
     /// Applies `body` as the item's content, which settles the divergence.
     ///
-    /// A decision left in an editor can be about a version nobody holds any
-    /// more, so the store is read again first, under the caller's lock, and a
-    /// revision that moved is reported rather than pushed over what arrived.
+    /// A decision left in an editor may be stale, so the store is read again
+    /// under the caller's lock and a moved revision reported, not pushed. A
+    /// body no parser reads is refused before it reaches the tree.
     pub fn apply(&self, dir: &Path, account: &str, body: &[u8]) -> Result<Applied> {
         let mut store = PimdirStore::open(dir)
             .map_err(pimdir_error)
@@ -180,19 +181,12 @@ impl Conflict {
 
         let kind = self.kind()?;
 
-        // NOTE: before the blob write, so a body no parser reads never
-        // reaches the tree at all. The automatic merge refuses the same
-        // thing with `Merged::Unmergeable`.
         kind.validate_body(body, &self.link_id)
             .with_context(|| format!("Settle conflict {} in {}", self.id, self.collection))?;
 
         let mut producer = PimdirProducer::open(dir, env!("CARGO_PKG_NAME"))
             .map_err(pimdir_error)
             .with_context(|| format!("Stage the resolution of conflict {}", self.id))?;
-        // NOTE: the decision was made over the local side, so an edit that
-        // replaced it since parks rather than being dropped unmerged. It
-        // resolves the divergence it was shown, the remote side, and no other
-        // (pimdir STORAGE §15.3): a conflict the person never saw parks it.
         let enqueued = producer
             .enqueue_with_body(&self.collection, body, |object| PimdirAction::Update {
                 seq: self.id,
@@ -414,10 +408,11 @@ mod tests {
         store
     }
 
-    /// A decision computed against a revision the store has moved past would
-    /// overwrite whatever arrived meanwhile, so it is reported as moved and
-    /// changes nothing. The same decision against the revision the store does
-    /// hold settles the item, so the guard discriminates.
+    /// A decision against a revision the store moved past is reported as
+    /// moved and changes nothing.
+    ///
+    /// It would overwrite whatever arrived meanwhile. The same decision
+    /// against the revision held settles the item: the guard discriminates.
     #[cfg(any(
         feature = "carddav",
         feature = "caldav",
@@ -467,10 +462,11 @@ mod tests {
         assert!(list(&store, ACCOUNT).unwrap().is_empty());
     }
 
-    /// A divergence whose remote body no run has fetched yet is a listing
-    /// entry and not a decision. Every conflict passes through that state,
-    /// and reading it as resolvable would hand `--prefer-remote` a side that
-    /// is not there.
+    /// A divergence whose remote body no run has fetched yet is listed, not
+    /// resolvable.
+    ///
+    /// Every conflict passes through that state, and reading it as
+    /// resolvable would hand `--prefer-remote` a side that is not there.
     #[test]
     fn a_conflict_waiting_for_its_diverging_body_is_listed_and_not_resolvable() {
         use crate::conflict::report::ConflictSummary;
@@ -507,8 +503,7 @@ mod tests {
     }
 
     /// A listed divergence prints the item's public id as a string, as
-    /// himalaya, cardamum and calendula print a store id, where it printed
-    /// an integer.
+    /// himalaya, cardamum and calendula print a store id.
     #[test]
     fn a_listed_conflict_prints_its_id_as_a_string() {
         use crate::conflict::report::ConflictSummary;

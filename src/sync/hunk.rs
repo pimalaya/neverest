@@ -115,9 +115,8 @@ pub enum ItemHunk {
         source_id: String,
         /// The flags the copy is written with.
         flags: BTreeSet<Flag>,
-        /// The collection the server copies from on `target_side`, for a
-        /// move or a copy a frontend staged; `None` for a body uploaded from
-        /// `source_side`.
+        /// The collection `target_side` copies from, for a frontend's staged
+        /// move or copy; `None` for a body uploaded from `source_side`.
         origin: Option<String>,
         /// The cross-side alignment key, never serialized.
         #[serde(skip)]

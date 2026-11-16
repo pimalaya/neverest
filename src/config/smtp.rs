@@ -8,11 +8,8 @@ use crate::config::{is_default, proxy::ProxyConfig, sasl::SaslConfig, tls::TlsCo
 
 /// The SMTP server a source's queued sends flush through.
 ///
-/// The shape mirrors [`ImapConfig`] field for field, submission being the
-/// other half of the same mail account: a bare authority or a URL, the same
-/// TLS block, and a `sasl` table naming one mechanism.
-///
-/// [`ImapConfig`]: crate::config::imap::ImapConfig
+/// It mirrors [`ImapConfig`](crate::config::imap::ImapConfig) field for
+/// field, submission being the other half of the same mail account.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct SmtpConfig {

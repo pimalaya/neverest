@@ -3,10 +3,11 @@
 //! What each source declares it can do (pimdir STORAGE §15.6), derived
 //! from its backend and its configured rights alone, so a declaration
 //! needs no network. JMAP sources stay undeclared, which gates nothing.
+//!
 //! A calendar taking no tasks (`calendar.component.vtodo`) is the provider's
 //! when it keeps tasks apart (Google, Graph), from the configuration too, and
-//! otherwise a fact a CalDAV server states, which comes from the source's
-//! last listing, kept in the sidecar.
+//! otherwise a fact a CalDAV server states, read from the source's last
+//! listing kept in the sidecar.
 
 use std::collections::BTreeSet;
 
@@ -62,9 +63,8 @@ const ONE_WAY_RENAME: &str =
 const PAIRED_RENAME: &str =
     "the pair mirrors its collections by name, so a rename would read as a delete and a create";
 
-/// The intents a source performs through its provider on what it holds:
-/// an item it binds, or a collection it syncs to create one under or
-/// beside, or to rename or delete.
+/// The intents a source performs on what it holds: an item it binds, or a
+/// collection it syncs to create one under or beside, rename or delete.
 fn held_only(name: &str) -> bool {
     matches!(
         name,
@@ -81,14 +81,9 @@ fn held_only(name: &str) -> bool {
 /// The declaration of one source, every capability of its kind included,
 /// `none` ones with their reason; empty for a source left undeclared.
 ///
-/// `collections` are the store collections the source syncs. An intent the
-/// source performs through its provider's own verbs reaches only what it
-/// holds, so it is declared on each of them and `none` source-wide
-/// (pimdir STORAGE §15.6 Implementations). `fixed` are those of them
-/// stating a role (an inbox, a system folder or label, a default calendar
-/// or address book), which the provider keeps: a rename or a delete is
-/// `none` there. `paired` is whether the account mirrors the source onto
-/// targets.
+/// An intent on what it holds is `none` source-wide and declared on each of
+/// `collections` (pimdir STORAGE §15.6), but a rename or delete on `fixed`
+/// ones, whose role the provider keeps. `paired`: mirrored onto targets.
 pub fn declaration(
     source: &SourceConfig,
     one_way: bool,
@@ -123,11 +118,11 @@ pub fn declaration(
 }
 
 /// A Graph mail source's `mail.message.add` by collection (pimdir STORAGE
-/// §15.6): Graph creates every MIME message as a draft, so an add lands in
-/// the folder stating the drafts role alone. Where its rights allow an add,
-/// the source-wide row reads `none` and each of `drafts` takes a `full` row
-/// of its own, so a frontend adding elsewhere is refused at enqueue rather
-/// than rejected by every sync. Any other source is left as it is.
+/// §15.6): Graph creates every MIME message as a draft.
+///
+/// Where its rights allow an add, the source-wide row reads `none` and each
+/// of `drafts` takes a `full` row, so an add elsewhere is refused at enqueue
+/// rather than rejected by every sync. Any other source is left as it is.
 pub fn drafts_only(
     source: &SourceConfig,
     capabilities: &mut Vec<PimdirCapability>,
@@ -153,11 +148,11 @@ pub fn drafts_only(
     }));
 }
 
-/// The `calendar.component.vtodo` rows of one source (pimdir STORAGE §15.6):
-/// `none` on each of `collections`, the store collections it syncs, that its
-/// last listing or the last listing of a target paired with it stated take no
-/// tasks (`taskless`). Nothing elsewhere: a collection with no row refuses no
-/// task.
+/// The `calendar.component.vtodo` rows of one source (pimdir STORAGE §15.6).
+///
+/// `none` on each of `collections` its last listing, or that of a paired
+/// target, stated takes no tasks (`taskless`); no row elsewhere, so a
+/// collection with no row refuses no task.
 pub fn vtodo(collections: &[String], taskless: &BTreeSet<String>) -> Vec<PimdirCapability> {
     collections
         .iter()
@@ -171,9 +166,8 @@ pub fn vtodo(collections: &[String], taskless: &BTreeSet<String>) -> Vec<PimdirC
         .collect()
 }
 
-/// Why a source's provider keeps tasks out of its calendars, `None` for
-/// one whose calendars may take them: Google Calendar and Graph store
-/// events alone, their tasks living behind another API.
+/// Why a source's provider keeps tasks out of its calendars, `None` if not:
+/// Google Calendar and Graph store events alone, tasks behind another API.
 fn keeps_tasks_apart(source: &SourceConfig) -> Option<&'static str> {
     match source.backend {
         SourceBackendConfig::Gcal(_) => Some(GCAL_NO_VTODO),
@@ -183,10 +177,11 @@ fn keeps_tasks_apart(source: &SourceConfig) -> Option<&'static str> {
 }
 
 /// The source-wide `calendar.component.vtodo` row of one source (pimdir
-/// STORAGE §15.6), from the configuration alone: `none` where its provider
-/// keeps tasks apart, or the provider of one of `targets`, by name, which
-/// every calendar of the source is copied to. `None` elsewhere, and for a
-/// source syncing no calendar (an undeclared JMAP one among them).
+/// STORAGE §15.6), from the configuration alone.
+///
+/// `none` where its provider keeps tasks apart, or that of one of `targets`
+/// its calendars are copied to; `None` elsewhere, and for a source syncing
+/// no calendar (an undeclared JMAP one among them).
 pub fn vtodo_wide(
     source: &SourceConfig,
     targets: &[(&str, &SourceConfig)],
@@ -217,15 +212,9 @@ pub fn vtodo_wide(
 /// What one source can do, a row per capability of its kind, from its
 /// backend and its rights alone; empty for a source left undeclared.
 ///
-/// An intent performed on what the source holds reads as it does there,
-/// where [`declaration`] splits it into a `none` source-wide row and one
-/// row per collection: this is what a check reports.
-///
-/// A Gmail source also states `mail.flags.important` and `mail.flags.junk`,
-/// which Gmail carries as labels of their own rather than as keywords; a
-/// source stating none has them read under `mail.flags.keywords` (pimdir
-/// STORAGE Annex B.1). `paired` is whether the account mirrors the source
-/// onto targets.
+/// Unlike [`declaration`], an intent on what the source holds is one row,
+/// as a check reports it. Gmail adds `mail.flags.important` and
+/// `mail.flags.junk`, labels rather than keywords (pimdir STORAGE Annex B.1).
 pub fn supports(source: &SourceConfig, one_way: bool, paired: bool) -> Vec<SupportRow> {
     let flags: &[&str] = match &source.backend {
         SourceBackendConfig::Gmail(_) => &[MAIL_FLAGS_IMPORTANT, MAIL_FLAGS_JUNK],
@@ -652,8 +641,6 @@ mod tests {
             assert_eq!(row.support, PimdirSupport::None);
             assert!(row.detail.as_deref().unwrap().contains("RFC 6638"));
         }
-        // NOTE: a calendar is created, renamed and deleted on the server, the
-        // only intents it takes on what it holds.
         assert!(
             declaration
                 .iter()
@@ -763,7 +750,6 @@ mod tests {
             PimdirSupport::Full
         );
 
-        // NOTE: what a check reports, as the source does it where it holds.
         let supports = supports(&imap, false, false);
         let create = supports
             .iter()
@@ -796,8 +782,9 @@ mod tests {
     }
 
     /// A rename is a write: a one-way account declares it `none` unless its
-    /// source sets `collection.rename = true`, and a two-way one declares
-    /// it unless the source sets it false (owner ruling D14, 2026-11-15).
+    /// source sets `collection.rename = true`, a two-way one unless false.
+    ///
+    /// Owner ruling D14, 2026-11-15.
     #[test]
     fn a_rename_follows_its_switch_and_a_one_way_account_is_off() {
         let imap = |rename: &str| {
@@ -812,8 +799,6 @@ mod tests {
             )
         };
         let collections = ["imap/Work".to_string()];
-        // NOTE: a rename the source performs is declared on each collection
-        // it holds; refused, by the source-wide row alone.
         let renames = |source: &SourceConfig, one_way| {
             let declaration = declaration(source, one_way, false, &collections, &BTreeSet::new());
             let renaming = |collection: Option<&str>| {
@@ -872,8 +857,9 @@ mod tests {
         );
     }
     /// Google and Graph keep tasks apart, so their calendars, and those a
-    /// source copies to them, take none; CalDAV says so per calendar, and a
-    /// source of another kind gets no row.
+    /// source copies to them, take none.
+    ///
+    /// CalDAV says so per calendar, and a source of another kind gets no row.
     #[test]
     fn a_provider_keeping_tasks_apart_declares_none_source_wide() {
         let gcal_row = vtodo_wide(&gcal(), &[]).unwrap();
@@ -935,11 +921,12 @@ mod tests {
             let projects = row(&declaration, name, Some("imap/Projects"));
             assert_eq!(projects.support, PimdirSupport::Full);
         }
-        // NOTE: a create goes under the inbox as under any collection.
         let create = row(&declaration, COLLECTION_CREATE, Some("imap/INBOX"));
         assert_eq!(create.support, PimdirSupport::Full);
     }
 
+    /// A delete is asked for, never derived, so a one-way account granting it
+    /// declares it; a rename there has its own switch, off unless set.
     #[test]
     fn a_delete_is_declared_only_where_collection_delete_is_granted() {
         let imap = source(
@@ -957,9 +944,6 @@ mod tests {
             Some("collection.delete is disabled")
         );
         assert_eq!(row(COLLECTION_RENAME).1, PimdirSupport::Full);
-        // NOTE: a delete is asked for, never derived, so a one-way account
-        // granting it declares it; a rename there has its own switch, off
-        // unless set.
         let one_way = supports(&imap_deleting(), true, false);
         let row = |name: &str| one_way.iter().find(|row| row.0 == name).unwrap();
         assert_eq!(row(COLLECTION_DELETE).1, PimdirSupport::Full);

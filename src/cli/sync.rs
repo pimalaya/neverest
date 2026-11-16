@@ -276,6 +276,10 @@ pub struct SyncCommand {
 impl SyncCommand {
     /// Reconciles every account the run covers, or plans them under
     /// `--dry-run`.
+    ///
+    /// An account failing validation fails the run before anything runs.
+    /// Every store's lock is taken first, in path order, so two runs over
+    /// several stores never wait on each other crosswise.
     pub fn execute(
         self,
         printer: &mut (impl Printer + Send),
@@ -316,8 +320,6 @@ impl SyncCommand {
             }
         }
 
-        // NOTE: the configuration is one document, so an account it does
-        // not validate fails the run before anything does.
         let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
         for (name, account_config) in selected {
             account_config
@@ -336,8 +338,6 @@ impl SyncCommand {
             .map(|(name, _)| name.clone())
             .collect();
 
-        // NOTE: every store's lock before any account runs, in path order, so
-        // two runs over several stores never wait on each other crosswise.
         let mut locks = Vec::new();
         let mut runnable = Vec::new();
         for (dir, accounts) in stores {
@@ -377,14 +377,10 @@ impl SyncCommand {
                 .with_context(|| format!("Reset account {name}"))?;
         }
 
-        // NOTE: the driver reports from its worker threads, which share the
-        // printer. A line that cannot be printed stops no sync.
         let printer = Mutex::new(printer);
         let json = printer.lock().unwrap().is_json();
         let total = order.len();
 
-        // NOTE: from here a first SIGINT or SIGTERM stops the run between
-        // collections and accounts, which then prints what it did.
         crate::sync::install_shutdown()?;
 
         for (dir, accounts) in runnable {
@@ -451,7 +447,6 @@ impl SyncCommand {
             ..SyncRunOutput::default()
         };
 
-        // NOTE: read before printing, which consumes the output.
         let exit = Exit::from(&output);
         printer.into_inner().unwrap().out(output)?;
 
@@ -459,13 +454,11 @@ impl SyncCommand {
     }
 
     /// The accounts of the store at `dir` ready to run, each with what the
-    /// store's drain applied on its collections, `None` when the run drains
-    /// by itself (a dry run, on its replica). One that cannot be readied
-    /// lands in `outcomes`.
+    /// store's drain applied, `None` when the run drains by itself.
     ///
-    /// The drain is the store's: it runs once, after every account was
-    /// readied, so it applies each account's queue under the capabilities
-    /// the account just declared (pimdir STORAGE §15.6).
+    /// The drain runs once, after every account declared, so each queue is
+    /// applied under fresh capabilities (pimdir STORAGE §15.6). A dry run
+    /// drains on its replica; an account not readied lands in `outcomes`.
     fn ready(
         &self,
         dir: &Path,
@@ -634,9 +627,10 @@ pub fn try_store_lock(store_dir: &Path) -> Result<Option<File>> {
     }
 }
 
-/// Opens, creating it if needed, the file the sync.lock is taken on: a
-/// file of the store's local/, neverest's own state there (pimdir STORAGE
-/// §3), which is created with it.
+/// Opens, creating it if needed, the file the sync.lock is taken on.
+///
+/// A file of the store's local/, neverest's own state there (pimdir STORAGE
+/// §3), created with it.
 fn open_store_lock(store_dir: &Path) -> Result<(PathBuf, File)> {
     let local = local::ensure(store_dir)
         .with_context(|| format!("Create {}", local::path(store_dir).display()))?;
@@ -688,18 +682,12 @@ fn busy(account: String) -> AccountSync {
     }
 }
 
-/// Starts `account` over inside the store it shares: drops its collections
-/// with what the store records under them (items, bindings, checkpoints,
-/// coverage, capability rows), its sources' source-wide capability rows and
-/// its sidecar entry, then stamps a fresh entry. Every other account of the
-/// store is left as it was.
+/// Starts `account` over inside the store it shares, every other account
+/// left as it was; `config` is [`AccountConfig::namespaced`].
 ///
-/// `config` is the account as the store sees it
-/// ([`AccountConfig::namespaced`]). Refused while a collection of the
-/// account holds a queued or parked action, which the store refuses to drop
-/// with its collection (pimdir GUIDE "Removal"), naming each row and the way
-/// out; without `force`, also while they hold other work no server has,
-/// naming it and `--force`.
+/// Refused over a queued or parked action, which the store would drop with
+/// its collection (pimdir GUIDE "Removal"), and without `force` over other
+/// work no server has. Freed bodies are collected on a best effort basis.
 fn reset_account(dir: &Path, account: &str, config: &AccountConfig, force: bool) -> Result<()> {
     let mode = config.mode()?;
     StoreState::load(dir)?.account(account)?;
@@ -740,9 +728,9 @@ fn reset_account(dir: &Path, account: &str, config: &AccountConfig, force: bool)
         let mut remedies = Vec::new();
         if !actions.is_empty() {
             remedies.push(format!(
-                "`neverest drain -a {account}` or a sync applies a queued action, and the \
-                 frontend that queued a parked one cancels it (`himalaya pimdir queue cancel \
-                 <ROW>`)"
+                "`neverest sync --queue-only -a {account}` or a sync applies a queued \
+                 action, and the frontend that queued a parked one cancels it \
+                 (`himalaya pimdir queue cancel <ROW>`)"
             ));
         }
         if !work.is_empty() {
@@ -772,8 +760,6 @@ fn reset_account(dir: &Path, account: &str, config: &AccountConfig, force: bool)
             .map_err(pimdir_error)
             .with_context(|| format!("Drop the capabilities of source {source}"))?;
     }
-    // NOTE: the bodies only the dropped collections held, whichever account
-    // referenced them last; a failure leaves them to the next collection.
     if let Err(err) = store.collect_garbage() {
         warn!("cannot collect what the reset of account {account} released: {err}");
     }
@@ -787,9 +773,11 @@ fn reset_account(dir: &Path, account: &str, config: &AccountConfig, force: bool)
     Ok(())
 }
 
-/// What `collections` hold that no server has, one line per collection: its
-/// conflicts, its retained items (bound to no server), its pending deletes
-/// and the items whose state no binding's base holds.
+/// What `collections` hold that no server has, one line per collection.
+///
+/// Its conflicts, retained items (bound to no server), pending deletes and
+/// items no binding's base holds; a delivered create, its handle still
+/// provisional (pimdir SYNC §2), counts as unpushed.
 fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result<Vec<String>> {
     let mut pending = Vec::new();
 
@@ -798,9 +786,6 @@ fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result
         let (mut conflicts, mut retained, mut deletes, mut unpushed) = (0, 0, 0, 0);
 
         for item in hub.items.values() {
-            // NOTE: a delivered create is based under its provisional
-            // handle, on a base naming nothing (pimdir SYNC §2): it holds
-            // nothing a listing confirmed, so it is a staged create still.
             let held = item.sources.values().any(|binding| {
                 !binding.handle.is_provisional()
                     && binding
@@ -839,8 +824,9 @@ fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result
 }
 
 /// Whether a binding's base holds an item's flags and body, what a server
-/// was last known to hold. Flags or a body read on one side only compare as
-/// held.
+/// was last known to hold.
+///
+/// Flags or a body read on one side only compare as held.
 fn holds(base: &PimdirBase, flags: &PimdirFlags, object: &Option<PimdirHash>) -> bool {
     let flags = match (base.flags.known(), flags.known()) {
         (Some(base), Some(item)) => base == item,
@@ -871,8 +857,9 @@ mod tests {
 
     use crate::{cli::sync::*, conflict::merger::SPAWNS};
 
-    /// Ordering and pacing flags mean nothing to a run that lists nothing,
-    /// so they are refused beside `--intents-only` and `--declare-only`;
+    /// Ordering and pacing flags are refused beside `--intents-only` and
+    /// `--declare-only`, which list nothing.
+    ///
     /// `--max-wait` still bounds the sends an intents run makes.
     #[test]
     fn pacing_flags_are_refused_where_nothing_is_listed() {
@@ -917,8 +904,9 @@ mod tests {
         acquire_store_lock(dir.path(), Duration::from_millis(1)).unwrap();
     }
 
-    /// The lock is neverest's own state: a file of the store's local/, the
-    /// one place pimdir leaves an owner in a store directory (pimdir
+    /// The lock is neverest's own state, a file of the store's local/.
+    ///
+    /// The one place pimdir leaves an owner in a store directory (pimdir
     /// STORAGE §3), and nothing of it beside the store's files.
     #[test]
     fn the_sync_lock_is_kept_under_local() {
@@ -930,9 +918,11 @@ mod tests {
         assert!(!dir.path().join("sync.lock").exists());
     }
 
-    /// A reset is the whole account's: beside a dry run it would drop the
-    /// real collections before planning, and beside a filter it would
-    /// reset more than it names. `--force` means nothing without it.
+    /// A reset is the whole account's, so it is refused beside a dry run or
+    /// a filter.
+    ///
+    /// Beside a dry run it would drop the real collections before planning,
+    /// beside a filter reset more than it names. `--force` needs `--reset`.
     #[test]
     fn a_reset_is_refused_beside_a_dry_run_or_a_filter() {
         let parse = |args: &[&str]| {
@@ -963,10 +953,11 @@ mod tests {
         format!("{account}/imap/INBOX")
     }
 
-    /// Initializes `account` in the store at `dir` and files a message
-    /// into its inbox, as a sync lands one: bound to its source with the
-    /// body as its base, so it is no work a server lacks, unless `based`
-    /// is false, a create staged and never pushed.
+    /// Initializes `account` in the store at `dir` and files a message into
+    /// its inbox, as a sync lands one.
+    ///
+    /// Bound to its source with the body as its base, so it is no work a
+    /// server lacks, unless `based` is false: a create staged, never pushed.
     fn land(dir: &Path, account: &str, id: &str, based: bool) {
         let config = namespaced(account);
         if !StoreState::load(dir).unwrap().initialized(account) {
@@ -1031,9 +1022,10 @@ mod tests {
             .unwrap()
     }
 
-    /// A reset starts one account over inside the store it shares: its
-    /// collections, items and capabilities go and its sidecar entry starts
-    /// again, while the other account keeps every one of its own.
+    /// A reset starts one account over inside the store it shares.
+    ///
+    /// Its collections, items and capabilities go and its sidecar entry
+    /// starts again, while the other account keeps every one of its own.
     #[test]
     fn a_reset_drops_one_account_and_leaves_the_other() {
         let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
@@ -1066,10 +1058,11 @@ mod tests {
         assert!(sidecar.account("home").unwrap().mode_accepted);
     }
 
-    /// A queued or parked action on the account's collections refuses the
-    /// reset, forced or not, naming the row and the way out: the store
-    /// would drop the row with its collection, and its producer never
-    /// learn why.
+    /// A queued or parked action refuses the reset, forced or not, naming
+    /// the row and the way out.
+    ///
+    /// The store would drop the row with its collection, and its producer
+    /// never learn why.
     #[test]
     fn a_reset_refuses_while_an_action_is_queued() {
         let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
@@ -1090,7 +1083,7 @@ mod tests {
 
             let err = format!("{err:#}");
             assert!(err.contains("queued action #1 (remove)"), "{err}");
-            assert!(err.contains("neverest drain -a work"), "{err}");
+            assert!(err.contains("neverest sync --queue-only -a work"), "{err}");
         }
         let reader = PimdirReader::open(dir.path()).unwrap();
         assert_eq!(reader.list_pending_actions().unwrap().len(), 1);
@@ -1128,10 +1121,10 @@ mod tests {
             .unwrap();
     }
 
-    /// A delivered create is a staged create still: its server took it and
-    /// no listing named it yet (pimdir SYNC §2), so its base names nothing
-    /// and what is staged on it is in the store alone. A plain reset
-    /// refuses over it as over a pending one.
+    /// A plain reset refuses over a delivered create as over a pending one.
+    ///
+    /// Its server took it and no listing named it yet (pimdir SYNC §2), so
+    /// its base names nothing and what is staged on it is in the store alone.
     #[test]
     fn a_reset_refuses_while_a_delivered_create_waits() {
         let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
@@ -1186,9 +1179,10 @@ mod tests {
         assert!(format!("{err:#}").contains("neverest init -a home"));
     }
 
-    /// An account that failed names its failure as an item error does: the
-    /// outermost message in `error`, its causes in `sources`, where `error`
-    /// held the whole chain.
+    /// An account that failed names its failure as an item error does.
+    ///
+    /// The outermost message in `error`, its causes in `sources`, where
+    /// `error` held the whole chain.
     #[test]
     fn a_failed_account_carries_its_causes_apart() {
         let err = anyhow!("connection refused").context("Open imap");
@@ -1205,8 +1199,10 @@ mod tests {
     }
 
     /// A queue row is keyed `row` wherever the report names one, as
-    /// himalaya's `pimdir queue list` does, and a parked row carries its
-    /// kebab-case `kind`, when it was queued and how often it was tried.
+    /// himalaya's `pimdir queue list` does.
+    ///
+    /// A parked row carries its kebab-case `kind`, when it was queued and
+    /// how often it was tried.
     #[test]
     fn a_queue_row_is_keyed_row_and_a_parked_one_names_its_kind() {
         use crate::sync::report::{IntentEntry, ParkedQueueAction, SubmitEntry};
@@ -1265,8 +1261,9 @@ mod tests {
     }
 
     /// A report lists its hunks as two arrays, `collectionPatch` and
-    /// `itemPatch`, where each was a single-key object around `patch`, and
-    /// leaves its account to the account row around it.
+    /// `itemPatch`, and leaves its account to the account row around it.
+    ///
+    /// Each was a single-key object around `patch`.
     #[test]
     fn a_report_lists_its_patches_as_arrays_and_names_no_account() {
         let output = ran(String::from("work"), SyncOutput::default());

@@ -67,10 +67,9 @@ const MSGRAPH_NO_DOMAIN: &str = "The `msgraph` table names no domain: write `msg
 /// The `msgraph` table: one Graph session and the domains it syncs, each
 /// domain a source of its own.
 ///
-/// Graph carries mail, contacts and calendars behind one host and one
-/// token, as carillon, cardamum and calendula read it, so the session is
-/// written once. What a domain syncs and may write sits in its own table,
-/// a mail include list meaning nothing to a contact folder.
+/// Graph carries mail, contacts and calendars behind one host and token,
+/// so the session is written once; what a domain syncs and may write sits
+/// in its own table.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct MsgraphTable {
@@ -89,9 +88,10 @@ pub struct MsgraphTable {
     pub alpn: Vec<String>,
     /// How the Graph session authenticates.
     pub auth: MsgraphAuthConfig,
-    /// The proxy every domain's connections go through, falling back to
-    /// the account's, then to the `all_proxy` and `https_proxy`
-    /// environment variables.
+    /// The proxy every domain's connections go through.
+    ///
+    /// Falls back to the account's, then to the `all_proxy` and
+    /// `https_proxy` environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
     /// The mail folders, the source `msgraph` under the account.

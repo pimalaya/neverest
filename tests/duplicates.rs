@@ -1,28 +1,19 @@
-//! End-to-end proof that a collection holding one identity twice syncs both
-//! copies, against TWO local Stalwart IMAP servers (A :143, B :144) spawned by
-//! `tests/stalwart2.sh`. Ignored by default.
+//! # Duplicates
 //!
-//! One collection may hold two messages with the same `Message-ID`, and a copy
-//! legitimately carries the identifier of the message it copies. The engine
+//! A collection holding one identity twice syncs both copies, against two
+//! local Stalwart IMAP servers (A :143, B :144) spawned by
+//! tests/stalwart2.sh. Ignored by default.
+//!
+//! A copy carries the `Message-ID` of the message it copies, so io-pimdir
 //! mints a key of its own for the second copy (pimdir STORAGE §9) instead of
-//! freezing the identity, so what this replays is the write side of that:
-//!   1. Seed one copy on A and two on B, then sync. Both copies cross: A ends
-//!      up holding the message twice, and the report warns about nothing.
-//!   2. Sync again with nothing changed. The run is quiescent, which is what
-//!      the freeze could never be: a frozen twin had no row, so every run
-//!      reported it as a body still to fetch.
-//!   3. Delete one copy on B and sync. Exactly that copy goes on A, and the
-//!      other survives, which is what two rows buy over one frozen pair.
-//!   4. Drop B's checkpoint (a UIDVALIDITY bump, a server without QRESYNC, a
-//!      reset) and sync. The full enumeration must re-append nothing: a bound
-//!      handle keeps the key it was given and is never minted a second one.
+//! freezing the identity. This proves it end to end, seeding with `curl`:
 //!
-//! The minting and the keys are upstream (io-pimdir, same change id); what
-//! is proved here is that they hold end to end through this
-//! crate, and that no copy is lost on the way.
-//!
-//! Seeding and verifying use `curl` rather than a backend of this crate, as
-//! the other live tests do.
+//! - one copy on A and two on B: both cross, with no warning;
+//! - nothing changed: the run is quiescent, where a frozen twin had no row
+//!   and read as a body to fetch on every run;
+//! - one copy deleted on B: exactly that copy goes on A;
+//! - B's checkpoint dropped (UIDVALIDITY bump, no QRESYNC, a reset): the full
+//!   enumeration re-appends nothing, a bound handle keeping its key.
 //!
 //! Start the servers and run with:
 //! ```sh
@@ -48,9 +39,10 @@ const B: &str = "imap://127.0.0.1:144/INBOX";
 const CRED: &str = "test@pimalaya.org:P!malaya-test-2026";
 const ACCOUNT: &str = "dup";
 
-/// A single-token marker, unique per run so the `SEARCH TEXT` sees only this
-/// run's copies (the servers keep what earlier runs seeded) and needs no
-/// quoting.
+/// A single-token marker, unique per run, needing no quoting.
+///
+/// The servers keep what earlier runs seeded, so `SEARCH TEXT` must see only
+/// this run's copies.
 fn marker() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -59,9 +51,10 @@ fn marker() -> String {
     format!("DUPMARKER{nanos}")
 }
 
-/// The one message both sides hold, twice on B. A copy legitimately carries
-/// the identifier of the message it copies, which is why this is a duplicate
-/// to mirror rather than a fault to blame.
+/// The one message both sides hold, twice on B.
+///
+/// A copy legitimately carries the identifier of the message it copies: a
+/// duplicate to mirror, not a fault to blame.
 fn message(marker: &str) -> Vec<u8> {
     format!(
         "Message-ID: <{marker}@pimalaya.org>\r\n\
@@ -87,7 +80,6 @@ fn a_duplicated_identity_syncs_both_copies_and_settles() {
     fs::create_dir_all(&state).unwrap();
     fs::write(&eml, message(&marker)).unwrap();
 
-    // 1. One copy on A, two on B.
     append(&eml, A);
     append(&eml, B);
     append(&eml, B);
@@ -96,8 +88,6 @@ fn a_duplicated_identity_syncs_both_copies_and_settles() {
     fs::write(&config, config_toml()).unwrap();
     neverest(&["init", "-a", ACCOUNT], &config, &state);
 
-    // Both copies are items, so the one A lacks crosses like any other, and
-    // nothing about the pair is worth a warning.
     let report = sync(&config, &state);
     assert!(
         report.get("ambiguous").is_none(),
@@ -113,9 +103,6 @@ fn a_duplicated_identity_syncs_both_copies_and_settles() {
         "the second copy was appended to A: {report}"
     );
 
-    // 2. Nothing changed, so nothing is reported. This is the run the freeze
-    //    could never reach: a copy with no row was read as a body still to
-    //    fetch, and named again on every run for ever.
     let report = sync(&config, &state);
     assert_eq!(
         report["item"][""].as_array().map_or(0, Vec::len),
@@ -123,8 +110,6 @@ fn a_duplicated_identity_syncs_both_copies_and_settles() {
         "a settled collection reports nothing: {report}"
     );
 
-    // 3. One copy goes on B. It is an item of its own now, so its delete says
-    //    something exact: that copy goes on A too, and the other stays.
     let mut expected = uids(B, &marker);
     expected.sort();
     expunge(B, &expected[0]);
@@ -136,9 +121,6 @@ fn a_duplicated_identity_syncs_both_copies_and_settles() {
         "exactly the deleted copy went: {report}"
     );
 
-    // 4. B loses its checkpoint, so its next enumeration is full. A bound
-    //    handle keeps the key it was given, so nothing is minted twice and
-    //    nothing is re-appended.
     drop_checkpoint(&state, "right");
     let report = sync(&config, &state);
     assert_eq!(
@@ -163,9 +145,10 @@ fn config_toml() -> String {
     )
 }
 
-/// Empties one side's stored sync cursor, which the IMAP backend reads as an
-/// absent checkpoint and answers with a full enumeration: the shape a
-/// UIDVALIDITY bump, a server without QRESYNC or a reset leaves behind.
+/// Empties one side's stored sync cursor, forcing a full enumeration.
+///
+/// The shape a UIDVALIDITY bump, a server without QRESYNC or a reset leaves
+/// behind.
 fn drop_checkpoint(state: &Path, source: &str) {
     let dir = state.join("neverest");
     let mut store = PimdirStore::open(&dir)

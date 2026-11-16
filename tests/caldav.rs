@@ -1,22 +1,19 @@
-//! End-to-end CalDAV test against a local Radicale (`tests/radicale.sh`).
+//! # CalDAV
+//!
+//! End-to-end CalDAV test against a local Radicale (tests/radicale.sh).
 //! Ignored by default.
 //!
-//! The CardDAV twin of this file drives the same four steps against the same
-//! server, and the DAV adapter is one implementation for both, so what this run
-//! is really for is the half the adapter does *not* share: the calendar home
-//! set, the calendar listing, `calendar-multiget`, and the `.ics` resource
-//! names a `UID` maps to. What it proves beyond that is the calendar kind,
-//! whose derivations neverest delegates to io-pimdir rather than owning.
+//! The DAV adapter is shared with the CardDAV twin, so this run is for what
+//! it does not share (calendar home set and listing, `calendar-multiget`,
+//! the `.ics` names a `UID` maps to) and the calendar kind io-pimdir derives:
 //!
-//!   1. Seed two events on the server (`curl` PUT), sync, and check the store
-//!      holds both, keyed by their iCalendar `UID` and ordered by their start.
-//!   2. Edit one event **on the server**, sync, and check the store followed
-//!      the new body (the ETag moved, so the item is re-fetched).
-//!   3. Delete an event on the server, sync, and check it is **retained**, not
-//!      lost: the local copy and its body survive an upstream delete.
-//!   4. Sync again with nothing changed and check the run is quiescent, which
-//!      is what proves a retained row is invisible to the merge rather than
-//!      re-derived on every run.
+//! - two events seeded (`curl` PUT) land keyed by `UID`, sorted by their
+//!   start resolved to UTC; a first dry run names them already, since a DAV
+//!   kind resolves its link id only at `Full`;
+//! - an event edited on the server moves its ETag, so it is re-fetched;
+//! - an event deleted on the server is retained, not lost;
+//! - a sync with nothing changed is quiescent: a retained row re-derived
+//!   would be re-uploaded on every run.
 //!
 //! Start the server and run with:
 //! ```sh
@@ -35,9 +32,9 @@ const DAV: &str = "http://127.0.0.1:5232";
 const USER: &str = "test";
 const PASS: &str = "test";
 const CALENDAR: &str = "agenda";
-/// The calendar as the store keys it: pimdir groups a collection under the id
-/// of the source that syncs it, the account then the source name, which for
-/// the direct-backend sugar is the protocol name.
+/// The calendar as the store keys it: account, source, then calendar.
+///
+/// For the direct-backend sugar the source name is the protocol name.
 const COLLECTION: &str = "calendar/caldav/agenda";
 
 /// An event, addressed on the server by `<uid>.ics` (the same resource name
@@ -78,7 +75,6 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
     )
     .unwrap();
 
-    // 1. Two events in a fresh calendar, then a first sync.
     create_calendar(root);
     put(
         root,
@@ -93,9 +89,6 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
 
     neverest(&["init", "-a", "calendar"], &config, &state);
 
-    // A dry run over a store that has never synced must name the events it
-    // would fetch: a DAV kind resolves its link id only at `Full`, so nothing
-    // is known about an event before its body arrives.
     let plan = neverest(&["sync", "-a", "calendar", "-d", "--json"], &config, &state);
     assert!(
         plan.contains("event-1") && plan.contains("event-2"),
@@ -113,15 +106,11 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
         items.contains("Stand-up"),
         "the summary carries what an agenda renders; store held:\n{items}",
     );
-    // The store orders a page by the sort key, which for this kind is the
-    // start resolved to UTC, so the morning event comes first.
     assert!(
         items.find("event-1").unwrap() < items.find("event-2").unwrap(),
         "the listing is chronological; store held:\n{items}",
     );
 
-    // 2. An in-place edit on the server: the ETag moves, so the sync must
-    //    re-fetch the body rather than trust what it cached.
     put(
         root,
         "event-1",
@@ -142,7 +131,6 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
         "the edited body reached the store; store held:\n{items}",
     );
 
-    // 3. A server-side delete is retained, never lost.
     delete("event-2");
     neverest(&["sync", "-a", "calendar"], &config, &state);
 
@@ -160,8 +148,6 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
         "the deleted event is retained, not lost; retained listing:\n{retained}",
     );
 
-    // 4. Nothing changed since: a retained row must be invisible to the merge,
-    //    not re-derived (which would re-upload it, forever).
     let report = neverest(&["sync", "-a", "calendar", "--json"], &config, &state);
     assert!(
         !report.contains("\"event-2\""),
@@ -252,9 +238,10 @@ fn store_items(state: &Path, collection: &str) -> String {
     pimdir(state, &["item", "list", collection, "--json"])
 }
 
-/// Runs the `pimdir` operator CLI against the account's store. It is the
-/// observation tool for everything the sync did not print, retention above
-/// all, and it comes from the io-pimdir crate rather than from neverest.
+/// Runs the `pimdir` operator CLI against the account's store.
+///
+/// It observes what the sync did not print, retention above all, and comes
+/// from io-pimdir rather than from neverest.
 fn pimdir(state: &Path, args: &[&str]) -> String {
     let store = state.join("neverest");
     let output = pimdir_cli()

@@ -48,12 +48,9 @@ use crate::{
 
 /// One page of a backend-neutral enumeration (pimdir SYNC §4).
 ///
-/// `complete` tells a page of a round, where absence across the round's
-/// pages means removed in scope, from a delta, where `vanished` names the
-/// removals. A round of one page (no `cursor`) is the whole listing of a
-/// backend that does not page. Every entry carries what names it, read in
-/// the listing itself, unless the store already holds it or its kind is
-/// named by its body, which [`crate::sync::remote::PimRemote`] fetches.
+/// `complete` tells a round's page (absence across its pages means removed
+/// in scope) from a delta's (`vanished` names the removals). Every entry
+/// carries what names it, unless the store holds it or its body names it.
 #[derive(Debug, Default)]
 pub struct Enumeration {
     /// The members the page answered with, in the server's own order.
@@ -64,41 +61,34 @@ pub struct Enumeration {
     pub complete: bool,
     /// The resume cursor, on every page of a round but the last.
     pub cursor: Option<Vec<u8>>,
-    /// The next sync's checkpoint, in the backend's own encoding, on the
-    /// page the backend gives it: a delta's, a round's first (IMAP
-    /// `HIGHESTMODSEQ`, Gmail's `historyId`) or its last (a Graph delta
-    /// link).
+    /// The next sync's checkpoint, in the backend's own encoding.
+    ///
+    /// On the page the backend gives it: a delta's, a round's first (IMAP
+    /// `HIGHESTMODSEQ`, Gmail's `historyId`) or its last (a Graph delta link).
     pub checkpoint: Option<Vec<u8>>,
     /// The octets of meta the page carried (headers, summaries), for the
     /// source's download count.
     pub bytes: u64,
-    /// Whether a date filter narrowed the round's listing (IMAP `SENTSINCE`,
-    /// Gmail `after:`, Graph `sentDateTime`), on every page of such a round
-    /// and on no other (pimdir SYNC §4, §5): the filter misses an undated
-    /// member and one whose date runs ahead of or behind its arrival, so
-    /// the round finds absent only what its enumeration lacks. A filter
-    /// reading another date than the `Date` lists no band's ceiling
-    /// ([`floor_of`]).
+    /// Whether a date filter narrowed the round's listing, on its every page.
+    ///
+    /// IMAP `SENTSINCE`, Gmail `after:`, Graph `sentDateTime` miss undated
+    /// and misdated members, so the round finds absent only what its
+    /// enumeration lacks (pimdir SYNC §4, §5).
     pub narrowed: bool,
-    /// Every handle the collection holds, read by an enumeration no date
-    /// filter narrowed, on the last page of a narrowed round, a band's
-    /// included: the round finds absent whatever in its scope it lacks,
-    /// and nothing when none is handed (pimdir SYNC §4, §5).
+    /// Every handle the collection holds, read unnarrowed, on the last page
+    /// of a narrowed round, a band's included.
+    ///
+    /// The round finds absent whatever in its scope it lacks, and nothing
+    /// when none is handed (pimdir SYNC §4, §5).
     pub enumerated: Option<Vec<String>>,
 }
 
-/// The scope a connector lists under when its date filter reads another
-/// date than the `Date` header the store scopes by (Gmail's arrival,
-/// Graph's `sentDateTime`, Exchange's submission): `scope`'s floor alone,
-/// never a band's ceiling (pimdir SYNC §5).
+/// The scope a connector filtering on another date than `Date` (Gmail,
+/// Graph) lists under: `scope`'s floor alone, never a ceiling (SYNC §5).
 ///
-/// A message is dated before it is submitted and received, at times long
-/// before (a delayed delivery, a draft sent weeks after it was written, an
-/// import), never long after. A ceiling on those dates misses a member its
-/// `Date` puts below it, which the narrowed round then finds absent, dated
-/// before it opened, while the server holds it; a floor misses only one
-/// dated after its submission, beyond the provider's margin. The listing
-/// reaches above a band, and the `Date` keeps what lies in it.
+/// A message is dated before its submission and arrival, often long before,
+/// never long after: a ceiling on those dates misses a member its `Date`
+/// puts below it, which the narrowed round finds absent on a live server.
 #[cfg(any(feature = "gmail", feature = "msgraph"))]
 pub fn floor_of(scope: &PimdirScope) -> PimdirScope {
     PimdirScope {
@@ -158,9 +148,10 @@ impl Enumeration {
 pub enum Listed {
     /// One page of the listing asked for.
     Page(Enumeration),
-    /// The backend refused the resume cursor or the checkpoint (an expired
-    /// Graph link, a Gmail page token): the engine restarts the round, or
-    /// opens one where a delta's checkpoint was refused.
+    /// The backend refused the resume cursor or the checkpoint.
+    ///
+    /// An expired Graph link, a Gmail page token: the engine restarts the
+    /// round, or opens one where a delta's checkpoint was refused.
     CursorRejected,
     /// The connector lists no head of the kind asked for (pimdir SYNC §5):
     /// the engine resumes the round.
@@ -168,8 +159,9 @@ pub enum Listed {
     /// The source refused the head's position: the engine restarts the
     /// round over the run's scope (an expired Gmail history id).
     HeadRejected,
-    /// The source renumbered every member since the store bound them (an
-    /// IMAP `UIDVALIDITY` bump): the enumeration fails and the collection
+    /// The source renumbered every member since the store bound them.
+    ///
+    /// An IMAP `UIDVALIDITY` bump: the enumeration fails and the collection
     /// is rekeyed before it is listed again (pimdir SYNC §4, §8).
     Rekey,
 }
@@ -192,13 +184,15 @@ pub enum Listed {
 pub struct Held<'a> {
     /// The handles this source binds in the collection.
     pub handles: &'a HashSet<String>,
-    /// The checkpoint the store holds, which tells a backend whose handles
-    /// can be reassigned (an IMAP `UIDVALIDITY`) whether they still name
-    /// what they named.
+    /// The checkpoint the store holds.
+    ///
+    /// It tells a backend whose handles can be reassigned (an IMAP
+    /// `UIDVALIDITY`) whether they still name what they named.
     pub checkpoint: Option<&'a [u8]>,
-    /// The scope of the source's last closed round, which tells a Graph
-    /// mail source whether a delta link stored before it tagged its links
-    /// was made under a `$filter`.
+    /// The scope of the source's last closed round.
+    ///
+    /// It tells a Graph mail source whether a delta link stored before it
+    /// tagged its links was made under a `$filter`.
     pub coverage: Option<&'a PimdirScope>,
 }
 
@@ -237,9 +231,10 @@ pub struct EnumEntry {
     /// `None` where content is immutable (IMAP, Graph), which io-pimdir's
     /// merge reads as unchanged, never as unknown.
     pub revision: Option<String>,
-    /// The identity hint, summary and sort key the listing read (pimdir
-    /// STORAGE Annex A): `None` for a member the store already binds, or
-    /// one of a kind whose body is what names it.
+    /// The identity hint, summary and sort key the listing read.
+    ///
+    /// `None` for a member the store already binds, or one of a kind whose
+    /// body is what names it (pimdir STORAGE Annex A).
     pub meta: Option<PimdirDerivation>,
 }
 
@@ -314,9 +309,10 @@ impl std::fmt::Display for Gone {
 
 impl std::error::Error for Gone {}
 
-/// The size the store records for a body about to be fetched, `None`
-/// when it records none: what a backend reading by size (Gmail, Graph)
-/// plans its batches with, rather than asking the server first.
+/// The size the store records for a body about to be fetched, if any.
+///
+/// What a backend reading by size (Gmail, Graph) plans its batches with,
+/// rather than asking the server first.
 pub type StoredSize<'a> = &'a (dyn Fn(&str) -> Option<u64> + Sync);
 
 /// A live sync client: exactly one compiled-in backend per side.
@@ -433,13 +429,11 @@ impl Client {
         }
     }
 
-    /// The collection a new item goes to when none is named, by collection
-    /// id: Google's primary calendar, Graph's default calendar and default
-    /// Contacts folder, the one People address book, the CalDAV calendar
-    /// the scheduling inbox names (RFC 6638), when the server gives it.
+    /// The id of the collection a new item goes to when none is named.
     ///
-    /// A check-only probe, never stored. Mail (whose folders have roles)
-    /// and CardDAV answer none.
+    /// Google's primary calendar, Graph's default folders, the one People
+    /// address book, the CalDAV scheduling inbox's (RFC 6638). A check-only
+    /// probe, never stored; mail (folders have roles) and CardDAV say none.
     pub fn default_collection(&mut self) -> Result<Option<String>> {
         match self {
             #[cfg(feature = "msgraph")]
@@ -465,13 +459,12 @@ impl Client {
         }
     }
 
-    /// The roles a listing does not carry, which cost requests of their
-    /// own, by collection id: Graph's well-known mail folders (one lookup
-    /// each) and the CalDAV default calendar (two `PROPFIND`s). `None` for
-    /// a backend whose listing states every role it has ([`Collection::role`]).
+    /// The roles a listing does not carry, by collection id, `None` when it
+    /// carries them all ([`Collection::role`]).
     ///
-    /// A sync asks only when the source's collection set moved since it
-    /// last asked, and keeps the answer in the store's sidecar.
+    /// They cost requests (a lookup per Graph well-known folder, two CalDAV
+    /// `PROPFIND`s), so a sync asks only when the source's collection set
+    /// moved, and keeps the answer in the store's sidecar.
     pub fn lookup_roles(&mut self) -> Result<Option<BTreeMap<String, String>>> {
         match self {
             #[cfg(feature = "msgraph")]
@@ -520,17 +513,12 @@ impl Client {
         }
     }
 
-    /// Creates the collection `name` under `parent`, the top level when
-    /// `None`, and answers the id it is listed under; one the server
-    /// already lists there is success (pimdir Annex B.2
-    /// `collection-create`).
+    /// Creates the collection `name` under `parent` (the top level when
+    /// `None`) and answers its id (pimdir Annex B.2 `collection-create`).
     ///
-    /// IMAP joins the two with the parent's hierarchy delimiter, Gmail
-    /// nests a label by its name (`Parent/name`), and DAV, whose
-    /// collections do not nest, keys a new one by a path segment made from
-    /// `name` and displays it as `name`. Graph and Google Calendar and
-    /// People create none. A request no run can perform fails with a
-    /// [`Refusal`].
+    /// One the server already lists there is success. IMAP and Gmail nest by
+    /// the hierarchy delimiter, DAV keys a flat one by a segment of `name`;
+    /// Graph and Google create none. An impossible request is a [`Refusal`].
     pub fn create_named_collection(&mut self, parent: Option<&str>, name: &str) -> Result<String> {
         let refused = |why: String| Err(anyhow::Error::new(Refusal(why)));
 
@@ -574,18 +562,12 @@ impl Client {
         }
     }
 
-    /// Renames the collection `collection` to `name`, one level of the
-    /// hierarchy under the parent it has (pimdir Annex B.2
-    /// `collection-rename`).
+    /// Renames the collection `collection` to `name` under the parent it has
+    /// (pimdir Annex B.2 `collection-rename`).
     ///
-    /// A collection already so named is success, and so is one gone where
-    /// a collection of the new name stands, the intent being at least once;
-    /// a sibling already named `name`, a collection the server keeps fixed
-    /// (an IMAP `INBOX`, a Gmail system label) and one gone with nothing in
-    /// its place fail with a [`Refusal`]. IMAP renames the mailbox, which
-    /// takes the ones under it along; Gmail renames the label and every
-    /// label nested under it, the deepest first; DAV sets the display name,
-    /// its id kept. Graph and Google Calendar and People rename none.
+    /// At least once: already so named, or gone where `name` stands, is
+    /// success; a taken sibling name, a fixed collection (`INBOX`, a Gmail
+    /// system label) or a plain gone one is a [`Refusal`].
     pub fn rename_named_collection(&mut self, collection: &str, name: &str) -> Result<Renamed> {
         let refused = |why: String| Err(anyhow::Error::new(Refusal(why)));
 
@@ -628,11 +610,9 @@ impl Client {
     /// Deletes the collection `collection` with the items it holds, and
     /// never another (pimdir Annex B.2 `collection-delete`).
     ///
-    /// A collection already gone is success, the intent being at least once.
-    /// One holding a collection under it on the server, or one the server
-    /// keeps fixed (an IMAP `INBOX`, a Gmail system label), fails with a
-    /// [`Refusal`], deleting nothing. Graph and Google Calendar and People
-    /// delete none.
+    /// At least once: one already gone is success. One with a child on the
+    /// server, or fixed (an IMAP `INBOX`, a Gmail system label), is a
+    /// [`Refusal`], deleting nothing. Graph and Google delete none.
     pub fn delete_named_collection(&mut self, collection: &str) -> Result<()> {
         let refused = |why: String| Err(anyhow::Error::new(Refusal(why)));
 
@@ -688,14 +668,12 @@ impl Client {
         }
     }
 
-    /// Lists one page of a collection (pimdir SYNC §4): of a delta from the
-    /// checkpoint `request` holds, or of a round over its scope, from its
-    /// start or its cursor. `held` is what the store binds already, which a
-    /// mail listing names from the store rather than reading its meta again.
+    /// Lists one page of a collection (pimdir SYNC §4): a delta from the
+    /// checkpoint `request` holds, or a round over its scope.
     ///
-    /// A backend that does not page answers a round in one page, and one
-    /// whose kind is named by its body (DAV, Google Calendar and People,
-    /// Graph contacts and events) answers bare entries.
+    /// `held` is what the store binds, which a mail listing names from the
+    /// store rather than reading its meta again. A kind its body names (DAV,
+    /// Google, Graph contacts and events) answers bare entries.
     pub fn enumerate(
         &mut self,
         collection: &str,
@@ -732,13 +710,11 @@ impl Client {
         }
     }
 
-    /// The heads the connector lists while a round is open (pimdir SYNC
-    /// §4): Gmail lists delta heads from its history; Graph mail band
-    /// heads by `receivedDateTime`, its delta link arriving with a round's
-    /// last page only. IMAP lists a delta head from a checkpoint where the server
-    /// offers QRESYNC, read from the capabilities it stated when this
-    /// connection opened, and a band head (`SEARCH SINCE`) everywhere;
-    /// CONDSTORE alone states no removal, so it lists no delta head.
+    /// The heads the connector lists while a round is open (pimdir SYNC §4).
+    ///
+    /// Gmail: delta, from its history. Graph mail: band, its delta link only
+    /// on a round's last page. IMAP: band, and delta where the server offers
+    /// QRESYNC (CONDSTORE alone states no removal).
     pub fn heads(&self) -> PimdirHeads {
         match self {
             #[cfg(feature = "gmail")]
@@ -755,10 +731,11 @@ impl Client {
     }
 
     /// Whether this backend's checkpoint is bound to the scope it was made
-    /// under (pimdir SYNC §4): IMAP's modseq, Gmail's history and Graph
-    /// mail's delta link, made over the whole folder and checked locally,
-    /// are not, and widen a scope by listing only the band their coverage
-    /// lacks. The kinds that take no scope keep the default.
+    /// under (pimdir SYNC §4).
+    ///
+    /// IMAP's modseq, Gmail's history and Graph mail's delta link cover the
+    /// whole folder, so they are not, and widen a scope by listing only the
+    /// band their coverage lacks.
     pub fn scope_bound(&self) -> bool {
         match self {
             #[cfg(feature = "imap")]
@@ -773,10 +750,9 @@ impl Client {
     }
 
     /// Whether one handle names one item across every collection of the
-    /// source, the item placed in each collection holding it: a Gmail
-    /// message id, the same under each of its labels. Its body is then
-    /// read once, whichever collection asks. An IMAP UID, a DAV href or a
-    /// Graph id names an item of one collection.
+    /// source, as a Gmail message id under each of its labels.
+    ///
+    /// Its body is then read once, whichever collection asks.
     pub fn global_handles(&self) -> bool {
         match self {
             #[cfg(feature = "gmail")]
@@ -823,13 +799,9 @@ impl Client {
 
     /// Streams the bodies of `ids` into a sink `open`ed and `done` per item.
     ///
-    /// No body lands in memory whole on the IMAP path. `done` also
-    /// receives the revision the body corresponds to when the backend
-    /// reports one (a DAV multiget), `None` on immutable content. Answers
-    /// the ids the server said are gone ([`Gone`]); an id neither
+    /// `done` gets the body's revision when the backend reports one (a DAV
+    /// multiget). Answers the ids the server said are [`Gone`]; one neither
     /// delivered nor gone went unanswered, which the caller reads alone.
-    /// `sizes` is what the store records of each, which Gmail and Graph
-    /// plan their batches by.
     #[cfg_attr(
         not(any(feature = "msgraph", feature = "gmail")),
         allow(unused_variables)
@@ -873,8 +845,9 @@ impl Client {
     }
 
     /// Leaves the connection fit for a read of one item after
-    /// [`fetch_bodies`](Self::fetch_bodies) failed with `err`. IMAP alone
-    /// may hold the rest of an answer; an HTTP backend reopens its own.
+    /// [`fetch_bodies`](Self::fetch_bodies) failed with `err`.
+    ///
+    /// IMAP alone may hold the rest of an answer; HTTP reopens its own.
     #[cfg_attr(not(feature = "imap"), allow(unused_variables))]
     pub fn recover(&mut self, err: &anyhow::Error) -> Result<()> {
         match self {
@@ -888,10 +861,9 @@ impl Client {
     /// Streams one item's raw body into `sink`, returning the revision it
     /// corresponds to when the backend reports one.
     ///
-    /// The bytes are RFC 5322 for mail and a vCard or iCalendar object for
-    /// the DAV kinds. On the IMAP path they never land in memory whole. An
-    /// item IMAP, Gmail, Graph, DAV, Google Calendar or Google People no
-    /// longer holds fails with [`Gone`].
+    /// RFC 5322 for mail, a vCard or iCalendar object otherwise; never whole
+    /// in memory on the IMAP path. An item the server no longer holds fails
+    /// with [`Gone`].
     pub fn get_item_stream(
         &mut self,
         collection: &str,
@@ -926,14 +898,9 @@ impl Client {
 
     /// Adds an item from `source` (`len` octets), returning what was assigned.
     ///
-    /// `link`'s hint recovers the UID on IMAP servers lacking UIDPLUS and
-    /// is the `UID` a DAV href is built from, while its mint keeps a second
-    /// copy off the href its twin holds. Graph assigns its own ids, and takes
-    /// a message into Drafts only, creating every MIME message as a draft.
-    ///
-    /// `None` when the server took the item without saying which it is (an
-    /// IMAP `APPEND` without UIDPLUS whose message no search names): it is
-    /// added all the same, and the next listing names it (pimdir SYNC §4).
+    /// `link`'s hint recovers a UID without UIDPLUS and names a DAV href, its
+    /// mint keeping a copy off its twin's; Graph makes every message a draft.
+    /// `None` when the server took it unnamed: the next listing names it.
     pub fn add_item_stream(
         &mut self,
         collection: &str,
@@ -1091,11 +1058,10 @@ impl Client {
     }
 
     /// Moves one item from `from` into `to` server side keeping its id,
-    /// gated on `if_match`, returning where it went, or `None` for a backend
-    /// or a server that cannot move it, the caller then uploading the body.
+    /// gated on `if_match`, returning where it went.
     ///
-    /// CalDAV moves (WebDAV `MOVE`); every other backend answers `None`, so
-    /// a create superseding a member is an upload there (pimdir SYNC §4).
+    /// Only CalDAV moves (WebDAV `MOVE`); `None` elsewhere, the caller then
+    /// uploading the body (pimdir SYNC §4).
     #[allow(unused_variables)]
     pub fn move_item(
         &mut self,
@@ -1142,9 +1108,10 @@ impl Client {
         }
     }
 
-    /// Adds `add` to and removes `remove` from an id set's flags, as deltas:
-    /// a flag named in neither is left as the server holds it (pimdir SYNC
-    /// §4), so a change the server made since the listing survives.
+    /// Adds `add` to and removes `remove` from an id set's flags, as deltas.
+    ///
+    /// A flag named in neither is left as the server holds it, so a change
+    /// the server made since the listing survives (pimdir SYNC §4).
     pub fn update_flags(
         &mut self,
         collection: &str,
@@ -1360,9 +1327,10 @@ impl Pool {
     }
 }
 
-/// The path segment a new DAV collection named `name` is keyed by: its
-/// letters, digits, `-`, `_` and `.` kept, every other run of characters
-/// one `-`, and a number appended while a listed collection holds it.
+/// The path segment a new DAV collection named `name` is keyed by.
+///
+/// Letters, digits, `-`, `_` and `.` kept, every other run one `-`, and a
+/// number appended while a listed collection holds it.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 fn free_segment(name: &str, listed: &[Collection]) -> String {
     let mut base = String::new();

@@ -10,27 +10,26 @@ use pimalaya_config::toml::opt_shell_expanded_path;
 use serde::{Deserialize, Serialize};
 
 /// The local pimdir store an account syncs through, the cache a frontend
-/// reads. Implicit, and shared by every account naming no root; this table
-/// only customises it.
+/// reads.
+///
+/// Implicit, and shared by every account naming no root; this table only
+/// customises it.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct StoreConfig {
     /// The store directory, holding `pimdir.db` and `objects/`.
     ///
-    /// Defaults to `neverest/` under the platform's state location (XDG on
-    /// Linux and the BSDs, Application Support on macOS, `%LOCALAPPDATA%` on
-    /// Windows), one store for every account naming no root. Accounts
-    /// naming one root share that store.
+    /// Defaults to `neverest/` under the platform's state location (XDG,
+    /// Application Support, `%LOCALAPPDATA%`), shared by every account
+    /// naming no root; accounts naming one root share that store.
     #[serde(default, deserialize_with = "opt_shell_expanded_path")]
     pub root: Option<PathBuf>,
     /// How long a retained item survives: `store.purge-after = "90d"`, or an
     /// integer of seconds.
     ///
-    /// A pimdir store never truly deletes: the row is retained, hidden but
-    /// keeping its body, and neverest is the sweeper. Unset means never
-    /// purge and `0` purges at once; there is deliberately no boolean. A
-    /// day is 86400 seconds and a week 7 days, months and years being
-    /// refused for having no fixed length.
+    /// A pimdir store retains a deleted row, body kept, and neverest is the
+    /// sweeper. Unset never purges, `0` purges at once (deliberately no
+    /// boolean); months and years are refused for having no fixed length.
     #[serde(
         default,
         with = "pimalaya_config::duration::option",
@@ -40,10 +39,9 @@ pub struct StoreConfig {
     /// How long the search index may be refreshed after a sync:
     /// `store.index-timeout = "60s"`, the default, or an integer of seconds.
     ///
-    /// A large first build spreads over several runs, each going on from
-    /// where the last stopped; `neverest index` builds it whole. A drain
-    /// refreshes for 2 seconds at most, `0` turns the refresh off, and a
-    /// build without the `search` feature ignores it.
+    /// A large first build spreads over runs, each resuming the last; `sync
+    /// --index-only` builds it whole. `--queue-only` refreshes 2 s at most,
+    /// `0` turns it off, and a build without `search` ignores it.
     #[serde(
         default,
         with = "pimalaya_config::duration::option",

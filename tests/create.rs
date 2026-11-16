@@ -1,11 +1,13 @@
-//! The collection intents against a local Stalwart (server A: IMAP
-//! on :143, HTTP and DAV on :8080), spawned via `tests/stalwart2.sh`.
-//! Ignored by default.
+//! # Collection intents
 //!
-//! What a frontend does to create a folder or a calendar: it queues the
-//! intent through io-pimdir's producer, anchored on a collection the store
-//! holds, and the next sync creates it on the server before listing, so
-//! the same run lists it.
+//! The collection intents against a local Stalwart (server A: IMAP on :143,
+//! HTTP and DAV on :8080), spawned via tests/stalwart2.sh. Ignored by
+//! default.
+//!
+//! A frontend queues the intent through io-pimdir's producer, anchored on a
+//! collection the store holds (the first sync declares the source the
+//! producer resolves the performer from), and the next sync creates it on
+//! the server before listing, so the same run lists it.
 //!
 //! Start the servers and run with:
 //! ```sh
@@ -41,6 +43,11 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}{nanos}")
 }
 
+/// A queued folder, then a child under it, are created on the server.
+///
+/// The row ends applied, a receipt a withdrawn row would not leave; the child
+/// is joined by the server's delimiter, and a folder listed already is
+/// success.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn a_queued_folder_and_its_child_are_created_on_the_imap_server() {
@@ -60,8 +67,6 @@ fn a_queued_folder_and_its_child_are_created_on_the_imap_server() {
     )
     .unwrap();
 
-    // NOTE: the first sync makes the store and declares the source, which
-    // the producer resolves the performer from.
     neverest(&["init", "-a", "create"], &config, &state);
     sync(&config, &state, "INBOX");
 
@@ -76,16 +81,12 @@ fn a_queued_folder_and_its_child_are_created_on_the_imap_server() {
     assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
     assert!(listed(&config, &state).contains(&folder));
 
-    // The producer follows its row to a receipt, which a withdrawn row
-    // would not leave.
     let PimdirActionStatus::Applied { seq: None, .. } =
         producer.action_status(id).expect("read the row's status")
     else {
         panic!("the performed collection-create reads as applied");
     };
 
-    // The folder now in the store, a child goes under it, joined by the
-    // server's hierarchy delimiter.
     producer
         .enqueue_collection_create(
             "create/imap/INBOX",
@@ -104,7 +105,6 @@ fn a_queued_folder_and_its_child_are_created_on_the_imap_server() {
         "{listed:?}"
     );
 
-    // Asked again, a folder the server lists already is success.
     producer
         .enqueue_collection_create("create/imap/INBOX", &folder, None, None)
         .expect("queue the folder again");
@@ -120,6 +120,10 @@ fn a_queued_folder_and_its_child_are_created_on_the_imap_server() {
     }
 }
 
+/// A queued calendar is created on the server.
+///
+/// A calendar does not nest, so one queued under a parent parks, the run
+/// waiting for a person (exit 3).
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :8080 and --ignored"]
 fn a_queued_calendar_is_created_on_the_caldav_server() {
@@ -162,8 +166,6 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
     let id = created["id"].as_str().unwrap().to_owned();
     assert_eq!(id, name.replace(' ', "-"), "{checked}");
 
-    // NOTE: a calendar does not nest, so a parent parks the row, and a
-    // parked intent waits for a person (exit 3).
     producer
         .enqueue_collection_create(
             "create/caldav/default",
@@ -190,9 +192,9 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
         .output();
 }
 
-/// `sync --intents-only` opens the source the intent needs and creates the
-/// folder, listing nothing: the folder is in the store only once a sync
-/// lists it.
+/// `sync --intents-only` creates the folder, opening the source it needs.
+///
+/// It lists nothing: the folder is in the store only once a sync lists it.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn a_queued_folder_is_created_by_a_run_performing_intents_alone() {
@@ -306,10 +308,11 @@ fn neverest(args: &[&str], config: &Path, state: &Path) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
-/// A renamed mailbox takes the one under it along, and the store follows it
-/// with its message rather than finding it again under the new name; a
-/// mailbox holding another is deleted only once that one is gone, and the
-/// store then drops it.
+/// A renamed mailbox takes its child along, the store following both.
+///
+/// The store follows a rename (message included) only for collections it
+/// holds, so the child is synced first; a mailbox holding another parks its
+/// delete until that one is gone, then the store drops it.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
@@ -353,8 +356,6 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
         .find(|id| id.starts_with(&folder) && *id != folder)
         .expect("the child is listed");
     let delimiter = &child[folder.len()..folder.len() + 1];
-    // NOTE: a run narrowed to the parent lists no child, and the store
-    // follows a rename only for the collections it holds.
     sync(&config, &state, &child);
 
     let message = tmp.path().join("message.eml");
@@ -409,7 +410,6 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
     );
     drop(reader);
 
-    // NOTE: a mailbox holding another parks, deleting nothing.
     let id = producer
         .enqueue_collection_delete(&format!("create/imap/{renamed}"), None)
         .expect("queue the delete");

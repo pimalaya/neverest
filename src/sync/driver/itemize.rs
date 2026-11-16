@@ -149,17 +149,12 @@ pub(super) fn itemize_single(
     Ok(())
 }
 
-/// Reports the pull plan: every not-yet-`Full`, non-tombstone item, and every
-/// item the pull brought in with its body.
+/// Reports the pull plan: every bodiless live item, and every item the pull
+/// brought in with its body.
 ///
 /// A kind named by its body (DAV, Google, Graph contacts and events) arrives
-/// with it, its page fetching the bodies before it lands, so the plan read
-/// off the store alone would be empty for exactly what the run pulled: those
-/// are read off the pull's events.
-///
-/// `owed` names what was bodiless before the pull: a body a landed page's
-/// hydration kept since is this run's fetch too, though the pull named no
-/// change for it (a page an earlier run listed).
+/// with it, so those are read off the pull's events, and off `owed`: what was
+/// bodiless before the pull and hydrated since.
 pub(super) fn itemize_fetches(
     collection: &str,
     display: &str,
@@ -225,13 +220,11 @@ pub(super) struct Noted {
     /// The creates the last pass left waiting (pimdir SYNC §5): one an
     /// earlier pass left waiting may have landed since.
     waiting: BTreeMap<String, Vec<PimdirWaiting>>,
-    /// The members named apart from a create of this side holding their
-    /// identity (pimdir SYNC §5, §6): the member's handle and the create's
-    /// key.
+    /// The members named apart from a create holding their identity (pimdir
+    /// SYNC §5, §6): the member's handle and the create's key.
     disagreed: Vec<(String, PimdirHandle, PimdirLinkId)>,
-    /// The changes the remote refused as they stand, this pass or one
-    /// before (pimdir SYNC §5): the handle and the reason, the last a
-    /// pass gave.
+    /// The changes the remote refused as they stand (pimdir SYNC §5), with
+    /// the last reason a pass gave.
     refusals: BTreeMap<(String, PimdirHandle), String>,
     /// The members a capped round did not list, and so kept (pimdir SYNC
     /// §5): the most one pass counted.
@@ -280,9 +273,8 @@ impl Noted {
         self.note_events(collection, &report.events);
     }
 
-    /// Notes the bodies `events` say a policy did not adopt in `collection`,
-    /// from a sync or an upgrade, and the members they say were named apart
-    /// from a create holding their identity, each once.
+    /// Notes, each once, the bodies `events` say a policy did not adopt and
+    /// the members named apart from a create holding their identity.
     pub(super) fn note_events(&mut self, collection: &str, events: &[PimdirSyncEvent]) {
         for event in events {
             match event {
@@ -303,14 +295,10 @@ impl Noted {
                         self.disagreed.push(apart);
                     }
                 }
-                // NOTE: a held change is reported by every pass meeting it,
-                // so each is kept once.
                 PimdirSyncEvent::Refused { handle, reason } => {
                     let key = (collection.to_string(), handle.clone());
                     self.refusals.insert(key, reason.clone());
                 }
-                // NOTE: reported by an `Abandon` alone, which no neverest
-                // command stages yet (pimdir SYNC §7).
                 PimdirSyncEvent::Abandoned(handle) => {
                     let key = handle.as_str().trim_start_matches('\u{1}');
                     info!("the delivered create {key} of {collection} was given up");
@@ -322,6 +310,9 @@ impl Noted {
 }
 
 /// Drains what `ctx`'s syncs noted into `report`.
+///
+/// A create is held under its provisional handle, U+0001 then its key (pimdir
+/// SYNC §2), and is named by that key, the part a person can read.
 pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
     let Noted {
         parked,
@@ -336,8 +327,6 @@ pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
     let display = |collection: &str| display_name(&ctx.namespace, collection).to_string();
 
     for ((collection, handle), reason) in refusals {
-        // NOTE: a create is held under its provisional handle, U+0001 then
-        // its key (pimdir SYNC §2), which its hunk names it by.
         let id = handle.as_str().trim_start_matches('\u{1}').to_owned();
         let collection = display(&collection);
         report
@@ -390,14 +379,11 @@ pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
         });
     }
     for (collection, creates) in waiting {
-        // NOTE: the last pass of a collection says what still waits.
         let named = display(&collection);
         report
             .waiting
             .retain(|create| create.side != ctx.name || create.collection != named);
         for create in creates {
-            // NOTE: a provisional handle is U+0001 then the create's key
-            // (pimdir SYNC §2), and the key is what a person can read.
             let key = create.handle.as_str().trim_start_matches('\u{1}');
             report.waiting.push(WaitingCreate {
                 side: ctx.name.clone(),
@@ -456,7 +442,9 @@ pub(super) fn itemize(
 
 /// Maps a projected placement to its report hunks.
 ///
-/// A flag change can surface as both an add and a remove.
+/// A flag change can surface as both an add and a remove. A create is a
+/// server-side copy from its origin, an upload of the other side's body, or,
+/// with no other side, an append a frontend authored (pimdir SYNC §5).
 pub(super) fn placement_hunks(
     source: &str,
     other: &str,
@@ -473,10 +461,6 @@ pub(super) fn placement_hunks(
                 .unwrap_or_default();
             let flags = to_email_flag_set(&placement.flags);
             let content_key = content_key(&link);
-            // NOTE: what the create delivers by says what it is (SYNC §5):
-            // a server-side copy from its origin, an upload of a body the
-            // other side holds, or, with no other side, an append a
-            // frontend authored.
             let hunk = match &placement.origin {
                 Some(origin) => ItemHunk::Copy {
                     source_side: source.to_string(),
@@ -582,15 +566,13 @@ pub(super) fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &
 
 /// Names the writes a side would not take, un-counting their hunks.
 ///
-/// The item patch is a plan, itemized before anything is pushed, so a refused
-/// write left in it counts as one the run made and comes back as a phantom on
-/// every later run, as a rejected `PUT` did against a real CardDAV server.
+/// The item patch is a plan itemized before any push, so a refused write left
+/// in it comes back as a phantom on every later run. A create is named by its
+/// provisional handle's key, past the U+0001 (pimdir SYNC §2).
 pub(super) fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: &mut SyncOutput) {
     let mut seen: HashSet<(String, String, &'static str)> = HashSet::new();
 
     for rejected in rejected {
-        // NOTE: a create is staged under its provisional handle, U+0001 then
-        // the link id (pimdir SYNC §2), which its hunk names it by.
         let id = match rejected.handle.strip_prefix('\u{1}') {
             Some(link) => link.to_string(),
             None => rejected.handle.clone(),

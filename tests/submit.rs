@@ -1,23 +1,12 @@
+//! # Submission
+//!
 //! End-to-end submission test against a local Stalwart (server A: IMAP on
-//! :143, SMTP on :2525), spawned via `tests/stalwart2.sh`. Ignored by default.
+//! :143, SMTP on :2525), spawned via tests/stalwart2.sh. Ignored by default.
 //!
-//! Submission is the one path the unit tests can only fake: they drive
-//! `send_one` against an in-process sink, so the SMTP dialogue, the envelope
-//! the payload carries and the acknowledgement that releases the body's pin
-//! were never proven against a server. Here they are:
-//!
-//!   1. Sync once so the store exists at the owner's schema version.
-//!   2. Stage a body in the blob tree and enqueue a `submit` intent naming it,
-//!      exactly as a frontend (himalaya) produces one.
-//!   3. Sync, and check the report says the intent was submitted and that the
-//!      queue row is gone, which is what releases the body's pin.
-//!   4. Wait for the server to deliver it back to the same account, sync, and
-//!      check the message reached the store through the IMAP side: the send
-//!      and the pull are one chain, not two.
-//!
-//! The recipient is the account itself, so a single server closes the loop
-//! without a relay: submission goes out through SMTP and comes back in
-//! through IMAP.
+//! The unit tests drive `send_one` against an in-process sink, so the SMTP
+//! dialogue, the envelope and the acknowledgement releasing the body's pin
+//! are proven here. The recipient is the account itself, so one server
+//! closes the loop: out through SMTP, back in through IMAP.
 //!
 //! Start the servers and run with:
 //! ```sh
@@ -54,10 +43,10 @@ const PASS: &str = "P!malaya-test-2026";
 /// The queue action kind neverest defines for a submission.
 const SUBMIT: &str = "submit";
 
-/// A single token, so the IMAP `SEARCH TEXT` needs no quoting, and a distinct
-/// one per run: the server keeps what earlier runs delivered to it, and a
-/// constant marker would let one of those messages pass this run's search
-/// without anything having been sent.
+/// A single token needing no quoting, distinct per run.
+///
+/// The server keeps what earlier runs delivered, so a constant marker would
+/// let one of those pass this run's search with nothing sent.
 fn marker() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -80,6 +69,11 @@ fn message(marker: &str) -> Vec<u8> {
     .into_bytes()
 }
 
+/// A queued `submit` leaves through SMTP and comes back through IMAP.
+///
+/// A first sync makes the store a producer only appends to; the body is
+/// staged before the row naming it, as a frontend does, and the acknowledged
+/// row leaves the queue, applied, releasing the body's pin.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143/:2525 and --ignored"]
 fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
@@ -102,14 +96,9 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     )
     .unwrap();
 
-    // 1. A first sync, which is what creates the store the producer needs:
-    //    a producer never creates one, it appends to the owner's.
     neverest(&["init", "-a", "submit"], &config, &state);
     neverest(&["sync", "-a", "submit"], &config, &state);
 
-    // 2. What a frontend does: the body durably in the blob tree first, then
-    //    the queue row naming it, so the body is never unreferenced with the
-    //    intent already queued.
     let store = state.join("neverest");
     let marker = marker();
     let body = message(&marker);
@@ -137,7 +126,6 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
         "the intent is queued before the run; queue held:\n{queued}",
     );
 
-    // 3. The run performs it: sent, acknowledged, and no longer queued.
     let report = neverest(&["sync", "-a", "submit", "--json"], &config, &state);
     let submitted = &json_report(&report)["submitted"];
     assert!(
@@ -155,7 +143,6 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
         "an acknowledged intent leaves the queue; queue held:\n{queued}",
     );
 
-    // Its receipt tells the producer it was sent, not withdrawn.
     let producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
     let status = producer.action_status(id).expect("read the row's status");
     assert!(
@@ -163,8 +150,6 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
         "a sent intent reads as applied; it read {status:?}",
     );
 
-    // 4. The server delivered it back to the same account, and the IMAP side
-    //    pulled it into the store: one chain, submission to replica.
     let delivered = wait_for_delivery(&marker).expect("the submitted message reached the server");
     neverest(&["sync", "-a", "submit"], &config, &state);
 
@@ -175,6 +160,10 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     );
 }
 
+/// `check` opens the SMTP channel a source declares.
+///
+/// With the sources still answering, a closed SMTP port fails the check
+/// alone; the error lands on either stream depending on the printer.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143/:2525 and --ignored"]
 fn check_opens_the_smtp_channel_a_source_declares() {
@@ -205,14 +194,12 @@ fn check_opens_the_smtp_channel_a_source_declares() {
         "{checked}"
     );
 
-    // NOTE: the sources still answer, so only the send channel fails.
     write("smtp://127.0.0.1:1");
     let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
         .args(["-c", &config.to_string_lossy(), "check", "-a", "submit"])
         .env("XDG_STATE_HOME", &state)
         .output()
         .expect("spawn neverest");
-    // NOTE: the error lands on either stream depending on the printer.
     let printed = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
@@ -222,6 +209,10 @@ fn check_opens_the_smtp_channel_a_source_declares() {
     assert!(printed.contains("Check the SMTP channel"), "{printed}");
 }
 
+/// `check` lists the collections with the roles the server states.
+///
+/// Stalwart creates its default folders with SPECIAL-USE roles; a folder
+/// the server states nothing about carries none.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn check_lists_collections_with_the_roles_the_server_states() {
@@ -254,7 +245,6 @@ fn check_lists_collections_with_the_roles_the_server_states() {
             .map(|collection| collection["id"].as_str().unwrap_or_default().to_owned())
     };
 
-    // NOTE: Stalwart creates its default folders with SPECIAL-USE roles.
     assert_eq!(role_of("inbox").as_deref(), Some("INBOX"), "{checked}");
     for role in ["sent", "drafts", "trash", "junk"] {
         assert!(
@@ -262,7 +252,6 @@ fn check_lists_collections_with_the_roles_the_server_states() {
             "no {role} folder stated: {checked}"
         );
     }
-    // A folder the server states nothing about carries no role.
     assert!(
         collections
             .iter()
@@ -273,9 +262,10 @@ fn check_lists_collections_with_the_roles_the_server_states() {
     );
 }
 
-/// `sync --intents-only` sends the queued message and stops: nothing listed,
-/// nothing fetched, the sent copy in the store at once and on the server
-/// after the next full sync.
+/// `sync --intents-only` sends the queued message and stops.
+///
+/// Nothing listed, nothing fetched; the sent copy is in the store at once
+/// and waits there until the next full sync pushes it.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143/:2525 and --ignored"]
 fn intents_only_sends_and_the_next_sync_files_the_copy() {
@@ -342,7 +332,6 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
 
     wait_for_delivery(&marker).expect("the submitted message reached the server");
 
-    // NOTE: the copy waits in the store until a sync pushes it.
     let folder = sent.trim_start_matches("submit/imap/").replace(' ', "%20");
     assert!(
         !search(&folder, &marker),
@@ -365,19 +354,11 @@ fn search(mailbox: &str, marker: &str) -> bool {
         .any(|token| token.parse::<u32>().is_ok())
 }
 
-/// Polls the account's mailboxes for the marker until one holds it, and
-/// answers which. Delivery is queued: the `250` that acknowledged the `DATA`
-/// is the server taking the message, not the server having filed it.
+/// Polls the mailboxes for the marker, answering the store's key of the one.
 ///
-/// Which mailbox it lands in is the server's call, not this chain's. Port 25
-/// offers no `AUTH`, so the submission arrives unauthenticated with a sender
-/// in the server's own domain, and Stalwart's filter reads that as spoofing
-/// and files it under `Junk Mail`. The sync collects every mailbox, so the
-/// verdict changes where the message is, never whether it arrives.
-///
-/// The name it answers with is the one the store keys the collection under,
-/// which pimdir groups by the id of the source that synced it, the account
-/// then the source name.
+/// The `250` to `DATA` is the server taking the message, not filing it. An
+/// unauthenticated sender of the server's own domain reads as spoofing to
+/// Stalwart, filed under `Junk Mail`, so both mailboxes are searched.
 fn wait_for_delivery(marker: &str) -> Option<String> {
     for _ in 0..30 {
         for (mailbox, path) in [("INBOX", "INBOX"), ("Junk Mail", "Junk%20Mail")] {
@@ -400,9 +381,9 @@ fn wait_for_delivery(marker: &str) -> Option<String> {
     None
 }
 
-/// Runs the `pimdir` operator CLI against the account's store, the way the
-/// CardDAV test does: the queue and the retained rows are what the sync
-/// report does not print.
+/// Runs the `pimdir` operator CLI against the account's store.
+///
+/// The queue and the retained rows are what the sync report does not print.
 fn pimdir(state: &Path, args: &[&str]) -> String {
     let store = state.join("neverest");
     let output = pimdir_cli()

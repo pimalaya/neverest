@@ -5,10 +5,9 @@
 //! engine's storage seam through the [`PimdirSourceStore`] handle itself.
 //!
 //! This module adds the multi-source reads the driver needs on top of that
-//! seam. [`load_side`] reads through one source handle, so it carries that
-//! source's own bindings and pending work, while [`projection_view`] and [`hydration_targets`] read
-//! the whole hub, both sources' bindings included. [`register_syncing`]
-//! records a source as syncing a collection before its first checkpoint.
+//! seam: [`load_side`] reads through one source handle, its own bindings and
+//! pending work, [`projection_view`] and [`hydration_targets`] the whole hub.
+//! [`register_syncing`] records a source syncing before its first checkpoint.
 
 use std::path::Path;
 
@@ -73,9 +72,9 @@ pub struct HydrationSide<'a> {
 
 /// The bodiless items to hydrate (`Full`) for the pair to converge this run.
 ///
-/// An item one side alone holds is a copy the other may be given. An item both
-/// hold, changed on exactly one, is an update the other is owed: without the
-/// body the push has nothing to send. An item both rewrote is a divergence.
+/// One side alone holding it owes the other a copy; one side changed it (its
+/// base bodiless, the mark a pull of new content leaves) owes the other the
+/// body; both changed it is a divergence, unless one side `decides`.
 pub fn hydration_targets(
     store: &PimdirStore,
     collection: &str,
@@ -104,10 +103,6 @@ pub fn hydration_targets(
             continue;
         }
 
-        // NOTE: a base that carries no body is the mark a pull leaves when
-        // the remote changed the content, since recording it drops the stale
-        // body from the item and from that source's base together. A base
-        // that is absent altogether never agreed with anything.
         let pulled: Vec<_> = item
             .sources
             .iter()
@@ -119,9 +114,6 @@ pub fn hydration_targets(
             })
             .collect();
 
-        // NOTE: a difference both sides made is a divergence, which the
-        // conflict path merges or parks, unless an authority is declared:
-        // then the deciding side overwrites the other.
         let changed = match pulled.as_slice() {
             [(source, binding)] => Some((*source, *binding)),
             _ => pulled
@@ -148,22 +140,12 @@ pub fn hydration_targets(
     Ok(out)
 }
 
-/// Records `source` as syncing each of `collections` it holds no state in
-/// yet, with no checkpoint, answering how many it recorded.
+/// Records `source` as syncing each of `collections` (already in the store)
+/// it holds no state in yet, with no checkpoint, answering how many.
 ///
-/// The store counts a source as syncing a collection from its `sources` row
-/// or a binding there (pimdir STORAGE §15.6, `load_capabilities`), so what
-/// the source declares for a calendar listed but not synced yet,
-/// `calendar.component.vtodo` among it, holds from the listing on rather
-/// than from its first checkpoint. A row with no checkpoint reads as no
-/// sync state at all. A row already there is left alone, its checkpoint the
-/// next delta's base: the canonical `load_checkpoint` reads it before
-/// `upsert_checkpoint` writes one, in one transaction, as Android's
-/// calendar does.
-///
-/// io-pimdir has no owner write for it, so this holds a connection of its
-/// own, which pimdir's canonical statements are vendored for. Each
-/// collection must be in the store already.
+/// The store counts a source syncing from its `sources` row (STORAGE §15.6),
+/// so its declarations hold from the listing on; a row there is kept, its
+/// checkpoint the next delta's base. io-pimdir has no owner write for it.
 pub fn register_syncing(dir: &Path, source: &str, collections: &[String]) -> Result<usize> {
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let mut conn = Connection::open_with_flags(dir.join("pimdir.db"), flags)

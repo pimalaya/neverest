@@ -125,9 +125,8 @@ pub struct Bound {
     handles: HashSet<String>,
     /// The name of each, by handle.
     metas: HashMap<String, BoundMeta>,
-    /// The checkpoint the store holds, or while no round has closed, the
-    /// one the open round's first page handed: the handle space the
-    /// store's bindings were made under.
+    /// The checkpoint the store holds, else the open round's first page's:
+    /// the handle space the store's bindings were made under.
     checkpoint: Option<Vec<u8>>,
     /// The scope of the source's last closed round.
     coverage: Option<PimdirScope>,
@@ -184,18 +183,18 @@ impl BoundMeta {
 }
 
 /// Drops the members of a page whose `Date` lies outside `scope` (pimdir
-/// SYNC §5): a connector narrows its listing by the provider's reception
-/// date to a superset at most, and the `Date` decides, a member with no
-/// usable date being in every scope.
+/// SYNC §5), a member with no usable date being in every scope.
+///
+/// A connector narrows by the provider's reception date to a superset at
+/// most, so the `Date` decides.
 pub(crate) fn keep_in_scope(items: &mut Vec<PimdirRemoteItem>, scope: &PimdirScope) {
     if !scope.is_unbounded() {
         items.retain(|item| scope.contains(listed_date(&item.meta)));
     }
 }
 
-/// The seam's page of a backend's listing, its members named: a page of a
-/// round when `complete`, the last one when it carries no `cursor`, else
-/// the one page of a delta.
+/// The seam's page of a backend's listing: a page of a round when
+/// `complete`, the last one with no `cursor`, else the one page of a delta.
 pub(crate) fn snapshot(
     complete: bool,
     cursor: Option<Vec<u8>>,
@@ -236,9 +235,10 @@ pub(crate) fn snapshot(
 }
 
 /// What a backend states of the date filter a round's listing ran under
-/// (pimdir SYNC §4, §5): whether one narrowed it, and on its last page the
-/// handles an unfiltered enumeration read. A delta and a round no filter
-/// narrowed state neither.
+/// (pimdir SYNC §4, §5).
+///
+/// Whether one narrowed it, and on its last page the handles an unfiltered
+/// enumeration read; a delta and an unnarrowed round state neither.
 #[derive(Debug, Default)]
 pub(crate) struct Narrowing {
     pub(crate) narrowed: bool,
@@ -389,17 +389,15 @@ impl<'a> PimRemote<'a> {
         self
     }
 
-    /// Names a member of a kind named by its body without fetching the
-    /// body, by its handle, when `bodies` is false: a dry run downloads
-    /// nothing, and its replica is thrown away.
+    /// Names a member of a kind named by its body by its handle, unfetched,
+    /// when `bodies` is false: a dry run downloads nothing, its replica gone.
     pub fn with_bodies(mut self, bodies: bool) -> Self {
         self.bodies = bodies;
         self
     }
 
-    /// States every page of a round capped when `capped`: the source lists
-    /// at most a number of what a collection holds, so a member it leaves
-    /// unlisted is no absence (pimdir SYNC §4, §5).
+    /// States every round's pages capped when `capped`: the source lists a
+    /// part, so an unlisted member is no absence (pimdir SYNC §4, §5).
     pub fn with_capped(mut self, capped: bool) -> Self {
         self.capped = capped;
         self
@@ -454,10 +452,9 @@ impl<'a> PimRemote<'a> {
     /// Answers a write the server failed with `err`: refused, when it
     /// refused the change as it stands ([`refusal`]), else rejected.
     ///
-    /// A refusal is recorded by the engine on the binding, which then holds
-    /// the change while its key stands and reports it every run (pimdir
-    /// SYNC §5): the run reports it from that event, so it is not recorded
-    /// here too.
+    /// A refusal is recorded by the engine on the binding, which holds the
+    /// change while its key stands and reports it every run (pimdir SYNC
+    /// §5), so it is not recorded here too.
     fn fail(
         &mut self,
         collection: &str,
@@ -534,6 +531,11 @@ fn to_item_flags(flags: &PimdirFlags) -> Vec<Flag> {
 impl PimdirRemote for PimRemote<'_> {
     type Error = anyhow::Error;
 
+    /// Lists one page of `collection` (pimdir SYNC §4).
+    ///
+    /// A member is named by what the listing read, else by its binding: a
+    /// message never renames, and a resource at the held revision (any, in a
+    /// dry run) states what it stated. A band head holds no checkpoint.
     fn enumerate(
         &mut self,
         collection: &PimdirCollectionId,
@@ -570,16 +572,11 @@ impl PimdirRemote for PimRemote<'_> {
         };
         self.pool.downloaded(page.bytes);
 
-        // NOTE: a member is named by what the listing read, else by what the
-        // store binds it under: a message never renames, and a resource
-        // listed at the revision the store holds states what it stated.
         let mut items = Vec::with_capacity(page.items.len());
         let mut unnamed = Vec::new();
         for mut entry in page.items {
             let meta = match entry.meta.take() {
                 Some(derivation) => Some(PimdirRemoteMeta::from(derivation)),
-                // NOTE: a dry run names a changed resource by its binding too,
-                // fetching no body: a pull without one, which the plan names.
                 None => bound.metas.get(&entry.id).and_then(|known| {
                     let same = self.kind == Kind::Mail
                         || !self.bodies
@@ -614,8 +611,6 @@ impl PimdirRemote for PimRemote<'_> {
             page.vanished.into_iter().map(PimdirHandle::from).collect();
         self.held.remember(collection, &items, &vanished);
 
-        // NOTE: a band head carries no checkpoint and states no removal; a
-        // delta head answers as a delta does (pimdir SYNC §4).
         if let Some(PimdirHead::Band { .. }) = request.head() {
             return Ok(PimdirEnumerated::Page(PimdirRemoteSnapshot::band_head(
                 items,
@@ -634,7 +629,6 @@ impl PimdirRemote for PimRemote<'_> {
             vanished,
             narrowing,
         );
-        // NOTE: stated on every page of a round and on no other page.
         answer.capped = self.capped && answer.complete;
         Ok(PimdirEnumerated::Page(answer))
     }
@@ -661,6 +655,11 @@ impl PimdirRemote for PimRemote<'_> {
         }
     }
 
+    /// Applies `changes` in order (pimdir SYNC §4).
+    ///
+    /// Flags go as deltas, never the whole set, so a flag the server changed
+    /// since the listing survives. A move to a target holding the identity
+    /// deletes the member on its own precondition, stating no relocation.
     fn push(
         &mut self,
         collection: &PimdirCollectionId,
@@ -677,8 +676,6 @@ impl PimdirRemote for PimRemote<'_> {
                     add,
                     remove,
                 } => {
-                    // NOTE: deltas, never the whole set (pimdir SYNC §4): a
-                    // flag the server changed since the listing survives.
                     let raw = |flags: BTreeSet<String>| -> Vec<Flag> {
                         flags.into_iter().map(Flag::from_raw).collect()
                     };
@@ -703,9 +700,6 @@ impl PimdirRemote for PimRemote<'_> {
                     (Some(_), Some(Err(reason))) => {
                         self.reject(&collection, handle, "move", reason)
                     }
-                    // NOTE: the target holds the identity already, so the
-                    // member is deleted, on its own precondition, and the
-                    // outcome states no relocation (pimdir SYNC §4).
                     (Some(target), Some(Ok(()))) => {
                         debug!(
                             "{} holds the identity of {} already, deleting it from {collection}",
@@ -845,11 +839,11 @@ impl<R: PimdirRemote<Error = anyhow::Error>> PimdirRemote for CachedFetchRemote<
 }
 
 impl PimRemote<'_> {
-    /// Names listed members of a kind named by its body (pimdir SYNC §4):
-    /// their bodies fetched for the page, [`BATCH_SIZE`] a request across the
-    /// pool, each carried by its member, the revision the body was read at
-    /// winning over the listed one. A member whose body did not come is left
-    /// out of the page, for the next run.
+    /// Names listed members of a kind named by its body (pimdir SYNC §4),
+    /// their bodies fetched [`BATCH_SIZE`] a request across the pool.
+    ///
+    /// The revision a body was read at wins over the listed one; a member
+    /// whose body did not come is left out of the page, for the next run.
     fn name_by_body(
         &mut self,
         collection: &str,
@@ -962,8 +956,9 @@ impl PimRemote<'_> {
     }
 
     /// The bodies of [`fetch_full`](Self::fetch_full), largest first when
-    /// the sizes are known, across the pool. A body gone from the server
-    /// is left out, which the upgrade asking for it leaves owed.
+    /// the sizes are known, across the pool.
+    ///
+    /// A body gone from the server is left out, which the upgrade leaves owed.
     fn fetch_bodies(
         &mut self,
         collection: &str,
@@ -1075,9 +1070,9 @@ impl PimRemote<'_> {
 
 /// Streams one body into the blob store and reports the object by reference.
 ///
-/// The link id and summary come from the streamed header prefix. Free of
-/// `PimRemote` so a pool worker can call it on its own connection. A body
-/// the server no longer holds fails with [`Gone`].
+/// Free of `PimRemote` so a pool worker can call it. A body the server no
+/// longer holds fails with [`Gone`], and an empty one fails too: every empty
+/// body would resolve to the one digest of nothing.
 fn fetch_one_full(
     kind: Kind,
     client: &mut Client,
@@ -1094,9 +1089,6 @@ fn fetch_one_full(
         .finish()
         .with_context(|| format!("Commit body {} in {collection} error", handle.as_str()))?;
 
-    // NOTE: no kind here has an empty body, and storing one names it by the
-    // digest of nothing: every empty body a server hands back resolves to that
-    // identity, each after the first filed as another copy of it.
     if size == 0 {
         bail!(
             "Server returned an empty body for {} in {collection}",
@@ -1127,16 +1119,12 @@ pub(crate) struct Hydrated {
     pub gone: Vec<PimdirHandle>,
 }
 
-/// The body the store already holds under `hash`, reported for `handle`
-/// as a fetch of the same bytes would be, read from the blob's header
-/// alone; `None` when the blob is not there (collected meanwhile).
+/// The body the store already holds under `hash`, reported for `handle` as a
+/// fetch would, read from the blob's header; `None` when the blob is gone.
 ///
-/// What serves a member of a second collection with the body a source
-/// whose handles are account-wide (Gmail) already delivered for the
-/// first: the identity, summary and sort key derive from the header as
-/// they did then, and nothing goes over the network. A message's mark
-/// and invitation are the store's to state: the write gives the new row
-/// those of the row already holding the body (Annex A.1).
+/// Serves a second collection of a source with account-wide handles (Gmail)
+/// with no network; a message's mark and invitation are the store's to state,
+/// taken from the row already holding the body (Annex A.1).
 pub(crate) fn stored_item(
     kind: Kind,
     blobs: &PimdirBlobs,
@@ -1185,13 +1173,9 @@ pub(crate) fn stored_item(
 
 /// Fetches a batch of bodies in one command, each streamed into its own blob.
 ///
-/// The handle the server echoes keys each body back, so out-of-order responses
-/// still route. A batch error, or a batch answering for fewer members than it
-/// was asked, falls back to per-item fetches, idempotent by content address,
-/// on a connection [`Client::recover`] left fit for them.
-/// A handle the server answers gone, in the batch or alone, is answered under
-/// [`Hydrated::gone`] and never fails the batch. `sizes` is what the store
-/// records of each body.
+/// Bodies route by echoed handle. A batch error or a short one (whose rest
+/// would be asked again every run) falls back to per-item fetches, a handle
+/// answered gone landing in [`Hydrated::gone`] without failing the batch.
 pub(crate) fn hydrate_batch(
     kind: Kind,
     client: &mut Client,
@@ -1233,10 +1217,6 @@ pub(crate) fn hydrate_batch(
 
     let (alone, mut gone): (Vec<PimdirHandle>, Vec<PimdirHandle>) = match batched {
         Ok(gone) => {
-            // NOTE: a short batch is not a batch that succeeded: the engine
-            // would record nothing for the rest and ask again every run. A
-            // CardDAV server was seen answering each card's ETag with a 404
-            // body.
             let gone: Vec<PimdirHandle> = gone.into_iter().map(PimdirHandle::from).collect();
             let answered: BTreeSet<&str> = items
                 .iter()
@@ -1293,9 +1273,9 @@ pub(crate) fn hydrate_batch(
 impl PimRemote<'_> {
     /// Appends a stored body as a genuine new member, checking the answer.
     ///
-    /// A server may answer a create by updating the resource already holding
-    /// the `UID` and handing its href back (RFC 6352 §6.3.2 forbids it). Two
-    /// items on one handle read as one vanished, propagating a phantom delete.
+    /// A create answered by updating the resource holding the `UID` (RFC 6352
+    /// §6.3.2 forbids it) would read as a phantom delete. One answered with no
+    /// handle is accepted, the next listing landing it (pimdir SYNC §4).
     fn append(
         &mut self,
         collection: &str,
@@ -1333,9 +1313,6 @@ impl PimRemote<'_> {
 
         let written = match written {
             Ok(Some(written)) => written,
-            // NOTE: taken by a server that names no appended member:
-            // accepted with no handle, which the engine records delivered,
-            // the next listing landing it (pimdir SYNC §4).
             Ok(None) => {
                 debug!(
                     "append of {} to {collection} accepted with no handle",
@@ -1344,8 +1321,6 @@ impl PimRemote<'_> {
                 return accepted(handle, None);
             }
             Err(err) => {
-                // NOTE: a duplicate `UID` gets its own report entry, naming the
-                // identity and the remedy a generic rejection cannot state.
                 if !is_duplicate_uid(&err) {
                     return self.fail(collection, handle, "append", &err);
                 }
@@ -1378,17 +1353,11 @@ impl PimRemote<'_> {
     }
 
     /// Delivers a create superseding a member of its own identity by moving
-    /// that member into `collection`, then writing `object` over it (pimdir
-    /// SYNC §3, §4), so the `UID` never lives twice on the server: Fastmail,
-    /// keeping one per account, refuses an upload while the source holds it.
+    /// it into `collection` and writing `object` over it (pimdir SYNC §3, §4).
     ///
-    /// The move is gated on the member's last-synced revision, and the write
-    /// on the ETag the move answered, unconditional when it answered none.
-    /// Accepted under the moved member's handle and the revision the write
-    /// left. `None` when the backend or its server cannot move it (CardDAV,
-    /// Google's 404, a 405 or 501): the caller uploads the body as for any
-    /// create. A refused move rejects the create as a refused upload does,
-    /// a duplicate `UID` with its own report entry.
+    /// The `UID` never lives twice (Fastmail refuses it). `None` when the
+    /// server cannot move (CardDAV, Google's 404, a 405, 501), uploading
+    /// instead; a write failing after the move lands on the next listing.
     fn supersede(
         &mut self,
         collection: &str,
@@ -1397,7 +1366,6 @@ impl PimRemote<'_> {
         object: &PimdirHash,
         link: LinkId<'_>,
     ) -> Option<PimdirPushResult> {
-        // NOTE: the body is opened first, so one missing moves nothing.
         let (reader, len) = match self.body(object) {
             Ok(body) => body,
             Err(reason) => return Some(self.reject(collection, handle.clone(), "move", reason)),
@@ -1427,9 +1395,6 @@ impl PimRemote<'_> {
             }
         };
 
-        // NOTE: a write failing after the move leaves the member in the
-        // target under its old body, and the create pending: the target's
-        // next listing names it, which lands the create (pimdir SYNC §6).
         let written = self.pool.primary().update_item_stream(
             collection,
             &moved.id,
@@ -1475,10 +1440,9 @@ impl PimRemote<'_> {
     /// Creates a member by server-side copy from `origin` (pimdir SYNC §4)
     /// on a backend that copies, else by appending the stored body.
     ///
-    /// The copy is accepted under the handle the server gives it, as an
-    /// append is. A failed copy is rejected rather than uploaded: the create
-    /// stays pending, and once the origin is gone the store offers it with
-    /// none, as an append.
+    /// A copy made before its answer was lost, maybe hidden by a scope, is
+    /// found by `Message-ID` and bound. A failed copy is rejected, not
+    /// uploaded: the create stays pending, an append once the origin is gone.
     fn copy(
         &mut self,
         collection: &str,
@@ -1488,7 +1452,6 @@ impl PimRemote<'_> {
         object: Option<PimdirHash>,
         link: LinkId<'_>,
     ) -> PimdirPushResult {
-        // NOTE: a scope can hide a copy made before its answer was lost.
         if let Some(message_id) = link.hint.filter(|_| link.mint.is_none()) {
             let found = match self.pool.primary().find_message(collection, message_id) {
                 Ok(found) => found,
@@ -1565,15 +1528,12 @@ impl PimRemote<'_> {
         }
     }
 
-    /// The removes of `changes` carrying a target that already holds their
-    /// identity, by position: such a member is deleted rather than relocated
-    /// (pimdir SYNC §4, §5), or the target would hold the identity twice. A
-    /// target that could not be asked answers why, which rejects the change.
+    /// The removes of `changes` whose target already holds their identity, by
+    /// position: such a member is deleted, not relocated (pimdir SYNC §4, §5).
     ///
-    /// Only an identity the backend can search for is asked (a `Message-ID`
-    /// on IMAP and Graph mail); a key minted on a handle is never, its
-    /// target holding the identity before the move. The targets are asked
-    /// one after another, so a session selects each once.
+    /// A target that could not be asked rejects the change. Only a searchable
+    /// identity is asked (a `Message-ID` on IMAP and Graph mail), never a key
+    /// minted on a handle; targets go one by one, a session selecting each.
     fn targets_holding(&mut self, changes: &[PimdirChange]) -> HashMap<usize, Result<(), Failure>> {
         let mut asked: BTreeMap<String, Vec<(usize, &str)>> = BTreeMap::new();
         for (at, change) in changes.iter().enumerate() {
@@ -1612,11 +1572,9 @@ impl PimRemote<'_> {
 
     /// Replaces an item's body in place, conditional on the synced revision.
     ///
-    /// A refusal is an outcome rather than an error: a stale base
-    /// [`PimdirPushOutcome::Rejected`] makes io-pimdir re-merge and mark
-    /// the placement conflicted instead of clobbering the remote body, a
-    /// refusal as it stands holds the change, and an error aborts the
-    /// batch.
+    /// A stale base is [`PimdirPushOutcome::Rejected`], so io-pimdir re-merges
+    /// and marks the placement conflicted instead of clobbering the remote
+    /// body; a refusal as it stands holds the change; an error aborts the push.
     fn update(
         &mut self,
         collection: &str,
@@ -1706,10 +1664,11 @@ fn rejected_bare(handle: PimdirHandle) -> PimdirPushResult {
 /// Cap on captured header bytes, bounding memory if no boundary is found.
 const HEADER_CAP: usize = 256 * 1024;
 
-/// The header prefix of a body, captured as it streams by without holding
-/// the body: what names it and summarises it. A message's mark and
-/// invitation, which only the walk of every part gives, are left to the
-/// store's write, which walks each body entering it once (Annex A.1).
+/// The header prefix of a body, captured as it streams by: what names and
+/// summarises it.
+///
+/// A message's mark and invitation, needing every part, are left to the
+/// store's write, which walks each entering body once (Annex A.1).
 #[derive(Default)]
 struct HeaderScan {
     header: Vec<u8>,
@@ -1898,8 +1857,9 @@ mod scope_tests {
     }
 
     /// The `Date` decides, whatever narrowed the listing: a message received
-    /// today but dated years ago is out, one dated in the future is in, and
-    /// one with no usable date is in every scope.
+    /// today but dated years ago is out, one dated in the future is in.
+    ///
+    /// One with no usable date is in every scope.
     #[test]
     fn a_page_keeps_what_its_date_puts_in_scope() {
         let mut items = vec![
@@ -2153,9 +2113,8 @@ mod push_tests {
             .any(|header| header.to_ascii_lowercase() == line)
     }
 
-    /// A task filed into another calendar keeping its `UID` is moved there,
-    /// then its body written over the moved member: the server never holds
-    /// the `UID` twice, which Fastmail refuses (pimdir SYNC §4).
+    /// A task filed into another calendar keeping its `UID` is moved, then
+    /// written over, so the `UID` never lives twice, which Fastmail refuses.
     #[test]
     fn a_superseding_create_is_delivered_by_a_move_then_a_write() {
         let dir = tempfile::tempdir().unwrap();
@@ -2259,9 +2218,11 @@ mod push_tests {
         }
     }
 
-    /// A move refused for the identity rejects the create as a refused
-    /// upload does: a duplicate `UID` named as one, a moved source member
-    /// (412) as a rejected move. Nothing is uploaded after either.
+    /// A move refused for the identity rejects the create as a refused upload
+    /// does, uploading nothing after.
+    ///
+    /// A duplicate `UID` is named as one, a moved source member (412) as a
+    /// rejected move.
     #[test]
     fn a_move_refused_for_its_identity_rejects_the_create() {
         let refusal = "<d:error xmlns:d=\"DAV:\" xmlns:c=\"urn:ietf:params:xml:ns:caldav\">\
@@ -2296,11 +2257,11 @@ mod push_tests {
         assert_eq!(rejected[0].action, "move");
     }
 
-    /// A create the server refuses as it stands, a status naming the
-    /// request or a precondition the body failed, is answered `Refused`
-    /// with the server's text and recorded as no rejection: the engine
-    /// holds it (pimdir SYNC §4, §5). A stale base (409, 412) and a quota
-    /// stay `Rejected`, pushed again by the next run.
+    /// A create refused as it stands (a status naming the request or a failed
+    /// precondition) is `Refused` with the server's text, no rejection.
+    ///
+    /// The engine holds it (pimdir SYNC §4, §5). A stale base (409, 412) and a
+    /// quota stay `Rejected`, pushed again by the next run.
     #[test]
     fn a_create_refused_as_it_stands_is_refused_not_rejected() {
         let error = |body: &str| {
@@ -2426,9 +2387,9 @@ mod hydrate_tests {
     }
 
     /// A multiget answering a member 404 leaves it gone, owed nothing more
-    /// in the run and read no more alone: the batch, and the collection
-    /// with it, is not failed for good by a member the server says is
-    /// missing.
+    /// and read no more alone.
+    ///
+    /// A member the server says is missing fails neither batch nor collection.
     #[test]
     fn a_member_a_multiget_answers_missing_is_gone() {
         let (hydrated, requests) = hydrate_one("404 Not Found", Vec::new());
@@ -2451,8 +2412,7 @@ mod hydrate_tests {
     }
 
     /// A batch whose hrefs carry escapes io-webdav decodes, or raw bytes,
-    /// still finds each body under its handle, the segment served, in the
-    /// one multiget, none read alone.
+    /// finds each body under its handle in the one multiget, none read alone.
     #[test]
     fn a_batch_of_served_hrefs_finds_each_body() {
         let handles = ["a%20b.ics", "r%C3%A9union%201.ics", "raw réunion.ics"];
@@ -2568,9 +2528,10 @@ mod imap_hydrate_tests {
         bodies
     }
 
-    /// A batch failing in the middle of its answer leaves the rest of it
-    /// unread: read one by one on that connection, the bodies would be the
-    /// leftovers, each under another message's handle.
+    /// A batch failing mid-answer leaves the rest unread on its connection.
+    ///
+    /// Read one by one there, the bodies would be the leftovers, each under
+    /// another message's handle.
     #[test]
     fn a_batch_failing_mid_answer_is_read_again_on_a_new_connection() {
         let expected = hydrated(&server(None));

@@ -3,11 +3,10 @@
 //! The contacts half of [`GraphClient`]: contact folders as collections,
 //! contacts as vCards through io-msgraph's `vcard` projection.
 //!
-//! The delta round lists handles and `changeKey`s only. Graph returns a
-//! contact's extended properties, the stash carrying its UID and every line
-//! Graph has no slot for, only through `$expand`, which a body read always
-//! carries ([`MSGRAPH_CONTACT_STASH_EXPAND`]); a delta row is never
-//! projected, so a card never loses its identity to a trimmed row.
+//! The delta round lists handles and `changeKey`s only: Graph returns a
+//! contact's stash (its UID and every line it has no slot for) only through
+//! `$expand` ([`MSGRAPH_CONTACT_STASH_EXPAND`]), which every body read carries,
+//! so a card is never projected from a trimmed row and loses no identity.
 //!
 //! Graph has no conditional write for contacts, so an `If-Match` from the
 //! engine is checked against the server's current `changeKey` right before
@@ -52,9 +51,10 @@ const CONTACTS_PAGE_SIZE: u32 = 1000;
 const FOLDER_PAGE_SIZE: u32 = 100;
 
 impl GraphClient {
-    /// Lists the default Contacts folder and every contact folder at every
-    /// depth, every page of each listing read, keyed by folder id, named by
-    /// display name. A folder left out would read as deleted.
+    /// Lists the default Contacts folder and every contact folder at any depth.
+    ///
+    /// Every page of each listing is read, keyed by folder id, named by
+    /// display name: a folder left out would read as deleted.
     pub(super) fn list_contact_folders(&mut self) -> Result<Vec<Collection>> {
         debug!("begin graph contact folder listing");
 
@@ -213,9 +213,10 @@ impl GraphClient {
             .with_context(|| format!("Get contact {id} error"))
     }
 
-    /// Streams the vCards of an id set, one read per contact, each committed
-    /// with the `changeKey` it was projected from; answers the contacts
-    /// Graph answered 404, gone since they were listed.
+    /// Streams the vCards of an id set, one read per contact.
+    ///
+    /// Each is committed with the `changeKey` it was projected from; answers
+    /// the contacts Graph answered 404, gone since they were listed.
     pub(super) fn fetch_contacts<S: Write>(
         &mut self,
         ids: &[&str],
@@ -256,10 +257,9 @@ impl GraphClient {
 
     /// Creates a contact from a vCard in a folder.
     ///
-    /// The contact is read back with its stash: one whose UID did not
-    /// survive would come back under an identity minted from its Graph id,
-    /// a second person for every other source, so it is deleted again and
-    /// the write refused rather than recorded.
+    /// The contact is read back with its stash: one whose UID was lost would
+    /// come back under an identity minted from its Graph id, a second person,
+    /// so it is deleted again and the write refused rather than recorded.
     pub(super) fn add_contact(
         &mut self,
         collection: &str,

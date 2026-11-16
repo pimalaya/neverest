@@ -26,9 +26,10 @@ pub(super) struct RelayTarget {
     size: usize,
     /// The markers to append the copy with, as its backend spells them.
     pub(super) flags: Vec<Flag>,
-    /// The same markers as the hub holds them, for the placement the
-    /// relay records: [`Flag`] equality collapses two wire spellings into
-    /// one, so a round trip through it can drop a marker the hub kept.
+    /// The same markers as the hub holds them, for the recorded placement.
+    ///
+    /// [`Flag`] equality collapses two wire spellings into one, so a round
+    /// trip through it can drop a marker the hub kept.
     marks: PimdirFlags,
     /// The item's cached summary, which the copy shares: the same message
     /// on the other side, so the same summary.
@@ -37,10 +38,9 @@ pub(super) struct RelayTarget {
 
 /// The relay targets: a one-sided, never-hydrated item its far side may create.
 ///
-/// Only into a target whose listing of the collection is closed and covers
-/// the item's date, as an add is guarded (pimdir SYNC §5): the store then
-/// knows what the target holds there, so a message it holds already is bound
-/// to it by its listing rather than appended twice.
+/// Only into a target whose closed listing covers the item's date (pimdir SYNC
+/// §5), so a message it holds already is bound by its listing, not appended
+/// twice; a round open or never closed covers nothing.
 pub(super) fn relay_targets(
     store: &PimdirStore,
     kind: Kind,
@@ -50,8 +50,6 @@ pub(super) fn relay_targets(
 ) -> Result<Vec<RelayTarget>> {
     let hub = store.load_hub(collection)?;
     let coverages = store.list_coverage(collection)?;
-    // NOTE: a target with a round open, or that never closed one, covers
-    // nothing yet.
     let covered = |target: &str| {
         coverages
             .iter()
@@ -145,9 +143,6 @@ pub(super) fn relay_copies(
         (&left.name, left.perms.item.create),
         (&right.name, right.perms.item.create),
     )?;
-    // NOTE: the hub id keys the store and the wire name is what a server
-    // answers to, and both sides sync one namespace, so the single
-    // stripped name serves the fetch, the append and the report alike.
     let wire = wire_name(&left.namespace, collection).to_string();
     let total = targets.len();
     let mut count = 0;
@@ -191,9 +186,9 @@ pub(super) fn relay_copies(
 
 /// Records the copy the target holds, bound to the item it was relayed from.
 ///
-/// The relay is a side channel around the engine, so it owes the store the
-/// assigned handle under the item's own link id, or the item stays one-sided
-/// and every later pass relays it again. `collection` is the hub id.
+/// Around the engine, the relay owes the store the handle under the item's
+/// link id, at `Meta` since `Full` would strand a body-less copy, with the
+/// accepted append as base, or a later pass relays or appends it again.
 pub(super) fn bind_relayed(
     store: &mut PimdirSourceStore,
     collection: &str,
@@ -204,23 +199,14 @@ pub(super) fn bind_relayed(
         collection: PimdirCollectionId(collection.to_string()),
         handle: PimdirHandle(written.id),
         link_id: Some(PimdirLinkId(target.link.clone())),
-        // NOTE: relaying keeps the spine and nothing else, so the copy
-        // holds no body: `Full` here would strand it, an upgrade skipping
-        // whatever reads as hydrated.
         object: None,
         level: PimdirLevel::Meta,
         summary: target.summary.clone(),
-        // NOTE: the relay derives no key, as a queued create does not,
-        // and an unknown one leaves the hub's own in place.
         sort_key: PimdirSortKey::default(),
         flags: target.marks.clone(),
         status: PimdirStatus::Clean,
         conflict_revision: None,
         conflict_object: None,
-        // NOTE: the base is the append the server has just accepted, so
-        // the next sync of this side reconciles the copy as already in
-        // sync. A base-less binding reads as a pending create instead,
-        // which is the append again.
         base: Some(PimdirBase {
             flags: target.marks.clone(),
             revision: written.revision,
@@ -237,9 +223,9 @@ pub(super) fn bind_relayed(
 
 /// Relays one message: a fetch thread into the pipe, this one into the append.
 ///
-/// The body crosses without ever being held whole or stored. Both ends are
-/// wire calls, so `collection` is the name the servers answer to; what the
-/// target assigned is returned for the store to record.
+/// The body is never held whole or stored; `collection` is the wire name. A
+/// copy the server does not name fails, the relay having no create a listing
+/// could land.
 fn relay_one(
     holding_pool: &mut Pool,
     target_pool: &mut Pool,
@@ -266,9 +252,6 @@ fn relay_one(
         (fetch.join().unwrap(), append)
     });
     fetch.context("relay fetch")?;
-    // NOTE: the relay binds the copy itself, around the engine, so it has
-    // no create a listing could land: a copy the server does not name
-    // fails here, as it did.
     append
         .context("relay append")?
         .ok_or_else(|| anyhow!("Cannot resolve appended UID: the server names no appended message"))

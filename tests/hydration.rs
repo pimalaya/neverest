@@ -1,17 +1,13 @@
-//! End-to-end proof that a one-source sync keeps each body as it arrives,
-//! against a local Stalwart IMAP server (A :143), spawned via
-//! `tests/stalwart.sh`. Ignored by default.
+//! # Hydration
 //!
-//! A local sync used to raise every body to `Full` only once the whole account
-//! had downloaded, so no mail was readable before then and a run stopped
-//! halfway kept nothing. Steps:
-//!   1. Seed three folders with messages large enough for the download to
-//!      take a moment over one connection.
-//!   2. Sync over one connection, each folder being one batch, and kill the
-//!      run halfway through the second batch. The first batch is readable
-//!      already, though the account has not finished downloading.
-//!   3. Sync again. The run fetches exactly the bodies the first one did not
-//!      keep, and every message of every folder ends up with its body.
+//! A one-source sync keeps each body as it arrives, against a local
+//! Stalwart IMAP server (A :143), spawned via tests/stalwart.sh. Ignored by
+//! default.
+//!
+//! A local sync used to raise every body to `Full` only once the whole
+//! account had downloaded, so a run stopped halfway kept nothing. Here a run
+//! over one connection is killed in its second batch with the first readable,
+//! and the next fetches exactly the bodies it did not keep.
 //!
 //! Start the server and run with:
 //! ```sh
@@ -153,9 +149,11 @@ fn a_body_is_kept_as_it_arrives() {
     }
 }
 
-/// Under `--download-order newest`, recent mail downloads first even when an
-/// older folder holds the larger bodies, which the default order fetches
-/// first: over one connection, the first batch applied is the recent one.
+/// Under `--download-order newest`, recent mail downloads first.
+///
+/// An older folder holds the larger bodies the default order fetches first;
+/// with priming off (it takes each folder's newest), the first batch applied
+/// over one connection is the recent one.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
 fn recent_mail_downloads_first_on_request() {
@@ -226,8 +224,6 @@ fn recent_mail_downloads_first_on_request() {
             "1",
             "--download-order",
             "newest",
-            // NOTE: the order alone, across the account: priming would take
-            // each folder's newest first, the old folder's among them.
             "--prime",
             "0",
         ])
@@ -302,8 +298,11 @@ fn seed_large(folders: &[String], tag: &str) {
     }
 }
 
-/// Appends `messages` to `folder` over one IMAP session, curl taking one
-/// session a message.
+/// Appends `messages` to `folder` over one IMAP session.
+///
+/// A hundred a command (MULTIAPPEND, RFC 3502, non-synchronizing literals):
+/// one command appends in order so the UIDs follow the dates, where curl
+/// takes a session a message and pipelined commands may be served unordered.
 fn append_all(folder: &str, messages: impl Iterator<Item = String>) {
     use std::{
         io::{BufRead, BufReader, Write},
@@ -330,10 +329,6 @@ fn append_all(folder: &str, messages: impl Iterator<Item = String>) {
     let (user, pass) = CRED.split_once(':').unwrap();
     write!(writer, "a LOGIN \"{user}\" \"{pass}\"\r\n").unwrap();
     expect(&mut reader, "a");
-    // NOTE: a hundred messages a command (MULTIAPPEND, RFC 3502), in
-    // non-synchronizing literals (RFC 7888): one command appends its
-    // messages in order, so the UIDs follow the dates, where pipelined
-    // commands may be served out of order.
     let messages: Vec<String> = messages.collect();
     for (chunk, messages) in messages.chunks(100).enumerate() {
         write!(writer, "b{chunk} APPEND {folder}").unwrap();
@@ -386,10 +381,11 @@ fn prime_config(root: &Path, account: &str, folders: &[String]) -> std::path::Pa
     config
 }
 
-/// Priming lists every folder's first page before any second page, each
-/// followed by its newest bodies, over one connection; a run killed then
-/// leaves every folder readable from its newest mail, and the next run
-/// closes every round, each message held once with its body.
+/// Priming makes every folder readable from its newest mail early.
+///
+/// Over one connection it lists every first page, each followed by its
+/// newest bodies, before any second page; a run killed then leaves every
+/// folder readable, and the next closes every round, each message once.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
 fn every_folder_is_readable_from_its_newest_mail_early() {
@@ -474,10 +470,11 @@ fn every_folder_is_readable_from_its_newest_mail_early() {
     }
 }
 
-/// A primed run that is not interrupted reports each body it fetched once,
-/// the fetches of a paused folder carried to the spine that fills it, over
-/// several connections as over one; and how soon the first body and every
-/// first page are readable, primed or not (`--nocapture` prints it).
+/// A primed run that is not interrupted reports each body it fetched once.
+///
+/// A paused folder's fetches are carried to the spine that fills it, over
+/// one connection or several; `--nocapture` prints how soon the first body
+/// and every first page are readable, primed or not.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
 fn a_primed_run_reports_each_fetch_once() {
@@ -622,13 +619,11 @@ fn a_listed_run_leaves_the_backlog_owed() {
     imap(&format!("DELETE {folder}"));
 }
 
-/// Messages expunged between the listing and the download of their
-/// bodies leave the run complete, their members kept as listed; the next
-/// run's listing takes them away and asks for nothing.
+/// Messages expunged between listing and download leave the run complete.
 ///
-/// Over one connection, phase 2 downloads the largest bodies first, a
-/// batch of 64 at a time: the tail of small messages sits in the second
-/// batch, expunged while the first downloads.
+/// Their members stay as listed, the next listing takes them away. The small
+/// tail (the last UIDs, twenty an append under the request size) goes while
+/// the first batch of 64 largest bodies downloads.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
 fn a_body_gone_mid_run_is_owed_nothing() {
@@ -654,7 +649,6 @@ fn a_body_gone_mid_run_is_owed_nothing() {
             n % 60,
         )
     };
-    // NOTE: twenty a command, under the server's request size.
     let messages: Vec<String> = (0..HEADS)
         .map(|n| message(n, &large))
         .chain((HEADS..HEADS + TAILS).map(|n| message(n, "small\r\n")))
@@ -682,7 +676,6 @@ fn a_body_gone_mid_run_is_owed_nothing() {
         assert!(run.try_wait().unwrap().is_none(), "the run ended early");
         thread::sleep(Duration::from_millis(1));
     }
-    // NOTE: the UIDs follow the appends, the tail last.
     let tail = format!("{}:{}", HEADS + 1, HEADS + TAILS);
     imap_in(&folder, &format!("UID STORE {tail} +FLAGS (\\Deleted)"));
     imap_in(&folder, "EXPUNGE");

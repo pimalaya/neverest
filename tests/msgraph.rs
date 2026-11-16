@@ -1,5 +1,7 @@
-//! Live plumbing tests against Microsoft Graph: mail, contacts and calendars,
-//! on the Pimalaya test mailbox. Ignored by default.
+//! # Microsoft Graph
+//!
+//! Live plumbing tests against Microsoft Graph: mail, contacts and
+//! calendars, on the Pimalaya test mailbox. Ignored by default.
 //!
 //! As in tests/google.rs, each runs two replicas of one account against one
 //! throwaway collection (see tests/common). Graph creates every uploaded
@@ -187,9 +189,11 @@ fn a_graph_mail_folder_syncs_both_ways() {
     );
 }
 
-/// A scope widens by its band alone and keeps the folder's delta link: three
-/// messages dated a year apart arrive one widening at a time, and a flag set
-/// on the server on the oldest reaches the store through the link.
+/// A scope widens by its band alone and keeps the folder's delta link.
+///
+/// Messages a year apart arrive one widening at a time; the account's scope
+/// being the widest asked, a run without `--since` follows the link, and a
+/// flag set on the oldest on the server reaches the store.
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_scope_widens_by_its_band() {
@@ -218,8 +222,6 @@ fn a_graph_scope_widens_by_its_band() {
 
     with_cleanup(
         || {
-            // NOTE: the account's own scope is the widest the run asks for, so
-            // a run without `--since` follows the link.
             let extra = format!("{}\nitem.filter.since = \"2024-01-01\"", user_line());
             let replica = Replica::open("msgraph", &extra, &token);
             let stored = |replica: &Replica| -> Vec<&str> {
@@ -266,12 +268,11 @@ fn a_graph_scope_widens_by_its_band() {
     );
 }
 
-/// A move staged through the store lands once on Graph, whichever of its
-/// halves delivers: the source relocating the message (its new id read by
-/// the target's next enumeration) or the target copying it (its new id the
-/// copy's answer). The message bounces between the Inbox and a throwaway
-/// folder, each run checked on the server and in the store, then goes to
-/// Deleted Items, the way a frontend trashes.
+/// A staged move lands once on Graph, whichever of its halves delivers.
+///
+/// The source relocating it (new id from the target's next listing) or the
+/// target copying it (new id from the answer); a second run per bounce shows
+/// the store bound the copy. It then goes to Deleted Items, as a trash does.
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_move_is_delivered_once() {
@@ -317,8 +318,6 @@ fn a_graph_move_is_delivered_once() {
                 wait_count(&token, to.1, &folder, 1, &what);
                 wait_count(&token, from.1, &folder, 0, &what);
 
-                // NOTE: a second run proves the store bound the server's
-                // copy: a create still pending would push again.
                 a.sync_keys(&keys, &[0]);
                 let landed = a.items(to.0, &folder);
                 assert_eq!(landed.len(), 1, "{what}: {} holds it once", to.0);
@@ -361,10 +360,10 @@ fn a_graph_move_is_delivered_once() {
     );
 }
 
-/// A message added through the store lands in Drafts with its flags, bound
-/// to the id Graph gave it; an add anywhere else is refused at enqueue, the
-/// source declaring `mail.message.add` for Drafts alone, and nothing is
-/// filed.
+/// A message added through the store lands in Drafts with its flags.
+///
+/// It is bound to the id Graph gave it; an add anywhere else is refused at
+/// enqueue, `mail.message.add` declared for Drafts alone, and nothing filed.
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_add_lands_in_drafts_only() {
@@ -499,10 +498,11 @@ fn a_graph_calendar_syncs_both_ways() {
     );
 }
 
-/// Every calendar of the mailbox syncs, the ones Graph makes itself
-/// (Birthdays, holidays) among them: their series have no end, which Graph
-/// writes as `0001-01-01`, and a window ending there was refused on every
-/// run. A run that cannot read a calendar now exits 4.
+/// Every calendar of the mailbox syncs, Graph's own (Birthdays, holidays) too.
+///
+/// Their series have no end, which Graph writes as `0001-01-01`, and a window
+/// ending there was refused on every run. A run that cannot read a calendar
+/// now exits 4.
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn every_graph_calendar_of_the_mailbox_syncs() {
@@ -512,9 +512,9 @@ fn every_graph_calendar_of_the_mailbox_syncs() {
     a.sync_keys(&[], &[0]);
 }
 
-/// A check names the folders Graph knows by their use, whatever the
-/// mailbox's language calls them, and the Drafts folder among them: the one
-/// place Graph creates a message.
+/// A check names the folders Graph knows by their use, whatever their name.
+///
+/// Drafts among them, the one place Graph creates a message.
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_check_names_the_well_known_folders() {
@@ -600,14 +600,11 @@ fn a_graph_teams_meeting_carries_its_join_link() {
     );
 }
 
-/// An event added through the store with `X-PIMDIR-ONLINE-MEETING:TRUE` is
-/// created as an online meeting, and the store reads it back without the
-/// request property (pimdir STORAGE Annex B.1).
+/// An event asking `X-PIMDIR-ONLINE-MEETING:TRUE` becomes an online meeting.
 ///
-/// Graph creates the meeting through the calendar's default provider and,
-/// with none, keeps the event without it: the check is then skipped, as it
-/// is for a meeting without a join link (a tenant without Teams, the
-/// Pimalaya test tenant since 2026-10-04).
+/// Read back without the request (pimdir STORAGE Annex B.1). With no default
+/// provider Graph silently stores `isOnlineMeeting: false` (hence `partial`)
+/// and the check skips, as with no join link (no Teams since 2026-10-04).
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_online_meeting_is_created_with_its_event() {
@@ -644,9 +641,6 @@ fn a_graph_online_meeting_is_created_with_its_event() {
                 .unwrap_or_default();
             assert_eq!(created.len(), 1, "{created:?}");
 
-            // NOTE: Graph stores `isOnlineMeeting: false` without a word when
-            // the calendar has no provider, which is why the capability is
-            // `partial`.
             let providers = graph(
                 &token,
                 "GET",
@@ -831,14 +825,11 @@ fn a_graph_meeting_is_cancelled() {
     );
 }
 
-/// A meeting edited right after its creation reaches Graph, and its
-/// cancellation stays one.
+/// A meeting edited right after creation reaches Graph, then stays cancelled.
 ///
-/// Exchange restamps a meeting once it has sent the invitations, so the
-/// first push of the edit parks and the next run merges it. The edit is the
-/// one a calendar client makes, a new `DTSTAMP` and a raised `SEQUENCE`,
-/// which used to collide with Graph's own stamps: the item parked for good,
-/// and the cancellation was undone by the edit still pending.
+/// Exchange restamps a meeting once invitations go, so the edit's first push
+/// (new `DTSTAMP`, raised `SEQUENCE`) parks and the next run merges it, where
+/// it once parked for good and the pending edit undid the cancellation.
 #[test]
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_meeting_edited_right_after_creation_is_pushed_then_cancelled() {
@@ -885,7 +876,6 @@ fn a_graph_meeting_edited_right_after_creation_is_pushed_then_cancelled() {
                 + "\r\n";
             a.update(&calendar, item.seq, &edited);
 
-            // NOTE: Graph mints its own iCalUId, so the calendar is listed.
             let subject = |token: &str| {
                 let path = format!("calendars/{calendar}/events?$select=subject");
                 graph(token, "GET", &path, None)["value"][0]["subject"]
@@ -913,8 +903,6 @@ fn a_graph_meeting_edited_right_after_creation_is_pushed_then_cancelled() {
                 a.item(&calendar, &uid).is_none()
             });
 
-            // NOTE: two more runs, so a pending edit would have had its chance
-            // to bring the meeting back.
             a.sync(&calendar);
             a.sync(&calendar);
             let path = format!("calendars/{calendar}/events?$select=subject,isCancelled");
@@ -1019,8 +1007,6 @@ fn a_graph_invitation_is_answered() {
                     eprintln!("WARNING: leftover invitation {id}: {err:?}");
                 }
             }
-            // NOTE: the invitation, its sent copy, the reply and the
-            // bounces of the organizer that holds no mailbox.
             delete_messages_about(&token, &uid);
         },
     );

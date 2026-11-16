@@ -115,10 +115,11 @@ pub enum SyncEvent {
         /// How many bodies the store owes.
         total: usize,
     },
-    /// A source refused a change as it stands, this run or a run before:
-    /// the store holds it while the refusal stands (pimdir SYNC §5).
-    /// Printed once the account's run ends, before its result, which names
-    /// it again under `refusals`.
+    /// A source refused a change as it stands, this run or a run before.
+    ///
+    /// The store holds it while the refusal stands (pimdir SYNC §5). Printed
+    /// once the account's run ends, before its result, which names it again
+    /// under `refusals`.
     Refused {
         /// The source that refused the change, as the account names it.
         source: String,

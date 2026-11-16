@@ -5,23 +5,11 @@
 
 use crate::sync::driver::*;
 
-/// Phase 1, spining each collection in parallel over its own connection.
+/// Phase 1: spines each collection in parallel, returning those it finished.
 ///
-/// Reads run concurrently through WAL, writes serialise on the store's
-/// single-writer lock. Each collection's report is absorbed whole, arms and
-/// all: dropping one leaves the run naming what it touched, never what it left.
-///
-/// The collections are taken in the order of `filtered` (see [`run_order`]).
-/// Under `--prime`, every collection first lists up to its newest page and
-/// its newest bodies download right after, before any collection lists a
-/// second page; the collections paused then are listed to their end once
-/// that first pass is over (see [`Work`]).
-///
-/// A connection with no collection left to spine downloads the bodies of the
-/// pages the others have landed, so a large collection's first bodies are
-/// readable while its later pages still list. Returns the collections
-/// spined to their end, in the run's order, whose remaining bodies phase 2
-/// downloads.
+/// Reads run through WAL, writes serialise on the store's lock; each report is
+/// absorbed whole, arms and all, or the run would not name what it left. Under
+/// `--prime` all list their newest page first ([`Work`]).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn phase1_spine(
     source: &str,
@@ -53,8 +41,6 @@ pub(super) fn phase1_spine(
     };
     progress.emit(|| scan_event(0));
 
-    // NOTE: one connection has none to spare: its bodies wait for phase 2,
-    // which orders them across the whole account, but for the primed ones.
     let feeding = !dry_run && ctxs.len() > 1;
     let gates: HashMap<&str, Mutex<()>> = filtered
         .iter()
@@ -93,8 +79,6 @@ pub(super) fn phase1_spine(
                         Job::Hydrate { batch, primed } => {
                             match landing_ref.land(ctx, store, &batch) {
                                 Ok(_) => {}
-                                // NOTE: left bodiless, so phase 2 downloads it
-                                // again and fails the run if it fails there too.
                                 Err(err) => {
                                     warn!("{} body download error: {err:#}", batch.collection)
                                 }
@@ -111,12 +95,8 @@ pub(super) fn phase1_spine(
                         .remove(&index)
                         .unwrap_or_default();
                     let mut pager = PageFeed {
-                        // NOTE: the first pass queues its bodies once it ends,
-                        // the newest first of all.
                         feed: (feeding && pass != Pass::First).then_some(work_ref),
                         rank: index,
-                        // NOTE: what a resumed round owes, the first pass
-                        // queued already.
                         resumed: pass == Pass::Whole,
                         pause: pass == Pass::First,
                         listed,
@@ -162,8 +142,6 @@ pub(super) fn phase1_spine(
                                     },
                                     Some(err),
                                 ));
-                            // NOTE: a round the failure interrupted stays open,
-                            // which the next run resumes.
                             report_coverage(
                                 store,
                                 collection,
@@ -195,10 +173,11 @@ pub(super) fn phase1_spine(
         .collect())
 }
 
-/// Queues the bodies a collection owes once the first pass over it ended:
-/// its `prime` newest ahead of any other, then, connections to spare, the
-/// rest beside the pages' bodies. Whether its round paused or closed, the
-/// store holds what the run listed so far.
+/// Queues the bodies a collection owes once the first pass over it ended.
+///
+/// Its `prime` newest by date come first whatever the order, being what a
+/// reader opens; then, connections to spare, the rest beside the pages'
+/// bodies. What is not queued waits for phase 2.
 fn prime_bodies(
     work: &Work,
     store: &PimdirSourceStore,
@@ -211,7 +190,6 @@ fn prime_bodies(
     let id = PimdirCollectionId(collection.to_string());
     let mut owed = match store.load(&id, &PimdirLoadSelection::All) {
         Ok(loaded) => bodiless(loaded.placements),
-        // NOTE: what is not queued waits for phase 2.
         Err(err) => {
             warn!("{collection} load error: {err}");
             return;
@@ -220,8 +198,6 @@ fn prime_bodies(
     if let Some(listed) = listed {
         owed = listed.keep(collection, owed);
     }
-    // NOTE: primed by date whatever the download order, the newest being
-    // what a reader opens first; the order still ranks the batches.
     owed.sort_by(|a, b| DownloadOrder::Newest.compare(a, b));
     let rest = owed.split_off(prime.min(owed.len()));
     work.feed(collection, rank, owed, true);
@@ -291,17 +267,9 @@ struct BatchKey {
 
 /// Phase 1's work, handed to the connections in turn.
 ///
-/// The collections to spine and the bodies their landed pages owe, waiting
-/// for a free connection. A connection takes, in this order: a batch of
-/// primed bodies; a collection the first pass has not reached; once that
-/// pass and its primed bodies are over, a collection it paused, to fill;
-/// else a batch of other bodies, the first in the download order across
-/// the account, ties going to the collection the run takes first. It
-/// waits while a spine or a primed download under way may queue more.
-///
-/// Only batches are held: every connection fetches one at a time into the
-/// blob store, so the memory in flight is the budget times a batch's
-/// handles, whatever the account holds.
+/// A connection takes, in order: a primed batch; a collection the first pass
+/// has not reached; a paused one to fill; else the next batch in the download
+/// order. Only batches are held, so memory is the budget times a batch.
 pub(super) struct Work {
     order: DownloadOrder,
     state: Mutex<WorkState>,
@@ -402,10 +370,12 @@ impl Work {
         self.ready.notify_all();
     }
 
-    /// The next job, waiting while one may still come; `None` once every
-    /// spine and primed download has ended and nothing is queued.
+    /// The next job, waiting while one may still come.
+    ///
+    /// `None` once every spine and primed download ended and nothing is queued.
+    /// The first pass ends with its last spine and primed body, so no
+    /// collection lists a second page before every one listed its first.
     pub(super) fn next(&self) -> Option<Job> {
-        // NOTE: a stopping run starts no new spine nor batch.
         if crate::sync::stopping() {
             return None;
         }
@@ -425,9 +395,6 @@ impl Work {
                 let pass = state.pass;
                 return Some(Job::Spine { index, pass });
             }
-            // NOTE: the first pass is over once its last spine and its
-            // last primed body are, so no collection lists a second page
-            // before every one has listed its first.
             if state.priming == 0
                 && state.downloading == 0
                 && let Some(index) = state.fill.pop_first()
@@ -471,20 +438,18 @@ impl Work {
 
 /// The [`Pager`] of a collection's spine in phase 1.
 ///
-/// It holds the collection's gate for the whole spine but the listing's
-/// waits on the server, so a body is applied to the collection only where
-/// the sync is at rest, never between a page's load and its write, which
-/// would write back the placement without the body. Each landed page's
-/// bodiless members go to the feed, and, when `resumed`, the bodiless
-/// members of a resumed round's earlier pages before its first page lists.
-/// Under `pause`, the listing stops before the second page of a round.
+/// It holds the collection's gate for the whole spine but the server waits, so
+/// a body lands only at rest, never between a page's load and its write, which
+/// would write back the placement without the body.
 pub(super) struct PageFeed<'a> {
     pub(super) gate: &'a Mutex<()>,
     pub(super) held: Option<MutexGuard<'a, ()>>,
     pub(super) feed: Option<&'a Work>,
     /// The collection's place in the run, which breaks the feed's ties.
     pub(super) rank: usize,
+    /// Whether a resumed round's earlier bodiless members feed before its page.
     pub(super) resumed: bool,
+    /// Whether the listing stops before the second page of a round.
     pub(super) pause: bool,
     pub(super) listed: Option<&'a Listed>,
 }
@@ -516,8 +481,6 @@ impl Pager for PageFeed<'_> {
         if let Some(listed) = self.listed {
             listed.record(collection.as_str(), &landed);
         }
-        // NOTE: a round asking for a page past its first, whether this run
-        // listed that one or an earlier run did.
         if self.pause
             && matches!(
                 next,
@@ -545,7 +508,6 @@ impl Pager for PageFeed<'_> {
                 }
                 feed.feed(collection.as_str(), self.rank, owed, false);
             }
-            // NOTE: what is not fed waits for phase 2.
             Err(err) => warn!("{} page load error: {err}", collection.as_str()),
         }
         Rest::Go
@@ -611,27 +573,18 @@ struct Spined {
     report: SyncOutput,
     /// Whether the listing stopped at rest, its round left open.
     paused: bool,
-    /// When paused, what the itemization of the spine that resumes it
-    /// counts as owed: the bodies owed before this one, and the members it
-    /// pulled, whose bodies may arrive in between.
+    /// When paused, what the spine resuming it counts as owed.
+    ///
+    /// The bodies owed before this one, and the members it pulled, whose
+    /// bodies may arrive in between.
     owed: HashSet<String>,
 }
 
 /// Reconciles one collection's spine, its bodies left to hydration.
 ///
-/// Returns the report patches; a dry run stops after itemizing. The listing
-/// tells `pager` each page it lands, which is how the bodies of a page
-/// download while the next pages list.
-///
-/// A spine the pager pauses reports what its pages pulled and stops there,
-/// its round open: the fetches, the staged work, the pushes and the
-/// coverage wait for the spine that resumes it, which `owed` is handed
-/// from the paused one.
-///
-/// Scans run in parallel, but `pushing` lets one collection of the source
-/// push at a time: the two halves of a move derive from the store, and two
-/// overlapping pushes would both read the create as pending, the target
-/// uploading it while the source relocates it (pimdir SYNC §5).
+/// A dry run stops after itemizing; a paused spine leaves its round open for
+/// the one `owed` resumes. One collection pushes at a time (`pushing`), or a
+/// move's halves would both read the create pending (pimdir SYNC §5).
 #[allow(clippy::too_many_arguments)]
 fn collection_spine(
     collection: &str,
@@ -664,8 +617,6 @@ fn collection_spine(
 
     let (pull, paused) = sync_side_rebuilding(collection, ctx, store, blobs, false, Some(pager))?;
     let display = display_name(&ctx.namespace, collection);
-    // NOTE: before the report reads which conflicts survived, a divergence the
-    // merge settles never having been a disagreement.
     resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
     itemize_pulled(
         &pull.events,
@@ -709,9 +660,6 @@ fn collection_spine(
         });
     }
 
-    // NOTE: held across the passes, so a move's halves never push at once:
-    // the second reads the first delivered, the target's create meeting the
-    // relocated member as a probe, the source's remove no destination left.
     let push = pushing.lock().unwrap_or_else(PoisonError::into_inner);
     let mut settled = false;
     for _ in 0..=MAX_EXTRA_PASSES {

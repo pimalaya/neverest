@@ -48,10 +48,9 @@ pub(super) fn report_coverage(
 /// Surfaces the parked queue actions of the account's collections, once for
 /// the run.
 ///
-/// A parked row belongs to its collection, not to a source, so reading it
-/// where the drain runs reports it once per source: an account syncing mail,
-/// contacts and calendar showed the same row three times. Every run
-/// re-reports them; another account's rows are its own run's to report.
+/// A parked row belongs to its collection, not a source: read per source, an
+/// account syncing mail, contacts and calendar showed it three times. Every
+/// run re-reports them; another account's rows are its own run's to report.
 pub(super) fn report_parked(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
     let owners = collection_accounts(store);
     match store.parked_actions() {
@@ -107,10 +106,9 @@ pub(super) fn warn_conflicts(report: &SyncOutput) -> usize {
 /// Reclaims the account's retained items older than `store.purge-after`,
 /// unset never.
 ///
-/// It runs after the sync, so an item this run retired starts its delay rather
-/// than going with it, and it warns instead of failing. A purge only releases a
-/// body (pimdir STORAGE §5), so the collector runs here too, after a purge
-/// only: what nothing references any more, whichever account it was.
+/// Run after the sync, an item this run retired starts its delay, and it warns
+/// instead of failing. A purge only releases a body (pimdir STORAGE §5), so
+/// the collector runs after a purge that took something, whoever's it was.
 pub(super) fn sweep_retained(
     account_config: &AccountConfig,
     store: &mut PimdirStore,
@@ -217,9 +215,9 @@ pub(super) struct DryRunReplica {
 impl DryRunReplica {
     /// Clones the store at `real_dir` into a sibling directory.
     ///
-    /// Whatever an earlier run left behind is cleared first: a panic aborts a
-    /// release build, running no destructor, so a leftover is a state this has
-    /// to meet rather than one it can rule out.
+    /// An earlier run's leftover is cleared first, a panic aborting a release
+    /// build with no destructor run. The replica is its user's alone (pimdir
+    /// STORAGE §18), or its open refuses it as exposed.
     pub(super) fn new(real_dir: &Path) -> Result<Self> {
         let parent = real_dir.parent().unwrap_or(Path::new("."));
         let name = real_dir
@@ -230,8 +228,6 @@ impl DryRunReplica {
 
         clear_stale_replicas(parent, &prefix);
 
-        // NOTE: the replica is a store, its user's alone (pimdir STORAGE §18),
-        // or its open refuses it as exposed.
         let dir = parent.join(format!("{prefix}{}", process::id()));
         modes::create_dir_all(&dir)
             .with_context(|| format!("Create dry-run replica {} error", dir.display()))?;
@@ -251,8 +247,6 @@ impl DryRunReplica {
                 counts.copied
             );
 
-            // NOTE: a blob tree that could not be shared was read and written
-            // whole, the slow dry run this exists to avoid.
             if counts.linked == 0 && counts.copied > 0 {
                 info!(
                     "dry-run replica copied {} file(s), links unavailable",

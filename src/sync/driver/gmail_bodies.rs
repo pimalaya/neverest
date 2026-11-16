@@ -175,10 +175,10 @@ fn bodies(store: &PimdirSourceStore, collection: &str) -> Vec<(String, Option<Pi
     bodies
 }
 
-/// A message under two labels is downloaded once and lands under both;
-/// one gone since it was listed leaves the run complete, is asked once,
-/// and no later batch of the run asks for it again. The sizes come from
-/// the store: no minimal read asks for them.
+/// A message under two labels downloads once and lands under both.
+///
+/// One gone since it was listed leaves the run complete, is asked once and
+/// never again. The sizes come from the store: no minimal read asks for them.
 #[test]
 fn a_message_under_two_labels_downloads_once_and_one_gone_is_owed_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -212,16 +212,15 @@ fn a_message_under_two_labels_downloads_once_and_one_gone_is_owed_nothing() {
     assert_eq!(work[0].1, inbox[0].1, "one body for both labels");
     assert_eq!(work[1], (String::from("m3"), None), "m3 stays as listed");
 
-    // NOTE: a second pass of the run plans nothing: m3 is owed nothing
-    // more, and the wire, answering no more, would fail any request.
     hydrate(&mut store, &mut ctx, &collections, &run);
     assert_eq!(batch.lines().len(), 2, "nothing asked again");
     assert_eq!(batch.left(), 0);
 }
 
-/// Under `--json`, the download prints its start, then its progress as
-/// bodies land: a caller sees the total before the first body. Text mode
-/// prints its start and its end alone, as plain lines.
+/// Under `--json`, the download prints its start, then its progress.
+///
+/// A caller sees the total before the first body. Text mode prints its start
+/// and its end alone, as plain lines.
 #[test]
 fn a_download_prints_its_progress_as_events() {
     let dir = tempfile::tempdir().unwrap();
@@ -311,11 +310,11 @@ fn ids(ids: &[&str]) -> Vec<u8> {
     ok(serde_json::json!({ "messages": messages }))
 }
 
-/// A scoped round finds absent neither an undated draft received
-/// before its window nor a message whose `Date` runs ahead of its
-/// arrival: `after:` reads the arrival and lists neither, so the round
-/// states it is narrowed and its last page hands the label's ids, which
-/// name both (pimdir SYNC §4, §5). A round stating neither dropped both.
+/// A scoped round keeps what `after:` misses (pimdir SYNC §4, §5).
+///
+/// `after:` reads the arrival, so an undated draft received before the window
+/// and a message dated ahead of its arrival are unlisted; the round states it
+/// is narrowed and its last page hands the label's ids, naming both.
 #[test]
 fn a_scoped_round_keeps_what_its_arrival_filter_misses() {
     let dir = tempfile::tempdir().unwrap();
@@ -336,7 +335,6 @@ fn a_scoped_round_keeps_what_its_arrival_filter_misses() {
         "historyId": "500"
     })));
     api.answer(ids(&["recent"]));
-    // NOTE: the unread, starred and important listings of the window.
     for _ in 0..3 {
         api.answer(ids(&[]));
     }
@@ -357,10 +355,10 @@ fn a_scoped_round_keeps_what_its_arrival_filter_misses() {
     assert_eq!(api.left() + batch.left(), 0, "{requests:?}");
 }
 
-/// Gmail as it answers for an inbox holding `messages`, each its id
-/// and its arrival in epoch seconds: `after:` and `before:` read the
-/// arrival (`internalDate`), never the `Date`, the flag labels hold
-/// none, and the history is empty.
+/// Gmail for an inbox holding `messages`, ids and arrivals in epoch seconds.
+///
+/// `after:` and `before:` read the arrival (`internalDate`), never the
+/// `Date`; the flag labels hold none, and the history is empty.
 fn inbox(messages: Vec<(&'static str, i64)>) -> impl FnMut(&str) -> Vec<u8> + Send {
     move |request| {
         let target = request.split(' ').nth(1).unwrap_or_default();
@@ -401,11 +399,11 @@ fn inbox(messages: Vec<(&'static str, i64)>) -> impl FnMut(&str) -> Vec<u8> + Se
     }
 }
 
-/// A message dated in a band by its `Date` and received after the band
-/// stays bound when a widening lists the band: Gmail's `before:` reads
-/// the arrival, so a band round narrowed by it missed the message, then
-/// found it absent, dated before the round opened (pimdir SYNC §5), and
-/// dropped it while Gmail still held it.
+/// A message received ten months after its `Date` stays bound when a widening
+/// lists its band.
+///
+/// Gmail's `before:` reads the arrival, so a band round narrowed by it missed
+/// the message, found it absent (pimdir SYNC §5) and dropped it.
 #[test]
 fn a_band_round_keeps_a_message_received_after_its_date() {
     let dir = tempfile::tempdir().unwrap();
@@ -417,8 +415,6 @@ fn a_band_round_keeps_a_message_received_after_its_date() {
         ],
     );
     let blobs = store.blob_stage();
-    // NOTE: `early` received as dated, on 2026-09-01; `late` on
-    // 2026-11-10, ten months after it was dated.
     let inbox = || inbox(vec![("early", 1_788_256_800), ("late", 1_794_268_800)]);
 
     let mut requests = Vec::new();

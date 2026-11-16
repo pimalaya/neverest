@@ -79,12 +79,9 @@ pub(crate) fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutpu
 /// Performs the queued collection intents (pimdir STORAGE Annex B.2), each
 /// by the side it names, and settles their rows.
 ///
-/// It runs before the listing, so a collection created, renamed or deleted
-/// here is listed as it now stands by the same run. `paired` is whether the
-/// account mirrors its source onto targets: there a rename parks, the pair
-/// reading it as a delete and a create, and the store follows a rename or a
-/// delete only on an account syncing its source alone, a pair settling the
-/// collections both endpoints list itself (pimdir SYNC §5).
+/// It runs before the listing, so the same run lists the result. Under
+/// `paired` a rename parks and the store follows nothing (pimdir SYNC §5). An
+/// intent naming no source goes to its namespace's side, which parks it.
 pub(super) fn drain_collection_intents(
     sides: &mut [&mut SourceCtx],
     store: &mut PimdirSourceStore,
@@ -100,9 +97,6 @@ pub(super) fn drain_collection_intents(
     };
 
     for intent in &intents {
-        // NOTE: an intent names its source (pimdir STORAGE §15.6); one whose
-        // payload does not decode names none, and goes to a side of its
-        // anchor's namespace, which parks it as malformed.
         let index = match intent.source() {
             Some(name) => sides.iter().position(|ctx| ctx.name == name),
             None => sides.iter().position(|ctx| {
@@ -140,10 +134,6 @@ pub(super) fn drain_collection_intents(
             Some(Performed::Renamed(renamed)) => {
                 follow_rename(store, &namespace, &intent.collection, &renamed)
             }
-            // NOTE: the source alone held it, and its server no longer does:
-            // the collection leaves the store as a pair's leaves it once
-            // neither endpoint lists it. A row still queued on it keeps it,
-            // the store refusing to drop one.
             Some(Performed::Deleted) => match store.delete_collection(&intent.collection) {
                 Ok(_) => info!("collection {} dropped from the store", intent.collection),
                 Err(err) => warn!(
@@ -211,13 +201,11 @@ fn perform_collection_intent(
     }
 }
 
-/// Follows a rename its server performed in the store (pimdir STORAGE Annex
-/// B.2): where the id derives from the name (IMAP, Gmail), the collection
-/// and every one under it take their new id through `rename_collection`,
-/// so their items keep their bindings rather than leaving under the old id
-/// and arriving again under the new one; each is named as its next listing
-/// names it. A failure is logged: the next listing then reads the renamed
-/// collection as a new one.
+/// Follows a server rename in the store (pimdir STORAGE Annex B.2).
+///
+/// Where the id derives from the name (IMAP, Gmail), the collection and those
+/// under it take their new id, so their items keep their bindings rather than
+/// leaving and arriving again. On failure the next listing reads a new one.
 pub(super) fn follow_rename(
     store: &mut PimdirSourceStore,
     namespace: &str,
@@ -298,11 +286,9 @@ fn perform_collection_create(
 /// Performs the queue's calendar intents, which the store's drain leaves
 /// alone (pimdir STORAGE Annex B.2).
 ///
-/// Each is performed by the side its payload names, on the item that side
-/// binds, through the provider's own verbs. A performed intent is
-/// acknowledged; a permanent failure parks the row with its error, a
-/// transient one leaves it pending. An intent naming a source this run does
-/// not drive waits for that source's own run.
+/// Each runs through the side its payload names, else the namespace's side
+/// binding the item, which parks it as malformed. A permanent failure parks
+/// the row, a transient one leaves it pending, as an undriven source's waits.
 pub(super) fn drain_invitations(
     sides: &mut [&mut SourceCtx],
     store: &mut PimdirSourceStore,
@@ -321,10 +307,6 @@ pub(super) fn drain_invitations(
 
     for intent in &intents {
         let located = locate_invitation(store, intent);
-        // NOTE: an intent names its source (pimdir STORAGE §15.6); one whose
-        // payload does not decode names none, and goes to a side of its
-        // collection's namespace, the one binding the item when two do,
-        // which parks it as malformed.
         let index = match intent.source() {
             Some(name) => sides.iter().position(|ctx| ctx.name == name),
             None => {
@@ -354,6 +336,8 @@ pub(super) fn drain_invitations(
 }
 
 /// Every source's binding of the item an intent addresses.
+///
+/// An intent keyed by link waits until the drain stages the producer's add.
 pub(super) fn locate_invitation(
     store: &PimdirSourceStore,
     intent: &InvitationIntent,
@@ -372,7 +356,6 @@ pub(super) fn locate_invitation(
                 )));
             }
         },
-        // NOTE: the producer's own add, which the drain stages first.
         Target::Link(link) => match store.seq_for_link(collection, &link).map_err(transient)? {
             Some(_) => link,
             None => {
@@ -387,6 +370,10 @@ pub(super) fn locate_invitation(
 }
 
 /// Performs one intent on the item `side` binds.
+///
+/// An item under its provisional handle waits for its push (pimdir SYNC §4);
+/// an occurrence is acted on as its own instance. The last arm reads every
+/// value so a build with no calendar backend leaves none unused.
 fn perform_invitation(
     side: &mut SourceCtx,
     intent: &InvitationIntent,
@@ -400,8 +387,6 @@ fn perform_invitation(
             intent.kind
         )));
     };
-    // NOTE: a pending create holds a provisional handle until its add is
-    // accepted, the next push (pimdir SYNC §4).
     let handle = binding.handle.as_str();
     if binding.base.is_none() || handle.starts_with('\u{1}') {
         return Err(InvitationFailure::Transient(anyhow!(
@@ -415,8 +400,6 @@ fn perform_invitation(
     let name = side.name.clone();
     let occurrence = intent.occurrence()?;
 
-    // NOTE: an occurrence is acted on as its own instance, which the
-    // provider's verbs take like any event.
     let outcome = match side.pool.primary() {
         #[cfg(feature = "gcal")]
         Client::Gcal(client) => {
@@ -446,8 +429,6 @@ fn perform_invitation(
         }
         #[allow(unreachable_patterns)]
         _ => {
-            // NOTE: read here too, so a build performing no intent at all
-            // still uses what the arms above read.
             let _: (&Invitation, &str, &str, &Option<String>) =
                 (&invitation, &collection, &handle, &occurrence);
             Err(anyhow::Error::new(Refusal(format!(
@@ -490,8 +471,7 @@ struct QueuedIntent<'a> {
 ///
 /// A performed intent is acknowledged with its receipt, so a producer reads it
 /// applied rather than withdrawn (pimdir STORAGE §15.4). The receipt names no
-/// item: a created collection arrives with a later listing, and an invitation
-/// answered or cancelled leaves its event where the producer found it.
+/// item: what was performed arrives with a later listing or stays in place.
 fn settle_intent(
     store: &mut PimdirSourceStore,
     intent: QueuedIntent<'_>,

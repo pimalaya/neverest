@@ -1,20 +1,13 @@
+//! # Heads
+//!
 //! End-to-end heads of an open IMAP round against a local Stalwart server
-//! (:143), spawned via `tests/stalwart2.sh` (or `tests/stalwart.sh`).
-//! Ignored by default.
+//! (:143), spawned via tests/stalwart2.sh (or tests/stalwart.sh). Ignored by
+//! default.
 //!
 //! A round left open by a run killed after its first page is resumed by
 //! the next run, which lists the round's head first (pimdir SYNC §4, §5):
 //! what arrived and what was removed meanwhile shows at once, before any
 //! further page.
-//!
-//!   1. With QRESYNC, a delta head from the round's checkpoint lands a
-//!      message appended after the first page and drops one expunged from
-//!      it, the round still open; the round then closes keeping the
-//!      arrival, and the next delta lists nothing new.
-//!   2. Read as a server without QRESYNC, a band head (`SEARCH SINCE`)
-//!      lands the arrival, the round still open; the round's last page
-//!      lists it again, so it survives the close, and the expunged message,
-//!      stamped by the first page, goes with the next round.
 //!
 //! ```sh
 //! ./tests/stalwart2.sh
@@ -42,6 +35,10 @@ const PAGED: usize = 1_100;
 /// QRESYNC.
 const NO_QRESYNC: &str = "NEVEREST_IMAP_NO_QRESYNC";
 
+/// With QRESYNC, a delta head lands the arrival and drops the expunge.
+///
+/// Both show while the round is open; the round then closes keeping the
+/// arrival, and the next delta lists nothing new.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn a_delta_head_shows_what_changed_while_a_round_is_open() {
@@ -68,16 +65,17 @@ fn a_delta_head_shows_what_changed_while_a_round_is_open() {
     assert_eq!(stored(&open.store, &open.collection), markers);
 }
 
+/// Without QRESYNC, a band head (`SEARCH SINCE`) lands the arrival.
+///
+/// It stamps nothing: the round's last page listing the arrival again keeps
+/// it from being found absent at the close (a dry run tells, a push would
+/// list it back), and the expunge goes with the next round.
 #[test]
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :143 and --ignored"]
 fn a_band_head_shows_what_arrived_while_a_round_is_open() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let open = Opened::new(tmp.path(), "band", true);
 
-    // NOTE: a band head stamps nothing; the round's last page listing the
-    // arrival again is what keeps it from being found absent at the close.
-    // A sync's push pass would list it back at once, so a dry run, one pass
-    // naming every removal, is what tells.
     let plan = sync(&open.config, open.account, &open.env, &["--dry-run"]);
     assert_eq!(
         deletes(&plan),
@@ -95,8 +93,6 @@ fn a_band_head_shows_what_arrived_while_a_round_is_open() {
         "the round's last page keeps what the band head named"
     );
 
-    // NOTE: without QRESYNC every run is a round, whose close finds the
-    // expunged message absent.
     sync(&open.config, open.account, &open.env, &[]);
     let markers = stored(&open.store, &open.collection);
     assert!(markers.contains(&open.arrival));
@@ -104,9 +100,11 @@ fn a_band_head_shows_what_arrived_while_a_round_is_open() {
     assert_eq!(markers.len(), PAGED, "every message once");
 }
 
-/// A round left open after its first page, a message appended and one of
-/// the first page expunged since, and the resumed run killed as soon as
-/// the arrival landed.
+/// A round left open after its first page, the resumed run killed early.
+///
+/// Since the first page, a message was appended and its newest expunged; a
+/// band head lists everything since the round opened less two days and
+/// states no removal.
 struct Opened {
     config: std::path::PathBuf,
     store: std::path::PathBuf,
@@ -155,7 +153,6 @@ impl Opened {
             before.len()
         );
 
-        // NOTE: the newest message, which the first page listed.
         let expunged = marker(&(PAGED - 1).to_string());
         assert!(before.contains(&expunged));
         let seqs = server_seqs(&mailbox, &expunged);
@@ -174,9 +171,6 @@ impl Opened {
         assert!(open, "the arrival landed while the round was open");
         let after = stored(&store, &collection);
         if band {
-            // NOTE: a band head by arrival lists every message appended
-            // since the round opened less two days, here all of them, and
-            // states no removal.
             assert!(after.len() <= PAGED + 1, "each message once");
         } else {
             assert!(!after.contains(&expunged), "the head stated the expunge");

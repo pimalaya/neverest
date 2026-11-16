@@ -10,13 +10,14 @@
 //! {"v":1,"source":"imap"}
 //! ```
 //!
-//! A creation is anchored on its parent, else on a collection of the kind
-//! the new one takes; a rename and a delete on the collection they act on,
-//! which their payload does not restate. The source an intent names
-//! performs it on its server, and the result arrives with the next listing,
-//! the same run's when the intent is performed before it. Each is at least
-//! once: a server already holding what was asked is success, so a crash
-//! between the request and the acknowledgement performs it again harmlessly.
+//! A creation is anchored on its parent, else on a collection of its kind; a
+//! rename and a delete on the collection they act on, which the payload does
+//! not restate. The source named performs it on its server, the result
+//! arriving with the next listing, this run's when performed before it.
+//!
+//! Each is at least once: a server already holding what was asked is
+//! success, so a crash between the request and the acknowledgement performs
+//! it again harmlessly.
 
 use anyhow::anyhow;
 use io_pimdir::{
@@ -106,10 +107,9 @@ fn collection_kind(kind: &str) -> Option<&'static str> {
 
 /// Every pending collection intent in the store, in queue order.
 ///
-/// The drain leaves the kinds pimdir does not apply itself (they read back
-/// as [`PimdirAction::Unknown`]), so this reads exactly what it skipped.
-/// One stating a version this neverest does not know is left out, so it
-/// stays pending and untouched (pimdir STORAGE §15.3).
+/// The drain skips kinds pimdir does not apply ([`PimdirAction::Unknown`]),
+/// so this reads exactly those; one stating a version this neverest does not
+/// know stays pending and untouched (pimdir STORAGE §15.3).
 pub fn pending(store: &PimdirStore) -> anyhow::Result<Vec<CollectionIntent>> {
     let rows = store
         .list_pending_actions()

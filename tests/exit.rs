@@ -161,12 +161,15 @@ fn a_failed_init_carries_its_causes_apart() {
 fn an_undrained_account_prints_its_report_and_exits_4() {
     let home = TempDir::new().unwrap();
     let config = closed_port_account(home.path());
-    let output = run(home.path(), &["--json", "-c", &config, "drain"]);
+    let output = run(
+        home.path(),
+        &["--json", "-c", &config, "sync", "--queue-only"],
+    );
     let stdout = text(&output.stdout);
 
     assert_eq!(output.status.code(), Some(4), "{stdout}");
     let json: Value = serde_json::from_str(&stdout).unwrap();
-    let account = &json["accounts"][0];
+    let account = &json["queue"][0];
     assert_eq!(account["account"], "a", "{json}");
     assert!(
         account["error"].as_str().unwrap().contains("init"),

@@ -80,12 +80,12 @@ exit 2;
 
 ## Phase 4: `sync` flags (D6)
 
-- [ ] Add to `sync`: `--init`, `--queue-only`, `--index-only`; clap `conflicts_with_all` so the two `-only` flags exclude each other and `--init`.
-- [ ] `--init`: initializes each covered account not yet initialized (the `init` path, src/cli/init.rs), then syncs; the report lists the accounts it initialized. Without it, an uninitialized account fails as today, the message (src/offline/state.rs:171) naming `neverest init` and `neverest sync --init`.
-- [ ] `--queue-only`: the old `drain` (src/cli/drain.rs): applies the queue, refreshes the index under `store.index-timeout`, no credential, no endpoint, `busy` exit 4 while a sync holds the store.
-- [ ] `--index-only`: the old `index` (src/cli/index.rs): builds until current, no deadline, no queue, no endpoint.
-- [ ] Remove the `drain` and `index` commands; their reports fold into the sync report (camelCase, every key printed); json-schema, completion and man output follow.
-- [ ] Spec: sync.md:267 and :2213 command lists, the drain and index requirements moved under `sync`. README and help name the flags.
+- [x] Add to `sync`: `--init`, `--queue-only`, `--index-only`; clap `conflicts_with_all` so the two `-only` flags exclude each other and `--init`.
+- [x] `--init`: initializes each covered account not yet initialized (the `init` path, src/cli/init.rs), then syncs; the report lists the accounts it initialized. Without it, an uninitialized account fails as today, the message (src/offline/state.rs:171) naming `neverest init` and `neverest sync --init`.
+- [x] `--queue-only`: the old `drain` (src/cli/drain.rs): applies the queue, refreshes the index under `store.index-timeout`, no credential, no endpoint, `busy` exit 4 while a sync holds the store.
+- [x] `--index-only`: the old `index` (src/cli/index.rs): builds until current, no deadline, no queue, no endpoint.
+- [x] Remove the `drain` and `index` commands; their reports fold into the sync report (camelCase, every key printed); json-schema, completion and man output follow.
+- [x] Spec: sync.md:267 and :2213 command lists, the drain and index requirements moved under `sync`. README and help name the flags.
 - Done when: tests cover each flag, each conflict, `--init` on initialized and uninitialized accounts, and `--queue-only` busy; gate green.
 
 ## Phase 5: restructure

@@ -1,13 +1,13 @@
 //! What a frontend queued is applied before any endpoint is opened, by
-//! `neverest drain` or at the start of a sync, so the frontend reads its
-//! own writes back offline.
+//! `neverest sync --queue-only` or at the start of a sync, so the frontend
+//! reads its own writes back offline.
 //!
 //! The first tests need no server: the CalDAV endpoint is a closed port.
 //! The last one pushes the drained event to a local Stalwart (HTTP and
 //! DAV on :8080, `tests/stalwart2.sh`) and is ignored by default:
 //! ```sh
 //! ./tests/stalwart2.sh
-//! cargo test --test drain -- --ignored --test-threads=1
+//! cargo test --test queue -- --ignored --test-threads=1
 //! ```
 
 #![cfg(feature = "caldav")]
@@ -225,7 +225,7 @@ fn restrict(path: &std::path::Path) {
 #[cfg(not(unix))]
 fn restrict(_path: &std::path::Path) {}
 
-/// `neverest drain` gives a queued create its id, offline, and says which.
+/// `sync --queue-only` gives a queued create its id, offline, and says which.
 #[test]
 fn a_drain_applies_a_queued_create_without_any_server() {
     let _serial = serialized();
@@ -234,7 +234,7 @@ fn a_drain_applies_a_queued_create_without_any_server() {
     let id = fixture.queue_event("drained-1");
     assert!(fixture.seqs_of("drained-1").is_empty());
 
-    let drained = &fixture.json(&["--json", "drain", "-a", ACCOUNT], 0)["accounts"][0];
+    let drained = &fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 0)["queue"][0];
 
     assert_eq!(drained["account"], ACCOUNT, "{drained}");
     assert_eq!(drained["busy"], false, "{drained}");
@@ -281,7 +281,7 @@ fn a_drain_leaves_a_busy_store_alone() {
         .unwrap();
     lock.lock().unwrap();
 
-    let drained = &fixture.json(&["--json", "drain", "-a", ACCOUNT], 4)["accounts"][0];
+    let drained = &fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 4)["queue"][0];
     assert_eq!(drained["busy"], true, "{drained}");
     assert!(matches!(
         fixture.status(id),
@@ -289,7 +289,7 @@ fn a_drain_leaves_a_busy_store_alone() {
     ));
 
     drop(lock);
-    fixture.json(&["--json", "drain", "-a", ACCOUNT], 0);
+    fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 0);
     assert!(matches!(
         fixture.status(id),
         PimdirActionStatus::Applied { seq: Some(_), .. }
@@ -315,7 +315,7 @@ fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
     fixture.offline_store();
     restamp_store(&fixture, "storage-draft-99");
 
-    let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
+    let failure = fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 1);
 
     assert_eq!(failure["code"], "store-version", "{failure}");
     let error = failure["error"].as_str().unwrap_or_default();
@@ -335,7 +335,7 @@ fn a_store_an_earlier_neverest_wrote_asks_for_a_reinstall() {
     fixture.offline_store();
     restamp_store(&fixture, "storage-draft-11");
 
-    let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
+    let failure = fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 1);
 
     assert_eq!(failure["code"], "store-version", "{failure}");
     let error = failure["error"].as_str().unwrap_or_default();
@@ -370,7 +370,7 @@ fn a_database_another_program_wrote_fails_as_foreign() {
     // its mode's (pimdir STORAGE §18).
     restrict(&db);
 
-    let failure = fixture.json(&["--json", "drain", "-a", ACCOUNT], 1);
+    let failure = fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 1);
 
     assert_eq!(failure["code"], "store-foreign", "{failure}");
     let tables: i64 = rusqlite::Connection::open(&db)
@@ -394,7 +394,7 @@ fn a_drained_event_keeps_its_id_across_the_push() {
 
     let uid = unique("drained");
     fixture.queue_event(&uid);
-    let drained = &fixture.json(&["--json", "drain", "-a", ACCOUNT], 0)["accounts"][0];
+    let drained = &fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 0)["queue"][0];
     let seq = drained["applied"][0]["seq"]
         .as_i64()
         .expect("the created item's id");

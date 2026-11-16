@@ -1,7 +1,8 @@
-//! # Drain command
+//! # Queue-only sync
 //!
-//! Applies what frontends queued in the store, opening no endpoint, so
-//! they read their own writes back without waiting for a sync.
+//! `sync --queue-only`: applies what frontends queued in the store, opening
+//! no endpoint, so they read their own writes back without waiting for a
+//! full sync.
 
 use std::{
     collections::BTreeMap,
@@ -10,7 +11,6 @@ use std::{
 };
 
 use anyhow::{Context, Error, Result, anyhow};
-use clap::Parser;
 use io_pimdir::client::producer::PimdirActionStatus;
 use log::info;
 use pimalaya_cli::printer::Printer;
@@ -22,99 +22,82 @@ use crate::{
     config::{AccountConfig, Config},
     error::{ErrorCode, Failure, chain},
     offline::{driver, state::StoreState},
-    sync::report::{IndexRefresh, OverruledBody},
+    sync::report::{IndexRefresh, OverruledBody, SyncRunOutput},
 };
 
-/// Applies the store changes frontends queued, without syncing.
-///
-/// A frontend (himalaya, calendula, cardamum) queues its writes, and
-/// only the store's owner applies them: until then a created item has
-/// no id and no reader lists it. This applies them now, the way a sync
-/// does first, reading no credential and opening no endpoint, so it
-/// works offline. The next sync pushes them.
-///
-/// The queue is the store's: a drain applies every account's, and
-/// reports each account the rows of its own collections.
-///
-/// Intents, a send or an invitation reply among them, need their server
-/// and stay queued for the sync. A sync holding the store answers
-/// `busy` with exit code 4: that run, or the next, applies them. An
-/// account that could not be drained exits 4 too.
-#[derive(Debug, Parser)]
-pub struct DrainCommand {}
+/// Drains the store of every account the run covers, or reports it busy.
+pub fn run(
+    printer: &mut impl Printer,
+    config_paths: &[PathBuf],
+    accounts: &[String],
+) -> Result<Exit> {
+    let config = Config::load(config_paths)?;
 
-impl DrainCommand {
-    /// Drains the store of every account the run covers, or reports it busy.
-    pub fn execute(
-        self,
-        printer: &mut impl Printer,
-        config_paths: &[PathBuf],
-        accounts: &[String],
-    ) -> Result<Exit> {
-        let config = Config::load(config_paths)?;
-
-        let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
-        for (name, account_config) in config.select(accounts)? {
-            account_config
-                .validate()
-                .with_context(|| format!("Validate account {name}"))?;
-            let dir = driver::store_dir(&account_config)?;
-            stores.entry(dir).or_default().push((name, account_config));
-        }
-        for dir in stores.keys() {
-            driver::refuse_former_stores(dir)?;
-        }
-
-        let order: Vec<String> = stores
-            .values()
-            .flatten()
-            .map(|(name, _)| name.clone())
-            .collect();
-        let mut outputs = Vec::new();
-
-        for (dir, accounts) in stores {
-            if !dir.join("pimdir.db").exists() {
-                for (name, _) in accounts {
-                    let err = anyhow!(
-                        "Account {name} not initialized, run `neverest init -a {name}` first"
-                    );
-                    outputs.push(DrainOutput::failed(name, err));
-                }
-                continue;
-            }
-
-            // NOTE: never waits: a sync holding the store drains it itself,
-            // at its start or at the next run.
-            let lock = try_store_lock(&dir)
-                .with_context(|| format!("Acquire the lock of the store at {}", dir.display()))?;
-            let Some(_lock) = lock else {
-                outputs.extend(
-                    accounts
-                        .into_iter()
-                        .map(|(name, _)| DrainOutput::busy(name)),
-                );
-                continue;
-            };
-            driver::check_store(&dir)?;
-
-            outputs.extend(drain(&dir, accounts)?);
-        }
-
-        outputs.sort_by_key(|output| order.iter().position(|name| *name == output.account));
-        let exit = match outputs.iter().any(|o| o.busy || o.error.is_some()) {
-            true => Exit::Incomplete,
-            false => Exit::Success,
-        };
-
-        printer.out(DrainRunOutput { accounts: outputs })?;
-        Ok(exit)
+    let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
+    for (name, account_config) in config.select(accounts)? {
+        account_config
+            .validate()
+            .with_context(|| format!("Validate account {name}"))?;
+        let dir = driver::store_dir(&account_config)?;
+        stores.entry(dir).or_default().push((name, account_config));
     }
+    for dir in stores.keys() {
+        driver::refuse_former_stores(dir)?;
+    }
+
+    let order: Vec<String> = stores
+        .values()
+        .flatten()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut outputs = Vec::new();
+
+    for (dir, accounts) in stores {
+        if !dir.join("pimdir.db").exists() {
+            for (name, _) in accounts {
+                let err = anyhow!(
+                    "Account {name} not initialized, run `neverest init -a {name}` or \
+                     `neverest sync --init -a {name}` first"
+                );
+                outputs.push(QueueOutput::failed(name, err));
+            }
+            continue;
+        }
+
+        // NOTE: never waits: a sync holding the store drains it itself,
+        // at its start or at the next run.
+        let lock = try_store_lock(&dir)
+            .with_context(|| format!("Acquire the lock of the store at {}", dir.display()))?;
+        let Some(_lock) = lock else {
+            outputs.extend(
+                accounts
+                    .into_iter()
+                    .map(|(name, _)| QueueOutput::busy(name)),
+            );
+            continue;
+        };
+        driver::check_store(&dir)?;
+
+        outputs.extend(drain(&dir, accounts)?);
+    }
+
+    outputs.sort_by_key(|output| order.iter().position(|name| *name == output.account));
+    let exit = match outputs.iter().any(|o| o.busy || o.error.is_some()) {
+        true => Exit::Incomplete,
+        false => Exit::Success,
+    };
+
+    printer.out(SyncRunOutput {
+        queue: outputs,
+        ..SyncRunOutput::default()
+    })?;
+    Ok(exit)
 }
 
 /// Declares the sources of `accounts` as a sync does before its drain, then
 /// drains the store at `dir` once, telling each account the rows of its own
 /// collections. An account that cannot be declared fails alone.
-fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<DrainOutput>> {
+fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<QueueOutput>> {
     let mut outputs = Vec::new();
     let mut ready = Vec::new();
 
@@ -129,7 +112,7 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Drain
         });
         match declared {
             Ok(namespaced) => ready.push((name, namespaced)),
-            Err(err) => outputs.push(DrainOutput::failed(name, err)),
+            Err(err) => outputs.push(QueueOutput::failed(name, err)),
         }
     }
 
@@ -155,10 +138,10 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Drain
     #[cfg(feature = "search")]
     crate::offline::index::after_run(dir, &first_config.store, true, &mut index);
 
-    let mut mine: BTreeMap<String, DrainOutput> = ready
+    let mut mine: BTreeMap<String, QueueOutput> = ready
         .iter()
         .map(|(name, _)| {
-            let mut output = DrainOutput::new(name.clone());
+            let mut output = QueueOutput::new(name.clone());
             let report = drained.remove(name).unwrap_or_default();
             output.overruled = report.overruled;
             output.index = index.clone();
@@ -218,27 +201,10 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Drain
     Ok(outputs)
 }
 
-/// What `neverest drain` did with the queue of every account it covered.
+/// What `neverest sync --queue-only` did with one account's queue.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct DrainRunOutput {
-    /// One entry per account the run covered.
-    pub accounts: Vec<DrainOutput>,
-}
-
-impl fmt::Display for DrainRunOutput {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for account in &self.accounts {
-            write!(f, "{account}")?;
-        }
-        Ok(())
-    }
-}
-
-/// What `neverest drain` did with one account's queue.
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct DrainOutput {
+pub struct QueueOutput {
     /// The account whose store was drained.
     pub account: String,
     /// A sync held the store, so nothing was drained.
@@ -269,7 +235,7 @@ pub struct DrainOutput {
     pub index: Option<IndexRefresh>,
 }
 
-impl DrainOutput {
+impl QueueOutput {
     fn new(account: String) -> Self {
         Self {
             account,
@@ -303,7 +269,7 @@ impl DrainOutput {
     }
 }
 
-impl fmt::Display for DrainOutput {
+impl fmt::Display for QueueOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.busy {
             return writeln!(
@@ -414,14 +380,14 @@ impl fmt::Display for ParkedAction {
 mod tests {
     use serde_json::json;
 
-    use crate::cli::drain::*;
+    use crate::cli::queue::*;
 
     /// A drained or parked row is keyed `row`, as himalaya's `pimdir queue
     /// list` keys it, and a parked one carries its producer, when it was
     /// queued and how often it was tried.
     #[test]
     fn a_drain_keys_its_rows_row() {
-        let mut output = DrainOutput::new(String::from("work"));
+        let mut output = QueueOutput::new(String::from("work"));
         output.applied.push(DrainedAction {
             id: 2,
             collection: String::from("work/imap/INBOX"),
@@ -463,7 +429,7 @@ mod tests {
     #[test]
     fn an_undrained_account_carries_its_causes_apart() {
         let err = anyhow!("no such table").context("Open the store");
-        let output = DrainOutput::failed(String::from("work"), err);
+        let output = QueueOutput::failed(String::from("work"), err);
         let json = serde_json::to_value(&output).unwrap();
 
         assert_eq!(json["error"], "Open the store", "{json}");

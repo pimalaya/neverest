@@ -20,12 +20,10 @@ use pimalaya_cli::{
 };
 use pimalaya_config::toml::ConfigMissingError;
 
-#[cfg(feature = "search")]
-use crate::cli::index::IndexCommand;
 use crate::{
     cli::{
-        account::AccountCommand, check::CheckCommand, conflict::ConflictCommand,
-        drain::DrainCommand, exit::Exit, init::InitCommand, sync::SyncCommand,
+        account::AccountCommand, check::CheckCommand, conflict::ConflictCommand, exit::Exit,
+        init::InitCommand, sync::SyncCommand,
     },
     config::Config,
     json_schema,
@@ -76,9 +74,6 @@ pub enum Command {
     Check(CheckCommand),
     Init(InitCommand),
     Sync(SyncCommand),
-    Drain(DrainCommand),
-    #[cfg(feature = "search")]
-    Index(IndexCommand),
     #[command(arg_required_else_help = true)]
     #[command(alias = "conflicts")]
     Conflict(ConflictCommand),
@@ -94,9 +89,9 @@ impl Command {
     /// Runs the subcommand over the accounts `-a` names, or every one.
     ///
     /// The flag is global and declared once, on [`Cli`], as in every other
-    /// pimalaya CLI: the accounts are a property of the invocation. Sync,
-    /// drain, init and index have an outcome beyond succeeding or failing, so
-    /// they return their own [`Exit`]; every other works or errors.
+    /// pimalaya CLI: the accounts are a property of the invocation. Sync
+    /// and init have an outcome beyond succeeding or failing, so they return
+    /// their own [`Exit`]; every other works or errors.
     pub fn execute(
         self,
         printer: &mut (impl Printer + Send),
@@ -105,9 +100,6 @@ impl Command {
     ) -> Result<Exit> {
         let done = match self {
             Self::Sync(cmd) => return cmd.execute(printer, config_paths, accounts),
-            Self::Drain(cmd) => return cmd.execute(printer, config_paths, accounts),
-            #[cfg(feature = "search")]
-            Self::Index(cmd) => return cmd.execute(printer, config_paths, accounts),
             Self::Init(cmd) => return cmd.execute(printer, config_paths, accounts),
             Self::Account(cmd) => cmd.execute(printer, config_paths, accounts),
             Self::Check(cmd) => cmd.execute(printer, config_paths, accounts),

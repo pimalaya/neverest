@@ -258,7 +258,7 @@ Neverest SHALL have no `repl` and no `mcp`: its commands are batch operations ov
 
 #### Scenario: Two configuration files
 - GIVEN `-c public.toml -c private.toml`, each declaring one account
-- WHEN `neverest drain` runs
+- WHEN `neverest sync --queue-only` runs
 - THEN it runs over both accounts, the second file merged on top of the first
 
 #### Scenario: A path holding a colon
@@ -339,7 +339,7 @@ A store opens under its own format version alone (pimdir STORAGE §4.2, §6): on
 
 #### Scenario: A store an earlier neverest wrote
 - **GIVEN** a store whose `store_meta.format_version` names `storage-draft-11`, as io-pimdir 0.13 wrote it
-- **WHEN** neverest runs `--json drain` on the account
+- **WHEN** neverest runs `--json sync --queue-only` on the account
 - **THEN** it exits 1 with `code` `store-version`, the message naming the sync with the previous neverest until nothing is queued, the move of the store directory and the rebuild with `neverest init`, and no delete
 
 ### Requirement: The report shows remote-originated changes a pull applied
@@ -429,8 +429,27 @@ The subsequent sync of a drained collection pushes the resulting dirty state. An
 - **WHEN** the queue is drained
 - **THEN** nothing is applied, the report lists the `move` parked with the diverging body's hash in its error, the card is still in its address book and the report still counts one item waiting for a decision (src/offline/driver.rs `a_queued_move_over_a_conflict_parks_and_the_decision_still_waits`)
 
+### Requirement: `sync` initializes, queues or indexes on a flag
+`sync` SHALL take three flags, and `drain` and `index` SHALL be no commands (D6 of the-v1-review):
+
+- `--init` SHALL initialize each account the run covers that is not yet, as `init` does (opening every endpoint, adding the account to the store, creating the store when there is none), then sync. The result SHALL list them under `initialized`, empty without the flag or when every account was initialized; an account whose initialization failed SHALL be reported with that failure in `accounts` and not synced. Without `--init`, an uninitialized account SHALL fail as before, the message naming both `neverest init -a <name>` and `neverest sync --init -a <name>`. Under `--dry-run` the accounts are still initialized, which moves no item, and the sync is only planned. `init` stays the command that initializes alone.
+- `--queue-only` SHALL be the former `drain` (*A drain applies the queue without syncing*), its rows printed under the sync result's `queue`, one an account.
+- `--index-only` SHALL be the former `index`, its stores printed under the sync result's `index`, one a store, in a build with `search`.
+
+The two `-only` flags SHALL exclude each other, `--init` and every flag of a full sync, refused by clap as a command line (exit 2). The sync result SHALL print every key whichever flag ran: `initialized`, `accounts`, `queue` and `index`, empty when not filled.
+
+#### Scenario: A first sync
+- GIVEN an account no `init` ever ran over
+- WHEN `neverest sync --init` runs
+- THEN the account is initialized, then synced, and `initialized` names it
+
+#### Scenario: Two only flags
+- GIVEN any configuration
+- WHEN `neverest sync --queue-only --index-only` runs
+- THEN it exits 2 and touches nothing
+
 ### Requirement: A drain applies the queue without syncing
-`neverest drain` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 4, the queue untouched.
+`neverest sync --queue-only` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 4, the queue untouched.
 
 ### Requirement: A run holds the store lock, waiting bounded
 A run SHALL hold an advisory sync.lock under local/ of the **actual** store directory (honouring `store.root`) for its whole length, whatever accounts it covers, taken once for each store it covers, in path order, before any account runs. A second run SHALL wait for the holder up to a bounded timeout (60 s) and then report every account of that store `busy` and exit 4, so cron ticks and connector-triggered scoped runs serialize instead of failing or corrupting.
@@ -1997,14 +2016,14 @@ A source's collection listing SHALL name every collection it holds, whatever the
 ### Requirement: A reset never loses work no server holds
 `sync --reset` SHALL act on exactly one account and SHALL start it over inside the store it shares: it SHALL drop the account's collections (pimdir GUIDE "Removal": `delete_collection`, the refcounts recomputed in its transaction, then the collector), with what the store records under them (items, bindings, checkpoints, coverage, capability rows), the account's source-wide capability rows and its sidecar entry, stamp the entry again and sync the account anew. Every other account SHALL be left as it was.
 
-It SHALL read the account's collections before dropping any, and SHALL refuse while one holds a queued or parked action, which io-pimdir refuses to drop with its collection: the refusal SHALL name each row and the way out, the queued ones applied by `neverest drain` or a sync, the parked ones cancelled from the frontend that queued them. Without `--force` it SHALL also refuse while they hold other work no server has: a conflict, an item whose flags or body no binding's base holds (a staged edit or create), a staged delete, or a retained item, bound to no server, listing that work per collection and naming `--force`, which drops that work with the collections.
+It SHALL read the account's collections before dropping any, and SHALL refuse while one holds a queued or parked action, which io-pimdir refuses to drop with its collection: the refusal SHALL name each row and the way out, the queued ones applied by `neverest sync --queue-only` or a sync, the parked ones cancelled from the frontend that queued them. Without `--force` it SHALL also refuse while they hold other work no server has: a conflict, an item whose flags or body no binding's base holds (a staged edit or create), a staged delete, or a retained item, bound to no server, listing that work per collection and naming `--force`, which drops that work with the collections.
 
 `--reset` SHALL be refused beside `--dry-run`, which would drop the real collections before planning, and beside a collection or source filter, the reset being the whole account's.
 
 #### Scenario: A queued send survives a reset
 - **GIVEN** an account whose collection holds a queued action
 - **WHEN** it is synced with `--reset`, forced or not
-- **THEN** the run refuses, naming the row and `neverest drain`, and the store is untouched
+- **THEN** the run refuses, naming the row and `neverest sync --queue-only`, and the store is untouched
 
 #### Scenario: A reset leaves the other accounts alone
 - **GIVEN** two accounts sharing a store, each holding a collection
@@ -2040,12 +2059,12 @@ A store failure that ends a command SHALL carry, in its JSON failure object, the
 
 #### Scenario: A downgrade under `--json`
 - **GIVEN** a store whose `store_meta.format_version` names a later draft
-- **WHEN** neverest runs `--json drain` on the account
+- **WHEN** neverest runs `--json sync --queue-only` on the account
 - **THEN** it exits 1 printing a failure object whose `code` is `store-version`, the message asking for an upgrade and naming no reset
 
 #### Scenario: A store root naming another program's database
 - **GIVEN** a pimdir.db holding another program's tables
-- **WHEN** neverest runs `--json drain` on the account
+- **WHEN** neverest runs `--json sync --queue-only` on the account
 - **THEN** it exits 1 printing a failure object whose `code` is `store-foreign`, the database untouched
 
 ### Requirement: A body reaches the blob tree under a lock
@@ -2160,7 +2179,7 @@ A build with the `search` feature (on by default) SHALL refresh the store's sear
 
 The run SHALL report the refresh under `index`: the changes folded, the bodies newly indexed, the stamps still `behind`, whether another indexer held it (`busy`), and the error of a failed one. An index failure SHALL be a warning and SHALL NOT fail the run or change its exit code: the index is derived from the store.
 
-`neverest index` SHALL build the index of each store the accounts it runs over use, once a store and whole, every account of the store included, until it holds every change the store has, reading no credential and opening no endpoint, and SHALL exit 4 answering `busy` while another indexer holds one.
+`neverest sync --index-only` SHALL build the index of each store the accounts it runs over use, once a store and whole, every account of the store included, until it holds every change the store has, reading no credential and opening no endpoint, and SHALL exit 4 answering `busy` while another indexer holds one.
 
 A reset SHALL leave the index to its next refresh, which folds the removal of every item the dropped collections held, the store counting each (pimdir STORAGE §4.5).
 
@@ -2202,11 +2221,11 @@ neverest.json, under the store's local/, SHALL record the collection-id layout o
 - **THEN** that run is refused naming `--accept-mode`, and the one-way account still syncs
 
 ### Requirement: `-a` filters the accounts a command runs over
-`-a/--account` SHALL be repeatable and SHALL filter the configured accounts. Without it, `sync`, `check`, `drain` and `init` SHALL run over every configured account, store by store and in name order within a store, one after the other inside one run holding each store's lock once; with it, over the named ones. The configuration is merged into a sorted table before neverest reads it, so name order is the only order it can keep. A name the configuration does not declare SHALL fail the command before anything runs, coded `account-missing`, in the family's words: "Account `x` not found, the configuration holds: a, b" (`default` among them, a name like any other: neverest has no default account); and so SHALL an account whose configuration does not validate, the configuration being one document.
+`-a/--account` SHALL be repeatable and SHALL filter the configured accounts. Without it, `sync` (its `-only` flags included), `check` and `init` SHALL run over every configured account, store by store and in name order within a store, one after the other inside one run holding each store's lock once; with it, over the named ones. The configuration is merged into a sorted table before neverest reads it, so name order is the only order it can keep. A name the configuration does not declare SHALL fail the command before anything runs, coded `account-missing`, in the family's words: "Account `x` not found, the configuration holds: a, b" (`default` among them, a name like any other: neverest has no default account); and so SHALL an account whose configuration does not validate, the configuration being one document.
 
 Each account's failure SHALL be its own: the run SHALL go on with the next account and SHALL end with one result listing every account's outcome, a failed one carrying its error and its `code`. The command SHALL exit 0 when every account succeeded, otherwise with the partial-outcome code its own outcomes give (3 for a sync that left work waiting for a person), a failed or a busy account making it 4, the code of a run that could not do all its work. A failure common to the run (no configuration, a store refused as a whole) SHALL fail the command with the failure object, exit 1.
 
-`index` is store-wide: it SHALL build the stores of the accounts the filter keeps, each once and whole, every account of a store included. `conflict show`, `conflict resolve` and `sync --reset` address one item or start one account over, so they SHALL need exactly one account: a filter leaving none or several SHALL fail, naming the accounts. `conflict list` SHALL list the conflicts of every account it runs over, each row naming its account.
+`sync --index-only` is store-wide: it SHALL build the stores of the accounts the filter keeps, each once and whole, every account of a store included. `conflict show`, `conflict resolve` and `sync --reset` address one item or start one account over, so they SHALL need exactly one account: a filter leaving none or several SHALL fail, naming the accounts. `conflict list` SHALL list the conflicts of every account it runs over, each row naming its account.
 
 #### Scenario: Two accounts, one of them failing
 - **GIVEN** two accounts, the first initialized and the second not
@@ -2320,7 +2339,7 @@ A report row naming what a run could not do to one item or one endpoint SHALL ca
 
 A parked queue row SHALL carry the error the store recorded, with no code and no causes, the store keeping its text alone. An unconfirmed send's `error` SHALL begin `unconfirmed: `, its causes under `sources`, so its message and causes joined read as its parked row does.
 
-An account's row of `sync`, `drain` and `init` and the index refresh SHALL carry `code`, `error` and `sources` the same way, `error` the outermost message, `null` and `[]` when it ran. Their `code` SHALL be read as a row's is, a server's refusal included; the index refresh's is the store's (`index-version`, `index-fts5-missing`). An account's row of `init` SHALL list the endpoints it opened under `opened`, sorted, those it opened before a failure included, empty for an account initialized already.
+An account's row of `sync`, `sync --queue-only` and `init` and the index refresh SHALL carry `code`, `error` and `sources` the same way, `error` the outermost message, `null` and `[]` when it ran. Their `code` SHALL be read as a row's is, a server's refusal included; the index refresh's is the store's (`index-version`, `index-fts5-missing`). An account's row of `init` SHALL list the endpoints it opened under `opened`, sorted, those it opened before a failure included, empty for an account initialized already.
 
 #### Scenario: A refused update under `--json`
 - GIVEN a CardDAV source refusing an update 403
@@ -2342,7 +2361,7 @@ Every report row naming a row of the store's queue SHALL name it `row`, as himal
 
 #### Scenario: A parked flag change
 - GIVEN a `set-flags` row himalaya queued, which the drain parks
-- WHEN `neverest --json drain` reports it
+- WHEN `neverest --json sync --queue-only` reports it
 - THEN its `parked` row reads `{row, collection, kind: "set-flags", producer: "himalaya", queuedAt, attempts, code: null, error, sources: []}`
 
 ### Requirement: A DAV source may name its home set

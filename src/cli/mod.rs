@@ -6,10 +6,10 @@
 pub mod account;
 pub mod check;
 pub mod conflict;
-pub mod drain;
 pub mod exit;
 #[cfg(feature = "search")]
 pub mod index;
 pub mod init;
 pub mod main;
+pub mod queue;
 pub mod sync;

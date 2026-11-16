@@ -25,7 +25,7 @@ use log::{debug, info, warn};
 use pimalaya_cli::printer::Printer;
 
 use crate::{
-    cli::exit::Exit,
+    cli::{exit::Exit, init, queue},
     config::{AccountConfig, CollectionFilter, Config},
     error::{Failure, pimdir_error},
     offline::{
@@ -51,6 +51,27 @@ const LOCK_POLL: Duration = Duration::from_millis(500);
 
 /// The file of the store's local/ a run holds its advisory lock on.
 const SYNC_LOCK: &str = "sync.lock";
+
+/// The flags a `--queue-only` or `--index-only` run refuses beside it: it
+/// syncs nothing, so none of them applies.
+const SYNC_ONLY: [&str; 16] = [
+    "init",
+    "dry_run",
+    "include_collection",
+    "exclude_collection",
+    "all_collections",
+    "reset",
+    "connections",
+    "no_purge",
+    "source",
+    "accept_mode",
+    "accept_absences",
+    "prime",
+    "declare_only",
+    "intents_only",
+    "since",
+    "bodies",
+];
 
 /// Synchronizes the collections and items of every account, or of those `-a`
 /// names, through the pimdir store they share.
@@ -84,6 +105,38 @@ const SYNC_LOCK: &str = "sync.lock";
 /// the wait. It wins over 3.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
+    /// Initialize each account the run covers that is not yet, as `init`
+    /// does, then sync.
+    ///
+    /// Initializing opens every endpoint and adds the account to the store,
+    /// creating the store when there is none; the first sync then copies
+    /// whole collections. Check what it would do with `--dry-run` first.
+    #[arg(long)]
+    pub init: bool,
+    /// Apply what frontends queued in the store, and nothing else.
+    ///
+    /// A frontend (himalaya, calendula, cardamum) queues its writes, and
+    /// only the store's owner applies them: until then a created item has
+    /// no id and no reader lists it. This applies them now, the way a sync
+    /// does first, reading no credential and opening no endpoint, so it
+    /// works offline; the next sync pushes them. The queue is the store's:
+    /// every account's is applied, each reported the rows of its own
+    /// collections. Intents (a send, an invitation reply) need their server
+    /// and stay queued. A sync holding the store answers `busy`, exit 4.
+    #[arg(long, conflicts_with_all = SYNC_ONLY)]
+    pub queue_only: bool,
+    /// Build the search index of the accounts' stores until it is current,
+    /// and nothing else.
+    ///
+    /// Frontends search the store through its index (index.db), which only
+    /// the store's owner builds: a sync refreshes it under a deadline
+    /// (`store.index-timeout`), so the first build of a large store spreads
+    /// over several runs. This folds every change the store holds now,
+    /// however long it takes, reading no credential and opening no
+    /// endpoint. Another indexer holding the index answers `busy`, exit 4.
+    #[cfg(feature = "search")]
+    #[arg(long, conflicts_with_all = SYNC_ONLY, conflicts_with = "queue_only")]
+    pub index_only: bool,
     /// Print the patch that would be applied, without applying it.
     #[arg(long, short = 'd')]
     pub dry_run: bool,
@@ -226,11 +279,39 @@ impl SyncCommand {
         config_paths: &[PathBuf],
         accounts: &[String],
     ) -> Result<Exit> {
+        if self.queue_only {
+            return queue::run(printer, config_paths, accounts);
+        }
+        #[cfg(feature = "search")]
+        if self.index_only {
+            return crate::cli::index::run(printer, config_paths, accounts);
+        }
+
         let config = Config::load(config_paths)?;
-        let selected = match self.reset {
+        let mut selected = match self.reset {
             true => vec![config.select_one(accounts, "A reset")?],
             false => config.select(accounts)?,
         };
+        let mut outcomes: Vec<AccountSync> = Vec::new();
+        let mut initialized = Vec::new();
+
+        if self.init {
+            for output in init::initialize(selected.clone())? {
+                if let Some(error) = output.error {
+                    selected.retain(|(name, _)| *name != output.account);
+                    outcomes.push(AccountSync {
+                        account: output.account,
+                        busy: false,
+                        code: output.code,
+                        error: Some(error),
+                        sources: output.sources,
+                        report: None,
+                    });
+                } else if !output.already_initialized {
+                    initialized.push(output.account);
+                }
+            }
+        }
 
         // NOTE: the configuration is one document, so an account it does
         // not validate fails the run before anything does.
@@ -251,7 +332,6 @@ impl SyncCommand {
             .flatten()
             .map(|(name, _)| name.clone())
             .collect();
-        let mut outcomes: Vec<AccountSync> = Vec::new();
 
         // NOTE: every store's lock before any account runs, in path order, so
         // two runs over several stores never wait on each other crosswise.
@@ -261,7 +341,8 @@ impl SyncCommand {
             if !dir.join("pimdir.db").exists() {
                 for (name, _) in accounts {
                     let err = anyhow!(
-                        "Account {name} not initialized, run `neverest init -a {name}` first"
+                        "Account {name} not initialized, run `neverest init -a {name}` or \
+                         `neverest sync --init -a {name}` first"
                     );
                     outcomes.push(failed(name, err));
                 }
@@ -361,7 +442,11 @@ impl SyncCommand {
         drop(locks);
 
         outcomes.sort_by_key(|outcome| order.iter().position(|name| *name == outcome.account));
-        let output = SyncRunOutput { accounts: outcomes };
+        let output = SyncRunOutput {
+            initialized,
+            accounts: outcomes,
+            ..SyncRunOutput::default()
+        };
 
         // NOTE: read before printing, which consumes the output.
         let exit = Exit::from(&output);

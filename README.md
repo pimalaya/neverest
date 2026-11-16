@@ -138,23 +138,24 @@ Every command carries its own `--help`, the source of truth for its flags and sy
 
 ```sh
 neverest init
+neverest sync --init
 neverest sync --dry-run
 neverest sync -a <account> --include-collection INBOX
 neverest account list
 neverest account check
-neverest drain
-neverest index
+neverest sync --queue-only
+neverest sync --index-only
 neverest conflict list
 neverest conflict resolve <id> -a <account> --interactive
 ```
 
-Every command runs over every account, one after the other, unless `-a` names some (it is repeatable). Each account's outcome is its own: one that fails is reported, the next one still runs, and the command exits 4. The store is locked for the whole run, so two accounts of one store never sync at once; give an account that needs its own schedule its own `store.root`. `conflict show`, `conflict resolve` and `sync --reset` act on one account, which `-a` names when there are several. `index` builds the store of the accounts it runs over, each store once. `default = true` on an account is ignored, with a warning.
+Every command runs over every account, one after the other, unless `-a` names some (it is repeatable). Each account's outcome is its own: one that fails is reported, the next one still runs, and the command exits 4. The store is locked for the whole run, so two accounts of one store never sync at once; give an account that needs its own schedule its own `store.root`. `conflict show`, `conflict resolve` and `sync --reset` act on one account, which `-a` names when there are several. `sync --index-only` builds the store of the accounts it runs over, each store once.
 
-An account is initialized once, which opens every source so credential and network errors surface up front, then adds the account to the store, creating the store when there is none. `sync` refuses to run an account without it, and `init` leaves an initialized account as it is. `sync --reset -a <account>` drops that account's collections before a run, rebuilding them as a first sync would, every other account of the store left as it was. It refuses while they hold a queued or parked action, which `drain` applies or its frontend cancels first, and while they hold other work no server has (conflicts, unpushed edits, mail a replica keeps after the server expunged it), listing that work; `--reset --force` drops that other work with the collections. A reset is the whole account's, so it is refused beside `--dry-run`, `-m`, `-x` and `-s`.
+An account is initialized once, which opens every source so credential and network errors surface up front, then adds the account to the store, creating the store when there is none. `sync` refuses to run an account without it unless given `--init`, and `init` leaves an initialized account as it is. `sync --reset -a <account>` drops that account's collections before a run, rebuilding them as a first sync would, every other account of the store left as it was. It refuses while they hold a queued or parked action, which `sync --queue-only` applies or its frontend cancels first, and while they hold other work no server has (conflicts, unpushed edits, mail a replica keeps after the server expunged it), listing that work; `--reset --force` drops that other work with the collections. A reset is the whole account's, so it is refused beside `--dry-run`, `-m`, `-x` and `-s`.
 
-What himalaya, calendula and cardamum write is queued in the store, and only neverest applies it. A sync does so first, before reaching any server; `drain` does it alone, offline, so a frontend reads a created item back at once, the next sync pushing it.
+What himalaya, calendula and cardamum write is queued in the store, and only neverest applies it. A sync does so first, before reaching any server; `sync --queue-only` does it alone, offline, so a frontend reads a created item back at once, the next sync pushing it.
 
-neverest also keeps the store's search index (index.db), which the frontends query and only the store's owner builds. A sync refreshes it last, for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), and a drain for 2 seconds; a large first build spreads over several runs, each going on where the last stopped, or `index` builds it whole at once. The report says how far it got under `index`; an index failure is a warning and never changes the exit code. After a reset, the next refresh drops what the account's collections held. The index reads floating times and all-day dates in your time zone, `TZ` else the system's, UTC when it has no IANA name; changing it re-expands every calendar item at the next refresh.
+neverest also keeps the store's search index (index.db), which the frontends query and only the store's owner builds. A sync refreshes it last, for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), and `sync --queue-only` for 2 seconds; a large first build spreads over several runs, each going on where the last stopped, or `sync --index-only` builds it whole at once. The report says how far it got under `index`; an index failure is a warning and never changes the exit code. After a reset, the next refresh drops what the account's collections held. The index reads floating times and all-day dates in your time zone, `TZ` else the system's, UTC when it has no IANA name; changing it re-expands every calendar item at the next refresh.
 
 ### Conflicts
 

@@ -279,7 +279,7 @@ fn stores_kept_per_account_are_refused_before_anything_is_created() {
     for command in [
         &["--json", "sync"][..],
         &["--json", "init"],
-        &["--json", "drain"],
+        &["--json", "sync", "--queue-only"],
     ] {
         let failure = fixture.json(command, 1);
 
@@ -399,4 +399,84 @@ fn turning_one_way_on_is_refused_until_accepted() {
 
     let again = fixture.json(&["--json", "sync"], 4);
     assert!(again["accounts"][0]["report"].is_object(), "{again}");
+}
+
+/// `sync --init` initializes the accounts that are not and says which, an
+/// initialized one left as it is; without it the uninitialized one fails,
+/// naming both remedies.
+#[test]
+fn sync_init_initializes_what_is_not_then_syncs() {
+    let _serial = serialized();
+    let fixture = Fixture::new(&["work", "home"], home_set_server());
+    fixture.json(&["--json", "init", "-a", "work"], 0);
+
+    let output = fixture.run(&["--json", "--log-level", "off", "sync", "-a", "home"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    let error = result["accounts"][0]["error"].as_str().unwrap_or_default();
+    assert!(error.contains("neverest init -a home"), "{result}");
+    assert!(error.contains("neverest sync --init -a home"), "{result}");
+    assert_eq!(result["initialized"], serde_json::json!([]), "{result}");
+
+    let output = fixture.run(&["--json", "--log-level", "off", "sync", "--init"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        result["initialized"],
+        serde_json::json!(["home"]),
+        "{result}"
+    );
+    for account in result["accounts"].as_array().unwrap() {
+        let error = account["error"].as_str().unwrap_or_default();
+        assert!(!error.contains("not initialized"), "{result}");
+    }
+    let sidecar: Value =
+        serde_json::from_str(&fs::read_to_string(fixture.sidecar()).unwrap()).unwrap();
+    assert!(sidecar["accounts"]["home"].is_object(), "{sidecar}");
+}
+
+/// `--queue-only` and `--index-only` exclude each other, `--init` and the
+/// flags of a full sync, refused as a command line (exit 2).
+#[test]
+fn the_only_flags_refuse_what_they_do_not_run() {
+    let _serial = serialized();
+    let fixture = Fixture::new(&["work"], closed_port());
+
+    let mut refused = vec![
+        vec!["sync", "--queue-only", "--init"],
+        vec!["sync", "--queue-only", "--dry-run"],
+        vec!["sync", "--queue-only", "--reset"],
+    ];
+    if cfg!(feature = "search") {
+        refused.push(vec!["sync", "--queue-only", "--index-only"]);
+        refused.push(vec!["sync", "--index-only", "--init"]);
+        refused.push(vec!["sync", "--index-only", "-m", "INBOX"]);
+    }
+    for args in refused {
+        let output = fixture.run(&args);
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
+}
+
+/// `sync --index-only` builds the store's index until current and reports
+/// it under `index`, one entry per store, `accounts` left empty.
+#[cfg(feature = "search")]
+#[test]
+fn sync_index_only_builds_the_index_of_the_store() {
+    let _serial = serialized();
+    let fixture = Fixture::new(&["work"], closed_port());
+    fixture.initialized(&["work"]);
+
+    let result = fixture.json(&["--json", "sync", "--index-only"], 0);
+
+    assert_eq!(result["accounts"], serde_json::json!([]), "{result}");
+    assert_eq!(result["queue"], serde_json::json!([]), "{result}");
+    let store = &result["index"][0];
+    assert_eq!(
+        store["store"],
+        fixture.store().to_str().unwrap(),
+        "{result}"
+    );
+    assert_eq!(store["accounts"], serde_json::json!(["work"]), "{result}");
+    assert_eq!(store["index"]["busy"], false, "{result}");
 }

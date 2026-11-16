@@ -20,7 +20,7 @@ use pimalaya_cli::{
 };
 
 use crate::{
-    cli::{check::CheckRunOutput, drain::DrainRunOutput, init::InitRunOutput},
+    cli::{check::CheckRunOutput, init::InitRunOutput},
     conflict::report::{ConflictListOutput, ConflictResolveOutput, ConflictShowOutput},
     error::ErrorCode,
     sync::{event::SyncEvent, report::SyncRunOutput},
@@ -38,9 +38,6 @@ pub fn registry() -> JsonSchemaRegistry {
     registry.insert::<AccountListOutput>("neverest-account-list");
     registry.insert::<CheckRunOutput>("neverest-account-check");
     registry.insert::<CheckRunOutput>("neverest-check");
-    registry.insert::<DrainRunOutput>("neverest-drain");
-    #[cfg(feature = "search")]
-    registry.insert::<crate::cli::index::IndexRunOutput>("neverest-index");
     registry.insert::<InitRunOutput>("neverest-init");
     registry.insert::<SyncRunOutput>("neverest-sync");
     registry.insert_events::<SyncEvent>("neverest-sync");

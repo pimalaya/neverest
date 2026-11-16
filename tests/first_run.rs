@@ -154,7 +154,15 @@ fn an_unknown_account_names_the_ones_the_configuration_holds() {
         account(home.path(), "a") + &account(home.path(), "b"),
     )
     .unwrap();
-    let args = ["--json", "-c", path.to_str().unwrap(), "-a", "x", "drain"];
+    let args = [
+        "--json",
+        "-c",
+        path.to_str().unwrap(),
+        "-a",
+        "x",
+        "sync",
+        "--queue-only",
+    ];
     let output = run(home.path(), &args);
 
     assert_eq!(output.status.code(), Some(1));
@@ -173,14 +181,17 @@ fn repeated_config_paths_merge_in_order() {
     fs::write(&base, account(home.path(), "a")).unwrap();
     fs::write(&other, account(home.path(), "b")).unwrap();
     let (base, other) = (base.to_str().unwrap(), other.to_str().unwrap());
-    let output = run(home.path(), &["--json", "-c", base, "-c", other, "drain"]);
+    let output = run(
+        home.path(),
+        &["--json", "-c", base, "-c", other, "sync", "--queue-only"],
+    );
     let stdout = text(&output.stdout);
 
     // NOTE: neither account is initialized, which a drain reports per
     // account and exits 4 for.
     assert_eq!(output.status.code(), Some(4), "{stdout}");
     let json: Value = serde_json::from_str(&stdout).unwrap();
-    let names: Vec<&str> = json["accounts"]
+    let names: Vec<&str> = json["queue"]
         .as_array()
         .unwrap()
         .iter()

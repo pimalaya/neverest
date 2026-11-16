@@ -3,13 +3,14 @@
 //! The end-of-run summary the sync engine returns: `Display` for the
 //! terminal, `Serialize` for `--json`, `JsonSchema` for `json-schema`.
 
-use std::fmt;
+use std::{fmt, path::PathBuf};
 
 use pimalaya_cli::error::ItemError;
 use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::{
+    cli::queue::QueueOutput,
     error::{ErrorCode, Failure, chain},
     sync::hunk::{CollectionHunk, ItemHunk},
 };
@@ -19,14 +20,30 @@ use crate::{
 #[derive(Debug, Default, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncRunOutput {
-    /// One entry per account the run covered.
+    /// The accounts `--init` initialized before the run, empty without it.
+    pub initialized: Vec<String>,
+    /// One entry per account the run covered, empty under `--queue-only`
+    /// and `--index-only`.
     pub accounts: Vec<AccountSync>,
+    /// What `--queue-only` applied, one entry per account, empty otherwise.
+    pub queue: Vec<QueueOutput>,
+    /// What `--index-only` built, one entry per store, empty otherwise.
+    pub index: Vec<IndexOutput>,
 }
 
 impl fmt::Display for SyncRunOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for account in &self.initialized {
+            writeln!(f, "Initialized account {account}")?;
+        }
         for account in &self.accounts {
             write!(f, "{account}")?;
+        }
+        for account in &self.queue {
+            write!(f, "{account}")?;
+        }
+        for store in &self.index {
+            write!(f, "{store}")?;
         }
         Ok(())
     }
@@ -1478,5 +1495,33 @@ impl fmt::Display for SyncOutput {
                 "Account {account} partially synchronized: {n} hunks, {e} errors, {w} warnings"
             ),
         }
+    }
+}
+
+/// What `sync --index-only` did to one store's search index.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexOutput {
+    /// The store directory whose index was built.
+    pub store: PathBuf,
+    /// The accounts of the run using the store, in name order.
+    pub accounts: Vec<String>,
+    /// What the build folded, and whether another indexer held it.
+    pub index: IndexRefresh,
+}
+
+impl fmt::Display for IndexOutput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            store,
+            accounts,
+            index,
+        } = self;
+        writeln!(
+            f,
+            "Search index of {} ({}): {index}",
+            store.display(),
+            accounts.join(", ")
+        )
     }
 }

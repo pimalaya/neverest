@@ -168,7 +168,10 @@ impl StoreState {
     /// The entry of `account`, refused when `init` never wrote one.
     pub fn account(&self, account: &str) -> Result<AccountState> {
         self.accounts.get(account).cloned().ok_or_else(|| {
-            anyhow!("Account {account} not initialized, run `neverest init -a {account}` first")
+            anyhow!(
+                "Account {account} not initialized, run `neverest init -a {account}` or \
+                 `neverest sync --init -a {account}` first"
+            )
         })
     }
 

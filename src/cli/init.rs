@@ -47,62 +47,7 @@ impl InitCommand {
         accounts: &[String],
     ) -> Result<Exit> {
         let config = Config::load(config_paths)?;
-
-        let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
-        for (name, account_config) in config.select(accounts)? {
-            account_config
-                .validate()
-                .with_context(|| format!("Validate account {name}"))?;
-            let dir = driver::store_dir(&account_config)?;
-            stores.entry(dir).or_default().push((name, account_config));
-        }
-        // NOTE: before anything is created: a directory holding the stores
-        // an earlier neverest kept per account is refused as it is.
-        for dir in stores.keys() {
-            driver::check_store(dir)?;
-        }
-
-        let order: Vec<String> = stores
-            .values()
-            .flatten()
-            .map(|(name, _)| name.clone())
-            .collect();
-        let mut outputs = Vec::new();
-
-        for (dir, accounts) in stores {
-            // NOTE: io-pimdir restricts the directory to its user when it
-            // creates the store in it (pimdir STORAGE §18).
-            fs::create_dir_all(&dir)
-                .with_context(|| format!("Create store dir {}", dir.display()))?;
-            let lock = wait_store_lock(&dir, LOCK_TIMEOUT)
-                .with_context(|| format!("Acquire the lock of the store at {}", dir.display()))?;
-            let Some(_lock) = lock else {
-                for (name, account_config) in accounts {
-                    let err = anyhow!(
-                        "Another run holds the store at {} after {}s",
-                        dir.display(),
-                        LOCK_TIMEOUT.as_secs()
-                    );
-                    let mode = account_config.mode()?;
-                    outputs.push(InitOutput::failed(name, mode, &dir, &[], err));
-                }
-                continue;
-            };
-
-            for (name, account_config) in accounts {
-                let mut opened = Vec::new();
-                let output = match init(&dir, &name, &account_config, &mut opened) {
-                    Ok(output) => output,
-                    Err(err) => {
-                        let mode = account_config.mode()?;
-                        InitOutput::failed(name, mode, &dir, &opened, err)
-                    }
-                };
-                outputs.push(output);
-            }
-        }
-
-        outputs.sort_by_key(|output| order.iter().position(|name| *name == output.account));
+        let outputs = initialize(config.select(accounts)?)?;
         let exit = match outputs.iter().any(|output| output.error.is_some()) {
             true => Exit::Incomplete,
             false => Exit::Success,
@@ -113,6 +58,67 @@ impl InitCommand {
         printer.out(InitRunOutput { accounts: outputs })?;
         Ok(exit)
     }
+}
+
+/// Initializes `selected` store by store, in the order `-a` and the
+/// configuration give: one that could not be initialized is reported, the
+/// others still are. What `init` and `sync --init` run.
+pub fn initialize(selected: Vec<(String, AccountConfig)>) -> Result<Vec<InitOutput>> {
+    let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
+    for (name, account_config) in selected {
+        account_config
+            .validate()
+            .with_context(|| format!("Validate account {name}"))?;
+        let dir = driver::store_dir(&account_config)?;
+        stores.entry(dir).or_default().push((name, account_config));
+    }
+    // NOTE: before anything is created: a directory holding the stores
+    // an earlier neverest kept per account is refused as it is.
+    for dir in stores.keys() {
+        driver::check_store(dir)?;
+    }
+
+    let order: Vec<String> = stores
+        .values()
+        .flatten()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let mut outputs = Vec::new();
+
+    for (dir, accounts) in stores {
+        // NOTE: io-pimdir restricts the directory to its user when it
+        // creates the store in it (pimdir STORAGE §18).
+        fs::create_dir_all(&dir).with_context(|| format!("Create store dir {}", dir.display()))?;
+        let lock = wait_store_lock(&dir, LOCK_TIMEOUT)
+            .with_context(|| format!("Acquire the lock of the store at {}", dir.display()))?;
+        let Some(_lock) = lock else {
+            for (name, account_config) in accounts {
+                let err = anyhow!(
+                    "Another run holds the store at {} after {}s",
+                    dir.display(),
+                    LOCK_TIMEOUT.as_secs()
+                );
+                let mode = account_config.mode()?;
+                outputs.push(InitOutput::failed(name, mode, &dir, &[], err));
+            }
+            continue;
+        };
+
+        for (name, account_config) in accounts {
+            let mut opened = Vec::new();
+            let output = match init(&dir, &name, &account_config, &mut opened) {
+                Ok(output) => output,
+                Err(err) => {
+                    let mode = account_config.mode()?;
+                    InitOutput::failed(name, mode, &dir, &opened, err)
+                }
+            };
+            outputs.push(output);
+        }
+    }
+
+    outputs.sort_by_key(|output| order.iter().position(|name| *name == output.account));
+    Ok(outputs)
 }
 
 /// Opens every endpoint of `account`, then adds it to the store at `dir`,

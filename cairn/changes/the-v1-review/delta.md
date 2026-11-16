@@ -9,6 +9,9 @@ Folded into cairn/spec/sync.md phase by phase, as each lands.
 
 ## ADDED Requirements
 
+### Requirement: `sync` initializes, queues or indexes on a flag
+Phase 4: `--init`, `--queue-only` (the former `drain`) and `--index-only` (the former `index`); `drain` and `index` are no commands; their rows fold into the sync result under `queue` and `index`, `initialized` naming what `--init` initialized.
+
 ## MODIFIED Requirements
 
 ### Requirement: Text mode prints plain lines

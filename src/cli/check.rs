@@ -25,9 +25,9 @@ use serde::Serialize;
 use crate::{
     account::{Account, SourceAccount},
     client,
+    collection::Collection,
     config::{AccountConfig, Config, mode::AccountMode, source::SourceConfig},
     error::{self, ErrorCode},
-    item::collection::Collection,
     offline::{capability, driver},
 };
 

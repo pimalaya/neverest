@@ -83,8 +83,9 @@
 //!
 //! [`config`] is the TOML schema and [`account`] its runtime counterpart,
 //! the endpoints with every secret already resolved, which [`client`], the
-//! kind-neutral backend seam, opens a connection from. [`item`] is the
-//! vocabulary above that seam, [`kind`] the per-media-type derivations.
+//! kind-neutral backend seam, opens a connection from. [`collection`] and
+//! [`flag`] are the vocabulary above that seam, [`kind`] the per-media-type
+//! derivations.
 //!
 //! [`conflict`] is the other end of that merge: the divergences it could not
 //! settle, the decision a person makes about one, and the guard refusing a
@@ -107,13 +108,17 @@
 //! [io-pimdir]: https://github.com/pimalaya/io-pimdir
 
 mod account;
+#[cfg(any(feature = "gcal", feature = "msgraph"))]
+mod calendar;
 mod cli;
 mod client;
+mod collection;
 mod config;
 mod conflict;
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 mod dav;
 mod error;
+mod flag;
 #[cfg(feature = "gcal")]
 mod gcal;
 #[cfg(feature = "gmail")]
@@ -129,7 +134,6 @@ mod gpeople;
 mod http;
 #[cfg(feature = "imap")]
 mod imap;
-mod item;
 mod json_schema;
 mod kind;
 #[cfg(feature = "msgraph")]

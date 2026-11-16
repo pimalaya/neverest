@@ -71,6 +71,7 @@ use crate::msgraph::client::GraphKind;
 use crate::{
     account::{Account, SourceAccount},
     client::{Client, Pool, Renamed, WrittenItem},
+    collection::Collection,
     config::{
         AccountConfig,
         filter::CollectionFilter,
@@ -78,9 +79,10 @@ use crate::{
         permissions::{CollectionPermissions, SourcePermissions},
         source::{SourceBackendConfig, SourceConfig},
     },
+    conflict::merge::Merged,
     error::{Failure, layout_error, pimdir_error},
-    item::{collection::Collection, flag::Flag},
-    kind::{Kind, LinkId, merge::Merged},
+    flag::Flag,
+    kind::{Kind, LinkId},
     offline::{
         Paged, Pager, Rest, capability,
         collection::{self, CollectionIntent},

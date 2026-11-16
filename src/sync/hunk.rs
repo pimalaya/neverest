@@ -13,7 +13,7 @@ use std::{collections::BTreeSet, fmt};
 use schemars::JsonSchema;
 use serde::Serialize;
 
-use crate::item::flag::Flag;
+use crate::flag::Flag;
 
 /// Collection-level change: create or delete a collection on one side.
 ///

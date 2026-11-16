@@ -2,7 +2,7 @@
 //!
 //! Thin glue over [`ImapClient`], which already wraps io_imap's high-level
 //! session. The only real work is converting between the shared
-//! [`crate::item`] types and io_imap's wire types.
+//! [`crate::collection`] and [`crate::flag`] types and io_imap's wire types.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -43,12 +43,10 @@ use log::{debug, warn};
 
 use crate::{
     client::{EnumEntry, Enumeration, Gone, Held, Listed, Renamed},
+    collection::Collection,
     error::ErrorCode,
+    flag::{Flag, FlagOp, IanaFlag},
     imap::client::{ImapClient, RoundUids},
-    item::{
-        collection::Collection,
-        flag::{Flag, FlagOp, IanaFlag},
-    },
     offline::invitation::Refusal,
 };
 

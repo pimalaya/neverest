@@ -33,7 +33,7 @@ use log::{debug, trace, warn};
 use super::{GraphClient, chain_not_found, decode_checkpoint, encode_checkpoint, is_expired_link};
 use crate::{
     client::{EnumEntry, Enumeration, WrittenItem},
-    item::collection::Collection,
+    collection::Collection,
 };
 
 /// The collection id of the default Contacts folder, which the folders

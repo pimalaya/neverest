@@ -60,11 +60,12 @@ use secrecy::ExposeSecret;
 
 use crate::{
     account::GoogleAccount,
+    calendar::{OccurrenceId, Occurrences, OriginalStart},
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
+    collection::Collection,
     error::{ErrorCode, names_the_request},
+    flag::Flag,
     http::open_tls,
-    item::{collection::Collection, flag::Flag},
-    kind::event::{self, OccurrenceId, Occurrences, OriginalStart},
     offline::invitation::{Partstat, Refusal, occurrence_window},
     throttle::{
         GoogleAnswer, GoogleError, GoogleSession, Pick, Reopen, Request, Throttle, google_code,
@@ -505,7 +506,7 @@ impl GcalClient {
     /// `ical` with its floating times anchored in the zone of `calendar`,
     /// the user's when Google states none, and whether it held any.
     fn anchor(&mut self, calendar: &str, ical: Vec<u8>) -> Result<(Vec<u8>, bool)> {
-        if !event::has_floating(&ical)? {
+        if !crate::calendar::has_floating(&ical)? {
             return Ok((ical, false));
         }
 
@@ -525,7 +526,7 @@ impl GcalClient {
         };
         let zone = (zone != UTC).then_some(zone.as_str());
 
-        Ok((event::anchor_floating(&ical, zone)?, true))
+        Ok((crate::calendar::anchor_floating(&ical, zone)?, true))
     }
 
     /// Whether the account organises a new event: it names no organizer,

@@ -35,9 +35,10 @@ use secrecy::ExposeSecret;
 use crate::{
     account::GoogleAccount,
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
+    collection::Collection,
     error::{ErrorCode, names_the_request},
+    flag::Flag,
     http::open_tls,
-    item::{collection::Collection, flag::Flag},
     throttle::{
         GoogleAnswer, GoogleError, GoogleSession, Pick, Reopen, Request, Throttle, google_code,
         google_send,

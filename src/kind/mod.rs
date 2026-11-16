@@ -2,12 +2,13 @@
 //!
 //! The per-kind seam: everything about a synced item that depends on which
 //! media type it is. io-pimdir and the [`crate::client`] seam are
-//! kind-agnostic; exactly four things are not, and they live here.
+//! kind-agnostic; exactly four things are not, and three of them live here.
 //!
 //! The link id is an item's stable cross-collection identity, the summary the
 //! typed row a reader lists from without fetching a body (pimdir STORAGE
 //! Annex A), the sort key its place in the collection's natural order (STORAGE
-//! §9.3), and the merge the three-way reconciliation in [`merge`].
+//! §9.3), and the merge the three-way reconciliation in
+//! [`crate::conflict::merge`].
 //!
 //! The first three are io-pimdir's derivations, reached through
 //! [`Kind::parse_body`]. A kind with a cheap server-side summary tier (mail)
@@ -18,10 +19,7 @@
 //! An enum rather than a trait: the set of kinds is closed and small, there
 //! is one dispatch point, and a trait would buy dispatch nobody needs.
 
-#[cfg(any(feature = "gcal", feature = "msgraph"))]
-pub mod event;
 pub mod mail;
-pub mod merge;
 
 use anyhow::{Result, bail};
 #[cfg(any(

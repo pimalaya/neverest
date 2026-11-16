@@ -395,7 +395,7 @@ fn unparsed<E: core::fmt::Display>(base: Option<E>, local: Option<E>, remote: Op
 
 #[cfg(test)]
 mod tests {
-    use crate::kind::{Kind, merge::Merged};
+    use crate::{conflict::merge::Merged, kind::Kind};
 
     /// Disjoint edits are not a disagreement: the base names which side
     /// touched which field, so both survive.

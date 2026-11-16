@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// Whether a run merges is not a setting: the three-way merge is a pure
 /// function over bodies the store holds, and because nobody can swap it out
-/// it resolves only what nobody disagreed about (see [`crate::kind::merge`]).
+/// it resolves only what nobody disagreed about (see
+/// [`crate::conflict::merge`]).
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ConflictConfig {

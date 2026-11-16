@@ -50,10 +50,10 @@ use url::Url;
 
 use super::{GraphClient, chain_not_found, is_not_found};
 use crate::{
+    calendar::{self, OccurrenceId, Occurrences},
     client::{EnumEntry, Enumeration, WrittenItem},
+    collection::Collection,
     error::ErrorCode,
-    item::collection::Collection,
-    kind::event::{self, OccurrenceId, Occurrences},
     offline::invitation::{Partstat, Refusal, occurrence_window},
     zone::UTC,
 };
@@ -712,13 +712,13 @@ fn instance_patch(
 /// stating no zone for a calendar, and whether it held any; `what` names
 /// the write in the log.
 fn anchor(ical: Vec<u8>, what: &str, zone: &str) -> Result<(Vec<u8>, bool)> {
-    if !event::has_floating(&ical)? {
+    if !calendar::has_floating(&ical)? {
         return Ok((ical, false));
     }
 
     warn!("{what} holds a floating time, which Graph cannot store: anchored in {zone}");
     let zone = (zone != UTC).then_some(zone);
-    Ok((event::anchor_floating(&ical, zone)?, true))
+    Ok((calendar::anchor_floating(&ical, zone)?, true))
 }
 
 /// Reads a whole body.

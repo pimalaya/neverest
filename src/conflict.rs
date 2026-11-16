@@ -1,7 +1,7 @@
 //! # Conflicts
 //!
 //! The divergences a run parked, and the decision that settles one. Every run
-//! three-way merges what nobody disagreed about (see [`crate::kind::merge`])
+//! three-way merges what nobody disagreed about (see [`merge`])
 //! and parks the genuine disagreements, whose winner a sync cannot pick.
 //!
 //! Deciding is a command and never a run: nothing here is reached from a
@@ -12,6 +12,7 @@
 //! Nothing is pushed from here; the next run does that, conditioned on the
 //! revision the divergence was recorded at.
 
+pub mod merge;
 pub mod merger;
 pub mod report;
 

@@ -79,12 +79,10 @@ use crate::{
     client::{
         EnumEntry, Enumeration, Gone, Held, Listed, Renamed, StoredSize, WrittenItem, floor_of,
     },
+    collection::Collection,
     error::{ErrorCode, names_the_request},
+    flag::{Flag, FlagOp, IanaFlag},
     http::open_tls,
-    item::{
-        collection::Collection,
-        flag::{Flag, FlagOp, IanaFlag},
-    },
     offline::invitation::Refusal,
     throttle::{
         GoogleAnswer, GoogleError, GoogleSession, Pick, Reopen, Request, Throttle, google_code,

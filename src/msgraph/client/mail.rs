@@ -77,7 +77,7 @@ use super::{
 };
 use crate::{
     client::{EnumEntry, Enumeration, Held, Listed, floor_of},
-    item::flag::{Flag, IanaFlag},
+    flag::{Flag, IanaFlag},
 };
 
 /// The summary `$select`: what names a message (pimdir STORAGE Annex A.1)

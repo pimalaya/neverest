@@ -49,7 +49,7 @@ use crate::dav::client::is_duplicate_uid;
 use crate::{
     client::{Client, EnumEntry, Gone, Held, Listed, Pool, StoredSize, WrittenItem},
     error::{Failure, chain, refusal},
-    item::flag::Flag,
+    flag::Flag,
     kind::{Kind, LinkId},
 };
 

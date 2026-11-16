@@ -1,6 +1,8 @@
 //! # Collection
 //!
-//! The collection shape shared across all protocols and kinds.
+//! The collection shape shared across all protocols and kinds. Each adapter
+//! keeps its own protocol vocabulary behind the seam (an IMAP mailbox stays
+//! a mailbox) and converts at the edge.
 
 use serde::{Deserialize, Serialize};
 

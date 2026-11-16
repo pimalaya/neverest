@@ -1,4 +1,4 @@
-//! # Flag
+//! # Mail flag
 //!
 //! An email flag (keyword) shared across all protocols: its wire spelling
 //! as observed on the backend, plus an [`IanaFlag`] classification when

@@ -40,7 +40,8 @@ use crate::imap::client::ImapClient;
 use crate::msgraph::client::{GraphClient, GraphKind};
 use crate::{
     account::{SourceAccount, SourceAccountBackend},
-    item::{collection::Collection, flag::Flag},
+    collection::Collection,
+    flag::Flag,
     kind::LinkId,
     offline::invitation::Refusal,
 };

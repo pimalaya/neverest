@@ -87,12 +87,10 @@ use url::Url;
 use self::wire::{Connect, Exchange, Shared, Watched};
 use crate::{
     client::{Gone, Held, Listed, StoredSize, WrittenItem},
+    collection::Collection,
     error::{ErrorCode, names_the_request},
+    flag::{Flag, IanaFlag},
     http::open_tls,
-    item::{
-        collection::Collection,
-        flag::{Flag, IanaFlag},
-    },
     throttle::{self, Request, Throttle},
     zone,
 };

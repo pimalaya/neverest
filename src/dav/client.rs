@@ -55,8 +55,9 @@ use url::Url;
 use crate::{
     account::{DavAccount, DavEndpoint},
     client::{EnumEntry, Enumeration, Gone, WrittenItem},
+    collection::Collection,
     error::{ErrorCode, names_the_request},
-    item::{collection::Collection, flag::Flag},
+    flag::Flag,
     kind::{Kind, LinkId},
     throttle::{Request, Throttle},
 };

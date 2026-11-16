@@ -64,7 +64,7 @@ io-webdav = { version = "0.11.0", default-features = false, optional = true }
 jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
 log = "0.4"
 percent-encoding = "2"
-pimalaya-cli = { version = "0.6.0", default-features = false, features = ["terminal", "spinner"] }
+pimalaya-cli = { version = "0.6.0", default-features = false, features = ["terminal", "signal"] }
 pimalaya-config = { version = "0.5.2", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.4", default-features = false }
 rusqlite = { version = "0.41", default-features = false }

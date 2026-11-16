@@ -11,6 +11,12 @@ Folded into cairn/spec/sync.md phase by phase, as each lands.
 
 ## MODIFIED Requirements
 
+### Requirement: Text mode prints plain lines
+Phase 2: replaces "The spinner reports in-mailbox progress" and "A spinner ends as what it reports": plain stderr lines, one a step, none under `--json`, no colour, no spinner, no crossterm.
+
+### Requirement: A sync prints its progress as events
+Phase 2: text mode prints the same events as plain stderr lines, the per-percent ones left out.
+
 ### Requirement: The configuration refuses every key it does not read
 Phase 1: a key an earlier neverest read, `default` included, is refused as any unknown key is, by serde's `deny_unknown_fields`; no by-name sentence, no MIGRATION.md pointer.
 

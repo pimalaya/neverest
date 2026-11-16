@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 use io_pimdir::client::{PimdirError, search::PimdirIndex};
 use log::info;
-use pimalaya_cli::{printer::Printer, spinner::Spinner};
+use pimalaya_cli::printer::Printer;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -98,12 +98,11 @@ fn build(dir: &Path, accounts: Vec<String>) -> Result<IndexOutput> {
 
     // NOTE: no sync.lock: the build may take long, and a sync meeting it
     // reports the index busy rather than waiting for it.
-    let spinner = Spinner::start(format!("Building the search index of {store}"));
+    crate::notice::print(format!("Building the search index of {store}"));
     let mut built = IndexRefresh::default();
     let mut index = match PimdirIndex::open(dir) {
         Ok(index) => index,
         Err(PimdirError::Indexing(_)) => {
-            spinner.clear();
             built.busy = true;
             return Ok(IndexOutput {
                 store: dir.to_path_buf(),
@@ -129,12 +128,7 @@ fn build(dir: &Path, accounts: Vec<String>) -> Result<IndexOutput> {
         if built.busy || built.behind == 0 {
             break;
         }
-        spinner.set_message(format!(
-            "Building the search index of {store}: {} change(s) to go",
-            built.behind
-        ));
     }
-    spinner.clear();
 
     info!("search index of {store}: {built}");
     Ok(IndexOutput {

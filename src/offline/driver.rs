@@ -75,7 +75,7 @@ use crate::{
         AccountConfig, AccountMode, CollectionFilter, CollectionPermissions, SourceBackendConfig,
         SourceConfig, SourcePermissions,
     },
-    error::{Failure, chain, layout_error, pimdir_error},
+    error::{Failure, layout_error, pimdir_error},
     item::{collection::Collection, flag::Flag},
     kind::{Kind, LinkId, merge::Merged},
     offline::{
@@ -85,7 +85,7 @@ use crate::{
             self, Failure as InvitationFailure, Invitation, InvitationIntent, Refusal, Target,
         },
         pipe,
-        progress::{PercentGate, Progress, Step},
+        progress::{PercentGate, Progress},
         remote::{
             BATCH_SIZE, Bound, CachedFetchRemote, PimRemote, RefusedCreate, RejectedPush,
             body_bytes, hydrate_batch, resolve_kind, stored_item, wire_name,
@@ -422,14 +422,8 @@ fn pair_kind(left: (&str, &str), right: (&str, &str)) -> Result<Kind> {
     Ok(left_kind)
 }
 
-/// Live per-collection progress of a pair: the spinner and its base label in
-/// text mode, `collection-progressed` events under `--json`.
-///
-/// An inner phase such as body hydration or relay appends a percentage to the
-/// `[2/7] Syncing INBOX` line.
+/// Live per-collection progress of a pair, as `collection-progressed` events.
 struct CollectionProgress<'a> {
-    step: &'a Step,
-    label: &'a str,
     progress: Progress<'a>,
     gate: PercentGate,
     source: &'a str,
@@ -438,13 +432,8 @@ struct CollectionProgress<'a> {
 }
 
 impl CollectionProgress<'_> {
-    /// Reports `done` of `total`: the spinner shows `<label> <percent>%`, an
-    /// event is printed once per percent.
+    /// Reports `done` of `total`, an event printed once per percent.
     fn tick(&self, done: usize, total: usize) {
-        let percent = (done * 100).checked_div(total).unwrap_or(100);
-        self.step
-            .set_message(format!("{} ({percent}%)", self.label));
-
         if self.gate.passes(done, total) {
             self.progress.emit(|| SyncEvent::CollectionProgressed {
                 source: self.source.to_owned(),
@@ -1127,7 +1116,6 @@ fn run_pair(
     let left_account = account.get(&left_name)?;
     let right_account = account.get(&right_name)?;
 
-    let s = progress.start("Opening endpoints…");
     let mut left = SourceCtx {
         name: left_name.clone(),
         namespace: namespace.to_string(),
@@ -1158,7 +1146,6 @@ fn run_pair(
         capped: right_config.collection().capped,
         noted: Noted::default(),
     };
-    s.success("Opened endpoints");
     for endpoint in [&left_name, &right_name] {
         progress.emit(|| SyncEvent::Opened {
             endpoint: endpoint.clone(),
@@ -1182,7 +1169,6 @@ fn run_pair(
         drain_invitations(&mut [&mut left, &mut right], &mut left_store, report);
     }
 
-    let s = progress.start("Listing collections…");
     let left_listed = left
         .pool
         .primary()
@@ -1195,11 +1181,6 @@ fn run_pair(
         .context("List collections error")?;
     let left_collections = names_by_id(&left_listed);
     let right_collections = names_by_id(&right_listed);
-    s.success(format!(
-        "Listed collections ({} on {left_name}, {} on {right_name})",
-        left_collections.len(),
-        right_collections.len()
-    ));
     for (endpoint, listed) in [
         (&left_name, &left_collections),
         (&right_name, &right_collections),
@@ -1306,8 +1287,6 @@ fn run_pair(
         }
 
         let collection = &hub_id(namespace, name);
-        let label = format!("[{}/{total}] Syncing {name}", index + 1);
-        let s = progress.start(label.clone());
         progress.emit(|| SyncEvent::CollectionStarted {
             source: left_name.clone(),
             target: right_name.clone(),
@@ -1327,8 +1306,6 @@ fn run_pair(
             }
         };
         let ticks = CollectionProgress {
-            step: &s,
-            label: &label,
             progress,
             gate: PercentGate::default(),
             source: &left_name,
@@ -1351,7 +1328,6 @@ fn run_pair(
             report,
         ) {
             warn!("{name} sync error: {err:#}");
-            s.success(format!("{name}: error ({err:#})"));
             progress.emit(|| finished(Some(Failure::of(&err))));
             continue;
         }
@@ -1378,13 +1354,6 @@ fn run_pair(
         itemize_noted(&mut left, report);
         itemize_noted(&mut right, report);
 
-        match &error {
-            Some(err) => s.success(format!(
-                "{name}: error ({})",
-                chain(&err.error, &err.sources)
-            )),
-            None => s.success(format!("{name}: done")),
-        }
         progress.emit(|| finished(error));
     }
 
@@ -1562,7 +1531,6 @@ fn run_local(
     } else {
         connection_budget(&source_config, connections)
     };
-    let s = progress.start(format!("Opening connections to {source_name}…"));
     // NOTE: with no target the store is the destination: `one-way` discards
     // what was staged locally, leaving it off merges the two.
     let authority = if mode.one_way {
@@ -1587,10 +1555,6 @@ fn run_local(
         .map(|_| open_store(work_dir, &source, account_name))
         .collect::<Result<_>>()?;
     let blobs = stores[0].blob_stage();
-    s.success(format!(
-        "Opened {} connection(s) to {source_name}",
-        ctxs.len()
-    ));
     progress.emit(|| SyncEvent::Opened {
         endpoint: source.clone(),
     });
@@ -1617,7 +1581,6 @@ fn run_local(
         }
     }
 
-    let s = progress.start(format!("Listing collections on {source_name}…"));
     let listed = ctxs[0]
         .pool
         .primary()
@@ -1627,10 +1590,6 @@ fn run_local(
         .iter()
         .map(|collection| (collection.id.clone(), collection.name.clone()))
         .collect();
-    s.success(format!(
-        "Listed {} collection(s) on {source_name}",
-        collections.len()
-    ));
     progress.emit(|| SyncEvent::Listed {
         endpoint: source.clone(),
         collections: collections.len(),
@@ -2085,7 +2044,6 @@ fn phase1_spine(
     let merged: Mutex<SyncOutput> = Mutex::new(SyncOutput::default());
     let scanned = AtomicUsize::new(0);
     let pushing: Mutex<()> = Mutex::new(());
-    let s = progress.start(format!("Scanning {source} (0/{total})"));
     let scan_event = |done| SyncEvent::ScanProgressed {
         source: source.to_owned(),
         done,
@@ -2101,7 +2059,6 @@ fn phase1_spine(
         .map(|collection| (collection.as_str(), Mutex::new(())))
         .collect();
     let applying: Mutex<()> = Mutex::new(());
-    let downloaded = AtomicUsize::new(0);
     let kind = ctxs
         .first_mut()
         .map(|ctx| resolve_kind(&mut ctx.pool))
@@ -2121,11 +2078,9 @@ fn phase1_spine(
     let carried_ref = &carried;
     let merged_ref = &merged;
     let scanned_ref = &scanned;
-    let s_ref = &s;
     let pushing_ref = &pushing;
     let gates_ref = &gates;
     let landing_ref = &landing;
-    let downloaded_ref = &downloaded;
 
     thread::scope(|scope| {
         for (ctx, store) in ctxs.iter_mut().zip(stores.iter_mut()) {
@@ -2135,9 +2090,7 @@ fn phase1_spine(
                         Job::Spine { index, pass } => (index, pass),
                         Job::Hydrate { batch, primed } => {
                             match landing_ref.land(ctx, store, &batch) {
-                                Ok(fetched) => {
-                                    downloaded_ref.fetch_add(fetched, Ordering::Relaxed);
-                                }
+                                Ok(_) => {}
                                 // NOTE: left bodiless, so phase 2 downloads it
                                 // again and fails the run if it fails there too.
                                 Err(err) => {
@@ -2224,7 +2177,6 @@ fn phase1_spine(
                     work_ref.spined(pass, index, paused);
                     if !paused {
                         let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
-                        s_ref.set_message(format!("Scanning {source} ({n}/{total})"));
                         progress.emit(|| scan_event(n));
                     }
                 }
@@ -2235,12 +2187,6 @@ fn phase1_spine(
     let mut spined = spined.into_inner().unwrap();
     spined.sort_unstable();
     report.absorb(merged.into_inner().unwrap());
-    match downloaded.into_inner() {
-        0 => s.success(format!("Scanned {total} collection(s) on {source}")),
-        n => s.success(format!(
-            "Scanned {total} collection(s) on {source}, downloaded {n} item(s)"
-        )),
-    }
     Ok(spined
         .into_iter()
         .map(|index| filtered[index].clone())
@@ -3102,7 +3048,6 @@ fn phase2_hydrate(
 
     let done = AtomicUsize::new(0);
     let fetched = AtomicUsize::new(0);
-    let s = progress.start(format!("Downloading {source} 0% (0/{total_bodies})"));
     let gate = PercentGate::default();
     let download_event = |done| SyncEvent::DownloadProgressed {
         source: source.to_owned(),
@@ -3112,10 +3057,6 @@ fn phase2_hydrate(
     progress.emit(|| download_event(0));
     let on_body = || {
         let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-        let percent = (n * 100).checked_div(total_bodies).unwrap_or(100);
-        s.set_message(format!(
-            "Downloading {source} {percent}% ({n}/{total_bodies})"
-        ));
         if gate.passes(n, total_bodies) {
             progress.emit(|| download_event(n));
         }
@@ -3139,10 +3080,6 @@ fn phase2_hydrate(
         Ok(())
     })?;
 
-    s.success(format!(
-        "Downloaded {} item(s) from {source}",
-        fetched.load(Ordering::Relaxed)
-    ));
     Ok(())
 }
 
@@ -14035,7 +13972,8 @@ mod gmail_bodies {
     }
 
     /// Under `--json`, the download prints its start, then its progress as
-    /// bodies land: a caller sees the total before the first body.
+    /// bodies land: a caller sees the total before the first body. Text mode
+    /// prints its start and its end alone, as plain lines.
     #[test]
     fn a_download_prints_its_progress_as_events() {
         let dir = tempfile::tempdir().unwrap();
@@ -14068,6 +14006,13 @@ mod gmail_bodies {
         };
         let seen = seen.into_inner().unwrap();
         assert_eq!(seen, [progressed(0), progressed(1), progressed(2)]);
+
+        let text: String = seen
+            .iter()
+            .filter(|event| event.is_coarse())
+            .map(SyncEvent::to_string)
+            .collect();
+        assert_eq!(text, "Downloading gmail (0/2)\nDownloading gmail (2/2)\n");
     }
 
     /// A message a label holds a body for, listed under another label

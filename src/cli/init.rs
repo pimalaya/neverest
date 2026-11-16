@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Error, Result, anyhow};
 use clap::Parser;
-use pimalaya_cli::{printer::Printer, spinner::Spinner};
+use pimalaya_cli::printer::Printer;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -142,16 +142,14 @@ fn init(
 
     let account = Account::resolve(account_config)?;
     for endpoint in account_config.endpoints()?.keys() {
-        let s = Spinner::start(format!("Initializing {endpoint} of account {name}…"));
         client::init(&account.get(endpoint)?).with_context(|| format!("Initialize {endpoint}"))?;
-        s.success(format!("Initialized {endpoint} of account {name}"));
+        crate::notice::print(format!("Initialized {endpoint} of account {name}"));
         opened.push(endpoint.clone());
     }
 
     if !dir.join("pimdir.db").exists() {
-        let s = Spinner::start("Creating the store…");
         driver::create_store(dir)?;
-        s.success("Created the store");
+        crate::notice::print("Created the store");
     }
     // NOTE: stamped here, so the first sync compares against what `init`
     // opened rather than against nothing.

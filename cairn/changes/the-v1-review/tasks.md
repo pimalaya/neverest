@@ -65,10 +65,10 @@ exit 2;
 
 ## Phase 2: plain output (D4)
 
-- [ ] Depend on pimalaya-cli `features = ["terminal", "signal"]` (not `spinner`); keep `signal::Shutdown` (src/sync/mod.rs:17).
-- [ ] Remove every `Spinner`: src/account.rs:109, src/cli/check.rs:218 and :239, src/cli/init.rs:145 and :152, src/cli/index.rs:101, src/offline/progress.rs (`Step`), src/offline/driver.rs:426.
-- [ ] Text mode renders the same `SyncEvent`s (src/sync/event.rs) `--json` emits: one plain line each on stderr, at step and collection granularity, never per item, no `\r`, no colour, no cursor move; stdout keeps only the result. progress.rs becomes one event stream with two renderers.
-- [ ] `check`, `init` and the credential resolution print a plain line per step on stderr in text mode, nothing under `--json`.
+- [x] Depend on pimalaya-cli `features = ["terminal", "signal"]` (not `spinner`); keep `signal::Shutdown` (src/sync/mod.rs:17).
+- [x] Remove every `Spinner`: src/account.rs:109, src/cli/check.rs:218 and :239, src/cli/init.rs:145 and :152, src/cli/index.rs:101, src/offline/progress.rs (`Step`), src/offline/driver.rs:426.
+- [x] Text mode renders the same `SyncEvent`s (src/sync/event.rs) `--json` emits: one plain line each on stderr, at step and collection granularity, never per item, no `\r`, no colour, no cursor move; stdout keeps only the result. progress.rs becomes one event stream with two renderers.
+- [x] `check`, `init` and the credential resolution print a plain line per step on stderr in text mode, nothing under `--json`.
 - Done when: `cargo tree -i crossterm --all-features` finds nothing; a test asserts a text-mode run's stderr holds no ESC byte and one line per collection; gate green.
 
 ## Phase 3: backend duplication and the suspected bug (A6)

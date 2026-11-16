@@ -18,7 +18,6 @@ use io_pimdir::client::reader::PimdirReader;
 use log::{info, warn};
 use pimalaya_cli::{
     account::BackendCheck, capability::CapabilityLevel, error::PartialOutcome, printer::Printer,
-    spinner::Spinner,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -215,18 +214,17 @@ fn check_source(
     account: &Account,
     capabilities: Vec<CheckedCapability>,
 ) -> SourceCheck {
-    let s = Spinner::start(format!("Checking source {label}…"));
     let (listed, source) = match account.get(label) {
         Ok(source) => (list(&source), Some(source)),
         Err(err) => (Err(err), None),
     };
 
     match &listed {
-        Ok(collections) => s.success(format!(
+        Ok(collections) => crate::notice::print(format!(
             "Checked source {label} ({} collections)",
             collections.len()
         )),
-        Err(err) => s.failure(format!("Source {label} failed ({err:#})")),
+        Err(err) => crate::notice::print(format!("Source {label} failed ({err:#})")),
     }
 
     // NOTE: nothing is sent: the session is opened, upgraded and
@@ -236,15 +234,16 @@ fn check_source(
         .as_ref()
         .and_then(|source| source.smtp.as_ref())
         .map(|smtp| {
-            let s = Spinner::start(format!("Checking the SMTP channel of {label}…"));
             let opened = crate::offline::submit::connect_smtp(smtp)
                 .map(|mut session| {
                     let _ = io_smtp::client::SmtpClient::quit(&mut session);
                 })
                 .map_err(|err| err.context(format!("Check the SMTP channel of {label}")));
             match &opened {
-                Ok(()) => s.success(format!("Checked the SMTP channel of {label}")),
-                Err(err) => s.failure(format!("SMTP channel of {label} failed ({err:#})")),
+                Ok(()) => crate::notice::print(format!("Checked the SMTP channel of {label}")),
+                Err(err) => {
+                    crate::notice::print(format!("SMTP channel of {label} failed ({err:#})"))
+                }
             }
             BackendCheck::new("smtp", opened.map_err(error::coded))
         });

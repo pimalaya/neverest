@@ -240,6 +240,29 @@ fn a_run_covers_every_account_and_reports_each_apart() {
     assert_eq!(started[0]["total"], 2);
 }
 
+/// Text mode prints the run's progress as plain lines on stderr, with no
+/// escape sequence, and leaves stdout to the result; `--json` prints no
+/// such line.
+#[test]
+fn a_text_run_prints_plain_lines_on_stderr() {
+    let _serial = serialized();
+    let fixture = Fixture::new(&["work"], closed_port());
+    fixture.initialized(&["work"]);
+
+    let output = fixture.run(&["--log-level", "off", "sync"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(!stderr.contains('\x1b'), "{stderr:?}");
+    assert!(!stdout.contains('\x1b'), "{stdout:?}");
+    assert!(stderr.contains("[1/1] Syncing account work\n"), "{stderr}");
+    assert!(!stdout.contains("Syncing account"), "{stdout}");
+
+    let output = fixture.run(&["--json", "--log-level", "off", "sync"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Syncing account"), "{stderr}");
+}
+
 /// The stores an earlier neverest kept per account are refused before
 /// anything is created, naming each and the order that keeps their queued
 /// writes, never a delete.

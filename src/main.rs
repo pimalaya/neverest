@@ -127,6 +127,7 @@ mod json_schema;
 mod kind;
 #[cfg(feature = "msgraph")]
 mod msgraph;
+mod notice;
 mod offline;
 mod sync;
 mod throttle;
@@ -156,6 +157,9 @@ use crate::{
 fn main() -> ExitCode {
     let cli = parse::<Cli>();
     let mut printer = StdoutPrinter::new(&cli.json);
+    if cli.json.enabled {
+        notice::silence();
+    }
 
     // NOTE: a sync prints its events to a pipe too, a status bar reading
     // them as they come.

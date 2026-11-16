@@ -320,14 +320,15 @@ impl SyncCommand {
 
                 let sink = |mut event: SyncEvent| {
                     event.name_endpoints(&name);
-                    if let Err(err) = printer.lock().unwrap().event(event) {
-                        debug!("cannot print sync event: {err:#}");
+                    if json {
+                        if let Err(err) = printer.lock().unwrap().event(event) {
+                            debug!("cannot print sync event: {err:#}");
+                        }
+                    } else if event.is_coarse() {
+                        crate::notice::print(event.to_string().trim_end());
                     }
                 };
-                let progress = match json {
-                    true => Progress::events(&sink),
-                    false => Progress::default(),
-                };
+                let progress = Progress::events(&sink);
 
                 let position = order.iter().position(|n| *n == name).unwrap_or(0) + 1;
                 progress.emit(|| SyncEvent::AccountStarted {

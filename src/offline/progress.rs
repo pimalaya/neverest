@@ -1,59 +1,31 @@
 //! # Run progress
 //!
-//! How the driver says where a run is: a spinner on stderr in text mode,
-//! [`SyncEvent`]s under `--json`. Text mode prints no event, the spinner
-//! being its text form; `--json` draws no spinner, which would interleave
-//! with the event lines on a terminal.
+//! How the driver says where a run is: [`SyncEvent`]s handed to a sink,
+//! which prints them as JSON lines or as plain text.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-use pimalaya_cli::spinner::Spinner;
 
 use crate::sync::event::SyncEvent;
 
 /// Where a run reports its progress.
 #[derive(Clone, Copy, Default)]
 pub struct Progress<'a> {
-    /// What prints an event, `None` in text mode.
+    /// What prints an event, `None` when nothing is printed.
     sink: Option<&'a (dyn Fn(SyncEvent) + Sync)>,
 }
 
 impl<'a> Progress<'a> {
-    /// Progress as events handed to `sink`, with no spinner.
+    /// Progress as events handed to `sink`.
     pub fn events(sink: &'a (dyn Fn(SyncEvent) + Sync)) -> Self {
         Self { sink: Some(sink) }
     }
 
-    /// Starts a step, drawing its spinner in text mode.
-    pub fn start(&self, message: impl Into<String>) -> Step {
-        Step(self.sink.is_none().then(|| Spinner::start(message)))
-    }
-
-    /// Prints `event` under `--json`.
+    /// Hands `event` to the sink.
     ///
-    /// Takes a closure so text mode builds no event.
+    /// Takes a closure so a run printing nothing builds no event.
     pub fn emit(&self, event: impl FnOnce() -> SyncEvent) {
         if let Some(sink) = self.sink {
             sink(event());
-        }
-    }
-}
-
-/// A step of the run: its spinner in text mode, nothing under `--json`.
-pub struct Step(Option<Spinner>);
-
-impl Step {
-    /// Replaces the spinner message.
-    pub fn set_message(&self, message: impl Into<String>) {
-        if let Some(spinner) = &self.0 {
-            spinner.set_message(message);
-        }
-    }
-
-    /// Ends the step with a success line.
-    pub fn success(self, message: impl AsRef<str>) {
-        if let Some(spinner) = self.0 {
-            spinner.success(message);
         }
     }
 }

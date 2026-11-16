@@ -32,7 +32,7 @@ use anyhow::{Context, Result, bail};
 use io_imap::types::core::{IString, NString};
 #[cfg(any(feature = "imap", feature = "smtp"))]
 use io_sasl::mechanism::Sasl;
-use pimalaya_cli::{error::CodedError, spinner::Spinner};
+use pimalaya_cli::error::CodedError;
 use pimalaya_config::secret::SecretResolver;
 #[cfg(any(
     feature = "imap",
@@ -95,7 +95,7 @@ impl Account {
     /// Resolves every declared endpoint, spawning each secret command once.
     ///
     /// Fails only when the endpoints cannot be enumerated at all, a failed
-    /// endpoint being kept for [`Account::get`] and counted by the spinner,
+    /// endpoint being kept for [`Account::get`] and counted in the notice,
     /// so a lost one does not read as clean. The wait is a locked agent.
     pub fn resolve(config: &AccountConfig) -> Result<Self> {
         Self::resolve_waiting(config, crate::throttle::MAX_WAIT)
@@ -106,8 +106,6 @@ impl Account {
     pub fn resolve_waiting(config: &AccountConfig, max_wait: Duration) -> Result<Self> {
         let endpoints = config.endpoints()?;
         let proxy = config.proxy.as_ref();
-        let s = Spinner::start("Resolving credentials…");
-
         let mut resolver = SecretResolver::new();
         let endpoints: HashMap<_, _> = endpoints
             .into_iter()
@@ -120,8 +118,10 @@ impl Account {
             .collect();
 
         match endpoints.values().filter(|end| end.is_err()).count() {
-            0 => s.success("Resolved credentials"),
-            failed => s.success(format!("Resolved credentials, {failed} endpoint(s) failed")),
+            0 => crate::notice::print("Resolved credentials"),
+            failed => {
+                crate::notice::print(format!("Resolved credentials, {failed} endpoint(s) failed"))
+            }
         }
 
         Ok(Self { endpoints })

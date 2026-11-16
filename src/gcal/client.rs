@@ -973,7 +973,7 @@ fn names_occurrence(instance: &GcalEvent, recurrence_id: &OccurrenceId) -> bool 
 
     let instant = written.parse::<Timestamp>().ok().or_else(|| {
         let zone = TimeZone::get(zone?).ok()?;
-        Some(wall?.to_zoned(zone).ok()?.timestamp())
+        Some(wall?.to_zoned_datetime(zone).ok()?.timestamp())
     });
     instant.is_some_and(|instant| recurrence_id.starts_at(instant, zone))
 }

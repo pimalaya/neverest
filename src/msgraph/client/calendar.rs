@@ -196,7 +196,7 @@ impl GraphClient {
             return Ok((master, Vec::new()));
         }
 
-        let today = Timestamp::now().to_zoned(TimeZone::UTC).date();
+        let today = Timestamp::now().to_zoned_datetime(TimeZone::UTC).date();
         let Some(windows) = series_windows(&master, today) else {
             warn!("series {id} has no readable range, its exceptions are skipped");
             return Ok((master, Vec::new()));
@@ -634,7 +634,7 @@ fn series_windows(master: &MsgraphEvent, today: Date) -> Option<Vec<(String, Str
     };
 
     let instant = |date: Date| -> Option<String> {
-        let timestamp: Timestamp = date.to_zoned(TimeZone::UTC).ok()?.timestamp();
+        let timestamp: Timestamp = date.to_zoned_datetime(TimeZone::UTC).ok()?.timestamp();
         Some(timestamp.strftime("%Y-%m-%dT%H:%M:%SZ").to_string())
     };
 

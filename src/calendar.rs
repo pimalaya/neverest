@@ -196,7 +196,7 @@ impl OccurrenceId {
 
         match zone {
             Some(zone) => Some(OriginalStart::Instant(
-                wall.to_zoned(zone).ok()?.timestamp(),
+                wall.to_zoned_datetime(zone).ok()?.timestamp(),
             )),
             None => Some(OriginalStart::Wall(wall)),
         }
@@ -209,7 +209,7 @@ impl OccurrenceId {
             Some(OriginalStart::Instant(instant)) => instant == original,
             Some(OriginalStart::Wall(wall)) => zone
                 .and_then(|zone| TimeZone::get(zone).ok())
-                .is_some_and(|zone| original.to_zoned(zone).datetime() == wall),
+                .is_some_and(|zone| original.to_zoned_datetime(zone).datetime() == wall),
             _ => false,
         }
     }

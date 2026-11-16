@@ -50,18 +50,18 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "serd
 clap = { version = "4.4", default-features = false, features = ["derive", "error-context", "help", "std", "suggestions", "usage"] }
 crossbeam-queue = "0.3"
 dirs = "7"
-ical-rs = { version = "0.7", optional = true }
-io-gcal = { version = "0.5.1", default-features = false, optional = true }
+ical-rs = { version = "0.7.1", optional = true }
+io-gcal = { version = "0.5.2", default-features = false, optional = true }
 io-gmail = { version = "0.9", default-features = false, optional = true }
 io-gpeople = { version = "0.8.1", default-features = false, optional = true }
 io-http = { version = "0.8", default-features = false, optional = true }
 io-imap = { version = "0.11.2", default-features = false, optional = true }
-io-msgraph = { version = "0.9.2", default-features = false, optional = true }
-io-pimdir = { version = "0.15.0", default-features = false, features = ["client"] }
+io-msgraph = { version = "0.9.3", default-features = false, optional = true }
+io-pimdir = { version = "0.15.1", default-features = false, features = ["client"] }
 io-sasl = { version = "0.2", default-features = false, features = ["scram"] }
 io-smtp = { version = "0.9", default-features = false, optional = true }
 io-webdav = { version = "0.11.0", default-features = false, optional = true }
-jiff = { version = "0.2", default-features = false, features = ["std"], optional = true }
+jiff = { version = "1", default-features = false, features = ["std"], optional = true }
 log = "0.4"
 percent-encoding = "2"
 pimalaya-cli = { version = "0.6.0", default-features = false, features = ["terminal", "signal"] }

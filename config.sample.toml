@@ -342,9 +342,9 @@ imap.item.delete = false
 # --------------------------------------------------------------------------------
 
 # A CardDAV side syncs **contacts**, so it pairs with another contacts side or
-# with the store alone, never with a mailbox. Requires the `dav` cargo feature,
-# in the default set, which covers CalDAV too. The URL is the entry point only:
-# the principal and home set are discovered, each address book a collection.
+# with the store alone, never with a mailbox. Requires the `carddav` cargo
+# feature, in the default set. The URL is the entry point only: the principal
+# and home set are discovered, each address book a collection.
 #
 # Bare authority (implicit `https://`), or a full `http://` / `https://` URL.
 #carddav.server = "dav.example.org"
@@ -379,7 +379,8 @@ imap.item.delete = false
 # --------------------------------------------------------------------------------
 
 # A CalDAV side syncs **calendar**, on exactly the terms the CardDAV block above
-# describes: same fields, same `dav` cargo feature, same adapter underneath.
+# describes: same fields, same adapter underneath, built by the `caldav` cargo
+# feature, in the default set.
 #
 # The item is the calendar object **resource**, not the component: RFC 4791
 # keeps every component sharing a `UID` in one resource, so a recurring series

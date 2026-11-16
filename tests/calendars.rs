@@ -31,7 +31,7 @@
 //! ```sh
 //! ./tests/radicale.sh
 //! ./tests/pimdir.sh
-//! cargo test --features dav --test calendars -- --ignored --test-threads=1
+//! cargo test --features caldav --test calendars -- --ignored --test-threads=1
 //! ```
 
 mod common;

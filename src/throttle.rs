@@ -24,7 +24,8 @@
         feature = "gmail",
         feature = "gcal",
         feature = "gpeople",
-        feature = "dav"
+        feature = "carddav",
+        feature = "caldav"
     )),
     allow(dead_code)
 )]

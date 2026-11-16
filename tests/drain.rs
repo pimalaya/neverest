@@ -10,7 +10,7 @@
 //! cargo test --test drain -- --ignored --test-threads=1
 //! ```
 
-#![cfg(feature = "dav")]
+#![cfg(feature = "caldav")]
 
 use std::{
     fs::{self, File},

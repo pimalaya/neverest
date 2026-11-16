@@ -35,7 +35,7 @@
 //! ```sh
 //! ./tests/radicale.sh
 //! ./tests/pimdir.sh
-//! cargo test --features dav --test endpoints -- --ignored
+//! cargo test --features carddav --test endpoints -- --ignored
 //! ```
 
 mod common;

@@ -71,7 +71,7 @@ jobs:
             "--no-default-features --features rustls-ring"
             "--no-default-features --features native-tls,imap,smtp"
           )
-          for backend in imap smtp dav msgraph gpeople gcal gmail search; do
+          for backend in imap smtp carddav caldav msgraph gpeople gcal gmail search; do
             sets+=("--no-default-features --features rustls-ring,$backend")
           done
           for set in "${sets[@]}"; do

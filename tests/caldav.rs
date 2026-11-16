@@ -22,7 +22,7 @@
 //! ```sh
 //! ./tests/radicale.sh
 //! ./tests/pimdir.sh
-//! cargo test --features dav --test caldav -- --ignored
+//! cargo test --features caldav --test caldav -- --ignored
 //! ```
 
 mod common;

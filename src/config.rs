@@ -50,8 +50,8 @@ pub const BACKENDS: [&str; 9] = [
 pub fn is_built(name: &str) -> bool {
     let built = [
         ("imap", cfg!(feature = "imap")),
-        ("carddav", cfg!(feature = "dav")),
-        ("caldav", cfg!(feature = "dav")),
+        ("carddav", cfg!(feature = "carddav")),
+        ("caldav", cfg!(feature = "caldav")),
         ("gmail", cfg!(feature = "gmail")),
         ("msgraph", cfg!(feature = "msgraph")),
         ("gpeople", cfg!(feature = "gpeople")),
@@ -1196,13 +1196,9 @@ impl SourceBackendConfig {
         }
     }
 
-    /// The cargo feature that builds this backend.
+    /// The cargo feature that builds this backend, named after its table.
     pub fn feature(&self) -> &'static str {
-        match self {
-            Self::Carddav(_) | Self::Caldav(_) => "dav",
-            Self::Msgraph(_) | Self::MsgraphContacts(_) | Self::MsgraphCalendar(_) => "msgraph",
-            backend => backend.protocol(),
-        }
+        self.protocol()
     }
 }
 
@@ -1672,7 +1668,7 @@ pub enum DavAuthConfig {
     Bearer { token: Secret },
 }
 
-#[cfg(feature = "dav")]
+#[cfg(any(feature = "carddav", feature = "caldav"))]
 impl DavAuthConfig {
     /// Resolves the configured secret and converts to io-webdav's auth.
     ///
@@ -1725,7 +1721,8 @@ impl ProxyConfig {
         not(any(
             feature = "imap",
             feature = "smtp",
-            feature = "dav",
+            feature = "carddav",
+            feature = "caldav",
             feature = "msgraph",
             feature = "gpeople",
             feature = "gcal",
@@ -2199,7 +2196,12 @@ pub struct SmtpConfig {
 /// is not a relative URL, `url` reading `dav.example.org:8443` as a scheme
 /// with a path, which parses cleanly and carries no host.
 #[cfg_attr(
-    not(any(feature = "imap", feature = "smtp", feature = "dav")),
+    not(any(
+        feature = "imap",
+        feature = "smtp",
+        feature = "carddav",
+        feature = "caldav"
+    )),
     allow(dead_code)
 )]
 pub fn server_url(server: &str, scheme: &str) -> Result<Url> {
@@ -3453,7 +3455,7 @@ mod tests {
 
     /// The DAV sources are the non-mail ones, so they are where the account
     /// shape stops being mail-shaped.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn google_sources_are_neither_mail_nor_a_send_channel() {
         let account: AccountConfig = toml::from_str(
@@ -3471,6 +3473,26 @@ mod tests {
             assert!(sources[name].is_http());
         }
         account.validate().unwrap();
+    }
+
+    /// Each DAV table is built by the cargo feature of its own name, so a
+    /// refusal names the one to rebuild with.
+    #[test]
+    fn each_dav_table_names_its_own_feature() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            carddav.server = "dav.example.org"
+            carddav.auth.bearer.token.raw = "tok"
+            caldav.server = "dav.example.org"
+            caldav.auth.bearer.token.raw = "tok"
+            "#,
+        )
+        .unwrap();
+
+        let sources = account.sources().unwrap();
+        for name in ["carddav", "caldav"] {
+            assert_eq!(sources[name].backend.feature(), name);
+        }
     }
 
     #[test]

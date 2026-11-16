@@ -300,13 +300,18 @@ Neverest has no `account capability`: what each source can do reads in `account 
 - THEN it prints what `account list` prints and exits 0, and `account -h` lists `list` with `[alias: ls]`
 
 ### Requirement: Every remote backend is a cargo feature
-Each remote SHALL be gated by a cargo feature: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backends, `dav` for the CardDAV and CalDAV backends, `gpeople` for the Google People backend, `gcal` for the Google Calendar backend, `gmail` for the Gmail backend, `smtp` for the SMTP submission channel.
+Each remote SHALL be gated by a cargo feature named after the configuration table it builds: `imap` for the IMAP backend, `msgraph` for the Microsoft Graph backends, `carddav` for the CardDAV backend, `caldav` for the CalDAV backend, `gpeople` for the Google People backend, `gcal` for the Google Calendar backend, `gmail` for the Gmail backend, `smtp` for the SMTP submission channel.
 
-Backends sharing one adapter and one dependency SHALL share one feature rather than take one each, separate features gating nothing that is separately compiled: `dav` covers CardDAV and CalDAV, `msgraph` covers Graph mail and Graph contacts. A feature that merely aliases another is not introduced for an older spelling.
+Backends read from one table SHALL share its feature: `msgraph` covers Graph mail, contacts and calendars, all under the `msgraph` table. CardDAV and CalDAV share one adapter but are two tables, so they take one feature each, as cardamum's `carddav` and calendula's `caldav`: code serving both kinds SHALL build under either feature, and opening a source of one kind only under that kind's. A feature that merely aliases another is not introduced for an older spelling (no `dav`).
 
 All of them SHALL ship in the default feature set, `msgraph` included again: it was held out under `msgraph-waits-for-its-domains` because a Graph account meant mail and nothing said so, and declaring the domain is what lifts that.
 
 A missing backend SHALL surface at runtime, never at build time: every feature combination compiles, the configuration surface stays whole (every source config still parses), and an unavailable backend fails when the source is *opened*, coded `backend-not-built` and naming the cargo feature that builds it; a JMAP source, which no feature opens yet, fails saying so. A build with neither `smtp` nor `msgraph` has no send channel and SHALL warn rather than perform a submit intent. Each optional backend crate SHALL take its TLS provider from neverest's own `native-tls` / `rustls-aws` / `rustls-ring` / `vendored` features rather than pinning one.
+
+#### Scenario: A CalDAV source in a CardDAV-only build
+- **GIVEN** a build with `carddav` and without `caldav`, and an account with a `caldav` table
+- **WHEN** the source is opened
+- **THEN** it fails coded `backend-not-built`, naming the `caldav` backend and `--features caldav`
 
 ### Requirement: A backend owns its ALPN default
 The `alpn` field of a source or channel config that has a backend crate SHALL be optional, and unset SHALL mean that crate's own default (io-imap's `["imap"]`, io-smtp's `["smtp"]`), resolved where the connection is opened. An explicit `[]` SHALL skip ALPN. Neverest SHALL NOT restate a backend's default in the config schema, so the default lives in exactly one place.

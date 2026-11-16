@@ -6,7 +6,7 @@
 //! cargo test --test accounts
 //! ```
 
-#![cfg(feature = "dav")]
+#![cfg(feature = "caldav")]
 
 use std::{
     fs,

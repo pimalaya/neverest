@@ -30,10 +30,12 @@ Every remote is a cargo feature, and every side config parses in every build: an
 ```sh
 cargo build --no-default-features --features rustls-ring
 cargo build --no-default-features --features imap,smtp,rustls-ring
+cargo build --no-default-features --features carddav,rustls-ring
+cargo build --no-default-features --features caldav,rustls-ring
 cargo build --all-features
 ```
 
-`carddav` is out of the default set until its live suite runs in CI.
+A feature is named after the configuration table it builds (`carddav`, `caldav`, `msgraph`), never an alias of another. Code serving both DAV kinds sits under `cfg(any(feature = "carddav", feature = "caldav"))`, code for one kind under its own feature.
 
 ## Live tests
 

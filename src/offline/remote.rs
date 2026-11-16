@@ -44,7 +44,7 @@ use io_pimdir::{
 };
 use log::{debug, warn};
 
-#[cfg(feature = "dav")]
+#[cfg(any(feature = "carddav", feature = "caldav"))]
 use crate::dav::client::is_duplicate_uid;
 use crate::{
     client::{Client, EnumEntry, Gone, Held, Listed, Pool, StoredSize, WrittenItem},
@@ -54,7 +54,7 @@ use crate::{
 };
 
 /// No DAV backend, so nothing can be refused with `no-uid-conflict`.
-#[cfg(not(feature = "dav"))]
+#[cfg(not(any(feature = "carddav", feature = "caldav")))]
 fn is_duplicate_uid(_err: &anyhow::Error) -> bool {
     false
 }
@@ -2055,7 +2055,7 @@ mod scan_tests {
     }
 }
 
-#[cfg(all(test, feature = "dav"))]
+#[cfg(all(test, any(feature = "carddav", feature = "caldav")))]
 mod push_tests {
     use std::sync::{Arc, atomic::AtomicU64};
 
@@ -2381,7 +2381,7 @@ mod push_tests {
     }
 }
 
-#[cfg(all(test, feature = "dav"))]
+#[cfg(all(test, any(feature = "carddav", feature = "caldav")))]
 mod hydrate_tests {
     use io_pimdir::client::PimdirStore;
 

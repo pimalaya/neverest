@@ -26,7 +26,7 @@ use io_pimdir::{
     summary::PimdirDerivation,
 };
 
-#[cfg(feature = "dav")]
+#[cfg(any(feature = "carddav", feature = "caldav"))]
 use crate::dav::client::DavClient;
 #[cfg(feature = "gcal")]
 use crate::gcal::client::GcalClient;
@@ -110,7 +110,8 @@ pub fn floor_of(scope: &PimdirScope) -> PimdirScope {
     not(all(
         feature = "imap",
         feature = "msgraph",
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gpeople",
         feature = "gcal",
         feature = "gmail"
@@ -145,7 +146,8 @@ impl Enumeration {
     not(all(
         feature = "imap",
         feature = "msgraph",
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gpeople",
         feature = "gcal",
         feature = "gmail"
@@ -178,7 +180,8 @@ pub enum Listed {
     not(all(
         feature = "imap",
         feature = "msgraph",
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gpeople",
         feature = "gcal",
         feature = "gmail"
@@ -202,7 +205,8 @@ pub struct Held<'a> {
     not(all(
         feature = "imap",
         feature = "msgraph",
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gpeople",
         feature = "gcal",
         feature = "gmail"
@@ -242,7 +246,8 @@ pub struct EnumEntry {
     not(all(
         feature = "imap",
         feature = "msgraph",
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gpeople",
         feature = "gcal",
         feature = "gmail"
@@ -317,7 +322,7 @@ pub type StoredSize<'a> = &'a (dyn Fn(&str) -> Option<u64> + Sync);
 pub enum Client {
     #[cfg(feature = "imap")]
     Imap(Box<ImapClient>),
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     Dav(Box<DavClient>),
     #[cfg(feature = "msgraph")]
     Msgraph(Box<GraphClient>),
@@ -334,7 +339,8 @@ pub enum Client {
     #[cfg(not(any(
         feature = "imap",
         feature = "msgraph",
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gpeople",
         feature = "gcal",
         feature = "gmail"
@@ -347,7 +353,8 @@ pub enum Client {
 #[cfg(not(any(
     feature = "imap",
     feature = "msgraph",
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "gpeople",
     feature = "gcal",
     feature = "gmail"
@@ -359,7 +366,8 @@ const NO_BACKEND: &str =
     not(all(
         feature = "imap",
         feature = "msgraph",
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gpeople",
         feature = "gcal",
         feature = "gmail"
@@ -374,7 +382,7 @@ impl Client {
             Client::Imap(c) => c.list_mailboxes(with_counts),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.list_collections(with_counts),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.list_collections(with_counts),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => c.list_collections(),
@@ -385,7 +393,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -411,7 +420,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -433,7 +443,7 @@ impl Client {
         match self {
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.default_collection(),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.default_collection(),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => Ok(c.default_collection()),
@@ -442,7 +452,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -464,7 +475,7 @@ impl Client {
         match self {
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) if c.kind() == GraphKind::Mail => c.mailbox_roles().map(Some),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => Ok(Some(
                 c.default_collection()?
                     .map(|id| (id, String::from("default")))
@@ -483,7 +494,7 @@ impl Client {
             Client::Imap(c) => c.create_mailbox(collection),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => bail!("Graph mailboxes are pull-only (create not supported)"),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.create_collection(collection),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(_) => {
@@ -498,7 +509,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -536,7 +548,7 @@ impl Client {
             }
             #[cfg(feature = "gmail")]
             Client::Gmail(c) => c.create_child_label(parent, name),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => {
                 if let Some(parent) = parent {
                     return refused(format!(
@@ -581,7 +593,7 @@ impl Client {
             Client::Imap(c) => c.rename_named_mailbox(collection, name),
             #[cfg(feature = "gmail")]
             Client::Gmail(c) => c.rename_label(collection, name),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => {
                 if name.trim().is_empty() {
                     return refused(format!("A collection name is not blank: {name:?}"));
@@ -628,7 +640,7 @@ impl Client {
             Client::Imap(c) => c.delete_named_mailbox(collection),
             #[cfg(feature = "gmail")]
             Client::Gmail(c) => c.delete_label(collection),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => {
                 let listed = c.list_collections(false)?;
                 if listed.iter().any(|listed| listed.id == collection) {
@@ -650,7 +662,7 @@ impl Client {
             Client::Imap(c) => c.delete_mailbox(collection),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(_) => bail!("Graph mailboxes are pull-only (delete not supported)"),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.delete_collection(collection),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(_) => {
@@ -665,7 +677,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -697,7 +710,7 @@ impl Client {
             Client::Imap(c) => c.enumerate(collection, request, held),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.enumerate(collection, request, held),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.enumerate(collection, checkpoint).map(Listed::Page),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => c.enumerate(collection, checkpoint).map(Listed::Page),
@@ -708,7 +721,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -783,7 +797,7 @@ impl Client {
             Client::Imap(c) => c.fetch_summaries(collection, ids),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.fetch_summaries(collection, ids),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(_) => bail!("DAV items have no summary tier (they resolve at Full)"),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(_) => {
@@ -796,7 +810,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -831,7 +846,7 @@ impl Client {
             Client::Imap(c) => c.fetch_bodies(collection, ids, open, done),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.fetch_bodies(collection, ids, sizes, open, done),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.fetch_bodies(collection, ids, open, done),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => c
@@ -846,7 +861,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -886,7 +902,7 @@ impl Client {
             Client::Imap(c) => c.get_message_stream(collection, id, sink).map(|()| None),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.get_item_stream(collection, id, sink),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.get_item_stream(collection, id, sink),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => c.get_item_stream(collection, id, sink),
@@ -897,7 +913,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -931,7 +948,7 @@ impl Client {
                 .map(|id| id.map(|id| WrittenItem { id, revision: None })),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.add_item_stream(collection, flags, source).map(Some),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.add_item_stream(collection, source, link).map(Some),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => c.add_item_stream(collection, source).map(Some),
@@ -944,7 +961,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -972,7 +990,7 @@ impl Client {
             Client::Imap(_) => bail!("IMAP message bodies are immutable (in-place update)"),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.update_item_stream(id, source, if_match),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.update_item_stream(collection, id, source, if_match),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => c.update_item_stream(id, source, if_match),
@@ -983,7 +1001,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -1006,7 +1025,7 @@ impl Client {
             Client::Imap(c) => c.delete_message(collection, id),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.delete_item(id, if_match),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.delete_item(collection, id, if_match),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => c.delete_item(id, if_match),
@@ -1017,7 +1036,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -1059,7 +1079,8 @@ impl Client {
             #[cfg(any(
                 not(feature = "imap"),
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -1083,7 +1104,7 @@ impl Client {
         if_match: Option<&str>,
     ) -> Result<Option<WrittenItem>> {
         match self {
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.move_item(from, to, id, if_match),
             #[allow(unreachable_patterns)]
             _ => Ok(None),
@@ -1097,7 +1118,7 @@ impl Client {
             Client::Imap(c) => c.move_messages(from, to, ids),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.move_messages(to, ids),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.move_items(from, to, ids),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(_) => bail!("Google contacts cannot move (move not supported)"),
@@ -1110,7 +1131,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -1134,7 +1156,7 @@ impl Client {
             Client::Imap(c) => c.update_flags(collection, ids, add, remove),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.update_flags(ids, add, remove),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.update_flags(ids, add, remove),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(c) => c.update_flags(ids, add, remove),
@@ -1145,7 +1167,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -1165,7 +1188,7 @@ impl Client {
             Client::Imap(_) => "message/rfc822",
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.kind().media_type(),
-            #[cfg(feature = "dav")]
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.media_type(),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(_) => "text/vcard",
@@ -1176,7 +1199,8 @@ impl Client {
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "gpeople",
                 feature = "gcal",
                 feature = "gmail"
@@ -1195,7 +1219,8 @@ impl Client {
     not(any(
         feature = "imap",
         feature = "msgraph",
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gpeople",
         feature = "gcal",
         feature = "gmail"
@@ -1232,7 +1257,7 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
             let client = GcalClient::connect(google, account.throttle.clone())?;
             Ok(Client::Gcal(Box::new(client)))
         }
-        #[cfg(feature = "dav")]
+        #[cfg(any(feature = "carddav", feature = "caldav"))]
         SourceAccountBackend::Dav(dav) => {
             let client = DavClient::connect(dav, account.throttle.clone())?;
             Ok(Client::Dav(Box::new(client)))
@@ -1245,7 +1270,8 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
         #[cfg(not(any(
             feature = "imap",
             feature = "msgraph",
-            feature = "dav",
+            feature = "carddav",
+            feature = "caldav",
             feature = "gpeople",
             feature = "gcal",
             feature = "gmail"
@@ -1282,7 +1308,15 @@ impl Pool {
     }
 
     /// A pool of one connection already open, for the tests.
-    #[cfg(all(test, any(feature = "dav", feature = "msgraph", feature = "gmail")))]
+    #[cfg(all(
+        test,
+        any(
+            feature = "carddav",
+            feature = "caldav",
+            feature = "msgraph",
+            feature = "gmail"
+        )
+    ))]
     pub fn of(account: SourceAccount, client: Client) -> Self {
         Self {
             account,
@@ -1328,7 +1362,7 @@ impl Pool {
 /// The path segment a new DAV collection named `name` is keyed by: its
 /// letters, digits, `-`, `_` and `.` kept, every other run of characters
 /// one `-`, and a number appended while a listed collection holds it.
-#[cfg(feature = "dav")]
+#[cfg(any(feature = "carddav", feature = "caldav"))]
 fn free_segment(name: &str, listed: &[Collection]) -> String {
     let mut base = String::new();
     for c in name.chars() {
@@ -1354,7 +1388,7 @@ fn free_segment(name: &str, listed: &[Collection]) -> String {
     id
 }
 
-#[cfg(all(test, feature = "dav"))]
+#[cfg(all(test, any(feature = "carddav", feature = "caldav")))]
 mod tests {
     use super::*;
 

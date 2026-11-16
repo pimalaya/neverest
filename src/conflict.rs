@@ -339,7 +339,8 @@ mod tests {
 
     use super::*;
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -417,7 +418,8 @@ mod tests {
     /// changes nothing. The same decision against the revision the store does
     /// hold settles the item, so the guard discriminates.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -525,7 +527,8 @@ mod tests {
     /// would otherwise replace a real card with something that is not one:
     /// the item keeps its link id and loses every field behind the identity.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -563,7 +566,8 @@ mod tests {
     /// would address the row by an identity its content no longer states, a
     /// frontend reading it as one contact and the server as another.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"

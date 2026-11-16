@@ -38,7 +38,8 @@ use pimalaya_config::secret::SecretResolver;
     feature = "imap",
     feature = "msgraph",
     feature = "smtp",
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "gpeople",
     feature = "gcal",
     feature = "gmail"
@@ -51,15 +52,25 @@ use pimalaya_stream::{proxy::Proxy, tls::Tls};
     feature = "gmail"
 ))]
 use secrecy::SecretString;
-#[cfg(any(feature = "imap", feature = "smtp", feature = "dav"))]
+#[cfg(any(
+    feature = "imap",
+    feature = "smtp",
+    feature = "carddav",
+    feature = "caldav"
+))]
 use url::Url;
 
 #[cfg(feature = "smtp")]
 use crate::config::SmtpConfig;
-#[cfg(any(feature = "imap", feature = "smtp", feature = "dav"))]
+#[cfg(any(
+    feature = "imap",
+    feature = "smtp",
+    feature = "carddav",
+    feature = "caldav"
+))]
 use crate::config::server_url;
 use crate::config::{AccountConfig, ProxyConfig, SourceBackendConfig, SourceConfig};
-#[cfg(feature = "dav")]
+#[cfg(any(feature = "carddav", feature = "caldav"))]
 use crate::dav::client::DavKind;
 use crate::error::{ErrorCode, Failure};
 #[cfg(feature = "msgraph")]
@@ -226,7 +237,7 @@ impl SourceAccount {
 pub enum SourceAccountBackend {
     #[cfg(feature = "imap")]
     Imap(ImapAccount),
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     Dav(DavAccount),
     #[cfg(feature = "msgraph")]
     Msgraph(MsgraphAccount),
@@ -242,7 +253,8 @@ pub enum SourceAccountBackend {
     #[cfg(not(any(
         feature = "imap",
         feature = "msgraph",
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gpeople",
         feature = "gcal",
         feature = "gmail"
@@ -258,7 +270,8 @@ impl SourceAccountBackend {
         not(any(
             feature = "imap",
             feature = "msgraph",
-            feature = "dav",
+            feature = "carddav",
+            feature = "caldav",
             feature = "gpeople",
             feature = "gcal",
             feature = "gmail"
@@ -306,7 +319,7 @@ impl SourceAccountBackend {
                     auto_id: crate::imap::client::auto_id(&config.id)?,
                 }))
             }
-            #[cfg(feature = "dav")]
+            #[cfg(feature = "carddav")]
             SourceBackendConfig::Carddav(config) => Ok(Self::Dav(DavAccount {
                 kind: DavKind::Card,
                 endpoint: DavEndpoint::of(config.server.as_deref(), config.home.as_deref())?,
@@ -314,7 +327,7 @@ impl SourceAccountBackend {
                 auth: config.auth.clone().try_into_dav_auth(resolver)?,
                 proxy: proxy(resolver)?,
             })),
-            #[cfg(feature = "dav")]
+            #[cfg(feature = "caldav")]
             SourceBackendConfig::Caldav(config) => Ok(Self::Dav(DavAccount {
                 kind: DavKind::Cal,
                 endpoint: DavEndpoint::of(config.server.as_deref(), config.home.as_deref())?,
@@ -418,7 +431,7 @@ pub struct ImapAccount {
 }
 
 /// A resolved DAV endpoint, `kind` telling CardDAV and CalDAV apart.
-#[cfg(feature = "dav")]
+#[cfg(any(feature = "carddav", feature = "caldav"))]
 #[derive(Clone)]
 pub struct DavAccount {
     /// Which home set the session discovers, or is given.
@@ -435,7 +448,7 @@ pub struct DavAccount {
 
 /// Where a DAV session starts: an entry point it discovers the home set
 /// from, or the home set itself.
-#[cfg(feature = "dav")]
+#[cfg(any(feature = "carddav", feature = "caldav"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DavEndpoint {
     /// The DAV entry point, a configured authority already read as a URL.
@@ -444,7 +457,7 @@ pub enum DavEndpoint {
     Home(Url),
 }
 
-#[cfg(feature = "dav")]
+#[cfg(any(feature = "carddav", feature = "caldav"))]
 impl DavEndpoint {
     /// The endpoint a table names: its `home` when it has one, else its
     /// `server`, read as `https://` when bare.
@@ -575,7 +588,14 @@ impl SmtpAccount {
     }
 }
 
-#[cfg(all(test, unix, feature = "imap", feature = "smtp", feature = "dav"))]
+#[cfg(all(
+    test,
+    unix,
+    feature = "imap",
+    feature = "smtp",
+    feature = "carddav",
+    feature = "caldav"
+))]
 mod tests {
     use std::{env::temp_dir, fs, process};
 
@@ -636,25 +656,57 @@ mod tests {
     }
 }
 
-#[cfg(all(test, not(feature = "gcal")))]
+#[cfg(all(
+    test,
+    any(
+        not(feature = "gcal"),
+        not(feature = "carddav"),
+        not(feature = "caldav")
+    )
+))]
 mod build_tests {
     use pimalaya_cli::error::code_of;
 
     use super::Account;
     use crate::{config::AccountConfig, error::ErrorCode};
 
-    /// A source of a backend the build leaves out loads, and opening it
-    /// fails coded `backend-not-built`, naming the cargo feature.
-    #[test]
-    fn a_backend_left_out_of_the_build_names_its_feature() {
-        let config: AccountConfig = toml::from_str("gcal.auth.token.raw = \"token\"").unwrap();
+    /// Opens the source `table` of the one-table account `toml`, which the
+    /// build leaves out, and checks the refusal names the feature `table`.
+    fn assert_names_its_feature(toml: &str, table: &str) {
+        let config: AccountConfig = toml::from_str(toml).unwrap();
 
-        let Err(err) = Account::resolve(&config).unwrap().get("gcal") else {
-            panic!("a gcal source opened in a build without gcal");
+        let Err(err) = Account::resolve(&config).unwrap().get(table) else {
+            panic!("a {table} source opened in a build without {table}");
         };
 
         assert_eq!(code_of(&err), Some(ErrorCode::BackendNotBuilt));
-        assert!(format!("{err:#}").contains("--features gcal"), "{err:#}");
+        let message = format!("{err:#}");
+        assert!(message.contains(&format!("`{table}` backend")), "{message}");
+        assert!(
+            message.ends_with(&format!("--features {table}`")),
+            "{message}"
+        );
+    }
+
+    /// A source of a backend the build leaves out loads, and opening it
+    /// fails coded `backend-not-built`, naming the cargo feature.
+    #[cfg(not(feature = "gcal"))]
+    #[test]
+    fn a_backend_left_out_of_the_build_names_its_feature() {
+        assert_names_its_feature("gcal.auth.token.raw = \"token\"", "gcal");
+    }
+
+    /// Each DAV table names its own feature, not a shared `dav` one.
+    #[cfg(not(feature = "carddav"))]
+    #[test]
+    fn a_carddav_source_left_out_names_carddav() {
+        assert_names_its_feature("carddav.auth.bearer.token.raw = \"tok\"", "carddav");
+    }
+
+    #[cfg(not(feature = "caldav"))]
+    #[test]
+    fn a_caldav_source_left_out_names_caldav() {
+        assert_names_its_feature("caldav.auth.bearer.token.raw = \"tok\"", "caldav");
     }
 }
 
@@ -712,7 +764,7 @@ mod connection_tests {
 
     /// A DAV table's `home` is where the session starts, its `server` the
     /// entry point otherwise, and one of the two is required.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn a_dav_home_set_is_taken_over_the_server() {
         use crate::account::DavEndpoint;

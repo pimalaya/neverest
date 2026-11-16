@@ -111,7 +111,7 @@ mod cli;
 mod client;
 mod config;
 mod conflict;
-#[cfg(feature = "dav")]
+#[cfg(any(feature = "carddav", feature = "caldav"))]
 mod dav;
 mod error;
 #[cfg(feature = "gcal")]

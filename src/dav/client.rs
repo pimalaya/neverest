@@ -71,6 +71,7 @@ pub enum DavKind {
     /// CardDAV (RFC 6352): address books of contact cards.
     Card,
     /// CalDAV (RFC 4791): calendars of calendar object resources.
+    #[cfg_attr(not(feature = "caldav"), allow(dead_code))]
     Cal,
 }
 

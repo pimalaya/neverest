@@ -353,7 +353,8 @@ fn read(name: &str, dir: &Path) -> Result<PimdirReader> {
 #[cfg(all(
     test,
     any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"

@@ -40,7 +40,8 @@ use serde::Serialize;
 /// The stable codes, each serialised in kebab-case.
 #[cfg_attr(
     not(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gcal",
         feature = "gmail",
         feature = "gpeople",
@@ -302,7 +303,7 @@ pub fn refusal(err: &Error) -> Option<String> {
     }
 
     let refusers: &[Refuses] = &[
-        #[cfg(feature = "dav")]
+        #[cfg(any(feature = "carddav", feature = "caldav"))]
         crate::dav::client::refuses,
         #[cfg(feature = "gcal")]
         crate::gcal::client::refuses,
@@ -328,7 +329,8 @@ pub fn refusal(err: &Error) -> Option<String> {
 /// that passes (408, 423, 425, 429) or a stale base (409, 412).
 #[cfg_attr(
     not(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "gcal",
         feature = "gmail",
         feature = "gpeople",
@@ -352,7 +354,7 @@ type Refusal = fn(&(dyn std::error::Error + 'static)) -> Option<ErrorCode>;
 /// protocol codes.
 fn refusal_code(err: &Error) -> Option<ErrorCode> {
     let refusals: &[Refusal] = &[
-        #[cfg(feature = "dav")]
+        #[cfg(any(feature = "carddav", feature = "caldav"))]
         crate::dav::client::refusal_code,
         #[cfg(feature = "gcal")]
         crate::gcal::client::refusal_code,

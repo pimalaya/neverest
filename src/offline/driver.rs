@@ -9534,7 +9534,7 @@ mod tests {
     /// The base names which side touched which, both survive, the conflict
     /// clears through the queue, and the run reports nothing. Asking a person
     /// is a background tool asking to be switched off.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn disjoint_edits_on_both_sides_resolve_with_no_report() {
         let dir = tempfile::tempdir().unwrap();
@@ -9598,7 +9598,7 @@ mod tests {
 
     /// One card a fake CardDAV server holds under `card1`, its body read
     /// with the listing as a DAV listing does.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     struct CardServer {
         revision: String,
         body: String,
@@ -9608,7 +9608,7 @@ mod tests {
         fetched: usize,
     }
 
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     impl CardServer {
         fn at(revision: &str, body: &str) -> Self {
             Self {
@@ -9644,7 +9644,7 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     impl PimdirRemote for CardServer {
         type Error = anyhow::Error;
 
@@ -9690,7 +9690,7 @@ mod tests {
 
     /// One endpoint's pulling pass over `server`, as a reconcile's first
     /// pass runs it.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     fn pull_endpoint(store: &mut PimdirSourceStore, server: &mut CardServer) -> PimdirSyncReport {
         let verb = sync_verb(
             "contacts",
@@ -9704,7 +9704,7 @@ mod tests {
     }
 
     /// Two endpoints of one account over one store, `left` and `right`.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     fn two_endpoints(dir: &Path) -> (PimdirSourceStore, PimdirSourceStore) {
         let open = |source: &str| {
             PimdirStore::open(dir)
@@ -9718,11 +9718,11 @@ mod tests {
     }
 
     /// A divergence as its source and its base, local and remote bodies.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     type CardDivergence = (String, Option<String>, Option<String>, Option<String>);
 
     /// The divergences the store holds for the card.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     fn card_divergence(store: &PimdirSourceStore, blobs: &PimdirBlobStage) -> Vec<CardDivergence> {
         let read = |hash: &Option<PimdirHash>| {
             let body = blobs.blobs().get(hash.as_ref()?).unwrap()?;
@@ -9747,7 +9747,7 @@ mod tests {
     /// they agreed on and records the divergence itself (pimdir SYNC §9),
     /// so the merge reads all three bodies and settles disjoint edits.
     /// What neverest's own snapshot of the shared bodies did before.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn a_card_both_endpoints_rewrote_diverges_against_their_agreed_body() {
         let dir = tempfile::tempdir().unwrap();
@@ -9796,7 +9796,7 @@ mod tests {
     /// agreed park it with no ancestor (pimdir SYNC §6): neither body is
     /// taken over the other. What neverest's own reading of the hub's
     /// conflict flag did before.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn a_card_two_endpoints_never_agreed_on_parks_with_no_ancestor() {
         let dir = tempfile::tempdir().unwrap();
@@ -9884,7 +9884,7 @@ mod tests {
     /// which the upgrade reports overruled. Under the default options, as
     /// every upgrade ran before, the fetch settles nothing and the item
     /// stays parked.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn a_fetched_divergence_settles_by_the_side_s_policy() {
         for (options, settles) in [(STORE_WINS, true), (PimdirUpgradeOptions::default(), false)] {
@@ -9964,7 +9964,7 @@ mod tests {
     /// target's body leaves its server, never the store. The source moved
     /// the card both endpoints agreed on, the target edited it meanwhile,
     /// and the target's pull, which may not push, parked the divergence.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn a_one_way_overwrite_keeps_the_target_body_as_a_retained_item() {
         let dir = tempfile::tempdir().unwrap();
@@ -10040,7 +10040,7 @@ mod tests {
     /// overwrite settles it, so the store keeps it as a retained item: the
     /// store refuses to overrule a body nobody has read, and the run takes
     /// that as a fetch owed, never as a failure.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn a_one_way_overwrite_fetches_an_unread_target_body_before_keeping_it() {
         let dir = tempfile::tempdir().unwrap();
@@ -10152,7 +10152,7 @@ mod tests {
     ///
     /// It stays parked and is counted from the store, which is the number the
     /// run's own exit code answers with 2.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn a_same_field_collision_parks_and_is_still_counted() {
         let dir = tempfile::tempdir().unwrap();
@@ -10212,7 +10212,7 @@ mod tests {
     /// The merge counts colliding fields and the report counts parked items,
     /// which are not the same number: a summary reading `1 item(s) waiting`
     /// over a two-field divergence would have passed everything else.
-    #[cfg(feature = "dav")]
+    #[cfg(any(feature = "carddav", feature = "caldav"))]
     #[test]
     fn two_colliding_fields_park_the_item_and_the_count_reads_past_one() {
         let dir = tempfile::tempdir().unwrap();

@@ -29,7 +29,7 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
-//! cargo test --features dav --test merger -- --ignored
+//! cargo test --features carddav --test merger -- --ignored
 //! ```
 
 use std::{

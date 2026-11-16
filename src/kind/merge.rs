@@ -5,9 +5,10 @@
 //! the base proves it by naming which side touched which field.
 //!
 //! Built in rather than configured, at build time too: it rides on the
-//! mutable-content backends (`dav`, `msgraph`, `gpeople`, `gcal`) rather than
-//! a feature of its own. Contacts are vcard-rs, calendars and tasks and
-//! journals ical-rs, and mail is immutable-content and reaches none of this.
+//! mutable-content backends (`carddav`, `caldav`, `msgraph`, `gpeople`,
+//! `gcal`) rather than a feature of its own. Contacts are vcard-rs, calendars
+//! and tasks and journals ical-rs, and mail is immutable-content and reaches
+//! none of this.
 //!
 //! Because it cannot be swapped it is strictly conservative, resolving on an
 //! empty report and on nothing else: a merge nobody can replace has no
@@ -15,14 +16,16 @@
 //! body is the left side, so the store's own bytes survive byte for byte.
 
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
 ))]
 use ical::tree::{cst::IcalCst, merge::IcalMerge};
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -32,11 +35,12 @@ use vcard::tree::{cst::VcardCst, merge::VcardMerge};
 use crate::kind::Kind;
 
 /// What a three-way merge concluded about one conflicted item.
-// NOTE: a build without `dav` carries no mutable-content kind, so mail is
-// the only arm left and neither resolving variant is ever constructed.
+// NOTE: a build without a mutable-content backend carries no such kind, so
+// mail is the only arm left and neither resolving variant is constructed.
 #[cfg_attr(
     not(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -63,11 +67,12 @@ impl Kind {
     /// The ical merge names no attendee the right side speaks for (RFC 5546
     /// §3.2): neverest syncs a calendar rather than acting as one. Preferring
     /// left decides nothing here, a run merging only on an empty report.
-    // NOTE: without `dav` the mail arm is the whole match, and mail is
-    // immutable-content, so no side is ever read.
+    // NOTE: without a mutable-content backend the mail arm is the whole match,
+    // and mail is immutable-content, so no side is ever read.
     #[cfg_attr(
         not(any(
-            feature = "dav",
+            feature = "carddav",
+            feature = "caldav",
             feature = "msgraph",
             feature = "gpeople",
             feature = "gcal"
@@ -78,7 +83,8 @@ impl Kind {
         match self {
             Self::Mail => Merged::Unmergeable(String::from("mail bodies are immutable")),
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
@@ -108,7 +114,8 @@ impl Kind {
                 }
             }
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
@@ -154,7 +161,8 @@ impl Kind {
 /// `LAST-MODIFIED` when it sends a meeting's invitations, and carries no
 /// `SEQUENCE`), so two sides touching them is no disagreement.
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -163,7 +171,8 @@ const STAMPS: &[&str] = &["DTSTAMP", "LAST-MODIFIED", "CREATED", "SEQUENCE"];
 
 /// The name of an unfolded content line, upper-cased.
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -179,7 +188,8 @@ fn line_name(line: &[u8]) -> String {
 /// Splits a body into its logical lines, each with its folds and its
 /// ending, so a line is dropped or replaced whole.
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -207,7 +217,8 @@ fn logical_lines(body: &[u8]) -> Vec<&[u8]> {
 
 /// The body without its stamps, in every component.
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -224,7 +235,8 @@ fn without_stamps(body: &[u8]) -> Vec<u8> {
 /// The `SEQUENCE` of each component of a body, keyed by its `UID` and
 /// `RECURRENCE-ID` lines as written, and the component's position.
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -272,7 +284,8 @@ fn sequences(body: &[u8]) -> Vec<(String, Option<u64>)> {
 /// remote's where the remote counted further: a revision count only grows,
 /// and the stamps left the merge, so neither side's count is lost.
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -348,7 +361,8 @@ fn with_sequences_of(merged: &[u8], remote: &[u8]) -> Vec<u8> {
 /// Whether a `BEGIN` or `END` line opens or closes an event, a to-do or
 /// a journal entry.
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -362,7 +376,8 @@ fn is_dated_component(line: &[u8]) -> bool {
 /// Names the side whose body no parser accepts, for the log line a parked
 /// conflict leaves behind, rather than counting it as a collision.
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -385,7 +400,8 @@ mod tests {
     /// Disjoint edits are not a disagreement: the base names which side
     /// touched which field, so both survive.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -410,7 +426,8 @@ mod tests {
 
     /// The same field set two ways is the residual case no merge settles.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -426,7 +443,8 @@ mod tests {
 
     /// The calendar half of the same rule, over the other library.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -464,7 +482,8 @@ mod tests {
     /// next run, while Graph restamped its own copy on sending the
     /// invitations. Only the summary was decided, by one side.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -499,7 +518,8 @@ mod tests {
     /// A revision count only grows: the remote counted further, so the
     /// merged event carries its count, and only that line changes.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -539,7 +559,8 @@ mod tests {
     /// A body no parser reads is reported as what it is, rather than counted
     /// as a disagreement nobody had.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"

@@ -36,7 +36,7 @@
 //! ```sh
 //! ./tests/radicale.sh
 //! ./tests/pimdir.sh
-//! cargo test --features dav --test carddav -- --ignored --test-threads=1
+//! cargo test --features carddav --test carddav -- --ignored --test-threads=1
 //! ```
 
 mod common;

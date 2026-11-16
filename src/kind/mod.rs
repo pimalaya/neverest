@@ -25,7 +25,8 @@ pub mod merge;
 
 use anyhow::{Result, bail};
 #[cfg(any(
-    feature = "dav",
+    feature = "carddav",
+    feature = "caldav",
     feature = "msgraph",
     feature = "gpeople",
     feature = "gcal"
@@ -72,7 +73,8 @@ pub enum Kind {
     Mail,
     /// `text/vcard`: contact cards, over CardDAV.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -80,7 +82,8 @@ pub enum Kind {
     Vcard,
     /// `text/calendar`: calendar object resources, over CalDAV.
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -95,14 +98,16 @@ impl Kind {
         match media_type {
             "message/rfc822" => Some(Self::Mail),
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
             ))]
             "text/vcard" => Some(Self::Vcard),
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
@@ -117,14 +122,16 @@ impl Kind {
         match self {
             Self::Mail => "message/rfc822",
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
             ))]
             Self::Vcard => "text/vcard",
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
@@ -139,14 +146,16 @@ impl Kind {
         match self {
             Self::Mail => "eml",
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
             ))]
             Self::Vcard => "vcf",
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
@@ -164,14 +173,16 @@ impl Kind {
         match self {
             Self::Mail => mail::parse_body(raw, size),
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
             ))]
             Self::Vcard => contact::derive(raw),
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
@@ -222,14 +233,16 @@ impl Kind {
         match self {
             Self::Mail => None,
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
             ))]
             Self::Vcard => Some("VCARD"),
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
@@ -272,7 +285,8 @@ impl Kind {
         let fallback = match self {
             Self::Mail => "alt:",
             #[cfg(any(
-                feature = "dav",
+                feature = "carddav",
+                feature = "caldav",
                 feature = "msgraph",
                 feature = "gpeople",
                 feature = "gcal"
@@ -358,7 +372,8 @@ mod tests {
     /// the mint is the only part a write can name them by.
     #[test]
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -378,7 +393,8 @@ mod tests {
     /// minted on the href it came from.
     #[test]
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"
@@ -439,7 +455,8 @@ mod tests {
     /// A card body of this item settles it, a message body settles nothing.
     #[test]
     #[cfg(any(
-        feature = "dav",
+        feature = "carddav",
+        feature = "caldav",
         feature = "msgraph",
         feature = "gpeople",
         feature = "gcal"

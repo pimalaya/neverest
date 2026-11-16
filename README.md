@@ -10,7 +10,7 @@
 </div>
 
 > [!CAUTION]
-> Neverest is `v0.x`: expect breaking changes between releases until it stabilises.
+> Neverest is preparing its v1: expect breaking changes until it is released.
 
 ## Table of contents
 
@@ -26,22 +26,14 @@
 
 ## Features
 
-- **PIM domain** support: **mail** via IMAP and Microsoft Graph, **contacts** via CardDAV <sup>[rfc6352](https://www.iana.org/go/rfc6352)</sup>, Microsoft Graph and Google People, **calendar** via CalDAV <sup>[rfc4791](https://www.iana.org/go/rfc4791)</sup>, Microsoft Graph and Google Calendar, one account syncing several at once
-- **Local pimdir store** <sup>[specs](https://github.com/pimalaya/pimdir)</sup>: the single local copy an app reads, holding every domain an account syncs
-- **Retention**: a removed item is kept, never lost, and reclaimed on a schedule
-- **Relay** mode: a body crossing two IMAP servers is streamed server-to-server, never stored
-- **Queued submission**: a message a frontend enqueued leaves through its source's send channel
-- **Search index**: the store's full-text index <sup>[specs](https://github.com/pimalaya/pimdir)</sup>, kept current at every sync for the frontends to query
-- **Auth** support: anonymous, login, plain, oauthbearer, xoauth2, scram-sha-256 for IMAP; basic and bearer for CardDAV and CalDAV; bearer for Microsoft Graph, Google People and Google Calendar
-- **TLS** support: [Rustls](https://crates.io/crates/rustls) with ring or aws crypto (`rustls-aws` feature), [Native TLS](https://crates.io/crates/native-tls) (`native-tls` feature)
-- **TOML configuration** with multi-account support, and **JSON** output via `--json`, described by `neverest json-schema`
-
-> [!TIP]
-> Neverest is written in [Rust](https://www.rust-lang.org/) and uses [cargo features](https://doc.rust-lang.org/cargo/reference/features.html) to gate backend support: CardDAV needs `carddav`, CalDAV `caldav`, Microsoft Graph mail, contacts and calendars need `msgraph`, Google contacts `gpeople`, Google calendars `gcal` and Gmail `gmail`. The default feature set is declared in [Cargo.toml](./Cargo.toml). JMAP sources configure but have no backend yet.
->
-> The default `vendored` feature builds SQLite from source; leave it out (`--no-default-features --features …`) to link the system one.
->
-> The default `search` feature builds the store's search index, which frontends such as himalaya search through and never build themselves; leave it out only where no frontend searches the store.
+- **Mail, contacts and calendars** over IMAP, Gmail, Microsoft Graph, CardDAV, CalDAV and the Google APIs
+- **One local pimdir store** the offline frontends read, every account and kind in it
+- **Two-way, one-way or migration** syncs, picked by an account's sources and targets
+- **Three-way merge** of cards and events, a real conflict parked for a decision, never lost
+- **Retention**: a removed item keeps its body in the store until a purge you schedule
+- **Queued writes** of himalaya, cardamum and calendula applied offline, sends included
+- **Search index** of the store kept current for the frontends to query
+- **JSON output** of every result and of a sync's progress, described by `neverest json-schema`
 
 ## Installation
 
@@ -63,35 +55,16 @@ curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh 
 
 Neverest v1 is not released yet, so the installer has nothing to fetch. Until then, check out the [releases](https://github.com/pimalaya/neverest/actions/workflows/releases.yml) GitHub workflow and look for the *Artifacts* section.
 
-> [!NOTE]
-> Such binaries are built with the default cargo features. If you need specific features, please use another installation method.
-
 ### Cargo
 
 ```sh
 cargo install --locked --git https://github.com/pimalaya/neverest.git
 ```
 
-With only IMAP support:
-
-```sh
-cargo install --locked --git https://github.com/pimalaya/neverest.git \
-  --no-default-features \
-  --features imap,smtp,rustls-ring
-```
-
 ### Nix
-
-If you have the [Flakes](https://nixos.wiki/wiki/Flakes) feature enabled:
 
 ```sh
 nix profile install github:pimalaya/neverest
-```
-
-Or run without installing:
-
-```sh
-nix run github:pimalaya/neverest
 ```
 
 ### Sources
@@ -104,108 +77,40 @@ nix run
 
 ## Configuration
 
-A configuration is loaded from every existing path among the following, each one deep-merged on top of the ones before, so $HOME/.neverestrc overrides the others:
+A configuration is loaded from every existing path among the following, each one deep-merged on top of the ones before:
 
 - $XDG_CONFIG_HOME/neverest/config.toml
 - $HOME/.config/neverest/config.toml
 - $HOME/.neverestrc
 
-Override those paths with `-c <PATH>`. Repeat it to merge several files, such as `-c public.toml -c private.toml`: the first one is the base and the next ones are deep-merged on top. Each `-c` takes one path, never split, and no environment variable is read. The full field reference lives in [config.sample.toml](./config.sample.toml).
+Override the path with `-c <PATH>`. Repeat it to merge several files: the first one is the base and the next ones are deep-merged on top. The full field reference lives in [config.sample.toml](./config.sample.toml), installed as share/doc/neverest/config.sample.toml.
 
-Neverest writes no configuration for you: copy [config.sample.toml](./config.sample.toml) to one of the paths above and uncomment what you need. A command finding no configuration file fails naming the path it looked for and the sample to start from; at a terminal, a bare `neverest` or any command meets a welcome giving the commands that create it. With a configuration, a bare `neverest` prints the help.
+Every account syncs through one pimdir store, at neverest/ under your state directory unless it names its own `store.root`. What an account does is the number of its `sources` and `targets` (a backend written under the account is a source named after it) and its `one-way` flag:
 
-Every account shares **one pimdir store**, at `neverest/` under your state directory ($XDG_STATE_HOME on Linux, `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows) unless it names its own `store.root`. Each account is fed by one or more named **sources**, each a remote, and it may hold several kinds at once; its collections are grouped under its name, so a frontend reads one account of the store through its own account key (`pimdir.account` in himalaya, calendula and cardamum). What an account does is its arity plus two flags: with no `targets` every source syncs into the local store, the offline replica; with them the source is copied to each target.
+| sources | targets | one-way | behaviour                                              |
+|---------|---------|---------|--------------------------------------------------------|
+| 1       | 1       | false   | two-way mirror between the two remotes                 |
+| 1       | 1       | true    | the source overwrites the target                       |
+| 1       | N       | true    | the source overwrites each target                      |
+| N       | 0       | false   | each source merges two-way with the local store        |
+| N       | 0       | true    | the sources overwrite the store, local edits dropped   |
 
-`one-way` makes the sources authoritative, so the other side's changes are overwritten rather than merged, and `retain` says whether the store keeps bodies or is only the ledger it has to be anyway. Sources never meet, so several cache side by side for a frontend to union at display time.
-
-Microsoft Graph is one `msgraph` table, as in the other Pimalaya CLIs: the session (`auth`, `user-id`, `tls`, `alpn`, `proxy`) once, then the domains it syncs, each a source of its own, `= true` taking the defaults:
-
-```toml
-[accounts.work]
-msgraph.auth.token.command = ["ortie", "token", "show", "-a", "microsoft"]
-msgraph.mail = true
-msgraph.contacts.item.delete = false
-msgraph.calendar = true
-```
-
-The domains sync as the sources `msgraph`, `msgraph-contacts` and `msgraph-calendar`; under `sources.<name>`, an `msgraph` table names one domain and the source is `<name>`.
-
-A collection one endpoint no longer lists is deleted on the other only where that endpoint sets `collection.delete = true`. It is off by default: a missing collection is the only sign IMAP and DAV give of a deletion, and a listing can leave out one nobody deleted. The same setting lets a frontend ask neverest to delete a collection on that server (pimdir's `collection-delete` intent, `himalaya pimdir mailbox delete`); renaming one (`collection-rename`) needs no setting.
+Anything else is refused at load. Neverest 1.0 reads no configuration or store of a 0.x release: write a new configuration from the sample and sync again.
 
 ## Usage
 
-Every command carries its own `--help`, the source of truth for its flags and syntax.
+Every command runs over every account unless `-a` names some, and explains its flags, exit codes and JSON output in its `--help`.
 
 ```sh
-neverest init
-neverest sync --init
-neverest sync --dry-run
-neverest sync -a <account> --include-collection INBOX
-neverest account list
 neverest account check
+neverest sync --init --dry-run
+neverest sync --init
+neverest sync -a work --include-collection INBOX
 neverest sync --queue-only
 neverest sync --index-only
 neverest conflict list
-neverest conflict resolve <id> -a <account> --interactive
+neverest conflict resolve <id> -a work --interactive
 ```
-
-Every command runs over every account, one after the other, unless `-a` names some (it is repeatable). Each account's outcome is its own: one that fails is reported, the next one still runs, and the command exits 4. The store is locked for the whole run, so two accounts of one store never sync at once; give an account that needs its own schedule its own `store.root`. `conflict show`, `conflict resolve` and `sync --reset` act on one account, which `-a` names when there are several. `sync --index-only` builds the store of the accounts it runs over, each store once.
-
-An account is initialized once, which opens every source so credential and network errors surface up front, then adds the account to the store, creating the store when there is none. `sync` refuses to run an account without it unless given `--init`, and `init` leaves an initialized account as it is. `sync --reset -a <account>` drops that account's collections before a run, rebuilding them as a first sync would, every other account of the store left as it was. It refuses while they hold a queued or parked action, which `sync --queue-only` applies or its frontend cancels first, and while they hold other work no server has (conflicts, unpushed edits, mail a replica keeps after the server expunged it), listing that work; `--reset --force` drops that other work with the collections. A reset is the whole account's, so it is refused beside `--dry-run`, `-m`, `-x` and `-s`.
-
-What himalaya, calendula and cardamum write is queued in the store, and only neverest applies it. A sync does so first, before reaching any server; `sync --queue-only` does it alone, offline, so a frontend reads a created item back at once, the next sync pushing it.
-
-neverest also keeps the store's search index (index.db), which the frontends query and only the store's owner builds. A sync refreshes it last, for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), and `sync --queue-only` for 2 seconds; a large first build spreads over several runs, each going on where the last stopped, or `sync --index-only` builds it whole at once. The report says how far it got under `index`; an index failure is a warning and never changes the exit code. After a reset, the next refresh drops what the account's collections held. The index reads floating times and all-day dates in your time zone, `TZ` else the system's, UTC when it has no IANA name; changing it re-expands every calendar item at the next refresh.
-
-### Conflicts
-
-A card or an event edited on both sides is merged against the base the last sync agreed on, so two people touching different fields cost nobody a decision. What no merge settles is both sides setting one field two ways: the item parks, everything else keeps syncing, and the run exits 3. A run that could not reach a source, or apply part of its work, exits 4, and the next run picks it up. Exit 1 is a failure, which `--json` prints as a failure object, and exit 2 a command line neverest refused, which `--json` prints as a failure object coded `usage-invalid`.
-
-Neverest raises no desktop notification of its own. Every run warns in the log, and `--json` carries, in each account's report, the two numbers a notifier needs: `conflicts` is what this run marked, `outstandingConflicts` what the store holds waiting for that account. Testing the first notifies on entry, once, with no state of its own to keep:
-
-```sh
-neverest sync --json | jq -e 'select(has("event") | not) | [.accounts[].report.conflicts // [] | length] | add > 0' >/dev/null \
-  && notify-send "neverest" "an item needs a decision"
-```
-
-A wrapper reading that report can name the item, its collection and its side, which a fixed summary and body could not.
-
-Before its result, `sync --json` prints its progress, one line per event, each carrying `event` (`neverest json-schema neverest-sync.events` describes them), `account-started` announcing each account, so a frontend can show how far a long run got; the result is the last line, listing each account's report under `accounts`.
-
-Deciding is a command and never a run. `conflict list` names what is waiting, `conflict show <id>` prints the three bodies, and `conflict resolve <id>` settles one, either by taking a side with `--prefer-local` or `--prefer-remote` or by handing the bodies to the merger `conflict.merger` names.
-
-A settled body has to be a body of that item, so one no parser reads and one stating another `UID` are both refused. A decision is refused when the remote moved while it was being made, and nothing here holds the store, so a sync stays free to run while a merger is open.
-
-Exit 3 is wider than conflicts: the run reconciled its collections but left something waiting for a person, be it a parked conflict, a duplicate `UID` the other side refuses, a write it would not take, a send the server refused for good, a queued action that could not be applied, a listing that left out most of a collection, or a change withheld over a body the store cannot serve. The report names which. A write that did not land is never counted, so `already in sync` means the run wrote nothing.
-
-A listing that leaves out more than half of at least 20 items a collection held drops nothing: it reads as a server answering short, and the report names it under `absences`. Once the server is known to hold no more, `sync --accept-absences` drops them, for that run only.
-
-A server that lists at most a number of the messages a folder holds (Gmail over IMAP with "Limit IMAP folders to contain no more than this many messages" set) leaves the same messages out of every listing, often fewer than half. Set `collection.capped = true` on that source: what its listings leave out is then kept and counted in the report under `unlisted`, and only a removal the server states itself deletes. Gmail's IMAP states none, so a message deleted there stays in the store while the key is set; the `gmail` backend, which lists every message, has no such limit.
-
-### Retention and backup
-
-The store never truly deletes an item: when its last binding vanishes the row is retained, hidden from the sync and from listings but kept with its body. After each sync neverest purges every retained item older than `store.purge-after`. Unset means never purge, `"0"` reproduces a terminal delete, and `sync --no-purge` skips one run.
-
-This is what turns a sync into a backup. Make the source read-only and leave `store.purge-after` unset: a remote expunge still retires the local row, but the item and its body stay in the store, restorable, and neverest never pushes a deletion back to the server.
-
-```toml
-[accounts.backup]
-imap.server = "imaps://imap.example.org:993"
-imap.item.delete = false
-imap.collection.delete = false
-```
-
-### Duplicated identities
-
-A collection may hold one identity twice: two messages carrying the same `Message-ID`, two cards the same `UID`. Neverest cannot tell such copies apart, so it syncs neither and reports every id involved, on every run until the collection holds the identity once. Which copy to keep is yours to decide.
-
-Nothing is wrong with your server: RFC 5322 binds the generator of a `Message-ID`, not what a store may hold, and a migration commonly produces such a pair. Guessing costs mail, since propagating a delete of the copy it happened to pick removes the only copy on the other source.
-
-### Coming from Maildir
-
-Neverest ships no Maildir converter, and a local file store is not a sync source: the pimdir store is the local replica. Keyword storage is not standardized across Maildir consumers, so a local migration would silently lose or mangle flags depending on which tool wrote the source tree.
-
-Initialize a fresh account and resync from the authoritative server instead: flags re-converge cleanly and the store reflects the actual server state. An existing on-disk tree is brought in through io-pimdir's conversion tooling rather than synced as a source.
 
 ## License
 

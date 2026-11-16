@@ -83,6 +83,11 @@ const SYNC_ONLY: [&str; 16] = [
 /// locked once for the whole run; one that fails is reported and the next
 /// one runs.
 ///
+/// A card or an event edited on both sides is merged against the base the
+/// last sync agreed on; one field set two ways parks the item for `conflict
+/// resolve`, and `--json` names it under each report's `conflicts`. A
+/// removed item is retained with its body until `store.purge-after`.
+///
 /// The three filter flags keep their pre-`generic-pim-sync` spellings
 /// (`--include-mailbox`, `--exclude-mailbox`, `--all-mailboxes`) as hidden
 /// aliases, so existing scripts keep working.

@@ -331,7 +331,7 @@ Upgrading from 0.3.0:
 
   A zone with no IANA name reads as UTC, with a warning. The first refresh in another zone re-expands every calendar item.
 
-- **BREAKING**: bumped io-pimdir to 0.14 (pimdir storage-draft-13, sync-draft-13, search-draft-13): a store any earlier neverest wrote, a draft-11 one included, is refused, never migrated, its message naming the rebuild, and the search index is built again by the first refresh.
+- **BREAKING**: bumped io-pimdir to 0.14.1 (pimdir storage-draft-13, sync-draft-13, search-draft-13): a store any earlier neverest wrote, a draft-11 one included, is refused, never migrated, its message naming the rebuild, and the search index is built again by the first refresh.
 
 - Changed the last page of a band round, which lists the band a widened scope lacks, to hand every handle the collection holds, as a scoped round's does (pimdir sync-draft-12): a message deleted on the server inside the band is dropped from the store, where a band round now finds nothing absent without it. IMAP sends one `UID SEARCH ALL`, Gmail lists the label's ids, and Graph reads them by a fresh delta of the folder, ids, dates and flags only, its link dropped.
 

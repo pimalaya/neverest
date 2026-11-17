@@ -38,12 +38,12 @@ pub enum SyncEvent {
         total: usize,
     },
     /// The run reached an endpoint: its first connection is open.
-    Opened {
+    EndpointOpened {
         /// The endpoint, as the account names it.
         endpoint: String,
     },
     /// An endpoint listed the collections it holds.
-    Listed {
+    EndpointListed {
         /// The endpoint, as the account names it.
         endpoint: String,
         /// How many collections it listed, filtered or not.
@@ -120,7 +120,7 @@ pub enum SyncEvent {
     /// The store holds it while the refusal stands (pimdir SYNC §5). Printed
     /// once the account's run ends, before its result, which names it again
     /// under `refusals`.
-    Refused {
+    ChangeRefused {
         /// The source that refused the change, as the account names it.
         source: String,
         /// The collection the item sits in, as the source names it.
@@ -149,13 +149,15 @@ impl SyncEvent {
         let prefix = format!("{account}/");
         let endpoints = match self {
             Self::AccountStarted { .. } => vec![],
-            Self::Opened { endpoint } | Self::Listed { endpoint, .. } => vec![endpoint],
+            Self::EndpointOpened { endpoint } | Self::EndpointListed { endpoint, .. } => {
+                vec![endpoint]
+            }
             Self::CollectionStarted { source, target, .. }
             | Self::CollectionProgressed { source, target, .. }
             | Self::CollectionFinished { source, target, .. } => vec![source, target],
             Self::ScanProgressed { source, .. }
             | Self::DownloadProgressed { source, .. }
-            | Self::Refused { source, .. } => {
+            | Self::ChangeRefused { source, .. } => {
                 vec![source]
             }
         };
@@ -176,8 +178,8 @@ impl fmt::Display for SyncEvent {
                 position,
                 total,
             } => writeln!(f, "[{position}/{total}] Syncing account {account}"),
-            Self::Opened { endpoint } => writeln!(f, "Opened {endpoint}"),
-            Self::Listed {
+            Self::EndpointOpened { endpoint } => writeln!(f, "Opened {endpoint}"),
+            Self::EndpointListed {
                 endpoint,
                 collections,
             } => writeln!(f, "Listed {collections} collection(s) on {endpoint}"),
@@ -214,7 +216,7 @@ impl fmt::Display for SyncEvent {
                 done,
                 total,
             } => writeln!(f, "Downloading {source} ({done}/{total})"),
-            Self::Refused {
+            Self::ChangeRefused {
                 source,
                 collection,
                 id,
@@ -271,7 +273,7 @@ mod tests {
     /// source as the account names it, under the kebab-case `refused`.
     #[test]
     fn a_refusal_is_an_event_named_as_its_row() {
-        let mut event = SyncEvent::Refused {
+        let mut event = SyncEvent::ChangeRefused {
             source: "work/msgraph".into(),
             collection: "Archive".into(),
             id: "m1@x".into(),
@@ -282,7 +284,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&event).unwrap(),
             json!({
-                "event": "refused",
+                "event": "change-refused",
                 "source": "msgraph",
                 "collection": "Archive",
                 "id": "m1@x",

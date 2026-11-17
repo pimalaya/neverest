@@ -362,7 +362,7 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
         "the second holder is bound, not minted a key of its own; report was:\n{report}",
     );
     assert!(
-        none(&report, "refused") && none(&report, "rejected"),
+        none(&report, "duplicates") && none(&report, "rejected"),
         "neither endpoint is asked to take a card it already holds; report was:\n{report}",
     );
 

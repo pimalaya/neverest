@@ -141,7 +141,7 @@ pub struct SyncOutput {
     ///
     /// Re-reported by every run until that side stops holding the identity
     /// twice (counted as warnings).
-    pub refused: Vec<RefusedDuplicate>,
+    pub duplicates: Vec<RefusedDuplicate>,
     /// Writes a remote refused, so the change stayed in the store.
     ///
     /// Re-tried and re-reported by every run until it lands or an operator
@@ -252,7 +252,7 @@ impl SyncOutput {
             purged: _,
             conflicts,
             outstanding_conflicts: _,
-            refused,
+            duplicates,
             rejected,
             refusals,
             unreached,
@@ -281,7 +281,7 @@ impl SyncOutput {
         self.submitted.extend(submitted);
         self.intents.extend(intents);
         self.conflicts.extend(conflicts);
-        self.refused.extend(refused);
+        self.duplicates.extend(duplicates);
         self.rejected.extend(rejected);
         self.refusals.extend(refusals);
         self.unreached.extend(unreached);
@@ -316,7 +316,7 @@ impl SyncOutput {
         endpoints.extend(self.forbidden.iter_mut().map(|f| &mut f.side));
         endpoints.extend(self.intents.iter_mut().map(|i| &mut i.source));
         endpoints.extend(self.conflicts.iter_mut().map(|c| &mut c.side));
-        endpoints.extend(self.refused.iter_mut().map(|r| &mut r.side));
+        endpoints.extend(self.duplicates.iter_mut().map(|r| &mut r.side));
         endpoints.extend(self.rejected.iter_mut().map(|r| &mut r.side));
         endpoints.extend(self.refusals.iter_mut().map(|r| &mut r.side));
         endpoints.extend(self.unreached.iter_mut().map(|u| &mut u.endpoint));
@@ -364,7 +364,7 @@ impl SyncOutput {
         self.outstanding_conflicts > 0
             || !self.absences.is_empty()
             || !self.unreadable.is_empty()
-            || !self.refused.is_empty()
+            || !self.duplicates.is_empty()
             || !self.rejected.is_empty()
             || !self.refusals.is_empty()
             || !self.parked.is_empty()
@@ -586,7 +586,7 @@ pub struct ForbiddenWrites {
     pub collection: String,
     /// The action its configuration forbids: `create`, `update`, `delete`
     /// or `set-flags`.
-    pub action: String,
+    pub kind: String,
     /// How many writes it held back.
     pub count: usize,
 }
@@ -596,12 +596,12 @@ impl fmt::Display for ForbiddenWrites {
         let Self {
             side,
             collection,
-            action,
+            kind,
             count,
         } = self;
         write!(
             f,
-            "{count} {action} write(s) to {collection} on {side} held back, its configuration forbids them"
+            "{count} {kind} write(s) to {collection} on {side} held back, its configuration forbids them"
         )
     }
 }
@@ -758,7 +758,7 @@ pub struct CollectionCoverage {
     pub until: Option<String>,
     /// When that round closed; `null` while none ever did, the source
     /// holding no complete listing of the collection yet.
-    pub at: Option<String>,
+    pub closed_at: Option<String>,
     /// The round still open, which the next run resumes.
     pub round: Option<OpenRound>,
 }
@@ -770,7 +770,7 @@ impl fmt::Display for CollectionCoverage {
             collection,
             since,
             until,
-            at,
+            closed_at,
             round,
         } = self;
         let span = |since: &Option<String>, until: &Option<String>| match (since, until) {
@@ -781,7 +781,7 @@ impl fmt::Display for CollectionCoverage {
         };
 
         write!(f, "{source} {collection}: ")?;
-        match at {
+        match closed_at {
             Some(at) => write!(f, "{} as of {at}", span(since, until))?,
             None => write!(f, "never listed whole")?,
         }
@@ -941,7 +941,7 @@ pub struct RejectedWrite {
     pub collection: String,
     /// What the run tried: `update`, `append`, `copy`, `delete`, `move`,
     /// `set-flags`.
-    pub action: String,
+    pub kind: String,
     /// The item error: the item's handle on that side as `id`, then the
     /// refusal's code, outermost message and causes (the backend's reason).
     #[serde(flatten)]
@@ -953,14 +953,14 @@ impl fmt::Display for RejectedWrite {
         let Self {
             side,
             collection,
-            action,
+            kind,
             failure,
         } = self;
         let id = failure.id.as_deref().unwrap_or_default();
         let error = chain(&failure.error, &failure.sources);
         write!(
             f,
-            "{side} refused the {action} of {id} in {collection}, so it stays in the store: {error}"
+            "{side} refused the {kind} of {id} in {collection}, so it stays in the store: {error}"
         )
     }
 }
@@ -1357,7 +1357,7 @@ impl fmt::Display for SyncOutput {
         let warnings = self.collisions.len()
             + self.parked.len()
             + self.conflicts.len()
-            + self.refused.len()
+            + self.duplicates.len()
             + self.rejected.len()
             + self.refusals.len()
             + self.absences.len()
@@ -1476,7 +1476,7 @@ impl fmt::Display for SyncOutput {
             for c in &self.conflicts {
                 writeln!(f, " - {c}")?;
             }
-            for r in &self.refused {
+            for r in &self.duplicates {
                 writeln!(f, " - {r}")?;
             }
             for r in &self.rejected {

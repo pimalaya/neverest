@@ -47,7 +47,10 @@ fn a_delta_head_shows_what_changed_while_a_round_is_open() {
 
     let report = sync(&open.config, open.account, &open.env, &[]);
     let coverage = coverage_of(&report, &open.mailbox);
-    assert!(coverage["at"].is_string(), "the round closed: {coverage}");
+    assert!(
+        coverage["closedAt"].is_string(),
+        "the round closed: {coverage}"
+    );
     assert!(coverage["round"].is_null());
     let markers = stored(&open.store, &open.collection);
     assert!(
@@ -85,7 +88,10 @@ fn a_band_head_shows_what_arrived_while_a_round_is_open() {
 
     let report = sync(&open.config, open.account, &open.env, &[]);
     let coverage = coverage_of(&report, &open.mailbox);
-    assert!(coverage["at"].is_string(), "the round closed: {coverage}");
+    assert!(
+        coverage["closedAt"].is_string(),
+        "the round closed: {coverage}"
+    );
     assert!(coverage["round"].is_null());
     let markers = stored(&open.store, &open.collection);
     assert!(

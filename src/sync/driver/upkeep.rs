@@ -35,7 +35,7 @@ pub(super) fn report_coverage(
             collection: display_name(&ctx.namespace, collection).to_owned(),
             since,
             until,
-            at,
+            closed_at: at,
             round: row.round.map(|round| OpenRound {
                 since: round.scope.since,
                 until: round.scope.until,

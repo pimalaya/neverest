@@ -79,7 +79,7 @@ fn a_scope_lists_by_date_widens_and_never_deletes_what_it_leaves() {
     let coverage = coverage_of(&report, &mailbox);
     let floor = coverage["since"].as_str().expect("a scoped coverage");
     assert!(floor.ends_with("T00:00:00Z"), "the floor is a day: {floor}");
-    assert!(coverage["at"].is_string(), "the round closed");
+    assert!(coverage["closedAt"].is_string(), "the round closed");
     assert!(coverage["round"].is_null());
     assert!(
         report["downloaded"]
@@ -194,7 +194,10 @@ fn an_interrupted_round_resumes_and_lands_every_message_once() {
 
     let report = sync(&config, "paged", &[]);
     let coverage = coverage_of(&report, &mailbox);
-    assert!(coverage["at"].is_string(), "the round closed: {coverage}");
+    assert!(
+        coverage["closedAt"].is_string(),
+        "the round closed: {coverage}"
+    );
     assert!(coverage["round"].is_null());
     assert_eq!(
         round_state(&store, &collection),

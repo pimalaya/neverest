@@ -172,7 +172,7 @@ pub(super) fn relay_copies(
                 report.rejected.push(RejectedWrite {
                     side: target_name,
                     collection: wire.clone(),
-                    action: String::from("append"),
+                    kind: String::from("append"),
                     failure: ItemError::new(Some(&target.link), &err),
                 });
                 continue;

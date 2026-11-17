@@ -180,7 +180,7 @@ fn report_forbidden(
         report.forbidden.push(ForbiddenWrites {
             side: ctx.name.clone(),
             collection: collection.to_string(),
-            action: action.to_string(),
+            kind: action.to_string(),
             count,
         });
     }
@@ -618,7 +618,7 @@ pub(super) fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &
             continue;
         }
 
-        report.refused.push(RefusedDuplicate {
+        report.duplicates.push(RefusedDuplicate {
             side: side.to_string(),
             collection: refused.collection,
             uid: refused.uid,
@@ -656,7 +656,7 @@ pub(super) fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: 
         report.rejected.push(RejectedWrite {
             side: side.to_string(),
             collection: rejected.collection,
-            action: rejected.action.to_string(),
+            kind: rejected.action.to_string(),
             failure: ItemError {
                 id: Some(id),
                 code,

@@ -415,7 +415,7 @@ impl SyncCommand {
                     Ok(mut report) => {
                         report.interrupted = crate::sync::stopping();
                         for refused in &report.refusals {
-                            progress.emit(|| SyncEvent::Refused {
+                            progress.emit(|| SyncEvent::ChangeRefused {
                                 source: refused.side.clone(),
                                 collection: refused.collection.clone(),
                                 id: refused.id.clone(),

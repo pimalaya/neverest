@@ -279,7 +279,7 @@ mod tests {
             collection: String::from("INBOX"),
             since: Some(String::from("2026-09-07T00:00:00Z")),
             until: None,
-            at: Some(String::from("2026-10-07T10:00:00Z")),
+            closed_at: Some(String::from("2026-10-07T10:00:00Z")),
             round: None,
         });
         report.downloaded.push(SourceDownload {
@@ -296,7 +296,7 @@ mod tests {
                 "collection": "INBOX",
                 "since": "2026-09-07T00:00:00Z",
                 "until": null,
-                "at": "2026-10-07T10:00:00Z",
+                "closedAt": "2026-10-07T10:00:00Z",
                 "round": null,
             }])
         );
@@ -335,7 +335,7 @@ mod tests {
             collection: String::from(collection),
             since: None,
             until: None,
-            at: None,
+            closed_at: None,
             round: Some(OpenRound {
                 since: None,
                 until: None,

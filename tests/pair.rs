@@ -192,7 +192,7 @@ fn writes_a_target_s_rights_forbid_are_reported_held_never_applied() {
             .iter()
             .map(|row| {
                 assert_eq!(row["side"], "dst", "{report}");
-                let action = row["action"].as_str().unwrap().to_string();
+                let action = row["kind"].as_str().unwrap().to_string();
                 (action, row["count"].as_u64().unwrap())
             })
             .collect();

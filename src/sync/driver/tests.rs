@@ -3779,7 +3779,7 @@ fn a_refused_write_keeps_its_code_and_causes() {
             "side": "dav",
             "collection": "Default",
             "id": "card1",
-            "action": "update",
+            "kind": "update",
             "code": "permission-denied",
             "error": "Cannot update card1 in Default",
             "sources": ["WebDAV server returned HTTP 403"],
@@ -4660,7 +4660,7 @@ fn a_duplicated_identity_is_two_items_and_no_warning() {
 
     let json = serde_json::to_value(&report).unwrap();
     assert!(json.get("ambiguous").is_none(), "{json}");
-    assert_eq!(json["refused"], serde_json::json!([]), "{json}");
+    assert_eq!(json["duplicates"], serde_json::json!([]), "{json}");
 }
 
 /// A target refusing the second copy is the one thing worth a line.
@@ -4681,8 +4681,8 @@ fn a_refused_duplicate_is_named_with_its_uid() {
     };
     itemize_refused("right", refused, &mut report);
 
-    assert_eq!(report.refused.len(), 1);
-    assert_eq!(report.refused[0].side, "right");
+    assert_eq!(report.duplicates.len(), 1);
+    assert_eq!(report.duplicates[0].side, "right");
 
     let text = report.to_string();
     assert!(text.contains("Warnings (1)"), "{text}");
@@ -4690,9 +4690,9 @@ fn a_refused_duplicate_is_named_with_its_uid() {
     assert!(text.contains("event-1@google.com"), "{text}");
 
     let json = serde_json::to_value(&report).unwrap();
-    assert_eq!(json["refused"][0]["side"], "right");
-    assert_eq!(json["refused"][0]["collection"], "agenda");
-    assert_eq!(json["refused"][0]["uid"], "event-1@google.com");
+    assert_eq!(json["duplicates"][0]["side"], "right");
+    assert_eq!(json["duplicates"][0]["collection"], "agenda");
+    assert_eq!(json["duplicates"][0]["uid"], "event-1@google.com");
 }
 
 /// A refusal is reported once however many passes met it.
@@ -4720,7 +4720,7 @@ fn a_refusal_re_observed_on_a_later_pass_is_still_one_refusal() {
     );
 
     assert_eq!(
-        report.refused.len(),
+        report.duplicates.len(),
         2,
         "one line per copy, however many passes met the same answer",
     );
@@ -5154,7 +5154,7 @@ fn a_refused_relay_is_reported_and_the_next_message_relayed() {
     assert_eq!(relayed, 1);
     assert_eq!(report.item_patch.len(), 1);
     assert_eq!(report.rejected.len(), 1, "{:?}", report.rejected);
-    assert_eq!(report.rejected[0].action, "append");
+    assert_eq!(report.rejected[0].kind, "append");
     assert_eq!(report.rejected[0].side, "right");
     assert_eq!(Exit::from(&report), Exit::Conflicted);
 }
@@ -5712,7 +5712,7 @@ fn one_identity_under_two_hrefs_mirrors_as_two_items_and_settles() {
             .map(|e| e.hunk.to_string())
             .collect::<Vec<_>>(),
     );
-    assert!(second.refused.is_empty());
+    assert!(second.duplicates.is_empty());
     assert_eq!(
         remote.fetched.len(),
         2,

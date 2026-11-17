@@ -106,7 +106,7 @@ pub(super) fn run_local(
         .map(|_| open_store(work_dir, &source, account_name))
         .collect::<Result<_>>()?;
     let blobs = stores[0].blob_stage();
-    progress.emit(|| SyncEvent::Opened {
+    progress.emit(|| SyncEvent::EndpointOpened {
         endpoint: source.clone(),
     });
 
@@ -141,7 +141,7 @@ pub(super) fn run_local(
         .iter()
         .map(|collection| (collection.id.clone(), collection.name.clone()))
         .collect();
-    progress.emit(|| SyncEvent::Listed {
+    progress.emit(|| SyncEvent::EndpointListed {
         endpoint: source.clone(),
         collections: collections.len(),
     });

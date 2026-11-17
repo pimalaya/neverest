@@ -241,7 +241,7 @@ impl OpenPair {
         let mut right = side(run, &namespace, &right_name, &right_config, right_authority)
             .with_context(|| Unreached::new(&right_name, format!("Open target {right_name}")))?;
         for endpoint in [&left_name, &right_name] {
-            run.progress.emit(|| SyncEvent::Opened {
+            run.progress.emit(|| SyncEvent::EndpointOpened {
                 endpoint: endpoint.clone(),
             });
         }
@@ -317,7 +317,7 @@ impl OpenPair {
             (&left_name, &left_collections),
             (&right_name, &right_collections),
         ] {
-            run.progress.emit(|| SyncEvent::Listed {
+            run.progress.emit(|| SyncEvent::EndpointListed {
                 endpoint: endpoint.clone(),
                 collections: listed.len(),
             });

@@ -262,6 +262,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Fixed the conflict auto-merge counting another app's parked row as its own and leaving the account's other applied rows unreported.
 
+- Fixed a floating recurring event queued on Google or Graph keeping a floating `UNTIL` beside its anchored start: the bound is written in UTC.
+
 - Fixed RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387 by bumping crypto-bigint, ctutils, rustls-webpki and webpki-root-certs.
 
 ## [0.3.0] - 2026-10-02

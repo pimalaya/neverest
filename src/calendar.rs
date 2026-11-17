@@ -240,6 +240,18 @@ pub fn anchor_floating(ical: &[u8], zone: Option<&str>) -> Result<Vec<u8>> {
             continue;
         }
 
+        let floating_start = event.items.iter().any(|item| {
+            is_floating(item)
+                && matches!(item, IcalItem::Prop(line) if line.name.get().eq_ignore_ascii_case("DTSTART"))
+        });
+        if floating_start {
+            for item in &mut event.items {
+                if let IcalItem::Prop(line) = item {
+                    anchor_until(line, zone);
+                }
+            }
+        }
+
         for item in &mut event.items {
             if !is_floating(item) {
                 continue;
@@ -267,6 +279,47 @@ pub fn anchor_floating(ical: &[u8], zone: Option<&str>) -> Result<Vec<u8>> {
     }
 
     Ok(calendar.to_bytes())
+}
+
+/// Rewrites the floating `UNTIL` of a recurrence rule as the UTC instant its
+/// wall time names in `zone`, UTC when `None`.
+///
+/// A series anchored in a zone must bound its rule in UTC (RFC 5545 §3.3.10):
+/// left floating, a provider refuses the rule or reads it in another zone.
+fn anchor_until(line: &mut IcalLine<'_>, zone: Option<&str>) {
+    let name = line.name.get();
+    if !name.eq_ignore_ascii_case("RRULE") && !name.eq_ignore_ascii_case("EXRULE") {
+        return;
+    }
+
+    let raw = line.raw_value_str().into_owned();
+    let Some((index, wall)) = raw.split(';').enumerate().find_map(|(index, part)| {
+        let (key, value) = part.split_once('=')?;
+        let value = value.trim();
+        (key.trim().eq_ignore_ascii_case("UNTIL") && is_wall_time(value))
+            .then(|| (index, value.to_owned()))
+    }) else {
+        return;
+    };
+
+    let Ok(wall) = DateTime::strptime("%Y%m%dT%H%M%S", &wall) else {
+        return;
+    };
+    let tz = match zone {
+        Some(zone) => match TimeZone::get(zone) {
+            Ok(tz) => tz,
+            Err(_) => return,
+        },
+        None => TimeZone::UTC,
+    };
+    let Ok(zoned) = wall.to_zoned_datetime(tz) else {
+        return;
+    };
+    let until = zoned
+        .timestamp()
+        .strftime("UNTIL=%Y%m%dT%H%M%SZ")
+        .to_string();
+    line.value.set_component(index, &[until]);
 }
 
 /// The events of a calendar.
@@ -491,6 +544,32 @@ mod tests {
             "{anchored}"
         );
         assert!(!has_floating(anchored.as_bytes()).unwrap());
+    }
+
+    /// A floating series anchored in a zone bounds its rule in UTC, the
+    /// wall time of its `UNTIL` read in that zone (RFC 5545 §3.3.10).
+    ///
+    /// Left floating beside a `TZID` start, the rule is invalid.
+    #[test]
+    fn a_floating_series_bounds_its_rule_in_utc() {
+        let series = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:s1\r\n\
+                      DTSTAMP:20261115T120000Z\r\nDTSTART:20261126T100000\r\n\
+                      RRULE:FREQ=WEEKLY;BYDAY=TH,FR;UNTIL=20261231T100000\r\n\
+                      END:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        let anchored = anchor_floating(series.as_bytes(), Some("Europe/Paris")).unwrap();
+        let anchored = String::from_utf8(anchored).unwrap();
+        assert!(
+            anchored.contains("RRULE:FREQ=WEEKLY;BYDAY=TH,FR;UNTIL=20261231T090000Z\r\n"),
+            "{anchored}"
+        );
+
+        let anchored = anchor_floating(series.as_bytes(), None).unwrap();
+        let anchored = String::from_utf8(anchored).unwrap();
+        assert!(
+            anchored.contains("RRULE:FREQ=WEEKLY;BYDAY=TH,FR;UNTIL=20261231T100000Z\r\n"),
+            "{anchored}"
+        );
     }
 
     #[test]

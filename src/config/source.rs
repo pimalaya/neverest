@@ -232,7 +232,17 @@ impl SourceConfig {
     source_ref_accessor!(collection, CollectionSourceConfig);
     source_accessor!(flag, FlagSourcePermissions);
     source_accessor!(item, ItemSourcePermissions);
-    source_accessor!(pool_size, Option<usize>);
+
+    /// The connection pool size a Graph domain sets, `None` elsewhere: only
+    /// Graph reads one, IMAP taking the account's `connections`.
+    pub fn pool_size(&self) -> Option<usize> {
+        match &self.backend {
+            SourceBackendConfig::Msgraph(c)
+            | SourceBackendConfig::MsgraphContacts(c)
+            | SourceBackendConfig::MsgraphCalendar(c) => c.pool_size,
+            _ => None,
+        }
+    }
 
     /// Whether this source is the IMAP backend.
     pub fn is_imap(&self) -> bool {

@@ -24,7 +24,7 @@
 )]
 
 /// Splices the per-source shared fields (`collection`, `flag`, `item`,
-/// `pool_size`) onto every protocol-specific config struct.
+/// `proxy`) onto every protocol-specific config struct.
 ///
 /// The old `mailbox` and `message` spellings of `collection` and `item`
 /// are refused by name.
@@ -54,9 +54,6 @@ macro_rules! source_config {
             /// Which item mutations may be pushed to this source.
             #[serde(default, skip_serializing_if = "crate::config::is_default")]
             pub item: $crate::config::permissions::ItemSourcePermissions,
-            /// Connection pool size override; the default is per backend.
-            #[serde(default, skip_serializing_if = "Option::is_none")]
-            pub pool_size: Option<usize>,
             /// The proxy this source's connections go through.
             ///
             /// Falls back to the account's, then to the `all_proxy` and
@@ -1395,6 +1392,10 @@ mod tests {
             (
                 "sources.a.msgraph.auth.token.raw = \"tok\"\nsources.a.msgraph.mail = true\n\
                  sources.a.msgraph.pool-size = 2",
+                "unknown field `pool-size`",
+            ),
+            (
+                "imap.server = \"imap.example.org\"\nimap.pool-size = 2",
                 "unknown field `pool-size`",
             ),
             (

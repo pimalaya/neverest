@@ -44,6 +44,9 @@ source_config! {
         pub alpn: Vec<String>,
         /// How the Graph session authenticates.
         pub auth: MsgraphAuthConfig,
+        /// The domain's connection pool size, its `pool-size`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub pool_size: Option<usize>,
     }
 }
 

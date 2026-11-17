@@ -21,7 +21,6 @@
 #imap.sasl-ir = false			# inline the credentials, unset following SASL-IR, false for Coremail
 #imap.id.auto = false			# send ID once signed in, as QQ Mail and Fastmail want
 #imap.id.fields.name = true		# what ID sends: true neverest's value, false NIL
-#imap.pool-size = 8			# narrow the pool below a server's LIMIT
 
 #imap.sasl.plain.username = "alice@example.org"	# PLAIN; login and scram-sha-256 take the same keys
 #imap.sasl.plain.password.command = "exit 127"	# prints the password
@@ -74,7 +73,7 @@
 # Microsoft Graph, one session for its domains, each a source
 #msgraph.user-id = "me"				# the mailbox owner [bob@example.org]
 #msgraph.auth.token.command = "exit 127"	# prints an OAuth 2.0 access token with each domain's scope
-#msgraph.mail = true				# the mail folders, or a table of the sync keys
+#msgraph.mail = true				# the mail folders, or a table of the sync keys and pool-size
 #msgraph.contact = true				# the contact folders, scope Contacts.ReadWrite
 #msgraph.calendar = true			# the calendars, scope Calendars.ReadWrite
 

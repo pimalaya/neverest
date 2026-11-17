@@ -1,7 +1,8 @@
 //! # Notices
 //!
-//! The plain lines a text-mode command prints on stderr as it works, one a
-//! step, none under `--json`, whose events and result say the same.
+//! The plain lines a text-mode command prints on stdout as it works, one a
+//! step, before its result, none under `--json`, whose events say the same.
+//! stderr is left to the logs.
 
 use std::{
     fmt,
@@ -23,11 +24,13 @@ pub fn printing() -> bool {
     !SILENT.load(Ordering::Relaxed)
 }
 
-/// Prints `line` on stderr unless [`silence`]d; a line that cannot be
-/// printed stops nothing.
+/// Prints `line` on stdout unless [`silence`]d, flushed so a pipe reads it
+/// as it comes; a line that cannot be printed stops nothing.
 pub fn print(line: impl fmt::Display) {
     if printing() {
         let line = terminal::text(&line.to_string());
-        let _ = writeln!(io::stderr().lock(), "{line}");
+        let mut stdout = io::stdout().lock();
+        let _ = writeln!(stdout, "{line}");
+        let _ = stdout.flush();
     }
 }

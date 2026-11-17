@@ -247,12 +247,12 @@ fn a_run_covers_every_account_and_reports_each_apart() {
     assert_eq!(started[0]["total"], 2);
 }
 
-/// Text mode prints the run's progress as plain lines on stderr.
+/// Text mode prints the run's progress as plain lines on stdout, before
+/// its result, piped or not.
 ///
-/// No escape sequence, stdout left to the result; `--json` prints no such
-/// line.
+/// No escape sequence, stderr left to the logs; `--json` prints no such line.
 #[test]
-fn a_text_run_prints_plain_lines_on_stderr() {
+fn a_text_run_prints_plain_lines_on_stdout() {
     let _serial = serialized();
     let fixture = Fixture::new(&["work"], closed_port());
     fixture.initialized(&["work"]);
@@ -263,12 +263,15 @@ fn a_text_run_prints_plain_lines_on_stderr() {
 
     assert!(!stderr.contains('\x1b'), "{stderr:?}");
     assert!(!stdout.contains('\x1b'), "{stdout:?}");
-    assert!(stderr.contains("[1/1] Syncing account work\n"), "{stderr}");
-    assert!(!stdout.contains("Syncing account"), "{stdout}");
+    let progress = stdout.find("[1/1] Syncing account work\n");
+    let result = stdout.find("Account work");
+    assert!(progress.is_some(), "{stdout}");
+    assert!(progress < result, "the progress comes first: {stdout}");
+    assert!(!stderr.contains("Syncing account"), "{stderr}");
 
     let output = fixture.run(&["--json", "--log-level", "off", "sync"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!stderr.contains("Syncing account"), "{stderr}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("Syncing account"), "{stdout}");
 }
 
 /// Stores an earlier neverest kept per account are refused up front.

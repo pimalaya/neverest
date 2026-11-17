@@ -135,9 +135,9 @@ fn a_failed_check_prints_its_report_and_exits_3() {
     assert!(!stderr.contains("Source imap failed"), "{stderr}");
 
     let output = run(home.path(), &["-c", &config, "check"]);
-    let stderr = text(&output.stderr);
-    assert!(stderr.contains("Source imap failed ("), "{stderr}");
-    assert!(!stderr.contains('\u{1b}'), "{stderr}");
+    let stdout = text(&output.stdout);
+    assert!(stdout.contains("Source imap failed ("), "{stdout}");
+    assert!(!stdout.contains('\u{1b}'), "{stdout}");
 }
 
 /// An account `init` could not open carries its failure as every row does.

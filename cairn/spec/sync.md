@@ -553,18 +553,18 @@ A read-only source (`<protocol>.item.delete = false`, `collection.delete = false
 The backend-neutral enumeration seam SHALL carry the incremental-sync cursor as opaque checkpoint bytes and string member handles: the IMAP adapter encodes its `(UIDVALIDITY, HIGHESTMODSEQ)` pair, the Graph adapter its delta link, and the engine stores whichever bytes the source produced. (Supersedes the IMAP-shaped `(u32, u64)` cursor on the shared seam; the QRESYNC behaviour itself is unchanged and stays specified under "IMAP enumeration is incremental".)
 
 ### Requirement: Text mode prints plain lines
-In text mode a command SHALL print where it is as plain lines on stderr, one a step, never per item: no colour, no `\r`, no cursor move, no spinner, and no dependency drawing one (D4 of the-v1-review). stdout SHALL keep only the result. Under `--json` no such line SHALL be printed, the events and the result saying the same. `check`, `init` and the credential resolution SHALL print one line per step (`Checked source imap (3 collections)`, `Source imap failed (…)`, `Initialized imap of account work`, `Created the store`, `Resolved credentials`).
+In text mode a command SHALL print where it is as plain lines on stdout, one a step, never per item, each flushed as it comes, then its result: no colour, no `\r`, no cursor move, no spinner, and no dependency drawing one (D4 of the-v1-review). Text mode is read by a person, so the progress and the result share stdout, as pimalaya-cli's output spec asks of a long-lived command, and stderr stays the logs'; a script reads `--json`, whose last line is the result alone (owner, 2026-11-17, closing N6). Under `--json` no such line SHALL be printed, the events and the result saying the same. `check`, `init` and the credential resolution SHALL print one line per step (`Checked source imap (3 collections)`, `Source imap failed (…)`, `Initialized imap of account work`, `Created the store`, `Resolved credentials`).
 
 Every text a command prints, result, notice or failure, SHALL pass through pimalaya-cli's sanitizer line by line, its line breaks and tabs kept: it holds what servers and other clients wrote (collection names, ids, flags, bodies, refusal reasons), and a control or bidi character there could drive the terminal or reorder what a person reads. Under `--json` every string SHALL stay exact.
 
 #### Scenario: A text-mode sync
 - GIVEN an initialized account `work`
 - WHEN `neverest sync` runs without `--json`
-- THEN stderr holds `[1/1] Syncing account work` and no escape byte, and stdout holds the result alone
+- THEN stdout holds `[1/1] Syncing account work`, then the result, and no escape byte, and stderr holds no progress line
 
-#### Scenario: A check with a source down, its stderr in a file
+#### Scenario: A check with a source down, its output in a file
 - **GIVEN** an account whose IMAP source points at a closed port
-- **WHEN** `neverest check 2>file` runs
+- **WHEN** `neverest check >file` runs
 - **THEN** the file reads `✗ Source imap failed (…)`, with no escape sequence
 
 ### Requirement: IMAP enumeration is incremental (QRESYNC)
@@ -1264,7 +1264,7 @@ Every such output type SHALL be registered in the schema registry under its invo
 ### Requirement: A sync prints its progress as events
 Under `--json`, `neverest sync` SHALL print its progress as events before its result, one line each, each an object carrying `event`: `account-started` (`account`, `position`, `total`) before each account the run covers, the events after it being that account's; `endpoint-opened` (`endpoint`) once an endpoint's first connection is open, `endpoint-listed` (`endpoint`, `collections`) once it listed its collections; for a pair, `collection-started` (`source`, `target`, `collection`, `position`, `total`), `collection-progressed` (`source`, `target`, `collection`, `done`, `total`) and `collection-finished` (`source`, `target`, `collection`, then `code`, `error` and `sources` as an item error carries them, `code` and `error` `null` and `sources` `[]` unless the collection stopped short); for a source with no target, `scan-progressed` and `download-progressed` (`source`, `done`, `total`), each printed as its phase starts; and `change-refused` (`source`, `collection`, `id`, `reason`), one for each row of the account's `refusals`, printed once the account's run ends. An endpoint SHALL be named as its account names it. A progress count SHALL be printed at most once per percent of its total, a new count of a collection's next phase starting again. Events SHALL report progress and the refusals: everything the run did or left SHALL stay in the result, the last line. The events SHALL be registered as `neverest-sync.events`.
 
-Text mode SHALL print the same events, each as one plain line on stderr, leaving out `collection-progressed` and every `download-progressed` but the first and the last, so a collection reads at most as its start and its end. `sync` SHALL print through pimalaya-cli's streaming printer, as carillon's `watch` does, so an event it prints reaches a pipe as it comes.
+Text mode SHALL print the same events, each as one plain line on stdout before the result, leaving out `collection-progressed` and every `download-progressed` but the first and the last, so a collection reads at most as its start and its end. `sync` SHALL print through pimalaya-cli's streaming printer, as carillon's `watch` does, so an event it prints reaches a pipe as it comes.
 
 #### Scenario: A frontend follows a long download
 - GIVEN an account with no target whose store owes 2 bodies

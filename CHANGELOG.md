@@ -98,6 +98,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Changed
 
+- **BREAKING**: Changed text-mode progress lines to print on stdout before the result, as pimalaya-cli asks of a long-lived command, stderr staying the logs'. Scripts read `--json`, whose last line is the result.
+
 - Changed a CardDAV or CalDAV table with no `auth` to load as `auth = "none"`, a 401 then saying no `auth` is configured.
 
 - **BREAKING**: Changed a configured host that is not ASCII into a load error naming its Punycode form (`xn--...`), as in every Pimalaya binary; the Unicode IDNA crates left the build.

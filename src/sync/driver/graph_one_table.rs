@@ -233,7 +233,7 @@ fn the_one_graph_table_finds_what_the_three_tables_synced() {
         r#"
             msgraph.auth.token.raw = "token"
             msgraph.mail = true
-            msgraph.contacts = true
+            msgraph.contact = true
             msgraph.calendar = true
             "#,
     )

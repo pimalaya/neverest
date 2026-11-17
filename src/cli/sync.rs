@@ -272,7 +272,7 @@ pub struct SyncCommand {
     pub intents_only: bool,
     /// Sync mail dated since then only, for this run: a duration back from
     /// today (`30d`, `12w`, `6mo`, `1y`), a date (`2026-01-01`) or an RFC 3339
-    /// instant. Overrides the account's `item.filter.since`; refused on an
+    /// instant. Overrides the account's `mail.filter.since`; refused on an
     /// account syncing contacts or calendars. Mail older than it is neither
     /// listed nor deleted.
     #[arg(long, value_name = "WHEN")]

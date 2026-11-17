@@ -11,7 +11,7 @@ Not started: scheduled after the next major release (owner, 2026-11-15). The sta
 
 - [ ] J1: a mailbox is keyed by its name path (check a name holding a `/` on Fastmail and Stalwart first).
 - [ ] J2: a delete from an email's last mailbox destroys it.
-- [ ] J3: one `jmap` table with domains (`jmap.mail`, `jmap.contacts`, `jmap.calendar`), the shape Graph took in neverest abb2a95 (2026-11-15); the keys now directly in `jmap` move under `jmap.mail`, the old spellings refused by name.
+- [ ] J3: one `jmap` table with domains (`jmap.mail`, `jmap.contact`, `jmap.calendar`), the shape Graph took in neverest abb2a95 (2026-11-15); the keys now directly in `jmap` move under `jmap.mail`, the old spellings refused by name.
 - [ ] J4: a contact write carries `ifInState`, one delta and one retry on `stateMismatch`.
 - [ ] J5: ship on the whole `headers` list, move to the one-header property when io-jmap has it.
 - [ ] Re-read every fact of the proposal against the tree of the day: io-jmap's version, the seam of src/client.rs, the Android connector.
@@ -52,9 +52,9 @@ Not started: scheduled after the next major release (owner, 2026-11-15). The sta
 - [ ] A JMAP endpoint and an IMAP endpoint of one Stalwart account in one store: the folders pair, a message is one item.
 - [ ] A live suite on Fastmail, read-only (the account is pull-only): session, listing, one full round, one delta.
 
-## 5. Contacts (`jmap.contacts`, source `jmap-contacts`)
+## 5. Contacts (`jmap.contact`, source `jmap-contacts`)
 
-- [ ] The `jmap.contacts` domain and its sugar (source `jmap-contacts`), the session shared with `jmap.mail`, kind `text/vcard`.
+- [ ] The `jmap.contact` domain and its sugar (source `jmap-contacts`), the session shared with `jmap.mail`, kind `text/vcard`.
 - [ ] Collections from `AddressBook/get`, items from `ContactCard/query` and `ContactCard/changes`, the vCard through io-jmap's `vcard` feature, the revision a hash of the card's JSON.
 - [ ] Writes through `ContactCard/set` with `ifInState` (J4); the three-way merge of a refused edit on the next run.
 - [ ] Tests: fake server, Stalwart, Fastmail read-only.

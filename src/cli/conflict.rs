@@ -10,6 +10,7 @@ use clap::{ArgGroup, Parser, Subcommand};
 use io_pimdir::client::reader::PimdirReader;
 use log::warn;
 use pimalaya_cli::printer::Printer;
+use pimalaya_config::command::CommandConfig;
 
 use crate::{
     cli::sync::{LOCK_TIMEOUT, acquire_store_lock},
@@ -20,6 +21,7 @@ use crate::{
         report::{ConflictListOutput, ConflictResolveOutput, ConflictShowOutput, ConflictSummary},
     },
     error::pimdir_error,
+    kind::Kind,
     sync::{driver, state::StoreState},
 };
 
@@ -157,8 +159,8 @@ pub struct ConflictResolveCommand {
     /// Keep the remote's body and discard the store's.
     #[arg(long, group = "side")]
     pub prefer_remote: bool,
-    /// Hand the three bodies to the `conflict.merger` command and take back
-    /// the one it writes.
+    /// Hand the three bodies to the kind's merger (`contact.merger`,
+    /// `calendar.merger`) and take back the one it writes.
     #[arg(long, short = 'i', group = "side")]
     pub interactive: bool,
 }
@@ -254,6 +256,16 @@ impl ConflictResolveCommand {
     }
 
     /// The body this decision settles on, or `None` when the merger aborted.
+    #[cfg_attr(
+        not(any(
+            feature = "carddav",
+            feature = "caldav",
+            feature = "msgraph",
+            feature = "gpeople",
+            feature = "gcal"
+        )),
+        allow(unused_variables)
+    )]
     fn decide(
         &self,
         account_config: &AccountConfig,
@@ -282,11 +294,33 @@ impl ConflictResolveCommand {
             return Ok(Some(body));
         }
 
-        let Some(command) = &account_config.conflict.merger else {
-            bail!("No interactive merger is configured, name one with `conflict.merger`");
+        let kind = conflict.kind()?;
+        let merger: Option<(&Option<CommandConfig>, &str)> = match kind {
+            Kind::Mail => None,
+            #[cfg(any(
+                feature = "carddav",
+                feature = "caldav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
+            Kind::Vcard => Some((&account_config.contact.merger, "contact.merger")),
+            #[cfg(any(
+                feature = "carddav",
+                feature = "caldav",
+                feature = "msgraph",
+                feature = "gpeople",
+                feature = "gcal"
+            ))]
+            Kind::Ical => Some((&account_config.calendar.merger, "calendar.merger")),
+        };
+        let Some((merger, key)) = merger else {
+            bail!("Mail bodies are immutable, so no merger settles a mail conflict");
+        };
+        let Some(command) = merger else {
+            bail!("No interactive merger is configured, name one with `{key}`");
         };
 
-        let kind = conflict.kind()?;
         let dir = tempfile::Builder::new()
             .prefix("neverest-conflict-")
             .tempdir()?;
@@ -512,7 +546,7 @@ mod tests {
         .unwrap();
 
         let config: AccountConfig =
-            toml::from_str(&format!("conflict.merger = \"sh {}\"", merger.display())).unwrap();
+            toml::from_str(&format!("contact.merger = \"sh {}\"", merger.display())).unwrap();
 
         let watcher = {
             let entered = entered.clone();
@@ -579,6 +613,48 @@ mod tests {
             Some(store.blobs().hash(card("+2").as_bytes())),
             "settled with the body the merger wrote, which is the local side",
         );
+    }
+
+    /// A card is never handed to the calendar's merger: an account naming
+    /// only `calendar.merger` is told to name `contact.merger`, and the card
+    /// stays parked.
+    #[test]
+    fn a_card_is_not_handed_to_the_calendar_merger() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let scripts = tempfile::tempdir().unwrap();
+        drop(store_with_conflict(dir.path()));
+
+        let ran = scripts.path().join("ran");
+        let merger = scripts.path().join("merger.sh");
+        fs::write(
+            &merger,
+            format!("#!/bin/sh\ntouch {}\ncp \"$2\" \"$4\"\n", ran.display()),
+        )
+        .unwrap();
+
+        let config: AccountConfig =
+            toml::from_str(&format!("calendar.merger = \"sh {}\"", merger.display())).unwrap();
+        let command = ConflictResolveCommand {
+            id: 1,
+            source: None,
+            prefer_local: false,
+            prefer_remote: false,
+            interactive: true,
+        };
+        let err = command
+            .resolve(&mut TestPrinter::default(), ACCOUNT, &config, dir.path())
+            .unwrap_err();
+
+        assert!(format!("{err:#}").contains("`contact.merger`"), "{err:#}");
+        assert!(!ran.exists(), "the calendar's merger ran on a card");
+
+        let store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account(ACCOUNT)
+            .for_source("dav");
+        let placement = load_side(&store, "contacts").unwrap().remove(0);
+        assert_eq!(placement.status, PimdirStatus::Conflict);
     }
 
     /// Polls for a file the merger writes, bounded so a failure fails the

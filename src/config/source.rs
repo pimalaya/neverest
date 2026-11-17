@@ -146,7 +146,7 @@ pub enum SourceBackendConfig {
     Gmail(GmailConfig),
     /// Microsoft Graph mail, the `mail` domain of an `msgraph` table.
     Msgraph(MsgraphConfig),
-    /// Microsoft Graph contacts, the `contacts` domain of an `msgraph`
+    /// Microsoft Graph contacts, the `contact` domain of an `msgraph`
     /// table: the same session, syncing contact folders.
     #[serde(rename = "msgraph-contacts")]
     MsgraphContacts(MsgraphConfig),
@@ -207,7 +207,7 @@ impl SourceBackendConfig {
     pub fn graph_domain(&self) -> Option<&'static str> {
         match self {
             Self::Msgraph(_) => Some("mail"),
-            Self::MsgraphContacts(_) => Some("contacts"),
+            Self::MsgraphContacts(_) => Some("contact"),
             Self::MsgraphCalendar(_) => Some("calendar"),
             _ => None,
         }
@@ -373,10 +373,10 @@ mod tests {
             r#"
             msgraph.auth.token.raw = "tok"
             msgraph.mail = true
-            msgraph.contacts = true
+            msgraph.contact = true
             msgraph.calendar = true
             sources.work.msgraph.auth.token.raw = "tok"
-            sources.work.msgraph.contacts = true
+            sources.work.msgraph.contact = true
             "#,
         )
         .unwrap();

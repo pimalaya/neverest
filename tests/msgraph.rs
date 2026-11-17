@@ -222,7 +222,7 @@ fn a_graph_scope_widens_by_its_band() {
 
     with_cleanup(
         || {
-            let extra = format!("{}\nitem.filter.since = \"2024-01-01\"", user_line());
+            let extra = format!("{}\nmail.filter.since = \"2024-01-01\"", user_line());
             let replica = Replica::open("msgraph", &extra, &token);
             let stored = |replica: &Replica| -> Vec<&str> {
                 years

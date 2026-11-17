@@ -3,7 +3,7 @@
 //! The external merger contract, against a local Radicale
 //! (tests/radicale.sh) holding two principals. Ignored by default.
 //!
-//! `conflict.merger` hands a parked divergence to a program of the person's
+//! `contact.merger` hands a parked divergence to a program of the person's
 //! choosing, so the argv order, the shell quoting of the exported paths and
 //! the two ways a merger says no only show across a real fork, which the
 //! in-process tests of `Merger` never cross.
@@ -387,7 +387,7 @@ fn account(merger: &str) -> String {
     format!(
         "[accounts.{ACCOUNT}]\n\
          retain = true\n\
-         conflict.merger = {merger}\n\
+         contact.merger = {merger}\n\
          sources.a.carddav.server = \"{DAV}/\"\n\
          sources.a.carddav.auth.basic.username = \"{SOURCE}\"\n\
          sources.a.carddav.auth.basic.password.raw = \"{SOURCE}\"\n\

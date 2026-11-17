@@ -26,7 +26,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Added `sync --intents-only`, which performs what frontends queued (sends, collection changes, invitation replies and cancellations) and nothing else, opening an endpoint only when an intent needs it.
 
-- Added scoped mail syncs: `item.filter.since` in the account and `sync --since <WHEN>` (`30d`, `6mo`, a date or an RFC 3339 instant) bound mail by its `Date` header.
+- Added scoped mail syncs: `mail.filter.since` in the account and `sync --since <WHEN>` (`30d`, `6mo`, a date or an RFC 3339 instant) bound mail by its `Date` header.
 
   Mail older than the floor is neither listed nor deleted. A wider scope later lists only the band it lacks on IMAP, Gmail and Graph.
 
@@ -126,9 +126,13 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - **BREAKING**: Changed the configuration to refuse every key neverest does not read, at every level, as an unknown field: a source table naming an unknown key or two backend tables is refused, and so is every key an earlier neverest read.
 
-- **BREAKING**: Changed Microsoft Graph to one `msgraph` table, its session once and its domains under `msgraph.mail`, `msgraph.contacts` and `msgraph.calendar`, where `msgraph-contacts` and `msgraph-calendar` were tables of their own.
+- **BREAKING**: Changed Microsoft Graph to one `msgraph` table, its session once and its domains under `msgraph.mail`, `msgraph.contact` and `msgraph.calendar`, where `msgraph-contacts` and `msgraph-calendar` were tables of their own.
 
   An `msgraph` table naming no domain is refused: add `msgraph.mail = true` to sync mail.
+
+- **BREAKING**: Changed `conflict.merger` into `contact.merger` and `calendar.merger`, one merger a kind, where one command was handed cards and events alike.
+
+  `conflict resolve --interactive` runs the merger of the conflict's kind, and refuses naming the key when that kind has none.
 
 - **BREAKING**: Changed the `dav` cargo feature into `carddav` and `caldav`, each named after its configuration table.
 

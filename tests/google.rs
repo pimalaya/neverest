@@ -181,7 +181,7 @@ fn a_message_sent_to_oneself_over_gmail_smtp_stays_unread() {
     let lines = format!(
         "imap.server = \"imap.gmail.com\"\n{}\
          imap.collection.filter.include = [\"INBOX\", \"{SENT}\"]\n\
-         item.filter.since = \"1d\"\n\
+         mail.filter.since = \"1d\"\n\
          smtp.server = \"smtp.gmail.com\"\n{}",
         auth("imap"),
         auth("smtp"),

@@ -8,7 +8,7 @@
 //! the floor, and the `Date` decides. Messages are appended today, so only
 //! their `Date` (2020, the future, none) tells:
 //!
-//! - under `item.filter.since = "30d"` all but the 2020 one are stored;
+//! - under `mail.filter.since = "30d"` all but the 2020 one are stored;
 //! - `--since 2019-01-01` brings it, the band below the coverage alone listed;
 //! - narrowing back deletes nothing, absence meaning deleted only in scope;
 //! - its delete on the server applies, out of scope as it is.
@@ -380,7 +380,7 @@ fn write_config(
         .collect::<Vec<_>>()
         .join(", ");
     let since = since
-        .map(|since| format!("item.filter.since = \"{since}\"\n"))
+        .map(|since| format!("mail.filter.since = \"{since}\"\n"))
         .unwrap_or_default();
     fs::write(
         config,

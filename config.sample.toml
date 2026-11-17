@@ -1,10 +1,11 @@
 [accounts.example]
 #one-way = false			# the sources win and the other side's changes are discarded, never merged
 #retain = true				# the store keeps bodies, unset true with no target and false with targets
-#item.filter.since = "30d"		# the oldest mail listed: a duration, a date or an RFC 3339 instant
+#mail.filter.since = "30d"		# the oldest mail listed: a duration, a date or an RFC 3339 instant
 #connections = 4			# connections per source for body downloads, sync -j overriding it
 
-#conflict.merger = "tcard merge {base} {local} {remote} --output {output}"	# what conflict resolve --interactive runs
+#contact.merger = "tcard merge {base} {local} {remote} --output {output}"	# what conflict resolve --interactive runs on a card
+#calendar.merger = "tcal merge {base} {local} {remote} --output {output}"	# and on an event
 
 #store.root = "~/.local/state/neverest"	# the store, shared by every account naming the same root
 #store.purge-after = "90d"		# when a retained item is reclaimed, unset never and 0 at once
@@ -74,7 +75,7 @@
 #msgraph.user-id = "me"				# the mailbox owner [bob@example.org]
 #msgraph.auth.token.command = "exit 127"	# prints an OAuth 2.0 access token with each domain's scope
 #msgraph.mail = true				# the mail folders, or a table of the sync keys
-#msgraph.contacts = true			# the contact folders, scope Contacts.ReadWrite
+#msgraph.contact = true				# the contact folders, scope Contacts.ReadWrite
 #msgraph.calendar = true			# the calendars, scope Calendars.ReadWrite
 
 # Google People and Google Calendar

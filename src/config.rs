@@ -67,13 +67,15 @@ macro_rules! source_config {
     };
 }
 
-pub mod conflict;
+pub mod calendar;
+pub mod contact;
 pub mod dav;
 pub mod filter;
 pub mod gmail;
 pub mod google;
 pub mod imap;
 pub mod jmap;
+pub mod mail;
 pub mod mode;
 pub mod msgraph;
 pub mod permissions;
@@ -98,13 +100,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     config::{
-        conflict::ConflictConfig,
+        calendar::CalendarConfig,
+        contact::ContactConfig,
         dav::{CaldavConfig, CarddavConfig},
-        filter::{ItemSyncConfig, resolve_since},
+        filter::resolve_since,
         gmail::GmailConfig,
         google::GoogleConfig,
         imap::ImapConfig,
         jmap::JmapConfig,
+        mail::MailConfig,
         mode::AccountMode,
         msgraph::{MsgraphTable, msgraph_sugar},
         proxy::ProxyConfig,
@@ -322,12 +326,15 @@ pub struct AccountConfig {
     /// source.
     #[serde(default)]
     pub store: StoreConfig,
-    /// How a run announces a content conflict it could not merge away.
+    /// What applies to the account's mail, whichever source holds it.
     #[serde(default)]
-    pub conflict: ConflictConfig,
-    /// Item-level sync options.
+    pub mail: MailConfig,
+    /// What applies to the account's contacts, whichever source holds them.
     #[serde(default)]
-    pub item: ItemSyncConfig,
+    pub contact: ContactConfig,
+    /// What applies to the account's calendars, whichever source holds them.
+    #[serde(default)]
+    pub calendar: CalendarConfig,
     /// Max connections per source for concurrent body fetches, 4 by default.
     ///
     /// Keep it under the provider's per-account connection limit. `sync
@@ -560,8 +567,8 @@ impl AccountConfig {
 
         self.mode()?;
 
-        if let Some(since) = &self.item.filter.since {
-            resolve_since(since, Utc::now()).context("Invalid `item.filter.since`")?;
+        if let Some(since) = &self.mail.filter.since {
+            resolve_since(since, Utc::now()).context("Invalid `mail.filter.since`")?;
         }
 
         let mut senders: Vec<_> = sources
@@ -583,7 +590,7 @@ impl AccountConfig {
     }
 
     /// The scope a run syncs mail under (pimdir SYNC §5): from `since` (the
-    /// run's `--since`), else `item.filter.since`, else unbounded.
+    /// run's `--since`), else `mail.filter.since`, else unbounded.
     ///
     /// A scope bounds mail by its `Date` and nothing else, so one is refused
     /// by the key it came from when an endpoint the run syncs (`only`'s
@@ -596,8 +603,8 @@ impl AccountConfig {
     ) -> Result<PimdirScope> {
         let (raw, key) = match since {
             Some(raw) => (raw, "--since"),
-            None => match &self.item.filter.since {
-                Some(raw) => (raw.as_str(), "item.filter.since"),
+            None => match &self.mail.filter.since {
+                Some(raw) => (raw.as_str(), "mail.filter.since"),
                 None => return Ok(PimdirScope::unbounded()),
             },
         };
@@ -763,7 +770,7 @@ mod tests {
             .map(|(id, source)| {
                 let domain = match source.backend {
                     SourceBackendConfig::Msgraph(_) => "mail",
-                    SourceBackendConfig::MsgraphContacts(_) => "contacts",
+                    SourceBackendConfig::MsgraphContacts(_) => "contact",
                     SourceBackendConfig::MsgraphCalendar(_) => "calendar",
                     _ => "other",
                 };
@@ -784,8 +791,8 @@ mod tests {
             r#"
             msgraph.auth.token.raw = "tok"
             msgraph.mail = true
-            msgraph.contacts.item.create = true
-            msgraph.contacts.item.delete = false
+            msgraph.contact.item.create = true
+            msgraph.contact.item.delete = false
             msgraph.calendar = true
             "#,
         );
@@ -794,7 +801,7 @@ mod tests {
             [
                 id("a/msgraph", "mail", true),
                 id("a/msgraph-calendar", "calendar", true),
-                id("a/msgraph-contacts", "contacts", false),
+                id("a/msgraph-contacts", "contact", false),
             ]
         );
 
@@ -803,7 +810,7 @@ mod tests {
             sources.outlook.msgraph.auth.token.raw = "tok"
             sources.outlook.msgraph.mail = true
             sources.people.msgraph.auth.token.raw = "tok"
-            sources.people.msgraph.contacts = true
+            sources.people.msgraph.contact = true
             sources.agenda.msgraph.auth.token.raw = "tok"
             sources.agenda.msgraph.calendar.item.create = true
             sources.agenda.msgraph.calendar.item.delete = false
@@ -814,7 +821,7 @@ mod tests {
             [
                 id("a/agenda", "calendar", false),
                 id("a/outlook", "mail", true),
-                id("a/people", "contacts", true),
+                id("a/people", "contact", true),
             ]
         );
 
@@ -822,16 +829,16 @@ mod tests {
             r#"
             one-way = true
             sources.people.msgraph.auth.token.raw = "tok"
-            sources.people.msgraph.contacts = true
+            sources.people.msgraph.contact = true
             targets.copy.msgraph.auth.token.raw = "other"
-            targets.copy.msgraph.contacts = true
+            targets.copy.msgraph.contact = true
             "#,
         );
         assert_eq!(
             copied,
             [
-                id("a/copy", "contacts", true),
-                id("a/people", "contacts", true),
+                id("a/copy", "contact", true),
+                id("a/people", "contact", true),
             ]
         );
     }
@@ -1635,7 +1642,7 @@ mod tests {
         DateTime::parse_from_rfc3339(instant).unwrap().to_utc()
     }
 
-    /// `item.filter.since` scopes mail, `--since` overrides it, and either is
+    /// `mail.filter.since` scopes mail, `--since` overrides it, and either is
     /// refused by its own name on an account syncing contacts.
     #[test]
     fn a_scope_is_read_from_the_flag_or_the_key_and_refused_beside_contacts() {
@@ -1643,7 +1650,7 @@ mod tests {
         let mail: AccountConfig = toml::from_str(
             r#"
             imap.server = "imaps://imap.example.org:993"
-            item.filter.since = "30d"
+            mail.filter.since = "30d"
             "#,
         )
         .unwrap();
@@ -1670,12 +1677,12 @@ mod tests {
             sources.dav.carddav.server = "https://carddav.example.org/"
             sources.dav.carddav.auth.basic.username = "user"
             sources.dav.carddav.auth.basic.password.raw = "pw"
-            item.filter.since = "30d"
+            mail.filter.since = "30d"
             "#,
         )
         .unwrap();
         let err = mixed.scope(None, &[], now).unwrap_err().to_string();
-        assert!(err.contains("`item.filter.since`"), "got {err}");
+        assert!(err.contains("`mail.filter.since`"), "got {err}");
         assert!(err.contains("dav"), "got {err}");
         let err = mixed.scope(Some("7d"), &[], now).unwrap_err().to_string();
         assert!(err.contains("`--since`"), "got {err}");
@@ -1687,11 +1694,11 @@ mod tests {
         let bad: AccountConfig = toml::from_str(
             r#"
             imap.server = "imaps://imap.example.org:993"
-            item.filter.since = "a while"
+            mail.filter.since = "a while"
             "#,
         )
         .unwrap();
         let err = format!("{:#}", bad.validate().unwrap_err());
-        assert!(err.contains("item.filter.since"), "got {err}");
+        assert!(err.contains("mail.filter.since"), "got {err}");
     }
 }

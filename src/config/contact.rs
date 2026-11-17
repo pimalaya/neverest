@@ -1,20 +1,20 @@
-//! # Conflict configuration
+//! # Contact configuration
 //!
-//! The `conflict` table of an account: how a run announces a content
-//! conflict it could not merge away.
+//! The `contact` table of an account: what applies to its contacts
+//! whichever source holds them.
 
 use pimalaya_config::command::CommandConfig;
 use serde::{Deserialize, Serialize};
 
-/// The only part of conflict handling anybody configures.
+/// What applies to an account's contacts.
 ///
 /// Whether a run merges is not a setting: the three-way merge
 /// ([`crate::conflict::merge`]) is pure and fixed, so it resolves only what
 /// nobody disagreed about.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ConflictConfig {
-    /// The merger `conflict resolve --interactive` runs.
+pub struct ContactConfig {
+    /// The merger `conflict resolve --interactive` runs on a card.
     ///
     /// Unset by default; a sync never runs it. The four paths are appended
     /// git-mergetool style, unless the command names {base}, {local}, {remote}

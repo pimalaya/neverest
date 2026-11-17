@@ -9,28 +9,29 @@ created: 2026-09-07
 
 ## Why
 
-`conflict.merger` names the program a person settles a collision in. That program is a property of the **person**, not of the account: whoever merges cards in tcard merges them in tcard for every account they have, the way they have one `$EDITOR` and one `core.editor`. Neverest makes them write it per account, because `Config` is "nothing but named accounts" and has nowhere else to put it.
+`contact.merger` and `calendar.merger` name the programs a person settles a collision in. Those are properties of the **person**, not of the account: whoever merges cards in tcard merges them in tcard for every account they have, the way they have one `$EDITOR` and one `core.editor`. Neverest makes them write them per account, because `Config` is "nothing but named accounts" and has nowhere else to put it.
 
 Two accounts is already two copies of the same line, and the line is long enough to get wrong: it carries four placeholders in a fixed order.
 
-Nothing about the design wanted it per account. It is the only key in `ConflictConfig`, it is unset by default, no sync ever reads it, and `conflict resolve --interactive` is the single call site. It ended up under the account because that is the only table there is.
+Nothing about the design wanted them per account. They are the only keys in `ContactConfig` and `CalendarConfig`, unset by default, no sync ever reads them, and `conflict resolve --interactive` is the single call site. They ended up under the account because that is the only table there is.
 
 himalaya already carries the shape this needs: document-level keys whose doc comments read "Fallback for `AccountConfig::…`", so a person writes the thing once and an account overrides it when it genuinely differs.
 
 ## What
 
-`Config` gains a document-level `conflict` table, of the same `ConflictConfig` type the account carries. The account's value wins where it is set, the document's answers where it is not, and neither is required.
+`Config` gains document-level `contact` and `calendar` tables, of the same `ContactConfig` and `CalendarConfig` types the account carries. The account's value wins where it is set, the document's answers where it is not, and neither is required.
 
-Resolution happens where the account config is loaded, so `conflict resolve --interactive` keeps reading one `Option<CommandConfig>` and the call site does not learn there are two places it could have come from.
+Resolution happens where the account config is loaded, so `conflict resolve --interactive` keeps reading one `Option<CommandConfig>` a kind and the call site does not learn there are two places it could have come from.
 
 ```toml
-conflict.merger = "tcard merge {base} {local} {remote} --output {output}"
+contact.merger = "tcard merge {base} {local} {remote} --output {output}"
+calendar.merger = "tcal merge {base} {local} {remote} --output {output}"
 
 [accounts.work]
-# inherits it
+# inherits both
 
 [accounts.calendars]
-conflict.merger = "tcal merge {base} {local} {remote} --output {output}"
+calendar.merger = "my-tcal merge {base} {local} {remote} --output {output}"
 ```
 
 The merger is a **command**, and a command in a shared table is worth saying twice: it is run with the terminal's stdin and stdout, on paths under a temporary directory, only from `conflict resolve --interactive`, and never from a sync. Lifting it to the document changes none of that.

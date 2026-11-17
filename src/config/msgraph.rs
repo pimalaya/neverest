@@ -1,6 +1,6 @@
 //! # Microsoft Graph configuration
 //!
-//! The `msgraph` table: one Graph session and the mail, contacts and
+//! The `msgraph` table: one Graph session and the mail, contact and
 //! calendar domains it syncs, each a source of its own.
 
 use std::fmt;
@@ -61,7 +61,7 @@ pub struct MsgraphAuthConfig {
 
 /// The refusal of an `msgraph` table naming no domain.
 const MSGRAPH_NO_DOMAIN: &str = "The `msgraph` table names no domain: write `msgraph.mail = \
-                                 true` to sync mail, `msgraph.contacts` or `msgraph.calendar` for \
+                                 true` to sync mail, `msgraph.contact` or `msgraph.calendar` for \
                                  the others";
 
 /// The `msgraph` table: one Graph session and the domains it syncs, each
@@ -108,7 +108,7 @@ pub struct MsgraphTable {
         deserialize_with = "msgraph_domain",
         skip_serializing_if = "Option::is_none"
     )]
-    pub contacts: Option<MsgraphDomainConfig>,
+    pub contact: Option<MsgraphDomainConfig>,
     /// The calendars, the source `msgraph-calendar` under the account.
     #[serde(
         default,
@@ -135,11 +135,11 @@ impl MsgraphTable {
         };
 
         let mail = self.mail.as_ref().map(source);
-        let contacts = self.contacts.as_ref().map(source);
+        let contact = self.contact.as_ref().map(source);
         let calendar = self.calendar.as_ref().map(source);
         [
             mail.map(SourceBackendConfig::Msgraph),
-            contacts.map(SourceBackendConfig::MsgraphContacts),
+            contact.map(SourceBackendConfig::MsgraphContacts),
             calendar.map(SourceBackendConfig::MsgraphCalendar),
         ]
         .into_iter()
@@ -275,8 +275,8 @@ mod tests {
             msgraph.auth.token.raw = "tok"
             msgraph.user-id = "user@example.org"
             msgraph.mail = true
-            msgraph.contacts.collection.filter.include = ["AAMk"]
-            msgraph.contacts.pool-size = 2
+            msgraph.contact.collection.filter.include = ["AAMk"]
+            msgraph.contact.pool-size = 2
             msgraph.calendar = false
             "#,
         )
@@ -307,7 +307,7 @@ mod tests {
         assert_eq!(account.backends(), ["msgraph"]);
 
         let err = toml::from_str::<AccountConfig>(
-            "msgraph.auth.token.raw = \"tok\"\nmsgraph.contacts.collection-typo = 1",
+            "msgraph.auth.token.raw = \"tok\"\nmsgraph.contact.collection-typo = 1",
         )
         .map(|_| String::from("loaded"))
         .unwrap_or_else(|err| err.to_string());
@@ -334,13 +334,13 @@ mod tests {
 
         let err = toml::from_str::<AccountConfig>(
             "sources.a.msgraph.auth.token.raw = \"tok\"\nsources.a.msgraph.mail = true\n\
-             sources.a.msgraph.contacts = true\nsources.a.msgraph.calendar = true",
+             sources.a.msgraph.contact = true\nsources.a.msgraph.calendar = true",
         )
         .map(|_| String::from("loaded"))
         .unwrap_or_else(|err| err.to_string());
         assert!(
             err.contains(
-                "A source's `msgraph` table names `mail`, `contacts` and `calendar`, and a source \
+                "A source's `msgraph` table names `mail`, `contact` and `calendar`, and a source \
                  syncs one domain"
             ),
             "{err}"

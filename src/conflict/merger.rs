@@ -48,7 +48,8 @@ pub(crate) static SPAWNS: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// One invocation of the configured interactive merger over one divergence.
 pub struct Merger<'a> {
-    /// The command the account's `conflict.merger` names.
+    /// The command the kind's merger names (`contact.merger`,
+    /// `calendar.merger`).
     pub command: &'a CommandConfig,
     /// The body the last sync agreed on, the merge's common ancestor.
     pub base: PathBuf,

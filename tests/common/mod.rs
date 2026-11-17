@@ -144,7 +144,7 @@ impl Replica {
     pub fn open(backend: &str, extra: &str, token: &str) -> Self {
         let (table, domain) = match backend {
             "msgraph" => ("msgraph", "msgraph.mail = true\n"),
-            "msgraph-contacts" => ("msgraph", "msgraph.contacts = true\n"),
+            "msgraph-contacts" => ("msgraph", "msgraph.contact = true\n"),
             "msgraph-calendar" => ("msgraph", "msgraph.calendar = true\n"),
             backend => (backend, ""),
         };

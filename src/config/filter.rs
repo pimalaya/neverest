@@ -1,36 +1,10 @@
 //! # Filter configuration
 //!
-//! Which collections and items a sync lists: a source's collection filter
-//! and an account's mail scope floor.
+//! Which collections a source lists, and how the mail scope floor reads.
 
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Days, Months, NaiveDate, NaiveTime, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-
-use crate::config::is_default;
-
-/// Item-level sync options.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ItemSyncConfig {
-    /// Which items a sync lists.
-    #[serde(default, skip_serializing_if = "is_default")]
-    pub filter: ItemFilter,
-}
-
-/// Which items a sync lists (pimdir SYNC §5).
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ItemFilter {
-    /// The floor of the `Date` scope a mail collection syncs under: `30d`,
-    /// `12w`, `6mo`, `1y`, a date (midnight UTC) or an RFC 3339 instant.
-    ///
-    /// Mail outside it is neither listed nor deleted: what a wider sync
-    /// stored stays. Refused beside contacts or calendars; `sync --since`
-    /// overrides it for one run.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub since: Option<String>,
-}
 
 /// The RFC 3339 instant in UTC a scope floor `raw` names at `now`.
 ///

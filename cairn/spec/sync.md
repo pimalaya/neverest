@@ -117,9 +117,9 @@ A first run with `one-way = true` against a non-empty target has no recorded mod
 - THEN the run proceeds, the recorded mode being unchanged
 
 ### Requirement: A backend under the account is a source named after its protocol
-A backend table written directly under the account (`imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`) SHALL be sugar for `sources.<key>.<key>`, the source taking the key as its name. The `msgraph` table SHALL be sugar for one source a domain it names, each named as the table the domain had before: `msgraph` for `mail`, `msgraph-contacts` for `contacts`, `msgraph-calendar` for `calendar`, each holding the table's session and that domain's table alone. The sugar SHALL produce a configuration indistinguishable from the expanded form, source id included, so expanding it by hand is a no-op on the store.
+A backend table written directly under the account (`imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`) SHALL be sugar for `sources.<key>.<key>`, the source taking the key as its name. The `msgraph` table SHALL be sugar for one source a domain it names, each named as the table the domain had before: `msgraph` for `mail`, `msgraph-contacts` for `contact`, `msgraph-calendar` for `calendar`, each holding the table's session and that domain's table alone. The sugar SHALL produce a configuration indistinguishable from the expanded form, source id included, so expanding it by hand is a no-op on the store.
 
-A key names a protocol, and where a protocol carries several domains a table under it names the domain: `carddav` and `caldav` are two keys over one adapter, `msgraph.mail`, `msgraph.contacts` and `msgraph.calendar` three tables over one session. The domain is what the kind falls out of, so it SHALL be distinct per kind even when the transport is shared.
+A key names a protocol, and where a protocol carries several domains a table under it names the domain: `carddav` and `caldav` are two keys over one adapter, `msgraph.mail`, `msgraph.contact` and `msgraph.calendar` three tables over one session. The domain is what the kind falls out of, so it SHALL be distinct per kind even when the transport is shared.
 
 Declaring the same key both directly and under `sources` SHALL be a configuration error rather than a merge.
 
@@ -129,16 +129,16 @@ Declaring the same key both directly and under `sources` SHALL be a configuratio
 - THEN the sync opens the same source id and reuses every existing binding
 
 #### Scenario: Expanding the Graph table changes nothing
-- GIVEN an account written as `msgraph.auth.token.raw = "..."` with `msgraph.mail = true` and `msgraph.contacts = true`
-- WHEN it is rewritten as `sources.msgraph.msgraph.mail = true` and `sources.msgraph-contacts.msgraph.contacts = true`, each with the token
+- GIVEN an account written as `msgraph.auth.token.raw = "..."` with `msgraph.mail = true` and `msgraph.contact = true`
+- WHEN it is rewritten as `sources.msgraph.msgraph.mail = true` and `sources.msgraph-contacts.msgraph.contact = true`, each with the token
 - THEN the sync opens the same two source ids and reuses every existing binding
 
 ### Requirement: One Graph table keeps the source ids of the three it replaced
-Writing Graph as one `msgraph` table, where `msgraph-contacts` and `msgraph-calendar` were tables of their own, SHALL move nothing in a store: every source id a configuration of the three tables produced SHALL be produced by its rewrite in the one table, so the first run of the new build finds every collection, binding and checkpoint where the last run of the old one left them, creating, listing whole and orphaning none. The sugar keeps the three names ("A backend under the account is a source named after its protocol"); a named source keeps its name, `sources.<name>.msgraph-contacts` becoming `sources.<name>.msgraph` with the `contacts` domain alone. A store SHALL NOT be migrated for it, nothing in a store naming a table.
+Writing Graph as one `msgraph` table, where `msgraph-contacts` and `msgraph-calendar` were tables of their own, SHALL move nothing in a store: every source id a configuration of the three tables produced SHALL be produced by its rewrite in the one table, so the first run of the new build finds every collection, binding and checkpoint where the last run of the old one left them, creating, listing whole and orphaning none. The sugar keeps the three names ("A backend under the account is a source named after its protocol"); a named source keeps its name, `sources.<name>.msgraph-contacts` becoming `sources.<name>.msgraph` with the `contact` domain alone. A store SHALL NOT be migrated for it, nothing in a store naming a table.
 
 #### Scenario: A store synced under the three tables
 - GIVEN a store an account synced under `msgraph.*`, `msgraph-contacts.*` and `msgraph-calendar.*`
-- WHEN the account is rewritten as one `msgraph` table naming `mail`, `contacts` and `calendar`, and synced
+- WHEN the account is rewritten as one `msgraph` table naming `mail`, `contact` and `calendar`, and synced
 - THEN mail and contacts resume from their stored delta links, the calendars list the same events, and the store holds the same sources, collections and bindings, none created
 
 ### Requirement: The configuration refuses every key it does not read
@@ -472,7 +472,7 @@ The driver SHALL then run io-pimdir's rekey on the collection before syncing it 
 - **THEN** the message is bound under its new UID with the staged flag, nothing is dropped as deleted, and the flag is pushed to the new UID
 
 ### Requirement: Microsoft Graph is a first-class source
-An `msgraph` source SHALL open protocol-direct over io-msgraph (never through a frozen aggregator). Graph carries several PIM domains behind one protocol, one host and one credential, so one `msgraph` table SHALL hold the session (`user-id`, `tls`, `alpn`, `auth`, `proxy`) and name the domains it syncs by their tables, as carillon, cardamum and calendula read one `msgraph` table: `msgraph.mail` the mail folders, `msgraph.contacts` the address book, `msgraph.calendar` the calendars. A domain table SHALL hold that domain's source keys (`collection`, `flag`, `item`, `pool-size`), or be written `true` to take their defaults, `false` reading as absent. A table naming no domain SHALL be refused at load, naming `msgraph.mail = true`. Each domain SHALL be a source of its own: under the account as the sugar names them, under `sources.<name>` or `targets.<name>` exactly one, a named table naming two or more being refused at load. One adapter SHALL serve every domain, parameterised by which it speaks, as one adapter serves both DAV protocols. A value naming the kind (`kind = "…"`) SHALL NOT be introduced for this or any other backend.
+An `msgraph` source SHALL open protocol-direct over io-msgraph (never through a frozen aggregator). Graph carries several PIM domains behind one protocol, one host and one credential, so one `msgraph` table SHALL hold the session (`user-id`, `tls`, `alpn`, `auth`, `proxy`) and name the domains it syncs by their tables, as carillon, cardamum and calendula read one `msgraph` table: `msgraph.mail` the mail folders, `msgraph.contact` the address book, `msgraph.calendar` the calendars. A domain table SHALL hold that domain's source keys (`collection`, `flag`, `item`, `pool-size`), or be written `true` to take their defaults, `false` reading as absent. A table naming no domain SHALL be refused at load, naming `msgraph.mail = true`. Each domain SHALL be a source of its own: under the account as the sugar names them, under `sources.<name>` or `targets.<name>` exactly one, a named table naming two or more being refused at load. One adapter SHALL serve every domain, parameterised by which it speaks, as one adapter serves both DAV protocols. A value naming the kind (`kind = "…"`) SHALL NOT be introduced for this or any other backend.
 
 For **calendars** (`msgraph.calendar`): the user's calendars keyed by id and named by name, events as `text/calendar` through io-msgraph's `ical` projection. Graph's event delta only runs over a calendar view, a time window, and an event leaving a sliding window would read as deleted and be deleted on every other source, so the enumeration SHALL list each calendar's lone events and series masters in full every run, with no window, the master's `changeKey` as the revision and removals reported by absence; an event Graph repeats across `@odata.nextLink` pages SHALL be enumerated once, and one id at two revisions SHALL fail the enumeration. A series SHALL be one item, read with its exceptions from the instances of its own date range, bounded by its range type (a `numbered` range sized from its occurrence count, an open-ended one five years either side of today), never by the `0001-01-01` `endDate` Graph fills the other types with, and listed in windows of at most five years, the longest Graph accepts, its cancelled occurrences as EXDATEs. The UID SHALL ride the projection's stash extended property, a create whose UID did not survive being deleted again and refused; an event with no stashed UID SHALL be keyed by Graph's `iCalUId`, unwrapped when it is a global object id wrapping the organizer's UID (an invitation Exchange took in by mail, the `vCal-Uid` form), so the event keeps the UID the organizer and the other attendees know; an update or delete SHALL be refused when the master's `changeKey` moved. A series SHALL be written whole, as "A series is pushed whole or not at all" says, and a floating time anchored, as "A floating time is anchored before Google or Graph takes it" says; an edit Graph makes to one occurrence alone is seen once the master's `changeKey` moves.
 
@@ -481,7 +481,7 @@ For **mail** (`msgraph.mail`): folders listed two levels deep (`Parent/Child` na
 Auth SHALL be a bearer access token only, resolved through the standard secret-command idiom (`auth.token.raw` / `auth.token.command`) once per run with every other credential; neverest SHALL NOT run any OAuth flow itself (no device sign-in, no client credentials, no token persistence): acquiring and refreshing the token is delegated to an external command, typically ortie. The token SHALL carry the scopes the declared domains need, which config.sample.toml names per domain so the first run does not fail on a bare 403. No token is ever logged.
 
 ### Requirement: A Graph contacts source syncs the address book
-An `msgraph` table MAY name the `contacts` domain, whose items are `text/vcard` cards and whose collections are the user's contact folders, listed two levels deep, keyed by folder id and named by display name. The default Contacts folder, which the folders endpoint does not list, SHALL be the collection `contacts`, addressed by omitting the folder segment.
+An `msgraph` table MAY name the `contact` domain, whose items are `text/vcard` cards and whose collections are the user's contact folders, listed two levels deep, keyed by folder id and named by display name. The default Contacts folder, which the folders endpoint does not list, SHALL be the collection `contacts`, addressed by omitting the folder segment.
 
 It SHALL take the session of its `msgraph` table (`user-id`, `tls`, `alpn`, `auth`, `proxy`), and SHALL carry no send channel: submission is a mail capability, so an `smtp` table beside it is refused before any connection is made, and it SHALL NOT be picked as the account's native sender however the sources are ordered.
 
@@ -847,7 +847,9 @@ caller announces one item rather than four
 ### Requirement: Deciding is a command, never a run
 Neverest SHALL NOT decide a content collision during a sync, and SHALL NOT open an editor or any interactive program from one, whatever is attached to its terminal. Deciding SHALL be `neverest conflict resolve` and nothing else.
 
-`--prefer-local` and `--prefer-remote` discard a side, which is what a person may ask for by name and what a background run may never do on its own. `--interactive` SHALL hand the bodies to the configured merger as filesystem paths, base first, then the divergent sides, then the path to write, and SHALL take the result only on a zero exit with that path modified. A non-zero exit, or an untouched output, SHALL leave the conflict exactly as it was: an editor exits zero on a bare quit, and reading that as a choice would discard a side by accident.
+`--prefer-local` and `--prefer-remote` discard a side, which is what a person may ask for by name and what a background run may never do on its own. `--interactive` SHALL hand the bodies to the merger the conflict's kind names, `contact.merger` for a card and `calendar.merger` for an event, as filesystem paths, base first, then the divergent sides, then the path to write, and SHALL take the result only on a zero exit with that path modified. A non-zero exit, or an untouched output, SHALL leave the conflict exactly as it was: an editor exits zero on a bare quit, and reading that as a choice would discard a side by accident.
+
+No merger SHALL be handed another kind's bodies: a tool reading cards cannot read events, so one command for every kind fails on half of them. A kind naming no merger SHALL be refused naming its key, and a mail conflict SHALL be refused outright, mail bodies being immutable.
 
 A tty is not consent. A run has one when it is driven by a wrapper script, when it is watched from a pane nobody is sitting at, and when it is a person waiting, and the three are indistinguishable from inside. Escalating on that signal blocks every remaining collection behind a human who may not exist.
 
@@ -860,6 +862,11 @@ A tty is not consent. A run has one when it is driven by a wrapper script, when 
 - GIVEN an interactive resolution whose merger exits non-zero, or leaves its output untouched
 - WHEN it returns
 - THEN the conflict is unchanged and nothing is pushed
+
+#### Scenario: A card never reaches the calendar's merger
+- GIVEN an account naming `calendar.merger` and no `contact.merger`, and a parked card
+- WHEN the card is resolved interactively
+- THEN it is refused naming `contact.merger`, nothing runs, and the card stays parked
 
 ### Requirement: A settled body is a body of its item
 A body a resolution settles on SHALL be read before it is staged, and refused unless it is a body of the collection's kind and of that item. It SHALL open and close with the kind's component delimiters (`VCARD`, `VCALENDAR`), and it SHALL state the identity the item is bound by: a body stating another `UID`, or none where the item states one, SHALL be refused. Mail SHALL be refused outright, its bodies being immutable.
@@ -1711,7 +1718,7 @@ A Graph mail source SHALL fetch the `Full` tier of an id set through JSON batche
 - **THEN** each of the three is read by its own get, and no batch asks for more than 4 MiB
 
 ### Requirement: A mail sync lists within a scope on the `Date`
-An account MAY bound its mail by `item.filter.since`, and a run by `sync --since`, which overrides it: a duration back from today (`30d`, `12w`, `6mo`, `1y`), taken to the start of its UTC day so the runs of one day list one scope, a date at midnight UTC, or an RFC 3339 instant. A mail collection SHALL then sync under the scope from that floor (pimdir SYNC §5): a listed message whose `Date` lies below it SHALL be left out of the page, a message with no usable `Date` SHALL be in every scope, and an explicit removal SHALL apply whatever the date. What a scope leaves out SHALL NOT be deleted, neither in the store nor on the server.
+An account MAY bound its mail by `mail.filter.since`, and a run by `sync --since`, which overrides it: a duration back from today (`30d`, `12w`, `6mo`, `1y`), taken to the start of its UTC day so the runs of one day list one scope, a date at midnight UTC, or an RFC 3339 instant. A mail collection SHALL then sync under the scope from that floor (pimdir SYNC §5): a listed message whose `Date` lies below it SHALL be left out of the page, a message with no usable `Date` SHALL be in every scope, and an explicit removal SHALL apply whatever the date. What a scope leaves out SHALL NOT be deleted, neither in the store nor on the server.
 
 A provider's date filter that reads another date than the `Date` header (Gmail's arrival, Graph's `sentDateTime`, which is Exchange's submission) SHALL narrow a round by the scope's floor alone, never by a band's ceiling: a message is dated before it is submitted and received, at times long before (a delayed delivery, a draft sent weeks after it was written, an import), so a ceiling on those dates misses a member its `Date` puts in the band, which the engine then finds absent, dated before the round opened, while the server holds it. Such a listing reaches above the band, and the page keeps what its `Date` puts in the band. IMAP's `SENTSINCE` and `SENTBEFORE` read the `Date` and keep both bounds.
 
@@ -1719,7 +1726,7 @@ A round whose listing a provider's date filter narrowed (IMAP `SENTSINCE` and `S
 
 #### Scenario: An old message received today
 - **GIVEN** a mailbox holding, all appended today, a message dated 2020, one dated in the future and one with no `Date`
-- **WHEN** it is synced under `item.filter.since = "30d"`
+- **WHEN** it is synced under `mail.filter.since = "30d"`
 - **THEN** the store holds the future and the undated messages and not the one dated 2020
 
 #### Scenario: A widening keeps the undated mail
@@ -1761,12 +1768,12 @@ A copy whose answer was lost stays staged, and a scope hides the server's copy f
 
 #### Scenario: A copy made before its answer was lost
 - **GIVEN** a message dated 2020 bound in `A`, a copy of it staged into `B`, and `B` already holding that message on the server, the answer to the copy having been lost
-- **WHEN** the account syncs under `item.filter.since = "30d"`
+- **WHEN** the account syncs under `mail.filter.since = "30d"`
 - **THEN** `B` holds the message once and the store binds the staged copy to it
 
 #### Scenario: A move made before its answer was lost
 - **GIVEN** a message dated 2020 bound in `A`, a move of it staged into `B`, and the server having moved it already
-- **WHEN** the account syncs under `item.filter.since = "30d"`
+- **WHEN** the account syncs under `mail.filter.since = "30d"`
 - **THEN** `B` holds the message once, `A` none, and the store binds it in `B`
 
 ### Requirement: A mail round lands page by page, newest first

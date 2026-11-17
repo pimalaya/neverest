@@ -562,6 +562,21 @@ impl AccountConfig {
             );
         }
 
+        let mut sending_targets: Vec<_> = self
+            .targets
+            .iter()
+            .filter(|(_, target)| target.smtp.is_some())
+            .map(|(name, _)| name.clone())
+            .collect();
+        sending_targets.sort();
+        if !sending_targets.is_empty() {
+            bail!(
+                "Target {} declares an `smtp` channel, which nothing uses: an account sends \
+                 through a source. Move the table under the source that sends, or drop it.",
+                sending_targets.join(", "),
+            );
+        }
+
         self.mode()?;
 
         if let Some(since) = &self.mail.filter.since {
@@ -1077,6 +1092,25 @@ mod tests {
         .unwrap();
         let err = account.validate().unwrap_err().to_string();
         assert!(err.contains("exactly one direct mail backend"), "got {err}");
+    }
+
+    /// A target's `smtp` is refused: an account sends through a source, so
+    /// the table loaded, its server was checked, and nothing ever sent.
+    #[test]
+    fn a_target_declares_no_send_channel() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            sources.src.imap.server = "imaps://a.example.org:993"
+            targets.dst.imap.server = "imaps://b.example.org:993"
+            targets.dst.smtp.server = "smtps://b.example.org:465"
+            "#,
+        )
+        .unwrap();
+        let err = account.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("Target dst declares an `smtp` channel"),
+            "got {err}"
+        );
     }
 
     /// Every path key expands once, at deserialize, so no call site can read

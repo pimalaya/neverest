@@ -192,7 +192,7 @@ The item a hydration pass picks up SHALL be selected by the absence of a stored 
 `sync --source <name>` SHALL narrow a run to the named sources. Narrowing no longer picks namespaces, there being none: an account is one mode, and a source is addressable on its own.
 
 ### Requirement: A send channel belongs to at most one source
-At most one source per account SHALL declare `smtp`. Two or more SHALL be a configuration error, reported at load, rather than a silent tiebreak on source order. A source that sends by itself (Microsoft Graph mail, through `sendMail`) needs none.
+At most one source per account SHALL declare `smtp`. Two or more SHALL be a configuration error, reported at load, rather than a silent tiebreak on source order. A source that sends by itself (Microsoft Graph mail, through `sendMail`) needs none. A target SHALL NOT declare `smtp`, refused at load naming it: an account sends through a source, so a target's channel was checked and never used. A queued send naming a target as its sender SHALL park, saying a target sends nothing, rather than wait for ever.
 
 Sending natively is a property of the source's **kind**, not of its transport: a Graph source of any other kind SHALL NOT be offered as the account's sender, and SHALL refuse an `smtp` table like any other non-mail source, so an account carrying two Graph sources still has at most one channel.
 
@@ -208,7 +208,7 @@ A build declaring the `smtp` feature SHALL enable io-smtp's `scram` feature, so 
 ### Requirement: A collection filter belongs to the source
 `collection.filter` SHALL be declared per source rather than per account, because an account may hold sources of several kinds and a mailbox include list means nothing to a contacts source. An account-level `collection` table SHALL be refused, naming its replacement.
 
-Filters are consequently asymmetric: a collection may be synced on one source and skipped on another, which the documentation SHALL state, since the previous account-level filter guaranteed symmetry. A source and its target SHALL apply the source's filter to both, since they bind one set of hub collections and filtering them apart would read as a delete on the next pass.
+Filters are consequently asymmetric: a collection may be synced on one source and skipped on another, which the documentation SHALL state, since the previous account-level filter guaranteed symmetry. A source and its target SHALL apply the source's filter (or the run's) to both, since they bind one set of hub collections and filtering them apart would read as a delete on the next pass; a target's own `collection.filter` SHALL narrow the pair further, applied to both sides alike, so a collection it leaves out is neither created on the target nor synced, and one source can feed different collections to different targets.
 
 ### Requirement: Bodies are content-addressed and deduped
 An item body SHALL be stored once per content hash; an item present on both sources or in several collections is stored once and copied by reference. The link id SHALL be the identity pimdir STORAGE Annex A gives, with nothing prepended: the bare `Message-ID` for mail, the bare `UID` for a card. Only a kind's own fallback is marked (`alt:` over subject, date and sender; `hash:` over a card's body), that being the one case a prefix is for, a name no server has heard of; a real id cannot be mistaken for one, RFC 5322 `atext` admitting no colon before the `@`.

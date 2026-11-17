@@ -57,6 +57,7 @@ pub(super) fn drain_submits(
         return;
     };
     let sender = sending_source(account_config, sides);
+    let intents = park_targeted(account_config, store, intents, report);
     let intents: Vec<_> = intents
         .into_iter()
         .filter(|intent| {
@@ -283,6 +284,44 @@ fn unconfirm_submit(
         warn!("submit intent #{id} vanished from the queue before it was parked");
     }
     Ok(())
+}
+
+/// Parks each intent naming one of the account's targets as its sender,
+/// returning the others.
+///
+/// A target sends nothing, an account sending through a source, so such an
+/// intent would wait for ever.
+pub(super) fn park_targeted(
+    account_config: &AccountConfig,
+    store: &mut PimdirSourceStore,
+    intents: Vec<submit::SubmitIntent>,
+    report: &mut SyncOutput,
+) -> Vec<submit::SubmitIntent> {
+    let (targeted, kept): (Vec<_>, Vec<_>) = intents.into_iter().partition(|intent| {
+        intent
+            .source()
+            .is_some_and(|source| account_config.targets.contains_key(&source))
+    });
+    for intent in targeted {
+        let source = intent.source().unwrap_or_default();
+        let error = format!("Target {source} sends nothing: an account sends through a source");
+        warn!("submit intent #{} parked: {error}", intent.id);
+        if let Err(err) = store.fail_action(intent.id, Some(&error)) {
+            warn!("cannot park submit intent #{}: {err}", intent.id);
+            continue;
+        }
+        report.submitted.push(SubmitEntry {
+            id: intent.id,
+            collection: intent.collection.clone(),
+            subject: intent.subject(),
+            code: None,
+            error: Some(error),
+            sources: Vec::new(),
+            parked: true,
+            unconfirmed: false,
+        });
+    }
+    kept
 }
 
 /// Parks the intent an earlier run left in flight, returning the others.

@@ -190,12 +190,14 @@ fn run_pair(
         Some(filter) => filter,
         None => pairing.left.1.collection().filter.clone(),
     };
+    let narrowing = pairing.right.1.collection().filter.clone();
     let mut pair = OpenPair::open(run, pairing)?;
 
     if !run.dry_run {
         pair.drain_queues(run, report);
     }
-    let common = pair.plan_collections(run, &filter, state, taskless, report)?;
+    let filters = [&filter, &narrowing];
+    let common = pair.plan_collections(run, filters, state, taskless, report)?;
     pair.sync_collections(run, &common, report);
 
     Ok(())
@@ -286,12 +288,13 @@ impl OpenPair {
     /// Lists both sides, creates and deletes the collections one side holds
     /// alone as the rights allow, and answers the collections both hold.
     ///
-    /// The collections both hold are declared, and the pair's listings
-    /// recorded, before any item moves.
+    /// Only what both `filters` keep counts: the run's or the source's, then
+    /// the target's, which narrows what the target takes. The collections
+    /// both hold are declared, and the listings recorded, before any item moves.
     fn plan_collections(
         &mut self,
         run: AccountRun<'_>,
-        filter: &CollectionFilter,
+        filters: [&CollectionFilter; 2],
         state: &mut AccountState,
         taskless: &mut PairTaskless,
         report: &mut SyncOutput,
@@ -323,8 +326,16 @@ impl OpenPair {
             });
         }
 
-        let left_filtered = filter_collections(&left_collections, filter);
-        let right_filtered = filter_collections(&right_collections, filter);
+        let filtered = |collections: &BTreeMap<String, String>| {
+            let [run_or_source, target] =
+                filters.map(|filter| filter_collections(collections, filter));
+            run_or_source
+                .intersection(&target)
+                .cloned()
+                .collect::<BTreeSet<_>>()
+        };
+        let left_filtered = filtered(&left_collections);
+        let right_filtered = filtered(&right_collections);
 
         let held = held_by_both(
             &self.left_store,

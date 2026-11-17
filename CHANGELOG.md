@@ -98,6 +98,10 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Changed
 
+- **BREAKING**: Changed a target's `smtp` table into a configuration error: an account sends through a source, and the target's channel was never used. A queued send naming a target parks.
+
+- Changed a target's `collection.filter`, which was ignored, to narrow what that target takes.
+
 - **BREAKING**: Renamed in the sync report and its events: `refused` to `duplicates`, the events `opened`, `listed` and `refused` to `endpoint-opened`, `endpoint-listed` and `change-refused`, a coverage row's `at` to `closedAt`, and the `action` of a `rejected` or `forbidden` row to `kind`.
 
 - **BREAKING**: Changed `pool-size` into a key of the Graph domain tables alone: on IMAP, Gmail and the other backends nothing read it, and it now fails to load as unknown. IMAP connections are bounded by `connections`.

@@ -286,3 +286,23 @@ fn a_lone_source_nothing_writes_is_listed_once_a_run() {
     assert_eq!(code, 0, "{report}");
     assert_eq!(dav.requests("REPORT").len() - listed, 1, "{report}");
 }
+
+/// A target's `collection.filter` narrows what that target takes: a
+/// collection it leaves out is neither created on it nor synced.
+///
+/// Ignored before, the filter loaded and every collection crossed.
+#[test]
+fn a_target_s_filter_narrows_what_it_takes() {
+    let home = tempfile::tempdir().unwrap();
+    let src = FakeDav::start();
+    let dst = FakeDav::start();
+    src.put("a.vcf", &card("a"));
+    let narrow = "targets.dst.carddav.collection.filter.exclude = [\"book\"]\n";
+    let config = pair(home.path(), &src, &dst, narrow);
+
+    let (code, report) = sync(home.path(), &config, &["--init"]);
+
+    assert_eq!(code, 0, "{report}");
+    assert!(dst.names().is_empty(), "{report}");
+    assert!(dst.requests("PUT").is_empty(), "{report}");
+}

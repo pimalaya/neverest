@@ -1730,6 +1730,56 @@ fn a_submit_intent_survives_the_drain_and_is_read_back() {
     assert!(submit::pending(&store).unwrap().is_empty());
 }
 
+/// A send naming one of the account's targets parks: a target sends
+/// nothing, an account sending through a source, so it would wait for ever.
+///
+/// One naming the source is left for the send channel.
+#[test]
+fn a_send_naming_a_target_parks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+    store
+        .ensure_collection("left/Sent", "message/rfc822")
+        .unwrap();
+    let mut producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
+    for sender in ["dst", "left"] {
+        let object = store
+            .blob_stage()
+            .stage_body(format!("Subject: {sender}\r\n\r\nhello").as_bytes())
+            .unwrap();
+        producer
+            .enqueue(
+                "left/Sent",
+                &PimdirAction::Unknown {
+                    kind: submit::SUBMIT.into(),
+                    payload: format!(
+                        r#"{{"v":1,"source":"{sender}","from":"a@x.org","rcpts":["b@y.org"],"subject":"{sender}"}}"#
+                    ),
+                    object_hash: Some(object.hash.clone()),
+                },
+                Some(&object),
+            )
+            .unwrap();
+    }
+    drop(producer);
+    let config: AccountConfig = toml::from_str(
+        "sources.left.imap.server = \"imap.example.org\"\n\
+         targets.dst.imap.server = \"imap.example.net\"\n",
+    )
+    .unwrap();
+
+    let intents = submit::pending(&store).unwrap();
+    let mut report = SyncOutput::default();
+    let kept = park_targeted(&config, &mut store, intents, &mut report);
+
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].subject().as_deref(), Some("left"));
+    assert_eq!(report.submitted.len(), 1);
+    assert!(report.submitted[0].parked);
+    assert_eq!(report.submitted[0].subject.as_deref(), Some("dst"));
+    assert_eq!(store.parked_actions().unwrap().len(), 1);
+}
+
 /// A store whose `gcal` source declares the intents on `gcal/primary`,
 /// with one `calendar-reply` queued there naming `target`.
 fn queued_reply(dir: &Path, target: &str) -> PimdirSourceStore {

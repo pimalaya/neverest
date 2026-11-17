@@ -19,7 +19,7 @@ The account root carries one table per kind, named in the singular as Graph's do
 
 - `mail.filter.since`, where `item.filter.since` was.
 - `contact.merger` and `calendar.merger`, where `conflict.merger` was. `conflict resolve --interactive` runs the merger of the conflict's kind, refuses naming the key when that kind has none, and refuses mail outright.
-- `msgraph.contact`, where `msgraph.contacts` was. The source the sugar names stays `msgraph-contacts`, so no store moves.
+- `msgraph.contact`, where `msgraph.contacts` was, and the sources the `msgraph` sugar names follow the table and the domain: `msgraph-mail`, `msgraph-contact` and `msgraph-calendar`, where they were `msgraph`, `msgraph-contacts` and `msgraph-calendar`. A store synced under the old ids is not carried over, as no 0.x store is.
 
 v1 already refuses every 0.x configuration, so the old spellings are unknown fields like any other, with no refusal by name.
 

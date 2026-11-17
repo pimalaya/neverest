@@ -139,12 +139,12 @@ impl Replica {
     /// lines, its token read from the environment of each run.
     ///
     /// `backend` is the source the sugar names: a Graph domain's is the
-    /// table it had before (`msgraph-contacts`), written as its domain of
+    /// table and the domain (`msgraph-contact`), written as that domain of
     /// the one `msgraph` table.
     pub fn open(backend: &str, extra: &str, token: &str) -> Self {
         let (table, domain) = match backend {
-            "msgraph" => ("msgraph", "msgraph.mail = true\n"),
-            "msgraph-contacts" => ("msgraph", "msgraph.contact = true\n"),
+            "msgraph-mail" => ("msgraph", "msgraph.mail = true\n"),
+            "msgraph-contact" => ("msgraph", "msgraph.contact = true\n"),
             "msgraph-calendar" => ("msgraph", "msgraph.calendar = true\n"),
             backend => (backend, ""),
         };

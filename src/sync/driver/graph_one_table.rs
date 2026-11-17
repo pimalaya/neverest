@@ -202,8 +202,8 @@ fn collections(dir: &Path) -> BTreeSet<String> {
 /// The source ids today's three tables gave, pinned by
 /// `config::tests::the_graph_tables_keep_their_source_ids`.
 const THREE_TABLES: [(&str, GraphKind); 3] = [
-    ("a/msgraph", GraphKind::Mail),
-    ("a/msgraph-contacts", GraphKind::Contacts),
+    ("a/msgraph-mail", GraphKind::Mail),
+    ("a/msgraph-contact", GraphKind::Contacts),
     ("a/msgraph-calendar", GraphKind::Calendar),
 ];
 

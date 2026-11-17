@@ -295,8 +295,8 @@ pub struct AccountConfig {
     pub gmail: Option<GmailConfig>,
     /// Direct-backend sugar: a Graph source per domain the table names.
     ///
-    /// Each is named as the table it had before (`msgraph`,
-    /// `msgraph-contacts`, `msgraph-calendar`).
+    /// Each is named after the table and its domain (`msgraph-mail`,
+    /// `msgraph-contact`, `msgraph-calendar`).
     #[serde(
         default,
         deserialize_with = "msgraph_sugar",
@@ -348,7 +348,7 @@ impl AccountConfig {
     /// explicit `sources` table.
     ///
     /// The sugar's source id is its protocol name, a Graph domain's the
-    /// table it had before, the same id the expanded form writes, so
+    /// table and the domain, the same id the expanded form writes, so
     /// expanding an account by hand is a store no-op.
     pub fn sources(&self) -> Result<HashMap<String, SourceConfig>> {
         let mut sources = self.sources.clone();
@@ -781,10 +781,10 @@ mod tests {
         endpoints
     }
 
-    /// A Graph source keeps the id today's stores hold its bindings under,
-    /// whatever table names it: renaming one orphans them.
+    /// The Graph sugar names a source after the table and its domain, and a
+    /// named source keeps its own name whatever domain it syncs.
     #[test]
-    fn the_graph_tables_keep_their_source_ids() {
+    fn a_graph_source_is_named_after_its_domain() {
         let id = |id: &str, domain, delete| (String::from(id), domain, delete);
 
         let sugar = graph_endpoints(
@@ -799,9 +799,9 @@ mod tests {
         assert_eq!(
             sugar,
             [
-                id("a/msgraph", "mail", true),
                 id("a/msgraph-calendar", "calendar", true),
-                id("a/msgraph-contacts", "contact", false),
+                id("a/msgraph-contact", "contact", false),
+                id("a/msgraph-mail", "mail", true),
             ]
         );
 

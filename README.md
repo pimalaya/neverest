@@ -86,33 +86,47 @@
 
 ## Configuration
 
-Neverest reads a TOML configuration you write, and never writes one. [config.sample.toml](./config.sample.toml) holds one account, every line commented, one section per backend: yours to uncomment. Releases and packages ship it as share/doc/neverest/config.sample.toml.
-
-A configuration is loaded from every existing path among the following, each one deep-merged on top of the ones before:
+A TOML configuration is loaded from every existing path among the following, each one deep-merged on top of the ones before:
 
 - `$XDG_CONFIG_HOME/neverest/config.toml`
 - `$HOME/.config/neverest/config.toml`
 - `$HOME/.neverestrc`
 
-Override the path with `-c <PATH>`, repeated to merge several files. `neverest account check` validates the accounts declared.
+Override the path with `-c <PATH>`, repeated to merge several files.
+
+> [!TIP]
+> See [config.sample.toml](./config.sample.toml) for a complete configuration of one example account with commented fields; rename the account and uncomment what you need.
 
 ## Usage
 
-Every command runs over every account unless `-a` names some, and explains its flags, exit codes and JSON output in its `--help`.
+**Step 1**: once your first account is configured, check that every endpoint answers:
 
 ```sh
-# Check the configuration: every endpoint is opened, nothing is synced
 neverest account check
+```
 
-# Preview the first sync, then run it: --init adds the accounts to the store
-neverest sync --init --dry-run
-neverest sync --init
+**Step 2**: initialize the account in the store:
 
-# Later runs sync what changed, everything or one collection of one account
+```sh
+neverest init
+```
+
+**Step 3**: preview the first sync, which writes nothing:
+
+```sh
+neverest sync --dry-run
+```
+
+**Step 4**: if the preview looks right, run it:
+
+```sh
 neverest sync
-neverest sync -a work --include-collection INBOX
+```
 
-# Apply what himalaya, cardamum or calendula queued, offline
+Every command covers every account unless `-a` names some, and its `--help` details its flags, exit codes and JSON output. More use cases:
+
+```sh
+# Apply what any other client queued, offline
 neverest sync --queue-only
 
 # Build the store's search index whole, for a large first sync

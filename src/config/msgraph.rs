@@ -94,14 +94,14 @@ pub struct MsgraphTable {
     /// `https_proxy` environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
-    /// The mail folders, the source `msgraph` under the account.
+    /// The mail folders, the source `msgraph-mail` under the account.
     #[serde(
         default,
         deserialize_with = "msgraph_domain",
         skip_serializing_if = "Option::is_none"
     )]
     pub mail: Option<MsgraphDomainConfig>,
-    /// The contact folders, the source `msgraph-contacts` under the
+    /// The contact folders, the source `msgraph-contact` under the
     /// account.
     #[serde(
         default,
@@ -285,15 +285,15 @@ mod tests {
 
         let mut ids: Vec<&String> = sources.keys().collect();
         ids.sort();
-        assert_eq!(ids, ["msgraph", "msgraph-contacts"]);
-        let contacts = &sources["msgraph-contacts"];
+        assert_eq!(ids, ["msgraph-contact", "msgraph-mail"]);
+        let contacts = &sources["msgraph-contact"];
         assert_eq!(
             contacts.collection().filter,
             CollectionFilter::Include(vec![String::from("AAMk")])
         );
         assert_eq!(contacts.pool_size(), Some(2));
         assert_eq!(
-            sources["msgraph"].collection().filter,
+            sources["msgraph-mail"].collection().filter,
             CollectionFilter::All
         );
         for source in sources.values() {

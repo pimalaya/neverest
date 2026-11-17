@@ -139,8 +139,8 @@ fn a_graph_mail_folder_syncs_both_ways() {
     with_cleanup(
         || {
             let extra = user_line();
-            let a = Replica::open("msgraph", &extra, &token);
-            let b = Replica::open("msgraph", &extra, &token);
+            let a = Replica::open("msgraph-mail", &extra, &token);
+            let b = Replica::open("msgraph-mail", &extra, &token);
 
             a.sync_until(&folder, "the seeded message reaches a replica", |a| {
                 a.item(&folder, &folder).is_some()
@@ -164,7 +164,7 @@ fn a_graph_mail_folder_syncs_both_ways() {
                 })
             });
 
-            let c = Replica::open("msgraph", &extra, &token);
+            let c = Replica::open("msgraph-mail", &extra, &token);
             c.sync(&folder);
             let item = c.item(&folder, &folder).expect("a full round reads it");
             assert!(flags(&item).contains("\\Flagged"), "with its flags");
@@ -223,7 +223,7 @@ fn a_graph_scope_widens_by_its_band() {
     with_cleanup(
         || {
             let extra = format!("{}\nmail.filter.since = \"2024-01-01\"", user_line());
-            let replica = Replica::open("msgraph", &extra, &token);
+            let replica = Replica::open("msgraph-mail", &extra, &token);
             let stored = |replica: &Replica| -> Vec<&str> {
                 years
                     .into_iter()
@@ -294,7 +294,7 @@ fn a_graph_move_is_delivered_once() {
     with_cleanup(
         || {
             let extra = user_line();
-            let a = Replica::open("msgraph", &extra, &token);
+            let a = Replica::open("msgraph-mail", &extra, &token);
             let trash = "Deleted Items";
             let keys = ["Inbox", folder.as_str(), trash];
 
@@ -341,7 +341,7 @@ fn a_graph_move_is_delivered_once() {
             assert_eq!(trashed.len(), 1, "Deleted Items holds it once");
             assert_eq!(trashed[0].seq, seq, "under the same seq");
 
-            let b = Replica::open("msgraph", &extra, &token);
+            let b = Replica::open("msgraph-mail", &extra, &token);
             b.sync_keys(&keys, &[0]);
             assert_eq!(
                 b.items(trash, &folder).len(),
@@ -383,7 +383,7 @@ fn a_graph_add_lands_in_drafts_only() {
     with_cleanup(
         || {
             let extra = user_line();
-            let a = Replica::open("msgraph", &extra, &token);
+            let a = Replica::open("msgraph-mail", &extra, &token);
             a.sync_keys(&["Drafts"], &[0]);
 
             a.add(
@@ -408,7 +408,7 @@ fn a_graph_add_lands_in_drafts_only() {
             assert_eq!(held[0].seq, seq);
             wait_count(&token, "drafts", &draft, 1, "the second run");
 
-            let b = Replica::open("msgraph", &extra, &token);
+            let b = Replica::open("msgraph-mail", &extra, &token);
             b.sync_keys(&["Drafts"], &[0]);
             let item = b.item("Drafts", &draft).expect("a fresh replica reads it");
             let set = flags(&item);
@@ -461,7 +461,7 @@ fn a_graph_contact_folder_syncs_both_ways() {
     with_cleanup(
         || {
             let extra = user_line();
-            round_trip("msgraph-contacts", &extra, &token, &folder, card);
+            round_trip("msgraph-contact", &extra, &token, &folder, card);
         },
         || {
             if let Err(err) = connect(&token).contact_folder_delete(&folder) {
@@ -519,7 +519,7 @@ fn every_graph_calendar_of_the_mailbox_syncs() {
 #[ignore = "live: needs the app registration's client secret"]
 fn a_graph_check_names_the_well_known_folders() {
     let token = msgraph_token();
-    let report = Replica::open("msgraph", &user_line(), &token).check();
+    let report = Replica::open("msgraph-mail", &user_line(), &token).check();
     let collections = report["sources"][0]["collections"]
         .as_array()
         .unwrap_or_else(|| panic!("collections listed: {report}"));

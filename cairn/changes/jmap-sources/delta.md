@@ -37,7 +37,7 @@ Auth SHALL be what the `auth` table names (`header`, `bearer` or `basic`), resol
 A `submit` intent on a `jmap` source SHALL be an `EmailSubmission` created through the source's own session, the message imported as a draft first and filed as sent on success, under `identity-id` where the source names one, else under the identity matching the message's `From`. The source SHALL need no `smtp` channel, and SHALL be refused one.
 
 ### Requirement: A JMAP contacts source syncs the address books
-A `jmap.contact` domain, the source `jmap-contacts`, SHALL sync `text/vcard` over the session's contacts capability (RFC 9610), through the session the `jmap` table holds. Every `AddressBook` SHALL be a collection keyed by its id and named by its `name`, a card in several books being one item filed in each. The body SHALL be the vCard io-jmap converts the `ContactCard` to and from (RFC 9555), the projection living in the protocol crate, and the item's identity the card's `uid`.
+A `jmap.contact` domain, the source `jmap-contact`, SHALL sync `text/vcard` over the session's contacts capability (RFC 9610), through the session the `jmap` table holds. Every `AddressBook` SHALL be a collection keyed by its id and named by its `name`, a card in several books being one item filed in each. The body SHALL be the vCard io-jmap converts the `ContactCard` to and from (RFC 9555), the projection living in the protocol crate, and the item's identity the card's `uid`.
 
 The revision of a card SHALL be a hash of its JSON, JMAP stating none. A write SHALL carry `ifInState`, so a card edited on the server since the run's listing is refused and merged by the next run, never overwritten.
 
@@ -52,7 +52,7 @@ The revision of a card SHALL be a hash of its JSON, JMAP stating none. A write S
 JMAP joins IMAP, Microsoft Graph and Gmail for `message/rfc822`, and CardDAV, Microsoft Graph and Google People for `text/vcard`. The parenthetical "JMAP as its backend lands" is kept for `text/calendar` alone.
 
 ### Requirement: A backend under the account is a source named after its protocol
-The `jmap` table SHALL be sugar for one source a domain it names, as `msgraph` is: `jmap` for `jmap.mail`, `jmap-contacts` for `jmap.contact` (`jmap-calendar` for `jmap.calendar` when it opens), each holding the table's session (`server`, `tls`, `alpn`, `auth`) and that domain's table alone, a domain written `= true` taking its defaults. Under `sources.<name>`, a `jmap` table SHALL name one domain, the source keeping `<name>`. `collection`, `item`, `flag` and `pool-size` written directly in `jmap`, and a `jmap` table naming no domain, SHALL be refused by name, pointing at `jmap.mail`.
+The `jmap` table SHALL be sugar for one source a domain it names, as `msgraph` is: `jmap-mail` for `jmap.mail`, `jmap-contact` for `jmap.contact` (`jmap-calendar` for `jmap.calendar` when it opens), each holding the table's session (`server`, `tls`, `alpn`, `auth`) and that domain's table alone, a domain written `= true` taking its defaults. Under `sources.<name>`, a `jmap` table SHALL name one domain, the source keeping `<name>`. `collection`, `item`, `flag` and `pool-size` written directly in `jmap`, and a `jmap` table naming no domain, SHALL be refused by name, pointing at `jmap.mail`.
 
 ### Requirement: Every remote backend is a cargo feature
 `jmap` gates the JMAP backends. A JMAP source in a build without it fails when opened, coded `backend-not-built` and naming `jmap`, as every other backend does; "a JMAP source, which no feature opens yet, fails saying so" is removed.

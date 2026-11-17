@@ -117,7 +117,7 @@ A first run with `one-way = true` against a non-empty target has no recorded mod
 - THEN the run proceeds, the recorded mode being unchanged
 
 ### Requirement: A backend under the account is a source named after its protocol
-A backend table written directly under the account (`imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`) SHALL be sugar for `sources.<key>.<key>`, the source taking the key as its name. The `msgraph` table SHALL be sugar for one source a domain it names, each named as the table the domain had before: `msgraph` for `mail`, `msgraph-contacts` for `contact`, `msgraph-calendar` for `calendar`, each holding the table's session and that domain's table alone. The sugar SHALL produce a configuration indistinguishable from the expanded form, source id included, so expanding it by hand is a no-op on the store.
+A backend table written directly under the account (`imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`) SHALL be sugar for `sources.<key>.<key>`, the source taking the key as its name. The `msgraph` table SHALL be sugar for one source a domain it names, each named after the table and the domain: `msgraph-mail`, `msgraph-contact` and `msgraph-calendar`, each holding the table's session and that domain's table alone. The sugar SHALL produce a configuration indistinguishable from the expanded form, source id included, so expanding it by hand is a no-op on the store.
 
 A key names a protocol, and where a protocol carries several domains a table under it names the domain: `carddav` and `caldav` are two keys over one adapter, `msgraph.mail`, `msgraph.contact` and `msgraph.calendar` three tables over one session. The domain is what the kind falls out of, so it SHALL be distinct per kind even when the transport is shared.
 
@@ -130,19 +130,11 @@ Declaring the same key both directly and under `sources` SHALL be a configuratio
 
 #### Scenario: Expanding the Graph table changes nothing
 - GIVEN an account written as `msgraph.auth.token.raw = "..."` with `msgraph.mail = true` and `msgraph.contact = true`
-- WHEN it is rewritten as `sources.msgraph.msgraph.mail = true` and `sources.msgraph-contacts.msgraph.contact = true`, each with the token
+- WHEN it is rewritten as `sources.msgraph-mail.msgraph.mail = true` and `sources.msgraph-contact.msgraph.contact = true`, each with the token
 - THEN the sync opens the same two source ids and reuses every existing binding
 
-### Requirement: One Graph table keeps the source ids of the three it replaced
-Writing Graph as one `msgraph` table, where `msgraph-contacts` and `msgraph-calendar` were tables of their own, SHALL move nothing in a store: every source id a configuration of the three tables produced SHALL be produced by its rewrite in the one table, so the first run of the new build finds every collection, binding and checkpoint where the last run of the old one left them, creating, listing whole and orphaning none. The sugar keeps the three names ("A backend under the account is a source named after its protocol"); a named source keeps its name, `sources.<name>.msgraph-contacts` becoming `sources.<name>.msgraph` with the `contact` domain alone. A store SHALL NOT be migrated for it, nothing in a store naming a table.
-
-#### Scenario: A store synced under the three tables
-- GIVEN a store an account synced under `msgraph.*`, `msgraph-contacts.*` and `msgraph-calendar.*`
-- WHEN the account is rewritten as one `msgraph` table naming `mail`, `contact` and `calendar`, and synced
-- THEN mail and contacts resume from their stored delta links, the calendars list the same events, and the store holds the same sources, collections and bindings, none created
-
 ### Requirement: The configuration refuses every key it does not read
-The configuration SHALL refuse at load, naming it, every key it does not read, at every level: the document root, which holds `accounts` alone; an account; a `sources.<name>` or `targets.<name>` table; a backend table, written under a source or directly under the account; and every table nested in one (`tls`, `sasl`, `auth`, `collection`, `item`, `flag`, `smtp`, `store`, `conflict`, an `msgraph` domain table). A source table naming no backend table, or more than one, SHALL be refused at load, naming the backends it found.
+The configuration SHALL refuse at load, naming it, every key it does not read, at every level: the document root, which holds `accounts` alone; an account; a `sources.<name>` or `targets.<name>` table; a backend table, written under a source or directly under the account; and every table nested in one (`tls`, `sasl`, `auth`, `collection`, `item`, `flag`, `smtp`, `store`, `mail`, `contact`, `calendar`, an `msgraph` domain table). A source table naming no backend table, or more than one, SHALL be refused at load, naming the backends it found.
 
 A key an earlier neverest read and this one does not, `default` included, SHALL be refused as any unknown key is, by serde's `deny_unknown_fields`, with no sentence of its own and no pointer to a migration guide: v1 reads no 0.x configuration, a person writes a new one from the sample. No key SHALL be read under an old spelling: an alias either loads a configuration the person thinks is refused or refuses it under a name the person never wrote.
 

@@ -128,7 +128,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - **BREAKING**: Changed Microsoft Graph to one `msgraph` table, its session once and its domains under `msgraph.mail`, `msgraph.contact` and `msgraph.calendar`, where `msgraph-contacts` and `msgraph-calendar` were tables of their own.
 
-  An `msgraph` table naming no domain is refused: add `msgraph.mail = true` to sync mail.
+  Each domain is a source of its own, named `msgraph-mail`, `msgraph-contact` or `msgraph-calendar`. An `msgraph` table naming no domain is refused: add `msgraph.mail = true` to sync mail.
 
 - **BREAKING**: Changed `conflict.merger` into `contact.merger` and `calendar.merger`, one merger a kind, where one command was handed cards and events alike.
 

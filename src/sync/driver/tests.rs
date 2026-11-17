@@ -1984,8 +1984,8 @@ fn a_graph_source_takes_an_add_in_its_drafts_alone() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account("live")
-        .for_source("msgraph");
-    for collection in ["msgraph/Drafts", "msgraph/Archive"] {
+        .for_source("msgraph-mail");
+    for collection in ["msgraph-mail/Drafts", "msgraph-mail/Archive"] {
         store
             .ensure_collection(collection, "message/rfc822")
             .unwrap();
@@ -2012,7 +2012,7 @@ fn a_graph_source_takes_an_add_in_its_drafts_alone() {
             .unwrap();
     }
     store
-        .set_collection_role("msgraph/Drafts", Some("drafts"))
+        .set_collection_role("msgraph-mail/Drafts", Some("drafts"))
         .unwrap();
     let config: AccountConfig =
         toml::from_str("msgraph.auth.token.raw = \"token\"\nmsgraph.mail = true").unwrap();
@@ -2029,15 +2029,15 @@ fn a_graph_source_takes_an_add_in_its_drafts_alone() {
             supersedes: None,
         })
     };
-    match add("msgraph/Archive") {
+    match add("msgraph-mail/Archive") {
         Err(PimdirError::Unsupported(refusal)) => {
             assert_eq!(refusal.capability, io_pimdir::capability::MAIL_MESSAGE_ADD);
-            assert_eq!(refusal.source, "msgraph");
+            assert_eq!(refusal.source, "msgraph-mail");
             assert!(refusal.detail.unwrap().contains("Drafts only"));
         }
         other => panic!("an add outside Drafts is refused at the gate: {other:?}"),
     }
-    add("msgraph/Drafts").expect("an add in Drafts is queued");
+    add("msgraph-mail/Drafts").expect("an add in Drafts is queued");
 }
 
 /// Gmail keeps no keyword but `$Important`, the IMPORTANT label.
@@ -4991,15 +4991,17 @@ fn a_send_needs_its_source_opened_only_when_it_sends_natively() {
     assert!(wanted_sides(&store, &smtp, &["imap"], "imap").is_empty());
 
     let dir = tempfile::tempdir().unwrap();
-    let store = PimdirStore::open(dir.path()).unwrap().for_source("msgraph");
+    let store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("msgraph-mail");
     store
-        .ensure_collection("msgraph/Sent Items", "message/rfc822")
+        .ensure_collection("msgraph-mail/Sent Items", "message/rfc822")
         .unwrap();
-    assert!(wanted_sides(&store, &graph, &["msgraph"], "msgraph").is_empty());
-    queue_submit(dir.path(), "msgraph/Sent Items", "msgraph");
+    assert!(wanted_sides(&store, &graph, &["msgraph-mail"], "msgraph-mail").is_empty());
+    queue_submit(dir.path(), "msgraph-mail/Sent Items", "msgraph-mail");
     assert_eq!(
-        wanted_sides(&store, &graph, &["msgraph"], "msgraph"),
-        BTreeSet::from([String::from("msgraph")])
+        wanted_sides(&store, &graph, &["msgraph-mail"], "msgraph-mail"),
+        BTreeSet::from([String::from("msgraph-mail")])
     );
 }
 
@@ -6492,12 +6494,12 @@ fn each_backend_opens_its_own_connection_budget() {
     assert_eq!(connection_budget(&imap, 8), 8);
 
     let graph = "msgraph.auth.token.raw = \"x\"\nmsgraph.mail = true";
-    let msgraph = source_of(graph, "msgraph");
+    let msgraph = source_of(graph, "msgraph-mail");
     assert_eq!(connection_budget(&msgraph, 4), 3);
     assert_eq!(connection_budget(&msgraph, 1), 1, "--connections 1");
     let sized = source_of(
         "msgraph.auth.token.raw = \"x\"\nmsgraph.mail.pool-size = 2",
-        "msgraph",
+        "msgraph-mail",
     );
     assert_eq!(connection_budget(&sized, 4), 2);
     let calendar = source_of(

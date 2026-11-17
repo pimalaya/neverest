@@ -31,3 +31,25 @@ A tty is not consent. A run has one when it is driven by a wrapper script, when 
 - WHEN the card is resolved interactively
 - THEN it is refused naming `contact.merger`, nothing runs, and the card stays parked
 
+
+### Requirement: A backend under the account is a source named after its protocol
+A backend table written directly under the account (`imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`) SHALL be sugar for `sources.<key>.<key>`, the source taking the key as its name. The `msgraph` table SHALL be sugar for one source a domain it names, each named after the table and the domain: `msgraph-mail`, `msgraph-contact` and `msgraph-calendar`, each holding the table's session and that domain's table alone. The sugar SHALL produce a configuration indistinguishable from the expanded form, source id included, so expanding it by hand is a no-op on the store.
+
+A key names a protocol, and where a protocol carries several domains a table under it names the domain: `carddav` and `caldav` are two keys over one adapter, `msgraph.mail`, `msgraph.contact` and `msgraph.calendar` three tables over one session. The domain is what the kind falls out of, so it SHALL be distinct per kind even when the transport is shared.
+
+Declaring the same key both directly and under `sources` SHALL be a configuration error rather than a merge.
+
+#### Scenario: Expanding the sugar changes nothing
+- GIVEN an account written as `imap.server = "..."`
+- WHEN it is rewritten as `sources.imap.imap.server = "..."`
+- THEN the sync opens the same source id and reuses every existing binding
+
+#### Scenario: Expanding the Graph table changes nothing
+- GIVEN an account written as `msgraph.auth.token.raw = "..."` with `msgraph.mail = true` and `msgraph.contact = true`
+- WHEN it is rewritten as `sources.msgraph-mail.msgraph.mail = true` and `sources.msgraph-contact.msgraph.contact = true`, each with the token
+- THEN the sync opens the same two source ids and reuses every existing binding
+
+## REMOVED Requirements
+
+### Requirement: One Graph table keeps the source ids of the three it replaced
+The Graph sources are named after the table and the domain (`msgraph-mail`, `msgraph-contact`, `msgraph-calendar`), and v1 reads no 0.x store, so no id needs keeping.

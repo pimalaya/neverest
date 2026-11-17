@@ -219,7 +219,7 @@ fn clients_waiting(
 ) -> (Vec<Client>, Arc<Throttle>) {
     let config: AccountConfig =
         toml::from_str("msgraph.auth.token.raw = \"x\"\nmsgraph.mail = true").unwrap();
-    let budget = connection_budget(&config.sources().unwrap()["msgraph"], 4);
+    let budget = connection_budget(&config.sources().unwrap()["msgraph-mail"], 4);
     let throttle = Arc::new(Throttle::new("msgraph").waiting(max_wait));
     let sizes = SizeHints::default();
     sizes.noted(ids.iter().map(|id| (id.clone(), 1_000)));

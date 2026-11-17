@@ -52,9 +52,9 @@ Not started: scheduled after the next major release (owner, 2026-11-15). The sta
 - [ ] A JMAP endpoint and an IMAP endpoint of one Stalwart account in one store: the folders pair, a message is one item.
 - [ ] A live suite on Fastmail, read-only (the account is pull-only): session, listing, one full round, one delta.
 
-## 5. Contacts (`jmap.contact`, source `jmap-contacts`)
+## 5. Contacts (`jmap.contact`, source `jmap-contact`)
 
-- [ ] The `jmap.contact` domain and its sugar (source `jmap-contacts`), the session shared with `jmap.mail`, kind `text/vcard`.
+- [ ] The `jmap.contact` domain and its sugar (source `jmap-contact`), the session shared with `jmap.mail`, kind `text/vcard`.
 - [ ] Collections from `AddressBook/get`, items from `ContactCard/query` and `ContactCard/changes`, the vCard through io-jmap's `vcard` feature, the revision a hash of the card's JSON.
 - [ ] Writes through `ContactCard/set` with `ifInState` (J4); the three-way merge of a refused edit on the next run.
 - [ ] Tests: fake server, Stalwart, Fastmail read-only.

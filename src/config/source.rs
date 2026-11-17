@@ -145,10 +145,11 @@ pub enum SourceBackendConfig {
     Jmap(JmapConfig),
     Gmail(GmailConfig),
     /// Microsoft Graph mail, the `mail` domain of an `msgraph` table.
+    #[serde(rename = "msgraph-mail")]
     Msgraph(MsgraphConfig),
     /// Microsoft Graph contacts, the `contact` domain of an `msgraph`
     /// table: the same session, syncing contact folders.
-    #[serde(rename = "msgraph-contacts")]
+    #[serde(rename = "msgraph-contact")]
     MsgraphContacts(MsgraphConfig),
     /// Microsoft Graph calendars, the `calendar` domain of an `msgraph`
     /// table: the same session, syncing calendars.
@@ -191,13 +192,12 @@ impl SourceBackendConfig {
         }
     }
 
-    /// The id of the source the sugar builds from this backend: its table.
-    ///
-    /// A Graph domain keeps the table it had before the domains shared one,
-    /// so a store keeps every binding.
+    /// The id of the source the sugar builds from this backend: its table,
+    /// and for a Graph domain the table and the domain.
     pub fn sugar_name(&self) -> &'static str {
         match self {
-            Self::MsgraphContacts(_) => "msgraph-contacts",
+            Self::Msgraph(_) => "msgraph-mail",
+            Self::MsgraphContacts(_) => "msgraph-contact",
             Self::MsgraphCalendar(_) => "msgraph-calendar",
             backend => backend.protocol(),
         }
@@ -324,8 +324,8 @@ mod tests {
         )
         .unwrap();
         let sources = account.sources().unwrap();
-        assert!(sources["msgraph"].sends_natively());
-        assert!(sources["msgraph"].smtp.is_none());
+        assert!(sources["msgraph-mail"].sends_natively());
+        assert!(sources["msgraph-mail"].smtp.is_none());
 
         let err = toml::from_str::<AccountConfig>(
             r#"
@@ -382,8 +382,8 @@ mod tests {
         .unwrap();
 
         let sources = account.sources().unwrap();
-        assert!(sources["msgraph"].sends_natively());
-        for name in ["msgraph-contacts", "msgraph-calendar", "work"] {
+        assert!(sources["msgraph-mail"].sends_natively());
+        for name in ["msgraph-contact", "msgraph-calendar", "work"] {
             assert!(!sources[name].carries_mail(), "{name} does not submit");
             assert!(!sources[name].sends_natively(), "{name} does not send");
         }

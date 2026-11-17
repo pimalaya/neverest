@@ -595,7 +595,7 @@ mod tests {
     fn a_graph_mail_source_moves_copies_and_adds_drafts() {
         let account: AccountConfig =
             toml::from_str("msgraph.auth.token.raw = \"token\"\nmsgraph.mail = true").unwrap();
-        let source = account.sources().unwrap().remove("msgraph").unwrap();
+        let source = account.sources().unwrap().remove("msgraph-mail").unwrap();
         let declaration = declaration(&source, false, false, &[], &BTreeSet::new());
         let row = |name: &str| declaration.iter().find(|row| row.name == name).unwrap();
 
@@ -758,12 +758,12 @@ mod tests {
 
         let account: AccountConfig =
             toml::from_str("msgraph.auth.token.raw = \"token\"\nmsgraph.mail = true").unwrap();
-        let graph = account.sources().unwrap().remove("msgraph").unwrap();
+        let graph = account.sources().unwrap().remove("msgraph-mail").unwrap();
         let graph_rows = super::declaration(
             &graph,
             false,
             false,
-            &["msgraph/Inbox".into()],
+            &["msgraph-mail/Inbox".into()],
             &BTreeSet::new(),
         );
         assert!(

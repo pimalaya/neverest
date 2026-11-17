@@ -42,7 +42,7 @@ Two places to read before writing a line:
 
 Three sources, in this order. Each is a release on its own.
 
-One `jmap` table holds the session and names the domains it syncs, as `msgraph` does (J3): `jmap.mail`, then `jmap.contact`, then `jmap.calendar`, each a source of its own (`jmap`, `jmap-contacts`, `jmap-calendar`) with its own rights and filter.
+One `jmap` table holds the session and names the domains it syncs, as `msgraph` does (J3): `jmap.mail`, then `jmap.contact`, then `jmap.calendar`, each a source of its own (`jmap-mail`, `jmap-contact`, `jmap-calendar`) with its own rights and filter.
 
 ### 1. Mail: `jmap.mail`
 
@@ -71,7 +71,7 @@ A `jmap` cargo feature in the default set, `Client::Jmap`, src/jmap/client.rs an
 
 ### 2. Contacts: `jmap.contact`
 
-A second domain of the same table and feature, as `msgraph.contact` is Graph's: the source `jmap-contacts`, syncing `text/vcard` over the session the mail domain uses.
+A second domain of the same table and feature, as `msgraph.contact` is Graph's: the source `jmap-contact`, syncing `text/vcard` over the session the mail domain uses.
 
 - Every `AddressBook` is a collection, keyed by its id and named by its `name`. A `ContactCard` lists the books it is in (`addressBookIds`), one item filed in several collections.
 - The body is the vCard io-jmap converts the card to and from (RFC 9555, its `vcard` feature); the projection stays in the protocol crate. The item's identity is the card's `uid`.
@@ -96,7 +96,7 @@ To settle when the work opens, each with the answer this proposal assumes:
 
 - **J1, what keys a mailbox.** The name path, so JMAP pairs with IMAP on one account, against the mailbox id, which never changes on a rename. Assumed: the name path, a rename reading as a remove and an add, as on IMAP and Gmail. To check first: a name holding a `/`.
 - **J2, a delete from an email's last mailbox.** Destroy it, which is what an IMAP expunge from its last folder does, against moving it to the trash mailbox. Assumed: destroy, under the source's `item.delete` right.
-- **J3, the table shape.** Graph's, which moved to one `msgraph` table in neverest abb2a95 (2026-11-15, cairn/changes/graph-domains-share-one-table): one `jmap` table holding the session (`server`, `tls`, `alpn`, `auth`), naming the domains it syncs under `jmap.mail`, `jmap.contact` and `jmap.calendar`, each `= true` or a table of its own `collection`, `item`, `flag` and `pool-size`; the source ids `jmap`, `jmap-contacts` and `jmap-calendar`; under `sources.<name>`, a `jmap` table names one domain and the source keeps `<name>`. Against: the three tables Graph left. Assumed: Graph's shape, so one session serves the account's domains and a JMAP and a Graph account read alike. Since `jmap` parses today with `collection`, `item`, `flag` and `pool-size` directly in it, those keys move under `jmap.mail` and the old spellings are refused by name, as Graph's were; no store holds a JMAP source yet, so nothing migrates.
+- **J3, the table shape.** Graph's, which moved to one `msgraph` table in neverest abb2a95 (2026-11-15, cairn/changes/graph-domains-share-one-table): one `jmap` table holding the session (`server`, `tls`, `alpn`, `auth`), naming the domains it syncs under `jmap.mail`, `jmap.contact` and `jmap.calendar`, each `= true` or a table of its own `collection`, `item`, `flag` and `pool-size`; the source ids `jmap-mail`, `jmap-contact` and `jmap-calendar`; under `sources.<name>`, a `jmap` table names one domain and the source keeps `<name>`. Against: the three tables Graph left. Assumed: Graph's shape, so one session serves the account's domains and a JMAP and a Graph account read alike. Since `jmap` parses today with `collection`, `item`, `flag` and `pool-size` directly in it, those keys move under `jmap.mail` and the old spellings are refused by name, as Graph's were; no store holds a JMAP source yet, so nothing migrates.
 - **J4, the guard on a contact write.** `ifInState` refuses a write whenever any card of the account changed, which starves on a busy shared book. Assumed: `ifInState`, with one delta and one retry before the item waits for the next run.
 - **J5, raw headers.** The whole `headers` list now, the one-header property once io-jmap has it. Assumed: ship on `headers`.
 

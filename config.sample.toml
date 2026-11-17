@@ -100,6 +100,15 @@
 
 #caldav.auth.bearer.token.command = "exit 127"	# prints a bearer token
 
-# Named sources and targets, for two endpoints of one protocol
-#sources.work.imap.server = "imap.work.example.org"	# a source named work; renaming it orphans what it synced
-#targets.backup.imap.server = "imap.backup.example.org"	# a target, the same keys, see sync --help
+# Named sources and targets. Each backend table above is shorthand for a
+# source named after it: imap.* means sources.imap.imap.*, and msgraph.* the
+# sources msgraph-mail, msgraph-contact and msgraph-calendar. A name keys what
+# the store holds, so renaming a source orphans what it synced.
+
+# Two endpoints of one protocol: name each source
+#sources.work.imap.server = "imap.work.example.org"	# the imap keys above, for a source named work
+#sources.work.smtp.server = "smtp.work.example.org"	# its send channel, the smtp keys above
+
+# A remote syncing with the source instead of the store: a mirror, or a backup
+# with one-way
+#targets.backup.imap.server = "imap.backup.example.org"	# a target named backup, the same keys

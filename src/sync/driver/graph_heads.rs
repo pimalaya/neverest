@@ -35,7 +35,7 @@ use crate::{
     throttle::Throttle,
 };
 
-const INBOX: &str = "msgraph/Inbox";
+const INBOX: &str = "msgraph-mail/Inbox";
 const DELTA: &str = "https://graph.microsoft.com/v1.0/me/mailFolders/id-inbox/messages/delta";
 
 /// What the listing looked like each time it rested.
@@ -88,7 +88,7 @@ impl Pager for Watch {
 }
 
 fn handles(store: &PimdirSourceStore) -> BTreeSet<String> {
-    projection_view(store, INBOX, "msgraph")
+    projection_view(store, INBOX, "msgraph-mail")
         .unwrap()
         .into_iter()
         .map(|placement| placement.handle.0)
@@ -168,7 +168,7 @@ fn requests(server: &Server) -> Vec<String> {
 fn context(client: GraphClient) -> SourceCtx {
     let config: AccountConfig =
         toml::from_str("msgraph.auth.token.raw = \"x\"\nmsgraph.mail = true").unwrap();
-    let perms = config.sources().unwrap()["msgraph"].permissions();
+    let perms = config.sources().unwrap()["msgraph-mail"].permissions();
     let account = SourceAccount {
         backend: SourceAccountBackend::Msgraph(MsgraphAccount {
             kind: GraphKind::Mail,
@@ -184,8 +184,8 @@ fn context(client: GraphClient) -> SourceCtx {
         downloaded: Arc::new(AtomicU64::new(0)),
     };
     SourceCtx {
-        name: String::from("msgraph"),
-        namespace: String::from("msgraph"),
+        name: String::from("msgraph-mail"),
+        namespace: String::from("msgraph-mail"),
         pool: Pool::of(account, Client::Msgraph(Box::new(client))),
         perms,
         authority: Authority::Shared,
@@ -202,7 +202,7 @@ fn context(client: GraphClient) -> SourceCtx {
 /// A store syncing the inbox whose whole-folder round's first page
 /// landed: m1 and m2 listed, the round open at its next link.
 fn first_page_landed(dir: &Path) -> PimdirSourceStore {
-    let mut store = open_store(dir, "msgraph", "msgraph").unwrap();
+    let mut store = open_store(dir, "msgraph-mail", "msgraph-mail").unwrap();
     store.ensure_collection(INBOX, "message/rfc822").unwrap();
     let (paused, _, requests) = sync(&mut store, true, vec![page(&["m1", "m2"], Some("t2"))]);
     assert!(paused, "stopped before the second page");

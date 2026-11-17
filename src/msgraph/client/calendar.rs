@@ -24,14 +24,16 @@
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
+    mem,
 };
 
 use anyhow::{Context, Result, bail};
 use io_msgraph::v1::{
+    field::MsgraphField,
     rest::users::{
         calendars::list::{MsgraphCalendarsListParams, MsgraphCalendarsListResponse},
         events::{
-            MsgraphEvent, MsgraphEventType,
+            MsgraphAttendee, MsgraphEvent, MsgraphEventType,
             ical::{MSGRAPH_EVENT_ICAL_SELECT, MSGRAPH_EVENT_STASH_EXPAND},
             list::MsgraphEventsListParams,
         },
@@ -284,16 +286,20 @@ impl GraphClient {
     }
 
     /// Creates an event from an iCalendar object in a calendar, then the
-    /// occurrences a series sets apart through their instances.
+    /// occurrences a series sets apart, then the series' attendees.
     ///
-    /// An event read back without its UID (under Graph's own `iCalUId`) would
-    /// be a second event for every other source: it is deleted again and the
-    /// write refused, as is a series whose occurrences do not all land.
+    /// One read back without its UID (under Graph's own `iCalUId`) would be a
+    /// second event for every other source: it is deleted again and the write
+    /// refused, as is a series whose occurrences do not all land.
     pub(super) fn add_event(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
         let (ical, anchored) = anchor(read_bytes(source)?, calendar, self.floating_zone)?;
         let occurrences = Occurrences::read(&ical)?;
         occurrences.refuse_ranges("Microsoft Graph")?;
-        let event = MsgraphEvent::create_from_ical(&ical)?;
+        let mut event = MsgraphEvent::create_from_ical(&ical)?;
+        let attendees = match occurrences.is_empty() {
+            true => MsgraphField::Unset,
+            false => mem::take(&mut event.attendees),
+        };
         let uid = event.stashed_uid();
 
         let created = self
@@ -323,6 +329,18 @@ impl GraphClient {
                 return Err(err.context(format!(
                     "Graph took the series created in {calendar} without its \
                      occurrences, so it was deleted again"
+                )));
+            }
+            if let MsgraphField::Set(attendees) = attendees
+                && !attendees.is_empty()
+                && let Err(err) = self.invite(&stored.id, attendees)
+            {
+                if let Err(undo) = self.op(|graph| graph.event_delete(&stored.id)) {
+                    warn!("cannot delete series {} again: {undo}", stored.id);
+                }
+                return Err(err.context(format!(
+                    "Graph took the series created in {calendar} without its \
+                     attendees, so it was deleted again"
                 )));
             }
             revision = self.event(&stored.id).ok().and_then(|read| read.change_key);
@@ -372,6 +390,18 @@ impl GraphClient {
         }
 
         Ok(revision.filter(|_| !asks_meeting(&patch) && !anchored))
+    }
+
+    /// Adds `attendees` to series `id`, Graph telling them of the series and
+    /// of each occurrence it sets apart.
+    fn invite(&mut self, id: &str, attendees: Vec<MsgraphAttendee>) -> Result<()> {
+        let patch = MsgraphEvent {
+            attendees: MsgraphField::Set(attendees),
+            ..Default::default()
+        };
+        self.op(|graph| graph.event_update(id, &patch))
+            .with_context(|| format!("Invite the attendees of series {id} error"))?;
+        Ok(())
     }
 
     /// Writes the occurrences `master` sets apart through their instances.
@@ -918,6 +948,53 @@ mod tests {
             "{requests:#?}"
         );
         assert!(requests.last().unwrap().starts_with("DELETE "));
+    }
+
+    /// A meeting series gets its attendees last, once its occurrences landed:
+    /// Graph mails them on any write carrying them, so the create sends none.
+    ///
+    /// A series taken back for an occurrence that did not land so told nobody.
+    #[test]
+    fn a_meeting_series_invites_its_attendees_once_whole() {
+        let meeting = SERIES.replace(
+            "SUMMARY:Daily\r\nEND:VEVENT\r\nBEGIN:VEVENT",
+            "SUMMARY:Daily\r\nORGANIZER:mailto:me@example.org\r\n\
+             ATTENDEE;CN=Ann:mailto:ann@example.org\r\nEND:VEVENT\r\nBEGIN:VEVENT",
+        );
+        let landing = vec![
+            Step::json(201, &json!({ "id": "S", "changeKey": "c0" })),
+            master("c1"),
+            instances(Some(("I25", "2026-11-25T13:00:00Z"))),
+            no_content(),
+            instances(Some(("I24", "2026-11-24T13:00:00Z"))),
+            Step::ok(json!({ "id": "I24" })),
+            Step::ok(json!({ "id": "S" })),
+            master("c2"),
+        ];
+        let (mut client, server) = session(landing);
+
+        client.add_event("cal", meeting.as_bytes()).unwrap();
+
+        let written = server.written(0);
+        let create = &written[..written.find("GET ").unwrap()];
+        assert!(!create.contains("ann@example.org"), "{create}");
+        let invite = &written[written.rfind("PATCH ").unwrap()..];
+        assert!(invite.contains("/me/events/S"), "{invite}");
+        assert!(invite.contains("ann@example.org"), "{invite}");
+
+        let (mut client, server) = session(vec![
+            Step::json(201, &json!({ "id": "S", "changeKey": "c0" })),
+            master("c1"),
+            instances(Some(("I25", "2026-11-25T13:00:00Z"))),
+            no_content(),
+            instances(None),
+            no_content(),
+        ]);
+
+        client.add_event("cal", meeting.as_bytes()).unwrap_err();
+
+        let written = server.written(0);
+        assert!(!written.contains("ann@example.org"), "{written}");
     }
 
     /// A floating time is anchored in the user's zone (10:00 stays 10:00 where

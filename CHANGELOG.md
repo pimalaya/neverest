@@ -266,6 +266,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Fixed Google Calendar reading every event again after a listing that returned it, and a source no write can reach being listed twice a run.
 
+- Fixed a recurring meeting created on Google or Graph mailing its attendees an invitation and a cancellation on every run when one of its modified occurrences did not land: the attendees are added last, once the series landed whole.
+
 - Fixed RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387 by bumping crypto-bigint, ctutils, rustls-webpki and webpki-root-certs.
 
 ## [0.3.0] - 2026-10-02

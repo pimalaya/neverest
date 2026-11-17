@@ -29,8 +29,9 @@
 //! the account's attendee or delete its meeting, with `sendUpdates=all`.
 
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::{Read, Write},
+    mem,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
@@ -40,8 +41,8 @@ use io_gcal::v3::{
     rest::{
         calendar_list::list::GcalCalendarListListParams,
         events::{
-            GcalEvent, GcalEventAttendeeResponseStatus, GcalEventStatus, GcalSendUpdates,
-            import::GcalEventImportParams, insert::GcalEventInsertParams,
+            GcalEvent, GcalEventAttendee, GcalEventAttendeeResponseStatus, GcalEventStatus,
+            GcalSendUpdates, import::GcalEventImportParams, insert::GcalEventInsertParams,
             instances::GcalEventInstancesParams, list::GcalEventsListParams,
             patch::GcalEventPatchParams, update::GcalEventUpdateParams,
         },
@@ -463,8 +464,8 @@ impl GcalClient {
     /// series, deleting it again when they do not all land.
     ///
     /// A UID stays the `iCalUID`: a scheduled event the account organises is
-    /// inserted, Google setting its organizer and inviting, any other
-    /// imported, telling nobody (pimdir STORAGE Annex B.1). No UID: inserted.
+    /// inserted, Google inviting (a series with overrides tells its attendees
+    /// once all landed), any other imported, telling nobody. No UID: inserted.
     pub fn add_item_stream(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
         self.listed().remove(calendar);
         let (ical, anchored) = self.anchor(calendar, read_ical(source)?)?;
@@ -475,10 +476,18 @@ impl GcalClient {
 
         let has_uid = event.ical_uid.as_deref().is_some_and(|uid| !uid.is_empty());
         let invites = has_uid && calendar::scheduled(&ical) && self.organises(calendar, &event)?;
+        let quiet = invites && !occurrences.overrides.is_empty();
+        let attendees = match quiet {
+            true => mem::take(&mut event.attendees),
+            false => Vec::new(),
+        };
         let created = if invites {
             event.organizer = None;
             let params = GcalEventInsertParams {
-                send_updates: Some(GcalSendUpdates::All),
+                send_updates: Some(match quiet {
+                    true => GcalSendUpdates::None,
+                    false => GcalSendUpdates::All,
+                }),
                 conference_data_version: CONFERENCE_DATA_VERSION,
                 ..Default::default()
             };
@@ -506,19 +515,28 @@ impl GcalClient {
             .context("Google returned the created event without an id")?;
 
         if !occurrences.overrides.is_empty() {
-            let send_updates = match invites {
-                true => GcalSendUpdates::All,
-                false => GcalSendUpdates::None,
-            };
-            if let Err(err) = self.write_overrides(calendar, &id, &occurrences, send_updates) {
-                let deleted =
-                    self.op(|gcal| gcal.event_delete(calendar, &id, Some(send_updates), None));
+            let silent = GcalSendUpdates::None;
+            let inherit = quiet.then_some(attendees.as_slice());
+            let wrote = self.write_overrides(calendar, &id, &occurrences, silent, inherit);
+            if let Err(err) = wrote {
+                let deleted = self.op(|gcal| gcal.event_delete(calendar, &id, Some(silent), None));
                 if let Err(undo) = deleted {
                     warn!("cannot delete series {id} of {calendar} again: {undo}");
                 }
                 return Err(err.context(format!(
                     "Google took the series created in {calendar} without its \
                      occurrences, so it was deleted again"
+                )));
+            }
+            if quiet && let Err(err) = self.invite(calendar, &id, attendees) {
+                let all = Some(GcalSendUpdates::All);
+                let deleted = self.op(|gcal| gcal.event_delete(calendar, &id, all, None));
+                if let Err(undo) = deleted {
+                    warn!("cannot delete series {id} of {calendar} again: {undo}");
+                }
+                return Err(err.context(format!(
+                    "Google took the series created in {calendar} without its \
+                     attendees, so it was deleted again"
                 )));
             }
             written = self
@@ -639,7 +657,7 @@ impl GcalClient {
                 Some(revision(&events))
             }
             false => {
-                self.write_overrides(calendar, id, &occurrences, send_updates)?;
+                self.write_overrides(calendar, id, &occurrences, send_updates, None)?;
                 self.series(calendar, id)
                     .ok()
                     .map(|events| revision(&events))
@@ -683,17 +701,41 @@ impl GcalClient {
         Ok(())
     }
 
+    /// Adds `attendees` to series `id`, Google telling them of the series and
+    /// of each occurrence it overrides.
+    fn invite(
+        &mut self,
+        calendar: &str,
+        id: &str,
+        attendees: Vec<GcalEventAttendee>,
+    ) -> Result<()> {
+        let patch = GcalEvent {
+            attendees,
+            ..Default::default()
+        };
+        let params = GcalEventPatchParams {
+            send_updates: Some(GcalSendUpdates::All),
+            conference_data_version: CONFERENCE_DATA_VERSION,
+            ..Default::default()
+        };
+        self.op(|gcal| gcal.event_patch(calendar, id, &patch, &params, None))
+            .with_context(|| format!("Invite the attendees of series {id} error"))?;
+        Ok(())
+    }
+
     /// Writes the occurrences series `id` overrides through their instances,
     /// each merged onto the instance Google holds.
     ///
-    /// An override of an occurrence the series does not have is refused,
-    /// coded `unsupported`.
+    /// An override naming the `inherit` attendees leaves them to the series,
+    /// which tells them last. One of an occurrence the series does not have
+    /// is refused, coded `unsupported`.
     fn write_overrides(
         &mut self,
         calendar: &str,
         id: &str,
         occurrences: &Occurrences,
         send_updates: GcalSendUpdates,
+        inherit: Option<&[GcalEventAttendee]>,
     ) -> Result<()> {
         let params = GcalEventUpdateParams {
             send_updates: Some(send_updates),
@@ -718,7 +760,10 @@ impl GcalClient {
                 continue;
             };
 
-            let event = GcalEvent::from_ical(&occurrence.document)?.merge(&instance);
+            let mut event = GcalEvent::from_ical(&occurrence.document)?.merge(&instance);
+            if inherit.is_some_and(|inherit| same_people(inherit, &event.attendees)) {
+                event.attendees.clear();
+            }
             self.op(|gcal| {
                 gcal.event_update(
                     calendar,
@@ -920,6 +965,17 @@ fn revision(events: &[GcalEvent]) -> String {
         .map(|(_, etag)| etag)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Whether two attendee lists name the same people, by address.
+fn same_people(left: &[GcalEventAttendee], right: &[GcalEventAttendee]) -> bool {
+    let people = |attendees: &[GcalEventAttendee]| {
+        attendees
+            .iter()
+            .map(|attendee| attendee.email.as_deref().map(str::to_lowercase))
+            .collect::<BTreeSet<_>>()
+    };
+    people(left) == people(right)
 }
 
 /// Whether a listing returned a series whole: a full listing returns every
@@ -1595,6 +1651,65 @@ mod tests {
             requests[2].starts_with("PUT ") && requests[2].contains("/events/S_20261221T090000Z"),
             "{requests:#?}"
         );
+    }
+
+    /// A meeting series is written telling nobody, its attendees added last
+    /// with `sendUpdates=all`.
+    ///
+    /// One taken back for an override that did not land so told nobody,
+    /// rather than an invitation and a cancellation.
+    #[test]
+    fn a_meeting_series_invites_its_attendees_once_whole() {
+        let meeting = SERIES.replace(
+            "SUMMARY:Daily\r\n",
+            "SUMMARY:Daily\r\nORGANIZER:mailto:c1\r\nATTENDEE:mailto:ann@example.org\r\n",
+        );
+        let master = r#"{"id":"S","etag":"\"1\"","iCalUID":"series","recurrence":["RRULE:FREQ=DAILY;COUNT=4"]}"#;
+        let (mut client, server) = answering(&[
+            ("200 OK", master),
+            ("200 OK", INSTANCE),
+            (
+                "200 OK",
+                r#"{"id":"S_20261124T130000Z","recurringEventId":"S","etag":"\"3\""}"#,
+            ),
+            ("200 OK", master),
+            ("200 OK", master),
+            ("200 OK", r#"{"items":[]}"#),
+        ]);
+
+        client.add_item_stream("c1", meeting.as_bytes()).unwrap();
+
+        let requests = server.lines();
+        let methods: Vec<&str> = requests
+            .iter()
+            .map(|request| request.split_once(' ').unwrap().0)
+            .collect();
+        assert_eq!(
+            methods[..4],
+            ["POST", "GET", "PUT", "PATCH"],
+            "{requests:#?}"
+        );
+        assert!(requests[0].contains("sendUpdates=none"), "{}", requests[0]);
+        assert!(requests[2].contains("sendUpdates=none"), "{}", requests[2]);
+        assert!(requests[3].contains("sendUpdates=all"), "{}", requests[3]);
+        let written = server.written(0);
+        let (silent, invite) = written.split_at(written.find("PATCH ").unwrap());
+        assert!(!silent.contains("ann@example.org"), "{silent}");
+        assert!(invite.contains("ann@example.org"), "{invite}");
+
+        let (mut client, server) = answering(&[
+            ("200 OK", r#"{"id":"S","etag":"\"1\""}"#),
+            ("200 OK", r#"{"items":[]}"#),
+            ("204 No Content", ""),
+        ]);
+
+        client
+            .add_item_stream("c1", meeting.as_bytes())
+            .unwrap_err();
+
+        let last = server.lines().pop().unwrap();
+        assert!(last.contains("sendUpdates=none"), "{last}");
+        assert!(!server.written(0).contains("ann@example.org"));
     }
 
     /// An override of an occurrence the series does not have takes the

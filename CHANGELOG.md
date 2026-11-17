@@ -278,6 +278,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Fixed a contact whose `UID` follows a blank line or a large inline photo being keyed by a hash of its first bytes, so the same contact on both endpoints of a pair was copied each way: cards and events are named from their whole body.
 
+- Fixed Graph mail folders below the second level never syncing, and a top-level folder named `A/B` colliding with the child `B` of `A`: every level is listed, a `/` in a folder name escaped as `%2F` in its id.
+
 - Fixed RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387 by bumping crypto-bigint, ctutils, rustls-webpki and webpki-root-certs.
 
 ## [0.3.0] - 2026-10-02

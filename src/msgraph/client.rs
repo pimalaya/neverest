@@ -12,8 +12,8 @@
 //!
 //! `enumerate` lists mail as [`mail`] describes: a folder-wide delta link as
 //! the opaque checkpoint (HTTP 410 restarts a round), a scope listed by
-//! `sentDateTime`. Folders are listed two levels deep, named `Parent/Child`;
-//! deeper nesting is not replicated.
+//! `sentDateTime`. Folders are listed at every depth, named `Parent/Child`, a
+//! `/` in a folder's own name written `%2F`.
 //!
 //! Push scope is honest: flag changes, deletes, moves and copies push, an
 //! append lands in Drafts only (Graph creates every MIME message as a draft)
@@ -34,7 +34,7 @@ mod mail;
 mod wire;
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     io::{Read, Write},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime},
@@ -506,17 +506,17 @@ impl GraphClient {
         }
     }
 
-    /// Lists the synced mail folders as shared mailboxes, every top-level
-    /// folder plus one level of children named `Parent/Child`.
+    /// Lists the synced mail folders as shared mailboxes, at every depth,
+    /// keyed `Parent/Child` and named as a person reads the path.
     ///
     /// The name map is refreshed as a side effect; counts are not populated.
     fn list_mailboxes(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         Ok(self
             .list_folders()?
             .into_iter()
-            .map(|(name, _)| Collection {
-                id: name.clone(),
-                name,
+            .map(|(path, _)| Collection {
+                name: folder_display(&path),
+                id: path,
                 total: None,
                 unread: None,
                 role: None,
@@ -570,30 +570,26 @@ impl GraphClient {
             ..Default::default()
         };
         let mut entries = Vec::new();
-        let mut parents = Vec::new();
+        let mut parents = VecDeque::new();
 
         let mut page = self
             .op(|client| client.mail_folders_list(&params))
             .context("List mail folders error")?;
         loop {
-            for folder in &page.value {
-                if folder.child_folder_count.unwrap_or(0) > 0 {
-                    parents.push((folder.display_name.clone(), folder.id.clone()));
-                }
-            }
-            fold_folder_page(&mut entries, None, &page.value);
+            parents.extend(fold_folder_page(&mut entries, None, &page.value));
             let Some(next) = page.next_link else {
                 break;
             };
             page = self.folders_from_link(&next)?;
         }
 
-        for (parent_name, parent_id) in parents {
+        while let Some((parent_name, parent_id)) = parents.pop_front() {
             let mut page = self
                 .op(|client| client.mail_child_folders_list(&parent_id, &params))
                 .with_context(|| format!("List child folders of {parent_name} error"))?;
             loop {
-                fold_folder_page(&mut entries, Some(&parent_name), &page.value);
+                let nested = fold_folder_page(&mut entries, Some(&parent_name), &page.value);
+                parents.extend(nested);
                 let Some(next) = page.next_link else {
                     break;
                 };
@@ -1507,8 +1503,7 @@ pub(crate) fn refusal_code(cause: &(dyn std::error::Error + 'static)) -> Option<
 
 /// Names the listed folders a well-known lookup answered, by role.
 ///
-/// A well-known folder outside the listing (deeper than two levels) names
-/// nothing.
+/// A well-known folder outside the listing names nothing.
 fn roles_by_id(
     folders: &[(String, String)],
     stated: &[(String, &str)],
@@ -1522,23 +1517,45 @@ fn roles_by_id(
         .collect()
 }
 
-/// Folds one folder listing page into `(name, id)` entries, prefixing child
-/// folders with their parent name. Folders missing a name or an id are skipped.
+/// Folds one folder listing page into `(path, id)` entries, answering the
+/// folders holding children, to walk next.
+///
+/// A child folder is prefixed with its parent's path. Folders missing a name
+/// or an id are skipped.
 fn fold_folder_page(
     entries: &mut Vec<(String, String)>,
     parent: Option<&str>,
     folders: &[MsgraphMailFolder],
-) {
+) -> Vec<(String, String)> {
+    let mut nested = Vec::new();
     for folder in folders {
         if folder.id.is_empty() || folder.display_name.is_empty() {
             continue;
         }
+        let segment = folder_segment(&folder.display_name);
         let name = match parent {
-            Some(parent) => format!("{parent}/{}", folder.display_name),
-            None => folder.display_name.clone(),
+            Some(parent) => format!("{parent}/{segment}"),
+            None => segment,
         };
+        if folder.child_folder_count.unwrap_or(0) > 0 {
+            nested.push((name.clone(), folder.id.clone()));
+        }
         entries.push((name, folder.id.clone()));
     }
+    nested
+}
+
+/// A folder's display name as one segment of its path: a `/` it holds
+/// written `%2F`, and a `%` written `%25` so the two never meet.
+///
+/// Unescaped, a top-level `A/B` and the child `B` of `A` named one folder.
+fn folder_segment(display_name: &str) -> String {
+    display_name.replace('%', "%25").replace('/', "%2F")
+}
+
+/// A folder path as a person reads it, its segments' escapes undone.
+fn folder_display(path: &str) -> String {
+    path.replace("%2F", "/").replace("%25", "%")
 }
 
 /// Finds a folder id by mailbox name, case-insensitively, as the sync matches
@@ -2220,6 +2237,56 @@ mod tests {
 
     fn session(scripts: Vec<Vec<Step>>) -> (GraphClient, Server) {
         session_of(GraphKind::Mail, scripts)
+    }
+
+    /// Mail folders are listed at every depth, a `/` in a folder's own name
+    /// escaped.
+    ///
+    /// So a top-level `A/B` and the child `B` of `A` stay two collections.
+    /// Listed two levels deep, `Inbox/Projects/2026` was never synced.
+    #[test]
+    fn mail_folders_are_listed_at_every_depth() {
+        let page = |folders: serde_json::Value| Step::ok(serde_json::json!({ "value": folders }));
+        let (mut client, _) = session(vec![vec![
+            page(serde_json::json!([
+                { "id": "inbox", "displayName": "Inbox", "childFolderCount": 1 },
+                { "id": "a", "displayName": "A", "childFolderCount": 1 },
+                { "id": "a-slash-b", "displayName": "A/B", "childFolderCount": 0 },
+            ])),
+            page(serde_json::json!([
+                { "id": "projects", "displayName": "Projects", "childFolderCount": 1 },
+            ])),
+            page(serde_json::json!([
+                { "id": "b", "displayName": "B", "childFolderCount": 0 },
+            ])),
+            page(serde_json::json!([
+                { "id": "y2026", "displayName": "2026", "childFolderCount": 0 },
+            ])),
+        ]]);
+
+        let listed: BTreeMap<String, (String, String)> = client
+            .list_collections(false)
+            .unwrap()
+            .into_iter()
+            .map(|collection| (collection.id.clone(), (collection.name, collection.id)))
+            .collect();
+
+        let ids: Vec<&str> = listed.keys().map(String::as_str).collect();
+        assert_eq!(
+            ids,
+            [
+                "A",
+                "A%2FB",
+                "A/B",
+                "Inbox",
+                "Inbox/Projects",
+                "Inbox/Projects/2026"
+            ]
+        );
+        assert_eq!(listed["A%2FB"].0, "A/B");
+        assert_eq!(client.folder_id("A%2FB").unwrap(), "a-slash-b");
+        assert_eq!(client.folder_id("A/B").unwrap(), "b");
+        assert_eq!(client.folder_id("Inbox/Projects/2026").unwrap(), "y2026");
     }
 
     fn inbox() -> Step {

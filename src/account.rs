@@ -380,12 +380,15 @@ impl SourceAccountBackend {
                 token: resolver.resolve(config.auth.token.clone())?,
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 proxy: proxy(resolver)?,
+                #[cfg(feature = "gcal")]
+                listed: Default::default(),
             })),
             #[cfg(feature = "gcal")]
             SourceBackendConfig::Gcal(config) => Ok(Self::Gcal(GoogleAccount {
                 token: resolver.resolve(config.auth.token.clone())?,
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 proxy: proxy(resolver)?,
+                listed: Default::default(),
             })),
             #[cfg(feature = "gmail")]
             SourceBackendConfig::Gmail(config) => {
@@ -524,6 +527,10 @@ pub struct GoogleAccount {
     pub tls: Tls,
     /// How the connections reach the server.
     pub proxy: Proxy,
+    /// The series the Calendar listings returned whole, shared by the
+    /// connections, so their bodies are read with no request.
+    #[cfg(feature = "gcal")]
+    pub listed: crate::gcal::client::Listed,
 }
 
 /// A resolved Gmail endpoint.

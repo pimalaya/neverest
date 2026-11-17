@@ -65,7 +65,9 @@ pub struct GpeopleClient {
 impl GpeopleClient {
     /// Opens the TLS connection to the People API with a bearer token.
     pub fn connect(account: &GoogleAccount, throttle: Arc<Throttle>) -> Result<Self> {
-        let GoogleAccount { token, tls, proxy } = account;
+        let GoogleAccount {
+            token, tls, proxy, ..
+        } = account;
         let options = GpeopleClientStdConnectOptions {
             tls: tls.clone(),
             proxy: proxy.clone(),

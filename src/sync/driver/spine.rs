@@ -661,8 +661,11 @@ fn collection_spine(
     }
 
     let push = pushing.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut settled = false;
+    let mut settled = !ctx.writable();
     for _ in 0..=MAX_EXTRA_PASSES {
+        if settled {
+            break;
+        }
         let (pass, _) = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable(), None)?;
         if !moved(&pass) {
             settled = true;

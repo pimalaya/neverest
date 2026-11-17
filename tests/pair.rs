@@ -243,3 +243,46 @@ fn a_declaration_performs_no_collection_intent_its_rights_now_refuse() {
         "{status:?}"
     );
 }
+
+/// A side no write can reach is listed once a run, by the opening round:
+/// the settling rounds list only the sides they push to.
+#[test]
+fn a_side_nothing_writes_is_listed_once_a_run() {
+    let home = tempfile::tempdir().unwrap();
+    let forbid = "sources.src.carddav.item.create = false\n\
+                  sources.src.carddav.item.update = false\n\
+                  sources.src.carddav.item.delete = false\n";
+    let (src, dst, config) = synced_pair(&home, forbid);
+
+    let listed = src.requests("REPORT").len();
+    dst.put("b.vcf", &card("b"));
+    let (code, report) = sync(home.path(), &config, &[]);
+
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(src.requests("REPORT").len() - listed, 1, "{report}");
+    assert_eq!(src.names(), ["a.vcf"], "{report}");
+}
+
+/// A lone source no write can reach is listed once a run too.
+#[test]
+fn a_lone_source_nothing_writes_is_listed_once_a_run() {
+    let home = tempfile::tempdir().unwrap();
+    let dav = FakeDav::start();
+    dav.put("a.vcf", &card("a"));
+    let config = solo(home.path(), &dav);
+    let mut toml = fs::read_to_string(&config).unwrap();
+    toml.push_str(
+        "carddav.item.create = false\n\
+         carddav.item.update = false\n\
+         carddav.item.delete = false\n",
+    );
+    fs::write(&config, toml).unwrap();
+
+    let (code, report) = sync(home.path(), &config, &["--init"]);
+    assert_eq!(code, 0, "{report}");
+    let listed = dav.requests("REPORT").len();
+    let (code, report) = sync(home.path(), &config, &[]);
+
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(dav.requests("REPORT").len() - listed, 1, "{report}");
+}

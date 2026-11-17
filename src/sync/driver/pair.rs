@@ -690,9 +690,9 @@ fn reconcile_pass(
 
 /// One side of a reconcile round: its merge, its probes and its report.
 ///
-/// Only a pulling round's events name what the remote did. A pushing round's
-/// `FlagsChanged` and `Vanished` also echo this run's own writes, so itemizing
-/// them would report the run's work back as the remote's.
+/// Only a pulling round's events name what the remote did, a pushing round's
+/// echoing this run's own writes. A side nothing writes is listed by the
+/// pulling round alone: a pushing one would only list it again.
 #[allow(clippy::too_many_arguments)]
 fn reconcile_side(
     collection: &str,
@@ -704,6 +704,11 @@ fn reconcile_side(
     dry_run: bool,
     report: &mut SyncOutput,
 ) -> Result<PimdirSyncReport> {
+    if push && !dry_run && !ctx.writable() {
+        resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
+        return Ok(PimdirSyncReport::default());
+    }
+
     let push = push && !dry_run && ctx.writable();
     let before = if push {
         None

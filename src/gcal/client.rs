@@ -29,9 +29,9 @@
 //! the account's attendee or delete its meeting, with `sendUpdates=all`.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io::{Read, Write},
-    sync::Arc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
 use anyhow::{Context, Result, bail};
@@ -70,6 +70,10 @@ use crate::{
     zone::{self, UTC},
 };
 
+/// The series each calendar's last listing returned whole, by calendar
+/// then event id, shared by the connections of one source.
+pub type Listed = Arc<Mutex<HashMap<String, HashMap<String, Vec<GcalEvent>>>>>;
+
 /// The page size requested from the events listing.
 const PAGE_SIZE: u32 = 2500;
 
@@ -104,6 +108,9 @@ pub struct GcalClient {
     /// The zone a floating time is anchored in when the calendar states
     /// none, the user's.
     floating_zone: &'static str,
+    /// The series the last listings returned whole, read with no request;
+    /// a write to a calendar forgets its own.
+    listed: Listed,
 }
 
 impl GcalClient {
@@ -111,7 +118,12 @@ impl GcalClient {
     ///
     /// The stream is opened here, io-gcal's own connect taking no proxy.
     pub fn connect(account: &GoogleAccount, throttle: Arc<Throttle>) -> Result<Self> {
-        let GoogleAccount { token, tls, proxy } = account;
+        let GoogleAccount {
+            token,
+            tls,
+            proxy,
+            listed,
+        } = account;
         let stream =
             open_tls(GCAL_API_BASE, tls, proxy).context("Cannot connect to Google Calendar")?;
         let inner = GcalClientStd::new(stream, token.expose_secret());
@@ -127,7 +139,14 @@ impl GcalClient {
             owner: None,
             issued: HashSet::new(),
             floating_zone: zone::floating_zone(),
+            listed: Arc::clone(listed),
         })
+    }
+
+    /// The listed series, a poisoned lock read through: it holds no
+    /// invariant a panic could break.
+    fn listed(&self) -> MutexGuard<'_, HashMap<String, HashMap<String, Vec<GcalEvent>>>> {
+        self.listed.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Runs one Calendar operation, reopening the stream first when the
@@ -267,11 +286,20 @@ impl GcalClient {
             }
         }
 
+        let mut whole = HashMap::new();
         let items = series
             .into_iter()
             .filter(|(id, _)| !vanished.contains(id))
-            .map(|(id, events)| EnumEntry::bare(id, Default::default(), Some(revision(&events))))
+            .map(|(id, events)| {
+                let entry =
+                    EnumEntry::bare(id.clone(), Default::default(), Some(revision(&events)));
+                if is_whole(&events, complete) {
+                    whole.insert(id, events);
+                }
+                entry
+            })
             .collect();
+        self.listed().insert(calendar.to_owned(), whole);
 
         if complete {
             vanished.clear();
@@ -371,9 +399,17 @@ impl GcalClient {
         }
     }
 
-    /// Reads one item as iCalendar with the revision it corresponds to.
+    /// Reads one item as iCalendar with the revision it corresponds to, from
+    /// its calendar's last listing when that returned it whole.
     fn item(&mut self, calendar: &str, id: &str) -> Result<(String, String)> {
-        let events = self.series(calendar, id)?;
+        let listed = self
+            .listed()
+            .get_mut(calendar)
+            .and_then(|listed| listed.remove(id));
+        let events = match listed {
+            Some(events) => events,
+            None => self.series(calendar, id)?,
+        };
         let (master, instances) = events.split_first().context("Empty event series")?;
         let instances: Vec<&GcalEvent> = instances.iter().collect();
 
@@ -430,6 +466,7 @@ impl GcalClient {
     /// inserted, Google setting its organizer and inviting, any other
     /// imported, telling nobody (pimdir STORAGE Annex B.1). No UID: inserted.
     pub fn add_item_stream(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
+        self.listed().remove(calendar);
         let (ical, anchored) = self.anchor(calendar, read_ical(source)?)?;
         let occurrences = Occurrences::read(&ical)?;
         occurrences.refuse_ranges("Google Calendar")?;
@@ -564,6 +601,7 @@ impl GcalClient {
         source: impl Read,
         if_match: Option<&str>,
     ) -> Result<Option<String>> {
+        self.listed().remove(calendar);
         let (ical, anchored) = self.anchor(calendar, read_ical(source)?)?;
         let occurrences = Occurrences::read(&ical)?;
         occurrences.refuse_ranges("Google Calendar")?;
@@ -614,6 +652,7 @@ impl GcalClient {
     /// Deletes a series, refused when it moved since `if_match`; one gone
     /// from Google already, missing or cancelled, counts as deleted.
     pub fn delete_item(&mut self, calendar: &str, id: &str, if_match: Option<&str>) -> Result<()> {
+        self.listed().remove(calendar);
         match self.delete_item_once(calendar, id, if_match) {
             Err(err) if is_missing(&err) => {
                 debug!("event {id} of {calendar} gone already, its delete counts as done");
@@ -767,6 +806,7 @@ impl GcalClient {
         partstat: Partstat,
         comment: Option<&str>,
     ) -> Result<()> {
+        self.listed().remove(calendar);
         let current = self
             .op(|gcal| gcal.event_get(calendar, id, None, None))
             .with_context(|| format!("Get event {id} of {calendar} error"))?;
@@ -786,6 +826,7 @@ impl GcalClient {
     ///
     /// Google sends its own notice, which carries no comment.
     pub fn cancel(&mut self, calendar: &str, id: &str) -> Result<()> {
+        self.listed().remove(calendar);
         let current = self
             .op(|gcal| gcal.event_get(calendar, id, None, None))
             .with_context(|| format!("Get event {id} of {calendar} error"))?;
@@ -879,6 +920,18 @@ fn revision(events: &[GcalEvent]) -> String {
         .map(|(_, etag)| etag)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Whether a listing returned a series whole: a full listing returns every
+/// event with every modified instance, a resumed one a lone event only.
+fn is_whole(events: &[GcalEvent], complete: bool) -> bool {
+    let Some(master) = events.first() else {
+        return false;
+    };
+    if master.recurring_event_id.is_some() {
+        return false;
+    }
+    complete || (master.recurrence.is_empty() && events.len() == 1)
 }
 
 /// Whether an event was cancelled, Google's tombstone for a deletion.
@@ -1181,6 +1234,7 @@ mod tests {
             owner: None,
             issued: HashSet::new(),
             floating_zone: UTC,
+            listed: Listed::default(),
         }
     }
 
@@ -1313,6 +1367,65 @@ mod tests {
                 server.requests()
             );
         }
+    }
+
+    /// A full listing returns every event whole, so their bodies are read
+    /// from it with no request.
+    ///
+    /// A series a resumed listing returns without its instances is read
+    /// again, and so is any event of a calendar written since.
+    #[test]
+    fn the_bodies_of_a_full_listing_cost_no_request() {
+        let full = r#"{"items":[
+            {"id":"s1","iCalUID":"u1","etag":"\"1\"","status":"confirmed",
+             "start":{"dateTime":"2026-11-26T10:00:00Z"},"end":{"dateTime":"2026-11-26T11:00:00Z"},
+             "recurrence":["RRULE:FREQ=WEEKLY;COUNT=4"]},
+            {"id":"s1_20261203T100000Z","iCalUID":"u1","etag":"\"2\"","status":"confirmed",
+             "recurringEventId":"s1","originalStartTime":{"dateTime":"2026-12-03T10:00:00Z"},
+             "start":{"dateTime":"2026-12-03T11:00:00Z"},"end":{"dateTime":"2026-12-03T12:00:00Z"}},
+            {"id":"e1","iCalUID":"u2","etag":"\"3\"","status":"confirmed",
+             "start":{"dateTime":"2026-11-27T10:00:00Z"},"end":{"dateTime":"2026-11-27T11:00:00Z"}}
+        ],"nextSyncToken":"t1"}"#;
+        let resumed = r#"{"items":[
+            {"id":"s1","iCalUID":"u1","etag":"\"4\"","status":"confirmed",
+             "start":{"dateTime":"2026-11-26T10:00:00Z"},"end":{"dateTime":"2026-11-26T11:00:00Z"},
+             "recurrence":["RRULE:FREQ=WEEKLY;COUNT=5"]}
+        ],"nextSyncToken":"t2"}"#;
+        let server = Server::replying([json("200 OK", full), json("200 OK", resumed)]);
+        let mut client = over(&server, Throttle::new("gcal"));
+
+        let listed = client.enumerate("c1", None).unwrap();
+        let mut bodies = BTreeMap::new();
+        for entry in &listed.items {
+            let mut body = Vec::new();
+            let revision = client.get_item_stream("c1", &entry.id, &mut body).unwrap();
+            assert_eq!(revision, entry.revision, "{}", entry.id);
+            bodies.insert(entry.id.clone(), String::from_utf8(body).unwrap());
+        }
+        assert_eq!(
+            server.requests().concat().len(),
+            1,
+            "{:?}",
+            server.requests()
+        );
+        assert!(
+            bodies["s1"].contains("RRULE:FREQ=WEEKLY;COUNT=4"),
+            "{}",
+            bodies["s1"]
+        );
+        assert!(bodies["s1"].contains("RECURRENCE-ID"), "{}", bodies["s1"]);
+        assert!(bodies["e1"].contains("UID:u2"), "{}", bodies["e1"]);
+
+        client.enumerate("c1", Some(b"t1")).unwrap();
+        client
+            .get_item_stream("c1", "s1", Vec::new())
+            .expect_err("no answer left: the series is read again");
+        assert_eq!(
+            server.requests().concat().len(),
+            3,
+            "{:?}",
+            server.requests()
+        );
     }
 
     /// A resumed listing asks what the listing that issued its token asked.

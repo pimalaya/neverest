@@ -2403,7 +2403,9 @@ Every report row naming a row of the store's queue SHALL name it `row`, as himal
 ### Requirement: A DAV source may name its home set
 A `carddav` or `caldav` table SHALL take `home`, the address book or calendar home set as a full URL, as cardamum and calendula do: the session SHALL connect to it and list its collections there, discovering no principal and no home set, `server` then being ignored. Without `home`, `server` SHALL be required and the home set discovered from it as before. A table naming neither SHALL fail when the account resolves, naming both keys.
 
-The `auth` table SHALL also take `"none"`, for a server asking for no credential: no `Authorization` header is sent.
+The `auth` table SHALL also take `"none"`, for a server asking for no credential: no `Authorization` header is sent. A table naming no `auth` SHALL read as `"none"`, anonymous DAV as the family reads it (a Radicale with no auth, a server behind a VPN or a proxy that authenticates), and a 401 such a session meets SHALL say the account configures no `auth`, so a forgotten table reads as one.
+
+A configured host SHALL be ASCII on every scheme, a `server` or a `home`, refused at load otherwise and naming its Punycode form (`xn--...`): no neverest build carries a Unicode IDNA back end, `idna_adapter` being pinned to 1.0.0 as in every family binary.
 
 #### Scenario: Google's address books
 - GIVEN `carddav.home = "https://www.googleapis.com/carddav/v1/principals/<email>/lists/"` and a bearer token

@@ -162,7 +162,8 @@ impl DavClient {
             DavKind::Card => client.op(WebdavClientStd::addressbook_home_set),
             DavKind::Cal => client.op(WebdavClientStd::calendar_home_set),
         }
-        .with_context(|| format!("Cannot discover the {kind} home set"))?;
+        .with_context(|| format!("Cannot discover the {kind} home set"));
+        let home = anonymous_hint(&client.auth, home)?;
         debug!("{kind} home set: {home}");
 
         Ok(client)
@@ -247,7 +248,7 @@ impl DavClient {
     /// still shows, falling back to the key (often a server's UUID).
     pub fn list_collections(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         let kind = self.kind;
-        let collections: BTreeMap<String, (Option<String>, Option<bool>)> = match kind {
+        let collections: Result<BTreeMap<String, Listed>> = match kind {
             DavKind::Card => self.op(WebdavClientStd::list_addressbooks).map(|books| {
                 books
                     .into_iter()
@@ -268,7 +269,8 @@ impl DavClient {
                     .collect()
             }),
         }
-        .with_context(|| format!("Cannot list the {kind} collections"))?;
+        .with_context(|| format!("Cannot list the {kind} collections"));
+        let collections = anonymous_hint(&self.auth, collections)?;
 
         Ok(collections
             .into_iter()
@@ -1083,6 +1085,28 @@ fn names_precondition(body: &str) -> bool {
     body.contains(":error") || body.contains("<error")
 }
 
+/// A listed collection's display name, and whether it takes tasks.
+type Listed = (Option<String>, Option<bool>);
+
+/// `result`, a 401 answered to a session with no `auth` saying so: the
+/// server asks for credentials the account never configured.
+fn anonymous_hint<T>(auth: &WebdavAuth, result: Result<T>) -> Result<T> {
+    match result {
+        Err(err) if matches!(auth, WebdavAuth::None) && answered_401(&err) => {
+            Err(err
+                .context("The server asks for credentials, and the account configures no `auth`"))
+        }
+        result => result,
+    }
+}
+
+/// Whether a request in an error chain was answered 401.
+fn answered_401(err: &anyhow::Error) -> bool {
+    err.chain()
+        .filter_map(|cause| cause.downcast_ref::<WebdavClientStdError>())
+        .any(|err| http_status(err) == Some(401))
+}
+
 /// The status a plain request failed with, as io-webdav surfaces a non-2xx
 /// answer to anything but a report.
 fn http_status(err: &WebdavClientStdError) -> Option<u16> {
@@ -1191,6 +1215,22 @@ impl DavClient {
 mod tests {
     use super::*;
     use crate::error::Failure;
+
+    /// A server asking for credentials of a session configuring no `auth`
+    /// says the account configures none, so a forgotten table reads as one.
+    #[test]
+    fn a_401_with_no_auth_names_the_missing_auth() {
+        let unauthorized = String::from(
+            "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"dav\"\r\n\
+             Content-Length: 0\r\n\r\n",
+        );
+        let (mut dav, _wire) = DavClient::scripted(DavKind::Card, "/dav/card/", vec![unauthorized]);
+
+        let err = dav.list_collections(false).unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("configures no `auth`"), "{message}");
+    }
 
     /// A configured home set is where the session lists, nothing discovered.
     ///

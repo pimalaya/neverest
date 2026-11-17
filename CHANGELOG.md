@@ -98,6 +98,10 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Changed
 
+- Changed a CardDAV or CalDAV table with no `auth` to load as `auth = "none"`, a 401 then saying no `auth` is configured.
+
+- **BREAKING**: Changed a configured host that is not ASCII into a load error naming its Punycode form (`xn--...`), as in every Pimalaya binary; the Unicode IDNA crates left the build.
+
 - **BREAKING**: Changed a target's `smtp` table into a configuration error: an account sends through a source, and the target's channel was never used. A queued send naming a target parks.
 
 - Changed a target's `collection.filter`, which was ignored, to narrow what that target takes.

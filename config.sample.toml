@@ -85,7 +85,7 @@
 #carddav.server = "dav.example.org"			# implicit https; the principal and home set are discovered
 #carddav.home = "https://dav.example.org/cards/"	# the home set itself, nothing discovered
 
-#carddav.auth.basic.username = "alice"			# HTTP Basic
+#carddav.auth.basic.username = "alice"			# HTTP Basic, no `auth` at all for an anonymous server
 #carddav.auth.basic.password.command = "exit 127"	# prints the password
 
 #carddav.auth.bearer.token.command = "exit 127"	# prints a bearer token

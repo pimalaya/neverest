@@ -1158,6 +1158,21 @@ mod tests {
 
     /// The keys the sibling CLIs read and neverest did not load.
     ///
+    /// A DAV block naming no `auth` loads as `auth = "none"`, anonymous DAV
+    /// as the family reads it (a Radicale with no auth, a server behind a
+    /// proxy that authenticates).
+    #[test]
+    fn a_dav_block_without_auth_is_anonymous() {
+        let account: AccountConfig =
+            toml::from_str(r#"carddav.home = "https://dav.example.org/card/user/""#).unwrap();
+        account.validate().unwrap();
+        let source = account.sources().unwrap().remove("carddav").unwrap();
+        let SourceBackendConfig::Carddav(dav) = source.backend else {
+            panic!("a CardDAV source");
+        };
+        assert!(matches!(dav.auth, dav::DavAuthConfig::None));
+    }
+
     /// A DAV home set with no server and no credential, the IMAP `SASL-IR`
     /// and `ID` quirks, and a proxy at the account, a backend and a channel.
     #[test]

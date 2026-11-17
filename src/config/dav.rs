@@ -40,7 +40,8 @@ source_config! {
         )]
         /// ALPN identifiers offered during the TLS handshake.
         pub alpn: Vec<String>,
-        /// How the DAV session authenticates.
+        /// How the DAV session authenticates, none when absent.
+        #[serde(default)]
         pub auth: DavAuthConfig,
     }
 }
@@ -78,17 +79,20 @@ source_config! {
         )]
         /// ALPN identifiers offered during the TLS handshake.
         pub alpn: Vec<String>,
-        /// How the DAV session authenticates.
+        /// How the DAV session authenticates, none when absent.
+        #[serde(default)]
         pub auth: DavAuthConfig,
     }
 }
 
 /// DAV authentication: none, HTTP Basic, or a bearer token for a provider
 /// fronting DAV with OAuth 2.0.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DavAuthConfig {
-    /// No credentials, for a server that asks for none: `auth = "none"`.
+    /// No credentials, for a server that asks for none: `auth = "none"`, or
+    /// no `auth` at all.
+    #[default]
     None,
     /// A username and a password, HTTP Basic.
     Basic {

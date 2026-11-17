@@ -480,6 +480,7 @@ impl DavEndpoint {
     /// `server`, read as `https://` when bare.
     pub fn of(server: Option<&str>, home: Option<&str>) -> Result<Self> {
         if let Some(home) = home {
+            crate::server::ascii_host(home)?;
             let url =
                 Url::parse(home).with_context(|| format!("Read the home set `{home}` as a URL"))?;
             return Ok(Self::Home(url));

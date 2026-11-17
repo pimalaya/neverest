@@ -3,7 +3,7 @@
 //! Resolves the `server` key of a backend table into the URL its client
 //! connects to.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use url::Url;
 
 /// Resolves a `server` into a URL, `scheme` filling in for a value with none.
@@ -12,6 +12,7 @@ use url::Url;
 /// is not a relative URL, `url` reading `dav.example.org:8443` as a scheme
 /// with a path, which parses cleanly and carries no host.
 pub fn server_url(server: &str, scheme: &str) -> Result<Url> {
+    ascii_host(server)?;
     let url = if server.contains("://") {
         Url::parse(server)
     } else {
@@ -21,9 +22,45 @@ pub fn server_url(server: &str, scheme: &str) -> Result<Url> {
     url.with_context(|| format!("Cannot parse {server} as a server URL"))
 }
 
+/// Refuses a URL or an authority whose host is not ASCII, naming the
+/// Punycode form the family takes instead.
+///
+/// No neverest build carries a Unicode IDNA back end, as no family binary
+/// does: `bücher.de` is written `xn--bcher-kva.de`.
+pub fn ascii_host(url: &str) -> Result<()> {
+    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if !host.is_ascii() {
+        bail!(
+            "Host `{host}` is not ASCII: write it in its Punycode form (`xn--...`), \
+             as `idn2` or any IDNA converter prints it"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::server::server_url;
+
+    /// A host that is not ASCII is refused naming its Punycode form, on every
+    /// scheme: url keeps an `imaps` host opaque, which then failed at DNS.
+    #[test]
+    fn a_host_that_is_not_ascii_asks_for_its_punycode_form() {
+        for server in [
+            "bücher.de",
+            "imaps://bücher.de:993",
+            "https://u@bücher.de/dav/",
+        ] {
+            let err = server_url(server, "https").unwrap_err().to_string();
+            assert!(err.contains("Punycode"), "{server}: {err}");
+        }
+        let url = server_url("xn--bcher-kva.de", "https").unwrap();
+        assert_eq!(url.host_str(), Some("xn--bcher-kva.de"));
+    }
 
     /// A bare authority with a port used to reach a backend as a hostless
     /// URL, `url` reading `dav.example.org:8443` as a scheme and a path.

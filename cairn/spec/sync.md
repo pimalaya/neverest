@@ -555,6 +555,8 @@ The backend-neutral enumeration seam SHALL carry the incremental-sync cursor as 
 ### Requirement: Text mode prints plain lines
 In text mode a command SHALL print where it is as plain lines on stderr, one a step, never per item: no colour, no `\r`, no cursor move, no spinner, and no dependency drawing one (D4 of the-v1-review). stdout SHALL keep only the result. Under `--json` no such line SHALL be printed, the events and the result saying the same. `check`, `init` and the credential resolution SHALL print one line per step (`Checked source imap (3 collections)`, `Source imap failed (…)`, `Initialized imap of account work`, `Created the store`, `Resolved credentials`).
 
+Every text a command prints, result, notice or failure, SHALL pass through pimalaya-cli's sanitizer line by line, its line breaks and tabs kept: it holds what servers and other clients wrote (collection names, ids, flags, bodies, refusal reasons), and a control or bidi character there could drive the terminal or reorder what a person reads. Under `--json` every string SHALL stay exact.
+
 #### Scenario: A text-mode sync
 - GIVEN an initialized account `work`
 - WHEN `neverest sync` runs without `--json`

@@ -9,6 +9,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+use crate::terminal;
+
 static SILENT: AtomicBool = AtomicBool::new(false);
 
 /// Silences every notice, for a `--json` run.
@@ -25,6 +27,7 @@ pub fn printing() -> bool {
 /// printed stops nothing.
 pub fn print(line: impl fmt::Display) {
     if printing() {
+        let line = terminal::text(&line.to_string());
         let _ = writeln!(io::stderr().lock(), "{line}");
     }
 }

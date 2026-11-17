@@ -162,6 +162,7 @@ mod sasl;
 mod scripted;
 mod server;
 mod sync;
+mod terminal;
 mod throttle;
 #[cfg(any(
     feature = "imap",
@@ -184,7 +185,7 @@ use pimalaya_cli::{
     clap::parse,
     error::{EXIT_FAILURE, ErrorReport},
     log::Logger,
-    printer::StdoutPrinter,
+    printer::{Printer, StdoutPrinter},
     welcome::{is_wanted, shipped_sample},
 };
 use pimalaya_config::toml::ConfigMissingError;
@@ -195,6 +196,7 @@ use crate::{
         main::{self as cli_main, Cli},
     },
     error::ErrorCode,
+    terminal::TerminalPrinter,
 };
 
 /// Parses and runs the command, then decides its outcome in this one place.
@@ -212,6 +214,7 @@ fn main() -> ExitCode {
     if matches!(cli.command, Some(cli::main::Command::Sync(_))) {
         printer = printer.streaming();
     }
+    let mut printer = TerminalPrinter(printer);
 
     let config_paths = cli.config.paths.clone();
     let result = execute(&mut printer, cli);
@@ -231,7 +234,7 @@ fn main() -> ExitCode {
 }
 
 /// Runs the subcommand, or meets a bare `neverest`.
-fn execute(printer: &mut StdoutPrinter, cli: Cli) -> Result<Exit> {
+fn execute(printer: &mut (impl Printer + Send), cli: Cli) -> Result<Exit> {
     Logger::try_init(&cli.log)?;
     let config_paths = &cli.config.paths;
 

@@ -178,6 +178,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed text output printing what servers wrote raw (bodies, names, ids, refusal reasons): every line goes through the sanitizer, JSON unchanged.
+
 - Fixed Google Calendar and Graph contacts and calendars declaring item moves they refuse: frontends are refused at the gate rather than every push failing and duplicating the item.
 
 - Fixed a merged event holding an alarm getting its `SEQUENCE` twice, once inside the `VALARM`.

@@ -779,6 +779,7 @@ impl GmailClient {
             bytes,
             narrowed,
             enumerated,
+            truncated: false,
         }))
     }
 

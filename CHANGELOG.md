@@ -178,6 +178,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed a CalDAV or CardDAV listing the server cut short ending the run as in sync: it is reported under `failures` as a `listing` step and the run exits 4.
+
 - Fixed the text output of an incomplete run (interrupted, an endpoint unreached, a source throttled) saying the account was already in sync: it says it is incomplete and lists what it did not reach.
 
 - Fixed an IMAP push aborting on every run over a message flagged `\Junk`, `\Important` or `\Forwarded`: such a keyword is written in its `$` form.

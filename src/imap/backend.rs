@@ -372,6 +372,7 @@ impl ImapClient {
             bytes,
             narrowed,
             enumerated,
+            truncated: false,
         }))
     }
 

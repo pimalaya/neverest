@@ -73,7 +73,10 @@ fn rebuild_collection(
     let rekey = PimdirRekey::new(collection.to_string()).accept_absences(ctx.accept_absences);
     let mut remote =
         PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone()).with_capped(ctx.capped);
-    run_verb(store, &mut remote, rekey).with_context(|| format!("Rebuild {collection}"))
+    let rebuilt =
+        run_verb(store, &mut remote, rekey).with_context(|| format!("Rebuild {collection}"));
+    ctx.noted.truncated.extend(remote.take_truncated());
+    rebuilt
 }
 
 /// The `sync` verb one side runs, under its options.
@@ -148,6 +151,7 @@ pub(super) fn sync_side(
     let rejected = remote.take_rejected();
     ctx.refused.extend(refused);
     ctx.rejected.extend(rejected);
+    ctx.noted.truncated.extend(remote.take_truncated());
 
     let report = match report {
         Err(err) if renumbered => Err(err.context(Renumbered)),

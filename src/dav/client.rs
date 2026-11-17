@@ -504,6 +504,7 @@ impl DavClient {
             items: delta.changed.into_iter().map(entry).collect(),
             vanished: Vec::new(),
             complete: !delta.truncated,
+            truncated: delta.truncated,
             checkpoint: Some(Vec::new()),
             ..Default::default()
         })
@@ -552,6 +553,7 @@ impl DavClient {
             items,
             vanished,
             complete: first && !truncated,
+            truncated,
             checkpoint: Some(token.unwrap_or_default().into_bytes()),
             ..Default::default()
         })

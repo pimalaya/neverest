@@ -945,6 +945,7 @@ impl Listing {
             bytes: self.bytes,
             narrowed: self.narrowed,
             enumerated: self.enumerated,
+            truncated: false,
         }
     }
 }

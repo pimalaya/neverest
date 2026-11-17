@@ -111,3 +111,45 @@ fn a_pair_collection_that_fails_is_reported_and_the_run_is_incomplete() {
     assert!(failed[0]["error"].is_string(), "{report}");
     assert_eq!(dst.requests("PUT").len(), puts, "nothing pushed: {report}");
 }
+
+/// A one-source CardDAV account over `dav`, its store under `home`.
+fn solo(home: &Path, dav: &FakeDav) -> String {
+    let store = home.join("store").display().to_string();
+    let toml = format!(
+        "[accounts.pair]\n\
+         store.root = {store:?}\n\
+         carddav.home = {home:?}\n\
+         carddav.auth.basic.username = \"u\"\n\
+         carddav.auth.basic.password.raw = \"p\"\n",
+        home = dav.home,
+    );
+    let path = home.join("config.toml");
+    fs::write(&path, toml).unwrap();
+    path.display().to_string()
+}
+
+#[test]
+fn a_listing_the_server_cuts_short_is_reported_on_every_run() {
+    for no_sync in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let dav = FakeDav::start();
+        for uid in ["a", "b", "c"] {
+            dav.put(&format!("{uid}.vcf"), &card(uid));
+        }
+        dav.set_faults(Faults {
+            truncate: Some(1),
+            no_sync,
+            ..Faults::default()
+        });
+        let config = solo(home.path(), &dav);
+
+        for run in [&["--init"][..], &[]] {
+            let (code, report) = sync(home.path(), &config, run);
+            assert_eq!(code, 4, "no_sync {no_sync}, {run:?}: {report}");
+            let failures = report["failures"].as_array().unwrap();
+            assert_eq!(failures.len(), 1, "{report}");
+            assert_eq!(failures[0]["step"], "listing", "{report}");
+            assert_eq!(failures[0]["collection"], "book", "{report}");
+        }
+    }
+}

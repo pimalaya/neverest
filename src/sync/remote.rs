@@ -116,6 +116,8 @@ pub struct PimRemote<'a> {
     /// Whether the source caps what it lists of a collection, as its
     /// configuration says (pimdir SYNC §4, §5).
     capped: bool,
+    /// The collections whose listing the server cut short.
+    truncated: BTreeSet<String>,
 }
 
 /// What the store binds of a collection for one source.
@@ -346,6 +348,7 @@ impl<'a> PimRemote<'a> {
             heads,
             rekey: false,
             capped: false,
+            truncated: BTreeSet::new(),
         }
     }
 
@@ -379,6 +382,7 @@ impl<'a> PimRemote<'a> {
             heads,
             rekey: false,
             capped: false,
+            truncated: BTreeSet::new(),
         }
     }
 
@@ -416,6 +420,11 @@ impl<'a> PimRemote<'a> {
     /// The rejected writes, taken off so the driver can name them in reports.
     pub fn take_rejected(&mut self) -> Vec<RejectedPush> {
         mem::take(&mut self.rejected)
+    }
+
+    /// The collections whose listing was cut short, taken off for the report.
+    pub fn take_truncated(&mut self) -> BTreeSet<String> {
+        mem::take(&mut self.truncated)
     }
 
     /// Whether a listing failed because the source renumbered every
@@ -607,6 +616,9 @@ impl PimdirRemote for PimRemote<'_> {
 
         keep_in_scope(&mut items, &request.scope);
 
+        if page.truncated {
+            self.truncated.insert(collection.to_string());
+        }
         let vanished: Vec<PimdirHandle> =
             page.vanished.into_iter().map(PimdirHandle::from).collect();
         self.held.remember(collection, &items, &vanished);

@@ -1283,6 +1283,8 @@ pub enum FailedStep {
     Bodies,
     /// Counting the conflicts waiting for a decision.
     Conflicts,
+    /// Listing a collection, which the server cut short.
+    Listing,
 }
 
 impl fmt::Display for FailedStep {
@@ -1291,6 +1293,7 @@ impl fmt::Display for FailedStep {
             Self::Queue => write!(f, "queue"),
             Self::Bodies => write!(f, "bodies"),
             Self::Conflicts => write!(f, "conflict count"),
+            Self::Listing => write!(f, "listing"),
         }
     }
 }

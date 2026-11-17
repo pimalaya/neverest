@@ -231,6 +231,8 @@ pub(super) struct Noted {
     unlisted: BTreeMap<String, usize>,
     /// The bodies a batch downloaded and could not land in the store.
     pub(super) failures: Vec<StepFailure>,
+    /// The collections whose listing the server cut short, by wire name.
+    pub(super) truncated: BTreeSet<String>,
 }
 
 impl Noted {
@@ -326,9 +328,15 @@ pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
         unlisted,
         refusals,
         failures,
+        truncated,
     } = mem::take(&mut ctx.noted);
     let display = |collection: &str| display_name(&ctx.namespace, collection).to_string();
     report.failures.extend(failures);
+    for collection in truncated {
+        let err = anyhow!("The server cut the listing short, the members past the cut unseen");
+        let failure = StepFailure::new(FailedStep::Listing, Some(collection), &err);
+        report.failures.push(failure);
+    }
 
     for ((collection, handle), reason) in refusals {
         let id = handle.as_str().trim_start_matches('\u{1}').to_owned();

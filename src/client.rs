@@ -81,6 +81,9 @@ pub struct Enumeration {
     /// The round finds absent whatever in its scope it lacks, and nothing
     /// when none is handed (pimdir SYNC §4, §5).
     pub enumerated: Option<Vec<String>>,
+    /// Whether the server cut the listing short, so the members past the
+    /// cut were never seen.
+    pub truncated: bool,
 }
 
 /// The scope a connector filtering on another date than `Date` (Gmail,

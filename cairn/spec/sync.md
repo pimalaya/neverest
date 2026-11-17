@@ -1153,7 +1153,7 @@ A pair collection whose sync fails SHALL be recorded under `collectionPatch` as 
 - THEN the report holds a `sync` hunk with the error, the text does not say the account is in sync, and the run exits 4
 
 ### Requirement: A store step that fails is reported
-A step of a run that fails outside any hunk SHALL be recorded under `failures`, one entry a failure: `step`, one of `queue` (the queue could not be read or drained), `bodies` (downloaded bodies could not land in the store, or a pair's full hydration failed) and `conflicts` (the waiting conflicts could not be counted); `collection`, `null` for a store-wide step; and `code`, `error` and `sources`. A `failures` entry SHALL make the run incomplete (exit 4) and SHALL be printed among the errors. A step that fails SHALL NOT read as having done nothing: rows a failed read could not classify SHALL NOT be counted as drained.
+A step of a run that fails outside any hunk SHALL be recorded under `failures`, one entry a failure: `step`, one of `queue` (the queue could not be read or drained), `bodies` (downloaded bodies could not land in the store, or a pair's full hydration failed) and `conflicts` (the waiting conflicts could not be counted) and `listing` (the server cut a listing short); `collection`, `null` for a store-wide step; and `code`, `error` and `sources`. A `failures` entry SHALL make the run incomplete (exit 4) and SHALL be printed among the errors. A step that fails SHALL NOT read as having done nothing: rows a failed read could not classify SHALL NOT be counted as drained.
 
 #### Scenario: A drain that fails
 - GIVEN a store whose queue cannot be drained
@@ -2017,6 +2017,8 @@ A `Remove` relocating a CalDAV member into another calendar SHALL move it with W
 
 ### Requirement: A truncated `sync-collection` listing is incomplete
 A `sync-collection` answer the server truncates (RFC 6578 §3.6, a `507` row) SHALL be followed from the sync token it carries until an answer is not truncated, a bounded number of times. A listing whose last answer was still truncated, the bound reached or the answer carrying no token, SHALL be returned incomplete, read as a delta: what it lists lands and no member is inferred removed from its absence. A truncated answer without a token SHALL end the listing, never restart it from its start, and the checkpoint SHALL stay the one the listing started from.
+
+A listing returned incomplete for a truncation, a `sync-collection` or a `PROPFIND` one, SHALL be reported under `failures` as a `listing` step naming the collection, and the run SHALL exit 4, every run the server cuts it again: the members past the cut never reached the store, and a run saying it is in sync hides them.
 
 #### Scenario: A first listing the server keeps truncating
 - **GIVEN** a CardDAV server truncating every `sync-collection` answer of a new address book

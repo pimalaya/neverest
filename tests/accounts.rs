@@ -92,10 +92,12 @@ impl Fixture {
         let state = tmp.path().join("state");
         let config = tmp.path().join("config.toml");
         fs::create_dir_all(&state).unwrap();
+        let root = state.join("neverest").display().to_string();
 
         let mut document = String::new();
         for account in accounts {
             document.push_str(&format!("[accounts.{account}]\n"));
+            document.push_str(&format!("store.root = {root:?}\n"));
             document.push_str(&format!(
                 "caldav.server = \"http://127.0.0.1:{port}/\"\n\
                  caldav.auth.basic.username = \"user\"\n\
@@ -371,10 +373,12 @@ fn turning_one_way_on_is_refused_until_accepted() {
     let _serial = serialized();
     let fixture = Fixture::new(&["work"], closed_port());
     let port = closed_port();
+    let root = fixture.store().display().to_string();
     fs::write(
         &fixture.config,
         format!(
             "[accounts.work]\n\
+             store.root = {root:?}\n\
              one-way = true\n\
              caldav.server = \"http://127.0.0.1:{port}/\"\n\
              caldav.auth.basic.username = \"user\"\n\

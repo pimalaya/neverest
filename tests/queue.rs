@@ -104,10 +104,12 @@ impl Fixture {
     }
 
     fn point_at(&self, server: &str, user: &str, pass: &str) {
+        let root = self.store().display().to_string();
         fs::write(
             &self.config,
             format!(
                 "[accounts.{ACCOUNT}]\n\
+                 store.root = {root:?}\n\
                  caldav.server = \"{server}\"\n\
                  caldav.auth.basic.username = \"{user}\"\n\
                  caldav.auth.basic.password.raw = \"{pass}\"\n",

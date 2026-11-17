@@ -163,6 +163,7 @@ impl Fixture {
         let state = tmp.path().join("state");
         let config = tmp.path().join("config.toml");
         fs::create_dir_all(&state).unwrap();
+        let root = state.join("neverest").display().to_string();
         let sasl = match auth {
             true => {
                 "smtp.sasl.plain.username = \"user\"\nsmtp.sasl.plain.password.raw = \"secret\"\n"
@@ -173,6 +174,7 @@ impl Fixture {
             &config,
             format!(
                 "[accounts.{ACCOUNT}]\n\
+                 store.root = {root:?}\n\
                  imap.server = \"imap://127.0.0.1:{}\"\n\
                  imap.starttls = false\n\
                  imap.sasl.plain.username = \"user\"\n\

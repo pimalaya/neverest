@@ -63,10 +63,12 @@ fn check(protocol: &str, server: &str) -> Value {
     let state = tmp.path().join("state");
     let config = tmp.path().join("config.toml");
     fs::create_dir_all(&state).unwrap();
+    let root = state.join("neverest").display().to_string();
     fs::write(
         &config,
         format!(
             "[accounts.check]\n\
+             store.root = {root:?}\n\
              {protocol}.server = \"{server}\"\n\
              {protocol}.auth.basic.username = \"{USER}\"\n\
              {protocol}.auth.basic.password.raw = \"{PASS}\"\n",
@@ -125,11 +127,13 @@ fn a_check_names_every_endpoint_that_did_not_answer() {
     let state = tmp.path().join("state");
     let config = tmp.path().join("config.toml");
     fs::create_dir_all(&state).unwrap();
+    let root = state.join("neverest").display().to_string();
     let (source, target) = (closed_port(), closed_port());
     fs::write(
         &config,
         format!(
             "[accounts.check]\n\
+             store.root = {root:?}\n\
              caldav.server = \"http://127.0.0.1:{source}/\"\n\
              caldav.auth.basic.username = \"{USER}\"\n\
              caldav.auth.basic.password.raw = \"{PASS}\"\n\

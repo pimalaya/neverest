@@ -178,6 +178,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed a merged event holding an alarm getting its `SEQUENCE` twice, once inside the `VALARM`.
+
 - Fixed a write a source's rights forbid (`item.create`, `item.update`, `item.delete`, `flag.update` false) being listed as applied on every run: it is counted under `forbidden` and the patch lists only what was written.
 
 - Fixed a CalDAV or CardDAV listing the server cut short ending the run as in sync: it is reported under `failures` as a `listing` step and the run exits 4.

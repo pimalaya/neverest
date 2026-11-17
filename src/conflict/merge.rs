@@ -340,7 +340,7 @@ fn with_sequences_of(merged: &[u8], remote: &[u8]) -> Vec<u8> {
                             out.extend_from_slice(format!("SEQUENCE:{sequence}").as_bytes());
                             out.extend_from_slice(ending);
                             written = true;
-                        } else if line_name(line) == "END" && !written {
+                        } else if line_name(line) == "END" && is_dated_component(line) && !written {
                             out.extend_from_slice(format!("SEQUENCE:{sequence}").as_bytes());
                             out.extend_from_slice(ending);
                             out.extend_from_slice(line);
@@ -550,6 +550,34 @@ mod tests {
         assert_eq!(
             Kind::Ical.merge(&base, &local, &remote),
             Merged::Collided(1)
+        );
+    }
+
+    /// A component holding none gets its count once, before its own `END`,
+    /// never inside an alarm it holds.
+    #[cfg(any(
+        feature = "carddav",
+        feature = "caldav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
+    #[test]
+    fn a_raised_sequence_is_written_once_outside_the_alarm() {
+        use crate::conflict::merge::with_sequences_of;
+
+        let merged = b"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:e1\r\nSUMMARY:Standup\r\n\
+            BEGIN:VALARM\r\nACTION:DISPLAY\r\nTRIGGER:-PT5M\r\nEND:VALARM\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n";
+        let remote = b"BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:e1\r\nSEQUENCE:4\r\n\
+            END:VEVENT\r\nEND:VCALENDAR\r\n";
+
+        let body = String::from_utf8(with_sequences_of(merged, remote)).unwrap();
+
+        assert_eq!(body.matches("SEQUENCE:4").count(), 1, "{body}");
+        assert!(
+            body.contains("END:VALARM\r\nSEQUENCE:4\r\nEND:VEVENT"),
+            "{body}"
         );
     }
 

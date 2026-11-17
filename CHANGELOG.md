@@ -98,6 +98,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Changed
 
+- Changed io-pimdir to 0.16: a hostile time zone rule no longer aborts a calendar pull, a second rekey or a delivered copy no longer makes another source remove a message from its server, a joined mail binding pushes its flags, a queued move into its own collection parks rather than deletes, a locally edited contact or event keeps its summary, store backups and restores never leave part of a file, and every search index is extracted again once.
+
 - **BREAKING**: Changed every account naming no `store.root` to share one store, neverest/ under the state directory, its collection ids carrying the account (`work/imap/INBOX`).
 
   A frontend reads every account from one store. An account name holding `/` is refused.

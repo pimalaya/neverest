@@ -319,11 +319,12 @@ fn perform_collection_create(
 /// alone (pimdir STORAGE Annex B.2).
 ///
 /// Each runs through the side its payload names, else the namespace's side
-/// binding the item, which parks it as malformed. A permanent failure parks
-/// the row, a transient one leaves it pending, as an undriven source's waits.
+/// binding the item, and is marked in flight first: one a killed run left
+/// marked parks unconfirmed rather than tell its attendees twice.
 pub(super) fn drain_invitations(
     sides: &mut [&mut SourceCtx],
     store: &mut PimdirSourceStore,
+    dir: &Path,
     report: &mut SyncOutput,
 ) {
     let intents = match invitation::pending(store) {
@@ -333,11 +334,22 @@ pub(super) fn drain_invitations(
             return;
         }
     };
-    if intents.is_empty() {
+    let in_flight = submit::InFlight::inviting(dir);
+    let left = in_flight.left();
+    if let Some(intent) = intents.iter().find(|intent| Some(intent.id) == left)
+        && !park_interrupted_invitation(store, intent, report)
+    {
+        return;
+    }
+    if let Err(err) = in_flight.end() {
+        warn!("cannot clear the calendar in-flight mark, no intent runs this run: {err}");
         return;
     }
 
     for intent in &intents {
+        if left == Some(intent.id) {
+            continue;
+        }
         let located = locate_invitation(store, intent);
         let index = match intent.source() {
             Some(name) => sides.iter().position(|ctx| ctx.name == name),
@@ -360,11 +372,63 @@ pub(super) fn drain_invitations(
             continue;
         };
 
+        if let Err(err) = in_flight.begin(intent.id) {
+            warn!(
+                "cannot mark {} intent #{} in flight, it waits: {err}",
+                intent.kind, intent.id
+            );
+            return;
+        }
         let side = &mut *sides[index];
         let outcome = located.and_then(|bindings| perform_invitation(side, intent, &bindings));
         let performer = side.name.clone();
-        settle_invitation(store, intent, &performer, outcome, report);
+        if !settle_invitation(store, intent, &performer, outcome, report) {
+            warn!(
+                "{} intent #{} keeps its in-flight mark, the next run parks it unconfirmed",
+                intent.kind, intent.id
+            );
+            return;
+        }
+        if let Err(err) = in_flight.end() {
+            warn!("cannot clear the calendar in-flight mark, no other intent runs: {err}");
+            return;
+        }
     }
+}
+
+/// Parks unconfirmed the calendar intent a killed run left in flight, which
+/// may have told its attendees already; false when it could not be parked.
+fn park_interrupted_invitation(
+    store: &mut PimdirSourceStore,
+    intent: &InvitationIntent,
+    report: &mut SyncOutput,
+) -> bool {
+    let detail = "the attendees may have been told, so it is never performed again on \
+                  its own: a run stopped while performing it";
+    warn!("{} intent #{} parked: {detail}", intent.kind, intent.id);
+    match store.unconfirm_action(intent.id, detail) {
+        Ok(true) => {}
+        Ok(false) => warn!(
+            "{} intent #{} vanished from the queue before it was parked",
+            intent.kind, intent.id
+        ),
+        Err(err) => {
+            warn!("cannot park {} intent #{}: {err}", intent.kind, intent.id);
+            return false;
+        }
+    }
+    report.intents.push(IntentEntry {
+        id: intent.id,
+        collection: intent.collection.clone(),
+        kind: intent.kind.clone(),
+        source: intent.source().unwrap_or_default().to_string(),
+        seq: intent.seq(),
+        code: None,
+        error: Some(submit::unconfirmed_reason(detail)),
+        sources: Vec::new(),
+        parked: true,
+    });
+    true
 }
 
 /// Every source's binding of the item an intent addresses.
@@ -474,20 +538,22 @@ fn perform_invitation(
 }
 
 /// Acknowledges or fails one performed invitation intent, and reports it.
+///
+/// False when the outcome could not be recorded in the queue.
 pub(super) fn settle_invitation(
     store: &mut PimdirSourceStore,
     intent: &InvitationIntent,
     performer: &str,
     outcome: Result<(), InvitationFailure>,
     report: &mut SyncOutput,
-) {
+) -> bool {
     let row = QueuedIntent {
         id: intent.id,
         collection: &intent.collection,
         kind: &intent.kind,
         seq: intent.seq(),
     };
-    settle_intent(store, row, performer, outcome, report);
+    settle_intent(store, row, performer, outcome, report)
 }
 
 /// The queue row of an intent neverest performs, as it is settled and
@@ -499,7 +565,8 @@ struct QueuedIntent<'a> {
     seq: Option<i64>,
 }
 
-/// Acknowledges or fails one performed intent, and reports it.
+/// Acknowledges or fails one performed intent, and reports it; false when
+/// the outcome could not be recorded in the queue.
 ///
 /// A performed intent is acknowledged with its receipt, so a producer reads it
 /// applied rather than withdrawn (pimdir STORAGE §15.4). The receipt names no
@@ -510,7 +577,8 @@ fn settle_intent(
     performer: &str,
     outcome: Result<(), InvitationFailure>,
     report: &mut SyncOutput,
-) {
+) -> bool {
+    let mut recorded = true;
     let (failure, parked) = match outcome {
         Ok(()) => {
             info!(
@@ -523,10 +591,13 @@ fn settle_intent(
                     "{} intent #{} vanished from the queue before its acknowledgement",
                     intent.kind, intent.id
                 ),
-                Err(err) => warn!(
-                    "{} intent #{} was performed but could not be acknowledged, it will be performed again: {err}",
-                    intent.kind, intent.id
-                ),
+                Err(err) => {
+                    recorded = false;
+                    warn!(
+                        "{} intent #{} was performed but could not be acknowledged: {err}",
+                        intent.kind, intent.id
+                    );
+                }
             }
             (None, false)
         }
@@ -535,6 +606,7 @@ fn settle_intent(
             let parked = failure.parks();
             warn!("{} intent #{} failed: {error}", intent.kind, intent.id);
             if let Err(err) = store.fail_action(intent.id, parked.then_some(error.as_str())) {
+                recorded = false;
                 warn!(
                     "cannot record {} intent #{} failure: {err}",
                     intent.kind, intent.id
@@ -556,4 +628,5 @@ fn settle_intent(
         sources,
         parked,
     });
+    recorded
 }

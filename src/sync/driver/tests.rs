@@ -1829,6 +1829,29 @@ fn a_performed_intent_reads_as_applied_by_its_producer() {
     assert_eq!(seq, None);
 }
 
+/// A calendar intent a killed run left in flight parks unconfirmed rather
+/// than run again: the provider may have told the attendees already.
+///
+/// The mark is cleared, so the next intent runs as usual.
+#[test]
+fn a_calendar_intent_left_in_flight_parks_unconfirmed() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = queued_reply(dir.path(), r#""seq":1"#);
+    let intent = invitation::pending(&store).unwrap().remove(0);
+    let in_flight = submit::InFlight::inviting(dir.path());
+    in_flight.begin(intent.id).unwrap();
+
+    let mut report = SyncOutput::default();
+    drain_invitations(&mut [], &mut store, dir.path(), &mut report);
+
+    assert!(invitation::pending(&store).unwrap().is_empty());
+    let parked = store.parked_actions().unwrap();
+    assert_eq!(parked.len(), 1);
+    assert!(parked[0].unconfirmed().is_some(), "{parked:?}");
+    assert!(report.intents[0].parked);
+    assert_eq!(in_flight.left(), None);
+}
+
 const TODO: &str = "BEGIN:VCALENDAR\r\nBEGIN:VTODO\r\nUID:t1\r\n\
                     DTSTAMP:20261028T090000Z\r\nSUMMARY:Call Ann\r\n\
                     END:VTODO\r\nEND:VCALENDAR\r\n";
@@ -2865,6 +2888,7 @@ fn disjoint_edits_on_both_sides_resolve_with_no_report() {
         &mut store,
         &blobs,
         dir.path(),
+        &mut Noted::default(),
     )
     .unwrap();
     assert_eq!(merged, 1);
@@ -2906,6 +2930,59 @@ fn disjoint_edits_on_both_sides_resolve_with_no_report() {
 
     count_conflicts(&store, CONFLICT_ACCOUNT, &mut report);
     assert_eq!(report.outstanding_conflicts, 0);
+}
+
+/// A merge is counted by its own row, never by the totals of the drain,
+/// which is the store's.
+///
+/// A frontend's resolution queued first lands first, so the merge, made over
+/// the body it replaced, parks; the resolution is reported as applied.
+#[cfg(any(feature = "carddav", feature = "caldav"))]
+#[test]
+fn a_merge_is_judged_by_its_own_row_and_the_drain_reports_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = card("+2", "old");
+    let mut store = store_with_conflict(dir.path(), &card("+1", "old"), &local, &card("+1", "new"));
+    let blobs = store.blob_stage();
+
+    let seq = store.seq_for_link("contacts", "uid:a").unwrap().unwrap();
+    let local_hash = blobs.blobs().hash(local.as_bytes());
+    let remote_hash = blobs.blobs().hash(card("+1", "new").as_bytes());
+    let mut frontend = PimdirProducer::open(dir.path(), "cardamum").unwrap();
+    frontend
+        .enqueue_with_body("contacts", card("+3", "old").as_bytes(), |object| {
+            PimdirAction::Update {
+                seq,
+                object,
+                if_match: Some(local_hash),
+                resolves: Some(vec![remote_hash]),
+            }
+        })
+        .unwrap();
+    drop(frontend);
+
+    let mut noted = Noted::default();
+    let merged = merge_conflicts(
+        "contacts",
+        Kind::Vcard,
+        "dav",
+        &mut store,
+        &blobs,
+        dir.path(),
+        &mut noted,
+    )
+    .unwrap();
+
+    assert_eq!(
+        merged, 0,
+        "the merge parked behind the frontend's resolution"
+    );
+    let drained: Vec<_> = noted
+        .drained
+        .iter()
+        .map(|entry| (entry.collection.as_str(), entry.applied))
+        .collect();
+    assert_eq!(drained, [("contacts", 1)]);
 }
 
 /// One card a fake CardDAV server holds under `card1`, its body read
@@ -3091,6 +3168,7 @@ fn a_card_both_endpoints_rewrote_diverges_against_their_agreed_body() {
         &mut right,
         &blobs,
         dir.path(),
+        &mut Noted::default(),
     )
     .unwrap();
     assert_eq!(merged, 1);
@@ -3135,6 +3213,7 @@ fn a_card_two_endpoints_never_agreed_on_parks_with_no_ancestor() {
         &mut right,
         &blobs,
         dir.path(),
+        &mut Noted::default(),
     )
     .unwrap();
     assert_eq!(merged, 0, "nothing to merge against");
@@ -3485,6 +3564,7 @@ fn a_same_field_collision_parks_and_is_still_counted() {
         &mut store,
         &blobs,
         dir.path(),
+        &mut Noted::default(),
     )
     .unwrap();
     assert_eq!(merged, 0);
@@ -3570,6 +3650,7 @@ fn two_colliding_fields_park_the_item_and_the_count_reads_past_one() {
         &mut store,
         &blobs,
         dir.path(),
+        &mut Noted::default(),
     )
     .unwrap();
     assert_eq!(

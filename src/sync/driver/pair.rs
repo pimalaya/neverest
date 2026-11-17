@@ -272,7 +272,12 @@ fn run_pair(
             work_dir,
             report,
         );
-        drain_invitations(&mut [&mut left, &mut right], &mut left_store, report);
+        drain_invitations(
+            &mut [&mut left, &mut right],
+            &mut left_store,
+            work_dir,
+            report,
+        );
     }
 
     let left_listed = left

@@ -268,7 +268,8 @@ pub(super) fn resolve_conflicts(
 
     let kind = resolve_kind(&mut ctx.pool);
 
-    merge_conflicts(collection, kind, &ctx.name, store, blobs, store_dir)
+    let noted = &mut ctx.noted;
+    merge_conflicts(collection, kind, &ctx.name, store, blobs, store_dir, noted)
 }
 
 /// Settles every divergence of a side the store decides on the store's body.
@@ -407,8 +408,8 @@ pub(super) fn fetch_diverging<R: PimdirRemote<Error = anyhow::Error>>(
 /// The half of [`resolve_conflicts`] that reaches no server.
 ///
 /// Stages each merge through the queue as an owner's edit, matched on the
-/// local body so an edit made since parks. The producer opens before any blob
-/// write: its staging lock keeps a collector off a body no row pins yet.
+/// local body so an edit made since parks, then judges it by its own row:
+/// the drain is the store's, its other rows of the account land in `noted`.
 pub(super) fn merge_conflicts(
     collection: &str,
     kind: Kind,
@@ -416,10 +417,11 @@ pub(super) fn merge_conflicts(
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobStage,
     store_dir: &Path,
+    noted: &mut Noted,
 ) -> Result<usize> {
     let mut producer = PimdirProducer::open(store_dir, env!("CARGO_PKG_NAME"))
         .with_context(|| format!("Stage the merged conflicts of {collection}"))?;
-    let mut staged = 0usize;
+    let mut staged = Vec::new();
 
     for placement in conflicted_placements(store, collection, source)? {
         let handle = placement.handle.0.clone();
@@ -474,7 +476,7 @@ pub(super) fn merge_conflicts(
             continue;
         };
 
-        producer
+        let enqueued = producer
             .enqueue_with_body(collection, &body, |object| PimdirAction::Update {
                 seq,
                 object,
@@ -483,25 +485,50 @@ pub(super) fn merge_conflicts(
             })
             .with_context(|| format!("Stage the merged body of {handle} in {collection}"))?;
 
-        staged += 1;
+        staged.push(enqueued.handle.id);
     }
 
     drop(producer);
 
-    if staged == 0 {
+    if staged.is_empty() {
         return Ok(0);
     }
 
-    let drained = store
-        .drain()
+    let mut drained = SyncOutput::default();
+    drain_queues_into(store, &mut drained)
         .with_context(|| format!("Apply the merged conflicts of {collection}"))?;
-    if drained.parked > 0 {
-        warn!(
-            "{} merged conflict(s) in {collection} could not be applied and parked",
-            drained.parked
-        );
-    }
-    info!("merged and resolved {staged} conflict(s) in {collection}");
 
-    Ok(staged)
+    let mut merged = 0usize;
+    for id in staged {
+        let status = store
+            .action_status(id)
+            .map_err(pimdir_error)
+            .with_context(|| format!("Read where the merge #{id} in {collection} stands"))?;
+        match status {
+            PimdirActionStatus::Applied { .. } => merged += 1,
+            PimdirActionStatus::Parked { error, .. } => {
+                warn!("merged conflict #{id} in {collection} parked: {error}");
+            }
+            _ => warn!("merged conflict #{id} in {collection} was left queued"),
+        }
+    }
+    info!("merged and resolved {merged} conflict(s) in {collection}");
+
+    let owners = collection_accounts(store);
+    let account = owners.get(collection);
+    let owned = |name: &str| account.is_some() && owners.get(name) == account;
+    for mut entry in drained.drained {
+        if entry.collection == collection {
+            entry.applied = entry.applied.saturating_sub(merged);
+        }
+        if entry.applied > 0 && owned(&entry.collection) {
+            noted.drained.push(entry);
+        }
+    }
+    let overruled = drained.overruled.into_iter();
+    noted
+        .drained_overruled
+        .extend(overruled.filter(|body| owned(&body.collection)));
+
+    Ok(merged)
 }

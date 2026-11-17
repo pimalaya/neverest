@@ -128,7 +128,7 @@ pub(super) fn run_local(
                 work_dir,
                 report,
             );
-            drain_invitations(&mut [first], &mut stores[0], report);
+            drain_invitations(&mut [first], &mut stores[0], work_dir, report);
         }
     }
 
@@ -398,6 +398,7 @@ pub(super) fn run_intents(
     drain_invitations(
         &mut opened.iter_mut().collect::<Vec<_>>(),
         &mut store,
+        work_dir,
         report,
     );
     Ok(())

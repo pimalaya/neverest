@@ -78,6 +78,10 @@ pub const SUBMIT: &str = "submit";
 /// The file of the store's local/ naming the intent a run is handing over.
 const IN_FLIGHT: &str = "submitting";
 
+/// The file of the store's local/ naming the calendar intent a run is
+/// performing.
+const INVITING: &str = "inviting";
+
 /// One pending `submit` row, as read from the queue.
 ///
 /// The payload stays raw so a malformed one can be parked with its reason
@@ -361,6 +365,15 @@ impl InFlight {
         }
     }
 
+    /// The mark of the calendar intent being performed in the store at
+    /// `dir`, apart from a submission's.
+    pub fn inviting(dir: &Path) -> Self {
+        Self {
+            dir: dir.to_path_buf(),
+            path: local::path(dir).join(INVITING),
+        }
+    }
+
     /// The intent an earlier run was handing over when it stopped, if it
     /// left one.
     pub fn left(&self) -> Option<i64> {
@@ -370,7 +383,6 @@ impl InFlight {
 
     /// Marks `id` as being handed over, durably: written aside, synced,
     /// then renamed into place, so a mark is either whole or absent.
-    #[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
     pub fn begin(&self, id: i64) -> io::Result<()> {
         local::ensure(&self.dir)?;
         let staged = self.path.with_extension("new");

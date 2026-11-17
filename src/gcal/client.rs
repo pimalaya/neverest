@@ -611,9 +611,24 @@ impl GcalClient {
         Ok(written.filter(|_| !meeting && !anchored))
     }
 
-    /// Deletes a series, refused when it moved since `if_match`.
+    /// Deletes a series, refused when it moved since `if_match`; one gone
+    /// from Google already, missing or cancelled, counts as deleted.
     pub fn delete_item(&mut self, calendar: &str, id: &str, if_match: Option<&str>) -> Result<()> {
+        match self.delete_item_once(calendar, id, if_match) {
+            Err(err) if is_missing(&err) => {
+                debug!("event {id} of {calendar} gone already, its delete counts as done");
+                Ok(())
+            }
+            deleted => deleted,
+        }
+    }
+
+    fn delete_item_once(&mut self, calendar: &str, id: &str, if_match: Option<&str>) -> Result<()> {
         let events = self.series(calendar, id)?;
+        if events.first().is_some_and(is_cancelled) {
+            debug!("event {id} of {calendar} cancelled already, its delete counts as done");
+            return Ok(());
+        }
         check_revision(id, &events, if_match)?;
         let etag = events.first().and_then(|event| event.etag.clone());
         let send_updates = match events
@@ -1267,6 +1282,36 @@ mod tests {
                 .expect_err("no event to read");
 
             assert!(Gone::is(&err), "{status}: {err:#}");
+        }
+    }
+
+    /// An event deleted on Google before its delete is pushed counts as
+    /// deleted, missing or kept as a cancelled tombstone.
+    ///
+    /// No delete is sent for it. Failing instead, the delete would be held
+    /// as refused for good.
+    #[test]
+    fn a_delete_of_an_event_gone_already_counts_as_done() {
+        let missing = r#"{"error":{"code":404,"message":"Not Found"}}"#;
+        let cancelled = r#"{"id":"e1","status":"cancelled","etag":"\"1\""}"#;
+        for (status, body) in [
+            ("404 Not Found", missing),
+            ("410 Gone", missing),
+            ("200 OK", cancelled),
+        ] {
+            let server = Server::replying([json(status, body)]);
+            let mut client = over(&server, Throttle::new("gcal"));
+
+            client
+                .delete_item("c1", "e1", None)
+                .unwrap_or_else(|err| panic!("{status}: {err:#}"));
+
+            assert_eq!(
+                server.requests().len(),
+                1,
+                "{status}: {:?}",
+                server.requests()
+            );
         }
     }
 

@@ -270,6 +270,10 @@ pub(super) struct Noted {
     pub(super) failures: Vec<StepFailure>,
     /// The collections whose listing the server cut short, by wire name.
     pub(super) truncated: BTreeSet<String>,
+    /// The account's rows a mid-run drain applied beside the run's merges.
+    pub(super) drained: Vec<DrainedQueue>,
+    /// The bodies that drain kept aside.
+    pub(super) drained_overruled: Vec<OverruledBody>,
 }
 
 impl Noted {
@@ -366,9 +370,13 @@ pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
         refusals,
         failures,
         truncated,
+        drained,
+        drained_overruled,
     } = mem::take(&mut ctx.noted);
     let display = |collection: &str| display_name(&ctx.namespace, collection).to_string();
     report.failures.extend(failures);
+    report.drained.extend(drained);
+    report.overruled.extend(drained_overruled);
     for collection in truncated {
         let err = anyhow!("The server cut the listing short, the members past the cut unseen");
         let failure = StepFailure::new(FailedStep::Listing, Some(collection), &err);

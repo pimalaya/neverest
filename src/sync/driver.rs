@@ -53,8 +53,11 @@ use crossbeam_queue::SegQueue;
 use io_pimdir::{
     change::PimdirWriteOp,
     client::{
-        PimdirError, PimdirRunError, PimdirSourceStore, PimdirStore, blobs::PimdirBlobStage, modes,
-        producer::PimdirProducer, reader::PimdirReader,
+        PimdirError, PimdirRunError, PimdirSourceStore, PimdirStore,
+        blobs::PimdirBlobStage,
+        modes,
+        producer::{PimdirActionStatus, PimdirProducer},
+        reader::PimdirReader,
     },
     codec::PimdirAction,
     collection::{PimdirCollectionId, PimdirScope},

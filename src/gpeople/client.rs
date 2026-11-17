@@ -365,8 +365,18 @@ impl GpeopleClient {
     }
 
     /// Deletes a person, refused when it moved since `if_match`, People
-    /// taking no etag on delete.
+    /// taking no etag on delete; one gone already counts as deleted.
     pub fn delete_item(&mut self, id: &str, if_match: Option<&str>) -> Result<()> {
+        match self.delete_item_once(id, if_match) {
+            Err(err) if is_missing(&err) => {
+                debug!("person {id} gone already, its delete counts as done");
+                Ok(())
+            }
+            deleted => deleted,
+        }
+    }
+
+    fn delete_item_once(&mut self, id: &str, if_match: Option<&str>) -> Result<()> {
         if let Some(expected) = if_match {
             let current = self.person(id)?;
             if current.etag != expected {
@@ -570,6 +580,26 @@ mod tests {
                 .expect_err("no person to read");
 
             assert!(Gone::is(&err), "{status}: {err:#}");
+        }
+    }
+
+    /// A person deleted on Google before its delete is pushed counts as
+    /// deleted, as on every other source.
+    ///
+    /// Failing instead, the delete would be held as refused for good.
+    #[test]
+    fn a_delete_of_a_person_gone_already_counts_as_done() {
+        for status in ["404 Not Found", "410 Gone"] {
+            let body = r#"{"error":{"code":404,"message":"Not Found"}}"#;
+            let answer = format!(
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let mut client = over(&Server::replying([answer]));
+
+            client
+                .delete_item("c1", None)
+                .unwrap_or_else(|err| panic!("{status}: {err:#}"));
         }
     }
 

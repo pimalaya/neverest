@@ -256,6 +256,12 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Fixed a credential command prompting for a password (`systemd-ask-password`) hanging the run: it reads the terminal.
 
+- Fixed a Google Calendar or People delete of an item gone already being held as refused for good: it counts as done, as on the other sources.
+
+- Fixed a calendar reply or cancellation a killed run left half done being sent again: it parks unconfirmed.
+
+- Fixed the conflict auto-merge counting another app's parked row as its own and leaving the account's other applied rows unreported.
+
 - Fixed RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387 by bumping crypto-bigint, ctutils, rustls-webpki and webpki-root-certs.
 
 ## [0.3.0] - 2026-10-02

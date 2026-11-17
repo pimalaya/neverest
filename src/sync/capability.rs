@@ -13,12 +13,12 @@ use std::collections::BTreeSet;
 
 use io_pimdir::capability::{
     CALENDAR, CALENDAR_CANCEL, CALENDAR_CANCEL_OCCURRENCE, CALENDAR_COMPONENT_VTODO,
-    CALENDAR_OCCURRENCE_UPDATE, CALENDAR_ONLINE_MEETING, CALENDAR_REPLY, CALENDAR_REPLY_OCCURRENCE,
-    CALENDAR_SCHEDULING, COLLECTION_CREATE, COLLECTION_DELETE, COLLECTION_RENAME, CONTACTS,
-    CONTACTS_CARD_COPY, CONTACTS_CARD_MOVE, MAIL, MAIL_FLAGS_ANSWERED, MAIL_FLAGS_DRAFT,
-    MAIL_FLAGS_FLAGGED, MAIL_FLAGS_IMPORTANT, MAIL_FLAGS_JUNK, MAIL_FLAGS_KEYWORDS,
-    MAIL_FLAGS_SEEN, MAIL_MESSAGE_ADD, MAIL_MESSAGE_REMOVE, MAIL_SUBMIT, MAIL_SUBMIT_COPY,
-    PimdirCapability, PimdirSupport,
+    CALENDAR_ITEM_MOVE, CALENDAR_OCCURRENCE_UPDATE, CALENDAR_ONLINE_MEETING, CALENDAR_REPLY,
+    CALENDAR_REPLY_OCCURRENCE, CALENDAR_SCHEDULING, COLLECTION_CREATE, COLLECTION_DELETE,
+    COLLECTION_RENAME, CONTACTS, CONTACTS_CARD_COPY, CONTACTS_CARD_MOVE, MAIL, MAIL_FLAGS_ANSWERED,
+    MAIL_FLAGS_DRAFT, MAIL_FLAGS_FLAGGED, MAIL_FLAGS_IMPORTANT, MAIL_FLAGS_JUNK,
+    MAIL_FLAGS_KEYWORDS, MAIL_FLAGS_SEEN, MAIL_MESSAGE_ADD, MAIL_MESSAGE_REMOVE, MAIL_SUBMIT,
+    MAIL_SUBMIT_COPY, PimdirCapability, PimdirSupport,
 };
 
 use crate::{
@@ -431,6 +431,10 @@ fn gpeople(name: &str, _smtp: bool) -> Support {
 
 fn msgraph_contacts(name: &str, _smtp: bool) -> Support {
     match name {
+        CONTACTS_CARD_MOVE => (
+            PimdirSupport::None,
+            Some("Graph contacts are not moved between folders here"),
+        ),
         COLLECTION_CREATE => (
             PimdirSupport::None,
             Some("Graph contact folders are not created yet"),
@@ -466,6 +470,10 @@ fn caldav(name: &str, _smtp: bool) -> Support {
 
 fn gcal(name: &str, _smtp: bool) -> Support {
     match name {
+        CALENDAR_ITEM_MOVE => (
+            PimdirSupport::None,
+            Some("Google events are not moved between calendars here"),
+        ),
         CALENDAR_OCCURRENCE_UPDATE => (
             PimdirSupport::Partial,
             Some("an override the update drops stays on Google"),
@@ -496,6 +504,10 @@ fn gcal(name: &str, _smtp: bool) -> Support {
 
 fn msgraph_calendar(name: &str, _smtp: bool) -> Support {
     match name {
+        CALENDAR_ITEM_MOVE => (
+            PimdirSupport::None,
+            Some("Graph events are not moved between calendars here"),
+        ),
         CALENDAR_OCCURRENCE_UPDATE => (
             PimdirSupport::Partial,
             Some("an override or an exclusion the update drops stays on Graph"),
@@ -609,6 +621,27 @@ mod tests {
         );
         assert_eq!(row(MAIL_FLAGS_DRAFT).support, PimdirSupport::Partial);
         assert_eq!(row(MAIL_FLAGS_ANSWERED).support, PimdirSupport::None);
+    }
+
+    /// A move the connector refuses is declared none, so a frontend is
+    /// refused at the gate rather than its push failing every run.
+    #[test]
+    fn a_move_the_connector_refuses_is_declared_none() {
+        let account: AccountConfig = toml::from_str(
+            "msgraph.auth.token.raw = \"token\"\nmsgraph.contact = true\nmsgraph.calendar = true",
+        )
+        .unwrap();
+        let mut sources = account.sources().unwrap();
+        let contacts = sources.remove("msgraph-contact").unwrap();
+        let calendar = sources.remove("msgraph-calendar").unwrap();
+        let none = BTreeSet::new();
+
+        let declared = declaration(&contacts, false, false, &[], &none);
+        assert_eq!(support(&declared, CONTACTS_CARD_MOVE), PimdirSupport::None);
+        let declared = declaration(&calendar, false, false, &[], &none);
+        assert_eq!(support(&declared, CALENDAR_ITEM_MOVE), PimdirSupport::None);
+        let declared = declaration(&gcal(), false, false, &[], &none);
+        assert_eq!(support(&declared, CALENDAR_ITEM_MOVE), PimdirSupport::None);
     }
 
     #[test]

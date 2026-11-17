@@ -270,6 +270,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Fixed `sync --index-only` over an uninitialized account failing the command (exit 1): the account is reported failed and the run exits 4, as a sync does.
 
+- Fixed a delete or a move out of Gmail's Drafts or Sent being refused by Gmail on every run: a delete trashes the message, a move other than to the trash is refused at once.
+
 - Fixed RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387 by bumping crypto-bigint, ctutils, rustls-webpki and webpki-root-certs.
 
 ## [0.3.0] - 2026-10-02

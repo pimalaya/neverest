@@ -17,8 +17,8 @@ use io_pimdir::capability::{
     CALENDAR_REPLY_OCCURRENCE, CALENDAR_SCHEDULING, COLLECTION_CREATE, COLLECTION_DELETE,
     COLLECTION_RENAME, CONTACTS, CONTACTS_CARD_COPY, CONTACTS_CARD_MOVE, MAIL, MAIL_FLAGS_ANSWERED,
     MAIL_FLAGS_DRAFT, MAIL_FLAGS_FLAGGED, MAIL_FLAGS_IMPORTANT, MAIL_FLAGS_JUNK,
-    MAIL_FLAGS_KEYWORDS, MAIL_FLAGS_SEEN, MAIL_MESSAGE_ADD, MAIL_MESSAGE_REMOVE, MAIL_SUBMIT,
-    MAIL_SUBMIT_COPY, PimdirCapability, PimdirSupport,
+    MAIL_FLAGS_KEYWORDS, MAIL_FLAGS_SEEN, MAIL_MESSAGE_ADD, MAIL_MESSAGE_MOVE, MAIL_MESSAGE_REMOVE,
+    MAIL_SUBMIT, MAIL_SUBMIT_COPY, PimdirCapability, PimdirSupport,
 };
 
 use crate::{
@@ -337,7 +337,11 @@ fn gmail(name: &str, smtp: bool) -> Support {
     match name {
         MAIL_MESSAGE_REMOVE => (
             PimdirSupport::Partial,
-            Some("removes the label, permanent from TRASH only"),
+            Some("removes the label, trashes from DRAFT and SENT, permanent from TRASH only"),
+        ),
+        MAIL_MESSAGE_MOVE => (
+            PimdirSupport::Partial,
+            Some("never into DRAFT or SENT, nor out of them but to TRASH: Gmail refuses both"),
         ),
         MAIL_FLAGS_ANSWERED => (PimdirSupport::None, Some("Gmail has no answered label")),
         MAIL_FLAGS_DRAFT => (

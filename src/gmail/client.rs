@@ -63,6 +63,7 @@ use io_pimdir::{
     },
 };
 use log::{debug, trace, warn};
+use pimalaya_cli::error::CodedError;
 use pimalaya_stream::{proxy::Proxy, tls::Tls};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -96,6 +97,11 @@ const IMPORTANT: &str = "IMPORTANT";
 const SPAM: &str = "SPAM";
 /// Gmail system label of the trash, hidden from other listings.
 const TRASH: &str = "TRASH";
+
+/// The system labels Gmail refuses in any label change, added or removed.
+///
+/// A message enters them by import alone and leaves them for the trash alone.
+const FIXED_LABELS: &[&str] = &["DRAFT", "SENT"];
 
 /// The system labels synced as collections, next to every user label.
 const SYSTEM_COLLECTIONS: &[&str] = &["INBOX", "SENT", "DRAFT", SPAM, TRASH];
@@ -1204,8 +1210,8 @@ impl GmailClient {
 
     /// Deletes one message from a label by removing that label.
     ///
-    /// From `INBOX` it archives, from `TRASH` it deletes for good; a message
-    /// gone already is deleted.
+    /// From `INBOX` it archives, from `TRASH` it deletes for good, from `DRAFT`
+    /// and `SENT` it trashes; a message gone already is deleted.
     pub fn delete_item(&mut self, collection: &str, id: &str) -> Result<()> {
         let label = self.label_id(collection)?;
 
@@ -1219,6 +1225,9 @@ impl GmailClient {
                     );
                 }
             }
+        } else if FIXED_LABELS.contains(&label.as_str()) {
+            self.modify(&[id], &[TRASH.to_owned()], &[])
+                .with_context(|| format!("Trash message {id} of {collection} error"))?;
         } else {
             self.modify(&[id], &[], &[label])
                 .with_context(|| format!("Remove {collection} from message {id} error"))?;
@@ -1228,11 +1237,29 @@ impl GmailClient {
     }
 
     /// Moves messages from one label to another in one modify each batch.
+    ///
+    /// Out of `DRAFT` or `SENT` only to `TRASH`, which trashes them, and never
+    /// into them: Gmail refuses either label in a change, coded `unsupported`.
     pub fn move_items(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
         let from_label = self.label_id(from)?;
         let to_label = self.label_id(to)?;
         if from_label == to_label {
             return Ok(());
+        }
+        if FIXED_LABELS.contains(&from_label.as_str()) && to_label == TRASH {
+            return self
+                .modify(ids, &[to_label], &[])
+                .with_context(|| format!("Trash messages of {from} error"));
+        }
+        if let Some(fixed) = [&from_label, &to_label]
+            .into_iter()
+            .find(|label| FIXED_LABELS.contains(&label.as_str()))
+        {
+            let message = format!(
+                "Gmail moves no message into or out of {fixed}, only imports into it \
+                 or trashes from it"
+            );
+            return Err(CodedError::new(ErrorCode::Unsupported, message).into());
         }
 
         self.modify(ids, &[to_label], &[from_label])
@@ -1801,6 +1828,8 @@ pub(crate) mod scripted {
                 (String::from("INBOX"), String::from("INBOX")),
                 (String::from("Work"), String::from("Label_1")),
                 (String::from("TRASH"), String::from("TRASH")),
+                (String::from("DRAFT"), String::from("DRAFT")),
+                (String::from("SENT"), String::from("SENT")),
             ]),
             throttle: Arc::new(Throttle::new("gmail")),
             run: Arc::new(GmailRun::new(Default::default())),
@@ -2879,5 +2908,39 @@ mod tests {
             client.delete_item("INBOX", "m1").is_err(),
             "any other refusal fails"
         );
+    }
+
+    /// Gmail refuses `DRAFT` and `SENT` in any label change (`Invalid label`,
+    /// 400, checked live on 2026-11-17).
+    ///
+    /// A delete from either trashes the message, naming `TRASH` alone; a move
+    /// into or out of either but to the trash is refused before any request.
+    #[test]
+    fn drafts_and_sent_are_left_for_the_trash_alone() {
+        let (mut client, api, _) = scripted();
+        api.answer(ok(
+            serde_json::json!({ "id": "m1", "labelIds": ["DRAFT", "TRASH"] }),
+        ));
+
+        client.delete_item("DRAFT", "m1").unwrap();
+
+        let written = api.written(0);
+        let body = written.rsplit("\r\n\r\n").next().unwrap_or_default();
+        let modify: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            modify,
+            serde_json::json!({ "addLabelIds": ["TRASH"], "removeLabelIds": [] })
+        );
+
+        for (from, to) in [("INBOX", "SENT"), ("SENT", "INBOX"), ("DRAFT", "INBOX")] {
+            let err = client.move_items(from, to, &["m1"]).unwrap_err();
+            let failure = crate::error::Failure::of(&err);
+            assert_eq!(
+                failure.code,
+                Some(ErrorCode::Unsupported),
+                "{from} to {to}: {err:#}"
+            );
+        }
+        assert_eq!(api.lines().len(), 1, "{:?}", api.lines());
     }
 }

@@ -111,6 +111,36 @@ mod tests {
         assert_eq!(Exit::from(&report), Exit::Incomplete);
     }
 
+    /// An incomplete run never reads as in sync in the text, and names what
+    /// it did not reach.
+    #[test]
+    fn an_incomplete_run_says_so_in_the_text() {
+        let mut report = SyncOutput {
+            account: String::from("dav"),
+            interrupted: true,
+            ..SyncOutput::default()
+        };
+        let text = report.to_string();
+        assert!(!text.contains("already in sync"), "{text}");
+        assert!(text.contains("Account dav is incomplete"), "{text}");
+
+        report.interrupted = false;
+        report.throttled.push(ThrottledSource {
+            source: String::from("gcal"),
+            until: String::from("2026-11-17T18:00:00Z"),
+        });
+        report.unreached.push(UnreachedEndpoint::new(
+            String::from("imap.smtp"),
+            Failure::of(&anyhow!("connection refused")),
+        ));
+        let text = report.to_string();
+        assert!(text.contains("Throttled (1):"), "{text}");
+        assert!(text.contains("gcal gave up throttled"), "{text}");
+        assert!(text.contains("Unreached (1):"), "{text}");
+        assert!(text.contains("imap.smtp: connection refused"), "{text}");
+        assert!(text.contains("Account dav is incomplete"), "{text}");
+    }
+
     /// A send the server refused for good parked: the message was not sent,
     /// which waits for a person, not for a rerun, and is no success.
     #[test]

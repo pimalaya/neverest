@@ -1486,6 +1486,27 @@ impl fmt::Display for SyncOutput {
             writeln!(f)?;
         }
 
+        if !self.unreached.is_empty() {
+            writeln!(f, "Unreached ({n}):", n = self.unreached.len())?;
+            for unreached in &self.unreached {
+                let err = chain(&unreached.error, &unreached.sources);
+                writeln!(f, " - {}: {err}", unreached.endpoint)?;
+            }
+            writeln!(f)?;
+        }
+
+        if !self.throttled.is_empty() {
+            writeln!(f, "Throttled ({n}):", n = self.throttled.len())?;
+            for throttled in &self.throttled {
+                writeln!(
+                    f,
+                    " - {} gave up throttled, rerun it after {}",
+                    throttled.source, throttled.until
+                )?;
+            }
+            writeln!(f)?;
+        }
+
         if errors > 0 {
             writeln!(f, "Errors ({errors}):")?;
             for entry in self.collection_patch.iter().filter(|e| e.error.is_some()) {
@@ -1511,7 +1532,23 @@ impl fmt::Display for SyncOutput {
         }
 
         let account = &self.account;
+        let stopped = errors == 0 && self.incomplete();
         match (total, errors, warnings, self.dry_run) {
+            (0, 0, 0, _) if stopped => {
+                writeln!(f, "Account {account} is incomplete, rerun it to go on")
+            }
+            (0, 0, w, _) if stopped => writeln!(
+                f,
+                "Account {account} is incomplete ({w} warnings), rerun it to go on"
+            ),
+            (n, 0, 0, false) if stopped => writeln!(
+                f,
+                "Account {account} partially synchronized: {n} hunks, rerun it to go on"
+            ),
+            (n, 0, w, false) if stopped => writeln!(
+                f,
+                "Account {account} partially synchronized: {n} hunks, {w} warnings, rerun it to go on"
+            ),
             (0, 0, 0, _) => writeln!(f, "Account {account} is already in sync"),
             (0, 0, w, _) => writeln!(f, "Account {account} is already in sync ({w} warnings)"),
             (n, 0, 0, true) => writeln!(f, "Account {account} would apply {n} hunks"),

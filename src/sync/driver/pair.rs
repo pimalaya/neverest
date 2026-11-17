@@ -74,60 +74,60 @@ impl CollectionProgress<'_> {
     }
 }
 
+/// What a pair run reads of its account: the account, its mode and the
+/// run's options, the same for every pair of the run.
+#[derive(Clone, Copy)]
+pub(super) struct AccountRun<'a> {
+    pub(super) name: &'a str,
+    pub(super) config: &'a AccountConfig,
+    pub(super) account: &'a Account,
+    pub(super) mode: &'a AccountMode,
+    pub(super) scope: &'a PimdirScope,
+    pub(super) work_dir: &'a Path,
+    pub(super) dry_run: bool,
+    pub(super) accept_absences: bool,
+    pub(super) connections: usize,
+    pub(super) progress: Progress<'a>,
+}
+
 /// One source against every target the account names, each pairing on its own.
 ///
 /// Both endpoints bind the source's namespace, which is what makes them meet.
 /// Targets run in turn rather than together, no target influencing another
 /// under `one-way`, so the source is enumerated once per target.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn run_targets(
-    account_name: &str,
-    account_config: &AccountConfig,
-    account: &Account,
-    mode: &AccountMode,
+    run: AccountRun<'_>,
     endpoints: &HashMap<String, SourceConfig>,
     source_name: &str,
     source_config: SourceConfig,
     collection_filter: Option<CollectionFilter>,
-    scope: &PimdirScope,
-    work_dir: &Path,
-    dry_run: bool,
-    accept_absences: bool,
-    connections: usize,
-    progress: Progress<'_>,
     state: &mut AccountState,
     report: &mut SyncOutput,
 ) -> Result<()> {
-    let relay = mode.streams(endpoints);
+    let relay = run.mode.streams(endpoints);
     let mut taskless = PairTaskless::new(state, source_name);
 
-    for target_name in &mode.targets {
-        run_pair(
-            account_name,
-            account_config,
-            account,
-            mode,
-            source_name,
-            source_name.to_string(),
-            source_config.clone(),
-            target_name.clone(),
-            endpoints[target_name].clone(),
-            collection_filter.clone(),
-            scope,
+    for target_name in &run.mode.targets {
+        let pairing = Pairing {
+            left: (source_name.to_string(), source_config.clone()),
+            right: (target_name.clone(), endpoints[target_name].clone()),
+            filter: collection_filter.clone(),
             relay,
-            work_dir,
-            dry_run,
-            accept_absences,
-            connections,
-            progress,
-            state,
-            &mut taskless,
-            report,
-        )?;
+        };
+        run_pair(run, pairing, state, &mut taskless, report)?;
     }
 
     record_taskless(state, source_name, &taskless.listed);
     Ok(())
+}
+
+/// One pairing of a run: its two endpoints, the source first, the filter
+/// the run names, and whether bodies relay.
+struct Pairing {
+    left: (String, SourceConfig),
+    right: (String, SourceConfig),
+    filter: Option<CollectionFilter>,
+    relay: bool,
 }
 
 /// What the pairs of one source stated of tasks this run, as hub ids.
@@ -179,224 +179,272 @@ pub(super) fn record_pair_listing(
 /// Full hydration follows `retain`, never `relay`. Under `one-way` the target
 /// follows the source, so no side records a conflict. A collection deleted on
 /// both leaves the store, so one created again reads as new, not as deleted.
-#[allow(clippy::too_many_arguments)]
 fn run_pair(
-    account_name: &str,
-    account_config: &AccountConfig,
-    account: &Account,
-    mode: &AccountMode,
-    namespace: &str,
-    left_name: String,
-    left_config: SourceConfig,
-    right_name: String,
-    right_config: SourceConfig,
-    collection_filter: Option<CollectionFilter>,
-    scope: &PimdirScope,
-    relay: bool,
-    work_dir: &Path,
-    dry_run: bool,
-    accept_absences: bool,
-    connections: usize,
-    progress: Progress<'_>,
+    run: AccountRun<'_>,
+    pairing: Pairing,
     state: &mut AccountState,
     taskless: &mut PairTaskless,
     report: &mut SyncOutput,
 ) -> Result<()> {
-    let left_filter = left_config.collection().filter.clone();
-
-    let mut left_store = open_store(work_dir, &left_name, account_name)?;
-    let mut right_store = open_store(work_dir, &right_name, account_name)?;
-    let blobs = left_store.blob_stage();
-
-    let hydrate_full = mode.retain;
-
-    let left_budget = connection_budget(&left_config, connections);
-    let right_budget = connection_budget(&right_config, connections);
-
-    let (left_authority, right_authority) = if mode.one_way {
-        (Authority::Endpoint, Authority::Store)
-    } else {
-        (Authority::Shared, Authority::Shared)
+    let filter = match pairing.filter.clone() {
+        Some(filter) => filter,
+        None => pairing.left.1.collection().filter.clone(),
     };
+    let mut pair = OpenPair::open(run, pairing)?;
 
-    let left_account = account.get(&left_name)?;
-    let right_account = account.get(&right_name)?;
-
-    let mut left = SourceCtx {
-        name: left_name.clone(),
-        namespace: namespace.to_string(),
-        perms: left_config.permissions(),
-        authority: left_authority,
-        pool: Pool::open(left_account, left_budget)
-            .with_context(|| Unreached::new(&left_name, format!("Open source {left_name}")))?,
-        refused: Vec::new(),
-        rejected: Vec::new(),
-        scope: scope.clone(),
-        dry_run,
-        accept_absences,
-        capped: left_config.collection().capped,
-        noted: Noted::default(),
-    };
-    let mut right = SourceCtx {
-        name: right_name.clone(),
-        namespace: namespace.to_string(),
-        perms: right_config.permissions(),
-        authority: right_authority,
-        pool: Pool::open(right_account, right_budget)
-            .with_context(|| Unreached::new(&right_name, format!("Open target {right_name}")))?,
-        refused: Vec::new(),
-        rejected: Vec::new(),
-        scope: scope.clone(),
-        dry_run,
-        accept_absences,
-        capped: right_config.collection().capped,
-        noted: Noted::default(),
-    };
-    for endpoint in [&left_name, &right_name] {
-        progress.emit(|| SyncEvent::Opened {
-            endpoint: endpoint.clone(),
-        });
+    if !run.dry_run {
+        pair.drain_queues(run, report);
     }
+    let common = pair.plan_collections(run, &filter, state, taskless, report)?;
+    pair.sync_collections(run, &common, report);
 
-    let kind = check_kinds(&mut left, &mut right)?;
-    let media_type = kind.media_type();
+    Ok(())
+}
 
-    if !dry_run {
-        drain_collection_intents(&mut [&mut left, &mut right], &mut left_store, true, report);
-        drain_submits(
-            account_config,
-            account,
-            &mut [SendSide::open(&mut left), SendSide::open(&mut right)],
-            &mut left_store,
-            &blobs,
-            work_dir,
-            report,
-        );
-        drain_invitations(
-            &mut [&mut left, &mut right],
-            &mut left_store,
-            work_dir,
-            report,
-        );
-    }
+/// The two sides of a pair, opened, with their stores.
+struct OpenPair {
+    /// The namespace both sides bind, the source's name.
+    namespace: String,
+    left: SourceCtx,
+    right: SourceCtx,
+    left_store: PimdirSourceStore,
+    right_store: PimdirSourceStore,
+    blobs: PimdirBlobStage,
+    /// The media type both sides hold.
+    media_type: &'static str,
+    relay: bool,
+}
 
-    let left_listed = left
-        .pool
-        .primary()
-        .list_collections(false)
-        .context("List collections error")?;
-    let right_listed = right
-        .pool
-        .primary()
-        .list_collections(false)
-        .context("List collections error")?;
-    let left_collections = names_by_id(&left_listed);
-    let right_collections = names_by_id(&right_listed);
-    for (endpoint, listed) in [
-        (&left_name, &left_collections),
-        (&right_name, &right_collections),
-    ] {
-        progress.emit(|| SyncEvent::Listed {
-            endpoint: endpoint.clone(),
-            collections: listed.len(),
-        });
-    }
+impl OpenPair {
+    /// Opens both stores and both sides, checks they hold the same kind,
+    /// and tells the progress each endpoint is open.
+    fn open(run: AccountRun<'_>, pairing: Pairing) -> Result<Self> {
+        let Pairing {
+            left: (left_name, left_config),
+            right: (right_name, right_config),
+            relay,
+            ..
+        } = pairing;
+        let namespace = left_name.clone();
 
-    let filter = collection_filter.unwrap_or(left_filter);
-    let left_filtered = filter_collections(&left_collections, &filter);
-    let right_filtered = filter_collections(&right_collections, &filter);
+        let left_store = open_store(run.work_dir, &left_name, run.name)?;
+        let right_store = open_store(run.work_dir, &right_name, run.name)?;
+        let blobs = left_store.blob_stage();
 
-    let held = held_by_both(
-        &left_store,
-        namespace,
-        left_filtered.symmetric_difference(&right_filtered),
-        &left_name,
-        &right_name,
-    )?;
-    let collection_hunks = diff_collections(
-        &left_filtered,
-        &right_filtered,
-        &held,
-        (&left_name, &left.perms.collection),
-        (&right_name, &right.perms.collection),
-    );
-    for hunk in collection_hunks {
-        let error = if dry_run {
-            None
+        let (left_authority, right_authority) = if run.mode.one_way {
+            (Authority::Endpoint, Authority::Store)
         } else {
-            apply_collection_hunk(&hunk, &mut left, &mut right).err()
+            (Authority::Shared, Authority::Shared)
         };
-        if !dry_run
-            && error.is_none()
-            && let CollectionHunk::Delete { collection, .. } = &hunk
-        {
-            let id = hub_id(namespace, collection);
-            if let Err(err) = left_store.delete_collection(&id) {
-                warn!("cannot drop {id} from the store: {err}");
-            }
+        let mut left = side(run, &namespace, &left_name, &left_config, left_authority)
+            .with_context(|| Unreached::new(&left_name, format!("Open source {left_name}")))?;
+        let mut right = side(run, &namespace, &right_name, &right_config, right_authority)
+            .with_context(|| Unreached::new(&right_name, format!("Open target {right_name}")))?;
+        for endpoint in [&left_name, &right_name] {
+            run.progress.emit(|| SyncEvent::Opened {
+                endpoint: endpoint.clone(),
+            });
         }
-        report.collection_patch.push(PatchEntry::new(hunk, error));
+
+        let media_type = check_kinds(&mut left, &mut right)?.media_type();
+
+        Ok(Self {
+            namespace,
+            left,
+            right,
+            left_store,
+            right_store,
+            blobs,
+            media_type,
+            relay,
+        })
     }
 
-    let mut present_left = left_filtered.clone();
-    let mut present_right = right_filtered.clone();
-    for entry in &report.collection_patch {
-        if entry.error.is_some() {
-            continue;
-        }
-        if let CollectionHunk::Create { side, collection } = &entry.hunk {
-            if *side == left_name {
-                present_left.insert(collection.clone());
-            } else if *side == right_name {
-                present_right.insert(collection.clone());
-            }
-        }
-    }
-    let common: BTreeSet<String> = present_left.intersection(&present_right).cloned().collect();
-
-    let mut syncing = Vec::with_capacity(common.len());
-    for name in &common {
-        let collection = hub_id(namespace, name);
-        let known = left_store.ensure_collection(&collection, media_type);
-        declare_name(
-            &left_store,
-            &collection,
-            name,
-            &[&left_collections, &right_collections],
+    /// Performs what frontends queued: collection intents, sends and
+    /// calendar intents.
+    fn drain_queues(&mut self, run: AccountRun<'_>, report: &mut SyncOutput) {
+        let Self {
+            left,
+            right,
+            left_store,
+            blobs,
+            ..
+        } = self;
+        drain_collection_intents(&mut [&mut *left, &mut *right], left_store, true, report);
+        drain_submits(
+            run.config,
+            run.account,
+            &mut [SendSide::open(left), SendSide::open(right)],
+            left_store,
+            blobs,
+            run.work_dir,
+            report,
         );
-        match known {
-            Ok(_) => syncing.push(collection),
-            Err(err) => warn!("cannot declare the kind of {collection}: {err}"),
+        drain_invitations(&mut [left, right], left_store, run.work_dir, report);
+    }
+
+    /// Lists both sides, creates and deletes the collections one side holds
+    /// alone as the rights allow, and answers the collections both hold.
+    ///
+    /// The collections both hold are declared, and the pair's listings
+    /// recorded, before any item moves.
+    fn plan_collections(
+        &mut self,
+        run: AccountRun<'_>,
+        filter: &CollectionFilter,
+        state: &mut AccountState,
+        taskless: &mut PairTaskless,
+        report: &mut SyncOutput,
+    ) -> Result<BTreeSet<String>> {
+        let namespace = self.namespace.as_str();
+        let (left_name, right_name) = (self.left.name.clone(), self.right.name.clone());
+
+        let left_listed = self
+            .left
+            .pool
+            .primary()
+            .list_collections(false)
+            .context("List collections error")?;
+        let right_listed = self
+            .right
+            .pool
+            .primary()
+            .list_collections(false)
+            .context("List collections error")?;
+        let left_collections = names_by_id(&left_listed);
+        let right_collections = names_by_id(&right_listed);
+        for (endpoint, listed) in [
+            (&left_name, &left_collections),
+            (&right_name, &right_collections),
+        ] {
+            run.progress.emit(|| SyncEvent::Listed {
+                endpoint: endpoint.clone(),
+                collections: listed.len(),
+            });
+        }
+
+        let left_filtered = filter_collections(&left_collections, filter);
+        let right_filtered = filter_collections(&right_collections, filter);
+
+        let held = held_by_both(
+            &self.left_store,
+            namespace,
+            left_filtered.symmetric_difference(&right_filtered),
+            &left_name,
+            &right_name,
+        )?;
+        let collection_hunks = diff_collections(
+            &left_filtered,
+            &right_filtered,
+            &held,
+            (&left_name, &self.left.perms.collection),
+            (&right_name, &self.right.perms.collection),
+        );
+        for hunk in collection_hunks {
+            let error = if run.dry_run {
+                None
+            } else {
+                apply_collection_hunk(&hunk, &mut self.left, &mut self.right).err()
+            };
+            if !run.dry_run
+                && error.is_none()
+                && let CollectionHunk::Delete { collection, .. } = &hunk
+            {
+                let id = hub_id(namespace, collection);
+                if let Err(err) = self.left_store.delete_collection(&id) {
+                    warn!("cannot drop {id} from the store: {err}");
+                }
+            }
+            report.collection_patch.push(PatchEntry::new(hunk, error));
+        }
+
+        let mut present_left = left_filtered.clone();
+        let mut present_right = right_filtered.clone();
+        for entry in &report.collection_patch {
+            if entry.error.is_some() {
+                continue;
+            }
+            if let CollectionHunk::Create { side, collection } = &entry.hunk {
+                if *side == left_name {
+                    present_left.insert(collection.clone());
+                } else if *side == right_name {
+                    present_right.insert(collection.clone());
+                }
+            }
+        }
+        let common: BTreeSet<String> = present_left.intersection(&present_right).cloned().collect();
+
+        let mut syncing = Vec::with_capacity(common.len());
+        for name in &common {
+            let collection = hub_id(namespace, name);
+            let known = self
+                .left_store
+                .ensure_collection(&collection, self.media_type);
+            declare_name(
+                &self.left_store,
+                &collection,
+                name,
+                &[&left_collections, &right_collections],
+            );
+            match known {
+                Ok(_) => syncing.push(collection),
+                Err(err) => warn!("cannot declare the kind of {collection}: {err}"),
+            }
+        }
+        let declaring = Declaring {
+            dir: run.work_dir,
+            account: run.name,
+            config: run.config,
+            mode: run.mode,
+        };
+        record_pair_listing(
+            &declaring,
+            state,
+            namespace,
+            taskless,
+            [&left_listed, &right_listed],
+            &syncing,
+            run.dry_run,
+        );
+
+        Ok(common)
+    }
+
+    /// Syncs each collection both sides hold, in turn, until a stop; a
+    /// collection that fails is reported and the next one runs.
+    fn sync_collections(
+        &mut self,
+        run: AccountRun<'_>,
+        common: &BTreeSet<String>,
+        report: &mut SyncOutput,
+    ) {
+        let total = common.len();
+        for (index, name) in common.iter().enumerate() {
+            if crate::sync::stopping() {
+                break;
+            }
+            self.sync_one(run, name, index + 1, total, report);
         }
     }
-    let declaring = Declaring {
-        dir: work_dir,
-        account: account_name,
-        config: account_config,
-        mode,
-    };
-    record_pair_listing(
-        &declaring,
-        state,
-        namespace,
-        taskless,
-        [&left_listed, &right_listed],
-        &syncing,
-        dry_run,
-    );
 
-    let total = common.len();
-    for (index, name) in common.iter().enumerate() {
-        if crate::sync::stopping() {
-            break;
-        }
-
-        let collection = &hub_id(namespace, name);
+    /// Syncs one collection both sides hold, then hydrates it whole under
+    /// `retain`, telling the progress where it starts and how it ends.
+    fn sync_one(
+        &mut self,
+        run: AccountRun<'_>,
+        name: &str,
+        position: usize,
+        total: usize,
+        report: &mut SyncOutput,
+    ) {
+        let collection = &hub_id(&self.namespace, name);
+        let (left_name, right_name) = (self.left.name.clone(), self.right.name.clone());
+        let progress = run.progress;
         progress.emit(|| SyncEvent::CollectionStarted {
             source: left_name.clone(),
             target: right_name.clone(),
-            collection: name.clone(),
-            position: index + 1,
+            collection: name.to_owned(),
+            position,
             total,
         });
         let finished = |failure: Option<Failure>| {
@@ -404,7 +452,7 @@ fn run_pair(
             SyncEvent::CollectionFinished {
                 source: left_name.clone(),
                 target: right_name.clone(),
-                collection: name.clone(),
+                collection: name.to_owned(),
                 code,
                 error,
                 sources,
@@ -418,43 +466,30 @@ fn run_pair(
             collection: name,
         };
 
-        if let Err(err) = sync_collection(
-            collection,
-            media_type,
-            &mut left,
-            &mut right,
-            &mut left_store,
-            &mut right_store,
-            &blobs,
-            work_dir,
-            dry_run,
-            relay,
-            &ticks,
-            report,
-        ) {
+        if let Err(err) = self.sync_collection(run, collection, &ticks, report) {
             warn!("{name} sync error: {err:#}");
             progress.emit(|| finished(Some(Failure::of(&err))));
             let hunk = CollectionHunk::Sync {
                 source: left_name.clone(),
                 target: right_name.clone(),
-                collection: name.clone(),
+                collection: name.to_owned(),
             };
             report
                 .collection_patch
                 .push(PatchEntry::new(hunk, Some(err)));
-            continue;
+            return;
         }
 
         let mut error = None;
-        if hydrate_full
-            && !dry_run
+        if run.mode.retain
+            && !run.dry_run
             && let Err(err) = hydrate_full_collection(
                 collection,
-                &mut left,
-                &mut right,
-                &mut left_store,
-                &mut right_store,
-                &blobs,
+                &mut self.left,
+                &mut self.right,
+                &mut self.left_store,
+                &mut self.right_store,
+                &self.blobs,
                 &ticks,
             )
         {
@@ -462,230 +497,202 @@ fn run_pair(
             error = Some(Failure::of(&err));
             report.failures.push(StepFailure::new(
                 FailedStep::Bodies,
-                Some(name.clone()),
+                Some(name.to_owned()),
                 &err,
             ));
         }
-        itemize_noted(&mut left, report);
-        itemize_noted(&mut right, report);
+        itemize_noted(&mut self.left, report);
+        itemize_noted(&mut self.right, report);
 
         progress.emit(|| finished(error));
     }
-
-    Ok(())
 }
 
-/// Reconciles one collection until quiescent.
-///
-/// Its own report is folded into the account's by [`SyncOutput::absorb`], the
-/// one-source path's fold, so no arm is dropped on one path; it is folded on
-/// failure too, what it reported before stopping having still happened.
-#[allow(clippy::too_many_arguments)]
-fn sync_collection(
-    collection: &str,
-    media_type: &str,
-    left: &mut SourceCtx,
-    right: &mut SourceCtx,
-    left_store: &mut PimdirSourceStore,
-    right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobStage,
-    store_dir: &Path,
-    dry_run: bool,
-    relay: bool,
-    progress: &CollectionProgress,
-    account: &mut SyncOutput,
-) -> Result<()> {
-    left_store
-        .ensure_collection(collection, media_type)
-        .with_context(|| format!("Declare kind for {collection}"))?;
-
-    let mut report = SyncOutput::default();
-    let outcome = sync_collection_into(
-        collection,
-        left,
-        right,
-        left_store,
-        right_store,
-        blobs,
-        store_dir,
-        dry_run,
-        relay,
-        progress,
-        &mut report,
-    );
-
-    report_coverage(left_store, collection, left, &mut report);
-    report_coverage(right_store, collection, right, &mut report);
-    itemize_noted(left, &mut report);
-    itemize_noted(right, &mut report);
-
-    account.absorb(report);
-
-    outcome
+/// One side of a pair, opened with the connections its backend may use.
+fn side(
+    run: AccountRun<'_>,
+    namespace: &str,
+    name: &str,
+    config: &SourceConfig,
+    authority: Authority,
+) -> Result<SourceCtx> {
+    let budget = connection_budget(config, run.connections);
+    let account = run.account.get(name)?;
+    Ok(SourceCtx {
+        name: name.to_owned(),
+        namespace: namespace.to_owned(),
+        perms: config.permissions(),
+        authority,
+        pool: Pool::open(account, budget)?,
+        refused: Vec::new(),
+        rejected: Vec::new(),
+        scope: run.scope.clone(),
+        dry_run: run.dry_run,
+        accept_absences: run.accept_absences,
+        capped: config.collection().capped,
+        noted: Noted::default(),
+    })
 }
 
-/// The body of [`sync_collection`], filling that collection's own report.
-///
-/// The opening round only pulls, so its events are the remotes' own rather
-/// than the echo of this run's writes, and no push clears a projection before
-/// `itemize` reads it.
-#[allow(clippy::too_many_arguments)]
-fn sync_collection_into(
-    collection: &str,
-    left: &mut SourceCtx,
-    right: &mut SourceCtx,
-    left_store: &mut PimdirSourceStore,
-    right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobStage,
-    store_dir: &Path,
-    dry_run: bool,
-    relay: bool,
-    progress: &CollectionProgress,
-    report: &mut SyncOutput,
-) -> Result<()> {
-    reconcile_pass(
-        collection,
-        left,
-        right,
-        left_store,
-        right_store,
-        blobs,
-        store_dir,
-        false,
-        dry_run,
-        report,
-    )?;
-    propagate(
-        collection,
-        left,
-        right,
-        left_store,
-        right_store,
-        blobs,
-        relay,
-        progress,
-        report,
-    )?;
+impl OpenPair {
+    /// Reconciles one collection until quiescent.
+    ///
+    /// Its own report is folded into the account's ([`SyncOutput::absorb`])
+    /// as the one-source path folds it, so no arm is dropped; on failure too,
+    /// what it reported before stopping having still happened.
+    fn sync_collection(
+        &mut self,
+        run: AccountRun<'_>,
+        collection: &str,
+        progress: &CollectionProgress,
+        account: &mut SyncOutput,
+    ) -> Result<()> {
+        self.left_store
+            .ensure_collection(collection, self.media_type)
+            .with_context(|| format!("Declare kind for {collection}"))?;
 
-    itemize(collection, left_store, left, right, report)?;
-    if dry_run {
-        return Ok(());
+        let mut report = SyncOutput::default();
+        let outcome = self.sync_collection_into(run, collection, progress, &mut report);
+
+        report_coverage(&self.left_store, collection, &self.left, &mut report);
+        report_coverage(&self.right_store, collection, &self.right, &mut report);
+        itemize_noted(&mut self.left, &mut report);
+        itemize_noted(&mut self.right, &mut report);
+
+        account.absorb(report);
+
+        outcome
     }
 
-    let mut settled = false;
-    for _ in 0..=MAX_EXTRA_PASSES {
-        let progressed = reconcile_pass(
+    /// The body of [`sync_collection`](Self::sync_collection), filling that
+    /// collection's own report.
+    ///
+    /// The opening round only pulls, so its events are the remotes' own rather
+    /// than the echo of this run's writes, and no push clears a projection
+    /// before `itemize` reads it.
+    fn sync_collection_into(
+        &mut self,
+        run: AccountRun<'_>,
+        collection: &str,
+        progress: &CollectionProgress,
+        report: &mut SyncOutput,
+    ) -> Result<()> {
+        self.reconcile_pass(run, collection, false, report)?;
+        self.propagate(collection, progress, report)?;
+
+        itemize(
             collection,
-            left,
-            right,
-            left_store,
-            right_store,
-            blobs,
-            store_dir,
-            true,
-            dry_run,
+            &self.left_store,
+            &self.left,
+            &self.right,
             report,
         )?;
-        let propagated = propagate(
-            collection,
+        if run.dry_run {
+            return Ok(());
+        }
+
+        let mut settled = false;
+        for _ in 0..=MAX_EXTRA_PASSES {
+            let progressed = self.reconcile_pass(run, collection, true, report)?;
+            let propagated = self.propagate(collection, progress, report)?;
+            if !progressed && propagated == 0 {
+                settled = true;
+                break;
+            }
+        }
+        if !settled {
+            report.unsettled.push(collection.to_owned());
+        }
+
+        let (left, right) = (&mut self.left, &mut self.right);
+        itemize_refused(&left.name, mem::take(&mut left.refused), report);
+        itemize_refused(&right.name, mem::take(&mut right.refused), report);
+        itemize_rejected(&left.name, mem::take(&mut left.rejected), report);
+        itemize_rejected(&right.name, mem::take(&mut right.rejected), report);
+
+        Ok(())
+    }
+
+    /// Propagates the collection's cross-side copies, returning how many
+    /// moved.
+    ///
+    /// Retaining hydrates the body into the store for the projection to
+    /// push; relaying streams it server-to-server and keeps only the spine.
+    fn propagate(
+        &mut self,
+        collection: &str,
+        progress: &CollectionProgress,
+        report: &mut SyncOutput,
+    ) -> Result<usize> {
+        let Self {
             left,
             right,
             left_store,
             right_store,
             blobs,
             relay,
-            progress,
-            report,
-        )?;
-        if !progressed && propagated == 0 {
-            settled = true;
-            break;
+            ..
+        } = self;
+        if *relay {
+            relay_copies(
+                collection,
+                left,
+                right,
+                left_store,
+                right_store,
+                progress,
+                report,
+            )
+        } else {
+            hydrate_copies(
+                collection,
+                left,
+                right,
+                left_store,
+                right_store,
+                blobs,
+                progress,
+            )
         }
     }
-    if !settled {
-        report.unsettled.push(collection.to_owned());
-    }
 
-    itemize_refused(&left.name, mem::take(&mut left.refused), report);
-    itemize_refused(&right.name, mem::take(&mut right.refused), report);
-    itemize_rejected(&left.name, mem::take(&mut left.rejected), report);
-    itemize_rejected(&right.name, mem::take(&mut right.rejected), report);
-
-    Ok(())
-}
-
-/// Propagates the collection's cross-side copies, returning how many moved.
-///
-/// Retaining hydrates the body into the store for the projection to push;
-/// relaying streams it server-to-server and keeps only the spine.
-#[allow(clippy::too_many_arguments)]
-fn propagate(
-    collection: &str,
-    left: &mut SourceCtx,
-    right: &mut SourceCtx,
-    left_store: &mut PimdirSourceStore,
-    right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobStage,
-    relay: bool,
-    progress: &CollectionProgress,
-    report: &mut SyncOutput,
-) -> Result<usize> {
-    if relay {
-        relay_copies(
-            collection,
-            left,
-            right,
-            left_store,
-            right_store,
-            progress,
-            report,
-        )
-    } else {
-        hydrate_copies(
-            collection,
+    /// One reconcile round over both sides, answering whether either moved.
+    ///
+    /// A side's divergences are itemized right after its own merge. One
+    /// between the endpoints is the store's: it keeps the agreed body and
+    /// parks the diverging binding (pimdir SYNC §9) for the side's merge.
+    fn reconcile_pass(
+        &mut self,
+        run: AccountRun<'_>,
+        collection: &str,
+        push: bool,
+        report: &mut SyncOutput,
+    ) -> Result<bool> {
+        let (store_dir, dry_run) = (run.work_dir, run.dry_run);
+        let Self {
             left,
             right,
             left_store,
             right_store,
             blobs,
-            progress,
-        )
+            ..
+        } = self;
+        let left_report = reconcile_side(
+            collection, left, left_store, blobs, store_dir, push, dry_run, report,
+        )?;
+        let right_report = reconcile_side(
+            collection,
+            right,
+            right_store,
+            blobs,
+            store_dir,
+            push,
+            dry_run,
+            report,
+        )?;
+
+        Ok(moved(&left_report) || moved(&right_report))
     }
-}
-
-/// One reconcile round over both sides, answering whether either moved.
-///
-/// A side's divergences are itemized right after its own merge. A divergence
-/// between the endpoints themselves is the store's: it keeps the agreed body
-/// and parks the diverging binding (pimdir SYNC §9) for the side's merge.
-#[allow(clippy::too_many_arguments)]
-fn reconcile_pass(
-    collection: &str,
-    left: &mut SourceCtx,
-    right: &mut SourceCtx,
-    left_store: &mut PimdirSourceStore,
-    right_store: &mut PimdirSourceStore,
-    blobs: &PimdirBlobStage,
-    store_dir: &Path,
-    push: bool,
-    dry_run: bool,
-    report: &mut SyncOutput,
-) -> Result<bool> {
-    let left_report = reconcile_side(
-        collection, left, left_store, blobs, store_dir, push, dry_run, report,
-    )?;
-    let right_report = reconcile_side(
-        collection,
-        right,
-        right_store,
-        blobs,
-        store_dir,
-        push,
-        dry_run,
-        report,
-    )?;
-
-    Ok(moved(&left_report) || moved(&right_report))
 }
 
 /// One side of a reconcile round: its merge, its probes and its report.

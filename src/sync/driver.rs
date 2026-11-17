@@ -622,21 +622,24 @@ pub fn run(
                 &mut report,
             )
         } else {
-            run_targets(
-                &account_name,
-                account_config,
-                &account,
-                &mode,
-                &endpoints,
-                source_name,
-                source,
-                collection_filter.clone(),
+            let run = AccountRun {
+                name: &account_name,
+                config: account_config,
+                account: &account,
+                mode: &mode,
                 scope,
-                &work_dir,
+                work_dir: &work_dir,
                 dry_run,
                 accept_absences,
                 connections,
                 progress,
+            };
+            run_targets(
+                run,
+                &endpoints,
+                source_name,
+                source,
+                collection_filter.clone(),
                 &mut state,
                 &mut report,
             )

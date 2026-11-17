@@ -169,6 +169,33 @@ pub fn store_dir(config: &AccountConfig) -> Result<PathBuf> {
     }
 }
 
+/// The stores the selected accounts use, each with its accounts in name
+/// order: every account validated, no store a 0.x layout.
+pub(crate) fn group_stores(
+    selected: Vec<(String, AccountConfig)>,
+) -> Result<BTreeMap<PathBuf, Vec<(String, AccountConfig)>>> {
+    let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
+    for (name, account_config) in selected {
+        account_config
+            .validate()
+            .with_context(|| format!("Validate account {name}"))?;
+        let dir = store_dir(&account_config)?;
+        stores.entry(dir).or_default().push((name, account_config));
+    }
+    for dir in stores.keys() {
+        refuse_former_stores(dir)?;
+    }
+    Ok(stores)
+}
+
+/// Why account `name` cannot run in a store `init` never created.
+pub(crate) fn not_initialized(name: &str) -> anyhow::Error {
+    anyhow!(
+        "Account {name} not initialized, run `neverest init -a {name}` or \
+         `neverest sync --init -a {name}` first"
+    )
+}
+
 /// Refuses the neverest directory an earlier neverest kept one store per
 /// account in, before anything is created there.
 ///

@@ -326,17 +326,7 @@ impl SyncCommand {
             }
         }
 
-        let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
-        for (name, account_config) in selected {
-            account_config
-                .validate()
-                .with_context(|| format!("Validate account {name}"))?;
-            let dir = driver::store_dir(&account_config)?;
-            stores.entry(dir).or_default().push((name, account_config));
-        }
-        for dir in stores.keys() {
-            driver::refuse_former_stores(dir)?;
-        }
+        let stores = driver::group_stores(selected)?;
 
         let order: Vec<String> = stores
             .values()
@@ -349,10 +339,7 @@ impl SyncCommand {
         for (dir, accounts) in stores {
             if !dir.join("pimdir.db").exists() {
                 for (name, _) in accounts {
-                    let err = anyhow!(
-                        "Account {name} not initialized, run `neverest init -a {name}` or \
-                         `neverest sync --init -a {name}` first"
-                    );
+                    let err = driver::not_initialized(&name);
                     outcomes.push(failed(name, err));
                 }
                 continue;
@@ -670,7 +657,7 @@ fn ran(account: String, report: SyncOutput) -> AccountSync {
 }
 
 /// The outcome of an account that failed, keeping the failure's code.
-fn failed(account: String, err: Error) -> AccountSync {
+pub(super) fn failed(account: String, err: Error) -> AccountSync {
     let failure = Failure::of(&err);
     AccountSync {
         account,

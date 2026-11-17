@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Error, Result, anyhow};
+use anyhow::{Context, Error, Result};
 use io_pimdir::client::producer::PimdirActionStatus;
 use log::info;
 use pimalaya_cli::printer::Printer;
@@ -39,17 +39,7 @@ pub fn run(
 ) -> Result<Exit> {
     let config = Config::load(config_paths)?;
 
-    let mut stores: BTreeMap<PathBuf, Vec<(String, AccountConfig)>> = BTreeMap::new();
-    for (name, account_config) in config.select(accounts)? {
-        account_config
-            .validate()
-            .with_context(|| format!("Validate account {name}"))?;
-        let dir = driver::store_dir(&account_config)?;
-        stores.entry(dir).or_default().push((name, account_config));
-    }
-    for dir in stores.keys() {
-        driver::refuse_former_stores(dir)?;
-    }
+    let stores = driver::group_stores(config.select(accounts)?)?;
 
     let order: Vec<String> = stores
         .values()
@@ -61,10 +51,7 @@ pub fn run(
     for (dir, accounts) in stores {
         if !dir.join("pimdir.db").exists() {
             for (name, _) in accounts {
-                let err = anyhow!(
-                    "Account {name} not initialized, run `neverest init -a {name}` or \
-                     `neverest sync --init -a {name}` first"
-                );
+                let err = driver::not_initialized(&name);
                 outputs.push(QueueOutput::failed(name, err));
             }
             continue;
@@ -444,7 +431,7 @@ mod tests {
     /// error does, the causes apart from the outermost message.
     #[test]
     fn an_undrained_account_carries_its_causes_apart() {
-        let err = anyhow!("no such table").context("Open the store");
+        let err = anyhow::anyhow!("no such table").context("Open the store");
         let output = QueueOutput::failed(String::from("work"), err);
         let json = serde_json::to_value(&output).unwrap();
 

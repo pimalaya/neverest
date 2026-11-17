@@ -2215,7 +2215,7 @@ A build with the `search` feature (on by default) SHALL refresh the store's sear
 
 The run SHALL report the refresh under `index`: the changes folded, the bodies newly indexed, the stamps still `behind`, whether another indexer held it (`busy`), and the error of a failed one. An index failure SHALL be a warning and SHALL NOT fail the run or change its exit code: the index is derived from the store.
 
-`neverest sync --index-only` SHALL build the index of each store the accounts it runs over use, once a store and whole, every account of the store included, until it holds every change the store has, reading no credential and opening no endpoint, and SHALL exit 4 answering `busy` while another indexer holds one.
+`neverest sync --index-only` SHALL build the index of each store the accounts it runs over use, once a store and whole, every account of the store included, until it holds every change the store has, reading no credential and opening no endpoint, and SHALL exit 4 answering `busy` while another indexer holds one. An account whose store `init` never created SHALL fail as a sync fails it, listed under the result's `accounts` with the message naming `neverest init -a <name>` and `neverest sync --init -a <name>`, the run exiting 4, never failing the command with exit 1.
 
 A reset SHALL leave the index to its next refresh, which folds the removal of every item the dropped collections held, the store counting each (pimdir STORAGE §4.5).
 

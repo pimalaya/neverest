@@ -5,18 +5,17 @@
 //! deadline only.
 
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use io_pimdir::client::{PimdirError, search::PimdirIndex};
 use log::info;
 use pimalaya_cli::printer::Printer;
 
 use crate::{
-    cli::exit::Exit,
+    cli::{exit::Exit, sync},
     config::Config,
     error::pimdir_error,
     sync::{
@@ -37,37 +36,35 @@ pub fn run(
     accounts: &[String],
 ) -> Result<Exit> {
     let config = Config::load(config_paths)?;
+    let stores = driver::group_stores(config.select(accounts)?)?;
 
-    let mut stores: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
-    for (name, account_config) in config.select(accounts)? {
-        account_config
-            .validate()
-            .with_context(|| format!("Validate account {name}"))?;
-        let dir = driver::store_dir(&account_config)?;
-        stores.entry(dir).or_default().push(name);
-    }
-
-    for (dir, accounts) in &stores {
-        driver::check_store(dir)?;
+    let mut failed = Vec::new();
+    let mut ready = Vec::new();
+    for (dir, accounts) in stores {
+        let names: Vec<String> = accounts.into_iter().map(|(name, _)| name).collect();
         if !dir.join("pimdir.db").exists() {
-            let name = &accounts[0];
-            bail!(
-                "Account {name} not initialized, run `neverest init -a {name}` or \
-                 `neverest sync --init -a {name}` first"
-            );
+            for name in names {
+                let err = driver::not_initialized(&name);
+                failed.push(sync::failed(name, err));
+            }
+            continue;
         }
+        driver::check_store(&dir)?;
+        ready.push((dir, names));
     }
 
     let mut built = Vec::new();
-    for (dir, accounts) in stores {
+    for (dir, accounts) in ready {
         built.push(build(&dir, accounts)?);
     }
 
-    let exit = match built.iter().any(|store| store.index.busy) {
+    let busy = built.iter().any(|store| store.index.busy);
+    let exit = match busy || !failed.is_empty() {
         true => Exit::Incomplete,
         false => Exit::Success,
     };
     printer.out(SyncRunOutput {
+        accounts: failed,
         index: built,
         ..SyncRunOutput::default()
     })?;

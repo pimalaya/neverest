@@ -492,3 +492,20 @@ fn sync_index_only_builds_the_index_of_the_store() {
     assert_eq!(store["accounts"], serde_json::json!(["work"]), "{result}");
     assert_eq!(store["index"]["busy"], false, "{result}");
 }
+
+/// `sync --index-only` over a store `init` never created fails the
+/// store's accounts and exits 4, as a sync and `--queue-only` do, rather
+/// than failing the command.
+#[cfg(feature = "search")]
+#[test]
+fn sync_index_only_fails_an_uninitialized_account_with_exit_4() {
+    let _serial = serialized();
+    let fixture = Fixture::new(&["work"], closed_port());
+
+    let result = fixture.json(&["--json", "sync", "--index-only"], 4);
+
+    let error = result["accounts"][0]["error"].as_str().unwrap_or_default();
+    assert_eq!(result["accounts"][0]["account"], "work", "{result}");
+    assert!(error.contains("neverest init -a work"), "{result}");
+    assert_eq!(result["index"], serde_json::json!([]), "{result}");
+}

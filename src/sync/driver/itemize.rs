@@ -229,6 +229,8 @@ pub(super) struct Noted {
     /// The members a capped round did not list, and so kept (pimdir SYNC
     /// §5): the most one pass counted.
     unlisted: BTreeMap<String, usize>,
+    /// The bodies a batch downloaded and could not land in the store.
+    pub(super) failures: Vec<StepFailure>,
 }
 
 impl Noted {
@@ -323,8 +325,10 @@ pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
         disagreed,
         unlisted,
         refusals,
+        failures,
     } = mem::take(&mut ctx.noted);
     let display = |collection: &str| display_name(&ctx.namespace, collection).to_string();
+    report.failures.extend(failures);
 
     for ((collection, handle), reason) in refusals {
         let id = handle.as_str().trim_start_matches('\u{1}').to_owned();

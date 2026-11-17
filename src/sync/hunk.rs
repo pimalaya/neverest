@@ -15,7 +15,8 @@ use serde::Serialize;
 
 use crate::flag::Flag;
 
-/// Collection-level change: create or delete a collection on one side.
+/// Collection-level change: create or delete a collection on one side, or
+/// a collection that could not be synced.
 ///
 /// `Delete` crosses a collection deleted on one endpoint of a pair, which
 /// the store knew both held.
@@ -51,15 +52,26 @@ pub enum CollectionHunk {
         /// The collection, by the name its server answers to.
         collection: String,
     },
+    /// A pair collection whose sync failed, either endpoint, the store or
+    /// the merge failing; what it reported before failing stands.
+    Sync {
+        /// The endpoint the pair syncs from.
+        source: String,
+        /// The endpoint the pair syncs with.
+        target: String,
+        /// The collection, by the name its server answers to.
+        collection: String,
+    },
 }
 
 impl CollectionHunk {
-    /// The endpoint the hunk names, to name it otherwise.
+    /// The endpoints the hunk names, to name them otherwise.
     pub fn endpoints_mut(&mut self) -> Vec<&mut String> {
         match self {
             Self::Create { side, .. } | Self::Delete { side, .. } | Self::Scan { side, .. } => {
                 vec![side]
             }
+            Self::Sync { source, target, .. } => vec![source, target],
         }
     }
 }
@@ -76,6 +88,14 @@ impl fmt::Display for CollectionHunk {
             Self::Scan { side, collection } => {
                 write!(f, "scan collection {collection} on {side}")
             }
+            Self::Sync {
+                source,
+                target,
+                collection,
+            } => write!(
+                f,
+                "sync collection {collection} between {source} and {target}"
+            ),
         }
     }
 }

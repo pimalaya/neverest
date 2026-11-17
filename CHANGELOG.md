@@ -178,6 +178,12 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed a pair collection whose sync failed exiting 0 as "already in sync": it is reported as a `sync` hunk with its error and the run exits 4.
+
+- Fixed store steps that failed (reading or draining the queue, landing downloaded bodies, counting conflicts) leaving the result clean: each is reported under `failures` and the run exits 4.
+
+- Fixed `sync --queue-only` exiting 0 when it parked a row: it exits 3, as a sync does.
+
 - Fixed an IMAP delete expunging every message marked `\Deleted` in its mailbox: it sends `UID EXPUNGE` on its UID, and a server without UIDPLUS gets no delete.
 
 - Fixed an IMAP `SELECT` answer without `EXISTS` being read as an empty mailbox, which deleted every message.

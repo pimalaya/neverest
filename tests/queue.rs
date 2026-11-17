@@ -249,6 +249,29 @@ fn a_drain_applies_a_queued_create_without_any_server() {
     assert_eq!(fixture.seqs_of("drained-1"), vec![seq]);
 }
 
+/// A drain that parks a row waits for a person, as a sync does: exit 3.
+#[test]
+fn a_drain_that_parks_a_row_exits_3() {
+    let _serial = serialized();
+    let fixture = Fixture::new(CLOSED, "user", "pass");
+    fixture.offline_store();
+    let flags = PimdirAction::SetFlags {
+        seq: 424242,
+        flags: PimdirFlags::default(),
+        base: None,
+    };
+    let id = PimdirProducer::open(fixture.store(), "neverest-tests")
+        .unwrap()
+        .enqueue(COLLECTION, &flags, None)
+        .unwrap()
+        .handle
+        .id;
+
+    let drained = &fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 3)["queue"][0];
+
+    assert_eq!(drained["parked"][0]["row"], id, "{drained}");
+}
+
 /// A sync that cannot reach its server still applies the queue first.
 #[test]
 fn a_sync_drains_before_it_connects() {

@@ -114,11 +114,11 @@ use crate::{
             body_bytes, hydrate_batch, resolve_kind, stored_item, wire_name,
         },
         report::{
-            CollectionCoverage, DisagreedMember, DrainedQueue, IntentEntry, ItemConflict,
-            OpenRound, OverruledBody, ParkedAbsence, ParkedQueueAction, PatchEntry, PurgedItems,
-            RefusedChange, RefusedDuplicate, RejectedWrite, SourceDownload, SubmitEntry,
-            SyncOutput, ThrottledSource, UnansweredPushes, UnlistedMembers, UnreachedEndpoint,
-            UnreadableBodies, WaitReason, WaitingCreate,
+            CollectionCoverage, DisagreedMember, DrainedQueue, FailedStep, IntentEntry,
+            ItemConflict, OpenRound, OverruledBody, ParkedAbsence, ParkedQueueAction, PatchEntry,
+            PurgedItems, RefusedChange, RefusedDuplicate, RejectedWrite, SourceDownload,
+            StepFailure, SubmitEntry, SyncOutput, ThrottledSource, UnansweredPushes,
+            UnlistedMembers, UnreachedEndpoint, UnreadableBodies, WaitReason, WaitingCreate,
         },
         run_verb, run_verb_paged, source_id,
         state::{AccountState, LookedUpRoles, StoreState},
@@ -539,8 +539,16 @@ pub fn run(
                     .first()
                     .expect("a validated account has at least one source");
                 let mut store = open_store(&work_dir, first, &account_name)?;
-                let mut drained = drain_store(&mut store);
-                report.absorb(drained.remove(&account_name).unwrap_or_default());
+                match drain_store(&mut store) {
+                    Ok(mut drained) => {
+                        report.absorb(drained.remove(&account_name).unwrap_or_default());
+                    }
+                    Err(err) => {
+                        warn!("drain failed, actions stay queued: {err:#}");
+                        let failure = StepFailure::new(FailedStep::Queue, None, &err);
+                        report.failures.push(failure);
+                    }
+                }
             }
         }
     }
@@ -623,7 +631,13 @@ pub fn run(
             report_parked(&store, &account_name, &mut report);
             count_conflicts(&store, &account_name, &mut report);
         }
-        Err(err) => warn!("cannot open the store to read what it left behind: {err}"),
+        Err(err) => {
+            warn!("cannot open the store to read what it left behind: {err}");
+            let err = pimdir_error(err).context("Open the store to count what waits");
+            report
+                .failures
+                .push(StepFailure::new(FailedStep::Conflicts, None, &err));
+        }
     }
 
     warn_conflicts(&report);
@@ -669,12 +683,12 @@ pub fn prepare(dir: &Path, account: &str, config: &AccountConfig, accept_mode: b
 
 /// Drains the store's queue once, every account's (pimdir STORAGE §15.2).
 ///
-/// What it applied is shared out by account: the collections rows landed on,
-/// the bodies an action kept aside. A row on a collection grouped under no
-/// account is applied and reported nowhere.
-pub(crate) fn drain_store(store: &mut PimdirSourceStore) -> BTreeMap<String, SyncOutput> {
+/// What it applied is shared out by account, a row on a collection grouped
+/// under no account applied and reported nowhere. A store step failing fails
+/// the drain.
+pub(crate) fn drain_store(store: &mut PimdirSourceStore) -> Result<BTreeMap<String, SyncOutput>> {
     let mut drained = SyncOutput::default();
-    drain_queues(store, &mut drained);
+    drain_queues_into(store, &mut drained)?;
 
     let owners = collection_accounts(store);
     let mut by_account: BTreeMap<String, SyncOutput> = BTreeMap::new();
@@ -697,7 +711,7 @@ pub(crate) fn drain_store(store: &mut PimdirSourceStore) -> BTreeMap<String, Syn
         }
     }
 
-    by_account
+    Ok(by_account)
 }
 
 /// The account each collection of the store is grouped under, by id.

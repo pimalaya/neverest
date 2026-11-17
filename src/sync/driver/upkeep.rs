@@ -74,7 +74,13 @@ pub(super) fn report_parked(store: &PimdirStore, account: &str, report: &mut Syn
                 });
             }
         }
-        Err(err) => warn!("cannot list parked actions: {err}"),
+        Err(err) => {
+            warn!("cannot list parked actions: {err}");
+            let err = pimdir_error(err).context("List the parked actions");
+            report
+                .failures
+                .push(StepFailure::new(FailedStep::Queue, None, &err));
+        }
     }
 }
 
@@ -86,7 +92,13 @@ pub(super) fn report_parked(store: &PimdirStore, account: &str, report: &mut Syn
 pub(super) fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
     match store.list_conflicts(Some(account)) {
         Ok(conflicts) => report.outstanding_conflicts = conflicts.len(),
-        Err(err) => warn!("cannot count the conflicts waiting for a decision: {err}"),
+        Err(err) => {
+            warn!("cannot count the conflicts waiting for a decision: {err}");
+            let err = pimdir_error(err).context("Count the conflicts");
+            report
+                .failures
+                .push(StepFailure::new(FailedStep::Conflicts, None, &err));
+        }
     }
 }
 

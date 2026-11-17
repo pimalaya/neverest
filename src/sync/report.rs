@@ -110,6 +110,9 @@ pub struct SyncOutput {
     pub collection_patch: Vec<PatchEntry<CollectionHunk>>,
     /// The item-level hunks the run applied, in the order it applied them.
     pub item_patch: Vec<PatchEntry<ItemHunk>>,
+    /// The steps that failed outside any hunk: the run is incomplete (exit
+    /// 4) and a rerun retries them.
+    pub failures: Vec<StepFailure>,
     /// Content-key collisions this sync surfaced; the first entry is kept.
     pub collisions: Vec<MessageCollision>,
     /// Frontend-queued actions the pre-sync drain applied, per collection.
@@ -235,6 +238,7 @@ impl SyncOutput {
             dry_run: _,
             collection_patch,
             item_patch,
+            failures,
             collisions,
             drained,
             parked,
@@ -264,6 +268,7 @@ impl SyncOutput {
 
         self.collection_patch.extend(collection_patch);
         self.item_patch.extend(item_patch);
+        self.failures.extend(failures);
         self.collisions.extend(collisions);
         self.drained.extend(drained);
         self.parked.extend(parked);
@@ -362,11 +367,12 @@ impl SyncOutput {
     /// Whether the run left work a rerun picks up, as an unreachable server
     /// reads: a run with nothing to do never carries an error.
     ///
-    /// An unscanned source, an unapplied hunk, a failed send or intent not
-    /// parked, a throttled source, an unsettled collection, an unanswered
+    /// An unscanned source, an unapplied hunk, a failed step, a failed send
+    /// or intent not parked, a throttled source, an unsettled collection, an unanswered
     /// push; a send channel that did not open is in `unreached` alone.
     pub fn incomplete(&self) -> bool {
         self.interrupted
+            || !self.failures.is_empty()
             || !self.throttled.is_empty()
             || !self.unanswered.is_empty()
             || !self.unreached.is_empty()
@@ -1223,6 +1229,72 @@ impl<H> PatchEntry<H> {
     }
 }
 
+/// A step of the run that failed outside any hunk.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StepFailure {
+    /// The step that failed.
+    pub step: FailedStep,
+    /// The collection the step worked on, `null` for a store-wide one.
+    pub collection: Option<String>,
+    /// The stable code of the failure, `null` when it carries none.
+    pub code: Option<ErrorCode>,
+    /// The outermost message.
+    pub error: String,
+    /// The messages of the failure's causes, outermost first.
+    pub sources: Vec<String>,
+}
+
+impl StepFailure {
+    /// Records `err` as the failure of `step` over `collection`.
+    pub fn new(step: FailedStep, collection: Option<String>, err: &anyhow::Error) -> Self {
+        let Failure {
+            code,
+            error,
+            sources,
+        } = Failure::of(err);
+        Self {
+            step,
+            collection,
+            code,
+            error,
+            sources,
+        }
+    }
+}
+
+impl fmt::Display for StepFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let err = chain(&self.error, &self.sources);
+        match &self.collection {
+            Some(collection) => write!(f, "{} of {collection}: {err}", self.step),
+            None => write!(f, "{}: {err}", self.step),
+        }
+    }
+}
+
+/// A store step a run takes outside any hunk.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum FailedStep {
+    /// Reading or draining the queue frontends filled.
+    Queue,
+    /// Landing downloaded bodies in the store.
+    Bodies,
+    /// Counting the conflicts waiting for a decision.
+    Conflicts,
+}
+
+impl fmt::Display for FailedStep {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Queue => write!(f, "queue"),
+            Self::Bodies => write!(f, "bodies"),
+            Self::Conflicts => write!(f, "conflict count"),
+        }
+    }
+}
+
 impl fmt::Display for SyncOutput {
     /// Prints what is worth a line: a collection covered whole prints none,
     /// nor an index refresh with nothing to fold (a failed one is a warning).
@@ -1238,7 +1310,8 @@ impl fmt::Display for SyncOutput {
         let item_errors = self.item_patch.iter().filter(|e| e.error.is_some()).count();
         let submit_errors = self.submitted.iter().filter(|e| e.error.is_some()).count();
         let intent_errors = self.intents.iter().filter(|e| e.error.is_some()).count();
-        let errors = mailbox_errors + item_errors + submit_errors + intent_errors;
+        let errors =
+            mailbox_errors + item_errors + submit_errors + intent_errors + self.failures.len();
         let warnings = self.collisions.len()
             + self.parked.len()
             + self.conflicts.len()
@@ -1430,6 +1503,9 @@ impl fmt::Display for SyncOutput {
                     hunk = entry.hunk,
                     err = entry.text().unwrap_or_default(),
                 )?;
+            }
+            for failure in &self.failures {
+                writeln!(f, " - {failure}")?;
             }
             writeln!(f)?;
         }

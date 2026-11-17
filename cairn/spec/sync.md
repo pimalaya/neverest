@@ -441,7 +441,7 @@ The two `-only` flags SHALL exclude each other, `--init` and every flag of a ful
 - THEN it exits 2 and touches nothing
 
 ### Requirement: A drain applies the queue without syncing
-`neverest sync --queue-only` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 4, the queue untouched.
+`neverest sync --queue-only` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 4, the queue untouched. A drain that parked a row SHALL exit 3, as a sync does; a store step failing SHALL fail every account of the store, which exits 4.
 
 ### Requirement: A run holds the store lock, waiting bounded
 A run SHALL hold an advisory sync.lock under local/ of the **actual** store directory (honouring `store.root`) for its whole length, whatever accounts it covers, taken once for each store it covers, in path order, before any account runs. A second run SHALL wait for the holder up to a bounded timeout (60 s) and then report every account of that store `busy` and exit 4, so cron ticks and connector-triggered scoped runs serialize instead of failing or corrupting.
@@ -702,7 +702,7 @@ The two conflict counts differ and the difference matters: the engine emits noth
 - THEN the send is parked and the run exits with the conflict code
 
 ### Requirement: An incomplete run has its own exit code
-A run that could not do all its work SHALL exit with a code of its own, distinct from success, failure and the conflict code, 4: a source it could not scan, an endpoint or a send channel it could not open, a hunk it could not apply, a push its server answered nothing for, a send or an intent that failed without parking, a source that gave up throttled, a round left open on a collection it synced (but one its listing parked over a mass absence), or convergence passes that ended still moving. It SHALL win over the conflict code, the report still counting what waits for a person.
+A run that could not do all its work SHALL exit with a code of its own, distinct from success, failure and the conflict code, 4: a source it could not scan, an endpoint or a send channel it could not open, a hunk it could not apply, a push its server answered nothing for, a send or an intent that failed without parking, a pair collection whose sync failed, a store step that failed, a source that gave up throttled, a round left open on a collection it synced (but one its listing parked over a mass absence), or convergence passes that ended still moving. It SHALL win over the conflict code, the report still counting what waits for a person.
 
 An unreachable server is the common case. The run stops nothing else over it, so it is no failure, yet a run with nothing to do and a run that could not reach its server both exited 0, and a caller told offline from idle by parsing error strings. A rerun clears this state on its own, which is what sets it apart from the conflict code: that one waits for a person, this one for the network.
 
@@ -1143,6 +1143,22 @@ A collection whose spine fails SHALL be recorded in the run's report, carrying i
 A run that failed to scan a collection SHALL NOT report itself in sync. "In sync" is a claim about what the sync compared, and a collection it could not enumerate was never compared; a run that says it anyway hides a broken account for as long as nobody reads the log.
 
 An error crossing an engine boundary SHALL be rendered with its full chain, not with its outermost context alone. A backend keeps a server's status and response body so a caller can read them, and a wrapper that renders only the top drops exactly the part naming what the server said.
+
+### Requirement: A failed pair collection is reported
+A pair collection whose sync fails SHALL be recorded under `collectionPatch` as a `sync` hunk naming `source`, `target` and `collection`, with its failure, and the run SHALL exit 4. It SHALL NOT be a `scan` hunk: the failure may come from either endpoint, the store or the merge, and what the collection reported before failing stands.
+
+#### Scenario: A pair whose target fails its listing
+- GIVEN a CardDAV pair whose target answers 500 to its REPORT
+- WHEN it is synced
+- THEN the report holds a `sync` hunk with the error, the text does not say the account is in sync, and the run exits 4
+
+### Requirement: A store step that fails is reported
+A step of a run that fails outside any hunk SHALL be recorded under `failures`, one entry a failure: `step`, one of `queue` (the queue could not be read or drained), `bodies` (downloaded bodies could not land in the store, or a pair's full hydration failed) and `conflicts` (the waiting conflicts could not be counted); `collection`, `null` for a store-wide step; and `code`, `error` and `sources`. A `failures` entry SHALL make the run incomplete (exit 4) and SHALL be printed among the errors. A step that fails SHALL NOT read as having done nothing: rows a failed read could not classify SHALL NOT be counted as drained.
+
+#### Scenario: A drain that fails
+- GIVEN a store whose queue cannot be drained
+- WHEN a sync runs
+- THEN `failures` holds a `queue` entry with the error and the run exits 4
 
 ### Requirement: A body fetch answers for every handle it was asked about
 A batched body fetch SHALL be treated as complete only when it answers for every handle it carried, a handle the server answered gone being answered (see "A body gone from the server is owed nothing more"). A batch answering for fewer SHALL fall back to a per-item fetch for the remainder, exactly as a batch that errors already does, and SHALL report the shortfall; a per-item fetch the server answers gone SHALL be answered gone, never fail the batch.
@@ -2342,7 +2358,7 @@ The codes are read once a row is built, from the chain the client returned, so t
 - THEN its `rejected` row's `code` is `permission-denied`, where a 403 naming `valid-address-data` carries none
 
 ### Requirement: A failing row carries its code and its causes
-A report row naming what a run could not do to one item or one endpoint SHALL carry, beside its own keys, those of pimalaya-cli's item error but its id: `code`, `null` when the failure carries none; `error`, the outermost message; and `sources`, the messages of its causes, outermost first. These rows are the `collectionPatch` and `itemPatch` entries, `rejected`, `submitted`, `intents`, `parked` and `unreached` of a sync, and `parked` of a drain. A `rejected` row SHALL be pimalaya-cli's `ItemError` itself, its `id` the item's handle on the side that refused it, beside `side`, `collection` and `action`. A row that succeeded SHALL carry `code` and `error` null and `sources` empty. The text output SHALL print a row's message and its causes as one chain, as `{err:#}` reads.
+A report row naming what a run could not do to one item or one endpoint SHALL carry, beside its own keys, those of pimalaya-cli's item error but its id: `code`, `null` when the failure carries none; `error`, the outermost message; and `sources`, the messages of its causes, outermost first. These rows are the `collectionPatch` and `itemPatch` entries, `failures`, `rejected`, `submitted`, `intents`, `parked` and `unreached` of a sync, and `parked` of a drain. A `rejected` row SHALL be pimalaya-cli's `ItemError` itself, its `id` the item's handle on the side that refused it, beside `side`, `collection` and `action`. A row that succeeded SHALL carry `code` and `error` null and `sources` empty. The text output SHALL print a row's message and its causes as one chain, as `{err:#}` reads.
 
 A parked queue row SHALL carry the error the store recorded, with no code and no causes, the store keeping its text alone. An unconfirmed send's `error` SHALL begin `unconfirmed: `, its causes under `sources`, so its message and causes joined read as its parked row does.
 

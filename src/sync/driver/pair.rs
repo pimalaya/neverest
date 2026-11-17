@@ -429,6 +429,14 @@ fn run_pair(
         ) {
             warn!("{name} sync error: {err:#}");
             progress.emit(|| finished(Some(Failure::of(&err))));
+            let hunk = CollectionHunk::Sync {
+                source: left_name.clone(),
+                target: right_name.clone(),
+                collection: name.clone(),
+            };
+            report
+                .collection_patch
+                .push(PatchEntry::new(hunk, Some(err)));
             continue;
         }
 
@@ -447,6 +455,11 @@ fn run_pair(
         {
             warn!("{name} full hydration error: {err:#}");
             error = Some(Failure::of(&err));
+            report.failures.push(StepFailure::new(
+                FailedStep::Bodies,
+                Some(name.clone()),
+                &err,
+            ));
         }
         itemize_noted(&mut left, report);
         itemize_noted(&mut right, report);

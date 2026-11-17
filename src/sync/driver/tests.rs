@@ -493,6 +493,54 @@ fn the_pre_sync_drain_applies_queued_actions_and_reports_parked_ones() {
     assert_eq!(second.parked.len(), 1);
 }
 
+/// Drops `table` from the store at `dir`, as a damaged database reads.
+fn drop_table(dir: &Path, table: &str) {
+    let conn = rusqlite::Connection::open(dir.join("pimdir.db")).unwrap();
+    conn.execute_batch(&format!(
+        "PRAGMA foreign_keys = OFF; DROP TABLE receipts; DROP TABLE {table};"
+    ))
+    .unwrap();
+}
+
+/// A drain whose store fails is reported, and the run is incomplete.
+#[test]
+fn a_drain_that_fails_is_reported_and_the_run_is_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_account("a")
+        .for_source("imap");
+    store
+        .ensure_collection("imap/INBOX", "message/rfc822")
+        .unwrap();
+    drop_table(dir.path(), "queue");
+
+    let mut report = SyncOutput::default();
+    drain_queues(&mut store, &mut report);
+    report_parked(&store, "a", &mut report);
+
+    let steps: Vec<FailedStep> = report.failures.iter().map(|f| f.step).collect();
+    assert_eq!(steps, [FailedStep::Queue, FailedStep::Queue]);
+    assert_eq!(Exit::from(&report), Exit::Incomplete);
+    assert!(report.to_string().contains("Errors (2)"), "{report}");
+}
+
+/// Conflicts that cannot be counted leave the run incomplete, never in
+/// sync.
+#[test]
+fn a_conflict_count_that_fails_leaves_the_run_incomplete() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PimdirStore::open(dir.path()).unwrap();
+    drop_table(dir.path(), "bindings");
+
+    let mut report = SyncOutput::default();
+    count_conflicts(&store, "a", &mut report);
+
+    assert_eq!(report.failures.len(), 1);
+    assert_eq!(report.failures[0].step, FailedStep::Conflicts);
+    assert_eq!(Exit::from(&report), Exit::Incomplete);
+}
+
 /// The stored checkpoint's UIDVALIDITY, as the IMAP adapter encodes it.
 #[cfg(feature = "imap")]
 fn stored_checkpoint_uid_validity(store: &PimdirSourceStore, collection: &str) -> Option<u32> {
@@ -1518,6 +1566,7 @@ fn hunk_list(hunks: &[CollectionHunk]) -> Vec<(&'static str, String, String)> {
                 ("delete", side.clone(), collection.clone())
             }
             CollectionHunk::Scan { .. } => ("scan", String::new(), String::new()),
+            CollectionHunk::Sync { .. } => ("sync", String::new(), String::new()),
         })
         .collect()
 }

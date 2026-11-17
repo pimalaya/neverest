@@ -33,7 +33,7 @@ use crate::{
         event::SyncEvent,
         local,
         progress::Progress,
-        report::{AccountSync, SyncOutput, SyncRunOutput},
+        report::{AccountSync, FailedStep, StepFailure, SyncOutput, SyncRunOutput},
         state::StoreState,
     },
 };
@@ -489,7 +489,7 @@ impl SyncCommand {
             }
         }
 
-        let mut drained = BTreeMap::new();
+        let mut drained = Ok(BTreeMap::new());
         if !self.declare_only
             && let Some((name, account_config)) = ready.first()
         {
@@ -506,7 +506,13 @@ impl SyncCommand {
         Ok(ready
             .into_iter()
             .map(|(name, config)| {
-                let mine = drained.remove(&name).unwrap_or_default();
+                let mine = match &mut drained {
+                    Ok(drained) => drained.remove(&name).unwrap_or_default(),
+                    Err(err) => SyncOutput {
+                        failures: vec![StepFailure::new(FailedStep::Queue, None, err)],
+                        ..SyncOutput::default()
+                    },
+                };
                 (name, config, Some(mine))
             })
             .collect())

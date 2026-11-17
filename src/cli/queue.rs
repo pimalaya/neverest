@@ -86,9 +86,12 @@ pub fn run(
     }
 
     outputs.sort_by_key(|output| order.iter().position(|name| *name == output.account));
-    let exit = match outputs.iter().any(|o| o.busy || o.error.is_some()) {
-        true => Exit::Incomplete,
-        false => Exit::Success,
+    let exit = if outputs.iter().any(|o| o.busy || o.error.is_some()) {
+        Exit::Incomplete
+    } else if outputs.iter().any(|o| !o.parked.is_empty()) {
+        Exit::Conflicted
+    } else {
+        Exit::Success
     };
 
     printer.out(SyncRunOutput {
@@ -134,7 +137,17 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Queue
         .list_pending_actions()
         .context("List the queued actions")?;
 
-    let mut drained = driver::drain_store(&mut store);
+    let mut drained = match driver::drain_store(&mut store) {
+        Ok(drained) => drained,
+        Err(err) => {
+            let failure = Failure::of(&err);
+            let failed = ready
+                .into_iter()
+                .map(|(name, _)| QueueOutput::failed(name, failure.to_error()));
+            outputs.extend(failed);
+            return Ok(outputs);
+        }
+    };
 
     #[cfg_attr(not(feature = "search"), allow(unused_mut))]
     let mut index = None;

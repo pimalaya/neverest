@@ -11,24 +11,31 @@ use crate::sync::driver::*;
 /// the handle draining (STORAGE §15.2), so whichever side runs first answers
 /// for both. The report names the collections whose rows landed.
 pub(crate) fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutput) {
-    let before = match store.list_pending_actions() {
-        Ok(rows) => rows,
-        Err(err) => {
-            warn!("cannot list the queued actions: {err}");
-            return;
-        }
-    };
+    if let Err(err) = drain_queues_into(store, report) {
+        warn!("drain failed, actions stay queued: {err:#}");
+        report
+            .failures
+            .push(StepFailure::new(FailedStep::Queue, None, &err));
+    }
+}
+
+/// The body of [`drain_queues`], failing on a store step that fails.
+pub(super) fn drain_queues_into(
+    store: &mut PimdirSourceStore,
+    report: &mut SyncOutput,
+) -> Result<()> {
+    let before = store
+        .list_pending_actions()
+        .map_err(pimdir_error)
+        .context("List the queued actions")?;
     if before.is_empty() {
-        return;
+        return Ok(());
     }
 
-    let drained = match store.drain() {
-        Ok(drained) => drained,
-        Err(err) => {
-            warn!("drain failed, actions stay queued: {err}");
-            return;
-        }
-    };
+    let drained = store
+        .drain()
+        .map_err(pimdir_error)
+        .context("Drain the queued actions")?;
     if drained.applied > 0 || drained.parked > 0 || drained.skipped > 0 {
         info!(
             "drained {} queued action(s) ({} parked, {} skipped)",
@@ -49,17 +56,23 @@ pub(crate) fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutpu
         });
     }
     if drained.applied == 0 {
-        return;
+        return Ok(());
     }
 
     let parked: BTreeSet<i64> = store
         .parked_actions()
-        .map(|rows| rows.into_iter().map(|row| row.id).collect())
-        .unwrap_or_default();
+        .map_err(pimdir_error)
+        .context("List the parked actions")?
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
     let pending: BTreeSet<i64> = store
         .list_pending_actions()
-        .map(|rows| rows.into_iter().map(|row| row.id).collect())
-        .unwrap_or_default();
+        .map_err(pimdir_error)
+        .context("List the queued actions")?
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
     let mut applied: BTreeMap<String, usize> = BTreeMap::new();
     for row in before {
         if !pending.contains(&row.id) && !parked.contains(&row.id) {
@@ -74,6 +87,8 @@ pub(crate) fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutpu
                 applied,
             }),
     );
+
+    Ok(())
 }
 
 /// Performs the queued collection intents (pimdir STORAGE Annex B.2), each

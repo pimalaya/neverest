@@ -228,7 +228,15 @@ impl Landing<'_> {
             let fallback = PimRemote::new(&mut ctx.pool, self.blobs.clone(), ctx.namespace.clone());
             match apply_batch(store, fallback, &place, landed, options) {
                 Ok(upgraded) => ctx.noted.note_events(&place, &upgraded.events),
-                Err(err) => warn!("{place} write error: {err:#}"),
+                Err(err) => {
+                    warn!("{place} write error: {err:#}");
+                    let collection = display_name(&ctx.namespace, &place).to_string();
+                    ctx.noted.failures.push(StepFailure::new(
+                        FailedStep::Bodies,
+                        Some(collection),
+                        &err,
+                    ));
+                }
             }
         }
 

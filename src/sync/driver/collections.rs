@@ -235,8 +235,8 @@ pub(super) fn apply_collection_hunk(
                 .create_collection(collection)
                 .with_context(|| format!("Create collection {collection} on {side}"))?;
         }
-        CollectionHunk::Scan { .. } => {
-            unreachable!("a scan hunk reports a failure and is never applied")
+        CollectionHunk::Scan { .. } | CollectionHunk::Sync { .. } => {
+            unreachable!("a failure hunk is reported and never applied")
         }
         CollectionHunk::Delete { side, collection } => {
             source_ctx(side, left, right)

@@ -3,7 +3,10 @@
 //! Cross-copy bodies streamed from one side to the other, never held whole
 //! or stored, each copy then bound in the store.
 
-use std::io::pipe;
+use std::{
+    fmt,
+    io::{self, Write, pipe},
+};
 
 use crate::sync::driver::*;
 
@@ -160,8 +163,21 @@ pub(super) fn relay_copies(
             (left.name.clone(), &mut *left_store)
         };
 
-        let written = relay_one(holding_pool, target_pool, &wire, &target)
+        let relayed = relay_one(holding_pool, target_pool, &wire, &target)
             .with_context(|| format!("Relay {} in {wire}", target.handle.0))?;
+        let written = match relayed {
+            Ok(written) => written,
+            Err(err) => {
+                warn!("relay of {} in {wire} failed: {err:#}", target.link);
+                report.rejected.push(RejectedWrite {
+                    side: target_name,
+                    collection: wire.clone(),
+                    action: String::from("append"),
+                    failure: ItemError::new(Some(&target.link), &err),
+                });
+                continue;
+            }
+        };
 
         bind_relayed(target_store, collection, &target, written)
             .with_context(|| format!("Record the relay of {} in {wire}", target.handle.0))?;
@@ -223,27 +239,34 @@ pub(super) fn bind_relayed(
 
 /// Relays one message: a fetch thread into the pipe, this one into the append.
 ///
-/// The body is never held whole or stored; `collection` is the wire name. A
-/// copy the server does not name fails, the relay having no create a listing
-/// could land.
-fn relay_one(
+/// The body is never held whole or stored; `collection` is the wire name. The
+/// outer error is a side that cannot be used again, the inner one this message
+/// failing: a refusal, a body not of its listed size, an unnamed copy.
+pub(super) fn relay_one(
     holding_pool: &mut Pool,
     target_pool: &mut Pool,
     collection: &str,
     target: &RelayTarget,
-) -> Result<WrittenItem> {
+) -> Result<Result<WrittenItem>> {
     let (reader, writer) = pipe().context("relay pipe")?;
     let holding = holding_pool.primary();
     let dest = target_pool.primary();
     let handle = target.handle.0.clone();
+    let size = target.size;
 
-    let (fetch, append) = std::thread::scope(|scope| {
-        let fetch = scope.spawn(move || holding.get_item_stream(collection, &handle, writer));
+    let (fetched, appended) = std::thread::scope(|scope| {
+        let fetch = scope.spawn(move || {
+            let mut sink = Exact::new(writer, size);
+            match holding.get_item_stream(collection, &handle, &mut sink) {
+                Ok(_) => sink.finish(),
+                Err(err) => Err(sink.mismatch().unwrap_or(err)),
+            }
+        });
         let append = dest.add_item_stream(
             collection,
             &target.flags,
             reader,
-            target.size,
+            size,
             LinkId {
                 hint: target.hint.as_deref(),
                 mint: target.mint.as_deref(),
@@ -251,8 +274,117 @@ fn relay_one(
         );
         (fetch.join().unwrap(), append)
     });
-    fetch.context("relay fetch")?;
-    append
-        .context("relay append")?
-        .ok_or_else(|| anyhow!("Cannot resolve appended UID: the server names no appended message"))
+
+    if let Err(err) = &fetched {
+        holding_pool.primary().recover(err)?;
+    }
+    if let Err(err) = &appended {
+        target_pool.primary().recover(err)?;
+    }
+
+    let failed = match (fetched, appended) {
+        (Ok(()), Ok(Some(written))) => return Ok(Ok(written)),
+        (Err(err), _) if err.is::<SizeMismatch>() => err,
+        (_, Err(err)) => err.context("relay append"),
+        (Err(err), Ok(_)) => err.context("relay fetch"),
+        (Ok(()), Ok(None)) => {
+            anyhow!("Cannot resolve appended UID: the server names no appended message")
+        }
+    };
+    Ok(Err(failed))
+}
+
+/// A body whose length is not the size its listing stated.
+#[derive(Debug)]
+pub(super) struct SizeMismatch {
+    listed: usize,
+    longer: bool,
+}
+
+impl fmt::Display for SizeMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let relation = if self.longer { "longer" } else { "shorter" };
+        write!(
+            f,
+            "Body {relation} than its listed size of {} octets",
+            self.listed
+        )
+    }
+}
+
+impl std::error::Error for SizeMismatch {}
+
+/// A sink passing on exactly `size` octets.
+///
+/// Its last octet is held until the source is known to end there, so a body
+/// of another length never completes an append.
+struct Exact<W> {
+    sink: W,
+    size: usize,
+    seen: usize,
+    held: Option<u8>,
+}
+
+impl<W: Write> Exact<W> {
+    fn new(sink: W, size: usize) -> Self {
+        Self {
+            sink,
+            size,
+            seen: 0,
+            held: None,
+        }
+    }
+
+    /// The mismatch a write met, when one did.
+    fn mismatch(&self) -> Option<anyhow::Error> {
+        (self.seen > self.size).then(|| {
+            anyhow::Error::new(SizeMismatch {
+                listed: self.size,
+                longer: true,
+            })
+        })
+    }
+
+    /// Passes on the held octet when the source ended at `size` exactly.
+    fn finish(mut self) -> Result<()> {
+        if self.seen != self.size {
+            return Err(anyhow::Error::new(SizeMismatch {
+                listed: self.size,
+                longer: self.seen > self.size,
+            }));
+        }
+        if let Some(last) = self.held.take() {
+            self.sink.write_all(&[last])?;
+        }
+        self.sink.flush()?;
+        Ok(())
+    }
+}
+
+impl<W: Write> Write for Exact<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        self.seen += buf.len();
+        if self.seen > self.size {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "body longer than its listed size",
+            ));
+        }
+        let pass = match self.seen == self.size {
+            true => {
+                self.held = buf.last().copied();
+                &buf[..buf.len() - 1]
+            }
+            false => buf,
+        };
+        self.sink.write_all(pass)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.sink.flush()
+    }
 }

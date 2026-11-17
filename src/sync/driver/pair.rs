@@ -52,11 +52,11 @@ pub(super) fn pair_kind(left: (&str, &str), right: (&str, &str)) -> Result<Kind>
 
 /// Live per-collection progress of a pair, as `collection-progressed` events.
 pub(super) struct CollectionProgress<'a> {
-    progress: Progress<'a>,
-    gate: PercentGate,
-    source: &'a str,
-    target: &'a str,
-    collection: &'a str,
+    pub(super) progress: Progress<'a>,
+    pub(super) gate: PercentGate,
+    pub(super) source: &'a str,
+    pub(super) target: &'a str,
+    pub(super) collection: &'a str,
 }
 
 impl CollectionProgress<'_> {

@@ -69,12 +69,18 @@ pub struct FakeImap {
     fault: Arc<Mutex<Option<FakeFault>>>,
     /// The completion its next `APPEND` or `UID STORE` is refused with.
     refusal: Arc<Mutex<Option<&'static str>>>,
+    /// The completion its next `APPEND` is refused with at its command line,
+    /// before the literal is sent.
+    early: Arc<Mutex<Option<&'static str>>>,
     /// The completion every search for the messages with no `Date` (`NOT
     /// HEADER Date ""`) is refused with, as iCloud refuses it.
     undated: Arc<Mutex<Option<&'static str>>>,
     /// Whether an `ENABLE` enables what it asks, else answered a bare `OK`
     /// with no `ENABLED`, as iCloud answers it.
     enables: Arc<AtomicBool>,
+    /// Whether an `APPEND` adds a message and names it by `APPENDUID`, else
+    /// its literal is dropped and nothing named.
+    keeps: Arc<AtomicBool>,
 }
 
 impl FakeImap {
@@ -88,8 +94,10 @@ impl FakeImap {
         let connections = Arc::new(AtomicUsize::new(0));
         let fault = Arc::new(Mutex::new(None));
         let refusal = Arc::new(Mutex::new(None));
+        let early = Arc::new(Mutex::new(None));
         let undated = Arc::new(Mutex::new(None));
         let enables = Arc::new(AtomicBool::new(true));
+        let keeps = Arc::new(AtomicBool::new(false));
 
         let logged = Arc::clone(&commands);
         let shared = Arc::clone(&served);
@@ -97,8 +105,10 @@ impl FakeImap {
         let accepted = Arc::clone(&connections);
         let broken = Arc::clone(&fault);
         let refused = Arc::clone(&refusal);
+        let refused_early = Arc::clone(&early);
         let blind = Arc::clone(&undated);
         let enabling = Arc::clone(&enables);
+        let keeping = Arc::clone(&keeps);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
@@ -108,13 +118,17 @@ impl FakeImap {
                 let headers = Arc::clone(&stated);
                 let fault = Arc::clone(&broken);
                 let refusal = Arc::clone(&refused);
+                let early = Arc::clone(&refused_early);
                 let undated = Arc::clone(&blind);
                 let enables = Arc::clone(&enabling);
+                let keeps = Arc::clone(&keeping);
                 thread::spawn(move || {
                     let refusals = Refusals {
                         write: &refusal,
+                        early: &early,
                         undated: &undated,
                         enables: &enables,
+                        keeps: &keeps,
                     };
                     serve(
                         stream, qresync, &mailbox, &headers, &commands, &fault, refusals,
@@ -131,8 +145,10 @@ impl FakeImap {
             headers,
             fault,
             refusal,
+            early,
             undated,
             enables,
+            keeps,
         }
     }
 
@@ -140,6 +156,11 @@ impl FakeImap {
     /// answers `ENABLE CONDSTORE QRESYNC` while advertising both.
     pub fn enable_nothing(&self) {
         self.enables.store(false, Ordering::SeqCst);
+    }
+
+    /// Has every `APPEND` add a message, named by `APPENDUID`.
+    pub fn keep_appends(&self) {
+        self.keeps.store(true, Ordering::SeqCst);
     }
 
     /// Has every search for the messages with no `Date` refused with the
@@ -157,6 +178,12 @@ impl FakeImap {
     /// `completion` (`NO [NOPERM] denied`), once.
     pub fn refuse_next_write(&self, completion: &'static str) {
         *self.refusal.lock().unwrap() = Some(completion);
+    }
+
+    /// Has the next `APPEND` refused with the tagged `completion` at its
+    /// command line, its literal never asked for, once.
+    pub fn refuse_next_append_line(&self, completion: &'static str) {
+        *self.early.lock().unwrap() = Some(completion);
     }
 
     /// Has the message `uid` state `header`, a whole header block, where a
@@ -204,8 +231,10 @@ impl FakeImap {
 /// what an `ENABLE` asks when it enables nothing.
 struct Refusals<'a> {
     write: &'a Mutex<Option<&'static str>>,
+    early: &'a Mutex<Option<&'static str>>,
     undated: &'a Mutex<Option<&'static str>>,
     enables: &'a AtomicBool,
+    keeps: &'a AtomicBool,
 }
 
 /// Serves one connection until the client leaves.
@@ -247,6 +276,20 @@ fn serve(
             continue;
         };
         commands.lock().unwrap().push(command.to_owned());
+
+        let appending = command.to_ascii_uppercase().starts_with("APPEND");
+        if let Some(completion) = appending
+            .then(|| refusals.early.lock().unwrap().take())
+            .flatten()
+        {
+            if writer
+                .write_all(format!("{tag} {completion}\r\n").as_bytes())
+                .is_err()
+            {
+                return;
+            }
+            continue;
+        }
 
         if let Some(octets) = literal_of(command) {
             let mut literal = vec![0; octets];
@@ -313,7 +356,20 @@ fn serve(
             _ => {}
         }
 
-        let done = format!("{tag} OK done\r\n");
+        let done = match appending && refusals.keeps.load(Ordering::SeqCst) {
+            true => {
+                let mut mailbox = mailbox.lock().unwrap();
+                let uid = mailbox.messages.last().map_or(1, |message| message.uid + 1);
+                mailbox.messages.push(FakeMessage {
+                    uid,
+                    flags: Vec::new(),
+                    message_id: String::new(),
+                });
+                let validity = mailbox.uid_validity;
+                format!("{tag} OK [APPENDUID {validity} {uid}] done\r\n")
+            }
+            false => format!("{tag} OK done\r\n"),
+        };
         if writer.write_all(&reply).is_err() || writer.write_all(done.as_bytes()).is_err() {
             return;
         }

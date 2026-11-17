@@ -4869,6 +4869,215 @@ fn a_relayed_copy_is_bound_to_its_target_and_never_relayed_twice() {
     assert_eq!(item.level, PimdirLevel::Meta, "so it claims no more");
 }
 
+/// A message of `octets` octets stating `message_id`.
+#[cfg(feature = "imap")]
+fn sized_message(message_id: &str, octets: usize) -> Vec<u8> {
+    let mut body = format!("Message-ID: <{message_id}>\r\nSubject: relayed\r\n\r\n").into_bytes();
+    while body.len() < octets {
+        body.extend_from_slice(b"relayed line of text\r\n");
+    }
+    body.truncate(octets);
+    body
+}
+
+/// Two IMAP sides over `holding` and `target`, renamed `left` and `right`,
+/// and a store relaying `left`'s UIDs to `right`, each listed at its size.
+#[cfg(feature = "imap")]
+fn imap_relay(
+    dir: &Path,
+    holding: &crate::imap::fake::FakeImap,
+    target: &crate::imap::fake::FakeImap,
+    listed: &[(&str, &str, usize)],
+) -> (SourceCtx, SourceCtx, PimdirSourceStore, PimdirSourceStore) {
+    let (mut left, _) = bound_imap_inbox(&dir.join("l"), holding, true, None);
+    let (mut right, _) = bound_imap_inbox(&dir.join("r"), target, true, None);
+    left.name = String::from("left");
+    right.name = String::from("right");
+
+    let placements = listed
+        .iter()
+        .map(|(uid, link, size)| {
+            PimdirWriteOp::UpsertPlacement(linked(uid, link, Some(*size as u64)))
+        })
+        .collect();
+    let mut left_store = PimdirStore::open(dir).unwrap().for_source("left");
+    left_store
+        .ensure_collection("INBOX", "message/rfc822")
+        .unwrap();
+    left_store.write(placements).unwrap();
+    let mut right_store = PimdirStore::open(dir).unwrap().for_source("right");
+    right_store.write(covered(None)).unwrap();
+
+    (left, right, left_store, right_store)
+}
+
+/// An empty fake mailbox naming what it is appended.
+#[cfg(feature = "imap")]
+fn empty_imap() -> crate::imap::fake::FakeImap {
+    use crate::imap::fake::{FakeImap, FakeMailbox};
+
+    let server = FakeImap::start(
+        FakeMailbox {
+            uid_validity: 1,
+            highest_mod_seq: 1,
+            messages: Vec::new(),
+            states_exists: true,
+        },
+        false,
+    );
+    server.keep_appends();
+    server
+}
+
+/// A target refusing the append of a message larger than the pipe at its
+/// command line fails the relay of that message rather than hanging it.
+#[test]
+#[cfg(feature = "imap")]
+fn a_relay_the_target_refuses_at_once_returns() {
+    use std::{sync::mpsc, time::Duration};
+
+    let body = sized_message("m1@x", 600_000);
+    let holding = one_message(1, 1);
+    holding.set_header(1, &body);
+    let target = empty_imap();
+    target.refuse_next_append_line("NO [TOOBIG] too big");
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut left, mut right, left_store, _) = imap_relay(
+        dir.path(),
+        &holding,
+        &target,
+        &[("1", "mid:m1@x", body.len())],
+    );
+    let targets = relay_targets(
+        &left_store,
+        Kind::Mail,
+        "INBOX",
+        ("left", false),
+        ("right", true),
+    )
+    .unwrap();
+
+    let (sent, received) = mpsc::channel();
+    thread::spawn(move || {
+        let relayed = relay_one(&mut left.pool, &mut right.pool, "INBOX", &targets[0]);
+        sent.send(relayed.map(|written| written.map(|w| w.id)))
+            .unwrap();
+    });
+    let relayed = received
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the relay returns");
+
+    let err = relayed.unwrap().unwrap_err();
+    assert!(format!("{err:#}").contains("too big"), "{err:#}");
+}
+
+/// A body longer than its listed size is never appended cut, and the side
+/// it failed on serves the next relay.
+#[test]
+#[cfg(feature = "imap")]
+fn a_body_longer_than_listed_is_not_appended_cut() {
+    let body = sized_message("m1@x", 2_000);
+    let holding = one_message(1, 1);
+    holding.set_header(1, &body);
+    let target = empty_imap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let listed = [("1", "mid:m1@x", body.len() - 10)];
+    let (mut left, mut right, left_store, _) = imap_relay(dir.path(), &holding, &target, &listed);
+    let targets = relay_targets(
+        &left_store,
+        Kind::Mail,
+        "INBOX",
+        ("left", false),
+        ("right", true),
+    )
+    .unwrap();
+
+    let relayed = relay_one(&mut left.pool, &mut right.pool, "INBOX", &targets[0]).unwrap();
+    let err = relayed.map(|w| w.id).unwrap_err();
+    assert!(err.is::<SizeMismatch>(), "{err:#}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let (_, _, left_store, _) = imap_relay(
+        dir.path(),
+        &holding,
+        &target,
+        &[("1", "mid:m1@x", body.len())],
+    );
+    let targets = relay_targets(
+        &left_store,
+        Kind::Mail,
+        "INBOX",
+        ("left", false),
+        ("right", true),
+    )
+    .unwrap();
+    let relayed = relay_one(&mut left.pool, &mut right.pool, "INBOX", &targets[0]).unwrap();
+    assert!(relayed.is_ok(), "the same sides relay again: {relayed:?}");
+}
+
+/// A message its target refuses is reported rejected, and the relay goes on
+/// with the next one.
+#[test]
+#[cfg(feature = "imap")]
+fn a_refused_relay_is_reported_and_the_next_message_relayed() {
+    use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+
+    let message = |uid: u32, id: &str| FakeMessage {
+        uid,
+        flags: Vec::new(),
+        message_id: String::from(id),
+    };
+    let holding = FakeImap::start(
+        FakeMailbox {
+            uid_validity: 1,
+            highest_mod_seq: 9,
+            messages: vec![message(1, "m1@x"), message(2, "m2@x")],
+            states_exists: true,
+        },
+        false,
+    );
+    let first = sized_message("m1@x", 500);
+    let second = sized_message("m2@x", 500);
+    holding.set_header(1, &first);
+    holding.set_header(2, &second);
+    let target = empty_imap();
+    target.refuse_next_write("NO [OVERQUOTA] full");
+
+    let dir = tempfile::tempdir().unwrap();
+    let listed = [("1", "mid:m1@x", 500), ("2", "mid:m2@x", 500)];
+    let (mut left, mut right, mut left_store, mut right_store) =
+        imap_relay(dir.path(), &holding, &target, &listed);
+    let progress = CollectionProgress {
+        progress: Progress::default(),
+        gate: PercentGate::default(),
+        source: "left",
+        target: "right",
+        collection: "INBOX",
+    };
+    let mut report = SyncOutput::default();
+
+    let relayed = relay_copies(
+        "INBOX",
+        &mut left,
+        &mut right,
+        &mut left_store,
+        &mut right_store,
+        &progress,
+        &mut report,
+    )
+    .unwrap();
+
+    assert_eq!(report.rejected.len(), 1, "{:?}", report.rejected);
+    assert_eq!(relayed, 1);
+    assert_eq!(report.item_patch.len(), 1);
+    assert_eq!(report.rejected.len(), 1, "{:?}", report.rejected);
+    assert_eq!(report.rejected[0].action, "append");
+    assert_eq!(report.rejected[0].side, "right");
+    assert_eq!(Exit::from(&report), Exit::Conflicted);
+}
+
 /// A hub collection id carries its namespace and the wire name does not.
 ///
 /// Getting this backwards is how a mailbox and an address book both called

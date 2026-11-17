@@ -2072,6 +2072,13 @@ neverest.json SHALL be written to a temporary file beside it, under the store's 
 ### Requirement: A relay appends only where the target's listing is closed
 A message SHALL be relayed to a target only when the target has closed a round over the collection, has none open, and that round's scope holds the message's date (an undated message being in every scope), as pimdir SYNC §5 guards an add: the store then knows what the target holds there, so a message it already holds is bound to it rather than appended twice. A message held back waits for a later pass.
 
+A relayed body SHALL be exactly the size its listing stated: the append is length-prefixed with it, so the last octet SHALL be held until the source is known to end there, and a body of another length SHALL NOT complete an append. A message whose relay fails (a refusal, a size mismatch, a copy the server does not name) SHALL be reported under `rejected`, action `append`, its id the link, and the relay SHALL go on with the next message; each side that failed SHALL be recovered first, as after a failed body fetch, and only a side that cannot be SHALL fail the collection.
+
+#### Scenario: A target refusing one message
+- **GIVEN** a relay whose target refuses the append of the first of two messages
+- **WHEN** the collection is relayed
+- **THEN** the first is reported rejected, the second is relayed, and the run exits 3
+
 #### Scenario: A target still listing its mailbox
 - **GIVEN** a relay account whose target's first round over the inbox is open
 - **WHEN** the account is synced

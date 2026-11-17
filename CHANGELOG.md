@@ -178,6 +178,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed an IMAP push aborting on every run over a message flagged `\Junk`, `\Important` or `\Forwarded`: such a keyword is written in its `$` form.
+
 - Fixed an IMAP relay that met a refused message failing its whole mailbox on every run, and one appending a body longer than listed cut: the message is reported rejected and the relay goes on, and a body of another size never completes its append.
 
 - Fixed a pair collection whose sync failed exiting 0 as "already in sync": it is reported as a `sync` hunk with its error and the run exits 4.

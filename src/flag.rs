@@ -59,7 +59,7 @@ impl Flag {
 
     /// Builds a [`Flag`] from an [`IanaFlag`] and its canonical wire
     /// spelling (`\Seen`, `$Forwarded`, …).
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "imap"), allow(dead_code))]
     pub fn from_iana(iana: IanaFlag) -> Self {
         Self {
             raw: canonical_raw(iana).to_string(),

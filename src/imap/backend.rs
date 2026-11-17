@@ -1389,6 +1389,8 @@ fn flag_from_fetch(fetch: FlagFetch<'_>) -> Option<Flag> {
 
 /// Maps a shared [`Flag`] to its IMAP wire counterpart: IANA flags become the
 /// matching system flag, custom keywords pass through as Keyword atoms.
+///
+/// An IANA keyword no atom spells (`\Junk`) takes its canonical `$` form.
 fn flag_from(flag: &Flag) -> ImapFlag<'static> {
     match flag.iana() {
         Some(IanaFlag::Seen) => ImapFlag::Seen,
@@ -1396,8 +1398,9 @@ fn flag_from(flag: &Flag) -> ImapFlag<'static> {
         Some(IanaFlag::Flagged) => ImapFlag::Flagged,
         Some(IanaFlag::Draft) => ImapFlag::Draft,
         Some(IanaFlag::Deleted) => ImapFlag::Deleted,
-        Some(_) => ImapFlag::keyword(
+        Some(iana) => ImapFlag::keyword(
             Atom::try_from(String::from(flag.raw()))
+                .or_else(|_| Atom::try_from(String::from(Flag::from_iana(iana).raw())))
                 .expect("canonical IANA keyword is a valid IMAP atom"),
         ),
         None => match Atom::try_from(String::from(flag.raw())) {
@@ -1515,6 +1518,19 @@ mod tests {
     };
 
     use super::*;
+
+    /// An IANA keyword spelled with a backslash, which no atom holds, is
+    /// pushed in its canonical form rather than aborting the push.
+    #[test]
+    fn an_iana_keyword_no_atom_spells_takes_its_canonical_form() {
+        let wire = |raw: &str| flag_from(&Flag::from_raw(raw)).to_string();
+
+        assert_eq!(wire("\\Junk"), "$Junk");
+        assert_eq!(wire("\\Important"), "$Important");
+        assert_eq!(wire("\\Forwarded"), "$Forwarded");
+        assert_eq!(wire("Junk"), "Junk");
+        assert_eq!(wire("$NotJunk"), "$NotJunk");
+    }
 
     #[test]
     fn a_renamed_mailbox_keeps_its_parent() {

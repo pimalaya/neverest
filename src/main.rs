@@ -189,6 +189,7 @@ use pimalaya_cli::{
     welcome::{is_wanted, shipped_sample},
 };
 use pimalaya_config::toml::ConfigMissingError;
+use simd_cpu::SimdCpu;
 
 use crate::{
     cli::{
@@ -201,10 +202,12 @@ use crate::{
 
 /// Parses and runs the command, then decides its outcome in this one place.
 ///
-/// A sync streams its events, piped too, for a status bar reading them as
-/// they come; a person missing a configuration meets the welcome, a script
-/// or a JSON caller the error.
+/// The SIMD CPU token goes first, for the codecs the store reaches. A sync
+/// streams its events, piped too; a person missing a configuration meets
+/// the welcome, a script or a JSON caller the error.
 fn main() -> ExitCode {
+    let _ = SimdCpu::install_detected();
+
     let cli = parse::<Cli>();
     let mut printer = StdoutPrinter::new(&cli.json);
     if cli.json.enabled {

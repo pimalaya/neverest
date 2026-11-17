@@ -1093,7 +1093,7 @@ fn fetch_one_full(
     blob: &PimdirBlobStage,
 ) -> Result<PimdirFetchedItem> {
     let writer = blob.writer().context("Open blob writer error")?;
-    let mut sink = HydrateSink::new(writer);
+    let mut sink = HydrateSink::new(writer, kind);
     let revision = client
         .get_item_stream(collection, handle.as_str(), &mut sink)
         .with_context(|| format!("Stream item {} in {collection} error", handle.as_str()))?;
@@ -1157,7 +1157,7 @@ pub(crate) fn stored_item(
         return Ok(None);
     }
 
-    let mut scan = HeaderScan::default();
+    let mut scan = HeaderScan::new(kind);
     let mut chunk = [0u8; 8192];
     while !scan.done() {
         let n = io::Read::read(&mut file, &mut chunk)
@@ -1204,7 +1204,7 @@ pub(crate) fn hydrate_batch(
         collection,
         &ids,
         sizes,
-        |_id| blob.writer().map(HydrateSink::new),
+        |_id| blob.writer().map(|writer| HydrateSink::new(writer, kind)),
         |id, revision, sink: HydrateSink| {
             let (hash, size, scan) = sink.finish().map_err(io::Error::other)?;
             let PimdirDerivation {
@@ -1676,21 +1676,36 @@ fn rejected_bare(handle: PimdirHandle) -> PimdirPushResult {
 /// Cap on captured header bytes, bounding memory if no boundary is found.
 const HEADER_CAP: usize = 256 * 1024;
 
-/// The header prefix of a body, captured as it streams by: what names and
-/// summarises it.
+/// What names and summarises a body, captured as it streams by: a message's
+/// header block, a card or a calendar resource whole.
 ///
-/// A message's mark and invitation, needing every part, are left to the
+/// A card's `UID` may follow an inline `PHOTO` or a blank line, so it is
+/// derived from every octet. A message's mark and invitation are left to the
 /// store's write, which walks each entering body once (Annex A.1).
 #[derive(Default)]
 struct HeaderScan {
     header: Vec<u8>,
     done: bool,
+    whole: bool,
 }
 
 impl HeaderScan {
+    /// The scan a body of `kind` needs: the header block of a message,
+    /// every octet of anything else.
+    fn new(kind: Kind) -> Self {
+        Self {
+            whole: !matches!(kind, Kind::Mail),
+            ..Self::default()
+        }
+    }
+
     /// Reads the next octets of the body, nothing once [`done`](Self::done).
     fn feed(&mut self, buf: &[u8]) {
         if self.done {
+            return;
+        }
+        if self.whole {
+            self.header.extend_from_slice(buf);
             return;
         }
         let from = self.header.len().saturating_sub(3);
@@ -1726,15 +1741,15 @@ struct HydrateSink {
 }
 
 impl HydrateSink {
-    /// Builds the sink over a blob writer.
+    /// Builds the sink over a blob writer, scanning a body of `kind`.
     ///
     /// The writer names a body by the algorithm the store records (pimdir
     /// STORAGE §5), so it dedups against what any other consumer of that
     /// store wrote.
-    fn new(writer: PimdirBlobWriter) -> Self {
+    fn new(writer: PimdirBlobWriter, kind: Kind) -> Self {
         Self {
             writer,
-            scan: HeaderScan::default(),
+            scan: HeaderScan::new(kind),
         }
     }
 
@@ -1983,7 +1998,7 @@ mod scan_tests {
         for (label, body) in MESSAGES {
             let whole = mail::derive(body.as_bytes());
             for chunk in [1, 7, 64, body.len()] {
-                let mut sink = HydrateSink::new(stage.writer().unwrap());
+                let mut sink = HydrateSink::new(stage.writer().unwrap(), Kind::Mail);
                 for part in body.as_bytes().chunks(chunk) {
                     sink.write_all(part).unwrap();
                 }
@@ -1999,6 +2014,43 @@ mod scan_tests {
         }
     }
 
+    /// A card is named from every octet, streamed or served from the store.
+    ///
+    /// Its `UID` may follow a blank line or an inline `PHOTO` past 256 KiB.
+    /// Named from a prefix, it was keyed `hash:`, and the same contact on the
+    /// other endpoint, serialised otherwise, read as another one.
+    #[cfg(feature = "carddav")]
+    #[test]
+    fn a_card_is_named_from_every_octet() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let photo = "A".repeat(300 * 1024);
+        let cards = [
+            "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Ann\r\n\r\nUID:ann\r\nEND:VCARD\r\n".to_owned(),
+            format!(
+                "BEGIN:VCARD\r\nVERSION:4.0\r\nFN:Ann\r\nPHOTO:data:image/png;base64,{photo}\r\n\
+                 UID:ann\r\nEND:VCARD\r\n"
+            ),
+        ];
+
+        for card in cards {
+            let whole = Kind::Vcard.parse_body(card.as_bytes(), card.len() as u64);
+            assert_eq!(whole.link_id.0, "ann", "the fixture names its UID");
+
+            let mut sink = HydrateSink::new(stage.writer().unwrap(), Kind::Vcard);
+            for part in card.as_bytes().chunks(8192) {
+                sink.write_all(part).unwrap();
+            }
+            let (hash, size, scan) = sink.finish().unwrap();
+            assert_eq!(scan.derive(Kind::Vcard, size).link_id, whole.link_id);
+
+            let stored = stored_item(Kind::Vcard, stage.blobs(), PimdirHandle("1".into()), hash)
+                .unwrap()
+                .expect("the body is stored");
+            assert_eq!(stored.link_id, whole.link_id);
+        }
+    }
+
     /// A body served from the store to a second label is named alike.
     #[test]
     fn a_stored_body_is_named_by_its_header_block() {
@@ -2006,7 +2058,7 @@ mod scan_tests {
         let stage = PimdirStore::open(dir.path()).unwrap().blob_stage();
 
         for (label, body) in MESSAGES {
-            let mut sink = HydrateSink::new(stage.writer().unwrap());
+            let mut sink = HydrateSink::new(stage.writer().unwrap(), Kind::Mail);
             sink.write_all(body.as_bytes()).unwrap();
             let (hash, _, _) = sink.finish().unwrap();
 

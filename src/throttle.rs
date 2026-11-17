@@ -41,7 +41,7 @@ use std::{
 use chrono::{DateTime, Datelike, Days, NaiveDate, SecondsFormat, TimeZone, Utc, Weekday};
 use log::{debug, warn};
 
-use crate::error::ErrorCode;
+use crate::{error::ErrorCode, sync};
 
 /// How many times a throttled request is sent again before the source gives
 /// up on it.
@@ -156,9 +156,7 @@ impl Throttle {
                 .unwrap_or_else(|err| err.into_inner())
                 .reserve(now + wait, units, *limit);
         }
-        if !wait.is_zero() {
-            thread::sleep(wait);
-        }
+        sleep_unless_stopped(wait);
     }
 
     /// Runs `attempt`, paced at `units`, sending it again while `throttled`
@@ -192,6 +190,9 @@ impl Throttle {
             let Some(stated) = throttled(&err) else {
                 return Err(err);
             };
+            if sync::stopping() {
+                return Err(err);
+            }
 
             let wait = stated.unwrap_or_else(|| backoff(retry));
             if retry >= MAX_RETRIES || wait > self.max_wait {
@@ -210,11 +211,33 @@ impl Throttle {
                 self.source,
                 wait.as_millis()
             );
-            thread::sleep(wait);
+            if !sleep_unless_stopped(wait) {
+                return Err(err);
+            }
             retry += 1;
         }
     }
 }
+
+/// Sleeps `wait` in short steps, false when a stop signal cut it short.
+///
+/// A throttled source states waits of minutes, which a stop must not sit out.
+fn sleep_unless_stopped(wait: Duration) -> bool {
+    let until = Instant::now() + wait;
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
+        }
+        if sync::stopping() {
+            return false;
+        }
+        thread::sleep(left.min(STOP_POLL));
+    }
+}
+
+/// How often a wait looks for a stop signal.
+const STOP_POLL: Duration = Duration::from_millis(200);
 
 /// What a request does to the provider, which decides which refusals it is
 /// sent again on.

@@ -839,7 +839,7 @@ earlier runs
 caller announces one item rather than four
 
 ### Requirement: Deciding is a command, never a run
-Neverest SHALL NOT decide a content collision during a sync, and SHALL NOT open an editor or any interactive program from one, whatever is attached to its terminal. Deciding SHALL be `neverest conflict resolve` and nothing else.
+Neverest SHALL NOT decide a content collision during a sync, and SHALL NOT open an editor or any interactive program from one, whatever is attached to its terminal. Deciding SHALL be `neverest conflict resolve` and nothing else. A resolution SHALL be judged by the queue row it staged alone: another producer's row parking in the same drain SHALL NOT fail it.
 
 `--prefer-local` and `--prefer-remote` discard a side, which is what a person may ask for by name and what a background run may never do on its own. `--interactive` SHALL hand the bodies to the merger the conflict's kind names, `contact.merger` for a card and `calendar.merger` for an event, as filesystem paths, base first, then the divergent sides, then the path to write, and SHALL take the result only on a zero exit with that path modified. A non-zero exit, or an untouched output, SHALL leave the conflict exactly as it was: an editor exits zero on a bare quit, and reading that as a choice would discard a side by accident.
 
@@ -1277,7 +1277,7 @@ Text mode SHALL print the same events, each as one plain line on stderr, leaving
 - THEN the last line is the result, listing each account's report, without an `event` key, and every line before it carries one
 
 ### Requirement: A signal stops a sync cleanly
-`neverest sync` SHALL install pimalaya-cli's `signal::Shutdown` once its stores are locked. On a first SIGINT or SIGTERM the run SHALL start no new account, collection, spine or body batch, let what is in flight finish, and print its result: an account it did not reach as failed with "Interrupted before the account ran", an account it stopped in with its report marked `interrupted`. An interrupted report is incomplete, so the run exits 4. A second signal ends the process with 130.
+`neverest sync` SHALL install pimalaya-cli's `signal::Shutdown` once its stores are locked. On a first SIGINT or SIGTERM the run SHALL start no new account, collection, spine or body batch, let what is in flight finish, and print its result: an account it did not reach as failed with "Interrupted before the account ran", an account it stopped in with its report marked `interrupted`. An interrupted report is incomplete, so the run exits 4. A second signal ends the process with 130. A wait for a throttled provider SHALL be cut short by the signal: the request is given up as the provider left it, never sent again, and the run stops within a fraction of a second rather than sitting out minutes.
 
 #### Scenario: Ctrl-C during a long download
 - GIVEN a sync downloading the bodies of a large mailbox

@@ -20,7 +20,12 @@ use std::{collections::HashMap, path::Path};
 
 use anyhow::{Context, Result, bail};
 use io_pimdir::{
-    client::{PimdirStore, blobs::PimdirBlobs, producer::PimdirProducer, reader::PimdirReader},
+    client::{
+        PimdirStore,
+        blobs::PimdirBlobs,
+        producer::{PimdirActionStatus, PimdirProducer},
+        reader::PimdirReader,
+    },
     codec::PimdirAction,
     object::PimdirHash,
     placement::PimdirLinkId,
@@ -199,19 +204,21 @@ impl Conflict {
 
         drop(producer);
 
-        let drained = store
+        store
             .drain()
             .with_context(|| format!("Apply the settled conflict {}", self.id))?;
 
-        if drained.parked > 0 {
-            bail!(
-                "The resolution of conflict {} could not be applied and parked",
+        let status = store
+            .action_status(enqueued.handle.id)
+            .map_err(pimdir_error)
+            .with_context(|| format!("Read where the resolution of {} stands", self.id))?;
+        match status {
+            PimdirActionStatus::Applied { .. } => {}
+            PimdirActionStatus::Parked { error, .. } => bail!(
+                "The resolution of conflict {} could not be applied and parked: {error}",
                 self.id
-            );
-        }
-
-        if drained.applied == 0 {
-            bail!("The resolution of conflict {} was not applied", self.id);
+            ),
+            _ => bail!("The resolution of conflict {} was not applied", self.id),
         }
 
         info!("resolved conflict {} in {}", self.id, self.collection);
@@ -460,6 +467,40 @@ mod tests {
         let body = blobs.get(&placement.object.unwrap()).unwrap().unwrap();
         assert_eq!(String::from_utf8(body).unwrap(), card("+4"));
         assert!(list(&store, ACCOUNT).unwrap().is_empty());
+    }
+
+    /// Another app's row parking in the same drain does not fail a
+    /// resolution that was applied: it is judged by its own row.
+    #[cfg(any(
+        feature = "carddav",
+        feature = "caldav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
+    #[test]
+    fn a_resolution_is_judged_by_its_own_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_conflict(dir.path());
+        let conflicts = list(&store, ACCOUNT).unwrap();
+        let conflict = find(conflicts.clone(), conflicts[0].id, None).unwrap();
+
+        let flags = PimdirAction::SetFlags {
+            seq: 424242,
+            flags: PimdirFlags::default(),
+            base: None,
+        };
+        PimdirProducer::open(dir.path(), "cardamum")
+            .unwrap()
+            .enqueue("contacts", &flags, None)
+            .unwrap();
+
+        assert_eq!(
+            conflict
+                .apply(dir.path(), ACCOUNT, card("+4").as_bytes())
+                .unwrap(),
+            Applied::Resolved(Vec::new()),
+        );
     }
 
     /// A divergence whose remote body no run has fetched yet is listed, not

@@ -508,6 +508,65 @@ fn a_throttling_server_is_named_in_the_report() {
     );
 }
 
+/// A stop signal cuts a throttled wait short: the run stops within seconds
+/// rather than sitting out the minutes the server stated, and exits 4.
+#[test]
+#[cfg(unix)]
+fn a_stop_signal_cuts_a_throttled_wait_short() {
+    use std::{
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+
+    let _serial = serialized();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let _ = stream.write_all(
+                b"HTTP/1.1 503 Service Unavailable\r\n\
+                  Retry-After: 100\r\n\
+                  Content-Length: 0\r\n\
+                  Connection: close\r\n\r\n",
+            );
+        }
+    });
+
+    let fixture = Fixture::new(CLOSED, "user", "pass");
+    fixture.offline_store();
+    fixture.point_at(&format!("http://127.0.0.1:{port}/"), "user", "pass");
+
+    let mut run = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", &fixture.config.to_string_lossy()])
+        .args(["--json", "sync", "-a", ACCOUNT])
+        .env("XDG_STATE_HOME", &fixture.state)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn neverest");
+    thread::sleep(Duration::from_secs(3));
+    let stopped = Instant::now();
+    Command::new("kill")
+        .args(["-INT", &run.id().to_string()])
+        .status()
+        .unwrap();
+
+    let status = loop {
+        if let Some(status) = run.try_wait().unwrap() {
+            break status;
+        }
+        if stopped.elapsed() > Duration::from_secs(5) {
+            run.kill().unwrap();
+            panic!("the run sat out the throttled wait");
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert_eq!(status.code(), Some(4));
+}
+
 /// A CalDAV server answering its port, enough for `neverest init`.
 ///
 /// Every request gets the principal and the calendar home set.

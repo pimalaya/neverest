@@ -170,13 +170,29 @@ enum Performed {
     Deleted,
 }
 
-/// Performs one collection intent on `side`'s server.
+/// Performs one collection intent on `side`'s server, refused when the
+/// source's rights now forbid it, as the drain refuses a row.
 fn perform_collection_intent(
     side: &mut SourceCtx,
     intent: &CollectionIntent,
     request: &collection::Request,
     paired: bool,
 ) -> Result<Performed, InvitationFailure> {
+    let rights = &side.perms.collection;
+    let one_way = side.authority == Authority::Endpoint;
+    let refused = match request {
+        collection::Request::Create(_) if !rights.create => Some("collection.create"),
+        collection::Request::Rename(_) if !rights.renames(one_way) => Some("collection.rename"),
+        collection::Request::Delete(_) if !rights.delete => Some("collection.delete"),
+        _ => None,
+    };
+    if let Some(right) = refused {
+        return Err(InvitationFailure::Permanent(anyhow!(
+            "{right} is disabled on source {}",
+            side.name
+        )));
+    }
+
     let prefix = format!("{}/", side.namespace);
     let anchor = || match intent.collection.strip_prefix(&prefix) {
         Some(id) => Ok(id.to_owned()),

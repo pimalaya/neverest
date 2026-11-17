@@ -178,6 +178,10 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed `sync --declare-only` performing a queued collection create, rename or delete the source's rights no longer allow: it parks.
+
+- Fixed a calendar reply or cancel with a misspelled member acting on the whole series: it parks.
+
 - Fixed a stop signal waiting out a throttled provider for minutes: the wait is cut short.
 
 - Fixed `conflict resolve` failing a resolution it applied when another app's queued row parked in the same drain.

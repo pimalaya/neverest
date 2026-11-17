@@ -272,6 +272,10 @@ fn answer(
                 String::new(),
             )
         }
+        ("DELETE", "/dav/book/", None) => {
+            state.cards.clear();
+            ("204 No Content".into(), Vec::new(), String::new())
+        }
         ("DELETE", _, Some(name)) => match state.cards.remove(name) {
             Some(_) => ("204 No Content".into(), Vec::new(), String::new()),
             None => ("404 Not Found".into(), Vec::new(), String::from("gone")),

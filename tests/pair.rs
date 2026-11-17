@@ -205,3 +205,41 @@ fn writes_a_target_s_rights_forbid_are_reported_held_never_applied() {
     let after = dst.requests("PUT").len() + dst.requests("DELETE").len();
     assert_eq!(after, writes, "no write reached the target");
 }
+
+/// A collection delete queued while the right was on is not performed by
+/// a declaration once the configuration turned it off: it parks.
+#[test]
+fn a_declaration_performs_no_collection_intent_its_rights_now_refuse() {
+    use io_pimdir::client::producer::{PimdirActionStatus, PimdirProducer};
+
+    let home = tempfile::tempdir().unwrap();
+    let dav = FakeDav::start();
+    dav.put("a.vcf", &card("a"));
+    let config = solo(home.path(), &dav);
+    let granted = fs::read_to_string(&config).unwrap() + "carddav.collection.delete = true\n";
+    fs::write(&config, &granted).unwrap();
+    let (code, report) = sync(home.path(), &config, &["--init"]);
+    assert_eq!(code, 0, "{report}");
+
+    let store = home.path().join("store");
+    let mut producer = PimdirProducer::open(&store, "neverest-tests").unwrap();
+    let id = producer
+        .enqueue_collection_delete("pair/carddav/book", None)
+        .unwrap()
+        .handle
+        .id;
+    fs::write(&config, granted.replace("delete = true", "delete = false")).unwrap();
+
+    sync(home.path(), &config, &["--declare-only"]);
+
+    assert!(
+        !dav.requests("DELETE")
+            .contains(&String::from("DELETE /dav/book/")),
+        "the book was deleted"
+    );
+    let status = producer.action_status(id).unwrap();
+    assert!(
+        matches!(status, PimdirActionStatus::Parked { .. }),
+        "{status:?}"
+    );
+}

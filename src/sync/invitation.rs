@@ -89,8 +89,10 @@ pub struct InvitationIntent {
     pub payload: String,
 }
 
-/// The decoded `v: 1` payload of either kind.
+/// The decoded `v: 1` payload of either kind, refusing a member `v: 1` does
+/// not define as every io-pimdir reader does.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Payload {
     v: u8,
     #[serde(default)]
@@ -373,6 +375,19 @@ mod tests {
 
         let bad = intent(CANCEL, r#"{"v":1,"seq":1,"recurrence_id":"next monday"}"#);
         assert!(bad.occurrence().unwrap_err().parks());
+    }
+
+    /// A misspelled member parks the row rather than widening it to the
+    /// whole series.
+    #[test]
+    fn a_misspelled_member_parks_rather_than_acting_on_the_series() {
+        let typo = intent(
+            CANCEL,
+            r#"{"v":1,"seq":1,"recurence_id":"20261006T090000"}"#,
+        );
+
+        assert!(typo.target().unwrap_err().parks());
+        assert!(typo.invitation().unwrap_err().parks());
     }
 
     #[cfg(any(feature = "gcal", feature = "msgraph"))]

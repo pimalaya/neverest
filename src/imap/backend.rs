@@ -16,9 +16,9 @@ use chrono::DateTime;
 use io_imap::{
     client::{ImapClient as _, ImapClientError},
     rfc3501::{
-        append::ImapMessageAppendOptions, copy::ImapMessageCopyOptions,
-        fetch::ImapMessageFetchOptions, search::ImapMessageSearchOptions,
-        select::ImapMailboxSelectOptions, store::ImapMessageStoreOptions,
+        append::ImapMessageAppendOptions, fetch::ImapMessageFetchOptions,
+        search::ImapMessageSearchOptions, select::ImapMailboxSelectOptions,
+        store::ImapMessageStoreOptions,
     },
     rfc6851::r#move::ImapMessageMoveOptions,
     send::ImapOutput,
@@ -783,18 +783,6 @@ impl ImapClient {
         let uids = rows_of("SEARCH", found)?;
 
         Ok(uids.into_iter().min().map(|uid| uid.to_string()))
-    }
-
-    /// Copies a UID set from `from` to `to`.
-    #[allow(dead_code)]
-    pub fn copy_messages(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
-        let target = parse_mailbox(to)?;
-        let sequence_set = parse_uids(ids)?;
-
-        self.select_cached(from)?;
-        self.copy(sequence_set, target, ImapMessageCopyOptions { uid: true })?;
-
-        Ok(())
     }
 
     /// Moves a UID set from `from` to `to` (RFC 6851).

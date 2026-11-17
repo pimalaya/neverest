@@ -1680,7 +1680,7 @@ Every one-source sync SHALL record in the store (`set_collection_role`, pimdir S
 - **THEN** `imap/Sent Items` holds `sent` and `imap/Sent` none
 
 ### Requirement: A declaration syncs no item
-`neverest sync --declare-only` SHALL list every collection each source holds, whatever the collection filter, and record its kind, name and role, perform the queued `collection-create`, `collection-rename` and `collection-delete` intents first, and move no item: no queue drain, no send, no other intent, no enumeration and no fetch. It SHALL refuse an account with targets.
+`neverest sync --declare-only` SHALL list every collection each source holds, whatever the collection filter, and record its kind, name and role, perform the queued `collection-create`, `collection-rename` and `collection-delete` intents first, each refused, parked, when the source's rights now forbid it, as the drain it skips would refuse it, and move no item: no queue drain, no send, no other intent, no enumeration and no fetch. It SHALL refuse an account with targets.
 
 #### Scenario: A frontend adding an account
 - **GIVEN** an account whose filter keeps `INBOX` alone

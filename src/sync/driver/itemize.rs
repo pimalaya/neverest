@@ -141,12 +141,49 @@ pub(super) fn itemize_single(
     let display = display_name(&ctx.namespace, collection);
     let view = projection_view(store, collection, &ctx.name)
         .with_context(|| format!("Project {} {display}", ctx.name))?;
+    let mut forbidden = BTreeMap::new();
     for placement in view {
         for hunk in placement_hunks(&ctx.name, &ctx.name, &ctx.namespace, display, &placement) {
-            report.item_patch.push(PatchEntry::new(hunk, None));
+            match forbidden_action(&ctx.perms, &hunk) {
+                Some(action) => *forbidden.entry(action).or_default() += 1,
+                None => report.item_patch.push(PatchEntry::new(hunk, None)),
+            }
         }
     }
+    report_forbidden(ctx, display, forbidden, report);
     Ok(())
+}
+
+/// The action `hunk` names when the source's rights forbid it, the engine
+/// then holding it in the store rather than pushing it.
+fn forbidden_action(perms: &SourcePermissions, hunk: &ItemHunk) -> Option<&'static str> {
+    match hunk {
+        ItemHunk::Add { .. } | ItemHunk::Copy { .. } if !perms.item.create => Some("create"),
+        ItemHunk::Update { .. } if !perms.item.update => Some("update"),
+        ItemHunk::Delete { .. } if !perms.item.delete => Some("delete"),
+        ItemHunk::AddFlags { .. } | ItemHunk::RemoveFlags { .. } if !perms.flag.update => {
+            Some("set-flags")
+        }
+        _ => None,
+    }
+}
+
+/// Reports the writes [`forbidden_action`] held back on `ctx`, one row an
+/// action.
+fn report_forbidden(
+    ctx: &SourceCtx,
+    collection: &str,
+    forbidden: BTreeMap<&'static str, usize>,
+    report: &mut SyncOutput,
+) {
+    for (action, count) in forbidden {
+        report.forbidden.push(ForbiddenWrites {
+            side: ctx.name.clone(),
+            collection: collection.to_string(),
+            action: action.to_string(),
+            count,
+        });
+    }
 }
 
 /// Reports the pull plan: every bodiless live item, and every item the pull
@@ -442,12 +479,17 @@ pub(super) fn itemize(
         let display = display_name(&ctx.namespace, collection);
         let view = projection_view(store, collection, &ctx.name)
             .with_context(|| format!("Project {} {display}", ctx.name))?;
+        let mut forbidden = BTreeMap::new();
         for placement in view {
             for hunk in placement_hunks(&ctx.name, &other.name, &ctx.namespace, display, &placement)
             {
-                report.item_patch.push(PatchEntry::new(hunk, None));
+                match forbidden_action(&ctx.perms, &hunk) {
+                    Some(action) => *forbidden.entry(action).or_default() += 1,
+                    None => report.item_patch.push(PatchEntry::new(hunk, None)),
+                }
             }
         }
+        report_forbidden(ctx, display, forbidden, report);
     }
     Ok(())
 }

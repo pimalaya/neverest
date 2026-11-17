@@ -29,6 +29,7 @@ pub struct Faults {
 #[derive(Default)]
 struct State {
     cards: BTreeMap<String, String>,
+    removed: Vec<String>,
     faults: Faults,
     requests: Vec<String>,
 }
@@ -65,6 +66,14 @@ impl FakeDav {
     pub fn put(&self, name: &str, body: &str) {
         let mut state = self.state.lock().unwrap();
         state.cards.insert(name.to_string(), body.to_string());
+        state.removed.retain(|removed| removed != name);
+    }
+
+    /// Removes the card `name`, as another client would.
+    pub fn remove(&self, name: &str) {
+        let mut state = self.state.lock().unwrap();
+        state.cards.remove(name);
+        state.removed.push(name.to_string());
     }
 
     /// The names of the cards the book holds.
@@ -200,6 +209,14 @@ fn answer(
                 true => String::new(),
                 false => members(state),
             };
+            if !asked.is_empty() && asked != token {
+                for name in &state.removed {
+                    rows.push_str(&format!(
+                        "<d:response><d:href>/dav/book/{name}</d:href>\
+                         <d:status>HTTP/1.1 404 Not Found</d:status></d:response>"
+                    ));
+                }
+            }
             match state.faults.truncate {
                 Some(_) => {}
                 None => rows.push_str(&format!("<d:sync-token>{token}</d:sync-token>")),

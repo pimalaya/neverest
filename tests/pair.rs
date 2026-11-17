@@ -153,3 +153,55 @@ fn a_listing_the_server_cuts_short_is_reported_on_every_run() {
         }
     }
 }
+
+#[test]
+fn writes_a_target_s_rights_forbid_are_reported_held_never_applied() {
+    let home = tempfile::tempdir().unwrap();
+    let forbid = "targets.dst.carddav.item.create = false\n\
+                  targets.dst.carddav.item.update = false\n\
+                  targets.dst.carddav.item.delete = false\n";
+    let (src, dst, config) = synced_pair(&home, "");
+    src.put("b.vcf", &card("b"));
+    let (code, _) = sync(home.path(), &config, &[]);
+    assert_eq!(code, 0);
+    let config = pair(home.path(), &src, &dst, forbid);
+
+    src.remove("a.vcf");
+    src.put("b.vcf", &card("b").replace("FN:b", "FN:bee"));
+    src.put("c.vcf", &card("c"));
+    let writes = dst.requests("PUT").len() + dst.requests("DELETE").len();
+
+    for _ in 0..2 {
+        let (code, report) = sync(home.path(), &config, &[]);
+        assert_eq!(code, 0, "{report}");
+
+        let on_dst: Vec<&Value> = report["itemPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| {
+                let hunk = &entry["hunk"];
+                hunk["side"] == "dst" || hunk["targetSide"] == "dst"
+            })
+            .collect();
+        assert!(on_dst.is_empty(), "{report}");
+
+        let mut forbidden: Vec<(String, u64)> = report["forbidden"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                assert_eq!(row["side"], "dst", "{report}");
+                let action = row["action"].as_str().unwrap().to_string();
+                (action, row["count"].as_u64().unwrap())
+            })
+            .collect();
+        forbidden.sort();
+        let expected =
+            [("create", 1), ("delete", 1), ("update", 1)].map(|(a, n)| (a.to_string(), n));
+        assert_eq!(forbidden, expected, "{report}");
+    }
+
+    let after = dst.requests("PUT").len() + dst.requests("DELETE").len();
+    assert_eq!(after, writes, "no write reached the target");
+}

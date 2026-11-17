@@ -199,6 +199,11 @@ pub struct SyncOutput {
     /// The pushes a side's server gave no outcome for, left pending: a
     /// rerun pushes them again, so the run is incomplete (exit 4).
     pub unanswered: Vec<UnansweredPushes>,
+    /// The writes a source's configuration forbids, by collection and
+    /// action: held in the store, never pushed, never counted as applied.
+    ///
+    /// No warning, no exit code: the configuration asked for it.
+    pub forbidden: Vec<ForbiddenWrites>,
     /// The creates the last pass of each collection left waiting rather
     /// than pushing them, each with its reason (pimdir SYNC §5).
     ///
@@ -259,6 +264,7 @@ impl SyncOutput {
             unreadable,
             overruled,
             unanswered,
+            forbidden,
             waiting,
             disagreed,
             unlisted,
@@ -287,6 +293,7 @@ impl SyncOutput {
         self.unreadable.extend(unreadable);
         self.overruled.extend(overruled);
         self.unanswered.extend(unanswered);
+        self.forbidden.extend(forbidden);
         self.waiting.extend(waiting);
         self.disagreed.extend(disagreed);
         self.unlisted.extend(unlisted);
@@ -306,6 +313,7 @@ impl SyncOutput {
             endpoints.extend(entry.hunk.endpoints_mut());
         }
         endpoints.extend(self.collisions.iter_mut().map(|c| &mut c.side));
+        endpoints.extend(self.forbidden.iter_mut().map(|f| &mut f.side));
         endpoints.extend(self.intents.iter_mut().map(|i| &mut i.source));
         endpoints.extend(self.conflicts.iter_mut().map(|c| &mut c.side));
         endpoints.extend(self.refused.iter_mut().map(|r| &mut r.side));
@@ -563,6 +571,37 @@ impl fmt::Display for UnlistedMembers {
         write!(
             f,
             "{count} item(s) of {collection} not listed by {side}, which is capped: kept"
+        )
+    }
+}
+
+/// The writes of one action a source's configuration forbids in one
+/// collection.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ForbiddenWrites {
+    /// The source the writes were for.
+    pub side: String,
+    /// The collection, as the side names it.
+    pub collection: String,
+    /// The action its configuration forbids: `create`, `update`, `delete`
+    /// or `set-flags`.
+    pub action: String,
+    /// How many writes it held back.
+    pub count: usize,
+}
+
+impl fmt::Display for ForbiddenWrites {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            action,
+            count,
+        } = self;
+        write!(
+            f,
+            "{count} {action} write(s) to {collection} on {side} held back, its configuration forbids them"
         )
     }
 }
@@ -1402,6 +1441,14 @@ impl fmt::Display for SyncOutput {
         {
             writeln!(f, "Search index:")?;
             writeln!(f, " - {index}")?;
+            writeln!(f)?;
+        }
+
+        if !self.forbidden.is_empty() {
+            writeln!(f, "Forbidden ({n}):", n = self.forbidden.len())?;
+            for forbidden in &self.forbidden {
+                writeln!(f, " - {forbidden}")?;
+            }
             writeln!(f)?;
         }
 

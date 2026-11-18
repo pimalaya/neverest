@@ -16,4 +16,4 @@ The owner's second first run on their own IMAP account (2026-11-18) printed `Dow
 
 ## Spec
 
-- [sync](../spec/sync.md): *A sync prints its progress as events*, text mode leaving out `collection-progressed` alone.
+- [sync](../spec/sync.md): *A sync prints its progress as events*, text mode leaving out `collection-progressed` alone, a download line naming its percent before its count (`Downloading imap 42% (3540/8433)`), the owner asking the same day.

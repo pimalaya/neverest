@@ -571,10 +571,10 @@ fn the_download_after_the_scan_prints_its_progress() {
         .position(|line| *line == "Scanning imap (2/2)")
         .unwrap_or_else(|| panic!("no scan end:\n{stdout}"));
     let left = lines[scanned + 1]
-        .strip_prefix("Downloading imap (0/")
+        .strip_prefix("Downloading imap 0% (0/")
         .and_then(|rest| rest.strip_suffix(')'))
         .unwrap_or_else(|| panic!("no download after the scan:\n{stdout}"));
-    let end = format!("Downloading imap ({left}/{left})");
+    let end = format!("Downloading imap 100% ({left}/{left})");
     assert!(lines.contains(&end.as_str()), "no `{end}`:\n{stdout}");
 
     for folder in &folders {

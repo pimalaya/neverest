@@ -211,7 +211,10 @@ impl fmt::Display for SyncEvent {
                 source,
                 done,
                 total,
-            } => writeln!(f, "Downloading {source} ({done}/{total})"),
+            } => {
+                let percent = (done * 100).checked_div(*total).unwrap_or(100);
+                writeln!(f, "Downloading {source} {percent}% ({done}/{total})")
+            }
             Self::ChangeRefused {
                 source,
                 collection,

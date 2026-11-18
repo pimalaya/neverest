@@ -200,7 +200,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Fixed a first sync over several connections going quiet after its scan: the bodies still downloading once the last collection is listed print their `Downloading` count.
 
-- Fixed a long download reading as stuck in text mode, which printed its first and last count alone: it prints once per percent, as `--json` does.
+- Fixed a long download reading as stuck in text mode, which printed its first and last count alone: it prints once per percent, as `--json` does, its line naming the percent.
 
 - Fixed `sync --declare-only` performing a queued collection create, rename or delete the source's rights no longer allow: it parks.
 

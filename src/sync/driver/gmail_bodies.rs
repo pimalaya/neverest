@@ -261,7 +261,7 @@ fn a_download_prints_its_progress_as_events() {
         .collect();
     assert_eq!(
         text,
-        "Downloading gmail (0/2)\nDownloading gmail (1/2)\nDownloading gmail (2/2)\n"
+        "Downloading gmail 0% (0/2)\nDownloading gmail 50% (1/2)\nDownloading gmail 100% (2/2)\n"
     );
 }
 

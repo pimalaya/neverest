@@ -51,6 +51,23 @@ pub(super) fn phase1_spine(
         .first_mut()
         .map(|ctx| resolve_kind(&mut ctx.pool))
         .unwrap_or(Kind::Mail);
+    let tally: Mutex<Tally> = Mutex::new(Tally::default());
+    let gate = PercentGate::default();
+    let download_event = |done, total| SyncEvent::DownloadProgressed {
+        source: source.to_owned(),
+        done,
+        total,
+    };
+    let on_body = || {
+        let mut tally = tally.lock().unwrap_or_else(PoisonError::into_inner);
+        tally.settled += 1;
+        if let Some((before, left)) = tally.window {
+            let done = tally.settled - before;
+            if done <= left && gate.passes(done, left) {
+                progress.emit(|| download_event(done, left));
+            }
+        }
+    };
     let landing = Landing {
         kind,
         blobs,
@@ -58,8 +75,9 @@ pub(super) fn phase1_spine(
         applying: &applying,
         shared: shared.then_some(filtered),
         gone,
-        on_body: None,
+        on_body: Some(&on_body),
     };
+    let tally_ref = &tally;
 
     let work_ref = &work;
     let spined_ref = &spined;
@@ -158,6 +176,15 @@ pub(super) fn phase1_spine(
                     if !paused {
                         let n = scanned_ref.fetch_add(1, Ordering::Relaxed) + 1;
                         progress.emit(|| scan_event(n));
+                        if n == total && feeding {
+                            let mut tally =
+                                tally_ref.lock().unwrap_or_else(PoisonError::into_inner);
+                            let left = work_ref.fed().saturating_sub(tally.settled);
+                            if left > 0 {
+                                tally.window = Some((tally.settled, left));
+                                progress.emit(|| download_event(0, left));
+                            }
+                        }
                     }
                 }
             });
@@ -248,6 +275,15 @@ pub(super) enum Pass {
     Fill,
 }
 
+/// The queued bodies phase 1 settled, and the download its scan's end opens.
+#[derive(Default)]
+struct Tally {
+    settled: usize,
+    /// Those settled before the scan ended and those left then, once the
+    /// last collection is listed with bodies still to download.
+    window: Option<(usize, usize)>,
+}
+
 /// What a phase-1 connection does next.
 #[derive(Debug, PartialEq)]
 pub(super) enum Job {
@@ -293,6 +329,8 @@ struct WorkState {
     downloading: usize,
     /// The batches of every other body.
     batches: Vec<(BatchKey, HydrateBatch)>,
+    /// How many bodies were queued, primed or not.
+    fed: usize,
 }
 
 impl Work {
@@ -309,6 +347,7 @@ impl Work {
                 primed: Vec::new(),
                 downloading: 0,
                 batches: Vec::new(),
+                fed: 0,
             }),
             ready: Condvar::new(),
         }
@@ -328,6 +367,7 @@ impl Work {
         }
         targets.sort_by(|a, b| self.order.compare(a, b));
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.fed += targets.len();
         let queue = if primed {
             &mut state.primed
         } else {
@@ -342,6 +382,14 @@ impl Work {
         }
         drop(state);
         self.ready.notify_all();
+    }
+
+    /// How many bodies were queued so far.
+    pub(super) fn fed(&self) -> usize {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .fed
     }
 
     /// A spine ended, whether it succeeded or not, `paused` when the first

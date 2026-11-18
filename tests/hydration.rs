@@ -549,6 +549,39 @@ fn a_primed_run_reports_each_fetch_once() {
     }
 }
 
+/// Over several connections, the bodies still downloading once the last
+/// folder is listed print a download line, its start and its end.
+///
+/// Those connections download beside the listing, so a first run used to go
+/// quiet after the scan until the account's result.
+#[test]
+#[ignore = "requires a Stalwart instance (./tests/stalwart.sh) on :143 and --ignored"]
+fn the_download_after_the_scan_prints_its_progress() {
+    let tmp = tempfile::tempdir().expect("temp dir");
+    let id = std::process::id();
+    let folders: Vec<String> = ["a", "b"].iter().map(|n| format!("Quiet{id}{n}")).collect();
+    seed_large(&folders, "quiet");
+    let config = prime_config(tmp.path(), "quiet", &folders);
+
+    let stdout = neverest(&["sync", "-a", "quiet", "-j", "4"], &config);
+
+    let lines: Vec<&str> = stdout.lines().collect();
+    let scanned = lines
+        .iter()
+        .position(|line| *line == "Scanning imap (2/2)")
+        .unwrap_or_else(|| panic!("no scan end:\n{stdout}"));
+    let left = lines[scanned + 1]
+        .strip_prefix("Downloading imap (0/")
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("no download after the scan:\n{stdout}"));
+    let end = format!("Downloading imap ({left}/{left})");
+    assert!(lines.contains(&end.as_str()), "no `{end}`:\n{stdout}");
+
+    for folder in &folders {
+        imap(&format!("DELETE {folder}"));
+    }
+}
+
 /// A run under `--bodies listed` downloads the body of a new mail and
 /// leaves the bodies an interrupted run left owed for a later run.
 #[test]

@@ -198,6 +198,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed a first sync over several connections going quiet after its scan: the bodies still downloading once the last collection is listed print a `Downloading` line, its start and its end.
+
 - Fixed `sync --declare-only` performing a queued collection create, rename or delete the source's rights no longer allow: it parks.
 
 - Fixed a calendar reply or cancel with a misspelled member acting on the whole series: it parks.

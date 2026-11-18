@@ -69,7 +69,9 @@ fn a_store_version_tells_an_earlier_neverest_from_a_newer_one() {
     assert!(written_earlier(&refused(Some("storage-draft-10"))));
     assert!(written_earlier(&refused(Some("storage-draft-11"))));
     assert!(written_earlier(&refused(Some("storage-draft-12"))));
-    assert!(!written_earlier(&refused(Some("storage-draft-14"))));
+    assert!(written_earlier(&refused(Some("storage-draft-13"))));
+    assert!(!written_earlier(&refused(Some("storage-draft-15"))));
+    assert!(!written_earlier(&refused(Some("storage-draft-x"))));
     assert!(!written_earlier(&refused(Some("storage-v1"))));
     assert!(!written_earlier(&PimdirError::Busy));
 }

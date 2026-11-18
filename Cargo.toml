@@ -38,7 +38,7 @@ strip = "symbols"
 panic = "abort"
 
 [build-dependencies]
-pimalaya-cli = { version = "0.6.0", default-features = false, features = ["build"] }
+pimalaya-cli = { version = "0.6.1", default-features = false, features = ["build"] }
 
 [dev-dependencies]
 io-oauth = { version = "0.7", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
@@ -58,14 +58,14 @@ io-gpeople = { version = "0.8.1", default-features = false, optional = true }
 io-http = { version = "0.8", default-features = false, optional = true }
 io-imap = { version = "0.11.2", default-features = false, optional = true }
 io-msgraph = { version = "0.9.3", default-features = false, optional = true }
-io-pimdir = { version = "0.16.0", default-features = false, features = ["client"] }
+io-pimdir = { version = "0.17.0", default-features = false, features = ["client"] }
 io-sasl = { version = "0.2", default-features = false, features = ["scram"] }
 io-smtp = { version = "0.9", default-features = false, optional = true }
 io-webdav = { version = "0.11.0", default-features = false, optional = true }
 jiff = { version = "1", default-features = false, features = ["std"], optional = true }
 log = "0.4"
-pimalaya-cli = { version = "0.6.0", default-features = false, features = ["terminal", "signal"] }
-pimalaya-config = { version = "0.5.2", default-features = false, features = ["toml", "secret"] }
+pimalaya-cli = { version = "0.6.1", default-features = false, features = ["terminal", "signal"] }
+pimalaya-config = { version = "0.6.0", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.4", default-features = false }
 rusqlite = { version = "0.43", default-features = false }
 schemars = "1"

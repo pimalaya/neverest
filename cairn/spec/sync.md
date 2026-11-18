@@ -8,7 +8,7 @@ status: current
 
 `neverest sync` reconciles the named sources of every account, or of those `-a` names, through the io-pimdir engine over the pimdir store the accounts share. It is sync-on-demand: one reconcile per invocation, no daemon.
 
-The store and the engine follow pimdir storage-draft-13, sync-draft-13 and search-draft-13 (io-pimdir 0.14; pimdir 1c6442e, the commit the three tags name): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
+The store and the engine follow pimdir storage-draft-14, sync-draft-14 and search-draft-14 (io-pimdir 0.17, vendoring pimdir da7e01a): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
 
 ### Requirement: An account holds named sources
 An account SHALL hold a map of named sources (`sources.<name>`), each declaring exactly one remote backend, and SHALL require at least one. It MAY additionally hold a map of named targets (`targets.<name>`) on the same terms. Both map keys SHALL be the names its pimdir source ids are made from, so a name is what every binding it owns in the store is recorded against, and a rename SHALL be treated as a new source. One name SHALL NOT be both a source and a target.
@@ -865,6 +865,8 @@ A tty is not consent. A run has one when it is driven by a wrapper script, when 
 ### Requirement: A settled body is a body of its item
 A body a resolution settles on SHALL be read before it is staged, and refused unless it is a body of the collection's kind and of that item. It SHALL open and close with the kind's component delimiters (`VCARD`, `VCALENDAR`), and it SHALL state the identity the item is bound by: a body stating another `UID`, or none where the item states one, SHALL be refused. Mail SHALL be refused outright, its bodies being immutable.
 
+A settled body and a body a run merges SHALL be queued with every `X-PIMDIR-` property removed (pimdir STORAGE §18), through io-pimdir's `enqueue_with_body`: neither is the user asking a performer for an instruction.
+
 A refusal SHALL leave the divergence exactly as it was, which is what an aborted merger already does.
 
 The three bodies a run merges by itself are the store's own, and the merge refuses a side no parser reads. A settled body is the one body reaching the store that nothing derived: a merger that crashed after a partial write, a template saved half-finished and a tool writing its error message to the output path all produce bytes that are not a contact, and the item keeps its link id while losing every field that identity came from.
@@ -878,6 +880,11 @@ The three bodies a run merges by itself are the store's own, and the merge refus
 - GIVEN a settled body that reads as a card but states another `UID`
 - WHEN the decision is applied
 - THEN it is refused naming both identities
+
+#### Scenario: A settled body carrying an instruction
+- GIVEN a settled card holding an `X-PIMDIR-` property
+- WHEN the decision is applied
+- THEN the card lands without that property, the rest of it as written
 
 ### Requirement: A resolution is refused when the remote moved under it
 `neverest conflict resolve` SHALL record the revision the resolution was computed against and SHALL refuse to push when the store has since observed a newer one, reporting it rather than applying it.

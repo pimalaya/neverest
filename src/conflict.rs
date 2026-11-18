@@ -629,4 +629,31 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err:#}").contains("states none"), "{err:#}");
     }
+
+    /// A settled body asks a performer for nothing: its `X-PIMDIR-` lines
+    /// are removed before it is queued (pimdir STORAGE §18).
+    #[cfg(any(
+        feature = "carddav",
+        feature = "caldav",
+        feature = "msgraph",
+        feature = "gpeople",
+        feature = "gcal"
+    ))]
+    #[test]
+    fn a_settled_body_lands_without_its_pimdir_instructions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_conflict(dir.path());
+        let blobs = store.blobs();
+
+        let conflicts = list(&store, ACCOUNT).unwrap();
+        let conflict = find(conflicts.clone(), conflicts[0].id, None).unwrap();
+
+        let asking = card("+4").replace("END:VCARD", "X-PIMDIR-TEST:1\r\nEND:VCARD");
+        conflict
+            .apply(dir.path(), ACCOUNT, asking.as_bytes())
+            .unwrap();
+
+        let placement = load_side(&store, "contacts").unwrap().remove(0);
+        assert_eq!(placement.object, Some(blobs.hash(card("+4").as_bytes())));
+    }
 }

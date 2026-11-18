@@ -116,6 +116,10 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - **BREAKING**: Changed `pool-size` into a key of the Graph domain tables alone: on IMAP, Gmail and the other backends nothing read it, and it now fails to load as unknown. IMAP connections are bounded by `connections`.
 
+- Changed io-pimdir to 0.17 (pimdir draft-14): a store neverest wrote on io-pimdir 0.16 is refused (`store-version`) and asks to be synced by that neverest until nothing is queued, then set aside; a settled conflict body and a body a run merges are queued with their `X-PIMDIR-` properties removed (pimdir STORAGE §18), so no instruction to a performer enters the queue unasked; a refused offered create is held as that source's pending create rather than pushed and refused every run; a recurrence rule filling every period no longer stalls the indexer.
+
+- Changed pimalaya-config to 0.6 and pimalaya-cli to 0.6.1: a failing secret command ends its message with ", run `<command>` yourself to see why", a TOML parse error no longer prints the source line, a refused `Secret` never echoes its value, a text error report sanitizes its chain line by line, and `--log-file` creates its file at 0600, refusing a symbolic link.
+
 - Changed io-pimdir to 0.16: a hostile time zone rule no longer aborts a calendar pull, a second rekey or a delivered copy no longer makes another source remove a message from its server, a joined mail binding pushes its flags, a queued move into its own collection parks rather than deletes, a locally edited contact or event keeps its summary, store backups and restores never leave part of a file, and every search index is extracted again once.
 
 - **BREAKING**: Changed every account naming no `store.root` to share one store, neverest/ under the state directory, its collection ids carrying the account (`work/imap/INBOX`).

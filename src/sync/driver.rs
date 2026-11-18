@@ -78,6 +78,7 @@ use io_pimdir::{
         PimdirSyncOptions, PimdirSyncReport, PimdirWaitReason, PimdirWaiting,
     },
     upgrade::{PimdirUpgrade, PimdirUpgradeOptions, PimdirUpgradeReport},
+    version::{PimdirFormatOrder, PimdirFormatRefusal},
 };
 use log::{debug, info, warn};
 use pimalaya_cli::error::ItemError;
@@ -340,25 +341,19 @@ fn store_refusal(dir: &Path, err: PimdirError) -> anyhow::Error {
 /// Whether a store refused for its format version was written by an earlier
 /// draft than this neverest's.
 ///
-/// That is one naming no version (every draft before storage-draft-08) or a
-/// draft below [`FORMAT_VERSION`](io_pimdir::sql::FORMAT_VERSION); a later
-/// draft or a release is a newer neverest's.
+/// One naming no version or an earlier draft, by io-pimdir's order of
+/// pimdir STORAGE §4.2; a later draft or a release is a newer neverest's.
 fn written_earlier(err: &PimdirError) -> bool {
     let PimdirError::Version { found } = err else {
         return false;
     };
-    let Some(found) = found else {
-        return true;
+    let refusal = PimdirFormatRefusal {
+        found: found.as_deref(),
+        own: io_pimdir::sql::FORMAT_VERSION,
+        program: env!("CARGO_PKG_NAME"),
     };
-    let draft = |version: &str| {
-        version
-            .strip_prefix("storage-draft-")
-            .and_then(|number| number.parse::<u32>().ok())
-    };
-    match (draft(found), draft(io_pimdir::sql::FORMAT_VERSION)) {
-        (Some(found), Some(ours)) => found < ours,
-        _ => false,
-    }
+
+    refusal.order() == PimdirFormatOrder::Earlier
 }
 
 /// Marks the failure to open an endpoint's connections, which the run

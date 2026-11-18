@@ -3,7 +3,7 @@
 //! What `neverest sync --json` prints while it runs, before its
 //! [`SyncOutput`]: one line per event, each told apart from the result by
 //! its `event` key. Without `--json`, the same events print as plain lines
-//! on stderr, at most one a collection ([`SyncEvent::is_coarse`]).
+//! on stdout, a pair's per-percent count left out ([`SyncEvent::is_coarse`]).
 //!
 //! Events report progress, and the refusals a source holds (`refused`),
 //! printed as an account ends. What the run did and left (hunks,
@@ -133,14 +133,10 @@ pub enum SyncEvent {
 }
 
 impl SyncEvent {
-    /// Whether text mode prints it: every event but the per-percent ones, a
-    /// download printed as it starts and as it ends.
+    /// Whether text mode prints it: every event but a pair's per-percent
+    /// count, a long download reading as it goes.
     pub fn is_coarse(&self) -> bool {
-        match self {
-            Self::CollectionProgressed { .. } => false,
-            Self::DownloadProgressed { done, total, .. } => *done == 0 || done == total,
-            _ => true,
-        }
+        !matches!(self, Self::CollectionProgressed { .. })
     }
 
     /// Names its endpoints as `account`'s configuration does, rather than

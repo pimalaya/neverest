@@ -219,8 +219,8 @@ fn a_message_under_two_labels_downloads_once_and_one_gone_is_owed_nothing() {
 
 /// Under `--json`, the download prints its start, then its progress.
 ///
-/// A caller sees the total before the first body. Text mode prints its start
-/// and its end alone, as plain lines.
+/// A caller sees the total before the first body. Text mode prints the same
+/// counts, as plain lines.
 #[test]
 fn a_download_prints_its_progress_as_events() {
     let dir = tempfile::tempdir().unwrap();
@@ -259,7 +259,10 @@ fn a_download_prints_its_progress_as_events() {
         .filter(|event| event.is_coarse())
         .map(SyncEvent::to_string)
         .collect();
-    assert_eq!(text, "Downloading gmail (0/2)\nDownloading gmail (2/2)\n");
+    assert_eq!(
+        text,
+        "Downloading gmail (0/2)\nDownloading gmail (1/2)\nDownloading gmail (2/2)\n"
+    );
 }
 
 /// A message a label holds a body for, listed under another label

@@ -164,7 +164,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - **BREAKING**: Changed a store another user can read to be refused (`store-exposed`): `chmod 700` its directory and `chmod 600` its pimdir.db.
 
-- Changed the text output to plain lines on stderr, the result alone on stdout: no spinner and no colour.
+- Changed the text output to plain lines: no spinner and no colour.
 
 - Changed a bare `neverest` without a configuration to fail (exit 1), showing a person at a terminal the commands creating one from the shipped sample, where it offered the wizard.
 
@@ -198,7 +198,9 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
-- Fixed a first sync over several connections going quiet after its scan: the bodies still downloading once the last collection is listed print a `Downloading` line, its start and its end.
+- Fixed a first sync over several connections going quiet after its scan: the bodies still downloading once the last collection is listed print their `Downloading` count.
+
+- Fixed a long download reading as stuck in text mode, which printed its first and last count alone: it prints once per percent, as `--json` does.
 
 - Fixed `sync --declare-only` performing a queued collection create, rename or delete the source's rights no longer allow: it parks.
 

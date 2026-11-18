@@ -198,6 +198,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed install.sh saving an HTTP error page as the archive and letting `tar` fail on it: it downloads with `curl -fsSLo` and stops on the error.
 - Fixed a first sync over several connections going quiet after its scan: the bodies still downloading once the last collection is listed print their `Downloading` count.
 
 - Fixed a long download reading as stuck in text mode, which printed its first and last count alone: it prints once per percent, as `--json` does, its line naming the percent.

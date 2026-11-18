@@ -45,7 +45,7 @@ tmpdir=$(mktemp -d) || die "Cannot create temporary directory"
 trap "rm -rf $tmpdir" EXIT
 
 echo "Downloading latest $system release…"
-curl -sLo "$tmpdir/neverest.tgz" \
+curl -fsSLo "$tmpdir/neverest.tgz" \
      "$RELEASES_URL/latest/download/neverest.$target.tgz"
 
 echo "Installing binary…"

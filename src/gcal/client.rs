@@ -29,7 +29,7 @@
 //! the account's attendee or delete its meeting, with `sendUpdates=all`.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     io::{Read, Write},
     mem,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
@@ -103,9 +103,6 @@ pub struct GcalClient {
     /// The account's own address, its primary calendar's id, read once
     /// when a new event first needs it.
     owner: Option<String>,
-    /// The sync tokens this run's listings ended on, so one Google refuses
-    /// as soon as it issued it is told from one that aged.
-    issued: HashSet<String>,
     /// The zone a floating time is anchored in when the calendar states
     /// none, the user's.
     floating_zone: &'static str,
@@ -138,7 +135,6 @@ impl GcalClient {
             session: GoogleSession::new("calendar", inner, reopen),
             throttle,
             owner: None,
-            issued: HashSet::new(),
             floating_zone: zone::floating_zone(),
             listed: Arc::clone(listed),
         })
@@ -252,27 +248,20 @@ impl GcalClient {
     /// token when it holds one and the token has not expired.
     ///
     /// A full listing reports removals by absence, only a resumed one names
-    /// them. Some calendars (a public holiday one) refuse a token seconds
-    /// after issuing it: their way, not a fault, so said at debug.
+    /// them. An expired token is Google's to give, some calendars (a public
+    /// holiday one) refusing every token: nothing to fix, so said at debug.
     pub fn enumerate(&mut self, calendar: &str, cursor: Option<&[u8]>) -> Result<Enumeration> {
         let token = cursor.and_then(|bytes| String::from_utf8(bytes.to_vec()).ok());
         let (events, complete, next) = match token {
             None => self.list(calendar, None)?,
             Some(token) => match self.list(calendar, Some(&token)) {
-                Err(err) if is_expired(&err) && self.issued.contains(&token) => {
-                    debug!(
-                        "calendar sync token of {calendar} refused as soon as issued, listing it whole"
-                    );
-                    self.list(calendar, None)?
-                }
                 Err(err) if is_expired(&err) => {
-                    warn!("calendar sync token of {calendar} expired, restarting a full listing");
+                    debug!("calendar sync token of {calendar} expired, listing it whole");
                     self.list(calendar, None)?
                 }
                 result => result?,
             },
         };
-        self.issued.insert(next.clone());
 
         let mut series: BTreeMap<String, Vec<GcalEvent>> = BTreeMap::new();
         let mut vanished = Vec::new();
@@ -1288,7 +1277,6 @@ mod tests {
             session: GoogleSession::new("calendar", inner, reopen),
             throttle: Arc::new(throttle),
             owner: None,
-            issued: HashSet::new(),
             floating_zone: UTC,
             listed: Listed::default(),
         }
@@ -1486,8 +1474,8 @@ mod tests {
 
     /// A resumed listing asks what the listing that issued its token asked.
     ///
-    /// So a token Google refuses at once is the calendar's doing: the
-    /// calendar is listed whole again, the token remembered as issued.
+    /// So a token Google refuses is the calendar's doing: the calendar is
+    /// listed whole again.
     #[test]
     fn a_resumed_listing_asks_what_issued_its_token() {
         let answer = |status: &str, body: &str| {
@@ -1505,7 +1493,6 @@ mod tests {
         let mut client = over(&server, Throttle::new("gcal"));
 
         client.enumerate("c1", None).unwrap();
-        assert!(client.issued.contains("t1"));
         let listed = client.enumerate("c1", Some(b"t1")).unwrap();
 
         assert!(listed.complete, "listed whole again");

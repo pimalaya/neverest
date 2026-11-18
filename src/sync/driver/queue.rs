@@ -10,7 +10,10 @@ use crate::sync::driver::*;
 /// The store applies each action as the source syncing its collection, not as
 /// the handle draining (STORAGE §15.2), so whichever side runs first answers
 /// for both. The report names the collections whose rows landed.
-#[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "smtp", feature = "msgraph", feature = "gmail")),
+    allow(dead_code)
+)]
 pub(crate) fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutput) {
     if let Err(err) = drain_queues_into(store, report) {
         warn!("drain failed, actions stay queued: {err:#}");

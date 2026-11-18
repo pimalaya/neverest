@@ -357,13 +357,16 @@ fn gmail(name: &str, smtp: bool) -> Support {
             PimdirSupport::None,
             Some("Gmail spam is the SPAM label, a collection: a move there"),
         ),
-        MAIL_SUBMIT | MAIL_SUBMIT_COPY if !smtp => (
-            PimdirSupport::None,
-            Some("no smtp table: Gmail sends through SMTP here"),
+        MAIL_SUBMIT if smtp => (
+            PimdirSupport::Full,
+            Some("through the smtp table; Gmail files every sent message in SENT, asked or not"),
         ),
         MAIL_SUBMIT => (
             PimdirSupport::Full,
-            Some("Gmail files every sent message in SENT, asked or not"),
+            Some(
+                "through messages.send, Bcc read from the headers; Gmail files every sent \
+                 message in SENT, asked or not",
+            ),
         ),
         MAIL_SUBMIT_COPY => (PimdirSupport::Full, Some("Gmail files it in SENT itself")),
         COLLECTION_CREATE => (PimdirSupport::Full, Some("a label, nested by `/`")),

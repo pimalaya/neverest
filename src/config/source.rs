@@ -63,9 +63,9 @@ macro_rules! source_ref_accessor {
 
 /// One source: the remote it talks to, plus the channel its sends leave by.
 ///
-/// The channel belongs to the source and not the account, since sending
-/// natively (Graph's `sendMail`) or needing a companion SMTP server is a
-/// property of the provider. At most one source per account declares one.
+/// The channel belongs to the source and not the account, sending natively
+/// or through SMTP being the provider's. At most one source per account
+/// declares one.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", try_from = "SourceTable")]
 pub struct SourceConfig {
@@ -74,8 +74,8 @@ pub struct SourceConfig {
     pub backend: SourceBackendConfig,
     /// The SMTP server this source's queued submit intents flush through.
     ///
-    /// Only meaningful on a backend that cannot send by itself (IMAP), a
-    /// Graph source using `sendMail` instead. Absent, and with no source
+    /// Needed by a backend that cannot send by itself (IMAP); Gmail sends
+    /// through it in place of `messages.send`. Absent, and with no source
     /// sending natively, submit intents stay pending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub smtp: Option<SmtpConfig>,
@@ -265,10 +265,13 @@ impl SourceConfig {
         )
     }
 
-    /// Whether this source sends by itself: Graph's `sendMail` today, on a
-    /// mail source only.
+    /// Whether this source sends by itself, with no `smtp` table: Graph's
+    /// `sendMail` on its mail source, Gmail's `messages.send`.
     pub fn sends_natively(&self) -> bool {
-        matches!(self.backend, SourceBackendConfig::Msgraph(_))
+        matches!(
+            self.backend,
+            SourceBackendConfig::Msgraph(_) | SourceBackendConfig::Gmail(_)
+        )
     }
 
     /// Whether this source can carry a send channel at all.

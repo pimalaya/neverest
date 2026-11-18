@@ -78,7 +78,7 @@ pub(super) fn drain_submits(
             .unwrap_or(false)
     });
 
-    #[cfg(any(feature = "smtp", feature = "msgraph"))]
+    #[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
     {
         let entry =
             |intent: &submit::SubmitIntent, failure: Option<Failure>, parked, unconfirmed| {
@@ -237,7 +237,7 @@ pub(super) fn drain_submits(
         }
     }
 
-    #[cfg(not(any(feature = "smtp", feature = "msgraph")))]
+    #[cfg(not(any(feature = "smtp", feature = "msgraph", feature = "gmail")))]
     {
         let _ = (
             account_config,
@@ -249,7 +249,7 @@ pub(super) fn drain_submits(
             files_copy,
         );
         warn!(
-            "this build has no send channel (needs the `smtp` or the `msgraph` cargo feature), {} submit intent(s) stay pending",
+            "this build has no send channel (needs the `smtp`, `msgraph` or `gmail` cargo feature), {} submit intent(s) stay pending",
             intents.len()
         );
     }
@@ -259,7 +259,7 @@ pub(super) fn drain_submits(
 ///
 /// One whose outcome is unknown is parked unconfirmed instead, under the
 /// prefix the store reserves and writes itself (pimdir STORAGE §13, §15.2).
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 fn park_submit(
     store: &mut PimdirSourceStore,
     id: i64,
@@ -391,14 +391,14 @@ pub(super) fn sending_source(
 }
 
 /// Why a run has no send channel for its intents.
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 enum Unopened {
     /// None this build or this account offers: the intents stay pending,
     /// unreported, another build or run being able to send them.
     Pending,
-    /// The SMTP server could not be reached: named under `unreached`, the
-    /// intents pending and unattempted.
-    #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
+    /// The SMTP server or Gmail could not be reached: named under
+    /// `unreached`, the intents pending and unattempted.
+    #[cfg_attr(not(any(feature = "smtp", feature = "gmail")), allow(dead_code))]
     Unreached(UnreachedEndpoint),
     /// The SMTP server refused the credentials: each intent fails with this
     /// error, pending and unattempted.
@@ -411,7 +411,7 @@ enum Unopened {
 /// At most one source may declare an `smtp` table, the account refusing more at
 /// load, so there is no tiebreak here. A channel the run cannot have warns and
 /// leaves the intents pending.
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 #[cfg_attr(not(feature = "smtp"), allow(unused_variables))]
 fn open_send_channel<'a>(
     account_config: &AccountConfig,
@@ -461,21 +461,39 @@ fn open_send_channel<'a>(
             );
             Err(Unopened::Pending)
         }
-        #[cfg(feature = "msgraph")]
-        Some(SendChannelPick::Native(index)) => match sides[index].client.as_deref_mut() {
-            Some(Client::Msgraph(client)) if client.kind() == GraphKind::Mail => {
-                Ok(submit::SendChannel::graph(client.as_mut()))
+        #[cfg(any(feature = "msgraph", feature = "gmail"))]
+        Some(SendChannelPick::Native(index)) => {
+            #[cfg_attr(not(feature = "gmail"), allow(unused_variables))]
+            let name = sides[index].name.to_owned();
+            match sides[index].client.as_deref_mut() {
+                #[cfg(feature = "msgraph")]
+                Some(Client::Msgraph(client)) if client.kind() == GraphKind::Mail => {
+                    Ok(submit::SendChannel::graph(client.as_mut()))
+                }
+                #[cfg(feature = "gmail")]
+                Some(Client::Gmail(client)) => match client.fresh_stream() {
+                    Ok(()) => Ok(submit::SendChannel::gmail(client.as_mut())),
+                    Err(err) => {
+                        warn!(
+                            "cannot open the gmail send channel, {queued} intent(s) stay pending: {err:#}"
+                        );
+                        Err(Unopened::Unreached(UnreachedEndpoint::new(
+                            name,
+                            Failure::of(&err),
+                        )))
+                    }
+                },
+                #[allow(unreachable_patterns)]
+                _ => {
+                    warn!("no send channel available, {queued} intent(s) stay pending");
+                    Err(Unopened::Pending)
+                }
             }
-            #[allow(unreachable_patterns)]
-            _ => {
-                warn!("no send channel available, {queued} intent(s) stay pending");
-                Err(Unopened::Pending)
-            }
-        },
-        #[cfg(not(feature = "msgraph"))]
+        }
+        #[cfg(not(any(feature = "msgraph", feature = "gmail")))]
         Some(SendChannelPick::Native(_)) => {
             warn!(
-                "the side sends through Microsoft Graph, which needs the `msgraph` cargo feature, {queued} intent(s) stay pending"
+                "the side sends through Microsoft Graph or Gmail, which need the `msgraph` or the `gmail` cargo feature, {queued} intent(s) stay pending"
             );
             Err(Unopened::Pending)
         }
@@ -491,7 +509,7 @@ fn open_send_channel<'a>(
 /// Each variant is consumed by the arm its cargo feature gates, so a build with
 /// only one of them carries the other unread rather than duplicating the walk
 /// per feature combination.
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 #[allow(dead_code)]
 enum SendChannelPick {
     /// The name of the source whose `smtp` table the intents leave through.

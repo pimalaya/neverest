@@ -42,13 +42,17 @@ use crate::account::SmtpAccount;
 #[cfg(feature = "smtp")]
 use crate::error::ErrorCode;
 use crate::error::Failure;
+#[cfg(feature = "gmail")]
+use crate::gmail::client::GmailClient;
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::{GraphClient, SendMimeFailure};
 use crate::sync::{local, states_unknown_version};
 #[cfg(feature = "smtp")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(feature = "gmail")]
+use io_gmail::v1::{client::GmailClientStdError, send::GmailSendError};
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 use io_pimdir::client::blobs::PimdirBlobs;
 use io_pimdir::{
     client::PimdirStore,
@@ -86,7 +90,10 @@ const INVITING: &str = "inviting";
 ///
 /// The payload stays raw so a malformed one can be parked with its reason
 /// rather than hiding the whole intent.
-#[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "smtp", feature = "msgraph", feature = "gmail")),
+    allow(dead_code)
+)]
 #[derive(Clone, Debug)]
 pub struct SubmitIntent {
     /// The queue row's append id, the handle for acknowledging or parking it.
@@ -99,7 +106,10 @@ pub struct SubmitIntent {
     pub payload: String,
 }
 
-#[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "smtp", feature = "msgraph", feature = "gmail")),
+    allow(dead_code)
+)]
 impl SubmitIntent {
     /// The decoded envelope, read by io-pimdir's [`PimdirSubmit`].
     ///
@@ -143,7 +153,10 @@ impl SubmitIntent {
 /// The distinction is why submission sits in the queue: a transient failure
 /// keeps the intent, a permanent one stops re-sending but stays queryable,
 /// and an unconfirmed one stops it too, the message having perhaps left.
-#[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "smtp", feature = "msgraph", feature = "gmail")),
+    allow(dead_code)
+)]
 #[derive(Debug)]
 pub enum SubmitFailure {
     /// Retry: certainly not delivered, the row stays pending for the next
@@ -156,7 +169,10 @@ pub enum SubmitFailure {
     Unconfirmed(anyhow::Error),
 }
 
-#[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "smtp", feature = "msgraph", feature = "gmail")),
+    allow(dead_code)
+)]
 impl SubmitFailure {
     /// A permanent failure from any error.
     pub fn permanent(err: anyhow::Error) -> Self {
@@ -223,7 +239,10 @@ pub fn unconfirmed_reason(detail: &str) -> String {
 
 /// What a failure tells about the message, before it is wrapped with its
 /// error: the classifiers' pure half.
-#[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "smtp", feature = "msgraph", feature = "gmail")),
+    allow(dead_code)
+)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Disposition {
     /// Certainly not delivered, worth trying again.
@@ -236,7 +255,10 @@ pub enum Disposition {
     Unconfirmed,
 }
 
-#[cfg_attr(not(any(feature = "smtp", feature = "msgraph")), allow(dead_code))]
+#[cfg_attr(
+    not(any(feature = "smtp", feature = "msgraph", feature = "gmail")),
+    allow(dead_code)
+)]
 impl Disposition {
     fn with(self, err: anyhow::Error) -> SubmitFailure {
         match self {
@@ -304,6 +326,20 @@ pub fn graph_disposition(status: Option<u16>, unanswered: bool) -> Disposition {
         Some(_) => Disposition::Transient,
         None if unanswered => Disposition::Unconfirmed,
         None => Disposition::Transient,
+    }
+}
+
+/// A Gmail `messages.send` failure by its HTTP status, `None` when no answer
+/// was read, and whether the request may have been taken by then.
+///
+/// As [`graph_disposition`], but a 403 waits: a token without the send
+/// scope or a domain policy is the user's to fix, Gmail's rate limits being
+/// retried before they reach here and then read as 429.
+#[cfg_attr(not(feature = "gmail"), allow(dead_code))]
+pub fn gmail_disposition(status: Option<u16>, taken: bool) -> Disposition {
+    match status {
+        Some(403) => Disposition::Transient,
+        status => graph_disposition(status, taken),
     }
 }
 
@@ -405,7 +441,7 @@ impl InFlight {
 ///
 /// Its links are the send-capable backends compiled in; a build with none of
 /// them has no channel type at all and can only leave intents pending.
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 pub struct SendChannel<'a> {
     link: Link<'a>,
     /// Why the session cannot carry another message, once it cannot.
@@ -414,7 +450,7 @@ pub struct SendChannel<'a> {
     held: Option<String>,
 }
 
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 enum Link<'a> {
     /// A fresh SMTP session, quit once every intent has been attempted.
     #[cfg(feature = "smtp")]
@@ -422,13 +458,18 @@ enum Link<'a> {
     /// The live Graph session: sendMail with the raw MIME body, filed in Sent.
     #[cfg(feature = "msgraph")]
     Graph(&'a mut GraphClient),
-    /// Ties the lifetime down when the Graph variant is compiled out.
-    #[cfg(not(feature = "msgraph"))]
+    /// The live Gmail session: `messages.send` with the raw MIME body, filed
+    /// in SENT.
+    #[cfg(feature = "gmail")]
+    Gmail(&'a mut GmailClient),
+    /// Ties the lifetime down when the Graph and Gmail variants are compiled
+    /// out.
+    #[cfg(not(any(feature = "msgraph", feature = "gmail")))]
     #[allow(dead_code)]
     Unused(core::marker::PhantomData<&'a ()>),
 }
 
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 impl<'a> SendChannel<'a> {
     /// A channel over an open SMTP submission session.
     #[cfg(feature = "smtp")]
@@ -445,6 +486,16 @@ impl<'a> SendChannel<'a> {
     pub fn graph(client: &'a mut GraphClient) -> Self {
         Self {
             link: Link::Graph(client),
+            lost: None,
+            held: None,
+        }
+    }
+
+    /// A channel through a Gmail session's `messages.send`.
+    #[cfg(feature = "gmail")]
+    pub fn gmail(client: &'a mut GmailClient) -> Self {
+        Self {
+            link: Link::Gmail(client),
             lost: None,
             held: None,
         }
@@ -547,7 +598,7 @@ fn ehlo_domain() -> SmtpEhloDomain<'static> {
 ///
 /// Read once its envelope decodes and its body is found, so every failure
 /// before the network is told apart from the send's own.
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 pub struct Outgoing {
     #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
     submit: PimdirSubmit,
@@ -556,7 +607,7 @@ pub struct Outgoing {
 
 /// Reads the envelope and the pinned body of one intent, the one message
 /// held in memory at a time.
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 pub fn prepare(blobs: &PimdirBlobs, intent: &SubmitIntent) -> Result<Outgoing, SubmitFailure> {
     let submit = intent.envelope()?;
     let hash = intent
@@ -575,7 +626,7 @@ pub fn prepare(blobs: &PimdirBlobs, intent: &SubmitIntent) -> Result<Outgoing, S
 /// A failure leaving the session unusable (no reply, or a 421 closing it,
 /// RFC 5321 §4.2.2) or a sending-limit refusal
 /// [`stops`](SendChannel::stopped) the channel, which then attempts nothing.
-#[cfg(any(feature = "smtp", feature = "msgraph"))]
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
 pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), SubmitFailure> {
     if let Some(why) = channel.stopped() {
         return Err(SubmitFailure::Transient(anyhow!("Not attempted, {why}")));
@@ -626,7 +677,28 @@ pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), 
             }
             Err(failure)
         }
-        #[cfg(not(feature = "msgraph"))]
+        #[cfg(feature = "gmail")]
+        Link::Gmail(client) => {
+            let Err(error) = client.send_raw(&bytes) else {
+                return Ok(());
+            };
+            let (status, taken) = match &error {
+                GmailClientStdError::Send(GmailSendError::Api(api)) => (Some(api.status), false),
+                GmailClientStdError::Send(
+                    GmailSendError::ParseUrl(_)
+                    | GmailSendError::SerializeRequest(_)
+                    | GmailSendError::InvalidRequest(_),
+                ) => (None, false),
+                _ => (None, true),
+            };
+            let error = anyhow!(error).context("Gmail send error");
+            let failure = gmail_disposition(status, taken).with(error);
+            if status.is_none() {
+                channel.lost = Some(format!("the send channel broke: {:#}", failure.error()));
+            }
+            Err(failure)
+        }
+        #[cfg(not(any(feature = "msgraph", feature = "gmail")))]
         Link::Unused(_) => unreachable!("the placeholder link is never constructed"),
     }
 }
@@ -829,6 +901,27 @@ mod dispositions {
         assert_eq!(graph_disposition(Some(507), false), Disposition::Transient);
         assert_eq!(graph_disposition(None, true), Disposition::Unconfirmed);
         assert_eq!(graph_disposition(None, false), Disposition::Transient);
+    }
+
+    /// A Gmail send is judged as a Graph one, but a 403 (a token without the
+    /// send scope, a domain policy) waits for the user rather than parking.
+    #[test]
+    fn a_gmail_send_failure_is_judged_by_its_status() {
+        for (status, taken, disposition) in [
+            (Some(403), false, Disposition::Transient),
+            (Some(429), false, Disposition::Transient),
+            (Some(400), false, Disposition::Permanent),
+            (Some(413), false, Disposition::Permanent),
+            (Some(500), false, Disposition::Unconfirmed),
+            (None, true, Disposition::Unconfirmed),
+            (None, false, Disposition::Transient),
+        ] {
+            assert_eq!(
+                gmail_disposition(status, taken),
+                disposition,
+                "{status:?} {taken}"
+            );
+        }
     }
 
     /// The store writes the prefix itself, so the detail it is handed has none.

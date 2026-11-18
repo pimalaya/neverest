@@ -60,6 +60,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Added the sent copy: a queued `submit` asking for `copy` files the message there once sent, unless the provider files sent mail itself (Gmail, Graph).
 
+- Added native sending on Gmail through `messages.send`, so a Gmail account needs no `smtp` table to send. An `smtp` table, under the account or the source, still sends in its place. The token needs the `gmail.send` or the `https://mail.google.com/` scope.
+
 - Added Microsoft Graph mail moves, copies and adds into Drafts, the one folder Graph creates a message in.
 
   The source declares the add on Drafts alone, so a frontend refuses an add elsewhere up front.

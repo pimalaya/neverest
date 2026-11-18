@@ -49,7 +49,7 @@ use io_gmail::v1::{
         messages::{
             GmailInternalDateSource, GmailMessage, GmailMessageFormat,
             batch_modify::GmailMessagesBatchModify, decode_raw, encode_raw,
-            import::GmailMessageImport, list::GmailMessagesListParams,
+            import::GmailMessageImport, list::GmailMessagesListParams, send::GmailMessageSend,
         },
     },
     send::{GMAIL_API_BASE, GmailApiError, GmailSendError, GmailSendOutput},
@@ -153,6 +153,7 @@ mod units {
     pub const HISTORY_LIST: u32 = 2;
     pub const MESSAGE_GET: u32 = 5;
     pub const MESSAGE_IMPORT: u32 = 25;
+    pub const MESSAGE_SEND: u32 = 100;
     pub const MESSAGE_DELETE: u32 = 10;
     pub const MESSAGE_MODIFY: u32 = 5;
     pub const BATCH_MODIFY: u32 = 50;
@@ -1102,6 +1103,30 @@ impl GmailClient {
         raw_body(id, message)
     }
 
+    /// Gives the API session a new connection, so a send never goes out
+    /// over one Gmail closed while it idled.
+    pub fn fresh_stream(&mut self) -> Result<()> {
+        self.inner.reopen()
+    }
+
+    /// Sends raw MIME through `messages.send`, which files the message in
+    /// SENT itself.
+    ///
+    /// Sent again on a refusal alone ([`create`](Self::create)). Gmail reads
+    /// the recipients from the headers, `Bcc` included and stripped: other
+    /// envelope ones are lost.
+    pub fn send_raw(&mut self, raw: &[u8]) -> Result<(), GmailClientStdError> {
+        let message = GmailMessage {
+            raw: Some(encode_raw(raw)),
+            ..Default::default()
+        };
+        self.create(units::MESSAGE_SEND, |client| {
+            let coroutine = GmailMessageSend::new(&client.auth, &client.user_id, &message)?;
+            client.run(coroutine)
+        })
+        .map(|_| ())
+    }
+
     /// Imports a message into a label with its flags, keeping its own date
     /// and `Message-ID`, and returns the id it really got.
     ///
@@ -1839,7 +1864,7 @@ pub(crate) mod scripted {
     }
 
     /// A Gmail session named `name` over the connections `server` opens.
-    fn session(name: &'static str, server: &Server) -> GoogleSession<GmailClientStd> {
+    pub(crate) fn session(name: &'static str, server: &Server) -> GoogleSession<GmailClientStd> {
         let options = GmailClientStdConnectOptions {
             tls: Tls::default(),
             proxy: Proxy::None,
@@ -1865,7 +1890,7 @@ mod tests {
     use crate::{
         error::Failure,
         kind::mail::vectors::VECTORS,
-        scripted::{json, ok},
+        scripted::{Server, json, ok},
     };
 
     #[test]
@@ -2404,6 +2429,33 @@ mod tests {
             let reason = crate::error::refusal(&err);
             assert_eq!(reason.is_some(), refused, "{status} {body}: {err:#}");
         }
+    }
+
+    /// A send posts the raw message to `messages.send` over a new connection,
+    /// and a refusal comes back with its status readable.
+    #[test]
+    fn a_send_posts_the_raw_message_over_a_fresh_stream() {
+        let raw = b"To: b@y.org\r\nBcc: c@y.org\r\nSubject: hi\r\n\r\nhello";
+        let (mut client, _, _) = scripted();
+        let api = Server::new(vec![Vec::new(), Vec::new()]);
+        client.inner = session("gmail", &api);
+
+        client.fresh_stream().unwrap();
+        api.answer(json("200 OK", r#"{"id":"m9","threadId":"t9"}"#));
+        client.send_raw(raw).unwrap();
+
+        assert_eq!(api.requests().len(), 2, "a second connection");
+        assert_eq!(api.requests()[1], ["POST /gmail/v1/users/me/messages/send"]);
+        let sent = api.written(1);
+        assert!(sent.contains(&encode_raw(raw)), "{sent}");
+
+        let invalid = r#"{"error":{"code":400,"message":"Recipient address required","errors":[{"reason":"invalidArgument"}]}}"#;
+        api.answer(json("400 Bad Request", invalid));
+        let err = client.send_raw(raw).unwrap_err();
+        assert!(
+            matches!(&err, GmailClientStdError::Send(GmailSendError::Api(api)) if api.status == 400),
+            "{err:#}"
+        );
     }
 
     /// An expired history restarts a round, for that label only.

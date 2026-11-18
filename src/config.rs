@@ -381,6 +381,9 @@ impl AccountConfig {
 
     /// Hands the account `smtp` table to the one sugar source that could use
     /// it; a source in the explicit table carries its own.
+    ///
+    /// Gmail sends by itself yet takes the channel, which then sends in its
+    /// place; Graph mail never does, sending through `sendMail` alone.
     fn attach_send_channel(&self, sources: &mut HashMap<String, SourceConfig>) -> Result<()> {
         let Some(smtp) = &self.smtp else {
             return Ok(());
@@ -389,7 +392,9 @@ impl AccountConfig {
         let mut candidates: Vec<_> = sources
             .iter()
             .filter(|(name, source)| {
-                self.is_sugar(name) && source.carries_mail() && !source.sends_natively()
+                self.is_sugar(name)
+                    && source.carries_mail()
+                    && !matches!(source.backend, SourceBackendConfig::Msgraph(_))
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -940,6 +945,39 @@ mod tests {
         assert!(sources["imap"].smtp.is_some(), "the channel completes mail");
         assert!(!sources["carddav"].carries_mail());
         assert!(sources["carddav"].smtp.is_none());
+    }
+
+    /// Gmail sends by itself, and an account `smtp` table still lands on it,
+    /// sending in its place.
+    #[test]
+    fn gmail_sends_by_itself_or_through_the_account_smtp() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            gmail.auth.token.raw = "tok"
+            gpeople.auth.token.raw = "tok"
+            "#,
+        )
+        .unwrap();
+        account.validate().unwrap();
+        let sources = account.sources().unwrap();
+        assert!(sources["gmail"].sends_natively());
+        assert!(sources["gmail"].smtp.is_none());
+
+        let account: AccountConfig = toml::from_str(
+            r#"
+            gmail.auth.token.raw = "tok"
+            gpeople.auth.token.raw = "tok"
+            smtp.server = "smtps://smtp.gmail.com:465"
+            "#,
+        )
+        .unwrap();
+        account.validate().unwrap();
+        let sources = account.sources().unwrap();
+        assert!(
+            sources["gmail"].smtp.is_some(),
+            "the channel completes Gmail"
+        );
+        assert!(sources["gpeople"].smtp.is_none());
     }
 
     /// The legal cells of the matrix, and what each resolves `retain` to.

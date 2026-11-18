@@ -49,7 +49,8 @@
 #imap.alpn = ["imap"]					# the ALPN ids rustls offers, empty for none
 #imap.proxy.url = "socks5h://localhost:1080"		# the proxy keys, for IMAP alone
 
-# SMTP, the send channel of queued messages, one per account
+# SMTP, the send channel of queued messages, one per account; Gmail and Graph
+# send by themselves, and Gmail takes this table instead when given
 #smtp.server = "smtp.example.org"		# implicit TLS on 465; smtp://host is cleartext on 25
 #smtp.starttls = false				# upgrade an smtp:// connection with STARTTLS
 #smtp.sasl.plain.username = "alice@example.org"	# as imap.sasl

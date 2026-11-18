@@ -70,7 +70,8 @@
 #gmail.batches-in-flight = 1		# batches at once across the source's connections
 #gmail.units-per-minute = 6000		# the quota units spent over any 60 seconds
 
-# Microsoft Graph, one session for its domains, each a source
+# Microsoft Graph, one session for its domains, each a source synced only
+# when named: `true`, or any key under it
 #msgraph.user-id = "me"				# the mailbox owner [bob@example.org]
 #msgraph.auth.token.command = "exit 127"	# prints an OAuth 2.0 access token with each domain's scope
 #msgraph.mail = true				# the mail folders, or a table of the sync keys and pool-size

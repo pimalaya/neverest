@@ -1617,14 +1617,20 @@ impl fmt::Display for SyncOutput {
             (n, 0, w, false) => {
                 writeln!(f, "Account {account} synchronized: {n} hunks, {w} warnings")
             }
-            (n, e, 0, false) => writeln!(
-                f,
-                "Account {account} partially synchronized: {n} hunks, {e} errors"
-            ),
-            (n, e, w, false) => writeln!(
-                f,
-                "Account {account} partially synchronized: {n} hunks, {e} errors, {w} warnings"
-            ),
+            (n, e, w, false) => {
+                let applied = n - mailbox_errors - item_errors;
+                let warned = match w {
+                    0 => String::new(),
+                    w => format!(", {w} warnings"),
+                };
+                match applied {
+                    0 => writeln!(f, "Account {account} not synchronized: {e} errors{warned}"),
+                    n => writeln!(
+                        f,
+                        "Account {account} partially synchronized: {n} hunks, {e} errors{warned}"
+                    ),
+                }
+            }
         }
     }
 }

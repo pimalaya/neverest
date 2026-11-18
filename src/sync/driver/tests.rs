@@ -4858,6 +4858,41 @@ fn a_relayed_copy_is_itemized_so_the_run_never_reads_as_already_in_sync() {
     assert!(text.contains("from left to right"), "{text}");
 }
 
+/// A run whose every hunk failed, offline say, synchronized nothing, and
+/// one that applied some counts those alone.
+#[test]
+fn a_run_whose_every_hunk_failed_is_not_synchronized() {
+    let scan = |side: &str| CollectionHunk::Scan {
+        side: side.into(),
+        collection: "*".into(),
+    };
+    let mut report = SyncOutput {
+        account: "a".into(),
+        ..Default::default()
+    };
+    for side in ["imap", "carddav"] {
+        let error = anyhow!("Network is unreachable");
+        report
+            .collection_patch
+            .push(PatchEntry::new(scan(side), Some(error)));
+    }
+
+    let text = report.to_string();
+    assert!(
+        text.contains("Account a not synchronized: 2 errors\n"),
+        "{text}"
+    );
+
+    report
+        .collection_patch
+        .push(PatchEntry::new(scan("caldav"), None));
+    let text = report.to_string();
+    assert!(
+        text.contains("Account a partially synchronized: 1 hunks, 2 errors\n"),
+        "{text}"
+    );
+}
+
 /// A store whose `left` holds `mid:a@x` dated `date`, the `right`
 /// target's coverage of the inbox written by `right`.
 fn relay_store(dir: &Path, date: Option<&str>, right: Vec<PimdirWriteOp>) -> PimdirStore {

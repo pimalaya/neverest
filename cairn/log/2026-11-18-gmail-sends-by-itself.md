@@ -18,7 +18,9 @@ The owner's ruling of 2026-11-18: a Gmail account sends through Gmail by default
 - src/sync/capability.rs: a Gmail source declares `mail.submit` and `mail.submit.copy` `full` with or without `smtp`, the detail naming the channel.
 - config.sample.toml: the SMTP block says Gmail and Graph send by themselves.
 
-Not run live yet: a send through `messages.send` on the Google test account, a large message among them (`send` posts JSON, not the upload endpoint, as `import` does).
+Run live the same day on the Google test account (a scratch copy of the account with no `smtp`, its own store): a message to the Microsoft test mailbox with a `Bcc` to itself was delivered to both, the `Bcc` hidden from Microsoft, filed in SENT; a 14.3 MB and a 28.7 MB message (10 and 20 MB attachments, sent to itself) were taken as one JSON post each, 5 seconds for the first, no bounce. A scoped sync after them fetched each once into SENT and INBOX and the next run was empty. Every test message was deleted from both servers.
+
+Gmail replaces the body's `Message-ID` with its own (`<...@mail.gmail.com>`) on `messages.send`, where its SMTP server keeps it (the run of 2026-11-17 bound its SMTP send by its own id). The store is unaffected, the SENT copy coming from Gmail; a producer that keeps the id it wrote, to thread a follow-up, holds one no recipient saw.
 
 ## Spec
 

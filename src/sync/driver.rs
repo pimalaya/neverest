@@ -107,7 +107,7 @@ use crate::{
             relay::*, send::*, spine::*, upkeep::*,
         },
         event::SyncEvent,
-        hunk::{CollectionHunk, ItemHunk},
+        hunk::{CollectionHunk, Direction, ItemHunk},
         invitation::{
             self, Failure as InvitationFailure, Invitation, InvitationIntent, Refusal, Target,
         },

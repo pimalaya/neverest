@@ -100,6 +100,18 @@ impl fmt::Display for CollectionHunk {
     }
 }
 
+/// Which way an item change went.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum Direction {
+    /// Applied on `side`, from the store or the other endpoint.
+    #[default]
+    Push,
+    /// Made on `side` by its server or another client, and taken into the
+    /// store.
+    Pull,
+}
+
 /// Item-level change.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(
@@ -142,9 +154,10 @@ pub enum ItemHunk {
         #[serde(skip)]
         content_key: u64,
     },
-    /// Add `flags` on `side`'s copy of the item.
+    /// Add `flags` on `side`'s copy of the item, or, pulled, `side` added
+    /// them.
     AddFlags {
-        /// The endpoint the change is applied on.
+        /// The endpoint the change is applied on, or pulled from.
         side: String,
         /// The collection, by the name its server answers to.
         collection: String,
@@ -152,13 +165,16 @@ pub enum ItemHunk {
         id: String,
         /// The flags being set.
         flags: BTreeSet<Flag>,
+        /// Whether `side` takes the change or made it.
+        direction: Direction,
         /// The cross-side alignment key, never serialized.
         #[serde(skip)]
         content_key: u64,
     },
-    /// Remove `flags` from `side`'s copy of the item.
+    /// Remove `flags` from `side`'s copy of the item, or, pulled, `side`
+    /// removed them.
     RemoveFlags {
-        /// The endpoint the change is applied on.
+        /// The endpoint the change is applied on, or pulled from.
         side: String,
         /// The collection, by the name its server answers to.
         collection: String,
@@ -166,18 +182,22 @@ pub enum ItemHunk {
         id: String,
         /// The flags being cleared.
         flags: BTreeSet<Flag>,
+        /// Whether `side` takes the change or made it.
+        direction: Direction,
         /// The cross-side alignment key, never serialized.
         #[serde(skip)]
         content_key: u64,
     },
-    /// Delete `side`'s copy of the item.
+    /// Delete `side`'s copy of the item, or, pulled, `side` deleted it.
     Delete {
-        /// The endpoint the change is applied on.
+        /// The endpoint the change is applied on, or pulled from.
         side: String,
         /// The collection, by the name its server answers to.
         collection: String,
         /// The item's handle on that endpoint.
         id: String,
+        /// Whether `side` takes the change or made it.
+        direction: Direction,
         /// The cross-side alignment key, never serialized.
         #[serde(skip)]
         content_key: u64,
@@ -264,10 +284,34 @@ impl fmt::Display for ItemHunk {
                 collection,
                 id,
                 flags,
+                direction: Direction::Push,
                 ..
             } => write!(
                 f,
                 "add {flags} to item {id} in {collection} on {side}",
+                flags = format_flag_list(flags),
+            ),
+            Self::AddFlags {
+                side,
+                collection,
+                id,
+                flags,
+                ..
+            } => write!(
+                f,
+                "pull {flags} added to item {id} in {collection} from {side}",
+                flags = format_flag_list(flags),
+            ),
+            Self::RemoveFlags {
+                side,
+                collection,
+                id,
+                flags,
+                direction: Direction::Push,
+                ..
+            } => write!(
+                f,
+                "remove {flags} from item {id} in {collection} on {side}",
                 flags = format_flag_list(flags),
             ),
             Self::RemoveFlags {
@@ -278,16 +322,28 @@ impl fmt::Display for ItemHunk {
                 ..
             } => write!(
                 f,
-                "remove {flags} from item {id} in {collection} on {side}",
+                "pull {flags} removed from item {id} in {collection} from {side}",
                 flags = format_flag_list(flags),
             ),
             Self::Delete {
                 side,
                 collection,
                 id,
+                direction: Direction::Push,
                 ..
             } => {
                 write!(f, "delete item {id} in {collection} on {side}")
+            }
+            Self::Delete {
+                side,
+                collection,
+                id,
+                ..
+            } => {
+                write!(
+                    f,
+                    "pull the deletion of item {id} in {collection} from {side}"
+                )
             }
             Self::Fetch {
                 side,

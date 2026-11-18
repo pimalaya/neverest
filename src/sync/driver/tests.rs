@@ -4405,19 +4405,36 @@ fn a_server_delete_is_named_once_on_each_endpoint() {
         }
     }
 
-    let deletes: Vec<&str> = report
+    let deletes: Vec<(&str, Direction)> = report
         .item_patch
         .iter()
         .filter_map(|entry| match &entry.hunk {
-            ItemHunk::Delete { side, .. } => Some(side.as_str()),
+            ItemHunk::Delete {
+                side, direction, ..
+            } => Some((side.as_str(), *direction)),
             _ => None,
         })
         .collect();
     assert_eq!(
         deletes,
-        ["left", "right"],
+        [("left", Direction::Pull), ("right", Direction::Push)],
         "the pull names it on left, the projection owes it on right: {:?}",
         report.item_patch,
+    );
+
+    let json = serde_json::to_string(&report.item_patch).unwrap();
+    assert!(
+        json.contains(r#""side":"left","collection":"contacts","id":"card1","direction":"pull""#),
+        "{json}"
+    );
+    let text = report.to_string();
+    assert!(
+        text.contains("pull the deletion of item card1 in contacts from left"),
+        "{text}"
+    );
+    assert!(
+        text.contains("delete item card1 in contacts on right"),
+        "{text}"
     );
 }
 

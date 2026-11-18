@@ -129,6 +129,10 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
         )),
         "along with the removal the server made; report was:\n{report}",
     );
+    assert!(
+        report.contains(r#""direction":"pull""#) && !report.contains(r#""direction":"push""#),
+        "both pulled from the server, none pushed to it; report was:\n{report}",
+    );
 
     let listed = neverest(
         &["conflict", "list", "-a", ACCOUNT, "--json"],

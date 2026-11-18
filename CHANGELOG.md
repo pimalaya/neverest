@@ -96,6 +96,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Added `coverage`, `downloaded`, `unreached`, `unsettled`, `unreadable`, `overruled`, `unanswered`, `waiting`, `disagreed`, `unlisted` and `intents` to the sync report.
 
+- Added `direction` to the `add-flags`, `remove-flags` and `delete` hunks: `pull` for a change a server made that the store took in, `push` for one the run applied on that server. The text reads a pulled one as `pull the deletion of item <id> in <collection> from <side>`.
+
 ### Changed
 
 - **BREAKING**: Changed text-mode progress lines to print on stdout before the result, as pimalaya-cli asks of a long-lived command, stderr staying the logs'. Scripts read `--json`, whose last line is the result.

@@ -52,6 +52,7 @@ pub(super) fn itemize_pulled(
                             collection: display.to_string(),
                             id: handle.0.clone(),
                             flags: added,
+                            direction: Direction::Pull,
                             content_key: 0,
                         },
                         None,
@@ -64,6 +65,7 @@ pub(super) fn itemize_pulled(
                             collection: display.to_string(),
                             id: handle.0.clone(),
                             flags: removed,
+                            direction: Direction::Pull,
                             content_key: 0,
                         },
                         None,
@@ -76,6 +78,7 @@ pub(super) fn itemize_pulled(
                         side: source.to_string(),
                         collection: display.to_string(),
                         id: handle.0.clone(),
+                        direction: Direction::Pull,
                         content_key: 0,
                     },
                     None,
@@ -556,6 +559,7 @@ pub(super) fn placement_hunks(
             side: source.to_string(),
             collection: collection.to_string(),
             id: placement.handle.0.clone(),
+            direction: Direction::Push,
             content_key: 0,
         }],
         PimdirStatus::Dirty => {
@@ -572,6 +576,7 @@ pub(super) fn placement_hunks(
                     collection: collection.to_string(),
                     id: placement.handle.0.clone(),
                     flags: added,
+                    direction: Direction::Push,
                     content_key: 0,
                 });
             }
@@ -581,6 +586,7 @@ pub(super) fn placement_hunks(
                     collection: collection.to_string(),
                     id: placement.handle.0.clone(),
                     flags: removed,
+                    direction: Direction::Push,
                     content_key: 0,
                 });
             }
@@ -671,25 +677,28 @@ pub(super) fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: 
 ///
 /// A copy carries no handle on the side it is being created on, so it is named
 /// by the item's link id, which is what an append the hub staged is keyed by
-/// too. A fetch reaches no server and is never rejected.
+/// too. A fetch and a pulled change reach no server and are never rejected.
 fn names(hunk: &ItemHunk, side: &str, collection: &str, handle: &str) -> bool {
     match hunk {
         ItemHunk::AddFlags {
             side: s,
             collection: c,
             id,
+            direction: Direction::Push,
             ..
         }
         | ItemHunk::RemoveFlags {
             side: s,
             collection: c,
             id,
+            direction: Direction::Push,
             ..
         }
         | ItemHunk::Delete {
             side: s,
             collection: c,
             id,
+            direction: Direction::Push,
             ..
         }
         | ItemHunk::Update {
@@ -710,7 +719,10 @@ fn names(hunk: &ItemHunk, side: &str, collection: &str, handle: &str) -> bool {
             source_id,
             ..
         } => target_side == side && c == collection && source_id == handle,
-        ItemHunk::Fetch { .. } => false,
+        ItemHunk::AddFlags { .. }
+        | ItemHunk::RemoveFlags { .. }
+        | ItemHunk::Delete { .. }
+        | ItemHunk::Fetch { .. } => false,
     }
 }
 

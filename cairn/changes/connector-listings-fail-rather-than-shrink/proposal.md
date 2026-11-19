@@ -30,3 +30,5 @@ src/msgraph/client/calendar.rs `series_windows` reads a series with an end date 
 Neither reading of the delta is free. Reading every open series from its start costs one request per five years of its age per series per body read (85 for a 1604 birthday, every time its body is read). Failing the read whenever the series starts before the floor fails every yearless birthday, in every run, for good.
 
 Recommendation: read an open series from the later of its start and the date its master states as `createdDateTime`, five years at a time, and up to five years past today as now. An occurrence is edited once the series exists in the mailbox, so a floor at its creation keeps every exception a person made there and costs a 1604 birthday created in 2019 two requests. A series imported with its exceptions may predate its own creation: whether Graph keeps the original `createdDateTime` on an import is the live check to make before the code, on the Microsoft test account with the owner's go.
+
+Ruling (owner, 2026-11-19): the recommendation is taken. The code lands after the live check above.

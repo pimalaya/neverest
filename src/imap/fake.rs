@@ -81,6 +81,9 @@ pub struct FakeImap {
     /// Whether an `APPEND` adds a message and names it by `APPENDUID`, else
     /// its literal is dropped and nothing named.
     keeps: Arc<AtomicBool>,
+    /// Whether the greeting announces UIDPLUS (RFC 4315), else a kept
+    /// `APPEND` names no `APPENDUID`.
+    uidplus: Arc<AtomicBool>,
 }
 
 impl FakeImap {
@@ -98,6 +101,7 @@ impl FakeImap {
         let undated = Arc::new(Mutex::new(None));
         let enables = Arc::new(AtomicBool::new(true));
         let keeps = Arc::new(AtomicBool::new(false));
+        let uidplus = Arc::new(AtomicBool::new(true));
 
         let logged = Arc::clone(&commands);
         let shared = Arc::clone(&served);
@@ -109,6 +113,7 @@ impl FakeImap {
         let blind = Arc::clone(&undated);
         let enabling = Arc::clone(&enables);
         let keeping = Arc::clone(&keeps);
+        let announcing = Arc::clone(&uidplus);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
@@ -122,6 +127,7 @@ impl FakeImap {
                 let undated = Arc::clone(&blind);
                 let enables = Arc::clone(&enabling);
                 let keeps = Arc::clone(&keeping);
+                let uidplus = Arc::clone(&announcing);
                 thread::spawn(move || {
                     let refusals = Refusals {
                         write: &refusal,
@@ -129,6 +135,7 @@ impl FakeImap {
                         undated: &undated,
                         enables: &enables,
                         keeps: &keeps,
+                        uidplus: &uidplus,
                     };
                     serve(
                         stream, qresync, &mailbox, &headers, &commands, &fault, refusals,
@@ -149,6 +156,7 @@ impl FakeImap {
             undated,
             enables,
             keeps,
+            uidplus,
         }
     }
 
@@ -161,6 +169,12 @@ impl FakeImap {
     /// Has every `APPEND` add a message, named by `APPENDUID`.
     pub fn keep_appends(&self) {
         self.keeps.store(true, Ordering::SeqCst);
+    }
+
+    /// Has the greeting announce no UIDPLUS, for the connections opened
+    /// after.
+    pub fn without_uidplus(&self) {
+        self.uidplus.store(false, Ordering::SeqCst);
     }
 
     /// Has every search for the messages with no `Date` refused with the
@@ -227,21 +241,22 @@ impl FakeImap {
 
 /// The commands a server refuses.
 ///
-/// Its next write, once, every search for the messages with no `Date`, and
-/// what an `ENABLE` asks when it enables nothing.
+/// Its next write, once, every search for the messages with no `Date`, what
+/// an `ENABLE` asks when it enables nothing, and the UIDPLUS it may lack.
 struct Refusals<'a> {
     write: &'a Mutex<Option<&'static str>>,
     early: &'a Mutex<Option<&'static str>>,
     undated: &'a Mutex<Option<&'static str>>,
     enables: &'a AtomicBool,
     keeps: &'a AtomicBool,
+    uidplus: &'a AtomicBool,
 }
 
 /// Serves one connection until the client leaves.
 ///
-/// An `APPEND` literal is read and dropped, with no `APPENDUID`. A fault cuts
-/// a reply after its first row, found by its closing `)`: no fake body ends a
-/// line so.
+/// An `APPEND` literal is dropped with no `APPENDUID`, unless the server
+/// keeps appends, its `Message-ID` naming the message. A fault cuts a reply
+/// after its first row, found by its closing `)`: no fake body ends so.
 fn serve(
     stream: TcpStream,
     qresync: bool,
@@ -259,7 +274,9 @@ fn serve(
     } else {
         ""
     };
-    let greeting = format!("* PREAUTH [CAPABILITY IMAP4rev1 UIDPLUS{extensions}] fake\r\n");
+    let uidplus = refusals.uidplus.load(Ordering::SeqCst);
+    let announced = if uidplus { " UIDPLUS" } else { "" };
+    let greeting = format!("* PREAUTH [CAPABILITY IMAP4rev1{announced}{extensions}] fake\r\n");
     if writer.write_all(greeting.as_bytes()).is_err() {
         return;
     }
@@ -291,6 +308,7 @@ fn serve(
             continue;
         }
 
+        let mut appended = String::new();
         if let Some(octets) = literal_of(command) {
             let mut literal = vec![0; octets];
             let mut rest = String::new();
@@ -300,6 +318,7 @@ fn serve(
             {
                 return;
             }
+            appended = message_id_of(&literal);
         }
 
         let upper = command.to_ascii_uppercase();
@@ -363,10 +382,13 @@ fn serve(
                 mailbox.messages.push(FakeMessage {
                     uid,
                     flags: Vec::new(),
-                    message_id: String::new(),
+                    message_id: appended,
                 });
                 let validity = mailbox.uid_validity;
-                format!("{tag} OK [APPENDUID {validity} {uid}] done\r\n")
+                match uidplus {
+                    true => format!("{tag} OK [APPENDUID {validity} {uid}] done\r\n"),
+                    false => format!("{tag} OK done\r\n"),
+                }
             }
             false => format!("{tag} OK done\r\n"),
         };
@@ -377,6 +399,18 @@ fn serve(
             return;
         }
     }
+}
+
+/// The `Message-ID` an appended message states, bare, empty when none.
+fn message_id_of(message: &[u8]) -> String {
+    let text = String::from_utf8_lossy(message);
+    text.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("Message-ID").then_some(value)
+        })
+        .map(|value| value.trim().trim_matches(['<', '>']).to_owned())
+        .unwrap_or_default()
 }
 
 /// The octets of the synchronising literal `command` ends on (`{12}`).

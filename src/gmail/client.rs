@@ -1423,15 +1423,17 @@ impl Batcher for LiveBatcher<'_> {
     fn pause(&mut self, wait: Duration) -> Result<()> {
         let throttle = &self.client.throttle;
         if let Some(until) = throttle.blocked() {
-            bail!(
+            let message = format!(
                 "Gmail gave up after being throttled, until {}",
                 rfc3339(until)
             );
+            return Err(CodedError::new(ErrorCode::RateLimited, message).into());
         }
         if !throttle.waits_in_process(wait) {
             let until = SystemTime::now() + wait;
             throttle.give_up(until);
-            bail!("Gmail throttled, giving up until {}", rfc3339(until));
+            let message = format!("Gmail throttled, giving up until {}", rfc3339(until));
+            return Err(CodedError::new(ErrorCode::RateLimited, message).into());
         }
         debug!("gmail batch paused {} ms", wait.as_millis());
         thread::sleep(wait);
@@ -2807,6 +2809,46 @@ mod tests {
         assert_eq!(batch.lines().len(), 4);
         assert_eq!(client.run.batch_size.lock().unwrap().current(), 4);
         assert_eq!(batch.left(), 0);
+    }
+
+    /// A batched read refused past the waits is coded: `rate-limited` for a
+    /// quota or a wait over the longest, `permission-denied` for rights.
+    #[test]
+    fn a_batched_read_refused_past_the_waits_is_coded() {
+        let daily = serde_json::json!({ "error": {
+            "code": 403,
+            "message": "Quota exceeded for quota metric 'Queries' and limit 'Queries per day'",
+            "errors": [{ "domain": "usageLimits", "reason": "dailyLimitExceeded" }],
+        }});
+        let minute = serde_json::json!({ "error": {
+            "code": 403,
+            "message": "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user'",
+            "errors": [{ "domain": "usageLimits", "reason": "rateLimitExceeded" }],
+        }});
+        let denied = serde_json::json!({ "error": {
+            "code": 403,
+            "message": "Insufficient Permission",
+            "errors": [{ "reason": "insufficientPermissions" }],
+        }});
+        let cases = [
+            (daily, ErrorCode::RateLimited),
+            (minute, ErrorCode::RateLimited),
+            (denied, ErrorCode::PermissionDenied),
+        ];
+
+        for (body, code) in cases {
+            let (mut client, _, batch) = scripted();
+            let throttle = Throttle::new("gmail").waiting(Duration::from_secs(1));
+            client.throttle = Arc::new(throttle);
+            client.run.keep_size("m1", 100);
+            batch.answer(batch_answer(&[(0, "403 Forbidden", body.clone())]));
+
+            let err = client
+                .fetch_bodies(&["m1"], &|_| None, |_| Ok(Vec::new()), |_, _, _| Ok(()))
+                .unwrap_err();
+
+            assert_eq!(Failure::of(&err).code, Some(code), "{body}: {err:#}");
+        }
     }
 
     /// A resumed hydration plans its batches by the sizes the store

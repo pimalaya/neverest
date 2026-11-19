@@ -11,7 +11,6 @@
 //! Start the servers and run with:
 //! ```sh
 //! ./tests/stalwart2.sh
-//! ./tests/pimdir.sh
 //! cargo test --test submit -- --ignored
 //! ```
 
@@ -34,15 +33,12 @@ use io_pimdir::{
     intent::PimdirSubmit,
 };
 
-use crate::common::{json_report, json_result, pimdir_cli};
+use crate::common::{json_report, json_result, pending_actions, store_items, summary_text};
 
 const IMAP_ROOT: &str = "imap://127.0.0.1:143";
 const SMTP: &str = "smtp://127.0.0.1:2525";
 const USER: &str = "test@pimalaya.org";
 const PASS: &str = "P!malaya-test-2026";
-/// The queue action kind neverest defines for a submission.
-const SUBMIT: &str = "submit";
-
 /// A single token needing no quoting, distinct per run.
 ///
 /// The server keeps what earlier runs delivered, so a constant marker would
@@ -120,10 +116,10 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
         .id;
     drop(producer);
 
-    let queued = pimdir(&state, &["queue", "list", "--json"]);
+    let queued = pending_actions(&store);
     assert!(
-        queued.contains(SUBMIT),
-        "the intent is queued before the run; queue held:\n{queued}",
+        queued.iter().any(|row| row.id == id),
+        "the intent is queued before the run; queue held:\n{queued:#?}",
     );
 
     let report = neverest(&["sync", "-a", "submit", "--json"], &config, &state);
@@ -137,10 +133,10 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
         "the intent was not parked; report was:\n{report}",
     );
 
-    let queued = pimdir(&state, &["queue", "list", "--json"]);
+    let queued = pending_actions(&store);
     assert!(
-        !queued.contains(SUBMIT),
-        "an acknowledged intent leaves the queue; queue held:\n{queued}",
+        !queued.iter().any(|row| row.id == id),
+        "an acknowledged intent leaves the queue; queue held:\n{queued:#?}",
     );
 
     let producer = PimdirProducer::open(&store, "neverest-tests").expect("open producer");
@@ -153,10 +149,12 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     let delivered = wait_for_delivery(&marker).expect("the submitted message reached the server");
     neverest(&["sync", "-a", "submit"], &config, &state);
 
-    let items = pimdir(&state, &["item", "list", &delivered, "--json"]);
+    let items = store_items(&store, &delivered);
     assert!(
-        items.contains(&marker),
-        "the submitted message came back into the store; {delivered} held:\n{items}",
+        items
+            .iter()
+            .any(|item| summary_text(item).contains(&marker)),
+        "the submitted message came back into the store; {delivered} held:\n{items:#?}",
     );
 }
 
@@ -379,27 +377,6 @@ fn wait_for_delivery(marker: &str) -> Option<String> {
     }
 
     None
-}
-
-/// Runs the `pimdir` operator CLI against the account's store.
-///
-/// The queue and the retained rows are what the sync report does not print.
-fn pimdir(state: &Path, args: &[&str]) -> String {
-    let store = state.join("neverest");
-    let output = pimdir_cli()
-        .args(["--store", &store.to_string_lossy()])
-        .args(args)
-        .output()
-        .expect("spawn pimdir");
-
-    assert!(
-        output.status.success(),
-        "`pimdir {}` failed:\n{}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr),
-    );
-
-    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn neverest(args: &[&str], config: &Path, state: &Path) -> String {

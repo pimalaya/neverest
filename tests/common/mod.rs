@@ -26,7 +26,7 @@ use std::{
     env, fs,
     io::Read,
     panic::{self, AssertUnwindSafe},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -44,13 +44,14 @@ use io_pimdir::{
     client::{
         PimdirError, PimdirStore,
         blobs::PimdirBlobs,
-        producer::PimdirProducer,
+        producer::{PimdirPendingAction, PimdirProducer},
         reader::{PimdirItem, PimdirReader},
     },
     codec::PimdirAction,
     collection::PimdirCollectionId,
     intent::PimdirSubmit,
     placement::PimdirFlags,
+    summary::PimdirSummary,
 };
 use pimalaya_stream::tls::Tls;
 use secrecy::{ExposeSecret, SecretString};
@@ -752,40 +753,45 @@ pub fn flags(item: &PimdirItem) -> BTreeSet<String> {
     item.flags.known().cloned().unwrap_or_default()
 }
 
-/// The `pimdir` operator CLI tests/pimdir.sh builds at the locked io-pimdir.
-///
-/// One built from a checkout may read the store another way than the library
-/// neverest writes it with.
-pub fn pimdir_cli() -> Command {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let lock = fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
-    let mut package = lock
-        .lines()
-        .skip_while(|line| *line != "name = \"io-pimdir\"")
-        .skip(1);
-    let version = package
-        .next()
-        .and_then(|line| line.strip_prefix("version = \""))
-        .and_then(|line| line.strip_suffix('"'))
-        .expect("io-pimdir's locked version");
-    let pin = match package
-        .next()
-        .and_then(|line| line.strip_prefix("source = \"git+"))
-    {
-        Some(source) => source
-            .trim_end_matches('"')
-            .rsplit_once('#')
-            .map(|(_, commit)| commit)
-            .expect("io-pimdir's locked commit"),
-        None => version,
-    };
+/// The live items of `collection` in the store at `store`, each with its
+/// summary, in the kind's order, read through the io-pimdir neverest links.
+pub fn store_items(store: &Path, collection: &str) -> Vec<PimdirItem> {
+    PimdirReader::open(store)
+        .expect("open the store")
+        .list_summaries(collection, None, 10_000)
+        .expect("list the collection")
+}
 
-    let bin = root.join("target/pimdir").join(pin).join("bin/pimdir");
-    assert!(
-        bin.is_file(),
-        "no pimdir CLI at io-pimdir {pin}: run ./tests/pimdir.sh"
-    );
-    Command::new(bin)
+/// The retained items of `collection` in the store at `store`.
+pub fn retained_items(store: &Path, collection: &str) -> Vec<PimdirItem> {
+    PimdirReader::open(store)
+        .expect("open the store")
+        .list_retained(collection, None, 10_000)
+        .expect("list the retained items")
+}
+
+/// The queue rows of the store at `store` still pending.
+pub fn pending_actions(store: &Path) -> Vec<PimdirPendingAction> {
+    PimdirReader::open(store)
+        .expect("open the store")
+        .list_pending_actions()
+        .expect("list the queue")
+}
+
+/// The link ids of `items`, in their order.
+pub fn link_ids(items: &[PimdirItem]) -> Vec<&str> {
+    items.iter().map(|item| item.link_id.0.as_str()).collect()
+}
+
+/// What a listing names an item by: a card's name, an event's summary, a
+/// message's subject.
+pub fn summary_text(item: &PimdirItem) -> &str {
+    match &item.summary {
+        Some(PimdirSummary::Contact(contact)) => &contact.full_name,
+        Some(PimdirSummary::Event(event)) => &event.summary,
+        Some(PimdirSummary::Mail(mail)) => &mail.subject,
+        _ => "",
+    }
 }
 
 /// The result a `--json` run prints last, after the events it streams.

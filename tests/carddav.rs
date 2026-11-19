@@ -18,7 +18,6 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
-//! ./tests/pimdir.sh
 //! cargo test --features carddav --test carddav -- --ignored --test-threads=1
 //! ```
 
@@ -31,11 +30,14 @@ use std::{
 };
 
 use io_pimdir::{
-    client::{producer::PimdirProducer, reader::PimdirReader},
+    client::{
+        producer::PimdirProducer,
+        reader::{PimdirItem, PimdirReader},
+    },
     codec::PimdirAction,
 };
 
-use crate::common::pimdir_cli;
+use crate::common::{link_ids, retained_items, summary_text};
 
 const DAV: &str = "http://127.0.0.1:5232";
 const USER: &str = "test";
@@ -116,13 +118,14 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
     sync(&config, &state, ACCOUNT, BOOK, 0);
 
     let items = store_items(&state, ACCOUNT, BOOK);
+    let ids = link_ids(&items);
     assert!(
-        items.contains(r#""linkId":"card-1""#) && items.contains(r#""linkId":"card-2""#),
-        "both cards landed, keyed by their UID; store held:\n{items}",
+        ids.contains(&"card-1") && ids.contains(&"card-2"),
+        "both cards landed, keyed by their UID; store held:\n{items:#?}",
     );
     assert!(
-        items.contains("Jane Doe"),
-        "the summary carries the display name; store held:\n{items}",
+        items.iter().any(|item| summary_text(item) == "Jane Doe"),
+        "the summary carries the display name; store held:\n{items:#?}",
     );
 
     put(root, BOOK, "card-1", &card("card-1", "Jane Rewritten"));
@@ -142,8 +145,10 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
 
     let items = store_items(&state, ACCOUNT, BOOK);
     assert!(
-        items.contains("Jane Rewritten"),
-        "the edited body reached the store; store held:\n{items}",
+        items
+            .iter()
+            .any(|item| summary_text(item) == "Jane Rewritten"),
+        "the edited body reached the store; store held:\n{items:#?}",
     );
 
     delete(BOOK, "card-2");
@@ -151,22 +156,13 @@ fn a_carddav_side_syncs_edits_and_retains_a_server_delete() {
 
     let live = store_items(&state, ACCOUNT, BOOK);
     assert!(
-        !live.contains(r#""linkId":"card-2""#),
-        "the deleted card left the live listing; store held:\n{live}",
+        !link_ids(&live).contains(&"card-2"),
+        "the deleted card left the live listing; store held:\n{live:#?}",
     );
-    let retained = pimdir(
-        &state,
-        &[
-            "item",
-            "list",
-            &collection(ACCOUNT, BOOK),
-            "--retained",
-            "--json",
-        ],
-    );
+    let retained = retained_items(&store_dir(&state), &collection(ACCOUNT, BOOK));
     assert!(
-        retained.contains(r#""linkId":"card-2""#),
-        "the deleted card is retained, not lost; retained listing:\n{retained}",
+        link_ids(&retained).contains(&"card-2"),
+        "the deleted card is retained, not lost; retained listing:\n{retained:#?}",
     );
 
     let report = sync(&config, &state, ACCOUNT, BOOK, 0);
@@ -562,13 +558,9 @@ fn sync(config: &Path, state: &Path, account: &str, book: &str, code: i32) -> St
     )
 }
 
-/// The store's live items for an address book, as the `pimdir` CLI renders
-/// them.
-fn store_items(state: &Path, account: &str, book: &str) -> String {
-    pimdir(
-        state,
-        &["item", "list", &collection(account, book), "--json"],
-    )
+/// The store's live items for an address book, with their summaries.
+fn store_items(state: &Path, account: &str, book: &str) -> Vec<PimdirItem> {
+    common::store_items(&store_dir(state), &collection(account, book))
 }
 
 /// The account's store under the run's state directory.
@@ -576,28 +568,6 @@ fn store_items(state: &Path, account: &str, book: &str) -> String {
 /// Every account naming no root shares it.
 fn store_dir(state: &Path) -> PathBuf {
     state.join("neverest")
-}
-
-/// Runs the `pimdir` operator CLI against the run's store.
-///
-/// It observes what the sync did not print, retention above all, and comes
-/// from io-pimdir rather than from neverest.
-fn pimdir(state: &Path, args: &[&str]) -> String {
-    let store = store_dir(state);
-    let output = pimdir_cli()
-        .args(["--store", &store.to_string_lossy()])
-        .args(args)
-        .output()
-        .expect("spawn pimdir");
-
-    assert!(
-        output.status.success(),
-        "`pimdir {}` failed:\n{}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr),
-    );
-
-    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 /// Runs neverest and checks it ended on `code`, 2 being a run that reconciled

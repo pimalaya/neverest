@@ -24,6 +24,7 @@ use io_gpeople::v1::{
     rest::people::{
         GpeoplePerson, GpeoplePersonField,
         connections::list::GpeopleConnectionsListParams,
+        get_batch_get::GpeoplePersonsBatchGet,
         vcard::{GPEOPLE_PERSON_VCARD_FIELDS, GpeoplePersonVcard},
     },
     send::{GPEOPLE_API_BASE, GpeopleApiError, GpeopleSendError, GpeopleSendOutput},
@@ -53,6 +54,9 @@ const ENUMERATION_FIELDS: &[GpeoplePersonField] = &[GpeoplePersonField::Metadata
 
 /// The page size requested from the connections listing.
 const PAGE_SIZE: u32 = 1000;
+
+/// The most persons one `people:batchGet` reads.
+const BATCH_GET_SIZE: usize = 200;
 
 /// The live People session of one side.
 pub struct GpeopleClient {
@@ -240,25 +244,63 @@ impl GpeopleClient {
             .with_context(|| format!("Get person {id} error"))
     }
 
-    /// Streams the vCards of an id set, each committed with its etag.
+    /// Streams the vCards of an id set through `people:batchGet`, 200 a
+    /// request, each committed with its etag as its batch lands.
+    ///
+    /// Answers the persons a batch answered not found (404, 410), gone; one
+    /// it refused otherwise goes unanswered, read alone by the caller.
     pub fn fetch_bodies<S: Write>(
         &mut self,
         collection: &str,
         ids: &[&str],
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<String>> {
         ensure_contacts(collection)?;
 
-        for id in ids {
-            let person = self.person(id)?;
-            let mut sink = open(id).with_context(|| format!("Open body sink for {id} error"))?;
-            sink.write_all(person.to_vcard().as_bytes())
-                .with_context(|| format!("Store person {id} error"))?;
-            done(id, Some(person.etag.as_str()), sink)
-                .with_context(|| format!("Commit person {id} error"))?;
+        let mut gone = Vec::new();
+        for chunk in ids.chunks(BATCH_GET_SIZE) {
+            let names: Vec<String> = chunk.iter().map(|id| format!("people/{id}")).collect();
+            let answered = self
+                .op(|people| {
+                    let coroutine = GpeoplePersonsBatchGet::new(
+                        &people.auth,
+                        &names,
+                        GPEOPLE_PERSON_VCARD_FIELDS,
+                        &[],
+                    )?;
+                    people.run(coroutine)
+                })
+                .with_context(|| format!("Get a batch of {} persons error", names.len()))?;
+
+            for response in answered.responses {
+                let Some(requested) = response.requested_resource_name else {
+                    continue;
+                };
+                let Some(id) = requested.strip_prefix("people/") else {
+                    continue;
+                };
+
+                let Some(person) = response.person else {
+                    if matches!(response.http_status_code, Some(404 | 410)) {
+                        debug!("person {id} gone before it was read");
+                        gone.push(id.to_owned());
+                    } else {
+                        debug!("person {id} unanswered by its batch: {:?}", response.status);
+                    }
+                    continue;
+                };
+
+                let mut sink =
+                    open(id).with_context(|| format!("Open body sink for {id} error"))?;
+                sink.write_all(person.to_vcard().as_bytes())
+                    .with_context(|| format!("Store person {id} error"))?;
+                done(id, Some(person.etag.as_str()), sink)
+                    .with_context(|| format!("Commit person {id} error"))?;
+            }
         }
-        Ok(())
+
+        Ok(gone)
     }
 
     /// Streams one person's vCard into `sink`, returning its etag.
@@ -692,5 +734,94 @@ mod tests {
             "{:?}",
             sent.client_data
         );
+    }
+    /// The answer of a `people:batchGet` reading `ids`, those in `missing`
+    /// answered not found.
+    fn batch_answer(ids: &[String], missing: &[&str]) -> Vec<u8> {
+        let responses: Vec<serde_json::Value> = ids
+            .iter()
+            .map(|id| match missing.contains(&id.as_str()) {
+                true => serde_json::json!({
+                    "requestedResourceName": format!("people/{id}"),
+                    "httpStatusCode": 404,
+                    "status": { "code": 5, "message": "Requested entity was not found." },
+                }),
+                false => serde_json::json!({
+                    "requestedResourceName": format!("people/{id}"),
+                    "httpStatusCode": 200,
+                    "person": {
+                        "resourceName": format!("people/{id}"),
+                        "etag": format!("e-{id}"),
+                        "names": [{ "displayName": format!("Person {id}") }],
+                    },
+                }),
+            })
+            .collect();
+        let body = serde_json::json!({ "responses": responses }).to_string();
+        json("200 OK", &body)
+    }
+
+    /// Persons are read through `people:batchGet`, each committed with its
+    /// etag; one the batch answers not found is gone, never an error.
+    #[test]
+    fn a_batch_reads_its_persons_and_a_missing_one_is_gone() {
+        let ids: Vec<String> = ["c1", "c2", "c3"].map(String::from).to_vec();
+        let server = Server::new(vec![vec![Step::Reply(batch_answer(&ids, &["c2"]))]]);
+        let mut client = over(&server);
+
+        let asked: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut bodies = Vec::new();
+        let gone = client
+            .fetch_bodies(
+                CONTACTS,
+                &asked,
+                |_| Ok(Vec::new()),
+                |id, etag, sink| {
+                    let vcard = String::from_utf8(sink).unwrap();
+                    bodies.push((id.to_owned(), etag.map(str::to_owned), vcard));
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(gone, ["c2"]);
+        let read: Vec<(&str, Option<&str>)> = bodies
+            .iter()
+            .map(|(id, etag, _)| (id.as_str(), etag.as_deref()))
+            .collect();
+        assert_eq!(read, [("c1", Some("e-c1")), ("c3", Some("e-c3"))]);
+        assert!(bodies[0].2.contains("Person c1"), "{}", bodies[0].2);
+        let lines = server.lines();
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("people:batchGet"), "{lines:?}");
+    }
+
+    /// An address book of 450 persons is read in 3 requests, 200 a batch.
+    #[test]
+    fn four_hundred_fifty_persons_are_read_in_three_requests() {
+        let ids: Vec<String> = (0..450).map(|n| format!("c{n}")).collect();
+        let script = ids
+            .chunks(200)
+            .map(|chunk| Step::Reply(batch_answer(chunk, &[])))
+            .collect();
+        let server = Server::new(vec![script]);
+        let mut client = over(&server);
+
+        let asked: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut read = 0;
+        client
+            .fetch_bodies(
+                CONTACTS,
+                &asked,
+                |_| Ok(Vec::new()),
+                |_, _, _| {
+                    read += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(read, 450);
+        assert_eq!(server.lines().len(), 3);
     }
 }

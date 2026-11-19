@@ -3,6 +3,8 @@
 //! What a run does around its phases: the coverage, parked rows and conflicts
 //! its report counts, the retention sweep and the replica a dry run uses.
 
+use rusqlite::{Connection, OpenFlags};
+
 use crate::sync::driver::*;
 
 /// Reports what one endpoint holds of a collection it just synced (pimdir
@@ -249,8 +251,23 @@ impl DryRunReplica {
             let mut counts = CloneCounts::default();
             let blobs = real_dir.join(BLOBS_DIR);
 
+            let staging = modes::options()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(real_dir.join(STAGING_LOCK))
+                .with_context(|| format!("Open the staging lock of {}", real_dir.display()))?;
+            staging
+                .lock_shared()
+                .with_context(|| format!("Take the staging lock of {}", real_dir.display()))?;
+
+            snapshot_database(real_dir, &dir).with_context(|| {
+                format!("Copy the database of {} for dry-run", real_dir.display())
+            })?;
             clone_dir(real_dir, &dir, &blobs, &mut counts)
                 .with_context(|| format!("Clone {} for dry-run", real_dir.display()))?;
+            drop(staging);
 
             debug!(
                 "dry-run replica prepared in {:?} ({} linked, {} copied)",
@@ -311,10 +328,41 @@ fn clear_stale_replicas(dir: &Path, prefix: &str) {
     }
 }
 
+/// The store's database, which a replica takes by [`snapshot_database`].
+const DATABASE: &str = "pimdir.db";
+
+/// The staging lock, held shared while a replica is taken (pimdir STORAGE
+/// §8) so no collector unlinks a body the copied database names.
+const STAGING_LOCK: &str = "objects.lock";
+
+/// Copies the database of the store at `real_dir` into `dir` as one
+/// consistent snapshot, through `VACUUM INTO` (pimdir STORAGE §8).
+///
+/// Producers write the store under no lock neverest holds, so a file copy of
+/// the database and its WAL may tear between two of their commits.
+fn snapshot_database(real_dir: &Path, dir: &Path) -> Result<()> {
+    let real = real_dir.join(DATABASE);
+    if !real.exists() {
+        return Ok(());
+    }
+
+    let copy = dir.join(DATABASE);
+    modes::options().write(true).create_new(true).open(&copy)?;
+    let Some(target) = copy.to_str() else {
+        bail!("Dry-run replica path {} is not UTF-8", copy.display());
+    };
+
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(&real, flags)?;
+    conn.execute("VACUUM INTO ?1", [target])?;
+    Ok(())
+}
+
 /// Clones `src` into `dst`, hardlinking under `blobs` and copying the rest.
 ///
-/// A link the filesystem refuses falls back to a copy, so the cost of
-/// misjudging a file is a slower dry run and never a corrupted store.
+/// The database, taken by [`snapshot_database`], and the root's lock files,
+/// holding no state, are left out. A link refused falls back to a copy:
+/// misjudging a file costs a slower dry run, never a corrupted store.
 fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> Result<()> {
     modes::create_dir_all(dst)?;
 
@@ -322,6 +370,12 @@ fn clone_dir(src: &Path, dst: &Path, blobs: &Path, counts: &mut CloneCounts) -> 
         let entry = entry?;
         let from = entry.path();
         let to = dst.join(entry.file_name());
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let at_root = Some(src) == blobs.parent();
+
+        if at_root && (name.starts_with(DATABASE) || name.ends_with(".lock")) {
+            continue;
+        }
 
         if entry.file_type()?.is_dir() {
             clone_dir(&from, &to, blobs, counts)?;

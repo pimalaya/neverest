@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Install the `pimdir` operator CLI the store-reading suites spawn (caldav,
-# calendars, carddav, endpoints, submit), built from the io-pimdir commit
-# Cargo.lock locks, so it reads the store the way neverest writes it.
+# Install the `pimdir` operator CLI, built from the io-pimdir commit or
+# version Cargo.lock locks, so it reads a store the way neverest writes it.
+# The suites never spawn it: it is for inspecting a store by hand.
 #
-# The binary lands in target/pimdir/<commit or version>/bin/pimdir, where
-# tests/common/mod.rs looks for it; a lock moving to another io-pimdir asks
-# for this script again.
+# The binary lands in target/pimdir/<commit or version>/bin/pimdir; a lock
+# moving to another io-pimdir asks for this script again.
 
 set -eu
 

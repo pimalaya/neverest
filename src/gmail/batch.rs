@@ -19,15 +19,19 @@ use std::{
     time::{Duration, SystemTime},
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use io_gmail::v1::{
     batch::{GmailBatchResponse, GmailBatchResponseError},
     rest::messages::{GmailMessage, GmailMessageFormat},
 };
 use log::debug;
+use pimalaya_cli::error::CodedError;
 
-use crate::throttle::{
-    GoogleAnswer, GoogleRefusal, GoogleWaits, burst_pause, google_refusal, rfc3339,
+use crate::{
+    error::ErrorCode,
+    throttle::{
+        GoogleAnswer, GoogleRefusal, GoogleWaits, burst_pause, google_code, google_refusal, rfc3339,
+    },
 };
 
 /// About how many bytes of messages one raw batch carries, by their sizes:
@@ -95,8 +99,14 @@ pub enum Inner {
     Minute,
     /// A daily quota refusal: nothing within the run lifts it.
     Daily,
-    /// Any other refusal, which fails the read.
-    Failed(String),
+    /// Any other refusal, which fails the read, coded as [`google_code`]
+    /// reads it.
+    Failed {
+        /// The refusal as Gmail stated it.
+        error: String,
+        /// Its code, `None` for one no caller acts on.
+        code: Option<ErrorCode>,
+    },
 }
 
 /// How one inner answer of a batch is taken ([`Inner`]).
@@ -108,6 +118,7 @@ pub fn inner(result: Result<GmailMessage, GmailBatchResponseError>) -> Inner {
     if err.is_not_found() {
         return Inner::Gone;
     }
+    let mut code = None;
     if let Some(api) = err.api() {
         let answer = GoogleAnswer {
             status: api.status,
@@ -122,11 +133,15 @@ pub fn inner(result: Result<GmailMessage, GmailBatchResponseError>) -> Inner {
             Some(GoogleRefusal::Burst) => return Inner::Busy,
             None => {}
         }
+        code = google_code(&answer);
     }
     if err.is_retryable() {
         return Inner::Busy;
     }
-    Inner::Failed(err.to_string())
+    Inner::Failed {
+        error: err.to_string(),
+        code,
+    }
 }
 
 /// How reads are sent: a batch, one read alone, and the waits between
@@ -286,13 +301,18 @@ pub fn read_all<B: Batcher>(
                     let until = SystemTime::now()
                         + waits.wait(GoogleRefusal::Daily, None, SystemTime::now());
                     batcher.give_up(until);
-                    return Err(anyhow!(
+                    let message = format!(
                         "Gmail's daily quota is spent, the source gave up until {}",
                         rfc3339(until)
-                    ));
+                    );
+                    return Err(CodedError::new(ErrorCode::RateLimited, message).into());
                 }
-                Inner::Failed(err) => {
-                    return Err(anyhow!("Read message {id} error: {err}"));
+                Inner::Failed { error, code } => {
+                    let message = format!("Read message {id} error: {error}");
+                    return Err(match code {
+                        Some(code) => CodedError::new(code, message).into(),
+                        None => anyhow::Error::msg(message),
+                    });
                 }
             }
         }
@@ -330,10 +350,11 @@ pub fn read_all<B: Batcher>(
             if *tried >= MAX_TRIES {
                 let until = SystemTime::now() + pause;
                 batcher.give_up(until);
-                return Err(anyhow!(
+                let message = format!(
                     "Gmail refused message {id} {MAX_TRIES} times, the source gave up until {}",
                     rfc3339(until)
-                ));
+                );
+                return Err(CodedError::new(ErrorCode::RateLimited, message).into());
             }
             queue.push_front(id);
         }
@@ -356,6 +377,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::error::{ErrorCode, Failure};
 
     /// The per-minute quota refusal Gmail answered on 2026-10-07, its
     /// project number made up.
@@ -510,7 +532,7 @@ mod tests {
                     Inner::Busy => "busy",
                     Inner::Minute => "minute",
                     Inner::Daily => "daily",
-                    Inner::Failed(_) => "failed",
+                    Inner::Failed { .. } => "failed",
                 };
                 (answer.id, kind.to_string())
             })
@@ -774,6 +796,7 @@ mod tests {
         };
         let err = read_metadata(&mut batcher, &ids(1)).unwrap_err();
         assert!(err.to_string().contains("6 times"), "{err}");
+        assert_eq!(Failure::of(&err).code, Some(ErrorCode::RateLimited));
         assert_eq!(batcher.batches.len(), MAX_TRIES as usize);
         assert!(batcher.gave_up.is_some());
     }

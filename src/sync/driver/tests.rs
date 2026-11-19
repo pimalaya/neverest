@@ -179,12 +179,10 @@ fn the_default_store_root_is_shared_under_a_platform_base() {
 
 /// A store with one body and the files a dry run writes to.
 fn stub_store(dir: &Path) {
+    create_store(dir).unwrap();
     let body = dir.join(BLOBS_DIR).join("ab").join("cd");
     fs::create_dir_all(&body).unwrap();
     fs::write(body.join("abcd"), b"body").unwrap();
-    fs::write(dir.join("pimdir.db"), b"index").unwrap();
-    let local = local::ensure(dir).unwrap();
-    fs::write(local.join("neverest.json"), b"{}").unwrap();
 }
 
 /// The rule the replica rests on.
@@ -212,10 +210,7 @@ fn a_dry_run_replica_shares_the_bodies_and_copies_the_rest() {
         fs::metadata(store.join("pimdir.db")).unwrap().ino(),
         fs::metadata(replica.dir.join("pimdir.db")).unwrap().ino(),
     );
-    assert_eq!(
-        fs::read(replica.dir.join("pimdir.db")).unwrap(),
-        b"index".to_vec()
-    );
+    PimdirStore::open(&replica.dir).expect("the replica opens");
 }
 
 /// A dry run's replica of a store opens as one.
@@ -262,13 +257,42 @@ fn writing_to_a_dry_run_replica_leaves_the_store_alone() {
     let store = root.path().join("account");
     stub_store(&store);
 
+    let before = fs::read(store.join("pimdir.db")).unwrap();
+
     let replica = DryRunReplica::new(&store).unwrap();
     fs::write(replica.dir.join("pimdir.db"), b"advanced").unwrap();
 
-    assert_eq!(
-        fs::read(store.join("pimdir.db")).unwrap(),
-        b"index".to_vec()
-    );
+    assert_eq!(fs::read(store.join("pimdir.db")).unwrap(), before);
+}
+
+/// A replica waits out a collector and copies no lock file.
+///
+/// It holds the staging lock shared while it takes the database and links the
+/// bodies (pimdir STORAGE §8), so no collector unlinks a body it names, and a
+/// lock file holds no state.
+#[test]
+fn a_dry_run_replica_waits_out_a_collector() {
+    let root = tempfile::tempdir().unwrap();
+    let store = root.path().join("account");
+    stub_store(&store);
+    let collector = fs::File::create(store.join("objects.lock")).unwrap();
+    collector.lock().unwrap();
+
+    let (sent, taken) = std::sync::mpsc::channel();
+    let real = store.clone();
+    let cloning = std::thread::spawn(move || {
+        let replica = DryRunReplica::new(&real).unwrap();
+        sent.send(()).unwrap();
+        replica
+    });
+
+    let waited = taken.recv_timeout(std::time::Duration::from_millis(300));
+    assert!(waited.is_err(), "the replica was taken under a collector");
+    collector.unlock().unwrap();
+    let replica = cloning.join().unwrap();
+
+    assert!(!replica.dir.join("objects.lock").exists());
+    PimdirStore::open(&replica.dir).expect("the replica opens");
 }
 
 /// The replica goes however the run ends, an early return included.
@@ -886,10 +910,11 @@ fn a_copy_the_target_holds_out_of_scope_is_bound_not_filed_again() {
     assert!(server.sent("APPEND").is_empty(), "nothing filed again");
 }
 
-/// The fake server's inbox holding `a@x` under UID 7, an IMAP side over
-/// it, and the outcome of pushing `kind` to that inbox.
+/// The outcome of pushing `kind` to a fake inbox holding `a@x` under UID 7,
+/// announcing UIDPLUS when `uidplus`.
 #[cfg(feature = "imap")]
 fn pushed_to_imap(
+    uidplus: bool,
     kind: impl FnOnce(&PimdirBlobStage) -> PimdirChangeKind,
 ) -> (crate::imap::fake::FakeImap, PimdirPushResult) {
     use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
@@ -907,6 +932,10 @@ fn pushed_to_imap(
         },
         true,
     );
+    if !uidplus {
+        server.without_uidplus();
+        server.keep_appends();
+    }
     let dir = tempfile::tempdir().unwrap();
     let (mut ctx, store) = bound_imap_inbox(dir.path(), &server, true, None);
     let blobs = store.blob_stage();
@@ -1216,7 +1245,7 @@ fn a_capped_source_keeps_what_its_listing_leaves_out() {
 #[test]
 #[cfg(feature = "imap")]
 fn a_remove_relocating_its_member_says_so() {
-    let (server, result) = pushed_to_imap(|_| PimdirChangeKind::Remove {
+    let (server, result) = pushed_to_imap(true, |_| PimdirChangeKind::Remove {
         handle: PimdirHandle("7".into()),
         to: Some(PimdirCollectionId("imap/Archive".into())),
         link_id: Some(PimdirLinkId("b@x".into())),
@@ -1237,7 +1266,7 @@ fn a_remove_relocating_its_member_says_so() {
 #[test]
 #[cfg(feature = "imap")]
 fn a_remove_into_a_target_holding_the_identity_deletes() {
-    let (server, result) = pushed_to_imap(|_| PimdirChangeKind::Remove {
+    let (server, result) = pushed_to_imap(true, |_| PimdirChangeKind::Remove {
         handle: PimdirHandle("7".into()),
         to: Some(PimdirCollectionId("imap/Archive".into())),
         link_id: Some(PimdirLinkId("a@x".into())),
@@ -1257,7 +1286,7 @@ fn a_remove_into_a_target_holding_the_identity_deletes() {
 #[test]
 #[cfg(feature = "imap")]
 fn a_remove_under_a_minted_key_relocates_unasked() {
-    let (server, result) = pushed_to_imap(|_| PimdirChangeKind::Remove {
+    let (server, result) = pushed_to_imap(true, |_| PimdirChangeKind::Remove {
         handle: PimdirHandle("7".into()),
         to: Some(PimdirCollectionId("imap/Archive".into())),
         link_id: Some(PimdirLinkId("dup:a@x#7".into())),
@@ -1279,7 +1308,7 @@ fn a_remove_under_a_minted_key_relocates_unasked() {
 fn an_append_answered_no_uid_is_accepted_with_no_handle() {
     const BODY: &str = "From: a@x\r\nSubject: undated\r\n\r\nbody\r\n";
 
-    let (server, result) = pushed_to_imap(|blobs| PimdirChangeKind::Add {
+    let (server, result) = pushed_to_imap(true, |blobs| PimdirChangeKind::Add {
         handle: PimdirLinkId("alt:undated".into()).provisional(),
         link_id: Some(PimdirLinkId("alt:undated".into())),
         flags: PimdirFlags::default(),
@@ -1292,6 +1321,57 @@ fn an_append_answered_no_uid_is_accepted_with_no_handle() {
     assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
     assert_eq!(result.assigned, None);
     assert!(!result.relocated);
+}
+
+/// A remove whose target holds the identity, on a server with no UIDPLUS, is
+/// held rather than relocated.
+///
+/// The server cannot expunge the one message, so the member stays where it
+/// is, neither filed a second time nor marked `\Deleted` (pimdir SYNC §4,
+/// §5).
+#[test]
+#[cfg(feature = "imap")]
+fn a_remove_into_a_target_holding_the_identity_without_uidplus_is_held() {
+    let (server, result) = pushed_to_imap(false, |_| PimdirChangeKind::Remove {
+        handle: PimdirHandle("7".into()),
+        to: Some(PimdirCollectionId("imap/Archive".into())),
+        link_id: Some(PimdirLinkId("a@x".into())),
+        if_match: None,
+    });
+
+    assert_ne!(result.outcome, PimdirPushOutcome::Accepted);
+    assert!(!result.relocated, "the target held it: nothing relocated");
+    assert!(server.sent("UID MOVE").is_empty(), "filed no second time");
+    assert!(
+        server.sent("UID STORE").is_empty(),
+        "nothing marked deleted"
+    );
+}
+
+/// An append to a server with no UIDPLUS is accepted with the UID a search
+/// on its `Message-ID` finds, never failed after it landed (pimdir SYNC §4).
+#[test]
+#[cfg(feature = "imap")]
+fn an_append_to_a_server_without_uidplus_is_found_by_its_message_id() {
+    const BODY: &str = "Message-ID: <new@x>\r\nFrom: a@x\r\nSubject: new\r\n\r\nbody\r\n";
+
+    let (server, result) = pushed_to_imap(false, |blobs| PimdirChangeKind::Add {
+        handle: PimdirLinkId("new@x".into()).provisional(),
+        link_id: Some(PimdirLinkId("new@x".into())),
+        flags: PimdirFlags::default(),
+        origin: None,
+        supersedes: None,
+        object: Some(blobs.stage_body(BODY.as_bytes()).unwrap().hash),
+    });
+
+    assert_eq!(server.sent("APPEND").len(), 1, "appended once");
+    assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+    assert_eq!(result.assigned, Some(PimdirHandle("8".into())));
+    let searched = server.sent("UID SEARCH");
+    assert!(
+        searched.iter().any(|line| line.contains("new@x")),
+        "{searched:?}"
+    );
 }
 
 /// A create holding no body names no member of its server yet.

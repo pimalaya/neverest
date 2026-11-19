@@ -347,6 +347,8 @@ The replica SHALL be built beside the real store rather than under the temporary
 
 Everything the run writes to, the index above all, SHALL be copied. A file this rule misjudges SHALL be copied rather than shared, so being wrong costs a slower dry run and never a write reaching the real store. A link the filesystem refuses SHALL fall back to a copy.
 
+pimdir.db SHALL be copied as one consistent snapshot through `VACUUM INTO`, never as a file with its WAL: producers write the store under no lock neverest holds, so a file copy may tear between two of their commits (pimdir STORAGE §8). The staging lock SHALL be held shared from before the snapshot until the last body is linked, waiting out a collector, so no body the copied database names is unlinked under the copy. No lock file of the store root SHALL be copied: a lock file holds no state, and the replica's owner creates its own.
+
 The replica SHALL be removed however the run ends, an early return included, and a run SHALL clear what an earlier one left behind: a release build aborts on a panic and runs no destructor, so a leftover is a state to meet rather than one to rule out. Two runs of one store cannot race for it, the store lock being held for the whole run, and a run over several accounts makes each its own replica of the whole store, one after the other.
 
 The preparation SHALL be logged with the time it took, and a blob tree that could not be shared SHALL say so, that being the slow case the sharing exists to avoid.
@@ -361,6 +363,11 @@ reading and writing the whole tree
 - GIVEN a dry run whose credentials fail to resolve
 - WHEN it returns
 - THEN its replica is gone
+
+#### Scenario: A dry run while a collector runs
+- GIVEN a store whose staging lock another process holds exclusively
+- WHEN `sync --dry-run` prepares its replica
+- THEN it waits for the lock, then takes the database as one snapshot, copying no lock file
 
 ### Requirement: The report shows the one-source pull plan
 A one-source sync SHALL report its pull plan, each non-tombstone item whose body it would download into the store, as `Fetch` hunks, in both a dry run (which stops there) and a real run (which then hydrates them). A dry run SHALL fetch no body to produce that report.
@@ -845,6 +852,8 @@ Neverest SHALL NOT decide a content collision during a sync, and SHALL NOT open 
 
 No merger SHALL be handed another kind's bodies: a tool reading cards cannot read events, so one command for every kind fails on half of them. A kind naming no merger SHALL be refused naming its key, and a mail conflict SHALL be refused outright, mail bodies being immutable.
 
+A command naming any of `{base}`, `{local}`, `{remote}` and `{output}` SHALL be substituted rather than appended, for a tool whose output is a flag rather than its last argument. The documentation SHALL show the form each named tool actually takes: tcard and tcal both take three positionals and their output as `--output`, so both are the placeholder form, and neither runs when handed four positionals.
+
 A tty is not consent. A run has one when it is driven by a wrapper script, when it is watched from a pane nobody is sitting at, and when it is a person waiting, and the three are indistinguishable from inside. Escalating on that signal blocks every remaining collection behind a human who may not exist.
 
 #### Scenario: A sync with a terminal still parks
@@ -861,6 +870,25 @@ A tty is not consent. A run has one when it is driven by a wrapper script, when 
 - GIVEN an account naming `calendar.merger` and no `contact.merger`, and a parked card
 - WHEN the card is resolved interactively
 - THEN it is refused naming `contact.merger`, nothing runs, and the card stays parked
+
+### Requirement: The merger is named once for the document
+The interactive mergers SHALL be configurable at the document level as well as under an account, the account's value winning where it is set and the document's applying where it is not. Neither SHALL be required, and an account naming no merger with no document-level one SHALL leave `conflict resolve --interactive` with nothing to run, as before.
+
+The merger is a property of the person rather than of the account: the same program settles a collision whichever account raised it, the way one `$EDITOR` serves every repository. Requiring it per account copies one long line, carrying four placeholders in a fixed order, once per account.
+
+The two SHALL be reconciled where the account configuration is loaded, so every reader still sees one optional command and no call site learns there are two places it could have come from.
+
+An `$EDITOR` or `$VISUAL` fallback SHALL NOT be inferred: a merger is handed four paths under a contract no text editor knows, so guessing one would open the base file and read a bare save as a decision.
+
+#### Scenario: One merger serves every account
+- GIVEN a document naming `contact.merger` and two accounts naming none
+- WHEN a conflict is resolved interactively under either
+- THEN both hand the bodies to that merger
+
+#### Scenario: An account overrides the document
+- GIVEN a document naming `calendar.merger` and an account naming another
+- WHEN a conflict is resolved interactively under that account
+- THEN the account's merger runs and the document's does not
 
 ### Requirement: A settled body is a body of its item
 A body a resolution settles on SHALL be read before it is staged, and refused unless it is a body of the collection's kind and of that item. It SHALL open and close with the kind's component delimiters (`VCARD`, `VCALENDAR`), and it SHALL state the identity the item is bound by: a body stating another `UID`, or none where the item states one, SHALL be refused. Mail SHALL be refused outright, its bodies being immutable.
@@ -1875,6 +1903,14 @@ A Gmail, Google Calendar or Google People request whose stream failed mid-exchan
 - WHEN the next request is sent
 - THEN it goes out on a new connection and succeeds
 
+### Requirement: Google People bodies are read in batches
+A `gpeople` source SHALL read the persons a page or a hydration asks for through `people:batchGet`, up to 200 a request, never one `people.get` a person. A person the batch answers not found SHALL be gone, never an error, and each person read SHALL be stored with its etag as its batch lands. A person the batch refuses otherwise SHALL be left unanswered, so the per-item read fetches it and surfaces its error.
+
+#### Scenario: An address book of 450 contacts
+- **GIVEN** a `gpeople` source whose 450 contacts the store does not hold
+- **WHEN** it is synced
+- **THEN** their bodies are read in 3 requests
+
 ### Requirement: A Graph connection is reused only after a whole answer
 A Graph session SHALL send its next request on the same connection only after an exchange that read a whole answer on a connection the server neither ended nor asked to close, and SHALL reopen a connection idle for more than 60 seconds, below the two minutes after which Graph closes one. Any other failure (a read that timed out, a reset, an answer cut short) SHALL drop the connection, so a late answer is never read as the next request's. A request that only reads (a `GET`, a `$batch` of gets) that met a reused connection already dead before any octet of its answer (reset, aborted, broken pipe, end of stream) SHALL be sent again once, on a new connection (RFC 9112 §9.3.1); a read that timed out SHALL NOT be sent again, nor SHALL a request that creates, sends or moves.
 
@@ -2366,6 +2402,11 @@ A failure a server refused SHALL carry a code of the vocabulary Himalaya shares,
 A refusal none of these name SHALL carry no code, its reason kept in the row's `sources`. A DAV 403 naming another precondition is a body the server would not take (RFC 4791 §5.3.2, RFC 6352 §6.3.2), no matter of rights, and SHALL carry none; nor SHALL a 5xx.
 
 The codes are read once a row is built, from the chain the client returned, so the typed errors the run reads back (a duplicate `UID`, an item gone) stay in it.
+
+#### Scenario: A source given up on a quota
+- GIVEN a Gmail source whose batched reads meet a daily quota, or a per-minute one asking a wait longer than `--max-wait`
+- WHEN the collection the reads were for is reported
+- THEN its row's `code` is `rate-limited`, and a batched read refused for rights reads `permission-denied`
 
 #### Scenario: A full mailbox
 - GIVEN an IMAP server answering an `APPEND` with `NO [OVERQUOTA]`

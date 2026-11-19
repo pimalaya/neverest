@@ -102,6 +102,10 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Changed
 
+- Changed `contact.merger` and `calendar.merger` to be written once for the whole configuration, above the accounts: an account naming its own overrides it, and config.sample.toml shows the document-level form.
+
+- Changed Google People to read contacts through `people:batchGet`, 200 a request, instead of one `people.get` a contact, which drew the per-minute read quota down on a first sync.
+
 - **BREAKING**: Changed text-mode progress lines to print on stdout before the result, as pimalaya-cli asks of a long-lived command, stderr staying the logs'. Scripts read `--json`, whose last line is the result.
 
 - Changed a CardDAV or CalDAV table with no `auth` to load as `auth = "none"`, a 401 then saying no `auth` is configured.
@@ -201,6 +205,10 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 - Removed the `NEVEREST_PROFILE` profiler.
 
 ### Fixed
+
+- Fixed a Gmail source given up on its quota printing `code: null` on the rows of the collections it was reading: a daily quota, a refusal repeated past the waits or a minute's wait over `--max-wait` reads `rate-limited`, and a read refused for rights `permission-denied`.
+
+- Fixed `sync --dry-run` copying the store database and its WAL as files while a frontend may write them: the replica takes it as one snapshot (`VACUUM INTO`) under the shared staging lock, and copies no lock file.
 
 - Fixed install.sh saving an HTTP error page as the archive and letting `tar` fail on it: it downloads with `curl -fsSLo` and stops on the error.
 - Fixed a first sync over several connections going quiet after its scan: the bodies still downloading once the last collection is listed print their `Downloading` count.

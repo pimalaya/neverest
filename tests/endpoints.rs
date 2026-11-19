@@ -19,7 +19,6 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
-//! ./tests/pimdir.sh
 //! cargo test --features carddav --test endpoints -- --ignored
 //! ```
 
@@ -32,7 +31,9 @@ use std::{
     sync::{Mutex, MutexGuard, PoisonError},
 };
 
-use crate::common::{none, pimdir_cli};
+use io_pimdir::client::reader::PimdirItem;
+
+use crate::common::{link_ids, none};
 
 const DAV: &str = "http://127.0.0.1:5232";
 /// The address book the divergence test owns on both principals.
@@ -367,14 +368,10 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
     );
 
     let items = store_items(&state, BIND_BOOK);
-    assert!(
-        items.contains(r#""linkId":"card-1""#) && !items.contains("dup:"),
-        "one identity is one item; store held:\n{items}",
-    );
     assert_eq!(
-        items.matches(r#""linkId""#).count(),
-        1,
-        "and only one; store held:\n{items}",
+        link_ids(&items),
+        ["card-1"],
+        "one identity is one item, and only one; store held:\n{items:#?}",
     );
 
     let report = sync(&config, &state, BIND_BOOK, 0);
@@ -640,22 +637,9 @@ fn sync(config: &Path, state: &Path, book: &str, code: i32) -> String {
     )
 }
 
-/// The store's live items for an address book, as `pimdir` renders them.
-fn store_items(state: &Path, book: &str) -> String {
-    let store = state.join("neverest");
-    let output = pimdir_cli()
-        .args(["--store", &store.to_string_lossy()])
-        .args(["item", "list", &format!("div/a/{book}"), "--json"])
-        .output()
-        .expect("spawn pimdir");
-
-    assert!(
-        output.status.success(),
-        "`pimdir item list div/a/{book}` failed:\n{}",
-        String::from_utf8_lossy(&output.stderr),
-    );
-
-    String::from_utf8_lossy(&output.stdout).into_owned()
+/// The store's live items for an address book, with their summaries.
+fn store_items(state: &Path, book: &str) -> Vec<PimdirItem> {
+    common::store_items(&state.join("neverest"), &format!("div/a/{book}"))
 }
 
 /// Runs neverest and checks it ended on `code`.

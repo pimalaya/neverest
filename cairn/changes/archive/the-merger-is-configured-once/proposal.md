@@ -1,7 +1,7 @@
 ---
 cairn: change
 id: the-merger-is-configured-once
-status: active
+status: landed
 created: 2026-09-07
 ---
 

@@ -44,12 +44,11 @@ The integration tests under tests/ are ignored by default: each needs a real ser
 ```sh
 ./tests/stalwart2.sh
 ./tests/radicale.sh
-./tests/pimdir.sh
 cargo test --test submit -- --ignored
 cargo test --test carddav -- --ignored --test-threads=1
 ```
 
-`tests/pimdir.sh` installs the `pimdir` CLI some suites read the store with, built from the io-pimdir commit Cargo.lock locks, under target/pimdir/. Under a rootless Docker, which binds no port under 1024, start the servers with `./tests/pasta.sh servers` and run each suite as `./tests/pasta.sh cargo test …`: pasta (from passt) forwards the ports the suites name to the shifted ones.
+The suites read the store through the io-pimdir neverest links (tests/common/mod.rs), never a `pimdir` binary. `tests/pimdir.sh` installs that CLI at the version Cargo.lock locks, under target/pimdir/, for inspecting a store by hand. Under a rootless Docker, which binds no port under 1024, start the servers with `./tests/pasta.sh servers` and run each suite as `./tests/pasta.sh cargo test …`: pasta (from passt) forwards the ports the suites name to the shifted ones.
 
 They exist because the unit tests drive a scripted remote: the SMTP dialogue, the ETag plumbing, the conflict path and the duplicate freeze are only proven end to end here.
 

@@ -22,3 +22,11 @@ Pimdir stable-release review (2026-10-30), connector holes (report-neverest.md, 
 - A 409 sync-token refusal restarts the listing, as a 403 `valid-sync-token` does, once a server is shown to answer one.
 - A Graph series reads its exceptions past five years, or fails rather than propagating a partial body.
 - The shared-calendar read is checked live first, with the user's go.
+
+## Open question: an open series older than five years (2026-11-19)
+
+src/msgraph/client/calendar.rs `series_windows` reads a series with an end date whole, in five-year windows, and an open-ended one only within five years of today on either side (`OPEN_SERIES_YEARS`), so a birthday Outlook stores from 1604 costs two or three requests and not 85. An exception of an open series older than that floor, or further than five years ahead, is left out, and the series is written to the other endpoint without it: the delta's "read whole or not at all" is not met for that case alone.
+
+Neither reading of the delta is free. Reading every open series from its start costs one request per five years of its age per series per body read (85 for a 1604 birthday, every time its body is read). Failing the read whenever the series starts before the floor fails every yearless birthday, in every run, for good.
+
+Recommendation: read an open series from the later of its start and the date its master states as `createdDateTime`, five years at a time, and up to five years past today as now. An occurrence is edited once the series exists in the mailbox, so a floor at its creation keeps every exception a person made there and costs a 1604 birthday created in 2019 two requests. A series imported with its exceptions may predate its own creation: whether Graph keeps the original `createdDateTime` on an import is the live check to make before the code, on the Microsoft test account with the owner's go.

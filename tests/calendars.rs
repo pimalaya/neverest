@@ -20,7 +20,6 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
-//! ./tests/pimdir.sh
 //! cargo test --features caldav --test calendars -- --ignored --test-threads=1
 //! ```
 
@@ -28,7 +27,9 @@ mod common;
 
 use std::{fs, path::Path, process::Command};
 
-use crate::common::pimdir_cli;
+use io_pimdir::client::reader::PimdirItem;
+
+use crate::common::link_ids;
 
 const DAV: &str = "http://127.0.0.1:5232";
 /// The calendar the disjoint-merge test owns on both principals.
@@ -155,9 +156,9 @@ fn disjoint_edits_on_two_calendar_endpoints_merge_into_one_event() {
 
     let items = store_items(&state, MERGE_CAL);
     assert_eq!(
-        items.matches(r#""linkId""#).count(),
+        items.len(),
         1,
-        "one identity is one item; store held:\n{items}",
+        "one identity is one item; store held:\n{items:#?}",
     );
 }
 
@@ -292,13 +293,13 @@ fn a_recurring_series_and_its_override_stay_one_item_through_a_merge() {
 
     let items = store_items(&state, SERIES_CAL);
     assert!(
-        items.contains(r#""linkId":"series-1""#),
-        "the series is keyed by its UID; store held:\n{items}",
+        link_ids(&items).contains(&"series-1"),
+        "the series is keyed by its UID; store held:\n{items:#?}",
     );
     assert_eq!(
-        items.matches(r#""linkId""#).count(),
+        items.len(),
         1,
-        "a series and its override are ONE item; store held:\n{items}",
+        "a series and its override are ONE item; store held:\n{items:#?}",
     );
 
     let crossed = get(TARGET, SERIES_CAL, "series-1");
@@ -331,10 +332,10 @@ fn a_recurring_series_and_its_override_stay_one_item_through_a_merge() {
 
     let items = store_items(&state, SERIES_CAL);
     assert_eq!(
-        items.matches(r#""linkId""#).count(),
+        items.len(),
         1,
         "the merge kept one item rather than minting one per component; store \
-         held:\n{items}",
+         held:\n{items:#?}",
     );
 
     for side in [SOURCE, TARGET] {
@@ -493,22 +494,9 @@ fn sync(config: &Path, state: &Path, calendar: &str, code: i32) -> String {
     )
 }
 
-/// The store's live items for a calendar, as the `pimdir` CLI renders them.
-fn store_items(state: &Path, calendar: &str) -> String {
-    let store = state.join("neverest");
-    let output = pimdir_cli()
-        .args(["--store", &store.to_string_lossy()])
-        .args(["item", "list", &format!("cal/a/{calendar}"), "--json"])
-        .output()
-        .expect("spawn pimdir");
-
-    assert!(
-        output.status.success(),
-        "`pimdir item list cal/a/{calendar}` failed:\n{}",
-        String::from_utf8_lossy(&output.stderr),
-    );
-
-    String::from_utf8_lossy(&output.stdout).into_owned()
+/// The store's live items for a calendar, with their summaries.
+fn store_items(state: &Path, calendar: &str) -> Vec<PimdirItem> {
+    common::store_items(&state.join("neverest"), &format!("cal/a/{calendar}"))
 }
 
 /// Runs neverest and checks it ended on `code`, 2 being a run that reconciled

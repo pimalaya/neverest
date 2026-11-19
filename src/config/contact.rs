@@ -1,7 +1,7 @@
 //! # Contact configuration
 //!
-//! The `contact` table of an account: what applies to its contacts
-//! whichever source holds them.
+//! The `contact` table of the document or an account: what applies to its
+//! contacts whichever source holds them.
 
 use pimalaya_config::command::CommandConfig;
 use serde::{Deserialize, Serialize};
@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 pub struct ContactConfig {
     /// The merger `conflict resolve --interactive` runs on a card.
     ///
-    /// Unset by default; a sync never runs it. The four paths are appended
-    /// git-mergetool style, unless the command names {base}, {local}, {remote}
-    /// or {output}: `tcard merge {base} {local} {remote} --output {output}`.
+    /// Unset takes the document's; a sync never runs it. The paths are
+    /// appended unless the command names {base}, {local}, {remote} or
+    /// {output}: `tcard merge {base} {local} {remote} --output {output}`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merger: Option<CommandConfig>,
 }

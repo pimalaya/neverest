@@ -137,6 +137,8 @@ neverest conflict list
 neverest conflict resolve <id> -a work --interactive
 ```
 
+`--interactive` runs the merger the configuration names once for every account, `contact.merger` for a card and `calendar.merger` for an event, an account naming its own overriding it (see [config.sample.toml](config.sample.toml)).
+
 ## License
 
 This project is licensed under either of:

@@ -142,10 +142,17 @@ pub fn is_built(name: &str) -> bool {
     built.contains(&(name, true))
 }
 
-/// The whole configuration document: nothing but named accounts.
+/// The whole configuration document: the person's mergers and the named
+/// accounts.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct Config {
+    /// The contact settings of every account naming none of its own.
+    #[serde(default)]
+    pub contact: ContactConfig,
+    /// The calendar settings of every account naming none of its own.
+    #[serde(default)]
+    pub calendar: CalendarConfig,
     /// The named accounts the document declares.
     pub accounts: HashMap<String, AccountConfig>,
 }
@@ -184,9 +191,9 @@ impl Config {
     /// The accounts a command runs over, each with its configuration:
     /// those `names` names, else every one, in name order.
     ///
-    /// A name the configuration does not declare fails before anything
-    /// runs, and so does one holding `/`, which separates the account from
-    /// the rest of a store-wide id (pimdir STORAGE §9.2).
+    /// An account naming no merger takes the document's. A name not declared
+    /// fails before anything runs, as does one holding `/`, which separates
+    /// the account from the rest of a store-wide id (pimdir STORAGE §9.2).
     pub fn select(&self, names: &[String]) -> Result<Vec<(String, AccountConfig)>> {
         let mut configured: Vec<&String> = self.accounts.keys().collect();
         configured.sort();
@@ -213,7 +220,16 @@ impl Config {
         Ok(configured
             .into_iter()
             .filter(|name| names.is_empty() || names.contains(name))
-            .map(|name| (name.clone(), self.accounts[name].clone()))
+            .map(|name| {
+                let mut account = self.accounts[name].clone();
+                if account.contact.merger.is_none() {
+                    account.contact.merger = self.contact.merger.clone();
+                }
+                if account.calendar.merger.is_none() {
+                    account.calendar.merger = self.calendar.merger.clone();
+                }
+                (name.clone(), account)
+            })
             .collect())
     }
 
@@ -669,6 +685,8 @@ fn default_http_alpn() -> Vec<String> {
 mod tests {
     use std::{collections::BTreeMap, fs};
 
+    use pimalaya_config::command::CommandConfig;
+
     use crate::config::{dav::DavAuthConfig, tls::TlsConfig, *};
 
     /// Two accounts, `home` declared after `work`.
@@ -700,6 +718,43 @@ mod tests {
         assert_eq!(names(&work), ["work"]);
         let both = [String::from("work"), String::from("home")];
         assert_eq!(names(&config.select(&both).unwrap()), ["home", "work"]);
+    }
+
+    /// A merger named for the document reaches every account naming none,
+    /// and an account naming its own keeps it.
+    #[test]
+    fn a_document_merger_serves_the_accounts_naming_none() {
+        let config: Config = toml::from_str(
+            r#"
+            contact.merger = "tcard merge {base} {local} {remote} --output {output}"
+            calendar.merger = "tcal merge {base} {local} {remote} --output {output}"
+
+            [accounts.home]
+            imap.server = "imaps://h.example.org:993"
+
+            [accounts.work]
+            imap.server = "imaps://w.example.org:993"
+            calendar.merger = "my-tcal {base} {local} {remote} --output {output}"
+            "#,
+        )
+        .unwrap();
+        let merger = |command: &Option<CommandConfig>| format!("{command:?}");
+
+        let selected: BTreeMap<String, AccountConfig> =
+            config.select(&[]).unwrap().into_iter().collect();
+
+        for account in selected.values() {
+            assert_eq!(
+                merger(&account.contact.merger),
+                merger(&config.contact.merger)
+            );
+        }
+        assert_eq!(
+            merger(&selected["home"].calendar.merger),
+            merger(&config.calendar.merger)
+        );
+        assert!(merger(&selected["work"].calendar.merger).contains("my-tcal"));
+        assert!(!merger(&config.calendar.merger).contains("my-tcal"));
     }
 
     /// A name the configuration does not declare fails before anything

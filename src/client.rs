@@ -825,9 +825,7 @@ impl Client {
             #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.fetch_bodies(collection, ids, open, done),
             #[cfg(feature = "gpeople")]
-            Client::Gpeople(c) => c
-                .fetch_bodies(collection, ids, open, done)
-                .map(|()| Vec::new()),
+            Client::Gpeople(c) => c.fetch_bodies(collection, ids, open, done),
             #[cfg(feature = "gcal")]
             Client::Gcal(c) => c
                 .fetch_bodies(collection, ids, open, done)

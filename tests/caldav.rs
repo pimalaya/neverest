@@ -18,7 +18,6 @@
 //! Start the server and run with:
 //! ```sh
 //! ./tests/radicale.sh
-//! ./tests/pimdir.sh
 //! cargo test --features caldav --test caldav -- --ignored
 //! ```
 
@@ -26,7 +25,7 @@ mod common;
 
 use std::{fs, path::Path, process::Command};
 
-use crate::common::pimdir_cli;
+use crate::common::{link_ids, retained_items, store_items, summary_text};
 
 const DAV: &str = "http://127.0.0.1:5232";
 const USER: &str = "test";
@@ -61,6 +60,7 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
     let tmp = tempfile::tempdir().expect("temp dir");
     let root = tmp.path();
     let state = root.join("state");
+    let store = state.join("neverest");
     let config = root.join("config.toml");
     fs::create_dir_all(&state).unwrap();
 
@@ -97,18 +97,16 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
 
     neverest(&["sync", "-a", "calendar"], &config, &state);
 
-    let items = store_items(&state, COLLECTION);
-    assert!(
-        items.contains(r#""linkId":"event-1""#) && items.contains(r#""linkId":"event-2""#),
-        "both events landed, keyed by their UID; store held:\n{items}",
+    let items = store_items(&store, COLLECTION);
+    assert_eq!(
+        link_ids(&items),
+        ["event-1", "event-2"],
+        "both events landed keyed by their UID, chronologically; store held:\n{items:#?}",
     );
-    assert!(
-        items.contains("Stand-up"),
-        "the summary carries what an agenda renders; store held:\n{items}",
-    );
-    assert!(
-        items.find("event-1").unwrap() < items.find("event-2").unwrap(),
-        "the listing is chronological; store held:\n{items}",
+    assert_eq!(
+        summary_text(&items[0]),
+        "Stand-up",
+        "the summary carries what an agenda renders; store held:\n{items:#?}",
     );
 
     put(
@@ -125,27 +123,26 @@ fn a_caldav_side_syncs_edits_and_retains_a_server_delete() {
 
     neverest(&["sync", "-a", "calendar"], &config, &state);
 
-    let items = store_items(&state, COLLECTION);
+    let items = store_items(&store, COLLECTION);
     assert!(
-        items.contains("Stand-up rescheduled"),
-        "the edited body reached the store; store held:\n{items}",
+        items
+            .iter()
+            .any(|item| summary_text(item) == "Stand-up rescheduled"),
+        "the edited body reached the store; store held:\n{items:#?}",
     );
 
     delete("event-2");
     neverest(&["sync", "-a", "calendar"], &config, &state);
 
-    let live = store_items(&state, COLLECTION);
+    let live = store_items(&store, COLLECTION);
     assert!(
-        !live.contains(r#""linkId":"event-2""#),
-        "the deleted event left the live listing; store held:\n{live}",
+        !link_ids(&live).contains(&"event-2"),
+        "the deleted event left the live listing; store held:\n{live:#?}",
     );
-    let retained = pimdir(
-        &state,
-        &["item", "list", COLLECTION, "--retained", "--json"],
-    );
+    let retained = retained_items(&store, COLLECTION);
     assert!(
-        retained.contains(r#""linkId":"event-2""#),
-        "the deleted event is retained, not lost; retained listing:\n{retained}",
+        link_ids(&retained).contains(&"event-2"),
+        "the deleted event is retained, not lost; retained listing:\n{retained:#?}",
     );
 
     let report = neverest(&["sync", "-a", "calendar", "--json"], &config, &state);
@@ -231,33 +228,6 @@ fn delete(id: &str) {
         "DELETE {id} failed: {}",
         String::from_utf8_lossy(&output.stderr),
     );
-}
-
-/// The store's live items for a collection, as the `pimdir` CLI renders them.
-fn store_items(state: &Path, collection: &str) -> String {
-    pimdir(state, &["item", "list", collection, "--json"])
-}
-
-/// Runs the `pimdir` operator CLI against the account's store.
-///
-/// It observes what the sync did not print, retention above all, and comes
-/// from io-pimdir rather than from neverest.
-fn pimdir(state: &Path, args: &[&str]) -> String {
-    let store = state.join("neverest");
-    let output = pimdir_cli()
-        .args(["--store", &store.to_string_lossy()])
-        .args(args)
-        .output()
-        .expect("spawn pimdir");
-
-    assert!(
-        output.status.success(),
-        "`pimdir {}` failed:\n{}",
-        args.join(" "),
-        String::from_utf8_lossy(&output.stderr),
-    );
-
-    String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
 fn neverest(args: &[&str], config: &Path, state: &Path) -> String {

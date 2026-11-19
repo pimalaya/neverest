@@ -1,11 +1,13 @@
+#contact.merger = "tcard merge {base} {local} {remote} --output {output}"	# what conflict resolve --interactive runs on a card, for every account
+#calendar.merger = "tcal merge {base} {local} {remote} --output {output}"	# and on an event
+
 [accounts.example]
 #one-way = false			# the sources win and the other side's changes are discarded, never merged
 #retain = true				# the store keeps bodies, unset true with no target and false with targets
 #mail.filter.since = "30d"		# the oldest mail listed: a duration, a date or an RFC 3339 instant
 #connections = 4			# connections per source for body downloads, sync -j overriding it
 
-#contact.merger = "tcard merge {base} {local} {remote} --output {output}"	# what conflict resolve --interactive runs on a card
-#calendar.merger = "tcal merge {base} {local} {remote} --output {output}"	# and on an event
+#calendar.merger = "my-tcal {base} {local} {remote} --output {output}"	# an account naming its own merger overrides the one above
 
 #store.root = "~/.local/state/neverest"	# the store, shared by every account naming the same root
 #store.purge-after = "90d"		# when a retained item is reclaimed, unset never and 0 at once

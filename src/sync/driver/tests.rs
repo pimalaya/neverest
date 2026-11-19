@@ -2816,6 +2816,59 @@ fn one_account_s_delay_purges_its_own_retained_items_alone() {
     assert_eq!(kept.len(), 1, "the other account keeps its trash");
 }
 
+/// The commit frames the store's write-ahead log holds past the octet
+/// `from`, one per committed transaction (SQLite WAL format).
+fn wal_commits(dir: &Path, from: u64) -> usize {
+    let wal = fs::read(dir.join("pimdir.db-wal")).unwrap_or_default();
+    if wal.len() < 32 {
+        return 0;
+    }
+    let page = u32::from_be_bytes(wal[8..12].try_into().unwrap()) as usize;
+    let mut at = (from as usize).max(32);
+    let mut commits = 0;
+    while at + 24 + page <= wal.len() {
+        if wal[at + 4..at + 8] != [0; 4] {
+            commits += 1;
+        }
+        at += 24 + page;
+    }
+    commits
+}
+
+/// An account's retention sweep is one write, however many items expired.
+///
+/// pimdir audit-2026-11-12 P5: the sweep committed once an item, so a
+/// thousand expired messages were a thousand synced transactions.
+#[test]
+fn the_retention_sweep_purges_in_one_transaction() {
+    let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+    let dir = tempfile::tempdir().unwrap();
+    retire(dir.path(), "work", "work/imap/INBOX", b"inbox");
+    retire(dir.path(), "work", "work/imap/Archive", b"archive");
+    retire(dir.path(), "work", "work/imap/Trash", b"trash");
+    retire(dir.path(), "home", "home/imap/INBOX", b"home");
+    thread::sleep(std::time::Duration::from_millis(5));
+
+    let cutoff = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut store = PimdirStore::open(dir.path()).unwrap().for_account("work");
+    let wal = dir.path().join("pimdir.db-wal");
+    let before = fs::metadata(&wal).map(|meta| meta.len()).unwrap_or(0);
+
+    assert_eq!(purge_account(&mut store, &cutoff), 3);
+    assert_eq!(wal_commits(dir.path(), before), 1, "one transaction");
+
+    for collection in ["work/imap/INBOX", "work/imap/Archive", "work/imap/Trash"] {
+        assert!(
+            store
+                .list_retained(collection, None, 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let kept = store.list_retained("home/imap/INBOX", None, 10).unwrap();
+    assert_eq!(kept.len(), 1, "the other account keeps its trash");
+}
+
 /// A mutable-content remote: every item carries an ETag.
 ///
 /// The path no compiled-in backend exercises yet, proven here before any

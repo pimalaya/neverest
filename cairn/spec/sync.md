@@ -8,7 +8,7 @@ status: current
 
 `neverest sync` reconciles the named sources of every account, or of those `-a` names, through the io-pimdir engine over the pimdir store the accounts share. It is sync-on-demand: one reconcile per invocation, no daemon.
 
-The store and the engine follow pimdir storage-draft-14, sync-draft-14 and search-draft-14 (io-pimdir 0.17, vendoring pimdir da7e01a): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
+The store and the engine follow pimdir storage-draft-14, sync-draft-14 and search-draft-14 (io-pimdir 0.18, vendoring pimdir e188e31; a store io-pimdir 0.17 wrote is the same draft and opens as is): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
 
 ### Requirement: An account holds named sources
 An account SHALL hold a map of named sources (`sources.<name>`), each declaring exactly one remote backend, and SHALL require at least one. It MAY additionally hold a map of named targets (`targets.<name>`) on the same terms. Both map keys SHALL be the names its pimdir source ids are made from, so a name is what every binding it owns in the store is recorded against, and a rename SHALL be treated as a new source. One name SHALL NOT be both a source and a target.
@@ -547,7 +547,7 @@ A provider refusing a send for its daily limit has not refused the message: the 
 ### Requirement: A run reclaims retained items on a schedule
 The store retains an item rather than deleting it when its last binding vanishes, so reclaiming is the client's schedule. An account SHALL configure it as `store.purge-after`, a duration as pimalaya-config reads one: an integer of seconds, or a number plus `s`/`m`/`h`/`d`/`w` (`"90d"`), a day being 86400 seconds and months and years refused. **Unset SHALL mean never purge**; `0` or `"0"` SHALL purge immediately, reproducing a terminal delete. There SHALL be no boolean beside it: the delay is the switch.
 
-A sync run SHALL sweep **after** the sync and before the report is finalised, on both the pair and the solo paths, never in a dry run, purging every retained item of the account's own collections whose `retained_at` precedes `now - purge-after` (RFC 3339, the shape the store stamps), one item at a time (`purge`), never another account's: the store's own sweep (`purge_retained_before`) is store-wide, and one account's delay would decide for every other. Sweeping after the sync means an item this run retired starts its delay now rather than being reclaimed by the run that retired it. The sweep SHALL warn rather than fail the run, as the send channel does, and `sync --no-purge` SHALL skip it. The report SHALL carry what was reclaimed (items and bytes) in both the text and `--json` output.
+A sync run SHALL sweep **after** the sync and before the report is finalised, on both the pair and the solo paths, never in a dry run, purging every retained item of the account's own collections whose `retained_at` precedes `now - purge-after` (RFC 3339, the shape the store stamps), every expired item of the account in one transaction (`purge_items`, never one transaction an item), never another account's: the store's own sweep (`purge_retained_before`) is store-wide, and one account's delay would decide for every other. Sweeping after the sync means an item this run retired starts its delay now rather than being reclaimed by the run that retired it. The sweep SHALL warn rather than fail the run, as the send channel does, and `sync --no-purge` SHALL skip it. The report SHALL carry what was reclaimed (items and bytes) in both the text and `--json` output.
 
 A read-only source (`<protocol>.item.delete = false`, `collection.delete = false`) with no purge delay is therefore a backup: a remote expunge retires the local row without losing the item or its body.
 
@@ -555,6 +555,11 @@ A read-only source (`<protocol>.item.delete = false`, `collection.delete = false
 - **GIVEN** a store shared by an account with `store.purge-after = "0"` and one with none, each holding a retained item
 - **WHEN** the first account's retention sweep runs
 - **THEN** its retained item is purged, and the other account's stays
+
+#### Scenario: One write a sweep
+- **GIVEN** an account holding expired retained items in three collections
+- **WHEN** its retention sweep runs
+- **THEN** the three are purged in one committed transaction
 
 ### Requirement: The checkpoint is opaque to the shared client seam
 The backend-neutral enumeration seam SHALL carry the incremental-sync cursor as opaque checkpoint bytes and string member handles: the IMAP adapter encodes its `(UIDVALIDITY, HIGHESTMODSEQ)` pair, the Graph adapter its delta link, and the engine stores whichever bytes the source produced. (Supersedes the IMAP-shaped `(u32, u64)` cursor on the shared seam; the QRESYNC behaviour itself is unchanged and stays specified under "IMAP enumeration is incremental".)

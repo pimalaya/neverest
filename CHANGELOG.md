@@ -122,6 +122,18 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Changed io-pimdir to 0.17 (pimdir draft-14): a store neverest wrote on io-pimdir 0.16 is refused (`store-version`) and asks to be synced by that neverest until nothing is queued, then set aside; a settled conflict body and a body a run merges are queued with their `X-PIMDIR-` properties removed (pimdir STORAGE §18), so no instruction to a performer enters the queue unasked; a refused offered create is held as that source's pending create rather than pushed and refused every run; a recurrence rule filling every period no longer stalls the indexer.
 
+- Changed the io-pimdir dependency to 0.18 (pimdir draft-14 still, a store io-pimdir 0.17 wrote opens as is): the retention sweep (`store.purge-after`) purges an account's expired items in one transaction instead of one per item.
+
+- Changed the io-imap dependency to 0.12.
+
+- Changed the io-smtp dependency to 0.10.
+
+- Changed the io-sasl dependency to 0.3.
+
+- Changed the pimalaya-cli dependency to 0.7.
+
+- Changed the ical-rs dependency to 0.7.2: a recurrence rule's `UNTIL` is shifted between UTC and the series zone through the time zone database, zones only the database knows included.
+
 - Changed pimalaya-config to 0.6 and pimalaya-cli to 0.6.1: a failing secret command ends its message with ", run `<command>` yourself to see why", a TOML parse error no longer prints the source line, a refused `Secret` never echoes its value, a text error report sanitizes its chain line by line, and `--log-file` creates its file at 0600, refusing a symbolic link.
 
 - Changed io-pimdir to 0.16: a hostile time zone rule no longer aborts a calendar pull, a second rekey or a delivered copy no longer makes another source remove a message from its server, a joined mail binding pushes its flags, a queued move into its own collection parks rather than deletes, a locally edited contact or event keeps its summary, store backups and restores never leave part of a file, and every search index is extracted again once.

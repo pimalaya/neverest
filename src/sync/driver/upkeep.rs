@@ -160,12 +160,12 @@ pub(super) fn sweep_retained(
 }
 
 /// Purges the retained items of the account `store` is opened for whose
-/// retirement precedes `cutoff`, one at a time, answering how many.
+/// retirement precedes `cutoff` in one transaction, answering how many.
 ///
 /// Never another account's: the store's own sweep (`purge_retained_before`)
 /// is store-wide, and one account's delay would decide for every account
-/// sharing the store. A failure is warned about and skipped.
-fn purge_account(store: &mut PimdirStore, cutoff: &str) -> usize {
+/// sharing the store. A failure is warned about, purging nothing.
+pub(super) fn purge_account(store: &mut PimdirStore, cutoff: &str) -> usize {
     const PAGE: usize = 512;
 
     let account = store.account().map(str::to_owned);
@@ -177,7 +177,7 @@ fn purge_account(store: &mut PimdirStore, cutoff: &str) -> usize {
         }
     };
 
-    let mut purged = 0;
+    let mut expired: Vec<(String, i64)> = Vec::new();
     for collection in collections {
         let mut after = None;
         loop {
@@ -193,13 +193,8 @@ fn purge_account(store: &mut PimdirStore, cutoff: &str) -> usize {
 
             for item in page {
                 let retired = item.retention.as_ref().and_then(|at| at.at.as_deref());
-                if !retired.is_some_and(|at| at < cutoff) {
-                    continue;
-                }
-                match store.purge(&collection.id, item.seq) {
-                    Ok(true) => purged += 1,
-                    Ok(false) => {}
-                    Err(err) => warn!("cannot purge item {} of {}: {err}", item.seq, collection.id),
+                if retired.is_some_and(|at| at < cutoff) {
+                    expired.push((collection.id.clone(), item.seq));
                 }
             }
 
@@ -209,7 +204,18 @@ fn purge_account(store: &mut PimdirStore, cutoff: &str) -> usize {
         }
     }
 
-    purged
+    if expired.is_empty() {
+        return 0;
+    }
+
+    let items = expired.iter().map(|(id, seq)| (id.as_str(), *seq));
+    match store.purge_items(items) {
+        Ok(report) => report.items,
+        Err(err) => {
+            warn!("cannot purge {} retained item(s): {err}", expired.len());
+            0
+        }
+    }
 }
 
 /// The blob subdirectory of a pimdir store (pimdir STORAGE §5), shared by a

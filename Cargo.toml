@@ -20,8 +20,8 @@ default = ["rustls-ring", "imap", "smtp", "carddav", "caldav", "msgraph", "gpeop
 native-tls = ["pimalaya-stream/native-tls", "io-webdav?/native-tls", "io-imap?/native-tls", "io-msgraph?/native-tls", "io-smtp?/native-tls", "io-gpeople?/native-tls", "io-gcal?/native-tls", "io-gmail?/native-tls"]
 rustls-aws = ["pimalaya-stream/rustls-aws", "io-webdav?/rustls-aws", "io-imap?/rustls-aws", "io-msgraph?/rustls-aws", "io-smtp?/rustls-aws", "io-gpeople?/rustls-aws", "io-gcal?/rustls-aws", "io-gmail?/rustls-aws"]
 rustls-ring = ["pimalaya-stream/rustls-ring", "io-webdav?/rustls-ring", "io-imap?/rustls-ring", "io-msgraph?/rustls-ring", "io-smtp?/rustls-ring", "io-gpeople?/rustls-ring", "io-gcal?/rustls-ring", "io-gmail?/rustls-ring"]
-imap = ["dep:io-imap", "io-imap/client", "io-imap/scram"]
-smtp = ["dep:io-smtp", "io-smtp/client", "io-smtp/scram"]
+imap = ["dep:io-imap", "io-imap/std", "io-imap/scram"]
+smtp = ["dep:io-smtp", "io-smtp/std", "io-smtp/scram"]
 carddav = ["dep:io-webdav", "dep:io-http", "dep:ical-rs", "dep:vcard-rs"]
 caldav = ["dep:io-webdav", "dep:io-http", "dep:ical-rs", "dep:vcard-rs"]
 msgraph = ["dep:io-msgraph", "dep:base64", "dep:ical-rs", "dep:jiff", "jiff/tz-system", "dep:vcard-rs", "io-msgraph/client", "io-msgraph/ical", "io-msgraph/vcard"]
@@ -38,7 +38,7 @@ strip = "symbols"
 panic = "abort"
 
 [build-dependencies]
-pimalaya-cli = { version = "0.6.1", default-features = false, features = ["build"] }
+pimalaya-cli = { version = "0.7.0", default-features = false, features = ["build"] }
 
 [dev-dependencies]
 io-oauth = { version = "0.7", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
@@ -51,20 +51,20 @@ clap = { version = "4.4", default-features = false, features = ["derive", "error
 crossbeam-queue = "0.3"
 dirs = "7"
 idna_adapter = { version = "=1.0.0", default-features = false }
-ical-rs = { version = "0.7.1", optional = true }
+ical-rs = { version = "0.7.2", optional = true }
 io-gcal = { version = "0.5.2", default-features = false, optional = true }
 io-gmail = { version = "0.9", default-features = false, optional = true }
 io-gpeople = { version = "0.8.1", default-features = false, optional = true }
 io-http = { version = "0.8", default-features = false, optional = true }
-io-imap = { version = "0.11.2", default-features = false, optional = true }
+io-imap = { version = "0.12.0", default-features = false, optional = true }
 io-msgraph = { version = "0.9.3", default-features = false, optional = true }
-io-pimdir = { version = "0.17.0", default-features = false, features = ["client"] }
-io-sasl = { version = "0.2", default-features = false, features = ["scram"] }
-io-smtp = { version = "0.9", default-features = false, optional = true }
+io-pimdir = { version = "0.18.0", default-features = false, features = ["client"] }
+io-sasl = { version = "0.3", default-features = false, features = ["scram"] }
+io-smtp = { version = "0.10", default-features = false, optional = true }
 io-webdav = { version = "0.11.0", default-features = false, optional = true }
 jiff = { version = "1", default-features = false, features = ["std"], optional = true }
 log = "0.4"
-pimalaya-cli = { version = "0.6.1", default-features = false, features = ["terminal", "signal"] }
+pimalaya-cli = { version = "0.7.0", default-features = false, features = ["terminal", "signal"] }
 pimalaya-config = { version = "0.6.0", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.4", default-features = false }
 rusqlite = { version = "0.43", default-features = false }

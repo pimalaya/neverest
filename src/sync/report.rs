@@ -222,6 +222,12 @@ pub struct SyncOutput {
     /// No warning, no exit code: a capped source lists the same part at every
     /// round. Every narrowed round of neverest counts here too.
     pub unlisted: Vec<UnlistedMembers>,
+    /// The open series a source read from a floor later than their start, an
+    /// exception before it left out of the body (warnings).
+    ///
+    /// No exit code: the body is still synced, a rerun reads it the same way
+    /// and no person can settle it.
+    pub clipped: Vec<ClippedSeries>,
     /// What the run did to the store's search index (pimdir SEARCH), `null`
     /// in a dry run and in a build without the `search` feature.
     ///
@@ -268,6 +274,7 @@ impl SyncOutput {
             waiting,
             disagreed,
             unlisted,
+            clipped,
             interrupted,
             index: _,
         } = other;
@@ -297,6 +304,7 @@ impl SyncOutput {
         self.waiting.extend(waiting);
         self.disagreed.extend(disagreed);
         self.unlisted.extend(unlisted);
+        self.clipped.extend(clipped);
         self.interrupted |= interrupted;
     }
 
@@ -330,6 +338,7 @@ impl SyncOutput {
         endpoints.extend(self.waiting.iter_mut().map(|w| &mut w.side));
         endpoints.extend(self.disagreed.iter_mut().map(|d| &mut d.side));
         endpoints.extend(self.unlisted.iter_mut().map(|u| &mut u.side));
+        endpoints.extend(self.clipped.iter_mut().map(|c| &mut c.side));
 
         for endpoint in endpoints {
             if let Some(name) = endpoint.strip_prefix(&prefix) {
@@ -571,6 +580,35 @@ impl fmt::Display for UnlistedMembers {
         write!(
             f,
             "{count} item(s) of {collection} not listed by {side}, which is capped: kept"
+        )
+    }
+}
+
+/// An open series a source read from a floor later than its start.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ClippedSeries {
+    /// The side that read the series.
+    pub side: String,
+    /// The collection, as the side names it.
+    pub collection: String,
+    /// The series, by its handle on the side.
+    pub id: String,
+    /// The floor its exceptions were read from, RFC 3339 UTC.
+    pub since: String,
+}
+
+impl fmt::Display for ClippedSeries {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            side,
+            collection,
+            id,
+            since,
+        } = self;
+        write!(
+            f,
+            "series {id} in {collection} on {side} starts before {since}, so the exceptions it holds before that were not read and its body was synced without them"
         )
     }
 }
@@ -1365,6 +1403,7 @@ impl fmt::Display for SyncOutput {
             + self.overruled.len()
             + self.unanswered.len()
             + self.disagreed.len()
+            + self.clipped.len()
             + self
                 .index
                 .as_ref()
@@ -1502,6 +1541,9 @@ impl fmt::Display for SyncOutput {
             }
             for d in &self.disagreed {
                 writeln!(f, " - {d}")?;
+            }
+            for c in &self.clipped {
+                writeln!(f, " - {c}")?;
             }
             if let Some(index) = &self.index
                 && index.error.is_some()

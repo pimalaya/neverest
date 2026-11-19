@@ -71,7 +71,7 @@ use crate::config::{
 use crate::dav::client::DavKind;
 use crate::error::{ErrorCode, Failure};
 #[cfg(feature = "msgraph")]
-use crate::msgraph::client::{GraphKind, SizeHints};
+use crate::msgraph::client::{GraphKind, SeriesClips, SizeHints};
 #[cfg(any(
     feature = "imap",
     feature = "smtp",
@@ -168,6 +168,28 @@ impl Account {
             .collect();
         downloaded.sort();
         downloaded
+    }
+
+    /// The open Graph series each endpoint read from a floor later than
+    /// their start, as (endpoint, collection, id, floor), sorted.
+    #[cfg(feature = "msgraph")]
+    pub fn clipped(&self) -> Vec<(String, String, String, String)> {
+        let mut clipped: Vec<_> = self
+            .endpoints
+            .iter()
+            .filter_map(|(name, account)| match &account.as_ref().ok()?.backend {
+                SourceAccountBackend::Msgraph(msgraph) => Some((name, msgraph.clips.noted())),
+                #[allow(unreachable_patterns)]
+                _ => None,
+            })
+            .flat_map(|(name, clips)| {
+                clips
+                    .into_iter()
+                    .map(|(collection, id, since)| (name.clone(), collection, id, since))
+            })
+            .collect();
+        clipped.sort();
+        clipped
     }
 }
 
@@ -355,6 +377,7 @@ impl SourceAccountBackend {
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 sizes: SizeHints::default(),
+                clips: SeriesClips::default(),
                 proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "msgraph")]
@@ -364,6 +387,7 @@ impl SourceAccountBackend {
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 sizes: SizeHints::default(),
+                clips: SeriesClips::default(),
                 proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "msgraph")]
@@ -373,6 +397,7 @@ impl SourceAccountBackend {
                 user_id: config.user_id.clone(),
                 tls: config.tls.clone().into_tls(config.alpn.clone()),
                 sizes: SizeHints::default(),
+                clips: SeriesClips::default(),
                 proxy: proxy(resolver)?,
             })),
             #[cfg(feature = "gpeople")]
@@ -514,6 +539,9 @@ pub struct MsgraphAccount {
     pub tls: Tls,
     /// The message sizes its listings stated, shared by its connections.
     pub sizes: SizeHints,
+    /// The open series its connections read from a floor later than their
+    /// start, for the run's report.
+    pub clips: SeriesClips,
     /// How the connections reach the server.
     pub proxy: Proxy,
 }

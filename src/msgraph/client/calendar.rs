@@ -191,18 +191,23 @@ impl GraphClient {
     /// Reads an item: the event, and the exceptions of a series.
     ///
     /// Instances are listed with the projection's `$select`: the default one
-    /// leaves out `originalStart`, an exception's `RECURRENCE-ID`.
-    fn series(&mut self, id: &str) -> Result<(MsgraphEvent, Vec<MsgraphEvent>)> {
+    /// leaves out `originalStart`, an exception's `RECURRENCE-ID`. The third
+    /// is the floor an open series starting before it was read from.
+    fn series(&mut self, id: &str) -> Result<(MsgraphEvent, Vec<MsgraphEvent>, Option<String>)> {
         let master = self.event(id)?;
         if master.event_type != Some(MsgraphEventType::SeriesMaster) {
-            return Ok((master, Vec::new()));
+            return Ok((master, Vec::new(), None));
         }
 
         let today = Timestamp::now().to_zoned_datetime(TimeZone::UTC).date();
-        let Some(windows) = series_windows(&master, today) else {
+        let Some((windows, clipped)) = series_windows(&master, today) else {
             warn!("series {id} has no readable range, its exceptions are skipped");
-            return Ok((master, Vec::new()));
+            return Ok((master, Vec::new(), None));
         };
+        let floor = windows
+            .first()
+            .filter(|_| clipped)
+            .map(|(from, _)| from.clone());
 
         let params = MsgraphEventsListParams {
             top: Some(PAGE_SIZE),
@@ -232,29 +237,35 @@ impl GraphClient {
             }
         }
 
-        Ok((master, unique(exceptions)?))
+        Ok((master, unique(exceptions)?, floor))
     }
 
-    /// Reads one item as iCalendar with the revision it corresponds to.
-    fn calendar_item(&mut self, id: &str) -> Result<(String, Option<String>)> {
-        let (master, exceptions) = self.series(id)?;
+    /// Reads one item of `collection` as iCalendar with the revision it
+    /// corresponds to, noting an open series read from a later floor.
+    fn calendar_item(&mut self, collection: &str, id: &str) -> Result<(String, Option<String>)> {
+        let (master, exceptions, floor) = self.series(id)?;
+        if let Some(floor) = floor {
+            debug!("series {id} starts before {floor}, its exceptions before it are not read");
+            self.clips.note(collection, id, &floor);
+        }
         let exceptions: Vec<&MsgraphEvent> = exceptions.iter().collect();
         Ok((master.to_ical_series(&exceptions), master.change_key))
     }
 
-    /// Streams the iCalendar objects of an id set.
+    /// Streams the iCalendar objects of an id set of `calendar`.
     ///
     /// Each is committed with its master's `changeKey`; answers the events
     /// Graph answered 404, gone since they were listed.
     pub(super) fn fetch_events<S: Write>(
         &mut self,
+        calendar: &str,
         ids: &[&str],
         mut open: impl FnMut(&str) -> std::io::Result<S>,
         mut done: impl FnMut(&str, Option<&str>, S) -> std::io::Result<()>,
     ) -> Result<Vec<String>> {
         let mut gone = Vec::new();
         for id in ids {
-            let (ical, revision) = match self.calendar_item(id) {
+            let (ical, revision) = match self.calendar_item(calendar, id) {
                 Ok(item) => item,
                 Err(err) if chain_not_found(&err) => {
                     debug!("event {id} gone before it was read");
@@ -272,14 +283,15 @@ impl GraphClient {
         Ok(gone)
     }
 
-    /// Streams one item's iCalendar object into `sink`, returning its
-    /// revision.
+    /// Streams one item of `calendar` as an iCalendar object into `sink`,
+    /// returning its revision.
     pub(super) fn get_event_stream(
         &mut self,
+        calendar: &str,
         id: &str,
         mut sink: impl Write,
     ) -> Result<Option<String>> {
-        let (ical, revision) = self.calendar_item(id)?;
+        let (ical, revision) = self.calendar_item(calendar, id)?;
         sink.write_all(ical.as_bytes())
             .with_context(|| format!("Stream event {id} error"))?;
         Ok(revision)
@@ -367,7 +379,7 @@ impl GraphClient {
         let (ical, anchored) = anchor(read_bytes(source)?, id, self.floating_zone)?;
         let occurrences = Occurrences::read(&ical)?;
         occurrences.refuse_ranges("Microsoft Graph")?;
-        let (current, exceptions) = self.series(id)?;
+        let (current, exceptions, _) = self.series(id)?;
         check_revision(id, &current, if_match)?;
 
         let exceptions: Vec<&MsgraphEvent> = exceptions.iter().collect();
@@ -646,20 +658,21 @@ fn unique(events: Vec<MsgraphEvent>) -> Result<Vec<MsgraphEvent>> {
     Ok(unique)
 }
 
-/// The windows a series' exceptions are read in, none longer than the five
-/// years Graph allows an instances listing (it answers 400 past them).
+/// The windows a series' exceptions are read in (none past Graph's five
+/// years), and whether an open one starts before the first: clipped.
 ///
-/// An open-ended series, whose `endDate` Graph fills with a sentinel, is read
-/// within [`OPEN_SERIES_YEARS`] of `today`: one born in 1604 (Outlook's year
-/// for a birthday without one) would take dozens of requests for nothing.
-fn series_windows(master: &MsgraphEvent, today: Date) -> Option<Vec<(String, String)>> {
+/// An open-ended series is read within [`OPEN_SERIES_YEARS`] of `today`: one
+/// born in 1604 (Outlook's year for a birthday without one) would take
+/// dozens of requests for nothing.
+fn series_windows(master: &MsgraphEvent, today: Date) -> Option<(Vec<(String, String)>, bool)> {
     let (start, end) = master.recurrence.as_option()?.bounds()?;
-    let (start, end) = match end {
-        Some(end) => (start, end.checked_add(1.day()).ok()?),
+    let (start, end, clipped) = match end {
+        Some(end) => (start, end.checked_add(1.day()).ok()?, false),
         None => {
             let years = OPEN_SERIES_YEARS.years();
             let floor = today.checked_sub(years).ok()?;
-            (start.max(floor), today.checked_add(years).ok()?)
+            let end = today.checked_add(years).ok()?;
+            (start.max(floor), end, start < floor)
         }
     };
 
@@ -681,7 +694,7 @@ fn series_windows(master: &MsgraphEvent, today: Date) -> Option<Vec<(String, Str
         from = to;
     }
 
-    Some(windows)
+    Some((windows, clipped))
 }
 
 /// Refuses a write when the event moved on Graph since `if_match`.
@@ -1035,6 +1048,61 @@ mod tests {
         }
     }
 
+    /// A yearly all-day series master with no end, from `start`.
+    fn open_series(start: Date) -> Step {
+        let day = start.strftime("%Y-%m-%d").to_string();
+        Step::ok(json!({
+            "id": "S",
+            "changeKey": "c1",
+            "type": "seriesMaster",
+            "subject": "Birthday",
+            "isAllDay": true,
+            "start": { "dateTime": format!("{day}T00:00:00.0000000"), "timeZone": "UTC" },
+            "end": { "dateTime": format!("{day}T00:00:00.0000000"), "timeZone": "UTC" },
+            "recurrence": {
+                "pattern": {
+                    "type": "absoluteYearly",
+                    "interval": 1,
+                    "month": start.month(),
+                    "dayOfMonth": start.day(),
+                },
+                "range": { "type": "noEnd", "startDate": day, "endDate": "0001-01-01" },
+            },
+        }))
+    }
+
+    /// An open series older than its window is served, noted read from the
+    /// window's floor; one starting inside it is noted nowhere.
+    #[test]
+    fn an_open_series_older_than_its_window_is_noted_read_from_its_floor() {
+        let today = Timestamp::now().to_zoned_datetime(TimeZone::UTC).date();
+        let floor = today.checked_sub(OPEN_SERIES_YEARS.years()).unwrap();
+        let empty = || Step::ok(json!({ "value": [] }));
+
+        let born: Date = "1604-03-12".parse().unwrap();
+        let (mut client, server) = session(vec![open_series(born), empty(), empty(), empty()]);
+        let mut body = Vec::new();
+
+        let revision = client.get_item_stream("cal", "S", &mut body).unwrap();
+
+        assert_eq!(revision.as_deref(), Some("c1"));
+        assert!(String::from_utf8(body).unwrap().contains("RRULE:"));
+        let requests = server.requests().remove(0);
+        let floor = floor.strftime("%Y-%m-%d").to_string();
+        let asked = format!("startDateTime={floor}T00%3A00%3A00Z");
+        assert!(requests[1].contains(&asked), "{requests:#?}");
+        let floor = format!("{floor}T00:00:00Z");
+        let noted = (String::from("cal"), String::from("S"), floor);
+        assert_eq!(client.clips.noted(), [noted]);
+
+        let born = today.checked_sub(1.year()).unwrap();
+        let (mut client, _server) = session(vec![open_series(born), empty(), empty()]);
+
+        client.get_item_stream("cal", "S", Vec::new()).unwrap();
+
+        assert_eq!(client.clips.noted(), []);
+    }
+
     fn event(id: &str, change_key: &str) -> MsgraphEvent {
         MsgraphEvent {
             id: id.into(),
@@ -1059,7 +1127,11 @@ mod tests {
         };
         let today: Date = "2026-10-04".parse().unwrap();
         let windows = |range_type, start, end| {
-            series_windows(&series(range_type, start, end), today).unwrap()
+            let (windows, clipped) =
+                series_windows(&series(range_type, start, end), today).unwrap();
+            let open = range_type == MsgraphRecurrenceRangeType::NoEnd;
+            assert_eq!(clipped, open && start < "2021-10-04", "{start}");
+            windows
         };
         let pair = |from: &str, to: &str| (format!("{from}T00:00:00Z"), format!("{to}T00:00:00Z"));
 

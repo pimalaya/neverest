@@ -1205,7 +1205,7 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
         }
         #[cfg(feature = "msgraph")]
         SourceAccountBackend::Msgraph(msgraph) => {
-            let client = GraphClient::connect(
+            let mut client = GraphClient::connect(
                 msgraph.kind,
                 &msgraph.token,
                 &msgraph.user_id,
@@ -1214,6 +1214,7 @@ pub fn open(account: &SourceAccount) -> Result<Client> {
                 msgraph.sizes.clone(),
                 account.throttle.clone(),
             )?;
+            client.clips = msgraph.clips.clone();
             Ok(Client::Msgraph(Box::new(client)))
         }
         #[cfg(feature = "gpeople")]

@@ -29,7 +29,7 @@ use crate::{
     account::{MsgraphAccount, SourceAccount, SourceAccountBackend},
     client::{Client, Pool},
     config::AccountConfig,
-    msgraph::client::{GraphClient, GraphKind, SizeHints},
+    msgraph::client::{GraphClient, GraphKind, SeriesClips, SizeHints},
     scripted::{Server, Step},
     sync::{Pager, Rest},
     throttle::Throttle,
@@ -176,6 +176,7 @@ fn context(client: GraphClient) -> SourceCtx {
             user_id: String::from("me"),
             tls: Tls::default(),
             sizes: SizeHints::default(),
+            clips: SeriesClips::default(),
             proxy: pimalaya_stream::proxy::Proxy::None,
         }),
         #[cfg(feature = "smtp")]

@@ -13,8 +13,8 @@ A `sync-collection` member row the server answered with a non-2xx status other t
 ### Requirement: A refused DAV sync token restarts the listing
 A sync token the server refuses, with a 403 `valid-sync-token` precondition or a 409, SHALL restart the listing from no token rather than fail the collection in every run.
 
-### Requirement: A Graph series is read whole or not at all
-A Graph event series SHALL be read with every exception it holds, past five years included, or fail its read: a partial series pushed to another endpoint loses the exceptions left out.
+### Requirement: A Graph series is read whole, or says what it left out
+A Graph event series with an end SHALL be read with every exception it holds, past five years included. One with no end SHALL be read within five years of today either side and, when it starts before that floor, listed under `clipped` with the floor (a warning, no exit code), its body still written to the other endpoints (owner, 2026-11-19).
 
 ## MODIFIED Requirements
 

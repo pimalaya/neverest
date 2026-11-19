@@ -654,6 +654,15 @@ pub fn run(
     for (source, bytes) in account.downloaded() {
         report.downloaded.push(SourceDownload { source, bytes });
     }
+    #[cfg(feature = "msgraph")]
+    for (side, collection, id, since) in account.clipped() {
+        report.clipped.push(crate::sync::report::ClippedSeries {
+            side,
+            collection,
+            id,
+            since,
+        });
+    }
 
     match PimdirStore::open(&work_dir) {
         Ok(store) => {

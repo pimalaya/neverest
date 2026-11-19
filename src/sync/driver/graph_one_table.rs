@@ -29,7 +29,7 @@ use crate::{
         },
         source::SourceBackendConfig,
     },
-    msgraph::client::{GraphClient, GraphKind, SizeHints},
+    msgraph::client::{GraphClient, GraphKind, SeriesClips, SizeHints},
     scripted::Step,
     throttle::Throttle,
 };
@@ -145,6 +145,7 @@ fn context(id: &str, kind: GraphKind, perms: SourcePermissions, client: GraphCli
             user_id: String::from("me"),
             tls: Tls::default(),
             sizes: SizeHints::default(),
+            clips: SeriesClips::default(),
             proxy: pimalaya_stream::proxy::Proxy::None,
         }),
         #[cfg(feature = "smtp")]

@@ -218,6 +218,10 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed a Graph series with no end starting more than five years ago (a birthday Outlook stores from 1604) syncing without its older exceptions and saying nothing: the run lists it under `clipped` with the date its exceptions were read from, as a warning.
+
+  Its body is still synced; an exception older than that date stays unread.
+
 - Fixed a Gmail source given up on its quota printing `code: null` on the rows of the collections it was reading: a daily quota, a refusal repeated past the waits or a minute's wait over `--max-wait` reads `rate-limited`, and a read refused for rights `permission-denied`.
 
 - Fixed `sync --dry-run` copying the store database and its WAL as files while a frontend may write them: the replica takes it as one snapshot (`VACUUM INTO`) under the shared staging lock, and copies no lock file.

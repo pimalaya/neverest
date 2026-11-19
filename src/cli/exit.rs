@@ -437,6 +437,38 @@ mod tests {
         );
     }
 
+    /// An open series read from a later floor is a warning naming the series
+    /// and the floor, and waits for no one: a rerun reads it the same way.
+    #[test]
+    fn a_clipped_series_is_a_warning_and_changes_no_exit_code() {
+        use crate::sync::report::ClippedSeries;
+
+        let mut report = SyncOutput::default();
+        report.clipped.push(ClippedSeries {
+            side: String::from("msgraph-calendar"),
+            collection: String::from("cal"),
+            id: String::from("S"),
+            since: String::from("2021-11-19T00:00:00Z"),
+        });
+
+        assert_eq!(Exit::from(&report), Exit::Success);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["clipped"],
+            serde_json::json!([{
+                "side": "msgraph-calendar",
+                "collection": "cal",
+                "id": "S",
+                "since": "2021-11-19T00:00:00Z",
+            }])
+        );
+        let text = report.to_string();
+        assert!(text.contains("Warnings (1)"), "{text}");
+        assert!(
+            text.contains("series S in cal on msgraph-calendar starts before 2021-11-19T00:00:00Z"),
+            "{text}"
+        );
+    }
+
     /// A push its server answered nothing for is pushed again by the next
     /// run, as a hunk that failed is: the run is incomplete.
     #[test]

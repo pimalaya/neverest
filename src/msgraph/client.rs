@@ -34,7 +34,7 @@ mod mail;
 mod wire;
 
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     io::{Read, Write},
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime},
@@ -166,6 +166,9 @@ pub struct GraphClient {
     /// The zone a floating time is anchored in, the user's, Graph stating
     /// none for a calendar.
     floating_zone: &'static str,
+    /// The open series the source read from a floor later than their start,
+    /// shared by its connections.
+    pub clips: SeriesClips,
 }
 
 impl GraphClient {
@@ -224,6 +227,7 @@ impl GraphClient {
             used: Instant::now(),
             throttle,
             floating_zone: zone::floating_zone(),
+            clips: SeriesClips::default(),
         })
     }
 
@@ -446,7 +450,7 @@ impl GraphClient {
         match self.kind {
             GraphKind::Mail => self.fetch_messages(collection, ids, sizes, open, done),
             GraphKind::Contacts => self.fetch_contacts(ids, open, done),
-            GraphKind::Calendar => self.fetch_events(ids, open, done),
+            GraphKind::Calendar => self.fetch_events(collection, ids, open, done),
         }
     }
 
@@ -461,7 +465,7 @@ impl GraphClient {
         let read = match self.kind {
             GraphKind::Mail => self.get_message_stream(collection, id, sink).map(|()| None),
             GraphKind::Contacts => self.get_contact_stream(id, sink),
-            GraphKind::Calendar => self.get_event_stream(id, sink),
+            GraphKind::Calendar => self.get_event_stream(collection, id, sink),
         };
         read.map_err(|err| match chain_not_found(&err) {
             true => err.context(Gone(id.to_owned())),
@@ -1226,6 +1230,27 @@ impl SizeHints {
     fn take(&self, id: &str) -> Option<u64> {
         let mut hints = self.0.lock().unwrap_or_else(|err| err.into_inner());
         hints.remove(id)
+    }
+}
+
+/// The open series a source read from a floor later than their start, as
+/// (collection, id, floor in RFC 3339 UTC): exceptions before it went unread.
+///
+/// Shared by every connection opened from the source, for the run's report.
+#[derive(Clone, Debug, Default)]
+pub struct SeriesClips(Arc<Mutex<BTreeSet<(String, String, String)>>>);
+
+impl SeriesClips {
+    /// Notes that series `id` of `collection` was read from `since` on.
+    fn note(&self, collection: &str, id: &str, since: &str) {
+        let mut clips = self.0.lock().unwrap_or_else(|err| err.into_inner());
+        clips.insert((collection.to_owned(), id.to_owned(), since.to_owned()));
+    }
+
+    /// The series noted so far, sorted.
+    pub fn noted(&self) -> Vec<(String, String, String)> {
+        let clips = self.0.lock().unwrap_or_else(|err| err.into_inner());
+        clips.iter().cloned().collect()
     }
 }
 

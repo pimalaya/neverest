@@ -2390,12 +2390,21 @@ An exception before the floor is left out of the body, so a series starting befo
 
 The body read SHALL still be written to the other endpoints, as one read whole is: the exceptions inside the window are complete, and failing the read would fail every yearless birthday in every run, for good. An exception further than five years ahead is left out the same way and reported by no row: every open series has its ceiling there.
 
+An exception before the floor is unknown on the Graph side, not removed (owner, 2026-11-19): a body read of a series the run notes clipped SHALL be completed, before the engine compares it, with each override (`RECURRENCE-ID` component) and each `EXDATE` value its base body (the one last synced with the Graph side) sets apart before the floor and the read lacks, with the `VTIMEZONE` each names that the read lacks. The merge so keeps them from the base, an edit or a removal of one on the other endpoint still taking effect. An occurrence counts as before the floor when its date is, when the instant it names in its `TZID` or in UTC is, or, for a wall time in no zone the time zone database names, when it is less than 14 hours past the floor, the furthest ahead of UTC a zone runs. A missing override or `EXDATE` inside the window is a removal on Graph as before. A series with no base, or read whole, is completed with nothing.
+
+A push to Graph rewrites none of them away: a master is patched with what changed against Graph's own read, and an occurrence Graph holds that the document leaves out is not written back (as "A series is pushed whole or not at all" says), while a carried override or `EXDATE` is sent through its instance like any other, found by a listing around its date and patched only where it differs. Each carried one costs that listing at every push of the series. A rule or start changed on Graph is not compared against the base: the carried ones stay in the body until the other endpoint removes them.
+
 No existing row fits: `coverage` is a collection's scope, `unlisted` counts members a capped listing left out, and neither names an item read in part; hence a key of its own.
 
 #### Scenario: A birthday from 1604
 - **GIVEN** a Graph calendar holding a yearly series with no end starting 1604-03-12, read on 2026-11-19
 - **WHEN** a run reads its body
 - **THEN** its instances are listed from 2021-11-19 to 2031-11-19, the body is synced, and `clipped` names the series with `since` 2021-11-19T00:00:00Z, one warning, exit 0
+
+#### Scenario: A 2012 override the window leaves out
+- **GIVEN** that birthday last synced with a CalDAV endpoint holding an override of its 2012 occurrence and one of next year's, both exceptions on Graph
+- **WHEN** the master is renamed on Graph and a run reads its body, the instances listing naming neither override before 2021-11-19 nor the one of next year, deleted
+- **THEN** the CalDAV endpoint is sent the renamed series still holding the 2012 override, next year's gone, nothing deleted, and `clipped` still names the series
 
 #### Scenario: A series inside the window
 - **GIVEN** a yearly series with no end starting 2025-11-19, read on 2026-11-19

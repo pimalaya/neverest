@@ -14,6 +14,8 @@ use ical::tree::{
     line::IcalLine,
     param::node::IcalParamNode,
 };
+#[cfg(feature = "msgraph")]
+use jiff::ToSpan;
 use jiff::{
     Timestamp,
     civil::{Date, DateTime},
@@ -219,6 +221,157 @@ impl fmt::Display for OccurrenceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.value)
     }
+}
+
+#[cfg(feature = "msgraph")]
+impl OccurrenceId {
+    /// The occurrence a `RECURRENCE-ID` line names.
+    fn of(line: &IcalLine<'_>) -> Self {
+        Self {
+            value: line.raw_value_str().trim().to_owned(),
+            zone: zone(line),
+        }
+    }
+
+    /// Whether it may start before `floor`, a read from it leaving it out.
+    ///
+    /// A wall time of no zone known counts until 14 hours past it, the
+    /// furthest ahead of UTC a zone runs.
+    fn before(&self, floor: Timestamp) -> bool {
+        let floor_utc = floor.to_zoned_datetime(TimeZone::UTC);
+        match self.start() {
+            Some(OriginalStart::Date(date)) => date < floor_utc.date(),
+            Some(OriginalStart::Instant(instant)) => instant < floor,
+            Some(OriginalStart::Wall(wall)) => floor_utc
+                .datetime()
+                .checked_add(14.hours())
+                .is_ok_and(|limit| wall < limit),
+            None => false,
+        }
+    }
+
+    /// Whether it names the same occurrence as `other`.
+    fn names(&self, other: &Self) -> bool {
+        self.value == other.value || self.start().is_some_and(|s| Some(s) == other.start())
+    }
+}
+
+/// `fetched` completed with what `base` sets apart before `floor` and it
+/// lacks, `None` when it lacks nothing.
+///
+/// Overrides, the zones they name and `EXDATE` values: a series read from
+/// `floor` on left them out unread, not removed.
+#[cfg(feature = "msgraph")]
+pub fn carry_before<'a>(
+    fetched: &'a [u8],
+    base: &'a [u8],
+    floor: Timestamp,
+) -> Result<Option<Vec<u8>>> {
+    let mut calendar = IcalCst::parse(fetched).context("Parse the read iCalendar object error")?;
+    let base = IcalCst::parse(base).context("Parse the base iCalendar object error")?;
+
+    let held: Vec<OccurrenceId> = events(&calendar)
+        .filter_map(|event| lines(event, "RECURRENCE-ID").next())
+        .map(OccurrenceId::of)
+        .collect();
+    let excluded: Vec<OccurrenceId> = events(&calendar)
+        .filter(|event| lines(event, "RECURRENCE-ID").next().is_none())
+        .flat_map(|event| lines(event, "EXDATE"))
+        .flat_map(|line| {
+            let zone = zone(line);
+            values(line).into_iter().map(move |value| OccurrenceId {
+                value,
+                zone: zone.clone(),
+            })
+        })
+        .collect();
+
+    let mut overrides = Vec::new();
+    let mut exdates = Vec::new();
+    for event in events(&base) {
+        if let Some(line) = lines(event, "RECURRENCE-ID").next() {
+            let id = OccurrenceId::of(line);
+            if id.before(floor) && !held.iter().any(|held| held.names(&id)) {
+                overrides.push(event.clone());
+            }
+            continue;
+        }
+
+        for line in lines(event, "EXDATE") {
+            let zone = zone(line);
+            let kept: Vec<String> = values(line)
+                .into_iter()
+                .filter(|value| {
+                    let id = OccurrenceId {
+                        value: value.clone(),
+                        zone: zone.clone(),
+                    };
+                    id.before(floor) && !excluded.iter().any(|known| known.names(&id))
+                })
+                .collect();
+            if !kept.is_empty() {
+                let mut line = line.clone();
+                line.value.set(&kept);
+                exdates.push(line);
+            }
+        }
+    }
+    if overrides.is_empty() && exdates.is_empty() {
+        return Ok(None);
+    }
+
+    let named: Vec<String> = overrides
+        .iter()
+        .flat_map(|event| event.items.iter())
+        .filter_map(|item| match item {
+            IcalItem::Prop(line) => zone(line),
+            _ => None,
+        })
+        .chain(exdates.iter().filter_map(zone))
+        .collect();
+    let zones_held: Vec<String> = timezones(&calendar).map(|(tzid, _)| tzid).collect();
+    let zones: Vec<IcalItem<'a>> = timezones(&base)
+        .filter(|(tzid, _)| named.contains(tzid) && !zones_held.contains(tzid))
+        .map(|(_, component)| IcalItem::Component(Box::new(component.clone())))
+        .collect();
+
+    let master = calendar.items.iter_mut().find_map(|item| match item {
+        IcalItem::Component(event)
+            if is_named(event, "VEVENT") && lines(event, "RECURRENCE-ID").next().is_none() =>
+        {
+            Some(event)
+        }
+        _ => None,
+    });
+    if let Some(master) = master {
+        master.items.extend(exdates.into_iter().map(IcalItem::Prop));
+    }
+
+    let first_event = calendar
+        .items
+        .iter()
+        .position(is_event)
+        .unwrap_or(calendar.items.len());
+    calendar.items.splice(first_event..first_event, zones);
+    calendar.items.extend(
+        overrides
+            .into_iter()
+            .map(|event| IcalItem::Component(Box::new(event))),
+    );
+
+    Ok(Some(calendar.to_bytes()))
+}
+
+/// The time zones of a calendar, by `TZID`.
+#[cfg(feature = "msgraph")]
+fn timezones<'c, 'a>(calendar: &'c IcalCst<'a>) -> impl Iterator<Item = (String, &'c IcalCst<'a>)> {
+    calendar.items.iter().filter_map(|item| match item {
+        IcalItem::Component(zone) if is_named(zone, "VTIMEZONE") => {
+            let tzid = lines(zone, "TZID").next()?;
+            Some((tzid.raw_value_str().trim().to_owned(), zone.as_ref()))
+        }
+        _ => None,
+    })
 }
 
 /// Whether an event of `ical` holds a floating date-time.
@@ -599,5 +752,63 @@ mod tests {
             let ical = ical.replace("DTSTART;TZID=Europe/Paris:20261124T160000", start);
             assert!(!has_floating(ical.as_bytes()).unwrap(), "{start}");
         }
+    }
+
+    /// What a base sets apart before the floor and the read lacks is carried.
+    ///
+    /// An override with the zone it names, and an `EXDATE` value; not what
+    /// lies past the floor, nor what the read holds.
+    #[cfg(feature = "msgraph")]
+    #[test]
+    fn a_read_lacking_what_its_base_sets_apart_before_the_floor_gets_it() {
+        let base = "BEGIN:VCALENDAR\r\n\
+            VERSION:2.0\r\n\
+            BEGIN:VTIMEZONE\r\n\
+            TZID:Europe/Paris\r\n\
+            END:VTIMEZONE\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:s\r\n\
+            DTSTART:20000312T090000Z\r\n\
+            RRULE:FREQ=YEARLY\r\n\
+            EXDATE:20110312T090000Z,20250312T090000Z\r\n\
+            SUMMARY:Old\r\n\
+            END:VEVENT\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:s\r\n\
+            RECURRENCE-ID;TZID=Europe/Paris:20120312T100000\r\n\
+            DTSTART;TZID=Europe/Paris:20120312T120000\r\n\
+            SUMMARY:Party 2012\r\n\
+            END:VEVENT\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:s\r\n\
+            RECURRENCE-ID:20240312T090000Z\r\n\
+            DTSTART:20240312T110000Z\r\n\
+            SUMMARY:Party 2024\r\n\
+            END:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let read = "BEGIN:VCALENDAR\r\n\
+            VERSION:2.0\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:s\r\n\
+            DTSTART:20000312T090000Z\r\n\
+            RRULE:FREQ=YEARLY\r\n\
+            SUMMARY:New\r\n\
+            END:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let floor: Timestamp = "2021-11-19T00:00:00Z".parse().unwrap();
+
+        let carried = carry_before(read.as_bytes(), base.as_bytes(), floor).unwrap();
+        let carried = String::from_utf8(carried.unwrap()).unwrap();
+
+        assert!(carried.contains("SUMMARY:New"), "{carried}");
+        assert!(carried.contains("SUMMARY:Party 2012"), "{carried}");
+        assert!(!carried.contains("Party 2024"), "{carried}");
+        assert!(carried.contains("EXDATE:20110312T090000Z\r\n"), "{carried}");
+        assert!(carried.contains("TZID:Europe/Paris"), "{carried}");
+        let master = Occurrences::read(carried.as_bytes()).unwrap();
+        assert_eq!(master.overrides.len(), 1, "{carried}");
+
+        let again = carry_before(carried.as_bytes(), base.as_bytes(), floor).unwrap();
+        assert_eq!(again, None, "nothing lacks once carried");
     }
 }

@@ -765,6 +765,17 @@ impl Client {
         }
     }
 
+    /// The floor an open Graph series `id` of `collection` was read from
+    /// this run, its exceptions before it unread.
+    #[cfg(feature = "msgraph")]
+    pub fn clip(&self, collection: &str, id: &str) -> Option<String> {
+        match self {
+            Client::Msgraph(client) => client.clips.floor(collection, id),
+            #[allow(unreachable_patterns)]
+            _ => None,
+        }
+    }
+
     /// What names each of an id set, by its handle, for `Meta`-tier link id
     /// and summary resolution, rather than listing the whole collection.
     pub fn fetch_summaries(

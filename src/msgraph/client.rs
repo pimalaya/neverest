@@ -1247,6 +1247,15 @@ impl SeriesClips {
         clips.insert((collection.to_owned(), id.to_owned(), since.to_owned()));
     }
 
+    /// The floor series `id` of `collection` was noted read from.
+    pub fn floor(&self, collection: &str, id: &str) -> Option<String> {
+        let clips = self.0.lock().unwrap_or_else(|err| err.into_inner());
+        clips
+            .iter()
+            .find(|(of, noted, _)| of == collection && noted == id)
+            .map(|(_, _, since)| since.clone())
+    }
+
     /// The series noted so far, sorted.
     pub fn noted(&self) -> Vec<(String, String, String)> {
         let clips = self.0.lock().unwrap_or_else(|err| err.into_inner());

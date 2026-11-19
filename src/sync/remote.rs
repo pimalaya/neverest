@@ -42,6 +42,8 @@ use io_pimdir::{
     },
     summary::{PimdirDerivation, PimdirSummary},
 };
+#[cfg(feature = "msgraph")]
+use jiff::Timestamp;
 use log::{debug, warn};
 
 #[cfg(any(feature = "carddav", feature = "caldav"))]
@@ -146,6 +148,8 @@ impl Bound {
                 let link_id = placement.link_id?;
                 let meta = BoundMeta {
                     revision: base.revision,
+                    #[cfg(feature = "msgraph")]
+                    object: base.object,
                     link_id,
                     sort_key: placement.sort_key,
                 };
@@ -168,6 +172,9 @@ impl Bound {
 /// How the store names one bound member.
 struct BoundMeta {
     revision: Option<String>,
+    /// The body last synced, which a clipped series is completed from.
+    #[cfg(feature = "msgraph")]
+    object: Option<PimdirHash>,
     link_id: PimdirLinkId,
     sort_key: PimdirSortKey,
 }
@@ -964,7 +971,98 @@ impl PimRemote<'_> {
     ) -> Result<Vec<PimdirFetchedItem>> {
         let items = self.fetch_bodies(collection, handles)?;
         self.pool.downloaded(body_bytes(&items));
+        #[cfg(feature = "msgraph")]
+        let items = self.carry_clipped(collection, items)?;
         Ok(items)
+    }
+
+    /// `items` of `collection`, each clipped Graph series completed from its
+    /// base.
+    ///
+    /// What the base sets apart before the floor went unread, not removed.
+    #[cfg(feature = "msgraph")]
+    fn carry_clipped(
+        &mut self,
+        collection: &str,
+        items: Vec<PimdirFetchedItem>,
+    ) -> Result<Vec<PimdirFetchedItem>> {
+        let mut carried = Vec::with_capacity(items.len());
+        for item in items {
+            let handle = item.handle.as_str();
+            let base = match &self.bound {
+                Some((of, bound)) if self.wire_name(of) == collection => {
+                    bound.metas.get(handle).and_then(|meta| meta.object.clone())
+                }
+                _ => None,
+            };
+            let floor = self.pool.primary().clip(collection, handle);
+            let item = match (base, floor, &item.body) {
+                (Some(base), Some(floor), Some(PimdirFetchedBody::Persisted { hash, .. }))
+                    if base != *hash =>
+                {
+                    let hash = hash.clone();
+                    self.carry_one(collection, item, &hash, &base, &floor)?
+                }
+                _ => item,
+            };
+            carried.push(item);
+        }
+        Ok(carried)
+    }
+
+    /// `item` of `collection`, read under `hash` from `floor` on, completed
+    /// from its base body `base`; as read when nothing lacks.
+    #[cfg(feature = "msgraph")]
+    fn carry_one(
+        &mut self,
+        collection: &str,
+        item: PimdirFetchedItem,
+        hash: &PimdirHash,
+        base: &PimdirHash,
+        floor: &str,
+    ) -> Result<PimdirFetchedItem> {
+        let handle = item.handle.as_str();
+        let blobs = self.blob.blobs();
+        let read = |hash: &PimdirHash| {
+            blobs
+                .get(hash)
+                .with_context(|| format!("Read body {} error", hash.as_str()))?
+                .with_context(|| format!("Body {} is missing", hash.as_str()))
+        };
+        let fetched = read(hash)?;
+        let based = read(base)?;
+        let since: Timestamp = floor
+            .parse()
+            .with_context(|| format!("Parse series floor {floor} error"))?;
+
+        let Some(body) = crate::calendar::carry_before(&fetched, &based, since)
+            .with_context(|| format!("Complete series {handle} of {collection} error"))?
+        else {
+            return Ok(item);
+        };
+        debug!("series {handle} of {collection} keeps what its base sets apart before {floor}");
+
+        let writer = self.blob.writer().context("Open blob writer error")?;
+        let mut sink = HydrateSink::new(writer, self.kind);
+        sink.write_all(&body)
+            .with_context(|| format!("Write series {handle} of {collection} error"))?;
+        let (hash, size, scan) = sink
+            .finish()
+            .with_context(|| format!("Commit series {handle} of {collection} error"))?;
+        let PimdirDerivation {
+            link_id,
+            summary,
+            sort_key,
+        } = scan.derive(self.kind, size);
+
+        Ok(PimdirFetchedItem {
+            handle: item.handle,
+            link_id,
+            summary,
+            sort_key,
+            body: Some(PimdirFetchedBody::Persisted { hash, size }),
+            revision: item.revision,
+        })
     }
 
     /// The bodies of [`fetch_full`](Self::fetch_full), largest first when
@@ -1930,6 +2028,8 @@ mod scope_tests {
     fn a_bound_member_is_in_scope_by_its_stored_date() {
         let bound = BoundMeta {
             revision: None,
+            #[cfg(feature = "msgraph")]
+            object: None,
             link_id: PimdirLinkId("old@example.org".into()),
             sort_key: PimdirSortKey("2020-01-01T10:00:00Z".into()),
         };

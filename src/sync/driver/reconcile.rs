@@ -258,7 +258,15 @@ pub(super) fn resolve_conflicts(
 
     if !wanted.is_empty() {
         let options = ctx.upgrade_options();
-        let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone());
+        let bound = store
+            .load(
+                &PimdirCollectionId(collection.to_string()),
+                &PimdirLoadSelection::All,
+            )
+            .map(Bound::from_loaded)
+            .map_err(|err| anyhow!("Load {collection} error: {err}"))?;
+        let mut remote = PimRemote::new(&mut ctx.pool, blobs.clone(), ctx.namespace.clone())
+            .with_bound(collection, bound);
         let upgrade =
             PimdirUpgrade::new(collection.to_string(), wanted, PimdirTier::Full).options(options);
         let upgraded = run_verb(store, &mut remote, upgrade)

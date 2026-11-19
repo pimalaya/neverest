@@ -969,6 +969,9 @@ mod gmail_heads;
 mod graph_heads;
 
 #[cfg(all(test, feature = "msgraph"))]
+mod graph_clips;
+
+#[cfg(all(test, feature = "msgraph"))]
 mod graph_one_table;
 
 #[cfg(test)]

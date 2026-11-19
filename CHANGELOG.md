@@ -222,6 +222,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
   Its body is still synced; an exception older than that date stays unread.
 
+- Fixed the exceptions of such a series older than that date being deleted on the other endpoints: Graph leaves them unread, so they are kept from the last synced body rather than taken as deleted, while an exception inside the window Graph no longer holds is still a deletion.
+
 - Fixed a Gmail source given up on its quota printing `code: null` on the rows of the collections it was reading: a daily quota, a refusal repeated past the waits or a minute's wait over `--max-wait` reads `rate-limited`, and a read refused for rights `permission-denied`.
 
 - Fixed `sync --dry-run` copying the store database and its WAL as files while a frontend may write them: the replica takes it as one snapshot (`VACUUM INTO`) under the shared staging lock, and copies no lock file.

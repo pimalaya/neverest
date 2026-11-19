@@ -151,7 +151,8 @@ pub trait Pager {
 /// and stopping where it answers [`Rest::Pause`].
 ///
 /// A page is written whole, its pushes settled, before the coroutine asks
-/// again, so dropping the coroutine there leaves what a kill would.
+/// again, so dropping the coroutine there leaves what a kill would. The verb
+/// counts as in flight throughout (pimdir STORAGE §5).
 pub fn run_verb_paged<R, C, T, E>(
     store: &mut PimdirSourceStore,
     remote: &mut R,
@@ -164,6 +165,7 @@ where
     E: std::fmt::Display,
     C: PimdirCoroutine<Yield = PimdirYield, Return = Result<T, E>>,
 {
+    let _running = store.running();
     let mut arg: Option<PimdirArg> = None;
     let mut page: Option<(PimdirCollectionId, Vec<PimdirHandle>)> = None;
     let mut first = true;

@@ -182,7 +182,7 @@ fn a_graph_mail_folder_syncs_both_ways() {
             });
         },
         || {
-            if let Err(err) = connect(&token).mail_folder_delete(&folder_id) {
+            if let Err(err) = connect(&token).mail_folder_permanent_delete(&folder_id) {
                 eprintln!("WARNING: leftover folder {folder}: {err:?}");
             }
         },
@@ -261,7 +261,7 @@ fn a_graph_scope_widens_by_its_band() {
             });
         },
         || {
-            if let Err(err) = connect(&token).mail_folder_delete(&folder_id) {
+            if let Err(err) = connect(&token).mail_folder_permanent_delete(&folder_id) {
                 eprintln!("WARNING: leftover folder {folder}: {err:?}");
             }
         },
@@ -353,7 +353,7 @@ fn a_graph_move_is_delivered_once() {
         },
         || {
             delete_tagged(&token, &["inbox", "deleteditems"], &folder);
-            if let Err(err) = connect(&token).mail_folder_delete(&folder_id) {
+            if let Err(err) = connect(&token).mail_folder_permanent_delete(&folder_id) {
                 eprintln!("WARNING: leftover folder {folder}: {err:?}");
             }
         },
@@ -437,7 +437,7 @@ fn a_graph_add_lands_in_drafts_only() {
         },
         || {
             delete_tagged(&token, &["drafts"], &draft);
-            if let Err(err) = connect(&token).mail_folder_delete(&folder_id) {
+            if let Err(err) = connect(&token).mail_folder_permanent_delete(&folder_id) {
                 eprintln!("WARNING: leftover folder {draft}: {err:?}");
             }
         },
@@ -464,7 +464,7 @@ fn a_graph_contact_folder_syncs_both_ways() {
             round_trip("msgraph-contact", &extra, &token, &folder, card);
         },
         || {
-            if let Err(err) = connect(&token).contact_folder_delete(&folder) {
+            if let Err(err) = connect(&token).contact_folder_permanent_delete(&folder) {
                 eprintln!("WARNING: leftover contact folder {folder}: {err:?}");
             }
         },
@@ -491,7 +491,7 @@ fn a_graph_calendar_syncs_both_ways() {
             round_trip("msgraph-calendar", &extra, &token, &calendar, event);
         },
         || {
-            if let Err(err) = connect(&token).calendar_delete(&calendar) {
+            if let Err(err) = connect(&token).calendar_permanent_delete(&calendar) {
                 eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
             }
         },
@@ -593,7 +593,7 @@ fn a_graph_teams_meeting_carries_its_join_link() {
             );
         },
         || {
-            if let Err(err) = connect(&token).calendar_delete(&calendar) {
+            if let Err(err) = connect(&token).calendar_permanent_delete(&calendar) {
                 eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
             }
         },
@@ -674,7 +674,7 @@ fn a_graph_online_meeting_is_created_with_its_event() {
             );
         },
         || {
-            if let Err(err) = connect(&token).calendar_delete(&calendar) {
+            if let Err(err) = connect(&token).calendar_permanent_delete(&calendar) {
                 eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
             }
             delete_messages_about(&token, &uid);
@@ -817,7 +817,7 @@ fn a_graph_meeting_is_cancelled() {
             });
         },
         || {
-            if let Err(err) = connect(&token).calendar_delete(&calendar) {
+            if let Err(err) = connect(&token).calendar_permanent_delete(&calendar) {
                 eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
             }
             delete_messages_about(&token, &uid);
@@ -917,7 +917,7 @@ fn a_graph_meeting_edited_right_after_creation_is_pushed_then_cancelled() {
             assert!(a.item(&calendar, &uid).is_none());
         },
         || {
-            if let Err(err) = connect(&token).calendar_delete(&calendar) {
+            if let Err(err) = connect(&token).calendar_permanent_delete(&calendar) {
                 eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
             }
             delete_messages_about(&token, &uid);

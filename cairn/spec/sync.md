@@ -1171,6 +1171,14 @@ The collector SHALL NOT run after a sweep that took nothing: its cost is a walk 
 - WHEN the sweep runs
 - THEN the item is purged, the object row is dropped, and the blob is gone from the tree
 
+### Requirement: A verb counts as in flight while neverest drives it
+neverest's own drive loop (src/sync/mod.rs `run_verb_paged`, which `run_verb` calls) SHALL hold io-pimdir's in-flight guard (`PimdirSourceStore::running`) from the coroutine's first resume to its completion, pause or failure, as io-pimdir's `run` does, so a collection of the process (`collect_garbage`, `evict_before`, `release_before`) refuses as `InFlight` rather than take a body one chunk streamed and the next attaches (pimdir STORAGE §5).
+
+#### Scenario: The collector asked between two pages refuses
+- GIVEN a paged mail round driven by `run_verb` and a second handle of the process on the store
+- WHEN that handle collects while the verb waits on a listing
+- THEN every collection refuses as `InFlight`, and the collector runs once the verb is done (src/sync/driver/tests.rs `a_running_verb_keeps_the_collector_out`)
+
 ### Requirement: A submission greets with an address literal
 An SMTP submission session SHALL greet with the loopback address literal (`EHLO [127.0.0.1]`), the form RFC 5321 §4.1.3 reserves for a client with no resolvable domain name of its own, which a desktop client behind a NAT never has. It SHALL NOT greet with a bare `localhost`, which is not such a name either: RFC 5321 §4.1.4 entitles a server to check, and one that does (Stalwart) answers `550 5.5.0 Invalid EHLO domain`, failing the session before `MAIL FROM` and leaving every intent pending behind a warning.
 

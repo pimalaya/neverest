@@ -7224,3 +7224,80 @@ fn a_body_the_drain_kept_aside_is_reported() {
     assert_eq!(overruled.collection, "contacts");
     assert!(kept.contains(&overruled.kept), "{kept:?}");
 }
+
+/// A [`PagedRemote`] asking the process's collector to run at every
+/// listing, while the verb waits on it.
+struct CollectingRemote {
+    inner: PagedRemote,
+    /// A second handle on the store, as a sweep of the same process holds.
+    collector: PimdirStore,
+    /// Whether each collection refused as a verb in flight.
+    refused: Vec<bool>,
+}
+
+impl PimdirRemote for CollectingRemote {
+    type Error = anyhow::Error;
+
+    fn enumerate(
+        &mut self,
+        collection: &PimdirCollectionId,
+        request: PimdirEnumerate,
+    ) -> Result<PimdirEnumerated, Self::Error> {
+        let refused = matches!(
+            self.collector.collect_garbage(),
+            Err(PimdirError::InFlight(_))
+        );
+        self.refused.push(refused);
+        self.inner.enumerate(collection, request)
+    }
+
+    fn fetch(
+        &mut self,
+        collection: &PimdirCollectionId,
+        handles: Vec<PimdirHandle>,
+        tier: PimdirTier,
+    ) -> Result<Vec<PimdirFetchedItem>, Self::Error> {
+        self.inner.fetch(collection, handles, tier)
+    }
+
+    fn push(
+        &mut self,
+        collection: &PimdirCollectionId,
+        changes: Vec<PimdirChange>,
+    ) -> Result<Vec<PimdirPushResult>, Self::Error> {
+        self.inner.push(collection, changes)
+    }
+}
+
+/// The drive loop counts its verb in flight (pimdir STORAGE §5).
+///
+/// The collector of the process, asked between two pages, refuses rather
+/// than take a body one chunk streamed and the next attaches.
+#[test]
+fn a_running_verb_keeps_the_collector_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = mailbox_with_an_old_message(dir.path());
+    let mut remote = CollectingRemote {
+        inner: PagedRemote::new(pages()),
+        collector: PimdirStore::open(dir.path()).unwrap(),
+        refused: Vec::new(),
+    };
+
+    let verb = sync_verb(
+        "imap/INBOX",
+        true,
+        PimdirPushRights::all(),
+        PimdirConflictPolicy::Manual,
+        PimdirScope::since("2026-09-07T00:00:00Z"),
+        false,
+    );
+    run_verb(&mut store, &mut remote, verb).unwrap();
+
+    assert!(!remote.refused.is_empty(), "the verb listed");
+    assert!(
+        remote.refused.iter().all(|refused| *refused),
+        "{:?}",
+        remote.refused
+    );
+    remote.collector.collect_garbage().unwrap();
+}

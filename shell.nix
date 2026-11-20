@@ -7,7 +7,12 @@
 }@args:
 
 let
-  inherit (pkgs) cargo-deny openssl sqlite;
+  inherit (pkgs)
+    cargo-deny
+    maddy
+    openssl
+    sqlite
+    ;
   shell = pimalaya.mkShell (removeAttrs args [ "pimalaya" ]);
 
 in
@@ -16,6 +21,9 @@ shell.overrideAttrs (prev: {
     openssl
     sqlite
   ];
+
+  # The IMAP server without UIDPLUS tests/without_uidplus.rs starts.
+  NEVEREST_MADDY = "${maddy}/bin/maddy";
 
   buildInputs = (prev.buildInputs or [ ]) ++ [
     cargo-deny

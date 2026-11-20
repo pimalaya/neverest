@@ -85,12 +85,16 @@ pub(super) fn report_parked(store: &PimdirStore, account: &str, report: &mut Syn
 
 /// Counts the decisions the store is holding, once for the run.
 ///
-/// Read from the store rather than from the run's own tally: the engine says
-/// nothing about a placement it already parked, so a run itemizes only what it
-/// newly marked, which is why that tally cannot count what is waiting.
+/// Read from the store, the bindings' conflicts and the items' own (pimdir
+/// SYNC §9): the engine says nothing about a placement it already parked, so
+/// the run's own tally, what it newly marked, cannot count what is waiting.
 pub(super) fn count_conflicts(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
-    match store.list_conflicts(Some(account)) {
-        Ok(conflicts) => report.outstanding_conflicts = conflicts.len(),
+    let counted = store.list_conflicts(Some(account)).and_then(|bindings| {
+        let items = store.list_item_conflicts(Some(account))?;
+        Ok(bindings.len() + items.len())
+    });
+    match counted {
+        Ok(count) => report.outstanding_conflicts = count,
         Err(err) => {
             warn!("cannot count the conflicts waiting for a decision: {err}");
             let err = pimdir_error(err).context("Count the conflicts");

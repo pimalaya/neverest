@@ -212,7 +212,7 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
         "the divergence is parked and counted, not resolved; report was:\n{report}",
     );
     assert!(
-        report.contains(r#""id":"event-1.ics""#),
+        report.contains(r#""remoteId":"event-1.ics""#),
         "the parked item is named; report was:\n{report}",
     );
 
@@ -243,7 +243,7 @@ fn a_same_field_collision_on_two_calendar_endpoints_parks_and_never_overwrites()
         &state,
         0,
     );
-    let id = conflict_id(&listed, "event-1.ics");
+    let id = conflict_id(&listed, "event-1", &config, &state);
 
     neverest(
         &["conflict", "resolve", "-a", "cal", &id, "--prefer-local"],
@@ -368,20 +368,30 @@ fn component<'a>(ics: &'a str, marker: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no component holding {marker} in:\n{ics}"))
 }
 
-/// The id `conflict list --json` gave the divergence of `handle`, which is what
-/// `conflict resolve` addresses it by.
-fn conflict_id(listing: &str, handle: &str) -> String {
+/// The id `conflict list --json` gave the divergence of the item `uid` names,
+/// as `conflict show` reads it: an item's own conflict names no remote id.
+fn conflict_id(listing: &str, uid: &str, config: &Path, state: &Path) -> String {
     let listed: serde_json::Value = serde_json::from_str(listing).expect("conflict listing");
+    let stated = format!("UID:{uid}");
 
     listed["conflicts"]
         .as_array()
         .expect("a conflict array")
         .iter()
-        .find(|conflict| conflict["remoteId"] == handle)
-        .unwrap_or_else(|| panic!("no conflict for {handle} in:\n{listing}"))["id"]
-        .as_str()
-        .expect("a conflict id")
-        .to_owned()
+        .map(|conflict| conflict["id"].as_str().expect("a conflict id").to_owned())
+        .find(|id| {
+            let shown = neverest(
+                &["conflict", "show", "-a", "cal", id, "--json"],
+                config,
+                state,
+                0,
+            );
+            let shown: serde_json::Value = serde_json::from_str(&shown).expect("conflict show");
+            shown["local"]["contents"]
+                .as_str()
+                .is_some_and(|body| body.lines().any(|line| line.trim_end() == stated))
+        })
+        .unwrap_or_else(|| panic!("no conflict for {uid} in:\n{listing}"))
 }
 
 /// The account every test runs: one source and one target, each a CalDAV

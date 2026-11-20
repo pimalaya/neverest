@@ -144,7 +144,7 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
         "the divergence is parked and counted, not resolved; report was:\n{report}",
     );
     assert!(
-        report.contains(r#""id":"card-2.vcf""#),
+        report.contains(r#""remoteId":"card-2.vcf""#),
         "the parked item is named; report was:\n{report}",
     );
 
@@ -182,10 +182,7 @@ fn a_card_changed_on_both_endpoints_merges_or_parks_and_never_overwrites() {
         &state,
         0,
     );
-    assert!(
-        listed.contains("card-2.vcf"),
-        "the divergence is listable; listing was:\n{listed}",
-    );
+    conflict_id(&listed, "card-2", &config, &state);
 }
 
 /// `one-way = true` answers a real divergence instead of parking it.
@@ -414,7 +411,8 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
         "both divergences are parked and counted; report was:\n{report}",
     );
     assert!(
-        report.contains(r#""id":"card-1.vcf""#) && report.contains(r#""id":"card-2.vcf""#),
+        report.contains(r#""remoteId":"card-1.vcf""#)
+            && report.contains(r#""remoteId":"card-2.vcf""#),
         "both parked items are named; report was:\n{report}",
     );
     assert!(
@@ -450,8 +448,8 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
         &state,
         0,
     );
-    let local = conflict_id(&listed, "card-1.vcf");
-    let remote = conflict_id(&listed, "card-2.vcf");
+    let local = conflict_id(&listed, "card-1", &config, &state);
+    let remote = conflict_id(&listed, "card-2", &config, &state);
 
     neverest(
         &["conflict", "resolve", "-a", "div", &local, "--prefer-local"],
@@ -486,19 +484,30 @@ fn two_endpoints_holding_one_card_under_two_bodies_park_it_and_never_overwrite()
     }
 }
 
-/// The id `conflict list --json` gave the divergence of `handle`.
-fn conflict_id(listing: &str, handle: &str) -> String {
+/// The id `conflict list --json` gave the divergence of the item `uid` names,
+/// as `conflict show` reads it: an item's own conflict names no remote id.
+fn conflict_id(listing: &str, uid: &str, config: &Path, state: &Path) -> String {
     let listed: serde_json::Value = serde_json::from_str(listing).expect("conflict listing");
+    let stated = format!("UID:{uid}");
 
     listed["conflicts"]
         .as_array()
         .expect("a conflict array")
         .iter()
-        .find(|conflict| conflict["remoteId"] == handle)
-        .unwrap_or_else(|| panic!("no conflict for {handle} in:\n{listing}"))["id"]
-        .as_str()
-        .expect("a conflict id")
-        .to_owned()
+        .map(|conflict| conflict["id"].as_str().expect("a conflict id").to_owned())
+        .find(|id| {
+            let shown = neverest(
+                &["conflict", "show", "-a", "div", id, "--json"],
+                config,
+                state,
+                0,
+            );
+            let shown: serde_json::Value = serde_json::from_str(&shown).expect("conflict show");
+            shown["local"]["contents"]
+                .as_str()
+                .is_some_and(|body| body.lines().any(|line| line.trim_end() == stated))
+        })
+        .unwrap_or_else(|| panic!("no conflict for {uid} in:\n{listing}"))
 }
 
 /// The account every test runs: a source and a target, one principal each.

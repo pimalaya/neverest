@@ -798,9 +798,9 @@ dependencies = [
 
 [[package]]
 name = "ical-rs"
-version = "0.7.2"
+version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a8faed65fdd66abcf29ae40582afeee2a3698ddc107a9f44fcd5132f5e30434e"
+checksum = "87c99e9e61b28da43ab66a0c676ba4678b3060cd4ba6690e6295f5e0085b6496"
 dependencies = [
  "base64-codec",
  "encoding_rs",
@@ -997,9 +997,9 @@ dependencies = [
 
 [[package]]
 name = "io-pimdir"
-version = "0.18.1"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a108bdc09a5130dd4b4aacd4ea9b56332d26a079705d5847689c0fda88db775"
+checksum = "478fe68c04b2021b226818ca07ce43b1d875786a9e974ea77a0c142ecbf7c445"
 dependencies = [
  "blake3",
  "encoding_rs",
@@ -1066,9 +1066,9 @@ dependencies = [
 
 [[package]]
 name = "io-webdav"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1b6e26fc702ab1f6fad5552b52352c5daa9f3ad3703f268be6e5b35f4abb94ab"
+checksum = "de481e88fd54ae82f8c2a1fcd5b11539fec6a94b9609c7bb4a972bdd495c42d5"
 dependencies = [
  "anyhow",
  "io-http",
@@ -1278,9 +1278,9 @@ dependencies = [
 
 [[package]]
 name = "mime-rs"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64fab22816df54ec4d6650ed93ac149d33b2844315959c2f4aa773b721482ccc"
+checksum = "848722f8fb6e2c7f164f23470d9618d25ae5f33dda3c85982b5a5093f10603e8"
 dependencies = [
  "base64-codec",
  "encoding_rs",
@@ -2405,9 +2405,9 @@ dependencies = [
 
 [[package]]
 name = "vcard-rs"
-version = "0.6.0"
+version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e4e9d3a6221632badbdc1b7fa9bb8518386ff0b5dfd12eacfcbcec88db38884d"
+checksum = "7e0bf98fed3a46522c7893facb4f2b133945e829f4965a2afecb0207b255eaee"
 dependencies = [
  "base64-codec",
  "encoding_rs",

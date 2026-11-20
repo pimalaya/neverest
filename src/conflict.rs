@@ -59,27 +59,31 @@ pub struct Conflict {
     /// extension an export is written under.
     pub media_type: String,
     /// The source whose own sync is stuck on the divergence, by its pimdir
-    /// source id (`<account>/<name>`).
+    /// source id (`<account>/<name>`), or `None` for the item's own conflict.
     ///
     /// One source may be conflicted while another holding the same item is in
-    /// sync, which is why a decision names this as well as the item.
-    pub source: String,
-    /// The item's handle on that source, which the next run pushes to.
-    pub handle: String,
+    /// sync, which is why a decision names this as well as the item. Two
+    /// endpoints disagreeing is the item's, no one source's (pimdir SYNC §9).
+    pub source: Option<String>,
+    /// The item's handle on that source, `None` for the item's own conflict.
+    pub handle: Option<String>,
     /// The item's cross-source identity, which finds the same binding again
     /// when a decision is applied.
     pub link_id: PimdirLinkId,
     /// The remote revision observed when the divergence was recorded.
     ///
-    /// `None` from a remote reporting none. A decision computed against it is
+    /// `None` from a remote reporting none, and for the item's own conflict. A decision computed against it is
     /// stale once it moves, which is what [`Conflict::apply`] refuses on.
     pub revision: Option<String>,
     /// The body the last sync agreed on, the merge's common ancestor.
+    ///
+    /// For the item's own conflict, the shared body a binding last agreed on
+    /// (see [`common_ancestor`]).
     pub base: Option<PimdirHash>,
     /// The local side of the divergence, the item's own body.
     pub local: Option<PimdirHash>,
-    /// The remote side at [`revision`](Self::revision), or `None` until a
-    /// run's upgrade pass supplies it.
+    /// The remote side at [`revision`](Self::revision), the item's own
+    /// diverging body, or `None` until a run's upgrade pass supplies it.
     pub remote: Option<PimdirHash>,
 }
 
@@ -118,10 +122,12 @@ pub struct Sides {
 }
 
 impl Conflict {
-    /// The source as the account's configuration names it.
-    pub fn endpoint(&self) -> &str {
+    /// The source as the account's configuration names it, `None` for the
+    /// item's own conflict.
+    pub fn endpoint(&self) -> Option<&str> {
+        let source = self.source.as_deref()?;
         let prefix = format!("{}/", self.account);
-        self.source.strip_prefix(&prefix).unwrap_or(&self.source)
+        Some(source.strip_prefix(&prefix).unwrap_or(source))
     }
 
     /// Whether a decision can be made about this divergence at all.
@@ -165,15 +171,14 @@ impl Conflict {
 
     /// Applies `body` as the item's content, which settles the divergence.
     ///
-    /// A decision left in an editor may be stale, so the store is read again
-    /// under the caller's lock and a moved revision reported, not pushed. A
-    /// body no parser reads is refused before it reaches the tree.
+    /// A stale decision is refused: the store is read again under the caller's
+    /// lock and a moved revision, or a moved side of the item's own conflict,
+    /// reported, not pushed. A body no parser reads is refused.
     pub fn apply(&self, dir: &Path, account: &str, body: &[u8]) -> Result<Applied> {
-        let mut store = PimdirStore::open(dir)
+        let store = PimdirStore::open(dir)
             .map_err(pimdir_error)
             .with_context(|| format!("Open the store of account {account}"))?
-            .for_account(account)
-            .for_source(&self.source);
+            .for_account(account);
 
         let observed = list(&store, account)?.into_iter().find(|observed| {
             observed.collection == self.collection
@@ -188,6 +193,24 @@ impl Conflict {
         if observed.revision != self.revision {
             return Ok(Applied::Moved(observed.revision));
         }
+
+        if self.source.is_none() && (observed.local != self.local || observed.remote != self.remote)
+        {
+            return Ok(Applied::Moved(None));
+        }
+
+        let source = match &self.source {
+            Some(source) => source.clone(),
+            None => store
+                .item_bindings(&self.collection, &self.link_id.0)
+                .map_err(pimdir_error)
+                .with_context(|| format!("Read the bindings of conflict {}", self.id))?
+                .into_keys()
+                .next()
+                .map(|source| source.0)
+                .with_context(|| format!("Conflict {} has no binding to settle", self.id))?,
+        };
+        let mut store = store.for_source(source);
 
         let kind = self.kind()?;
 
@@ -239,16 +262,30 @@ impl Conflict {
 
 /// The divergences the store holds, by collection then item then source.
 ///
-/// The store answers off a partial index over the conflicted flag, so a store
-/// with nothing outstanding pays for an empty index rather than for a pass
-/// over every collection.
+/// A binding's conflicts come first, then the items' own (pimdir SYNC §9): two
+/// endpoints disagreeing, each sorted by collection then item. The store
+/// answers both off partial indexes over the conflicted flags.
 pub fn list(store: &PimdirReader, account: &str) -> Result<Vec<Conflict>> {
     let parked = store
         .list_conflicts(Some(account))
         .with_context(|| format!("List the conflicts of account {account}"))?;
+    let diverged = store
+        .list_item_conflicts(Some(account))
+        .with_context(|| format!("List the item conflicts of account {account}"))?;
 
-    let mut conflicts = Vec::with_capacity(parked.len());
+    let mut conflicts = Vec::with_capacity(parked.len() + diverged.len());
     let mut media_types: HashMap<String, String> = HashMap::new();
+    let mut media_type = |collection: &str| -> Result<String> {
+        if let Some(media_type) = media_types.get(collection) {
+            return Ok(media_type.clone());
+        }
+        let media_type = store
+            .collection_kind(collection)
+            .with_context(|| format!("Read the kind of collection {collection}"))?
+            .unwrap_or_default();
+        media_types.insert(collection.to_owned(), media_type.clone());
+        Ok(media_type)
+    };
 
     for conflict in parked {
         let seq = store
@@ -268,27 +305,13 @@ pub fn list(store: &PimdirReader, account: &str) -> Result<Vec<Conflict>> {
             continue;
         };
 
-        let media_type = match media_types.get(&conflict.collection) {
-            Some(media_type) => media_type.clone(),
-            None => {
-                let media_type = store
-                    .collection_kind(&conflict.collection)
-                    .with_context(|| {
-                        format!("Read the kind of collection {}", conflict.collection)
-                    })?
-                    .unwrap_or_default();
-                media_types.insert(conflict.collection.clone(), media_type.clone());
-                media_type
-            }
-        };
-
         conflicts.push(Conflict {
             id,
             account: account.to_owned(),
-            media_type,
+            media_type: media_type(&conflict.collection)?,
             collection: conflict.collection,
-            source: conflict.source.0,
-            handle: conflict.handle.0,
+            source: Some(conflict.source.0),
+            handle: Some(conflict.handle.0),
             link_id: conflict.link_id,
             revision: conflict.conflict_revision,
             base: conflict.base_object,
@@ -297,7 +320,56 @@ pub fn list(store: &PimdirReader, account: &str) -> Result<Vec<Conflict>> {
         });
     }
 
+    for conflict in diverged {
+        let base = common_ancestor(
+            store,
+            &conflict.collection,
+            &conflict.link_id,
+            conflict.object.as_ref(),
+            conflict.conflict_object.as_ref(),
+        )?;
+
+        conflicts.push(Conflict {
+            id: conflict.seq,
+            account: account.to_owned(),
+            media_type: media_type(&conflict.collection)?,
+            collection: conflict.collection,
+            source: None,
+            handle: None,
+            link_id: conflict.link_id,
+            revision: None,
+            base,
+            local: conflict.object,
+            remote: conflict.conflict_object,
+        });
+    }
+
     Ok(conflicts)
+}
+
+/// The body an item's own conflict diverged from, its merge's ancestor.
+///
+/// The shared body a binding last agreed on and neither side holds (pimdir
+/// SYNC §9, `shared_object`, else its sync base), which the diverging binding
+/// keeps pinned; `None` for two bodies its endpoints never agreed on.
+pub fn common_ancestor(
+    store: &PimdirReader,
+    collection: &str,
+    link_id: &PimdirLinkId,
+    local: Option<&PimdirHash>,
+    remote: Option<&PimdirHash>,
+) -> Result<Option<PimdirHash>> {
+    let bindings = store
+        .item_bindings(collection, &link_id.0)
+        .with_context(|| format!("Read the bindings of {} in {collection}", link_id.0))?;
+
+    Ok(bindings
+        .into_values()
+        .filter_map(|binding| {
+            let base = binding.base.and_then(|base| base.object);
+            binding.shared_object.or(base)
+        })
+        .find(|agreed| Some(agreed) != local && Some(agreed) != remote))
 }
 
 /// The one conflict `id` names, narrowed by `source`, as the account's
@@ -310,12 +382,15 @@ pub fn find(conflicts: Vec<Conflict>, id: i64, source: Option<&str>) -> Result<C
     let mut found: Vec<Conflict> = conflicts
         .into_iter()
         .filter(|conflict| {
-            conflict.id == id && source.is_none_or(|source| conflict.endpoint() == source)
+            conflict.id == id && source.is_none_or(|source| conflict.endpoint() == Some(source))
         })
         .collect();
 
     if found.len() > 1 {
-        let sources: Vec<&str> = found.iter().map(Conflict::endpoint).collect();
+        let sources: Vec<&str> = found
+            .iter()
+            .map(|conflict| conflict.endpoint().unwrap_or("the item itself"))
+            .collect();
         bail!(
             "Item {id} diverged on several sources ({}), name one with --source",
             sources.join(", ")

@@ -52,17 +52,17 @@ clap = { version = "4.4", default-features = false, features = ["derive", "error
 crossbeam-queue = "0.3"
 dirs = "7"
 idna_adapter = { version = "=1.0.0", default-features = false }
-ical-rs = { version = "0.7.2", optional = true }
+ical-rs = { version = "0.7.3", optional = true }
 io-gcal = { version = "0.5.2", default-features = false, optional = true }
 io-gmail = { version = "0.9", default-features = false, optional = true }
 io-gpeople = { version = "0.8.1", default-features = false, optional = true }
 io-http = { version = "0.8", default-features = false, optional = true }
 io-imap = { version = "0.12.0", default-features = false, optional = true }
 io-msgraph = { version = "0.9.4", default-features = false, optional = true }
-io-pimdir = { version = "0.18.1", default-features = false, features = ["client"] }
+io-pimdir = { version = "0.19.0", default-features = false, features = ["client"] }
 io-sasl = { version = "0.3", default-features = false, features = ["scram"] }
 io-smtp = { version = "0.10", default-features = false, optional = true }
-io-webdav = { version = "0.11.0", default-features = false, optional = true }
+io-webdav = { version = "0.12.0", default-features = false, optional = true }
 jiff = { version = "1", default-features = false, features = ["std"], optional = true }
 log = "0.4"
 pimalaya-cli = { version = "0.8.0", default-features = false, features = ["terminal", "signal"] }
@@ -77,5 +77,4 @@ simd-cpu = { version = "0.1", default-features = false, features = ["std"] }
 tempfile = "3"
 toml = "1.1"
 url = { version = "2.2", features = ["serde"] }
-vcard-rs = { version = "0.6", optional = true }
-
+vcard-rs = { version = "0.6.1", optional = true }

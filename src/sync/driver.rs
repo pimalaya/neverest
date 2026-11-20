@@ -57,7 +57,7 @@ use io_pimdir::{
         blobs::PimdirBlobStage,
         modes,
         producer::{PimdirActionStatus, PimdirProducer},
-        reader::PimdirReader,
+        reader::{PimdirItemConflict, PimdirReader},
     },
     codec::{PimdirAction, PimdirStoreIdentity},
     collection::{PimdirCollectionId, PimdirScope},
@@ -408,7 +408,7 @@ impl Authority {
         match self {
             Self::Shared => PimdirConflictPolicy::Manual,
             Self::Endpoint => PimdirConflictPolicy::PreferRemote,
-            Self::Store => PimdirConflictPolicy::PreferLocal,
+            Self::Store => PimdirConflictPolicy::KeepLocal,
         }
     }
 

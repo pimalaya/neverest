@@ -128,6 +128,9 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Changed the io-pimdir dependency to 0.18 (pimdir draft-14 still, a store io-pimdir 0.17 wrote opens as is): the retention sweep (`store.purge-after`) purges an account's expired items in one transaction instead of one per item.
 
+- **BREAKING**: Changed the io-pimdir dependency to 0.19 (pimdir draft-15): a store or a sync state io-pimdir 0.18 wrote is refused (`store-version`), never migrated, and the search index is rebuilt.
+- **BREAKING**: Changed the conflicts to include the item's own conflict, which io-pimdir 0.19 records when two endpoints of an account disagree (pimdir SYNC §9): `conflict list`, `show` and `resolve` name it with `source` and `remoteId` `null`, a run merges it against the body the endpoints last agreed on, and `outstandingConflicts` counts it.
+
 - Changed the io-imap dependency to 0.12.
 
 - Changed the io-smtp dependency to 0.10.
@@ -234,6 +237,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed an edit made on a one-way target alone being pulled into the store, and from there into the other targets, rather than overwritten: a target syncs under io-pimdir's `KeepLocal`, its edit kept as a retained item and listed under `overruled`, and the store's body pushed back over it.
+- Fixed the messages a rebuild of a renumbered mailbox found new going unreported: the run reports them added.
 - Fixed a termination signal while a sync waits for another run's store lock, or while `sync --init` initializes, ending the process with no result: the shutdown is installed first, so the run prints its result, the accounts not reached interrupted, and exits 4.
 
 - Fixed `sync --queue-only` failing the whole command, uncoded, over a malformed queue row: the drain of that store's accounts fails coded `action-malformed` (exit 4), as a sync reports it.

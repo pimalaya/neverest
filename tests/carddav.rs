@@ -271,7 +271,7 @@ fn a_queued_edit_and_a_server_edit_of_the_same_field_park_until_a_person_decides
         "the divergence is parked and counted; report was:\n{report}",
     );
     assert!(
-        report.contains(r#""id":"card-1.vcf""#),
+        report.contains(r#""remoteId":"card-1.vcf""#),
         "the run names the item it parked; report was:\n{report}",
     );
 
@@ -367,7 +367,8 @@ fn a_body_no_parser_reads_is_reported_unmergeable_rather_than_collided() {
     );
 
     assert!(
-        report.contains(r#""outstandingConflicts":1"#) && report.contains(r#""id":"card-1.vcf""#),
+        report.contains(r#""outstandingConflicts":1"#)
+            && report.contains(r#""remoteId":"card-1.vcf""#),
         "the item parks and the run names it; report was:\n{report}",
     );
     assert!(

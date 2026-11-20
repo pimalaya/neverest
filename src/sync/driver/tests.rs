@@ -721,7 +721,8 @@ fn a_rekey_carries_state_by_link_id_and_bumps_the_generation_once() {
 /// A sync meeting a renumbered mailbox rekeys it before listing it.
 ///
 /// The message moves to its new UID with its staged flag, nothing is
-/// dropped as deleted, and the flag is pushed to the new UID.
+/// dropped as deleted, and the flag is pushed to the new UID. A message no
+/// old placement resolves to is reported added, as the rekey named it.
 #[test]
 #[cfg(feature = "imap")]
 fn a_renumbered_mailbox_is_rekeyed_before_it_is_listed() {
@@ -741,11 +742,18 @@ fn a_renumbered_mailbox_is_rekeyed_before_it_is_listed() {
         FakeMailbox {
             uid_validity: 2,
             highest_mod_seq: 9,
-            messages: vec![FakeMessage {
-                uid: 7,
-                flags: Vec::new(),
-                message_id: String::from("a@x"),
-            }],
+            messages: vec![
+                FakeMessage {
+                    uid: 7,
+                    flags: Vec::new(),
+                    message_id: String::from("a@x"),
+                },
+                FakeMessage {
+                    uid: 8,
+                    flags: Vec::new(),
+                    message_id: String::from("b@x"),
+                },
+            ],
             states_exists: true,
         },
         true,
@@ -815,7 +823,16 @@ fn a_renumbered_mailbox_is_rekeyed_before_it_is_listed() {
     };
 
     let blobs = store.blob_stage();
-    sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None).expect("the sync");
+    let (report, _) =
+        sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None).expect("the sync");
+    assert!(
+        report
+            .events
+            .iter()
+            .any(|event| matches!(event, PimdirSyncEvent::Added(h) if h.0 == "8")),
+        "the rekey's new member is reported: {:?}",
+        report.events,
+    );
 
     let placements = load_side(&store, INBOX).unwrap();
     let held: Vec<_> = placements
@@ -827,7 +844,7 @@ fn a_renumbered_mailbox_is_rekeyed_before_it_is_listed() {
             )
         })
         .collect();
-    assert_eq!(held, [("7", true)]);
+    assert_eq!(held, [("7", true), ("8", false)]);
     assert_eq!(store.generation(INBOX).unwrap(), Some(2));
     assert!(
         server
@@ -3298,9 +3315,15 @@ fn two_endpoints(dir: &Path) -> (PimdirSourceStore, PimdirSourceStore) {
     (left, open("right"))
 }
 
-/// A divergence as its source and its base, local and remote bodies.
+/// A divergence as its source (`None` for the item's own) and its base, local
+/// and remote bodies.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
-type CardDivergence = (String, Option<String>, Option<String>, Option<String>);
+type CardDivergence = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// The divergences the store holds for the card.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
@@ -3325,9 +3348,9 @@ fn card_divergence(store: &PimdirSourceStore, blobs: &PimdirBlobStage) -> Vec<Ca
 
 /// A card both endpoints rewrote merges against the body they agreed on.
 ///
-/// Each pass pulling only, as a reconcile's first does, the store keeps
-/// that body and records the divergence (pimdir SYNC §9), so the merge
-/// reads all three bodies and settles disjoint edits.
+/// Each pass pulling only, as a reconcile's first does, the second pull is
+/// the collection's divergence, the item's own conflict (pimdir SYNC §9), its
+/// ancestor the body the diverging binding agreed on: the merge settles it.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 #[test]
 fn a_card_both_endpoints_rewrote_diverges_against_their_agreed_body() {
@@ -3346,7 +3369,7 @@ fn a_card_both_endpoints_rewrote_diverges_against_their_agreed_body() {
     assert_eq!(
         card_divergence(&left, &blobs),
         [(
-            String::from("right"),
+            None,
             Some(agreed),
             Some(card("+2", "old")),
             Some(card("+1", "new")),
@@ -3365,6 +3388,12 @@ fn a_card_both_endpoints_rewrote_diverges_against_their_agreed_body() {
     .unwrap();
     assert_eq!(merged, 1);
     assert!(card_divergence(&left, &blobs).is_empty());
+    assert!(
+        left.list_item_conflicts(Some(CONFLICT_ACCOUNT))
+            .unwrap()
+            .is_empty(),
+        "the item's conflict is settled",
+    );
     let item = load_side(&right, "contacts").unwrap().remove(0);
     let body = String::from_utf8(blobs.blobs().get(&item.object.unwrap()).unwrap().unwrap());
     let body = body.unwrap();
@@ -3375,7 +3404,7 @@ fn a_card_both_endpoints_rewrote_diverges_against_their_agreed_body() {
 }
 
 /// Two endpoints holding one card under two bodies before they ever
-/// agreed park it with no ancestor (pimdir SYNC §6).
+/// agreed park it with no ancestor, the item's own conflict (pimdir SYNC §6).
 ///
 /// Neither body is taken over the other.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
@@ -3390,12 +3419,7 @@ fn a_card_two_endpoints_never_agreed_on_parks_with_no_ancestor() {
 
     assert_eq!(
         card_divergence(&left, &blobs),
-        [(
-            String::from("right"),
-            None,
-            Some(card("+1", "old")),
-            Some(card("+9", "old")),
-        )]
+        [(None, None, Some(card("+1", "old")), Some(card("+9", "old")),)]
     );
 
     let merged = merge_conflicts(
@@ -3409,12 +3433,35 @@ fn a_card_two_endpoints_never_agreed_on_parks_with_no_ancestor() {
     )
     .unwrap();
     assert_eq!(merged, 0, "nothing to merge against");
+    assert_eq!(
+        left.list_item_conflicts(Some(CONFLICT_ACCOUNT))
+            .unwrap()
+            .len(),
+        1,
+        "the item's conflict stands",
+    );
+
+    let mut report = SyncOutput::default();
+    count_conflicts(&left, CONFLICT_ACCOUNT, &mut report);
+    assert_eq!(report.outstanding_conflicts, 1, "the item's conflict waits");
+
+    let conflicts = crate::conflict::list(&left, CONFLICT_ACCOUNT).unwrap();
+    let conflict = crate::conflict::find(conflicts, 1, None).unwrap();
+    assert_eq!(conflict.endpoint(), None, "the item's own conflict");
+    let settled = card("+9", "old").replace("VERSION:4.0\r\n", "VERSION:4.0\r\nUID:uid:a\r\n");
+    let applied = conflict
+        .apply(dir.path(), CONFLICT_ACCOUNT, settled.as_bytes())
+        .unwrap();
+    assert_eq!(applied, crate::conflict::Applied::Resolved(Vec::new()));
+    assert!(card_divergence(&left, &blobs).is_empty());
+    let item = load_side(&left, "contacts").unwrap().remove(0);
+    assert_eq!(item.object, Some(blobs.blobs().hash(settled.as_bytes())));
 }
 
 /// How a one-way target's upgrade settles what it fetches: its pushing
 /// sync's policy.
 const STORE_WINS: PimdirUpgradeOptions = PimdirUpgradeOptions {
-    conflict: PimdirConflictPolicy::PreferLocal,
+    conflict: PimdirConflictPolicy::KeepLocal,
     push_content: true,
 };
 
@@ -3464,7 +3511,7 @@ fn a_side_the_store_decides_keeps_the_store_body_against_the_endpoint() {
 /// The fetch of a diverging body settles it by the side's policy (pimdir
 /// SYNC §6); under the default options it settles nothing and parks.
 ///
-/// A one-way target's `prefer-local` keeps the store's body, owed to the
+/// A one-way target's `KeepLocal` keeps the store's body, owed to the
 /// target, and the target's own as a retained item reported overruled.
 #[cfg(any(feature = "carddav", feature = "caldav"))]
 #[test]
@@ -3481,7 +3528,7 @@ fn a_fetched_divergence_settles_by_the_side_s_policy() {
             "contacts",
             false,
             PimdirPushRights::all(),
-            PimdirConflictPolicy::PreferLocal,
+            PimdirConflictPolicy::KeepLocal,
             PimdirScope::unbounded(),
             false,
         );
@@ -3561,7 +3608,7 @@ fn a_one_way_overwrite_keeps_the_target_body_as_a_retained_item() {
         "contacts",
         false,
         PimdirPushRights::all(),
-        PimdirConflictPolicy::PreferLocal,
+        PimdirConflictPolicy::KeepLocal,
         PimdirScope::unbounded(),
         false,
     );
@@ -3638,7 +3685,7 @@ fn a_one_way_overwrite_fetches_an_unread_target_body_before_keeping_it() {
         "contacts",
         false,
         PimdirPushRights::all(),
-        PimdirConflictPolicy::PreferLocal,
+        PimdirConflictPolicy::KeepLocal,
         PimdirScope::unbounded(),
         false,
     );
@@ -3686,6 +3733,90 @@ fn a_one_way_overwrite_fetches_an_unread_target_body_before_keeping_it() {
     assert_eq!(
         placement.object,
         Some(blobs.blobs().hash(card("+2", "old").as_bytes()))
+    );
+}
+
+/// An edit made on a one-way target alone is overwritten, never pulled.
+///
+/// The target's body is kept as a retained item reported overruled (pimdir
+/// SYNC §5, `KeepLocal`); under `PreferLocal` the target's pull took it.
+#[cfg(any(feature = "carddav", feature = "caldav"))]
+#[test]
+fn a_one_way_target_s_own_edit_is_overwritten_and_its_body_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut source, mut target) = two_endpoints(dir.path());
+    let blobs = source.blob_stage();
+    let agreed = card("+1", "old");
+
+    pull_endpoint(&mut source, &mut CardServer::at("v1", &agreed));
+    pull_endpoint(&mut target, &mut CardServer::at("w1", &agreed));
+    let verb = sync_verb(
+        "contacts",
+        false,
+        PimdirPushRights::all(),
+        Authority::Store.conflict_policy(),
+        PimdirScope::unbounded(),
+        false,
+    );
+    let edited = card("+3", "old");
+    let pulled = run_verb(&mut target, &mut CardServer::at("w2", &edited), verb).unwrap();
+    assert_eq!(pulled.conflicts, 1, "{:?}", pulled.events);
+    assert!(
+        !pulled
+            .events
+            .iter()
+            .any(|event| matches!(event, PimdirSyncEvent::ContentChanged(_))),
+        "the target's edit is not pulled: {:?}",
+        pulled.events,
+    );
+
+    let mut overruled = Vec::new();
+    let mut server = CardServer::at("w2", &edited);
+    let kept = keep_store_bodies(
+        "contacts",
+        "right",
+        &mut target,
+        &blobs,
+        &mut server,
+        STORE_WINS,
+        &mut overruled,
+    );
+    assert_eq!(kept.unwrap(), 1);
+
+    let retained = PimdirReader::open(dir.path())
+        .unwrap()
+        .list_retained("contacts", None, 10)
+        .unwrap();
+    assert_eq!(retained.len(), 1, "{retained:?}");
+    assert_eq!(
+        retained[0].object,
+        Some(blobs.blobs().hash(edited.as_bytes())),
+        "the target's own body",
+    );
+    assert_eq!(
+        overruled,
+        [(
+            String::from("contacts"),
+            PimdirHandle::from("card1"),
+            retained[0].link_id.clone(),
+        )]
+    );
+
+    let placement = load_side(&target, "contacts").unwrap().remove(0);
+    assert_eq!(
+        placement.status,
+        PimdirStatus::Dirty,
+        "the overwrite is owed"
+    );
+    assert_eq!(
+        placement.object,
+        Some(blobs.blobs().hash(agreed.as_bytes())),
+        "the store's body, the source's",
+    );
+    assert_eq!(
+        placement.base.and_then(|base| base.revision).as_deref(),
+        Some("w2"),
+        "gated on the revision the target holds",
     );
 }
 
@@ -5706,7 +5837,7 @@ fn the_authority_decides_the_conflict_and_the_push() {
 
     assert_eq!(
         Authority::Store.conflict_policy(),
-        PimdirConflictPolicy::PreferLocal,
+        PimdirConflictPolicy::KeepLocal,
     );
     assert!(
         Authority::Store.writes_back(),

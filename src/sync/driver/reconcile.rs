@@ -8,9 +8,9 @@ use crate::sync::driver::*;
 /// Runs one side's sync, rekeying the collection first when its listing
 /// found the source renumbered every member (pimdir SYNC §4, §8).
 ///
-/// The rekey carries every placement onto the new handles by link id, then
-/// the sync runs again; a failed or parked rekey writes nothing, so the next
-/// run meets the renumbering again. Also answers whether `pager` paused it.
+/// The rekey carries placements to the new handles by link id, the sync runs
+/// again and reports the rekey's added members first; a failed or parked rekey
+/// writes nothing. Also answers whether `pager` paused it.
 pub(super) fn sync_side_rebuilding(
     collection: &str,
     ctx: &mut SourceCtx,
@@ -40,7 +40,9 @@ pub(super) fn sync_side_rebuilding(
                 "{collection} rebuilt under generation {generation}: {} carried, {} pulled, {} pending dropped",
                 rekey.rekeyed, rekey.pulled, rekey.dropped
             );
-            sync_side(collection, ctx, store, blobs, push, pager)
+            let (mut report, paused) = sync_side(collection, ctx, store, blobs, push, pager)?;
+            report.events.splice(0..0, rekey.events);
+            Ok((report, paused))
         }
         synced => synced,
     }?;
@@ -211,6 +213,40 @@ pub(super) fn conflicted_placements(
         .collect())
 }
 
+/// The handles of the side's bindings in conflict of their own in `collection`.
+///
+/// A placement projects `Conflict` for its item's conflict too (pimdir SYNC
+/// §9), which no fetch of the side's body settles.
+pub(super) fn binding_conflicts(
+    store: &PimdirSourceStore,
+    collection: &str,
+) -> Result<HashSet<PimdirHandle>> {
+    let conflicts = store
+        .list_conflicts(store.account())
+        .with_context(|| format!("List the conflicts of {collection}"))?;
+    Ok(conflicts
+        .into_iter()
+        .filter(|conflict| conflict.collection == collection)
+        .filter(|conflict| conflict.source.0 == store.source())
+        .map(|conflict| conflict.handle)
+        .collect())
+}
+
+/// The items of `collection` in conflict of their own: two endpoints
+/// disagreeing, the collection's divergence (pimdir SYNC §9).
+pub(super) fn item_conflicts(
+    store: &PimdirSourceStore,
+    collection: &str,
+) -> Result<Vec<PimdirItemConflict>> {
+    let conflicts = store
+        .list_item_conflicts(store.account())
+        .with_context(|| format!("List the item conflicts of {collection}"))?;
+    Ok(conflicts
+        .into_iter()
+        .filter(|conflict| conflict.collection == collection)
+        .collect())
+}
+
 /// Merges what nobody disagreed about, leaving parked only what needs a person.
 ///
 /// Most divergence is not disagreement, as the base proves; the remote body is
@@ -250,9 +286,22 @@ pub(super) fn resolve_conflicts(
 
     debug!("merge {} conflicted item(s) in {collection}", parked.len());
 
+    let diverged = binding_conflicts(store, collection)?;
+    let item_read: HashSet<PimdirLinkId> = item_conflicts(store, collection)?
+        .into_iter()
+        .filter(|conflict| conflict.conflict_object.is_some())
+        .map(|conflict| conflict.link_id)
+        .collect();
     let wanted: Vec<PimdirHandle> = parked
         .iter()
         .filter(|placement| placement.conflict_object.is_none())
+        .filter(|placement| {
+            diverged.contains(&placement.handle)
+                || placement
+                    .link_id
+                    .as_ref()
+                    .is_none_or(|link_id| !item_read.contains(link_id))
+        })
         .map(|placement| placement.handle.clone())
         .collect();
 
@@ -413,11 +462,21 @@ pub(super) fn fetch_diverging<R: PimdirRemote<Error = anyhow::Error>>(
         .with_context(|| format!("Fetch the diverging bodies of {source} {collection}"))
 }
 
+/// One divergence a run merges: a binding's or its item's own.
+struct Divergence {
+    /// The binding's handle, or the item's link id, for the log.
+    name: String,
+    link_id: PimdirLinkId,
+    base: Option<PimdirHash>,
+    local: Option<PimdirHash>,
+    remote: Option<PimdirHash>,
+}
+
 /// The half of [`resolve_conflicts`] that reaches no server.
 ///
-/// Stages each merge through the queue as an owner's edit, matched on the
-/// local body so an edit made since parks, then judges it by its own row:
-/// the drain is the store's, its other rows of the account land in `noted`.
+/// Stages each merge, the side's bindings' then the collection's items' own
+/// (pimdir SYNC §9), as an owner's edit matched on the local body, judging it
+/// by its own row: the drain's other rows of the account land in `noted`.
 pub(super) fn merge_conflicts(
     collection: &str,
     kind: Kind,
@@ -431,20 +490,48 @@ pub(super) fn merge_conflicts(
         .with_context(|| format!("Stage the merged conflicts of {collection}"))?;
     let mut staged = Vec::new();
 
+    let mut diverged = Vec::new();
     for placement in conflicted_placements(store, collection, source)? {
         let handle = placement.handle.0.clone();
-
         let Some(link_id) = placement.link_id.clone() else {
             debug!("conflicted item {handle} in {collection} carries no link id yet");
             continue;
         };
+        diverged.push(Divergence {
+            name: handle,
+            link_id,
+            base: placement.base.and_then(|base| base.object),
+            local: placement.object,
+            remote: placement.conflict_object,
+        });
+    }
+    for conflict in item_conflicts(store, collection)? {
+        let base = crate::conflict::common_ancestor(
+            store,
+            collection,
+            &conflict.link_id,
+            conflict.object.as_ref(),
+            conflict.conflict_object.as_ref(),
+        )?;
+        diverged.push(Divergence {
+            name: conflict.link_id.0.clone(),
+            link_id: conflict.link_id,
+            base,
+            local: conflict.object,
+            remote: conflict.conflict_object,
+        });
+    }
 
-        let sides = (
-            placement.base.as_ref().and_then(|base| base.object.clone()),
-            placement.object.clone(),
-            placement.conflict_object.clone(),
-        );
-        let (Some(base_hash), Some(local_hash), Some(remote_hash)) = sides else {
+    for divergence in diverged {
+        let Divergence {
+            name: handle,
+            link_id,
+            base,
+            local,
+            remote,
+        } = divergence;
+
+        let (Some(base_hash), Some(local_hash), Some(remote_hash)) = (base, local, remote) else {
             debug!("conflicted item {handle} in {collection} is missing a side to merge against");
             continue;
         };

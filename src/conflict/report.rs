@@ -53,10 +53,11 @@ pub struct ConflictSummary {
     /// The store collection the item sits in.
     pub collection: String,
     /// The source whose own sync is stuck on the divergence, as the
-    /// account's configuration names it.
-    pub source: String,
-    /// The item's handle on that source, its id on the remote side.
-    pub remote_id: String,
+    /// account's configuration names it, `null` for the item's own conflict.
+    pub source: Option<String>,
+    /// The item's handle on that source, its id on the remote side, `null`
+    /// for the item's own conflict.
+    pub remote_id: Option<String>,
     /// The remote revision the divergence was recorded at.
     pub revision: Option<String>,
     /// Whether a decision can be made about it at all.
@@ -72,7 +73,7 @@ impl From<&Conflict> for ConflictSummary {
             id: conflict.id.to_string(),
             account: conflict.account.clone(),
             collection: conflict.collection.clone(),
-            source: conflict.endpoint().to_owned(),
+            source: conflict.endpoint().map(str::to_owned),
             remote_id: conflict.handle.clone(),
             revision: conflict.revision.clone(),
             resolvable: conflict.resolvable(),
@@ -91,7 +92,13 @@ impl fmt::Display for ConflictSummary {
             ..
         } = self;
 
-        write!(f, "{id} in {collection} on {source} ({remote_id})")?;
+        match (source, remote_id) {
+            (Some(source), Some(remote_id)) => {
+                write!(f, "{id} in {collection} on {source} ({remote_id})")?
+            }
+            (Some(source), None) => write!(f, "{id} in {collection} on {source}")?,
+            (None, _) => write!(f, "{id} in {collection}, between its endpoints")?,
+        }
 
         if !resolvable {
             write!(f, ", waiting for its diverging body")?;

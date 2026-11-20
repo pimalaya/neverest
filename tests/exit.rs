@@ -13,6 +13,8 @@ use std::{
     net::TcpListener,
     path::Path,
     process::{Command, Output, Stdio},
+    thread,
+    time::Duration,
 };
 
 use serde_json::Value;
@@ -97,25 +99,40 @@ fn a_json_word_after_the_separator_leaves_the_refusal_on_stderr() {
     assert!(!output.stderr.is_empty());
 }
 
-/// `completion`, `manual` and `json-schema` with no argument fail as any
-/// command does, the error on stdout, rather than printing their help.
+/// `completion`, `manual` and `json-schema` with no argument are a refused
+/// command line: exit 2, coded `usage-invalid` under `--json`.
 #[test]
-fn a_standard_command_without_its_argument_fails_on_stdout() {
+fn a_standard_command_without_its_argument_is_a_refused_command_line() {
     let home = TempDir::new().unwrap();
 
     for command in ["completion", "manual", "json-schema"] {
-        let output = run(home.path(), &[command]);
+        let output = run(home.path(), &["--json", command]);
         let stdout = text(&output.stdout);
 
-        assert_eq!(output.status.code(), Some(1), "{command}: {stdout}");
+        assert_eq!(output.status.code(), Some(2), "{command}: {stdout}");
+        let json: Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(json["code"], "usage-invalid", "{command}: {json}");
         assert!(stdout.contains("--dir"), "{command}: {stdout}");
-        assert!(!stdout.contains("Usage:"), "{command}: {stdout}");
-        assert!(output.stderr.is_empty(), "{}", text(&output.stderr));
     }
 }
 
-/// A failed check exits 3 with its report; its notice is a plain line on
-/// stderr in text mode and absent under `--json`.
+/// A bare `neverest --json` is a refused command line, never the help a
+/// JSON reader cannot parse, even with a configuration.
+#[test]
+fn a_bare_invocation_under_json_is_a_refused_command_line() {
+    let home = TempDir::new().unwrap();
+    let config = closed_port_account(home.path());
+    let output = run(home.path(), &["--json", "-c", &config]);
+    let stdout = text(&output.stdout);
+
+    assert_eq!(output.status.code(), Some(2), "{stdout}");
+    let json: Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(json["code"], "usage-invalid", "{json}");
+}
+
+/// A failed check exits 3 with its report, pimalaya-cli's account check: a
+/// cleartext endpoint's row carries no TLS. Off a terminal its progress
+/// lines are left out, so a redirected check holds its report alone.
 #[test]
 fn a_failed_check_prints_its_report_and_exits_3() {
     let home = TempDir::new().unwrap();
@@ -125,10 +142,12 @@ fn a_failed_check_prints_its_report_and_exits_3() {
 
     assert_eq!(output.status.code(), Some(3), "{stdout}");
     let json: Value = serde_json::from_str(&stdout).unwrap();
-    let source = &json["accounts"][0]["sources"][0];
+    let source = &json["accounts"][0]["backends"][0];
     assert_eq!(source["backend"], "imap", "{json}");
     assert_eq!(source["ok"], false, "{json}");
     assert!(source["error"].is_string(), "{json}");
+    assert!(source["tls"].is_null(), "{json}");
+    assert_eq!(source["source"], "imap", "{json}");
     assert_eq!(stdout.lines().count(), 1, "{stdout}");
 
     let stderr = text(&output.stderr);
@@ -136,7 +155,11 @@ fn a_failed_check_prints_its_report_and_exits_3() {
 
     let output = run(home.path(), &["-c", &config, "check"]);
     let stdout = text(&output.stdout);
-    assert!(stdout.contains("Source imap failed ("), "{stdout}");
+    assert_eq!(output.status.code(), Some(3), "{stdout}");
+    assert!(!stdout.contains("Source imap failed"), "{stdout}");
+    assert!(!stdout.contains("Resolved credentials"), "{stdout}");
+    assert!(stdout.starts_with("Account:  a\n"), "{stdout}");
+    assert!(stdout.contains("imap:     FAIL ("), "{stdout}");
     assert!(!stdout.contains('\u{1b}'), "{stdout}");
 }
 
@@ -176,6 +199,56 @@ fn an_undrained_account_prints_its_report_and_exits_4() {
     assert_eq!(account["account"], "a", "{json}");
     assert!(
         account["error"].as_str().unwrap().contains("init"),
+        "{json}"
+    );
+    assert_eq!(account["code"], "account-uninitialized", "{json}");
+}
+
+/// A termination signal while a sync waits for a store another run holds
+/// stops the wait and prints the result, the account interrupted, exit 4.
+#[cfg(unix)]
+#[test]
+fn a_signal_during_the_lock_wait_prints_the_interrupted_result() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let home = TempDir::new().unwrap();
+    let config = closed_port_account(home.path());
+    let store = home.path().join("store");
+    let local = store.join("local");
+    fs::create_dir_all(&local).unwrap();
+    fs::set_permissions(&local, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::write(store.join("pimdir.db"), b"").unwrap();
+    let lock = fs::File::create(local.join("sync.lock")).unwrap();
+    lock.set_permissions(fs::Permissions::from_mode(0o600))
+        .unwrap();
+    lock.try_lock().unwrap();
+
+    let child = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["--json", "-c", &config, "sync"])
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", home.path())
+        .env("XDG_STATE_HOME", home.path())
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    thread::sleep(Duration::from_secs(2));
+    let killed = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(killed.success());
+
+    let output = child.wait_with_output().unwrap();
+    let stdout = text(&output.stdout);
+    assert_eq!(output.status.code(), Some(4), "{stdout}");
+    let json: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    let account = &json["accounts"][0];
+    assert_eq!(account["account"], "a", "{json}");
+    assert_eq!(
+        account["error"], "Interrupted before the account ran",
         "{json}"
     );
 }

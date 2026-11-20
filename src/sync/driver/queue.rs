@@ -17,9 +17,7 @@ use crate::sync::driver::*;
 pub(crate) fn drain_queues(store: &mut PimdirSourceStore, report: &mut SyncOutput) {
     if let Err(err) = drain_queues_into(store, report) {
         warn!("drain failed, actions stay queued: {err:#}");
-        report
-            .failures
-            .push(StepFailure::new(FailedStep::Queue, None, &err));
+        report.note_step_failure(FailedStep::Queue, None, &err);
     }
 }
 
@@ -420,17 +418,15 @@ fn park_interrupted_invitation(
             return false;
         }
     }
-    report.intents.push(IntentEntry {
+    let entry = IntentEntry {
         id: intent.id,
         collection: intent.collection.clone(),
         kind: intent.kind.clone(),
         source: intent.source().unwrap_or_default().to_string(),
         seq: intent.seq(),
-        code: None,
-        error: Some(submit::unconfirmed_reason(detail)),
-        sources: Vec::new(),
-        parked: true,
-    });
+    };
+    let failure = Failure::new(submit::unconfirmed_reason(detail));
+    report.note_intent(entry, Some((failure, true)));
     true
 }
 
@@ -618,18 +614,13 @@ fn settle_intent(
             (Some(Failure::of(failure.error())), parked)
         }
     };
-    let (code, error, sources) = Failure::row(failure);
-
-    report.intents.push(IntentEntry {
+    let entry = IntentEntry {
         id: intent.id,
         collection: intent.collection.to_owned(),
         kind: intent.kind.to_owned(),
         source: performer.to_string(),
         seq: intent.seq,
-        code,
-        error,
-        sources,
-        parked,
-    });
+    };
+    report.note_intent(entry, failure.map(|failure| (failure, parked)));
     recorded
 }

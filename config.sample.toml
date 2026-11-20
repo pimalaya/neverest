@@ -16,6 +16,8 @@
 #proxy.url = "socks5h://localhost:1080"	# a socks5, socks5h or http proxy for every endpoint
 #proxy.username = "alice"		# its username
 #proxy.password.command = "exit 127"	# prints its password
+#tls.provider = "rustls"		# the TLS of every endpoint, each `<backend>.tls` field overriding it
+#tls.cert = "/path/to/cert.pem"	# a PEM certificate every endpoint trusts
 
 # IMAP
 #imap.server = "imap.example.org"	# implicit TLS on 993; imap://host is cleartext on 143

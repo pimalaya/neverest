@@ -119,6 +119,14 @@ pub enum ErrorCode {
     IndexVersion,
     /// No account has a name `-a` gives.
     AccountMissing,
+    /// The account was never initialized in its store: `neverest init`, or
+    /// `sync --init`, initializes it.
+    AccountUninitialized,
+    /// No conflict of the account has the id given.
+    ConflictNotFound,
+    /// A side refused a create because the collection already holds an
+    /// item of its `UID` (RFC 4791 §5.3.2, RFC 6352 §6.3.2).
+    ItemDuplicate,
     /// A source's backend is one this build leaves out: rebuild with the
     /// cargo feature the message names.
     BackendNotBuilt,

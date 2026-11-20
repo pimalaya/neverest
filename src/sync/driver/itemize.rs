@@ -35,7 +35,7 @@ pub(super) fn itemize_pulled(
     report: &mut SyncOutput,
 ) -> Result<()> {
     let after = flag_snapshot(store, collection, source)?;
-    itemize_conflicted(events, store, collection, display, source, report)?;
+    itemize_conflicted(events, store, collection, source, report)?;
 
     for event in events {
         match event {
@@ -46,7 +46,7 @@ pub(super) fn itemize_pulled(
                 };
                 let (added, removed) = flag_diff(&old, new);
                 if !added.is_empty() {
-                    report.item_patch.push(PatchEntry::new(
+                    report.note_item_hunk(
                         ItemHunk::AddFlags {
                             side: source.to_string(),
                             collection: display.to_string(),
@@ -56,10 +56,10 @@ pub(super) fn itemize_pulled(
                             content_key: 0,
                         },
                         None,
-                    ));
+                    );
                 }
                 if !removed.is_empty() {
-                    report.item_patch.push(PatchEntry::new(
+                    report.note_item_hunk(
                         ItemHunk::RemoveFlags {
                             side: source.to_string(),
                             collection: display.to_string(),
@@ -69,11 +69,11 @@ pub(super) fn itemize_pulled(
                             content_key: 0,
                         },
                         None,
-                    ));
+                    );
                 }
             }
             PimdirSyncEvent::Vanished(handle) => {
-                report.item_patch.push(PatchEntry::new(
+                report.note_item_hunk(
                     ItemHunk::Delete {
                         side: source.to_string(),
                         collection: display.to_string(),
@@ -82,7 +82,7 @@ pub(super) fn itemize_pulled(
                         content_key: 0,
                     },
                     None,
-                ));
+                );
             }
             _ => {}
         }
@@ -99,7 +99,6 @@ pub(super) fn itemize_conflicted(
     events: &[PimdirSyncEvent],
     store: &PimdirSourceStore,
     collection: &str,
-    display: &str,
     source: &str,
     report: &mut SyncOutput,
 ) -> Result<()> {
@@ -110,9 +109,9 @@ pub(super) fn itemize_conflicted(
         return Ok(());
     }
 
-    let parked: HashSet<String> = conflicted_placements(store, collection, source)?
+    let parked: HashMap<String, Option<String>> = conflicted_placements(store, collection, source)?
         .into_iter()
-        .map(|placement| placement.handle.0)
+        .map(|placement| (placement.handle.0, placement.link_id.map(|link| link.0)))
         .collect();
 
     for event in events {
@@ -120,14 +119,18 @@ pub(super) fn itemize_conflicted(
             continue;
         };
 
-        if !parked.contains(&handle.0) {
+        let Some(link_id) = parked.get(&handle.0) else {
             continue;
-        }
+        };
+        let seq = link_id
+            .as_ref()
+            .and_then(|link_id| store.seq_for_link(collection, link_id).ok().flatten());
 
         report.note_conflict(ItemConflict {
+            id: seq.map(|seq| seq.to_string()),
+            collection: collection.to_string(),
             side: source.to_string(),
-            collection: display.to_string(),
-            id: handle.0.clone(),
+            remote_id: handle.0.clone(),
         });
     }
 
@@ -155,7 +158,7 @@ pub(super) fn itemize_single(
             }
             match forbidden_action(&ctx.perms, &hunk) {
                 Some(action) => *forbidden.entry(action).or_default() += 1,
-                None => report.item_patch.push(PatchEntry::new(hunk, None)),
+                None => report.note_item_hunk(hunk, None),
             }
         }
     }
@@ -286,7 +289,7 @@ pub(super) fn itemize_fetches(
             .as_ref()
             .map(|l| l.0.clone())
             .unwrap_or_else(|| placement.handle.0.clone());
-        report.item_patch.push(PatchEntry::new(
+        report.note_item_hunk(
             ItemHunk::Fetch {
                 side: source.to_string(),
                 collection: display.to_string(),
@@ -294,7 +297,7 @@ pub(super) fn itemize_fetches(
                 content_key: 0,
             },
             None,
-        ));
+        );
     }
     Ok(())
 }
@@ -329,7 +332,7 @@ pub(super) struct Noted {
     /// §5): the most one pass counted.
     unlisted: BTreeMap<String, usize>,
     /// The bodies a batch downloaded and could not land in the store.
-    pub(super) failures: Vec<StepFailure>,
+    pub(super) failures: Vec<SyncError>,
     /// The collections whose listing the server cut short, by wire name.
     pub(super) truncated: BTreeSet<String>,
     /// The account's rows a mid-run drain applied beside the run's merges.
@@ -436,30 +439,33 @@ pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
         drained_overruled,
     } = mem::take(&mut ctx.noted);
     let display = |collection: &str| display_name(&ctx.namespace, collection).to_string();
-    report.failures.extend(failures);
+    report.errors.extend(failures);
     report.drained.extend(drained);
     report.overruled.extend(drained_overruled);
     for collection in truncated {
         let err = anyhow!("The server cut the listing short, the members past the cut unseen");
-        let failure = StepFailure::new(FailedStep::Listing, Some(collection), &err);
-        report.failures.push(failure);
+        report.note_step_failure(FailedStep::Listing, Some(collection), &err);
     }
 
     for ((collection, handle), reason) in refusals {
         let id = handle.as_str().trim_start_matches('\u{1}').to_owned();
         let collection = display(&collection);
-        report
-            .item_patch
-            .retain(|entry| !names(&entry.hunk, &ctx.name, &collection, &id));
-        report
-            .refusals
-            .retain(|r| r.side != ctx.name || r.collection != collection || r.id != id);
-        report.refusals.push(RefusedChange {
+        unplan(report, &ctx.name, &collection, &id);
+        report.errors.retain(|error| match &error.row {
+            SyncErrorRow::Refusals(refused) => {
+                refused.side != ctx.name
+                    || refused.collection != collection
+                    || error.failure.id.as_deref() != Some(&id)
+            }
+            _ => true,
+        });
+        let row = SyncErrorRow::Refusals(RefusedChange {
             side: ctx.name.clone(),
             collection,
-            id,
-            reason,
         });
+        report
+            .errors
+            .push(SyncError::new(Some(&id), Failure::new(reason), row));
     }
 
     for (collection, (parked, rebuild)) in parked {
@@ -561,7 +567,7 @@ pub(super) fn itemize(
                 }
                 match forbidden_action(&ctx.perms, &hunk) {
                     Some(action) => *forbidden.entry(action).or_default() += 1,
-                    None => report.item_patch.push(PatchEntry::new(hunk, None)),
+                    None => report.note_item_hunk(hunk, None),
                 }
             }
         }
@@ -689,11 +695,20 @@ pub(super) fn itemize_refused(side: &str, refused: Vec<RefusedCreate>, report: &
             continue;
         }
 
-        report.duplicates.push(RefusedDuplicate {
+        let message = format!(
+            "Cannot create a copy of UID {} in {}: {side} already holds it",
+            refused.uid, refused.collection,
+        );
+        let failure = Failure {
+            code: Some(ErrorCode::ItemDuplicate),
+            ..Failure::new(message)
+        };
+        let row = SyncErrorRow::Duplicates(RefusedDuplicate {
             side: side.to_string(),
             collection: refused.collection,
             uid: refused.uid,
         });
+        report.errors.push(SyncError::new(None, failure, row));
     }
 }
 
@@ -716,26 +731,28 @@ pub(super) fn itemize_rejected(side: &str, rejected: Vec<RejectedPush>, report: 
             continue;
         }
 
-        report
-            .item_patch
-            .retain(|entry| !names(&entry.hunk, side, &rejected.collection, &id));
-        let Failure {
-            code,
-            error,
-            sources,
-        } = rejected.failure;
-        report.rejected.push(RejectedWrite {
+        unplan(report, side, &rejected.collection, &id);
+        let row = SyncErrorRow::Rejected(RejectedWrite {
             side: side.to_string(),
             collection: rejected.collection,
-            kind: rejected.action.to_string(),
-            failure: ItemError {
-                id: Some(id),
-                code,
-                error,
-                sources,
-            },
+            action: rejected.action.to_string(),
         });
+        report
+            .errors
+            .push(SyncError::new(Some(&id), rejected.failure, row));
     }
+}
+
+/// Drops the hunks planned for `handle` in `collection` on `side`, applied or
+/// failed, the item's refusal naming it instead.
+fn unplan(report: &mut SyncOutput, side: &str, collection: &str, handle: &str) {
+    report
+        .item_patch
+        .retain(|hunk| !names(hunk, side, collection, handle));
+    report.errors.retain(|error| match &error.row {
+        SyncErrorRow::ItemPatch { hunk } => !names(hunk, side, collection, handle),
+        _ => true,
+    });
 }
 
 /// Whether `hunk` is the plan for `handle` in `collection` on `side`.

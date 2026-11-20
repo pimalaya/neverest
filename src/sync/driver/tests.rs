@@ -15,9 +15,17 @@ use io_pimdir::{
     },
     summary::mail::PimdirMailSummary,
 };
+use pimalaya_cli::error::ItemError;
 
 use super::*;
-use crate::{conflict::merger::SPAWNS, sync::local};
+use crate::{
+    conflict::merger::SPAWNS,
+    error::ErrorCode,
+    sync::{
+        local,
+        report::{IntentError, SubmitError},
+    },
+};
 
 /// What names a listed member by `link` alone, as a store binding does.
 fn named(link: &str) -> PimdirRemoteMeta {
@@ -545,8 +553,7 @@ fn a_drain_that_fails_is_reported_and_the_run_is_incomplete() {
     drain_queues(&mut store, &mut report);
     report_parked(&store, "a", &mut report);
 
-    let steps: Vec<FailedStep> = report.failures.iter().map(|f| f.step).collect();
-    assert_eq!(steps, [FailedStep::Queue, FailedStep::Queue]);
+    assert_eq!(steps(&report), [FailedStep::Queue, FailedStep::Queue]);
     assert_eq!(Exit::from(&report), Exit::Incomplete);
     assert!(report.to_string().contains("Errors (2)"), "{report}");
 }
@@ -562,8 +569,7 @@ fn a_conflict_count_that_fails_leaves_the_run_incomplete() {
     let mut report = SyncOutput::default();
     count_conflicts(&store, "a", &mut report);
 
-    assert_eq!(report.failures.len(), 1);
-    assert_eq!(report.failures[0].step, FailedStep::Conflicts);
+    assert_eq!(steps(&report), [FailedStep::Conflicts]);
     assert_eq!(Exit::from(&report), Exit::Incomplete);
 }
 
@@ -1006,7 +1012,7 @@ fn a_create_appended_without_a_uid_waits_and_is_not_appended_again() {
 
     let mut report = SyncOutput::default();
     itemize_noted(&mut ctx, &mut report);
-    assert!(report.rejected.is_empty() && ctx.rejected.is_empty());
+    assert!(report.rejected().next().is_none() && ctx.rejected.is_empty());
     assert_eq!(report.waiting.len(), 1, "{:?}", report.waiting);
     let waiting = &report.waiting[0];
     assert_eq!(waiting.side, "imap");
@@ -1088,16 +1094,13 @@ fn a_create_refused_as_it_stands_is_held_and_reported() {
 
         server.refuse_next_write(completion);
         let mut report = SyncOutput::default();
-        report.item_patch.push(PatchEntry::new(
-            ItemHunk::Add {
-                side: String::from("imap"),
-                collection: String::from("INBOX"),
-                id: String::from("held@x"),
-                flags: BTreeSet::new(),
-                content_key: 0,
-            },
-            None,
-        ));
+        report.item_patch.push(ItemHunk::Add {
+            side: String::from("imap"),
+            collection: String::from("INBOX"),
+            id: String::from("held@x"),
+            flags: BTreeSet::new(),
+            content_key: 0,
+        });
         sync_side_rebuilding(INBOX, &mut ctx, &mut store, &blobs, true, None).expect("the sync");
         itemize_noted(&mut ctx, &mut report);
         itemize_rejected(&ctx.name, mem::take(&mut ctx.rejected), &mut report);
@@ -1114,22 +1117,23 @@ fn a_create_refused_as_it_stands_is_held_and_reported() {
         if !held {
             assert_eq!(server.sent("APPEND").len(), 2, "appended again");
             assert!(standing.is_empty(), "{standing:?}");
-            assert!(report.refusals.is_empty(), "{:?}", report.refusals);
-            assert_eq!(report.rejected.len(), 1, "{:?}", report.rejected);
+            assert!(report.refusals().next().is_none(), "{:?}", report.errors);
+            assert_eq!(report.rejected().count(), 1, "{:?}", report.errors);
             continue;
         }
 
         assert_eq!(server.sent("APPEND").len(), 1, "held, never appended again");
         assert_eq!(standing.len(), 1, "{standing:?}");
         assert_eq!(standing[0].source, "imap");
-        assert!(report.rejected.is_empty(), "{:?}", report.rejected);
+        assert!(report.rejected().next().is_none(), "{:?}", report.errors);
         let json = serde_json::to_value(&report).unwrap();
-        let refusals = json["refusals"].as_array().unwrap();
+        let refusals = json["errors"].as_array().unwrap();
         assert_eq!(refusals.len(), 1, "{json}");
+        assert_eq!(refusals[0]["kind"], "refusals");
         assert_eq!(refusals[0]["side"], "imap");
         assert_eq!(refusals[0]["collection"], "INBOX");
         assert_eq!(refusals[0]["id"], "held@x", "the key, no control character");
-        let reason = refusals[0]["reason"].as_str().unwrap();
+        let reason = refusals[0]["error"].as_str().unwrap();
         assert!(reason.contains("Cannot store that message"), "{reason}");
         let text = report.to_string();
         assert!(text.contains("Warnings (1):"), "{text}");
@@ -1856,9 +1860,10 @@ fn a_send_naming_a_target_parks() {
 
     assert_eq!(kept.len(), 1);
     assert_eq!(kept[0].subject().as_deref(), Some("left"));
-    assert_eq!(report.submitted.len(), 1);
-    assert!(report.submitted[0].parked);
-    assert_eq!(report.submitted[0].subject.as_deref(), Some("dst"));
+    let sends = failed_sends(&report);
+    assert_eq!(sends.len(), 1);
+    assert!(sends[0].1.parked);
+    assert_eq!(sends[0].1.subject.as_deref(), Some("dst"));
     assert_eq!(store.parked_actions().unwrap().len(), 1);
 }
 
@@ -1926,8 +1931,9 @@ fn an_intent_on_a_gone_item_parks_and_one_on_a_pending_add_waits() {
     settle_invitation(&mut store, &intent, "gcal", Err(failure), &mut report);
     assert!(invitation::pending(&store).unwrap().is_empty());
     assert_eq!(store.parked_actions().unwrap().len(), 1);
-    assert!(report.intents[0].parked);
-    assert_eq!(report.intents[0].seq, Some(42));
+    let (failure, intent) = failed_intents(&report)[0];
+    assert!(intent.parked);
+    assert_eq!(failure.id.as_deref(), Some("42"));
 
     let dir = tempfile::tempdir().unwrap();
     let store = queued_reply(dir.path(), r#""link_id":"uid:not-yet""#);
@@ -1948,7 +1954,8 @@ fn a_performed_intent_reads_as_applied_by_its_producer() {
     let mut report = SyncOutput::default();
     settle_invitation(&mut store, &intent, "gcal", Ok(()), &mut report);
     assert!(invitation::pending(&store).unwrap().is_empty());
-    assert!(report.intents[0].error.is_none());
+    assert!(failed_intents(&report).is_empty());
+    assert_eq!(report.intents.len(), 1);
 
     let producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
     let PimdirActionStatus::Applied {
@@ -1980,7 +1987,7 @@ fn a_calendar_intent_left_in_flight_parks_unconfirmed() {
     let parked = store.parked_actions().unwrap();
     assert_eq!(parked.len(), 1);
     assert!(parked[0].unconfirmed().is_some(), "{parked:?}");
-    assert!(report.intents[0].parked);
+    assert!(failed_intents(&report)[0].1.parked);
     assert_eq!(in_flight.left(), None);
 }
 
@@ -3900,15 +3907,12 @@ fn two_colliding_fields_park_the_item_and_the_count_reads_past_one() {
 fn a_refused_write_is_reported_instead_of_counted_as_a_hunk() {
     let mut report = SyncOutput::default();
     for id in ["card1", "card2"] {
-        report.item_patch.push(PatchEntry::new(
-            ItemHunk::Update {
-                side: String::from("dav"),
-                collection: String::from("Default"),
-                id: String::from(id),
-                content_key: 0,
-            },
-            None,
-        ));
+        report.item_patch.push(ItemHunk::Update {
+            side: String::from("dav"),
+            collection: String::from("Default"),
+            id: String::from(id),
+            content_key: 0,
+        });
     }
 
     itemize_rejected(
@@ -3922,7 +3926,7 @@ fn a_refused_write_is_reported_instead_of_counted_as_a_hunk() {
         &mut report,
     );
 
-    let ids: Vec<&ItemHunk> = report.item_patch.iter().map(|entry| &entry.hunk).collect();
+    let ids: Vec<&ItemHunk> = report.item_patch.iter().collect();
     assert_eq!(ids.len(), 1, "the refused write left the patch: {ids:?}");
     assert!(format!("{:?}", ids[0]).contains("card2"), "{ids:?}");
 
@@ -3959,15 +3963,16 @@ fn a_refused_write_keeps_its_code_and_causes() {
 
     let json = serde_json::to_value(&report).unwrap();
     assert_eq!(
-        json["rejected"],
+        json["errors"],
         serde_json::json!([{
-            "side": "dav",
-            "collection": "Default",
             "id": "card1",
-            "kind": "update",
             "code": "permission-denied",
             "error": "Cannot update card1 in Default",
             "sources": ["WebDAV server returned HTTP 403"],
+            "kind": "rejected",
+            "side": "dav",
+            "collection": "Default",
+            "action": "update",
         }])
     );
     let text = report.to_string();
@@ -3984,29 +3989,23 @@ fn a_refused_write_keeps_its_code_and_causes() {
 fn a_refused_append_is_named_by_its_link_id_and_its_hunk_is_taken_back() {
     let mut report = SyncOutput::default();
     for id in ["event-1", "event-2"] {
-        report.item_patch.push(PatchEntry::new(
-            ItemHunk::Copy {
-                source_side: String::from("local"),
-                target_side: String::from("dav"),
-                collection: String::from("Calendar"),
-                source_id: String::from(id),
-                flags: BTreeSet::new(),
-                origin: None,
-                content_key: 0,
-            },
-            None,
-        ));
-    }
-    report.item_patch.push(PatchEntry::new(
-        ItemHunk::Add {
-            side: String::from("dav"),
+        report.item_patch.push(ItemHunk::Copy {
+            source_side: String::from("local"),
+            target_side: String::from("dav"),
             collection: String::from("Calendar"),
-            id: String::from("event-3"),
+            source_id: String::from(id),
             flags: BTreeSet::new(),
+            origin: None,
             content_key: 0,
-        },
-        None,
-    ));
+        });
+    }
+    report.item_patch.push(ItemHunk::Add {
+        side: String::from("dav"),
+        collection: String::from("Calendar"),
+        id: String::from("event-3"),
+        flags: BTreeSet::new(),
+        content_key: 0,
+    });
 
     let rejected = |link: &str| RejectedPush {
         collection: String::from("Calendar"),
@@ -4020,14 +4019,13 @@ fn a_refused_append_is_named_by_its_link_id_and_its_hunk_is_taken_back() {
         &mut report,
     );
 
-    let left: Vec<&ItemHunk> = report.item_patch.iter().map(|entry| &entry.hunk).collect();
+    let left: Vec<&ItemHunk> = report.item_patch.iter().collect();
     assert_eq!(left.len(), 1, "a refused append left the patch: {left:?}");
     assert!(format!("{:?}", left[0]).contains("event-2"), "{left:?}");
 
     let ids: Vec<Option<&str>> = report
-        .rejected
-        .iter()
-        .map(|rejected| rejected.failure.id.as_deref())
+        .rejected()
+        .map(|(failure, _)| failure.id.as_deref())
         .collect();
     assert_eq!(ids, [Some("event-1"), Some("event-3")]);
     let text = report.to_string();
@@ -4354,26 +4352,10 @@ fn a_conflict_on_each_endpoint_is_named_once_across_a_convergence_loop() {
     let mut report = SyncOutput::default();
     for pass in 0..2 {
         let left_pass = sync_with(&mut left, &mut left_remote, PimdirPushRights::all());
-        itemize_conflicted(
-            &left_pass.events,
-            &left,
-            "contacts",
-            "contacts",
-            "left",
-            &mut report,
-        )
-        .unwrap();
+        itemize_conflicted(&left_pass.events, &left, "contacts", "left", &mut report).unwrap();
 
         let right_pass = sync_with(&mut right, &mut right_remote, PimdirPushRights::all());
-        itemize_conflicted(
-            &right_pass.events,
-            &right,
-            "contacts",
-            "contacts",
-            "right",
-            &mut report,
-        )
-        .unwrap();
+        itemize_conflicted(&right_pass.events, &right, "contacts", "right", &mut report).unwrap();
 
         assert_eq!(
             (pass, left_pass.conflicts),
@@ -4399,6 +4381,14 @@ fn a_conflict_on_each_endpoint_is_named_once_across_a_convergence_loop() {
         .map(|conflict| conflict.side.as_str())
         .collect();
     assert_eq!(sides, ["left", "right"]);
+    for conflict in &report.conflicts {
+        let id = conflict.id.as_deref().and_then(|id| id.parse::<i64>().ok());
+        assert!(id.is_some(), "the id conflict resolve takes: {conflict:?}");
+        assert_eq!(
+            conflict.remote_id, "card1",
+            "the handle apart: {conflict:?}"
+        );
+    }
 
     assert_eq!(
         warn_conflicts(&report),
@@ -4412,15 +4402,7 @@ fn a_conflict_on_each_endpoint_is_named_once_across_a_convergence_loop() {
         (&mut right, &mut right_remote, "right"),
     ] {
         let pass = sync_with(store, remote, PimdirPushRights::all());
-        itemize_conflicted(
-            &pass.events,
-            store,
-            "contacts",
-            "contacts",
-            side,
-            &mut later,
-        )
-        .unwrap();
+        itemize_conflicted(&pass.events, store, "contacts", side, &mut later).unwrap();
     }
 
     assert!(later.conflicts.is_empty());
@@ -4535,7 +4517,7 @@ fn a_server_delete_is_named_once_on_each_endpoint() {
     for (source, other) in [("left", "right"), ("right", "left")] {
         for placement in projection_view(&right, "contacts", source).unwrap() {
             for hunk in placement_hunks(source, other, source, "contacts", &placement) {
-                report.item_patch.push(PatchEntry::new(hunk, None));
+                report.item_patch.push(hunk);
             }
         }
     }
@@ -4543,7 +4525,7 @@ fn a_server_delete_is_named_once_on_each_endpoint() {
     let deletes: Vec<(&str, Direction)> = report
         .item_patch
         .iter()
-        .filter_map(|entry| match &entry.hunk {
+        .filter_map(|hunk| match hunk {
             ItemHunk::Delete {
                 side, direction, ..
             } => Some((side.as_str(), *direction)),
@@ -4772,7 +4754,7 @@ fn a_moved_card_is_itemized_as_both_its_halves() {
         report
             .item_patch
             .into_iter()
-            .map(|entry| match entry.hunk {
+            .map(|hunk| match hunk {
                 ItemHunk::Delete { collection, .. } => format!("delete in {collection}"),
                 ItemHunk::Add { collection, .. } => format!("add in {collection}"),
                 ItemHunk::Copy { collection, .. } => format!("copy in {collection}"),
@@ -4976,7 +4958,7 @@ fn a_duplicated_identity_is_two_items_and_no_warning() {
     };
     for placement in &view {
         for hunk in placement_hunks("left", "right", "left", "INBOX", placement) {
-            report.item_patch.push(PatchEntry::new(hunk, None));
+            report.item_patch.push(hunk);
         }
     }
 
@@ -4985,7 +4967,7 @@ fn a_duplicated_identity_is_two_items_and_no_warning() {
 
     let json = serde_json::to_value(&report).unwrap();
     assert!(json.get("ambiguous").is_none(), "{json}");
-    assert_eq!(json["duplicates"], serde_json::json!([]), "{json}");
+    assert_eq!(json["errors"], serde_json::json!([]), "{json}");
 }
 
 /// A target refusing the second copy is the one thing worth a line.
@@ -5006,8 +4988,9 @@ fn a_refused_duplicate_is_named_with_its_uid() {
     };
     itemize_refused("right", refused, &mut report);
 
-    assert_eq!(report.duplicates.len(), 1);
-    assert_eq!(report.duplicates[0].side, "right");
+    let duplicates = duplicates(&report);
+    assert_eq!(duplicates.len(), 1);
+    assert_eq!(duplicates[0].side, "right");
 
     let text = report.to_string();
     assert!(text.contains("Warnings (1)"), "{text}");
@@ -5015,9 +4998,12 @@ fn a_refused_duplicate_is_named_with_its_uid() {
     assert!(text.contains("event-1@google.com"), "{text}");
 
     let json = serde_json::to_value(&report).unwrap();
-    assert_eq!(json["duplicates"][0]["side"], "right");
-    assert_eq!(json["duplicates"][0]["collection"], "agenda");
-    assert_eq!(json["duplicates"][0]["uid"], "event-1@google.com");
+    let duplicate = &json["errors"][0];
+    assert_eq!(duplicate["kind"], "duplicates", "{json}");
+    assert_eq!(duplicate["code"], "item-duplicate", "{json}");
+    assert_eq!(duplicate["side"], "right");
+    assert_eq!(duplicate["collection"], "agenda");
+    assert_eq!(duplicate["uid"], "event-1@google.com");
 }
 
 /// A refusal is reported once however many passes met it.
@@ -5045,7 +5031,7 @@ fn a_refusal_re_observed_on_a_later_pass_is_still_one_refusal() {
     );
 
     assert_eq!(
-        report.duplicates.len(),
+        duplicates(&report).len(),
         2,
         "one line per copy, however many passes met the same answer",
     );
@@ -5062,22 +5048,19 @@ fn a_write_refused_on_every_pass_is_still_one_line() {
     };
 
     let mut report = SyncOutput::default();
-    report.item_patch.push(PatchEntry::new(
-        ItemHunk::Update {
-            side: String::from("dav"),
-            collection: String::from("Default"),
-            id: String::from("card1"),
-            content_key: 0,
-        },
-        None,
-    ));
+    report.item_patch.push(ItemHunk::Update {
+        side: String::from("dav"),
+        collection: String::from("Default"),
+        id: String::from("card1"),
+        content_key: 0,
+    });
     itemize_rejected(
         "dav",
         vec![rejected("card1"), rejected("card1"), rejected("card2")],
         &mut report,
     );
 
-    assert_eq!(report.rejected.len(), 2);
+    assert_eq!(report.rejected().count(), 2);
     assert!(report.item_patch.is_empty(), "and the hunk is still gone");
 }
 
@@ -5114,18 +5097,15 @@ fn a_relayed_copy_is_itemized_so_the_run_never_reads_as_already_in_sync() {
         account: "relay".into(),
         ..Default::default()
     };
-    report.item_patch.push(PatchEntry::new(
-        ItemHunk::Copy {
-            source_side: target.holding.clone(),
-            target_side: String::from("right"),
-            collection: "INBOX".into(),
-            source_id: target.link.clone(),
-            flags: target.flags.iter().cloned().collect(),
-            origin: None,
-            content_key: content_key(&target.link),
-        },
-        None,
-    ));
+    report.item_patch.push(ItemHunk::Copy {
+        source_side: target.holding.clone(),
+        target_side: String::from("right"),
+        collection: "INBOX".into(),
+        source_id: target.link.clone(),
+        flags: target.flags.iter().cloned().collect(),
+        origin: None,
+        content_key: content_key(&target.link),
+    });
 
     let text = report.to_string();
     assert!(!text.contains("already in sync"), "{text}");
@@ -5147,9 +5127,7 @@ fn a_run_whose_every_hunk_failed_is_not_synchronized() {
     };
     for side in ["imap", "carddav"] {
         let error = anyhow!("Network is unreachable");
-        report
-            .collection_patch
-            .push(PatchEntry::new(scan(side), Some(error)));
+        report.note_collection_hunk(scan(side), Some(error));
     }
 
     let text = report.to_string();
@@ -5158,9 +5136,7 @@ fn a_run_whose_every_hunk_failed_is_not_synchronized() {
         "{text}"
     );
 
-    report
-        .collection_patch
-        .push(PatchEntry::new(scan("caldav"), None));
+    report.collection_patch.push(scan("caldav"));
     let text = report.to_string();
     assert!(
         text.contains("Account a partially synchronized: 1 hunks, 2 errors\n"),
@@ -5510,12 +5486,13 @@ fn a_refused_relay_is_reported_and_the_next_message_relayed() {
     )
     .unwrap();
 
-    assert_eq!(report.rejected.len(), 1, "{:?}", report.rejected);
+    assert_eq!(report.rejected().count(), 1, "{:?}", report.errors);
     assert_eq!(relayed, 1);
     assert_eq!(report.item_patch.len(), 1);
-    assert_eq!(report.rejected.len(), 1, "{:?}", report.rejected);
-    assert_eq!(report.rejected[0].kind, "append");
-    assert_eq!(report.rejected[0].side, "right");
+    assert_eq!(report.rejected().count(), 1, "{:?}", report.errors);
+    let (_, rejected) = report.rejected().next().unwrap();
+    assert_eq!(rejected.action, "append");
+    assert_eq!(rejected.side, "right");
     assert_eq!(Exit::from(&report), Exit::Conflicted);
 }
 
@@ -5646,9 +5623,9 @@ fn an_interrupted_send_is_parked_unconfirmed() {
 
     assert_eq!(left.map(|intents| intents.len()), Some(0), "not sent again");
     assert_eq!(in_flight.left(), None);
-    let entry = &report.submitted[0];
+    let (failure, entry) = failed_sends(&report)[0];
     assert!(entry.parked && entry.unconfirmed);
-    let error = entry.error.as_deref().unwrap();
+    let error = failure.error.as_str();
     assert!(error.starts_with("unconfirmed: "), "{error}");
 
     let producer = PimdirProducer::open(dir.path(), "test-frontend").unwrap();
@@ -5810,7 +5787,7 @@ fn the_pull_plan_names_an_item_its_listing_brought_with_its_body() {
     .unwrap();
     assert_eq!(report.item_patch.len(), 1);
     assert!(
-        matches!(&report.item_patch[0].hunk, ItemHunk::Fetch { id, .. } if id == "uid:card-1"),
+        matches!(&report.item_patch[0], ItemHunk::Fetch { id, .. } if id == "uid:card-1"),
         "named by the identity its body states",
     );
 }
@@ -6069,10 +6046,10 @@ fn one_identity_under_two_hrefs_mirrors_as_two_items_and_settles() {
         second
             .item_patch
             .iter()
-            .map(|e| e.hunk.to_string())
+            .map(ToString::to_string)
             .collect::<Vec<_>>(),
     );
-    assert!(second.duplicates.is_empty());
+    assert!(duplicates(&second).is_empty());
     assert_eq!(
         remote.fetched.len(),
         2,
@@ -7423,4 +7400,40 @@ fn a_running_verb_keeps_the_collector_out() {
         remote.refused
     );
     remote.collector.collect_garbage().unwrap();
+}
+
+/// The steps `report`'s errors name as failed.
+fn steps(report: &SyncOutput) -> Vec<FailedStep> {
+    let steps = report.errors.iter().filter_map(|error| match &error.row {
+        SyncErrorRow::Failures(failure) => Some(failure.step),
+        _ => None,
+    });
+    steps.collect()
+}
+
+/// The creates `report`'s errors name as refused for a duplicate `UID`.
+fn duplicates(report: &SyncOutput) -> Vec<&RefusedDuplicate> {
+    let duplicates = report.errors.iter().filter_map(|error| match &error.row {
+        SyncErrorRow::Duplicates(duplicate) => Some(duplicate),
+        _ => None,
+    });
+    duplicates.collect()
+}
+
+/// The sends `report`'s errors name as failed, each with its failure.
+fn failed_sends(report: &SyncOutput) -> Vec<(&ItemError<ErrorCode>, &SubmitError)> {
+    let sends = report.errors.iter().filter_map(|error| match &error.row {
+        SyncErrorRow::Submitted(send) => Some((&error.failure, send)),
+        _ => None,
+    });
+    sends.collect()
+}
+
+/// The intents `report`'s errors name as failed, each with its failure.
+fn failed_intents(report: &SyncOutput) -> Vec<(&ItemError<ErrorCode>, &IntentError)> {
+    let intents = report.errors.iter().filter_map(|error| match &error.row {
+        SyncErrorRow::Intents(intent) => Some((&error.failure, intent)),
+        _ => None,
+    });
+    intents.collect()
 }

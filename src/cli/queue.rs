@@ -11,7 +11,7 @@ use std::{
 };
 
 use anyhow::{Context, Error, Result};
-use io_pimdir::client::producer::PimdirActionStatus;
+use io_pimdir::{client::producer::PimdirActionStatus, codec::PimdirStoreIdentity};
 use log::info;
 use pimalaya_cli::printer::Printer;
 use schemars::JsonSchema;
@@ -20,10 +20,10 @@ use serde::Serialize;
 use crate::{
     cli::{exit::Exit, sync::try_store_lock},
     config::{AccountConfig, Config},
-    error::{ErrorCode, Failure, chain},
+    error::{ErrorCode, Failure, chain, pimdir_error},
     sync::{
         driver,
-        report::{IndexRefresh, OverruledBody, SyncRunOutput},
+        report::{IndexRefresh, OverruledBody, ParkedQueueAction, SyncRunOutput},
         state::StoreState,
     },
 };
@@ -92,8 +92,11 @@ pub fn run(
 /// at `dir` once; an account that cannot be declared fails alone.
 ///
 /// Declaring reads the configuration and the calendars the last listing
-/// stated take no tasks (pimdir STORAGE §15.6). A drain performs no intent,
-/// so no row it reports is unconfirmed. The index refreshes once, briefly.
+/// stated take no tasks (pimdir STORAGE §15.6). Every row the store holds
+/// parked on an account's collections is reported, as a sync reports it,
+/// whichever drain parked it. The index refreshes once, briefly. A store
+/// step that fails, a malformed row among them, fails every account of
+/// the store alone.
 fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<QueueOutput>> {
     let mut outputs = Vec::new();
     let mut ready = Vec::new();
@@ -120,11 +123,12 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Queue
         .first()
         .expect("a validated account has at least one source");
     let mut store = driver::open_store(dir, first, first_name)?;
-    let queued = store
+    let queued = match store
         .list_pending_actions()
-        .context("List the queued actions")?;
-
-    let mut drained = match driver::drain_store(&mut store) {
+        .map_err(pimdir_error)
+        .context("List the queued actions")
+        .and_then(|queued| Ok((queued, driver::drain_store(&mut store)?)))
+    {
         Ok(drained) => drained,
         Err(err) => {
             let failure = Failure::of(&err);
@@ -135,6 +139,7 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Queue
             return Ok(outputs);
         }
     };
+    let (queued, mut drained) = queued;
 
     #[cfg_attr(not(feature = "search"), allow(unused_mut))]
     let mut index = None;
@@ -168,24 +173,31 @@ fn drain(dir: &Path, accounts: Vec<(String, AccountConfig)>) -> Result<Vec<Queue
                 kind,
                 seq,
             }),
-            PimdirActionStatus::Parked {
-                attempts, error, ..
-            } => output.parked.push(ParkedAction {
-                id: row.id,
-                collection: row.collection,
-                kind,
-                producer: row.producer,
-                queued_at: row.created_at,
-                attempts,
-                code: None,
-                error,
-                sources: Vec::new(),
-            }),
             PimdirActionStatus::Pending { .. } => output.waiting += 1,
-            PimdirActionStatus::Unconfirmed { .. }
+            PimdirActionStatus::Parked { .. }
+            | PimdirActionStatus::Unconfirmed { .. }
             | PimdirActionStatus::Reset
             | PimdirActionStatus::Unknown => {}
         }
+    }
+
+    let cursor = store
+        .change_cursor()
+        .map_err(pimdir_error)
+        .context("Read the store identity")?;
+    let identity = PimdirStoreIdentity {
+        store_id: cursor.store_id,
+        incarnation: cursor.incarnation,
+    };
+    let parked = store
+        .parked_actions()
+        .map_err(pimdir_error)
+        .context("List the parked actions")?;
+    for row in parked {
+        let Some(output) = owners.get(&row.collection).and_then(|o| mine.get_mut(o)) else {
+            continue;
+        };
+        output.parked.push(ParkedQueueAction::new(&identity, row));
     }
 
     for output in mine.values() {
@@ -221,8 +233,10 @@ pub struct QueueOutput {
     pub sources: Vec<String>,
     /// The actions applied to the account's collections, in queue order.
     pub applied: Vec<DrainedAction>,
-    /// The actions refused for good this time, kept for an operator.
-    pub parked: Vec<ParkedAction>,
+    /// The rows the store holds parked on the account's collections, this
+    /// drain's or an earlier one's, as `pimdir queue list` prints a row,
+    /// until a person retries or cancels them.
+    pub parked: Vec<ParkedQueueAction>,
     /// The rows left queued for a sync: intents, a send or a reply, and
     /// actions a transient failure deferred.
     pub waiting: usize,
@@ -336,58 +350,13 @@ impl fmt::Display for DrainedAction {
     }
 }
 
-/// One queue row the drain parked.
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ParkedAction {
-    /// The queue row.
-    #[serde(rename = "row")]
-    pub id: i64,
-    /// The collection it was queued on.
-    pub collection: String,
-    /// The action kind, kebab-case as the store spells it: `add`, `update`,
-    /// `set-flags`, `remove`, `move`, `copy`.
-    pub kind: String,
-    /// The enqueuing process, diagnostic only.
-    pub producer: String,
-    /// When the row was appended, stamped by the store's own clock.
-    pub queued_at: String,
-    /// How many times the row was tried before it was parked.
-    pub attempts: i64,
-    /// The stable code of the refusal, `null`: the store keeps its text
-    /// alone.
-    pub code: Option<ErrorCode>,
-    /// Why the store refused it, as the store recorded it.
-    pub error: String,
-    /// The messages of the refusal's causes, empty: the store recorded
-    /// them in `error`.
-    pub sources: Vec<String>,
-}
-
-impl fmt::Display for ParkedAction {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "#{} {} in {} parked: {}",
-            self.id,
-            self.kind,
-            self.collection,
-            chain(&self.error, &self.sources)
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use crate::cli::queue::*;
 
-    /// A drained or parked row is keyed `row`, as himalaya's `pimdir queue
-    /// list` keys it.
-    ///
-    /// A parked one carries its producer, when it was queued and how often
-    /// it was tried.
+    /// A drained row is keyed `row`, as `pimdir queue list` keys it.
     #[test]
     fn a_drain_keys_its_rows_row() {
         let mut output = QueueOutput::new(String::from("work"));
@@ -397,34 +366,10 @@ mod tests {
             kind: String::from("add"),
             seq: Some(5),
         });
-        output.parked.push(ParkedAction {
-            id: 3,
-            collection: String::from("work/imap/INBOX"),
-            kind: String::from("set-flags"),
-            producer: String::from("himalaya"),
-            queued_at: String::from("2026-11-15T08:00:00.000Z"),
-            attempts: 1,
-            code: None,
-            error: String::from("unknown seq 9"),
-            sources: Vec::new(),
-        });
         let json = serde_json::to_value(&output).unwrap();
 
         assert_eq!(json["applied"][0]["row"], 2, "{json}");
-        assert_eq!(
-            json["parked"][0],
-            json!({
-                "row": 3,
-                "collection": "work/imap/INBOX",
-                "kind": "set-flags",
-                "producer": "himalaya",
-                "queuedAt": "2026-11-15T08:00:00.000Z",
-                "attempts": 1,
-                "code": null,
-                "error": "unknown seq 9",
-                "sources": [],
-            })
-        );
+        assert_eq!(json["parked"], json!([]), "{json}");
     }
 
     /// An account that could not be drained names its failure as an item

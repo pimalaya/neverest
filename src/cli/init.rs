@@ -25,10 +25,10 @@ use crate::{
     client,
     config::{AccountConfig, Config, mode::AccountMode},
     error::{ErrorCode, Failure, chain},
-    sync::{driver, state::StoreState},
+    sync::{driver, state::StoreState, stopping},
 };
 
-/// Initializes every account, or those `-a` names, in the store it shares.
+/// Initialize every account, or those `-a` names, in the store it shares.
 ///
 /// Opens each endpoint first, so credential and network errors surface up
 /// front, then adds the account to the store, creating the store when there
@@ -93,11 +93,14 @@ pub fn initialize(selected: Vec<(String, AccountConfig)>) -> Result<Vec<InitOutp
             .with_context(|| format!("Acquire the lock of the store at {}", dir.display()))?;
         let Some(_lock) = lock else {
             for (name, account_config) in accounts {
-                let err = anyhow!(
-                    "Another run holds the store at {} after {}s",
-                    dir.display(),
-                    LOCK_TIMEOUT.as_secs()
-                );
+                let err = match stopping() {
+                    true => anyhow!("Interrupted before the account ran"),
+                    false => anyhow!(
+                        "Another run holds the store at {} after {}s",
+                        dir.display(),
+                        LOCK_TIMEOUT.as_secs()
+                    ),
+                };
                 let mode = account_config.mode()?;
                 outputs.push(InitOutput::failed(name, mode, &dir, &[], err));
             }

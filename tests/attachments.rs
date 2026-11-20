@@ -499,7 +499,7 @@ fn fetches(report: &serde_json::Value) -> usize {
         .map(|patch| {
             patch
                 .iter()
-                .filter(|entry| entry["hunk"]["kind"] == "fetch")
+                .filter(|entry| entry["kind"] == "fetch")
                 .count()
         })
         .unwrap_or(0)

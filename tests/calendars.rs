@@ -377,7 +377,7 @@ fn conflict_id(listing: &str, handle: &str) -> String {
         .as_array()
         .expect("a conflict array")
         .iter()
-        .find(|conflict| conflict["handle"] == handle)
+        .find(|conflict| conflict["remoteId"] == handle)
         .unwrap_or_else(|| panic!("no conflict for {handle} in:\n{listing}"))["id"]
         .as_str()
         .expect("a conflict id")

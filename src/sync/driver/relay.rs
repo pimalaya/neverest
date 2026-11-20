@@ -169,12 +169,12 @@ pub(super) fn relay_copies(
             Ok(written) => written,
             Err(err) => {
                 warn!("relay of {} in {wire} failed: {err:#}", target.link);
-                report.rejected.push(RejectedWrite {
+                let row = SyncErrorRow::Rejected(RejectedWrite {
                     side: target_name,
                     collection: wire.clone(),
-                    kind: String::from("append"),
-                    failure: ItemError::new(Some(&target.link), &err),
+                    action: String::from("append"),
                 });
+                report.note_error(Some(&target.link), &err, row);
                 continue;
             }
         };
@@ -182,18 +182,15 @@ pub(super) fn relay_copies(
         bind_relayed(target_store, collection, &target, written)
             .with_context(|| format!("Record the relay of {} in {wire}", target.handle.0))?;
 
-        report.item_patch.push(PatchEntry::new(
-            ItemHunk::Copy {
-                source_side: target.holding.clone(),
-                target_side: target_name,
-                collection: wire.clone(),
-                source_id: target.link.clone(),
-                flags: target.flags.iter().cloned().collect(),
-                origin: None,
-                content_key: content_key(&target.link),
-            },
-            None,
-        ));
+        report.item_patch.push(ItemHunk::Copy {
+            source_side: target.holding.clone(),
+            target_side: target_name,
+            collection: wire.clone(),
+            source_id: target.link.clone(),
+            flags: target.flags.iter().cloned().collect(),
+            origin: None,
+            content_key: content_key(&target.link),
+        });
         count += 1;
         progress.tick(count, total);
     }

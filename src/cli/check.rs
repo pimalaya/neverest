@@ -17,7 +17,8 @@ use io_pimdir::capability::PimdirSupport;
 use io_pimdir::client::reader::PimdirReader;
 use log::{info, warn};
 use pimalaya_cli::{
-    account::BackendCheck, capability::CapabilityLevel, error::PartialOutcome, printer::Printer,
+    account::BackendCheck, capability::CapabilityLevel, error::PartialOutcome, fields::Fields,
+    printer::Printer, sanitize,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -26,12 +27,12 @@ use crate::{
     account::{Account, SourceAccount},
     client,
     collection::Collection,
-    config::{AccountConfig, Config, mode::AccountMode, source::SourceConfig},
+    config::{AccountConfig, Config, mode::AccountMode, source::SourceConfig, tls::TlsConfig},
     error::{self, ErrorCode},
     sync::{capability, driver},
 };
 
-/// Probes every configured source before a real sync.
+/// Probe every configured source before a real sync.
 ///
 /// Reports each account's mode, then opens each endpoint and lists its
 /// collections, and opens and authenticates the SMTP channel an endpoint
@@ -105,7 +106,7 @@ fn check_account(name: &str, account_config: &AccountConfig) -> Result<CheckOutp
     let mut names: Vec<&String> = endpoints.keys().collect();
     names.sort();
 
-    let sources: Vec<SourceCheck> = names
+    let backends: Vec<SourceCheck> = names
         .into_iter()
         .map(|endpoint| {
             let config = &endpoints[endpoint];
@@ -116,8 +117,8 @@ fn check_account(name: &str, account_config: &AccountConfig) -> Result<CheckOutp
 
     Ok(CheckOutput {
         account: name.to_owned(),
+        backends,
         mode,
-        sources,
     })
 }
 
@@ -220,8 +221,8 @@ fn check_source(
 
     match &listed {
         Ok(collections) => crate::notice::print(format!(
-            "Checked source {label} ({} collections)",
-            collections.len()
+            "Checked source {label} ({})",
+            counted(collections.len(), "collection")
         )),
         Err(err) => crate::notice::print(format!("Source {label} failed ({err:#})")),
     }
@@ -242,7 +243,13 @@ fn check_source(
                     crate::notice::print(format!("SMTP channel of {label} failed ({err:#})"))
                 }
             }
-            BackendCheck::new("smtp", opened.map_err(error::coded))
+            let mut check = BackendCheck::new("smtp", opened.map_err(error::coded));
+            check.tls = config
+                .smtp
+                .as_ref()
+                .and_then(|smtp| smtp.secured())
+                .map(TlsConfig::checked);
+            check
         });
     #[cfg(not(feature = "smtp"))]
     let smtp = {
@@ -254,19 +261,12 @@ fn check_source(
         Ok(collections) => (collections, Ok(())),
         Err(err) => (Vec::new(), Err(err)),
     };
-    let BackendCheck {
-        backend,
-        ok,
-        code,
-        error,
-    } = BackendCheck::new(config.backend.protocol(), outcome.map_err(error::coded));
+    let mut check = BackendCheck::new(config.backend.protocol(), outcome.map_err(error::coded));
+    check.tls = config.secured().map(TlsConfig::checked);
 
     SourceCheck {
+        check,
         source: label.to_owned(),
-        backend,
-        ok,
-        code,
-        error,
         collections,
         capabilities,
         smtp,
@@ -303,18 +303,23 @@ fn checked(
     }
 }
 
-/// What `neverest check` reports: every account it covered, and the
-/// accounts its stores hold that no configuration names.
+/// What `neverest account check` reports: pimalaya-cli's account check
+/// output, one entry per account checked, then the accounts its stores hold
+/// that no configuration names.
+///
+/// Its shared keys come first, `orphans` after them, as every row's own
+/// keys after the shared ones.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckRunOutput {
-    /// One entry per account the run covered.
+    /// One entry per account the run covered, in name order.
     pub accounts: Vec<CheckOutput>,
     /// The accounts a store the run reads holds collections of, and no
     /// configured account sharing that store names.
     pub orphans: Vec<OrphanAccount>,
 }
 
+/// One block per account, a blank line apart, then the orphans.
 impl fmt::Display for CheckRunOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (index, account) in self.accounts.iter().enumerate() {
@@ -349,77 +354,72 @@ pub struct OrphanAccount {
 impl fmt::Display for OrphanAccount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self { store, account } = self;
+        let store = store.display().to_string();
         write!(
             f,
-            "Store {} holds account {account}, which no configured account names: rename an \
-             account's key back to `{account}` to reach its collections",
-            store.display(),
+            "Store {} holds account {}, which no configured account names: rename an \
+             account's key back to `{}` to reach its collections",
+            sanitize::text(&store),
+            sanitize::text(account),
+            sanitize::text(account),
         )
     }
 }
 
-/// What `neverest check` reports of one account: its declared mode, and
-/// the outcome of every endpoint, whether it answered or not.
+/// One account checked, as pimalaya-cli's account check prints it: the
+/// account, one row per endpoint, then its declared mode.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckOutput {
     /// The account that was checked.
     pub account: String,
+    /// One row per endpoint the account opens, source and target alike,
+    /// sorted by name.
+    pub backends: Vec<SourceCheck>,
     /// What the account does: its endpoints, direction and whether the
     /// store keeps bodies.
     pub mode: AccountMode,
-    /// One row per endpoint the account opens, source and target alike,
-    /// sorted by name.
-    pub sources: Vec<SourceCheck>,
 }
 
 impl CheckOutput {
     /// Whether an endpoint or its send channel did not answer.
     pub fn failed(&self) -> bool {
-        self.sources
+        self.backends
             .iter()
-            .any(|source| !source.ok || source.smtp.as_ref().is_some_and(|smtp| !smtp.ok))
+            .any(|source| !source.check.ok || source.smtp.as_ref().is_some_and(|smtp| !smtp.ok))
     }
 }
 
+/// The account's fields, as pimalaya-cli prints a check: `Account`, its
+/// mode, then one field per endpoint named as the account names it.
 impl fmt::Display for CheckOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{mode}", mode = self.mode)?;
-        writeln!(f)?;
+        let mut fields = Fields::default();
+        fields.push("Account", sanitize::text(&self.account));
+        fields.push("Mode", sanitize::text(&self.mode.to_string()));
 
-        for source in &self.sources {
-            writeln!(f, " - {source}")?;
+        for source in &self.backends {
+            fields.push(&source.source, source);
         }
 
-        writeln!(f)?;
-
-        let account = &self.account;
-        match self.failed() {
-            true => writeln!(f, "Account {account} has endpoints that did not answer"),
-            false => writeln!(f, "Account {account} looks healthy"),
-        }
+        write!(f, "{fields}")
     }
 }
 
 /// One endpoint, whether it answered, and how much it holds.
 ///
-/// Its first four keys are the backend check row every pimalaya binary
-/// prints.
+/// pimalaya-cli's backend check row, `backend` the table the endpoint is
+/// written under, followed by neverest's own keys.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceCheck {
-    /// The endpoint's pimdir source id.
+    /// Whether the endpoint opened and listed its collections, and the
+    /// TLS it connected with: `backend` its protocol table (`imap`,
+    /// `caldav`, `msgraph` for every Graph domain…).
+    #[serde(flatten)]
+    pub check: BackendCheck<ErrorCode>,
+    /// The endpoint, as the account names it.
     pub source: String,
-    /// Its protocol, the table it is written under: `imap`, `caldav`,
-    /// `msgraph` for every Graph domain…
-    pub backend: &'static str,
-    /// Whether it opened and listed its collections.
-    pub ok: bool,
-    /// The stable code of the failure, `null` when it answered or the
-    /// failure carries none.
-    pub code: Option<ErrorCode>,
-    /// Why it did not answer, `null` when it did.
-    pub error: Option<String>,
     /// Every collection it listed, with the role the server states; empty
     /// when it did not answer.
     pub collections: Vec<CheckedCollection>,
@@ -435,20 +435,21 @@ pub struct SourceCheck {
     pub smtp: Option<BackendCheck<ErrorCode>>,
 }
 
+/// `OK` or `FAIL (<error>)` and the TLS, as pimalaya-cli prints a backend,
+/// then the collections and the send channel.
 impl fmt::Display for SourceCheck {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let source = &self.source;
-        match &self.error {
-            None => write!(f, "{source} ({} collection(s))", self.collections.len())?,
-            Some(err) => write!(f, "{source}: FAIL ({err})")?,
+        write!(f, "{}", outcome(&self.check))?;
+
+        if self.check.ok {
+            write!(f, ", {}", counted(self.collections.len(), "collection"))?;
         }
-        match &self.smtp {
-            Some(BackendCheck { error: None, .. }) => write!(f, ", SMTP channel authenticated"),
-            Some(BackendCheck {
-                error: Some(err), ..
-            }) => write!(f, ", SMTP channel: FAIL ({err})"),
-            None => Ok(()),
+
+        if let Some(smtp) = &self.smtp {
+            write!(f, ", SMTP {}", outcome(smtp))?;
         }
+
+        Ok(())
     }
 }
 
@@ -515,6 +516,35 @@ fn level(support: PimdirSupport) -> CapabilityLevel {
         PimdirSupport::Full => CapabilityLevel::Full,
         PimdirSupport::Partial => CapabilityLevel::Partial,
         PimdirSupport::None => CapabilityLevel::None,
+    }
+}
+
+/// A check row as pimalaya-cli prints it: `OK` or `FAIL (<error>)`, then
+/// `, TLS` and the parts its table sets when it connected over TLS.
+fn outcome(check: &BackendCheck<ErrorCode>) -> String {
+    let mut outcome = match &check.error {
+        None => String::from("OK"),
+        Some(err) => format!("FAIL ({})", sanitize::text(err)),
+    };
+
+    if let Some(tls) = &check.tls {
+        outcome.push_str(", TLS");
+
+        let tls = tls.to_string();
+        if !tls.is_empty() {
+            outcome.push(' ');
+            outcome.push_str(&tls);
+        }
+    }
+
+    outcome
+}
+
+/// `count` `noun`s, the noun plural but for one.
+fn counted(count: usize, noun: &str) -> String {
+    match count {
+        1 => format!("1 {noun}"),
+        n => format!("{n} {noun}s"),
     }
 }
 

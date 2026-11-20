@@ -53,19 +53,20 @@ impl AccountMode {
 
 impl fmt::Display for AccountMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let sources = self.sources.join(", ");
+        let sources = listed(&self.sources);
 
         if self.is_local() {
-            let verb = if self.one_way {
-                "overwrite the local store, discarding local edits"
-            } else {
-                "sync both ways with the local store"
+            let verb = match (self.one_way, self.sources.len()) {
+                (true, 1) => "overwrites the local store, discarding local edits",
+                (true, _) => "each overwrite the local store, discarding local edits",
+                (false, 1) => "syncs both ways with the local store",
+                (false, _) => "each sync both ways with the local store",
             };
 
             return write!(f, "{sources} {verb}");
         }
 
-        let targets = self.targets.join(", ");
+        let targets = listed(&self.targets);
         let body = if self.retain {
             ", keeping a local copy"
         } else {
@@ -80,9 +81,40 @@ impl fmt::Display for AccountMode {
     }
 }
 
+/// `names` as a sentence lists them: `a`, `a and b`, `a, b and c`.
+fn listed(names: &[String]) -> String {
+    match names.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, others)) => format!("{} and {last}", others.join(", ")),
+        None => String::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crate::config::AccountConfig;
+
+    /// The sentence agrees with how many endpoints it names.
+    #[test]
+    fn the_mode_sentence_agrees_with_its_endpoints() {
+        let one: AccountConfig =
+            toml::from_str("imap.server = \"imaps://a.example.org:993\"").unwrap();
+        let text = one.mode().unwrap().to_string();
+        assert_eq!(text, "imap syncs both ways with the local store");
+
+        let two: AccountConfig = toml::from_str(
+            r#"
+            carddav.server = "https://dav.example.org/"
+            caldav.server = "https://dav.example.org/"
+            "#,
+        )
+        .unwrap();
+        let text = two.mode().unwrap().to_string();
+        assert_eq!(
+            text,
+            "caldav and carddav each sync both ways with the local store"
+        );
+    }
 
     /// Streaming is an optimisation of `retain = false`, never a mode: it
     /// needs both endpoints on a protocol that can take a body from the other.

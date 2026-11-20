@@ -149,17 +149,14 @@ pub(super) fn phase1_spine(
                         Err(err) => {
                             warn!("{collection} scan error: {err:#}");
                             let display = display_name(&ctx.namespace, collection).to_string();
+                            let scan = CollectionHunk::Scan {
+                                side: ctx.name.clone(),
+                                collection: display,
+                            };
                             merged_ref
                                 .lock()
                                 .unwrap()
-                                .collection_patch
-                                .push(PatchEntry::new(
-                                    CollectionHunk::Scan {
-                                        side: ctx.name.clone(),
-                                        collection: display,
-                                    },
-                                    Some(err),
-                                ));
+                                .note_collection_hunk(scan, Some(err));
                             report_coverage(
                                 store,
                                 collection,

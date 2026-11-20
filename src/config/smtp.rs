@@ -4,7 +4,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::config::{is_default, proxy::ProxyConfig, sasl::SaslConfig, tls::TlsConfig};
+use crate::config::{
+    is_default,
+    proxy::ProxyConfig,
+    sasl::SaslConfig,
+    tls::{TlsConfig, secured},
+};
 
 /// The SMTP server a source's queued sends flush through.
 ///
@@ -40,6 +45,14 @@ pub struct SmtpConfig {
     /// then to the `all_proxy` and `https_proxy` environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
+}
+
+impl SmtpConfig {
+    /// The `tls` table the channel connects with, `None` over a cleartext
+    /// `smtp://` URL that does not upgrade.
+    pub fn secured(&self) -> Option<&TlsConfig> {
+        secured(&self.server, "smtps", self.starttls).then_some(&self.tls)
+    }
 }
 
 #[cfg(test)]

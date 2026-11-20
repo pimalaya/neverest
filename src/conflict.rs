@@ -31,8 +31,13 @@ use io_pimdir::{
     placement::PimdirLinkId,
 };
 use log::{info, warn};
+use pimalaya_cli::error::CodedError;
 
-use crate::{conflict::report::PartialCapability, error::pimdir_error, kind::Kind};
+use crate::{
+    conflict::report::PartialCapability,
+    error::{ErrorCode, pimdir_error},
+    kind::Kind,
+};
 
 /// One divergence waiting for a decision: an item whose local body and whose
 /// remote body both moved away from the base the last sync agreed on.
@@ -317,13 +322,15 @@ pub fn find(conflicts: Vec<Conflict>, id: i64, source: Option<&str>) -> Result<C
         );
     }
 
-    match found.pop() {
-        Some(conflict) => Ok(conflict),
-        None => match source {
-            Some(source) => bail!("Cannot find a conflict {id} on source {source}"),
-            None => bail!("Cannot find a conflict {id}"),
-        },
+    if let Some(conflict) = found.pop() {
+        return Ok(conflict);
     }
+
+    let message = match source {
+        Some(source) => format!("Cannot find a conflict {id} on source {source}"),
+        None => format!("Cannot find a conflict {id}"),
+    };
+    Err(CodedError::new(ErrorCode::ConflictNotFound, message).into())
 }
 
 #[cfg(test)]

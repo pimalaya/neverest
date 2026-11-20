@@ -59,7 +59,7 @@ use io_pimdir::{
         producer::{PimdirActionStatus, PimdirProducer},
         reader::PimdirReader,
     },
-    codec::PimdirAction,
+    codec::{PimdirAction, PimdirStoreIdentity},
     collection::{PimdirCollectionId, PimdirScope},
     hub::{PimdirBinding, PimdirSourceId},
     intent::PimdirCollectionCreate,
@@ -81,7 +81,7 @@ use io_pimdir::{
     version::{PimdirFormatOrder, PimdirFormatRefusal},
 };
 use log::{debug, info, warn};
-use pimalaya_cli::error::ItemError;
+use pimalaya_cli::error::CodedError;
 
 #[cfg(feature = "msgraph")]
 use crate::msgraph::client::GraphKind;
@@ -97,7 +97,7 @@ use crate::{
         source::{SourceBackendConfig, SourceConfig},
     },
     conflict::merge::Merged,
-    error::{Failure, layout_error, pimdir_error},
+    error::{ErrorCode, Failure, layout_error, pimdir_error},
     flag::Flag,
     kind::{Kind, LinkId},
     sync::{
@@ -120,10 +120,9 @@ use crate::{
         report::{
             CollectionCoverage, DisagreedMember, DrainedQueue, FailedStep, ForbiddenWrites,
             IntentEntry, ItemConflict, OpenRound, OverruledBody, ParkedAbsence, ParkedQueueAction,
-            PatchEntry, PurgedItems, RefusedChange, RefusedDuplicate, RejectedWrite,
-            SourceDownload, StepFailure, SubmitEntry, SyncOutput, ThrottledSource,
-            UnansweredPushes, UnlistedMembers, UnreachedEndpoint, UnreadableBodies, WaitReason,
-            WaitingCreate,
+            PurgedItems, RefusedChange, RefusedDuplicate, RejectedWrite, SourceDownload,
+            SubmitEntry, SubmitFailure, SyncError, SyncErrorRow, SyncOutput, ThrottledSource,
+            UnansweredPushes, UnlistedMembers, UnreadableBodies, WaitReason, WaitingCreate,
         },
         run_verb, run_verb_paged, source_id,
         state::{AccountState, LookedUpRoles, StoreState},
@@ -191,10 +190,11 @@ pub(crate) fn group_stores(
 
 /// Why account `name` cannot run in a store `init` never created.
 pub(crate) fn not_initialized(name: &str) -> anyhow::Error {
-    anyhow!(
+    let message = format!(
         "Account {name} not initialized, run `neverest init -a {name}` or \
          `neverest sync --init -a {name}` first"
-    )
+    );
+    CodedError::new(ErrorCode::AccountUninitialized, message).into()
 }
 
 /// Refuses the neverest directory an earlier neverest kept one store per
@@ -571,8 +571,7 @@ pub fn run(
                     }
                     Err(err) => {
                         warn!("drain failed, actions stay queued: {err:#}");
-                        let failure = StepFailure::new(FailedStep::Queue, None, &err);
-                        report.failures.push(failure);
+                        report.note_step_failure(FailedStep::Queue, None, &err);
                     }
                 }
             }
@@ -672,9 +671,7 @@ pub fn run(
         Err(err) => {
             warn!("cannot open the store to read what it left behind: {err}");
             let err = pimdir_error(err).context("Open the store to count what waits");
-            report
-                .failures
-                .push(StepFailure::new(FailedStep::Conflicts, None, &err));
+            report.note_step_failure(FailedStep::Conflicts, None, &err);
         }
     }
 

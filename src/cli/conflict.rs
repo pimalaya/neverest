@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use clap::{ArgGroup, Parser, Subcommand};
 use io_pimdir::client::reader::PimdirReader;
 use log::warn;
-use pimalaya_cli::printer::Printer;
+use pimalaya_cli::{error::PartialOutcome, printer::Printer};
 use pimalaya_config::command::CommandConfig;
 
 use crate::{
@@ -33,7 +33,7 @@ use crate::{
 /// syncing hard from turning that into a loop.
 const MAX_ATTEMPTS: usize = 3;
 
-/// Lists, inspects and settles the divergences a run could not merge away.
+/// List, inspect and settle the divergences a run could not merge away.
 ///
 /// Deciding is a command and never a run: nothing here is reached from a
 /// sync, whatever is attached to its terminal.
@@ -47,11 +47,11 @@ pub struct ConflictCommand {
 /// The three things a person does about a divergence.
 #[derive(Debug, Subcommand)]
 pub enum ConflictSubcommand {
-    /// Names every divergence the account is holding.
+    /// List every divergence the accounts hold.
     List(ConflictListCommand),
-    /// Prints the three bodies one divergence is decided from.
+    /// Print the three bodies one divergence is decided from.
     Show(ConflictShowCommand),
-    /// Settles one divergence, by side or through the merger.
+    /// Settle one divergence, by side or through the merger.
     Resolve(ConflictResolveCommand),
 }
 
@@ -71,7 +71,7 @@ impl ConflictCommand {
     }
 }
 
-/// Lists the items waiting for a decision, whichever run parked them, for
+/// List the items waiting for a decision, whichever run parked them, for
 /// every account or those `-a` names.
 ///
 /// An item whose diverging remote body no run has fetched yet is listed and
@@ -104,7 +104,7 @@ impl ConflictListCommand {
     }
 }
 
-/// Shows one divergence and the three bodies it is between: the base the last
+/// Show one divergence and the three bodies it is between: the base the last
 /// sync agreed on, and what each side made of it.
 #[derive(Debug, Parser)]
 pub struct ConflictShowCommand {
@@ -136,13 +136,18 @@ impl ConflictShowCommand {
     }
 }
 
-/// Settles one divergence, by taking a side or by handing the bodies to the
+/// Settle one divergence, by taking a side or by handing the bodies to the
 /// configured merger.
 ///
 /// `--prefer-local` and `--prefer-remote` discard the other side, which a
 /// person may ask for by name and a background run must never do on its own.
 /// The decision is refused when the store has observed a newer remote
 /// revision since it was computed.
+///
+/// Exit code 3 means the interactive merger decided nothing, exiting
+/// non-zero or leaving its output untouched: the conflict is exactly as it
+/// was. An id no conflict of the account has fails coded
+/// `conflict-not-found`.
 #[derive(Debug, Parser)]
 #[command(group = ArgGroup::new("side").required(true))]
 pub struct ConflictResolveCommand {
@@ -211,9 +216,10 @@ impl ConflictResolveCommand {
             };
 
             let Some(body) = self.decide(account_config, &conflict, sides)? else {
-                return printer.out(ConflictResolveOutput::Aborted {
+                printer.out(ConflictResolveOutput::Aborted {
                     id: conflict.id.to_string(),
-                });
+                })?;
+                return Err(PartialOutcome::default().into());
             };
 
             let _lock = acquire_store_lock(dir, LOCK_TIMEOUT)?;
@@ -364,7 +370,7 @@ fn store_dir(name: &str, account_config: &AccountConfig) -> Result<PathBuf> {
     driver::check_store(&dir)?;
 
     if !dir.join("pimdir.db").exists() || !StoreState::load(&dir)?.initialized(name) {
-        bail!("Account {name} not initialized, run `neverest init -a {name}` first");
+        return Err(driver::not_initialized(name));
     }
 
     Ok(dir)

@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use pimalaya_cli::account::BackendCheckTls;
 use pimalaya_config::toml::{opt_shell_expanded_path, shell_expanded_path};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +23,48 @@ pub struct TlsConfig {
     /// A client certificate, presented when the server asks for one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client: Option<TlsClientConfig>,
+}
+
+impl TlsConfig {
+    /// Takes from `account` each field this table leaves unset, the client
+    /// certificate as one unit.
+    pub fn inherit(&mut self, account: &TlsConfig) {
+        if self.provider.is_none() {
+            self.provider.clone_from(&account.provider);
+        }
+        if self.rustls.crypto.is_none() {
+            self.rustls.crypto.clone_from(&account.rustls.crypto);
+        }
+        if self.cert.is_none() {
+            self.cert.clone_from(&account.cert);
+        }
+        if self.client.is_none() {
+            self.client.clone_from(&account.client);
+        }
+    }
+
+    /// The table as a check row reports it, `null` where the build's
+    /// default answers.
+    pub fn checked(&self) -> BackendCheckTls {
+        let provider = self.provider.as_ref().map(|provider| match provider {
+            TlsProviderConfig::Rustls => "rustls",
+            TlsProviderConfig::NativeTls => "native-tls",
+        });
+        let crypto = self.rustls.crypto.as_ref().map(|crypto| match crypto {
+            RustlsCryptoConfig::Aws => "aws",
+            RustlsCryptoConfig::Ring => "ring",
+        });
+
+        BackendCheckTls {
+            provider: provider.map(String::from),
+            crypto: crypto.map(String::from),
+            cert: self.cert.as_ref().map(|cert| cert.display().to_string()),
+            client_cert: self
+                .client
+                .as_ref()
+                .map(|client| client.cert.display().to_string()),
+        }
+    }
 }
 
 /// A client certificate and its key, both PEM, shell-expanded.
@@ -62,4 +105,15 @@ pub enum RustlsCryptoConfig {
     Aws,
     /// The ring backend.
     Ring,
+}
+
+/// Whether a connection to `server`, `default` the scheme of a bare
+/// authority, runs over TLS: its scheme is no cleartext one, or it upgrades.
+pub fn secured(server: &str, default: &str, starttls: bool) -> bool {
+    let scheme = match server.split_once("://") {
+        Some((scheme, _)) => scheme.to_ascii_lowercase(),
+        None => default.to_owned(),
+    };
+
+    starttls || !matches!(scheme.as_str(), "imap" | "smtp" | "http")
 }

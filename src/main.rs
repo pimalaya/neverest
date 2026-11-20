@@ -178,11 +178,15 @@ mod tls;
 #[cfg(any(feature = "search", feature = "gcal", feature = "msgraph"))]
 mod zone;
 
-use std::process::{self, ExitCode};
+use std::{
+    io::{self, IsTerminal},
+    process::{self, ExitCode},
+};
 
 use anyhow::Result;
+use clap::CommandFactory;
 use pimalaya_cli::{
-    clap::parse,
+    clap::{meet_bare_invocation, parse},
     error::{EXIT_FAILURE, ErrorReport},
     log::Logger,
     printer::{Printer, StdoutPrinter},
@@ -194,27 +198,29 @@ use simd_cpu::SimdCpu;
 use crate::{
     cli::{
         exit::Exit,
-        main::{self as cli_main, Cli},
+        main::{self as cli_main, Cli, Command},
     },
+    config::Config,
     error::ErrorCode,
     terminal::TerminalPrinter,
 };
 
 /// Parses and runs the command, then decides its outcome in this one place.
 ///
-/// The SIMD CPU token goes first, for the codecs the store reaches. A sync
-/// streams its events, piped too; a person missing a configuration meets
-/// the welcome, a script or a JSON caller the error.
+/// The SIMD CPU token goes first. A full sync streams its events and
+/// progress lines, piped too, every other command on a terminal alone. A
+/// person missing a configuration meets the welcome, a script the error.
 fn main() -> ExitCode {
     let _ = SimdCpu::install_detected();
 
     let cli = parse::<Cli>();
     let mut printer = StdoutPrinter::new(&cli.json);
-    if cli.json.enabled {
+    let streams = cli.command.as_ref().is_some_and(Command::streams);
+    if cli.json.enabled || !(streams || io::stdout().is_terminal()) {
         notice::silence();
     }
 
-    if matches!(cli.command, Some(cli::main::Command::Sync(_))) {
+    if streams {
         printer = printer.streaming();
     }
     let mut printer = TerminalPrinter(printer);
@@ -244,7 +250,10 @@ fn execute(printer: &mut (impl Printer + Send), cli: Cli) -> Result<Exit> {
     match cli.command {
         Some(command) => command.execute(printer, config_paths, &cli.accounts),
         None => {
-            cli_main::meet_bare_invocation(config_paths)?;
+            meet_bare_invocation(printer, Cli::command(), || {
+                let missing = Config::load(config_paths).err();
+                missing.filter(|err| err.is::<ConfigMissingError>())
+            })?;
             Ok(Exit::Success)
         }
     }

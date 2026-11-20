@@ -38,7 +38,7 @@ strip = "symbols"
 panic = "abort"
 
 [build-dependencies]
-pimalaya-cli = { version = "0.7.0", default-features = false, features = ["build"] }
+pimalaya-cli = { version = "0.8.0", default-features = false, features = ["build"] }
 
 [dev-dependencies]
 io-oauth = { version = "0.7", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
@@ -46,6 +46,7 @@ io-oauth = { version = "0.7", default-features = false, features = ["jwt-bearer"
 [dependencies]
 anyhow = "1"
 base64 = { version = "0.23", default-features = false, features = ["alloc"], optional = true }
+base64-codec = { version = "0.1", default-features = false, features = ["alloc"] }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
 clap = { version = "4.4", default-features = false, features = ["derive", "error-context", "help", "std", "suggestions", "usage"] }
 crossbeam-queue = "0.3"
@@ -64,7 +65,7 @@ io-smtp = { version = "0.10", default-features = false, optional = true }
 io-webdav = { version = "0.11.0", default-features = false, optional = true }
 jiff = { version = "1", default-features = false, features = ["std"], optional = true }
 log = "0.4"
-pimalaya-cli = { version = "0.7.0", default-features = false, features = ["terminal", "signal"] }
+pimalaya-cli = { version = "0.8.0", default-features = false, features = ["terminal", "signal"] }
 pimalaya-config = { version = "0.6.0", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.4", default-features = false }
 rusqlite = { version = "0.43", default-features = false }
@@ -77,3 +78,4 @@ tempfile = "3"
 toml = "1.1"
 url = { version = "2.2", features = ["serde"] }
 vcard-rs = { version = "0.6", optional = true }
+

@@ -5,6 +5,11 @@
 
 use std::{fmt, path::PathBuf};
 
+use io_pimdir::{
+    client::producer::PimdirParkedAction,
+    codec::{PimdirAction, PimdirActionHandle, PimdirStoreIdentity, action_from_payload},
+    intent::{PimdirIntentItem, PimdirInvitation},
+};
 use pimalaya_cli::error::ItemError;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -106,23 +111,23 @@ pub struct SyncOutput {
     /// Whether the run only planned the patch instead of applying it.
     pub dry_run: bool,
     /// The collection-level hunks the run applied, in the order it applied
-    /// them.
-    pub collection_patch: Vec<PatchEntry<CollectionHunk>>,
-    /// The item-level hunks the run applied, in the order it applied them.
-    pub item_patch: Vec<PatchEntry<ItemHunk>>,
-    /// The steps that failed outside any hunk: the run is incomplete (exit
-    /// 4) and a rerun retries them.
-    pub failures: Vec<StepFailure>,
+    /// them; one that failed is in [`errors`](Self::errors) instead.
+    pub collection_patch: Vec<CollectionHunk>,
+    /// The item-level hunks the run applied, in the order it applied them;
+    /// one that failed is in [`errors`](Self::errors) instead.
+    pub item_patch: Vec<ItemHunk>,
     /// Content-key collisions this sync surfaced; the first entry is kept.
     pub collisions: Vec<MessageCollision>,
     /// Frontend-queued actions the pre-sync drain applied, per collection.
     pub drained: Vec<DrainedQueue>,
-    /// Queue actions parked as permanently unappliable, surfaced until an
-    /// operator repairs them (counted as warnings).
+    /// Queue rows the store holds parked, as `pimdir queue list` prints a
+    /// row, until a person retries or cancels them (warnings, exit 3).
     pub parked: Vec<ParkedQueueAction>,
-    /// The queued submit intents attempted this run, one entry each.
+    /// The queued submit intents this run sent, one entry each; one that
+    /// failed is in [`errors`](Self::errors) instead.
     pub submitted: Vec<SubmitEntry>,
-    /// The queued calendar intents attempted this run, one entry each.
+    /// The queued calendar and collection intents this run performed, one
+    /// entry each; one that failed is in [`errors`](Self::errors) instead.
     pub intents: Vec<IntentEntry>,
     /// What the retention sweep reclaimed, when one ran.
     pub purged: Option<PurgedItems>,
@@ -137,29 +142,6 @@ pub struct SyncOutput {
     /// nothing for a placement it already parked, which is what keeps a
     /// five-minute schedule from notifying about one card all day.
     pub outstanding_conflicts: usize,
-    /// Creates a side refused because it already holds the item's `UID`.
-    ///
-    /// Re-reported by every run until that side stops holding the identity
-    /// twice (counted as warnings).
-    pub duplicates: Vec<RefusedDuplicate>,
-    /// Writes a remote refused, so the change stayed in the store.
-    ///
-    /// Re-tried and re-reported by every run until it lands or an operator
-    /// removes the reason (counted as warnings).
-    pub rejected: Vec<RejectedWrite>,
-    /// Changes a remote refused as they stand, held in the store while the
-    /// refusal stands (pimdir SYNC §5; counted as warnings).
-    ///
-    /// Reported by every run until the item changes, which pushes it anew,
-    /// or is removed, which withdraws it: a rerun alone holds it again.
-    pub refusals: Vec<RefusedChange>,
-    /// The endpoints the run could not open: a server it could not reach, or
-    /// one refusing the connection or its credentials.
-    ///
-    /// Each exits 4 and fails its `*` scan; a collection failing on an opened
-    /// endpoint never lands here. A source's SMTP channel, `<source>.smtp`,
-    /// has no scan and lands unreachable only: bad credentials fail each send.
-    pub unreached: Vec<UnreachedEndpoint>,
     /// The sources that gave up after their provider throttled them (HTTP
     /// 429, 503, a Google rate limit) past the waits neverest takes.
     ///
@@ -228,6 +210,13 @@ pub struct SyncOutput {
     /// No exit code: the body is still synced, a rerun reads it the same way
     /// and no person can settle it.
     pub clipped: Vec<ClippedSeries>,
+    /// What the run could not do: one item error each, `kind` naming what
+    /// failed, then the keys that kind needs (pimalaya-cli's item error).
+    ///
+    /// A `rejected`, `duplicates` or `refusals` row and a parked send or
+    /// intent wait for a person (exit 3); any other row waits for a rerun
+    /// (exit 4), which wins.
+    pub errors: Vec<SyncError>,
     /// What the run did to the store's search index (pimdir SEARCH), `null`
     /// in a dry run and in a build without the `search` feature.
     ///
@@ -249,7 +238,6 @@ impl SyncOutput {
             dry_run: _,
             collection_patch,
             item_patch,
-            failures,
             collisions,
             drained,
             parked,
@@ -258,10 +246,6 @@ impl SyncOutput {
             purged: _,
             conflicts,
             outstanding_conflicts: _,
-            duplicates,
-            rejected,
-            refusals,
-            unreached,
             throttled,
             coverage,
             downloaded,
@@ -276,22 +260,18 @@ impl SyncOutput {
             unlisted,
             clipped,
             interrupted,
+            errors,
             index: _,
         } = other;
 
         self.collection_patch.extend(collection_patch);
         self.item_patch.extend(item_patch);
-        self.failures.extend(failures);
         self.collisions.extend(collisions);
         self.drained.extend(drained);
         self.parked.extend(parked);
         self.submitted.extend(submitted);
         self.intents.extend(intents);
         self.conflicts.extend(conflicts);
-        self.duplicates.extend(duplicates);
-        self.rejected.extend(rejected);
-        self.refusals.extend(refusals);
-        self.unreached.extend(unreached);
         self.throttled.extend(throttled);
         self.coverage.extend(coverage);
         self.downloaded.extend(downloaded);
@@ -305,6 +285,7 @@ impl SyncOutput {
         self.disagreed.extend(disagreed);
         self.unlisted.extend(unlisted);
         self.clipped.extend(clipped);
+        self.errors.extend(errors);
         self.interrupted |= interrupted;
     }
 
@@ -314,20 +295,19 @@ impl SyncOutput {
         let prefix = format!("{}/", self.account);
         let mut endpoints: Vec<&mut String> = Vec::new();
 
-        for entry in &mut self.collection_patch {
-            endpoints.extend(entry.hunk.endpoints_mut());
+        for hunk in &mut self.collection_patch {
+            endpoints.extend(hunk.endpoints_mut());
         }
-        for entry in &mut self.item_patch {
-            endpoints.extend(entry.hunk.endpoints_mut());
+        for hunk in &mut self.item_patch {
+            endpoints.extend(hunk.endpoints_mut());
+        }
+        for error in &mut self.errors {
+            endpoints.extend(error.row.endpoints_mut());
         }
         endpoints.extend(self.collisions.iter_mut().map(|c| &mut c.side));
         endpoints.extend(self.forbidden.iter_mut().map(|f| &mut f.side));
         endpoints.extend(self.intents.iter_mut().map(|i| &mut i.source));
         endpoints.extend(self.conflicts.iter_mut().map(|c| &mut c.side));
-        endpoints.extend(self.duplicates.iter_mut().map(|r| &mut r.side));
-        endpoints.extend(self.rejected.iter_mut().map(|r| &mut r.side));
-        endpoints.extend(self.refusals.iter_mut().map(|r| &mut r.side));
-        endpoints.extend(self.unreached.iter_mut().map(|u| &mut u.endpoint));
         endpoints.extend(self.throttled.iter_mut().map(|t| &mut t.source));
         endpoints.extend(self.coverage.iter_mut().map(|c| &mut c.source));
         endpoints.extend(self.downloaded.iter_mut().map(|d| &mut d.source));
@@ -356,12 +336,111 @@ impl SyncOutput {
         let named = self.conflicts.iter().any(|named| {
             named.side == conflict.side
                 && named.collection == conflict.collection
-                && named.id == conflict.id
+                && named.remote_id == conflict.remote_id
         });
 
         if !named {
             self.conflicts.push(conflict);
         }
+    }
+
+    /// Records a collection hunk the run applied, or the failure that kept
+    /// it from applying among the errors.
+    pub fn note_collection_hunk(&mut self, hunk: CollectionHunk, error: Option<anyhow::Error>) {
+        match error {
+            None => self.collection_patch.push(hunk),
+            Some(err) => self.note_error(None, &err, SyncErrorRow::CollectionPatch { hunk }),
+        }
+    }
+
+    /// Records an item hunk the run applied, or the failure that kept it
+    /// from applying among the errors.
+    pub fn note_item_hunk(&mut self, hunk: ItemHunk, error: Option<anyhow::Error>) {
+        match error {
+            None => self.item_patch.push(hunk),
+            Some(err) => self.note_error(None, &err, SyncErrorRow::ItemPatch { hunk }),
+        }
+    }
+
+    /// Records the failure of a store step over `collection`, `None` for a
+    /// store-wide one.
+    pub fn note_step_failure(
+        &mut self,
+        step: FailedStep,
+        collection: Option<String>,
+        err: &anyhow::Error,
+    ) {
+        self.errors.push(SyncError::step(step, collection, err));
+    }
+
+    /// Records the endpoint `endpoint` unreached for `failure`.
+    pub fn note_unreached(&mut self, endpoint: String, failure: Failure) {
+        let row = SyncErrorRow::Unreached(UnreachedEndpoint { endpoint });
+        self.errors.push(SyncError::new(None, failure, row));
+    }
+
+    /// Records a submit intent sent, or the failure that kept it from
+    /// being sent among the errors, parked or left pending.
+    pub fn note_submitted(&mut self, entry: SubmitEntry, outcome: Option<SubmitFailure>) {
+        match outcome {
+            None => self.submitted.push(entry),
+            Some(SubmitFailure {
+                failure,
+                parked,
+                unconfirmed,
+            }) => {
+                let row = SyncErrorRow::Submitted(SubmitError {
+                    row: entry.id,
+                    collection: entry.collection,
+                    subject: entry.subject,
+                    parked,
+                    unconfirmed,
+                });
+                self.errors.push(SyncError::new(None, failure, row));
+            }
+        }
+    }
+
+    /// Records an intent performed, or the failure that kept it from being
+    /// performed among the errors, parked or left pending.
+    pub fn note_intent(&mut self, entry: IntentEntry, outcome: Option<(Failure, bool)>) {
+        match outcome {
+            None => self.intents.push(entry),
+            Some((failure, parked)) => {
+                let id = entry.seq.map(|seq| seq.to_string());
+                let row = SyncErrorRow::Intents(IntentError {
+                    row: entry.id,
+                    collection: entry.collection,
+                    intent: entry.kind,
+                    source: entry.source,
+                    parked,
+                });
+                self.errors
+                    .push(SyncError::new(id.as_deref(), failure, row));
+            }
+        }
+    }
+
+    /// Records `err` as the error of the item `id` the row names.
+    pub fn note_error(&mut self, id: Option<&str>, err: &anyhow::Error, row: SyncErrorRow) {
+        self.errors.push(SyncError::new(id, Failure::of(err), row));
+    }
+
+    /// The writes a remote refused, each with its failure.
+    pub fn rejected(&self) -> impl Iterator<Item = (&ItemError<ErrorCode>, &RejectedWrite)> {
+        self.errors.iter().filter_map(|error| match &error.row {
+            SyncErrorRow::Rejected(rejected) => Some((&error.failure, rejected)),
+            _ => None,
+        })
+    }
+
+    /// The changes a remote refused as they stand, each with its failure,
+    /// the reason the store keeps as its message.
+    pub fn refusals(&self) -> impl Iterator<Item = (&ItemError<ErrorCode>, &RefusedChange)> {
+        self.errors.iter().filter_map(|error| match &error.row {
+            SyncErrorRow::Refusals(refused) => Some((&error.failure, refused)),
+            _ => None,
+        })
     }
 
     /// Whether the run left work no rerun clears, which the exit code answers.
@@ -373,44 +452,31 @@ impl SyncOutput {
         self.outstanding_conflicts > 0
             || !self.absences.is_empty()
             || !self.unreadable.is_empty()
-            || !self.duplicates.is_empty()
-            || !self.rejected.is_empty()
-            || !self.refusals.is_empty()
             || !self.parked.is_empty()
-            || self.submitted.iter().any(|entry| entry.parked)
-            || self.intents.iter().any(|entry| entry.parked)
+            || self
+                .errors
+                .iter()
+                .any(|error| error.row.waits_for_a_person())
     }
 
     /// Whether the run left work a rerun picks up, as an unreachable server
     /// reads: a run with nothing to do never carries an error.
     ///
-    /// An unscanned source, an unapplied hunk, a failed step, a failed send
-    /// or intent not parked, a throttled source, an unsettled collection, an unanswered
-    /// push; a send channel that did not open is in `unreached` alone.
+    /// An error no person settles, a throttled source, an unsettled
+    /// collection, an unanswered push.
     pub fn incomplete(&self) -> bool {
         self.interrupted
-            || !self.failures.is_empty()
             || !self.throttled.is_empty()
             || !self.unanswered.is_empty()
-            || !self.unreached.is_empty()
             || !self.unsettled.is_empty()
             || self
                 .coverage
                 .iter()
                 .any(|coverage| coverage.round.is_some() && !self.parks(coverage))
             || self
-                .collection_patch
+                .errors
                 .iter()
-                .any(|entry| entry.error.is_some())
-            || self.item_patch.iter().any(|entry| entry.error.is_some())
-            || self
-                .submitted
-                .iter()
-                .any(|entry| entry.error.is_some() && !entry.parked)
-            || self
-                .intents
-                .iter()
-                .any(|entry| entry.error.is_some() && !entry.parked)
+                .any(|error| !error.row.waits_for_a_person())
     }
 }
 
@@ -868,6 +934,209 @@ pub struct ThrottledSource {
     pub until: String,
 }
 
+/// One thing a run could not do: pimalaya-cli's item error, then what
+/// failed, tagged `kind`, with the keys that kind needs.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct SyncError {
+    /// The item's id when the failure is one item's, `null` for a hunk, an
+    /// endpoint, a step or a send, then the code, message and causes.
+    #[serde(flatten)]
+    pub failure: ItemError<ErrorCode>,
+    /// What failed.
+    #[serde(flatten)]
+    pub row: SyncErrorRow,
+}
+
+impl SyncError {
+    /// The error of the item `id`, `failure` its code, message and causes.
+    pub fn new(id: Option<&str>, failure: Failure, row: SyncErrorRow) -> Self {
+        let Failure {
+            code,
+            error,
+            sources,
+        } = failure;
+
+        Self {
+            failure: ItemError {
+                id: id.map(String::from),
+                code,
+                error,
+                sources,
+            },
+            row,
+        }
+    }
+
+    /// The failure `err` of a store step over `collection`, `None` for a
+    /// store-wide one.
+    pub fn step(step: FailedStep, collection: Option<String>, err: &anyhow::Error) -> Self {
+        let row = SyncErrorRow::Failures(StepFailure { step, collection });
+        Self::new(None, Failure::of(err), row)
+    }
+
+    /// The message and its causes, as the text output prints them.
+    pub fn text(&self) -> String {
+        chain(&self.failure.error, &self.failure.sources)
+    }
+}
+
+/// The line the text output prints, as the run's warnings and errors list
+/// each kind.
+impl fmt::Display for SyncError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let error = self.text();
+        let id = self.failure.id.as_deref().unwrap_or_default();
+
+        match &self.row {
+            SyncErrorRow::CollectionPatch { hunk } => write!(f, "{hunk}: {error}"),
+            SyncErrorRow::ItemPatch { hunk } => write!(f, "{hunk}: {error}"),
+            SyncErrorRow::Failures(StepFailure { step, collection }) => match collection {
+                Some(collection) => write!(f, "{step} of {collection}: {error}"),
+                None => write!(f, "{step}: {error}"),
+            },
+            SyncErrorRow::Rejected(RejectedWrite {
+                side,
+                collection,
+                action,
+            }) => write!(
+                f,
+                "{side} refused the {action} of {id} in {collection}, so it stays in the store: {error}"
+            ),
+            SyncErrorRow::Duplicates(RefusedDuplicate {
+                side,
+                collection,
+                uid,
+            }) => write!(
+                f,
+                "{side} refused a copy in {collection}: it already holds UID {uid}, so the second copy stays unwritten until one of the two carries a UID of its own"
+            ),
+            SyncErrorRow::Refusals(RefusedChange { side, collection }) => write!(
+                f,
+                "{side} refused the change of {id} in {collection} as it stands, held until the item changes: {error}"
+            ),
+            SyncErrorRow::Submitted(SubmitError {
+                subject,
+                parked,
+                unconfirmed,
+                ..
+            }) => {
+                let subject = subject.as_deref().unwrap_or("<no subject>");
+                match (parked, unconfirmed) {
+                    (true, true) => write!(
+                        f,
+                        "{subject} may have been sent, parked and never sent again: {error}"
+                    ),
+                    (true, false) => write!(f, "{subject} parked, never retried: {error}"),
+                    (false, _) => {
+                        write!(f, "{subject} not submitted, retried next run: {error}")
+                    }
+                }
+            }
+            SyncErrorRow::Intents(IntentError {
+                row,
+                intent,
+                parked,
+                ..
+            }) => match parked {
+                true => write!(f, "{intent} #{row} parked, never retried: {error}"),
+                false => write!(
+                    f,
+                    "{intent} #{row} not performed, retried next run: {error}"
+                ),
+            },
+            SyncErrorRow::Unreached(UnreachedEndpoint { endpoint }) => {
+                write!(f, "{endpoint}: {error}")
+            }
+        }
+    }
+}
+
+/// What a run could not do, `kind` the list the report held it in before
+/// its failures were one list.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub enum SyncErrorRow {
+    /// A collection hunk that did not apply: a rerun retries it.
+    CollectionPatch {
+        /// The change the run tried to make.
+        hunk: CollectionHunk,
+    },
+    /// An item hunk that did not apply: a rerun retries it.
+    ItemPatch {
+        /// The change the run tried to make.
+        hunk: ItemHunk,
+    },
+    /// A store step that failed outside any hunk: a rerun retries it.
+    Failures(StepFailure),
+    /// A write a remote would not take, the change staying in the store:
+    /// retried by every run, it waits for a person.
+    Rejected(RejectedWrite),
+    /// A create a side refused because it already holds the item's `UID`
+    /// (RFC 4791 §5.3.2, RFC 6352 §6.3.2): it waits for a person.
+    Duplicates(RefusedDuplicate),
+    /// A change a remote refused as it stands, held while the refusal
+    /// stands (pimdir SYNC §5): it waits for a person.
+    Refusals(RefusedChange),
+    /// A queued send that failed: parked, it waits for a person, else a
+    /// rerun retries it.
+    Submitted(SubmitError),
+    /// A queued intent that failed: parked, it waits for a person, else a
+    /// rerun retries it.
+    Intents(IntentError),
+    /// An endpoint whose connections the run could not open: a rerun
+    /// retries it.
+    Unreached(UnreachedEndpoint),
+}
+
+impl SyncErrorRow {
+    /// Whether the row waits for a person (exit 3) rather than a rerun
+    /// (exit 4).
+    pub fn waits_for_a_person(&self) -> bool {
+        match self {
+            Self::Rejected(_) | Self::Duplicates(_) | Self::Refusals(_) => true,
+            Self::Submitted(SubmitError { parked, .. }) => *parked,
+            Self::Intents(IntentError { parked, .. }) => *parked,
+            Self::CollectionPatch { .. }
+            | Self::ItemPatch { .. }
+            | Self::Failures(_)
+            | Self::Unreached(_) => false,
+        }
+    }
+
+    /// The endpoints the row names, to name them otherwise.
+    pub fn endpoints_mut(&mut self) -> Vec<&mut String> {
+        match self {
+            Self::CollectionPatch { hunk } => hunk.endpoints_mut(),
+            Self::ItemPatch { hunk } => hunk.endpoints_mut(),
+            Self::Rejected(RejectedWrite { side, .. })
+            | Self::Duplicates(RefusedDuplicate { side, .. })
+            | Self::Refusals(RefusedChange { side, .. }) => vec![side],
+            Self::Intents(IntentError { source, .. }) => vec![source],
+            Self::Unreached(UnreachedEndpoint { endpoint }) => vec![endpoint],
+            Self::Failures(_) | Self::Submitted(_) => Vec::new(),
+        }
+    }
+
+    /// Whether the row is a failed hunk or step, which the text output
+    /// counts among the errors rather than the warnings.
+    fn is_error(&self) -> bool {
+        match self {
+            Self::CollectionPatch { .. }
+            | Self::ItemPatch { .. }
+            | Self::Failures(_)
+            | Self::Submitted(_)
+            | Self::Intents(_) => true,
+            Self::Rejected(_) | Self::Duplicates(_) | Self::Refusals(_) | Self::Unreached(_) => {
+                false
+            }
+        }
+    }
+}
+
 /// An endpoint whose connections the run could not open.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -875,29 +1144,6 @@ pub struct UnreachedEndpoint {
     /// The source or target, as the account names it, or `<source>.smtp`
     /// for a source's SMTP channel.
     pub endpoint: String,
-    /// The stable code of the failure, `null` when it carries none.
-    pub code: Option<ErrorCode>,
-    /// Why, the outermost message.
-    pub error: String,
-    /// The messages of the failure's causes, outermost first.
-    pub sources: Vec<String>,
-}
-
-impl UnreachedEndpoint {
-    /// The endpoint `endpoint`, unreached for `failure`.
-    pub fn new(endpoint: String, failure: Failure) -> Self {
-        let Failure {
-            code,
-            error,
-            sources,
-        } = failure;
-        Self {
-            endpoint,
-            code,
-            error,
-            sources,
-        }
-    }
 }
 
 /// One create refused for `no-uid-conflict` (RFC 4791 §5.3.2, RFC 6352
@@ -917,26 +1163,11 @@ pub struct RefusedDuplicate {
     pub uid: String,
 }
 
-impl fmt::Display for RefusedDuplicate {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self {
-            side,
-            collection,
-            uid,
-        } = self;
-        write!(
-            f,
-            "{side} refused a copy in {collection}: it already holds UID {uid}, so the second copy stays unwritten until one of the two carries a UID of its own"
-        )
-    }
-}
-
-/// One change a remote refused as it stands, this run or a run before
-/// (pimdir SYNC §4, §5).
+/// One change a remote refused as it stands (pimdir SYNC §4, §5), the
+/// item's handle as the error's `id`, what the remote said its message.
 ///
-/// Held on the item's binding while it stands, pushing nothing, since the
-/// same change would be refused again; changing the item (an edit, a flag, a
-/// move) pushes it anew, removing it withdraws it. Reported by every run.
+/// Held on the item's binding while it stands, pushing nothing; changing the
+/// item pushes it anew, removing it withdraws it. Reported by every run.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RefusedChange {
@@ -944,28 +1175,10 @@ pub struct RefusedChange {
     pub side: String,
     /// The collection the item sits in, as the side names it.
     pub collection: String,
-    /// The item's handle on that side, the item's key for a create.
-    pub id: String,
-    /// What the remote said, as the store keeps it.
-    pub reason: String,
 }
 
-impl fmt::Display for RefusedChange {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self {
-            side,
-            collection,
-            id,
-            reason,
-        } = self;
-        write!(
-            f,
-            "{side} refused the change of {id} in {collection} as it stands, held until the item changes: {reason}"
-        )
-    }
-}
-
-/// One write a remote would not take, or that never reached the wire.
+/// One write a remote would not take, or that never reached the wire, the
+/// item's handle on that side as the error's `id`.
 ///
 /// Carried here rather than among the applied hunks, so `already in sync`
 /// keeps meaning the run wrote nothing. The store still holds the change and
@@ -979,28 +1192,7 @@ pub struct RejectedWrite {
     pub collection: String,
     /// What the run tried: `update`, `append`, `copy`, `delete`, `move`,
     /// `set-flags`.
-    pub kind: String,
-    /// The item error: the item's handle on that side as `id`, then the
-    /// refusal's code, outermost message and causes (the backend's reason).
-    #[serde(flatten)]
-    pub failure: ItemError<ErrorCode>,
-}
-
-impl fmt::Display for RejectedWrite {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self {
-            side,
-            collection,
-            kind,
-            failure,
-        } = self;
-        let id = failure.id.as_deref().unwrap_or_default();
-        let error = chain(&failure.error, &failure.sources);
-        write!(
-            f,
-            "{side} refused the {kind} of {id} in {collection}, so it stays in the store: {error}"
-        )
-    }
+    pub action: String,
 }
 
 /// One item both sides changed against a shared base, left conflicted.
@@ -1011,24 +1203,32 @@ impl fmt::Display for RejectedWrite {
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemConflict {
-    /// The side the divergence is against.
-    pub side: String,
-    /// The collection the item sits in.
+    /// The item's public id, the one `conflict show` and `conflict resolve`
+    /// take, `null` when the store names the item by no id yet.
+    pub id: Option<String>,
+    /// The store collection the item sits in, as `conflict list` spells it.
     pub collection: String,
-    /// The item's handle on that side.
-    pub id: String,
+    /// The side the divergence is against, as the account names it.
+    pub side: String,
+    /// The item's handle on that side, its id on the remote.
+    pub remote_id: String,
 }
 
 impl fmt::Display for ItemConflict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
-            side,
-            collection,
             id,
+            collection,
+            side,
+            remote_id,
         } = self;
+        match id {
+            Some(id) => write!(f, "item {id} ({remote_id})")?,
+            None => write!(f, "item {remote_id}")?,
+        }
         write!(
             f,
-            "item {id} in {collection} on {side} changed on both sides and is left conflicted"
+            " in {collection} on {side} changed on both sides and is left conflicted"
         )
     }
 }
@@ -1053,61 +1253,103 @@ impl fmt::Display for DrainedQueue {
     }
 }
 
-/// One queue action the drain parked as permanently unappliable.
+/// One queue row the store holds parked, as `pimdir queue list` prints a
+/// row in every binary reading a pimdir store.
 ///
-/// It stays queryable in the store until repaired, and every run reports it
-/// again.
+/// It stays in the store until a person retries or cancels it, and every
+/// run reports it again.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ParkedQueueAction {
-    /// The queue row's global append id.
-    #[serde(rename = "row")]
-    pub id: i64,
-    /// The collection the action was anchored on.
-    pub collection: String,
-    /// The action kind, kebab-case as the store spells it: `add`, `update`,
+    /// The queue row's id.
+    pub row: i64,
+    /// The row under the store's identity, `<store-id>.<incarnation>.<row>`
+    /// (pimdir STORAGE §4.5), as a frontend's `pimdir queue` takes it.
+    pub handle: String,
+    /// The action as the store spells it, kebab-case: `add`, `update`,
     /// `set-flags`, `remove`, `move`, `copy`, `submit`, `calendar-reply`…
     pub kind: String,
+    /// The store collection the row is queued on.
+    pub collection: String,
+    /// The link id of the item the row creates, `null` when it creates none.
+    pub link_id: Option<String>,
+    /// The id of the stored item the row addresses, `null` when it
+    /// addresses none.
+    pub item_id: Option<String>,
     /// The enqueuing process, diagnostic only.
     pub producer: String,
-    /// When the row was appended, stamped by the store's own clock.
+    /// When the store stamped the row, RFC 3339.
     pub queued_at: String,
     /// How many times the row was tried before it was parked.
     pub attempts: i64,
-    /// The stable code of the failure, `null`: the store keeps its text
-    /// alone.
-    pub code: Option<ErrorCode>,
+    /// Whether the row's outcome is unknown (pimdir STORAGE §15.2), its
+    /// `error` then beginning `unconfirmed: `.
+    pub unconfirmed: bool,
     /// The failure that parked the row, as the store recorded it.
     pub error: String,
-    /// The messages of the failure's causes, empty: the store recorded
-    /// them in `error`.
-    pub sources: Vec<String>,
+}
+
+impl ParkedQueueAction {
+    /// The row `parked` of the store `identity`, what it creates and
+    /// addresses read from its payload, `null` where it does not decode.
+    pub fn new(identity: &PimdirStoreIdentity, parked: PimdirParkedAction) -> Self {
+        let handle = PimdirActionHandle {
+            id: parked.id,
+            store: Some(identity.clone()),
+        };
+        let (link_id, item_id) = match action_from_payload(&parked.action, &parked.payload) {
+            Ok(PimdirAction::Add { link_id, .. }) => (link_id.map(|id| id.0), None),
+            Ok(
+                PimdirAction::Update { seq, .. }
+                | PimdirAction::SetFlags { seq, .. }
+                | PimdirAction::Remove { seq, .. }
+                | PimdirAction::Move { seq, .. }
+                | PimdirAction::Copy { seq, .. },
+            ) => (None, Some(seq.to_string())),
+            Ok(PimdirAction::Unknown { kind, payload, .. }) => {
+                match PimdirInvitation::from_payload(&kind, &payload).map(|it| it.item) {
+                    Ok(PimdirIntentItem::Seq(seq)) => (None, Some(seq.to_string())),
+                    Ok(PimdirIntentItem::Link(link_id)) => (Some(link_id.0), None),
+                    Err(_) => (None, None),
+                }
+            }
+            Ok(PimdirAction::SetPerformer { .. }) | Err(_) => (None, None),
+        };
+
+        Self {
+            row: parked.id,
+            handle: handle.to_string(),
+            unconfirmed: parked.unconfirmed().is_some(),
+            kind: parked.action,
+            collection: parked.collection,
+            link_id,
+            item_id,
+            producer: parked.producer,
+            queued_at: parked.created_at,
+            attempts: parked.attempts,
+            error: parked.error,
+        }
+    }
 }
 
 impl fmt::Display for ParkedQueueAction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Self {
-            id,
-            collection,
+            row,
             kind,
+            collection,
             producer,
             error,
-            sources,
             ..
         } = self;
-        let error = chain(error, sources);
         write!(
             f,
-            "parked queue action #{id} ({kind} in {collection} from {producer}): {error}"
+            "parked queue action #{row} ({kind} in {collection} from {producer}): {error}"
         )
     }
 }
 
-/// One submit intent attempted this run.
-///
-/// Acknowledged when `error` is `None` (row dropped, pin released); parked
-/// when permanent or of unknown outcome, then with an `error` beginning
-/// `unconfirmed: ` (pimdir STORAGE §13); pending otherwise.
+/// One submit intent this run sent, its row dropped and its pin released.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SubmitEntry {
@@ -1118,13 +1360,37 @@ pub struct SubmitEntry {
     pub collection: String,
     /// The submitted item's subject, when the intent payload carried one.
     pub subject: Option<String>,
-    /// The stable code of the failure, `null` on success or when it
-    /// carries none.
-    pub code: Option<ErrorCode>,
-    /// The send error, the outermost message; `None` on success.
-    pub error: Option<String>,
-    /// The messages of the failure's causes, outermost first.
-    pub sources: Vec<String>,
+}
+
+impl fmt::Display for SubmitEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let subject = self.subject.as_deref().unwrap_or("<no subject>");
+        write!(f, "submitted {subject}")
+    }
+}
+
+/// How a submit intent failed: parked when permanent or of unknown
+/// outcome (pimdir STORAGE §13), pending otherwise.
+#[derive(Clone, Debug)]
+pub struct SubmitFailure {
+    /// The send error.
+    pub failure: Failure,
+    /// Whether the failure parked the row rather than leaving it pending.
+    pub parked: bool,
+    /// Whether the message may have been delivered despite the failure.
+    pub unconfirmed: bool,
+}
+
+/// A submit intent that failed, as the errors list holds it.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SubmitError {
+    /// The queue row's global append id.
+    pub row: i64,
+    /// The collection the intent was anchored on.
+    pub collection: String,
+    /// The item's subject, when the intent payload carried one.
+    pub subject: Option<String>,
     /// Whether the failure parked the row rather than leaving it pending.
     pub parked: bool,
     /// Whether the message may have been delivered despite the failure (no
@@ -1135,29 +1401,11 @@ pub struct SubmitEntry {
     pub unconfirmed: bool,
 }
 
-impl fmt::Display for SubmitEntry {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let subject = self.subject.as_deref().unwrap_or("<no subject>");
-        let error = self.error.as_deref().map(|err| chain(err, &self.sources));
-        match (error, self.parked) {
-            (None, _) => write!(f, "submitted {subject}"),
-            (Some(err), true) if self.unconfirmed => {
-                write!(
-                    f,
-                    "{subject} may have been sent, parked and never sent again: {err}"
-                )
-            }
-            (Some(err), true) => write!(f, "{subject} parked, never retried: {err}"),
-            (Some(err), false) => write!(f, "{subject} not submitted, retried next run: {err}"),
-        }
-    }
-}
-
-/// One calendar intent attempted this run (pimdir STORAGE Annex B.2).
+/// One calendar or collection intent this run performed (pimdir STORAGE
+/// Annex B.2), its queue row dropped.
 ///
-/// Acknowledged when `error` is `None`, its queue row dropped; parked when
-/// the failure is permanent, pending otherwise. The effect itself, the new
-/// `PARTSTAT` or the removal, arrives with the next sync.
+/// The effect itself, the new `PARTSTAT` or the removal, arrives with the
+/// next sync.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IntentEntry {
@@ -1166,21 +1414,13 @@ pub struct IntentEntry {
     pub id: i64,
     /// The collection of the item it addresses.
     pub collection: String,
-    /// The intent kind: `calendar-reply` or `calendar-cancel`.
+    /// The intent kind: `calendar-reply`, `calendar-cancel`,
+    /// `collection-create`…
     pub kind: String,
     /// The source that performed it.
     pub source: String,
     /// The public id of the item, when the payload named one.
     pub seq: Option<i64>,
-    /// The stable code of the failure, `null` on success or when it
-    /// carries none.
-    pub code: Option<ErrorCode>,
-    /// The provider error, the outermost message; `None` on success.
-    pub error: Option<String>,
-    /// The messages of the failure's causes, outermost first.
-    pub sources: Vec<String>,
-    /// Whether the failure parked the row rather than leaving it pending.
-    pub parked: bool,
 }
 
 impl fmt::Display for IntentEntry {
@@ -1188,13 +1428,26 @@ impl fmt::Display for IntentEntry {
         let Self {
             id, kind, source, ..
         } = self;
-        let error = self.error.as_deref().map(|err| chain(err, &self.sources));
-        match (error, self.parked) {
-            (None, _) => write!(f, "{kind} #{id} performed by {source}"),
-            (Some(err), true) => write!(f, "{kind} #{id} parked, never retried: {err}"),
-            (Some(err), false) => write!(f, "{kind} #{id} not performed, retried next run: {err}"),
-        }
+        write!(f, "{kind} #{id} performed by {source}")
     }
+}
+
+/// An intent that failed, as the errors list holds it, the public id of
+/// the item it addresses as the error's `id`.
+#[derive(Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IntentError {
+    /// The queue row's global append id.
+    pub row: i64,
+    /// The collection of the item it addresses.
+    pub collection: String,
+    /// The intent kind: `calendar-reply`, `calendar-cancel`,
+    /// `collection-create`…
+    pub intent: String,
+    /// The source that tried to perform it.
+    pub source: String,
+    /// Whether the failure parked the row rather than leaving it pending.
+    pub parked: bool,
 }
 
 /// What the retention sweep reclaimed past `store.purge-after`.
@@ -1272,40 +1525,6 @@ impl fmt::Display for MessageCollision {
     }
 }
 
-/// One hunk of a patch, and whether applying it worked.
-#[derive(Debug, Serialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-#[schemars(rename = "{H}Entry")]
-pub struct PatchEntry<H> {
-    /// The change the run tried to make.
-    pub hunk: H,
-    /// The stable code of the failure, `null` on success or when it
-    /// carries none.
-    pub code: Option<ErrorCode>,
-    /// The apply error, the outermost message; `None` on success.
-    pub error: Option<String>,
-    /// The messages of the failure's causes, outermost first.
-    pub sources: Vec<String>,
-}
-
-impl<H> PatchEntry<H> {
-    /// Records one hunk and, where the apply failed, how it read.
-    pub fn new(hunk: H, error: Option<anyhow::Error>) -> Self {
-        let (code, error, sources) = Failure::row(error.as_ref().map(Failure::of));
-        Self {
-            hunk,
-            code,
-            error,
-            sources,
-        }
-    }
-
-    /// The apply error and its causes, as the text output prints them.
-    pub fn text(&self) -> Option<String> {
-        self.error.as_deref().map(|err| chain(err, &self.sources))
-    }
-}
-
 /// A step of the run that failed outside any hunk.
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -1314,40 +1533,6 @@ pub struct StepFailure {
     pub step: FailedStep,
     /// The collection the step worked on, `null` for a store-wide one.
     pub collection: Option<String>,
-    /// The stable code of the failure, `null` when it carries none.
-    pub code: Option<ErrorCode>,
-    /// The outermost message.
-    pub error: String,
-    /// The messages of the failure's causes, outermost first.
-    pub sources: Vec<String>,
-}
-
-impl StepFailure {
-    /// Records `err` as the failure of `step` over `collection`.
-    pub fn new(step: FailedStep, collection: Option<String>, err: &anyhow::Error) -> Self {
-        let Failure {
-            code,
-            error,
-            sources,
-        } = Failure::of(err);
-        Self {
-            step,
-            collection,
-            code,
-            error,
-            sources,
-        }
-    }
-}
-
-impl fmt::Display for StepFailure {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let err = chain(&self.error, &self.sources);
-        match &self.collection {
-            Some(collection) => write!(f, "{} of {collection}: {err}", self.step),
-            None => write!(f, "{}: {err}", self.step),
-        }
-    }
 }
 
 /// A store step a run takes outside any hunk.
@@ -1381,23 +1566,53 @@ impl fmt::Display for SyncOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f)?;
 
-        let total = self.collection_patch.len() + self.item_patch.len();
-        let mailbox_errors = self
-            .collection_patch
+        let failed_collections: Vec<&CollectionHunk> = self
+            .errors
             .iter()
-            .filter(|e| e.error.is_some())
-            .count();
-        let item_errors = self.item_patch.iter().filter(|e| e.error.is_some()).count();
-        let submit_errors = self.submitted.iter().filter(|e| e.error.is_some()).count();
-        let intent_errors = self.intents.iter().filter(|e| e.error.is_some()).count();
-        let errors =
-            mailbox_errors + item_errors + submit_errors + intent_errors + self.failures.len();
+            .filter_map(|error| match &error.row {
+                SyncErrorRow::CollectionPatch { hunk } => Some(hunk),
+                _ => None,
+            })
+            .collect();
+        let failed_items: Vec<&ItemHunk> = self
+            .errors
+            .iter()
+            .filter_map(|error| match &error.row {
+                SyncErrorRow::ItemPatch { hunk } => Some(hunk),
+                _ => None,
+            })
+            .collect();
+        let of = |kind: fn(&SyncErrorRow) -> bool| -> Vec<&SyncError> {
+            self.errors
+                .iter()
+                .filter(|error| kind(&error.row))
+                .collect()
+        };
+        let failed_sends = of(|row| matches!(row, SyncErrorRow::Submitted(_)));
+        let failed_intents = of(|row| matches!(row, SyncErrorRow::Intents(_)));
+        let warned = of(|row| {
+            matches!(
+                row,
+                SyncErrorRow::Rejected(_) | SyncErrorRow::Duplicates(_) | SyncErrorRow::Refusals(_)
+            )
+        });
+        let unreached = of(|row| matches!(row, SyncErrorRow::Unreached(_)));
+        let failed_steps = of(|row| {
+            matches!(
+                row,
+                SyncErrorRow::CollectionPatch { .. }
+                    | SyncErrorRow::ItemPatch { .. }
+                    | SyncErrorRow::Failures(_)
+            )
+        });
+
+        let hunk_errors = failed_collections.len() + failed_items.len();
+        let total = self.collection_patch.len() + self.item_patch.len() + hunk_errors;
+        let errors = of(SyncErrorRow::is_error).len();
         let warnings = self.collisions.len()
             + self.parked.len()
             + self.conflicts.len()
-            + self.duplicates.len()
-            + self.rejected.len()
-            + self.refusals.len()
+            + warned.len()
             + self.absences.len()
             + self.unreadable.len()
             + self.overruled.len()
@@ -1417,38 +1632,44 @@ impl fmt::Display for SyncOutput {
             writeln!(f)?;
         }
 
-        if !self.submitted.is_empty() {
-            writeln!(f, "Submissions ({n}):", n = self.submitted.len())?;
+        if !self.submitted.is_empty() || !failed_sends.is_empty() {
+            let n = self.submitted.len() + failed_sends.len();
+            writeln!(f, "Submissions ({n}):")?;
             for entry in &self.submitted {
                 writeln!(f, " - {entry}")?;
             }
+            for error in failed_sends {
+                writeln!(f, " - {error}")?;
+            }
             writeln!(f)?;
         }
 
-        if !self.intents.is_empty() {
-            writeln!(f, "Calendar intents ({n}):", n = self.intents.len())?;
+        if !self.intents.is_empty() || !failed_intents.is_empty() {
+            let n = self.intents.len() + failed_intents.len();
+            writeln!(f, "Intents ({n}):")?;
             for entry in &self.intents {
                 writeln!(f, " - {entry}")?;
             }
-            writeln!(f)?;
-        }
-
-        if !self.collection_patch.is_empty() {
-            writeln!(
-                f,
-                "Collection patches ({n}):",
-                n = self.collection_patch.len()
-            )?;
-            for entry in &self.collection_patch {
-                writeln!(f, " - {hunk}", hunk = entry.hunk)?;
+            for error in failed_intents {
+                writeln!(f, " - {error}")?;
             }
             writeln!(f)?;
         }
 
-        if !self.item_patch.is_empty() {
-            writeln!(f, "Item patches ({n}):", n = self.item_patch.len())?;
-            for entry in &self.item_patch {
-                writeln!(f, " - {hunk}", hunk = entry.hunk)?;
+        if !self.collection_patch.is_empty() || !failed_collections.is_empty() {
+            let n = self.collection_patch.len() + failed_collections.len();
+            writeln!(f, "Collection patches ({n}):")?;
+            for hunk in self.collection_patch.iter().chain(failed_collections) {
+                writeln!(f, " - {hunk}")?;
+            }
+            writeln!(f)?;
+        }
+
+        if !self.item_patch.is_empty() || !failed_items.is_empty() {
+            let n = self.item_patch.len() + failed_items.len();
+            writeln!(f, "Item patches ({n}):")?;
+            for hunk in self.item_patch.iter().chain(failed_items) {
+                writeln!(f, " - {hunk}")?;
             }
             writeln!(f)?;
         }
@@ -1515,14 +1736,8 @@ impl fmt::Display for SyncOutput {
             for c in &self.conflicts {
                 writeln!(f, " - {c}")?;
             }
-            for r in &self.duplicates {
-                writeln!(f, " - {r}")?;
-            }
-            for r in &self.rejected {
-                writeln!(f, " - {r}")?;
-            }
-            for r in &self.refusals {
-                writeln!(f, " - {r}")?;
+            for error in warned {
+                writeln!(f, " - {error}")?;
             }
             for p in &self.parked {
                 writeln!(f, " - {p}")?;
@@ -1578,11 +1793,10 @@ impl fmt::Display for SyncOutput {
             writeln!(f)?;
         }
 
-        if !self.unreached.is_empty() {
-            writeln!(f, "Unreached ({n}):", n = self.unreached.len())?;
-            for unreached in &self.unreached {
-                let err = chain(&unreached.error, &unreached.sources);
-                writeln!(f, " - {}: {err}", unreached.endpoint)?;
+        if !unreached.is_empty() {
+            writeln!(f, "Unreached ({n}):", n = unreached.len())?;
+            for error in unreached {
+                writeln!(f, " - {error}")?;
             }
             writeln!(f)?;
         }
@@ -1601,24 +1815,8 @@ impl fmt::Display for SyncOutput {
 
         if errors > 0 {
             writeln!(f, "Errors ({errors}):")?;
-            for entry in self.collection_patch.iter().filter(|e| e.error.is_some()) {
-                writeln!(
-                    f,
-                    " - {hunk}: {err}",
-                    hunk = entry.hunk,
-                    err = entry.text().unwrap_or_default(),
-                )?;
-            }
-            for entry in self.item_patch.iter().filter(|e| e.error.is_some()) {
-                writeln!(
-                    f,
-                    " - {hunk}: {err}",
-                    hunk = entry.hunk,
-                    err = entry.text().unwrap_or_default(),
-                )?;
-            }
-            for failure in &self.failures {
-                writeln!(f, " - {failure}")?;
+            for error in failed_steps {
+                writeln!(f, " - {error}")?;
             }
             writeln!(f)?;
         }
@@ -1660,7 +1858,7 @@ impl fmt::Display for SyncOutput {
                 writeln!(f, "Account {account} synchronized: {n} hunks, {w} warnings")
             }
             (n, e, w, false) => {
-                let applied = n - mailbox_errors - item_errors;
+                let applied = n - hunk_errors;
                 let warned = match w {
                     0 => String::new(),
                     w => format!(", {w} warnings"),

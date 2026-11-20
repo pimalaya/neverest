@@ -148,7 +148,7 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
         "the parked item is the card, not a message: {listed}",
     );
     assert_eq!(
-        conflicts[0]["handle"],
+        conflicts[0]["remoteId"],
         format!("{CARD}.vcf"),
         "named by its handle on the CardDAV source: {listed}",
     );

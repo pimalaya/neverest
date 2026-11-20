@@ -520,7 +520,7 @@ fn every_graph_calendar_of_the_mailbox_syncs() {
 fn a_graph_check_names_the_well_known_folders() {
     let token = msgraph_token();
     let report = Replica::open("msgraph-mail", &user_line(), &token).check();
-    let collections = report["sources"][0]["collections"]
+    let collections = report["backends"][0]["collections"]
         .as_array()
         .unwrap_or_else(|| panic!("collections listed: {report}"));
     let mut client = connect(&token);

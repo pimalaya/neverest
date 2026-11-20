@@ -44,7 +44,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
   `sync --accept-absences` confirms such absences for one run.
 
-- Added the refusal of a change as it stands: a change a server refuses for good (an HTTP 4xx naming the request, an IMAP `NO [CANNOT]` or `[TOOBIG]`) is held in the store and reported under `refusals` by every run (exit 3).
+- Added the refusal of a change as it stands: a change a server refuses for good (an HTTP 4xx naming the request, an IMAP `NO [CANNOT]` or `[TOOBIG]`) is held in the store and reported by every run as a `refusals` error (exit 3).
 
   It is pushed again only once the item changes: change it, or remove it.
 
@@ -84,6 +84,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Added `tls.client.cert` and `tls.client.key` under every backend table and `smtp`, a client certificate presented for mutual TLS, as himalaya reads them.
 
+- Added an account-level `tls` table, inherited field by field by every backend's and every `smtp`'s `tls` table, as himalaya reads it.
+
 - Added `imap.sasl-ir`, `imap.id.auto` and `imap.id.fields`, as himalaya reads them.
 
 - Added `carddav.home` and `caldav.home`, the home set as a URL with nothing discovered, and `auth = "none"` for a DAV server asking for no credential.
@@ -92,11 +94,13 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
   Read the last line, or skip the lines carrying `event`.
 
-- Added a stable `code` to the JSON failure object and to every failing row (`store-version`, `store-layout`, `store-exposed`, `backend-not-built`, `account-missing`, `permission-denied`, `quota-exceeded`, `rate-limited`, `recipient-refused`, `usage-invalid` and others), described by the `neverest-error` schema.
+- Added a stable `code` to the JSON failure object and to every failing row (`store-version`, `store-layout`, `store-exposed`, `backend-not-built`, `account-missing`, `account-uninitialized`, `conflict-not-found`, `item-duplicate`, `permission-denied`, `quota-exceeded`, `rate-limited`, `recipient-refused`, `usage-invalid` and others), described by the `neverest-error` schema.
 
 - Added `account list` (alias `ls`), listing the accounts with the backend tables each writes, those this build leaves out under `notBuilt`.
 
-- Added `coverage`, `downloaded`, `unreached`, `unsettled`, `unreadable`, `overruled`, `unanswered`, `waiting`, `disagreed`, `unlisted` and `intents` to the sync report.
+- Added `coverage`, `downloaded`, `unsettled`, `unreadable`, `overruled`, `unanswered`, `waiting`, `disagreed`, `unlisted`, `intents` and `errors` to the sync report.
+
+  `errors` lists what a run could not do, an endpoint it could not reach included, one item error each tagged by `kind`.
 
 - Added `direction` to the `add-flags`, `remove-flags` and `delete` hunks: `pull` for a change a server made that the store took in, `push` for one the run applied on that server. The text reads a pulled one as `pull the deletion of item <id> in <collection> from <side>`.
 
@@ -106,7 +110,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Changed Google People to read contacts through `people:batchGet`, 200 a request, instead of one `people.get` a contact, which drew the per-minute read quota down on a first sync.
 
-- **BREAKING**: Changed text-mode progress lines to print on stdout before the result, as pimalaya-cli asks of a long-lived command, stderr staying the logs'. Scripts read `--json`, whose last line is the result.
+- **BREAKING**: Changed text-mode progress lines to print on stdout before the result, as pimalaya-cli asks of a long-lived command, stderr staying the logs'. A full `sync` prints them to a pipe too; `account check`, `init`, `sync --queue-only` and `sync --index-only` print them on a terminal alone, so their redirected output holds the result alone. Scripts read `--json`, whose last line is the result.
 
 - Changed a CardDAV or CalDAV table with no `auth` to load as `auth = "none"`, a 401 then saying no `auth` is configured.
 
@@ -116,7 +120,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Changed a target's `collection.filter`, which was ignored, to narrow what that target takes.
 
-- **BREAKING**: Renamed in the sync report and its events: `refused` to `duplicates`, the events `opened`, `listed` and `refused` to `endpoint-opened`, `endpoint-listed` and `change-refused`, a coverage row's `at` to `closedAt`, and the `action` of a `rejected` or `forbidden` row to `kind`.
+- **BREAKING**: Renamed in the sync report and its events: `refused` to `duplicates`, the events `opened`, `listed` and `refused` to `endpoint-opened`, `endpoint-listed` and `change-refused`, a coverage row's `at` to `closedAt`, and the `action` of a `forbidden` row to `kind`.
 
 - **BREAKING**: Changed `pool-size` into a key of the Graph domain tables alone: on IMAP, Gmail and the other backends nothing read it, and it now fails to load as unknown. IMAP connections are bounded by `connections`.
 
@@ -130,7 +134,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Changed the io-sasl dependency to 0.3.
 
-- Changed the pimalaya-cli dependency to 0.7.
+- Changed the pimalaya-cli dependency to 0.8.
 
 - Changed the ical-rs dependency to 0.7.2: a recurrence rule's `UNTIL` is shifted between UTC and the series zone through the time zone database, zones only the database knows included.
 
@@ -150,9 +154,17 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - **BREAKING**: Changed every `--json` output to print every key it declares (an empty list as `[]`, an absent value as `null`), one value per line when piped.
 
-- **BREAKING**: Changed the rows of a sync report: a queue row is keyed `row` (was `id`), a parked row names its kind `kind` (was `action`), a failing row carries `code`, `error` and `sources` (was `reason`), and the patches are the `collectionPatch` and `itemPatch` arrays.
+- **BREAKING**: Changed the rows of a sync report: a queue row is keyed `row` (was `id`), and the patches are the `collectionPatch` and `itemPatch` arrays of the hunks applied.
 
-- **BREAKING**: Changed the `conflict` commands to print an item's `id` as a string, and `conflict show --json` to print a body that is not valid UTF-8 as `{data, size, mime}`, `data` in base64.
+- **BREAKING**: Changed every failure of a sync report into one row of `errors`, pimalaya-cli's item error `{id, code, error, sources}` tagged `kind`, then the keys the kind needs: `collection-patch` and `item-patch` (a hunk that did not apply, under `hunk`), `failures` (a store step), `rejected` (its `action`), `duplicates`, `refusals` (the reason as `error`), `submitted` and `intents` (a send or an intent that failed, parked or not) and `unreached` (its `endpoint`).
+
+  `failures`, `rejected`, `duplicates`, `refusals` and `unreached` are no lists of their own, and `collectionPatch`, `itemPatch`, `submitted` and `intents` list what the run did alone. A `rejected`, `duplicates` or `refusals` row and a parked send or intent exit 3, any other row 4.
+
+- **BREAKING**: Changed a parked queue row, of a sync and of `sync --queue-only`, to read as `pimdir queue list` prints a row: `row`, `handle`, `kind`, `collection`, `linkId`, `itemId`, `producer`, `queuedAt`, `attempts`, `unconfirmed` and `error`.
+
+- **BREAKING**: Changed the `conflict` commands to print an item's `id` as a string and its handle on the source as `remoteId`, and `conflict show --json` to print each body as `{contents, encoding}`, the text when it is valid UTF-8 and its base64 otherwise, `null` when absent.
+
+- **BREAKING**: Changed a sync report's conflict row to print the `id` `conflict show` and `conflict resolve` take and the store `collection` as `conflict list` spells it, the handle on the side as `remoteId`.
 
 - **BREAKING**: Changed the exit statuses to the Pimalaya contract: 2 is a command line neverest refused, 3 a run that left something for a person (where 0.3.0 exited 2), 4 a run that could not do all its work.
 
@@ -161,6 +173,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 - **BREAKING**: Changed `check` into `account check`, `check` staying a hidden alias: it checks every endpoint and exits 3 when one does not answer, where it failed on the first.
 
   Each row lists the source's collections with their roles, its capabilities and its SMTP channel (opened without sending), and `orphans` lists the accounts the store holds that the configuration no longer names.
+
+- **BREAKING**: Changed `account check` to print pimalaya-cli's account check: each account's endpoints under `backends` (was `sources`), each row the shared `{backend, ok, code, error, tls}` then `source`, `collections`, `capabilities` and `smtp`, the account's `mode` after them, and the text one block of fields per account.
 
 - **BREAKING**: Changed `collection.delete` to default to false: set it on each endpoint whose collection deletions should reach the other.
 
@@ -185,6 +199,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 - **BREAKING**: Changed a store another user can read to be refused (`store-exposed`): `chmod 700` its directory and `chmod 600` its pimdir.db.
 
 - Changed the text output to plain lines: no spinner and no colour.
+
+- Changed `completion`, `manual` and `json-schema` without their names or `--dir` into a refused command line, exit 2, coded `usage-invalid` under `--json`, where they failed with exit 1.
 
 - Changed a bare `neverest` without a configuration to fail (exit 1), showing a person at a terminal the commands creating one from the shipped sample, where it offered the wizard.
 
@@ -217,6 +233,18 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 - Removed the `NEVEREST_PROFILE` profiler.
 
 ### Fixed
+
+- Fixed a termination signal while a sync waits for another run's store lock, or while `sync --init` initializes, ending the process with no result: the shutdown is installed first, so the run prints its result, the accounts not reached interrupted, and exits 4.
+
+- Fixed `sync --queue-only` failing the whole command, uncoded, over a malformed queue row: the drain of that store's accounts fails coded `action-malformed` (exit 4), as a sync reports it.
+
+- Fixed `sync --queue-only` reporting only the rows its own drain parked and exiting 0 over a row the store already held parked: it reports every parked row of the account's collections and exits 3, as a sync does.
+
+- Fixed `conflict resolve --interactive` exiting 0 when the merger decided nothing: it prints `aborted` and exits 3.
+
+- Fixed a bare `neverest --json` printing the text help: it fails coded `usage-invalid` and exits 2, through pimalaya-cli.
+
+- Fixed the account mode's sentence for one or several sources (`imap syncs both ways`, `caldav and carddav each sync both ways`) and the plural of `1 collection` in `account check`.
 
 - Fixed an IMAP append on a server without UIDPLUS being bound to another message whose `Message-ID` holds its own (`a@x` in `<a@x.y>`) when that one arrived right after: the search now names the whole bracketed `Message-ID`.
 

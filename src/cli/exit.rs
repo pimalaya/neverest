@@ -81,19 +81,34 @@ mod tests {
         error::Failure,
         sync::{
             hunk::CollectionHunk,
-            report::{
-                IntentEntry, ParkedQueueAction, PatchEntry, SubmitEntry, ThrottledSource,
-                UnreachedEndpoint,
-            },
+            report::{IntentEntry, ParkedQueueAction, SubmitEntry, SubmitFailure, ThrottledSource},
         },
     };
 
-    fn unreachable() -> PatchEntry<CollectionHunk> {
+    fn unreachable(report: &mut SyncOutput) {
         let scan = CollectionHunk::Scan {
             side: String::from("imap"),
             collection: String::from("*"),
         };
-        PatchEntry::new(scan, Some(anyhow!("Open connection: connection refused")))
+        let err = anyhow!("Open connection: connection refused");
+        report.note_collection_hunk(scan, Some(err));
+    }
+
+    /// A send attempt of the row `id` that failed, parked or not.
+    fn failed_send(id: i64, error: &str, parked: bool, unconfirmed: bool) -> SyncOutput {
+        let mut report = SyncOutput::default();
+        let entry = SubmitEntry {
+            id,
+            collection: String::from("imap/Sent"),
+            subject: Some(String::from("hi")),
+        };
+        let failure = SubmitFailure {
+            failure: Failure::new(error),
+            parked,
+            unconfirmed,
+        };
+        report.note_submitted(entry, Some(failure));
+        report
     }
 
     /// A run that could not reach a source is not a run with nothing to
@@ -103,7 +118,7 @@ mod tests {
         let mut report = SyncOutput::default();
         assert_eq!(Exit::from(&report), Exit::Success);
 
-        report.collection_patch.push(unreachable());
+        unreachable(&mut report);
         assert_eq!(Exit::from(&report), Exit::Incomplete);
         assert_eq!(ExitCode::from(Exit::Incomplete), ExitCode::from(4));
 
@@ -129,10 +144,10 @@ mod tests {
             source: String::from("gcal"),
             until: String::from("2026-11-17T18:00:00Z"),
         });
-        report.unreached.push(UnreachedEndpoint::new(
+        report.note_unreached(
             String::from("imap.smtp"),
             Failure::of(&anyhow!("connection refused")),
-        ));
+        );
         let text = report.to_string();
         assert!(text.contains("Throttled (1):"), "{text}");
         assert!(text.contains("gcal gave up throttled"), "{text}");
@@ -145,20 +160,10 @@ mod tests {
     /// which waits for a person, not for a rerun, and is no success.
     #[test]
     fn a_parked_send_waits_for_a_person() {
-        let mut report = SyncOutput::default();
-        report.submitted.push(SubmitEntry {
-            id: 1,
-            collection: String::from("INBOX"),
-            subject: None,
-            code: None,
-            error: Some(String::from("550 rejected")),
-            sources: Vec::new(),
-            parked: true,
-            unconfirmed: false,
-        });
+        let report = failed_send(1, "550 rejected", true, false);
         assert_eq!(Exit::from(&report), Exit::Conflicted);
 
-        report.submitted[0].parked = false;
+        let report = failed_send(1, "550 rejected", false, false);
         assert_eq!(Exit::from(&report), Exit::Incomplete);
     }
 
@@ -166,30 +171,29 @@ mod tests {
     #[test]
     fn a_parked_intent_or_queue_action_waits_for_a_person() {
         let mut report = SyncOutput::default();
-        report.intents.push(IntentEntry {
+        let entry = IntentEntry {
             id: 2,
             collection: String::from("caldav/work"),
             kind: String::from("calendar-reply"),
             source: String::from("caldav"),
             seq: None,
-            code: None,
-            error: Some(String::from("refused")),
-            sources: Vec::new(),
-            parked: true,
-        });
+        };
+        report.note_intent(entry, Some((Failure::new("refused"), true)));
         assert_eq!(Exit::from(&report), Exit::Conflicted);
 
         let mut report = SyncOutput::default();
         report.parked.push(ParkedQueueAction {
-            id: 3,
-            collection: String::from("imap/INBOX"),
+            row: 3,
+            handle: String::from("s1.1.3"),
             kind: String::from("remove"),
+            collection: String::from("imap/INBOX"),
+            link_id: None,
+            item_id: Some(String::from("9")),
             producer: String::from("himalaya"),
             queued_at: String::from("2026-11-15T08:00:00.000Z"),
             attempts: 1,
-            code: None,
+            unconfirmed: false,
             error: String::from("unknown seq 9"),
-            sources: Vec::new(),
         });
         assert_eq!(Exit::from(&report), Exit::Conflicted);
     }
@@ -207,30 +211,23 @@ mod tests {
     /// decide, never resent: the run left something waiting.
     #[test]
     fn an_unconfirmed_send_waits_for_a_person() {
-        let mut report = SyncOutput::default();
-        report.submitted.push(SubmitEntry {
-            id: 7,
-            collection: String::from("imap/Sent"),
-            subject: Some(String::from("hi")),
-            code: None,
-            error: Some(String::from("unconfirmed: Reached unexpected EOF")),
-            sources: Vec::new(),
-            parked: true,
-            unconfirmed: true,
-        });
+        let report = failed_send(7, "unconfirmed: Reached unexpected EOF", true, true);
         assert_eq!(Exit::from(&report), Exit::Conflicted);
         assert_eq!(ExitCode::from(Exit::Conflicted), ExitCode::from(3));
 
         let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["submitted"], serde_json::json!([]));
         assert_eq!(
-            json["submitted"],
+            json["errors"],
             serde_json::json!([{
-                "row": 7,
-                "collection": "imap/Sent",
-                "subject": "hi",
+                "id": null,
                 "code": null,
                 "error": "unconfirmed: Reached unexpected EOF",
                 "sources": [],
+                "kind": "submitted",
+                "row": 7,
+                "collection": "imap/Sent",
+                "subject": "hi",
                 "parked": true,
                 "unconfirmed": true,
             }])
@@ -242,10 +239,10 @@ mod tests {
     #[test]
     fn an_unreached_send_channel_makes_the_run_incomplete() {
         let mut report = SyncOutput::default();
-        report.unreached.push(UnreachedEndpoint::new(
+        report.note_unreached(
             String::from("imap.smtp"),
             Failure::new("Cannot connect to the SMTP submission server: refused"),
-        ));
+        );
         assert_eq!(Exit::from(&report), Exit::Incomplete);
     }
 

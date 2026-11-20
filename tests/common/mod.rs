@@ -441,7 +441,7 @@ impl Replica {
     pub fn sync_intents(&self, key: &str) -> Vec<serde_json::Value> {
         let report: serde_json::Value =
             serde_json::from_str(&self.sync(key)).expect("the report is JSON");
-        report["intents"].as_array().cloned().unwrap_or_default()
+        attempts(&report, "intents")
     }
 
     /// Syncs once as [`sync_intents`](Self::sync_intents), emptying the
@@ -461,7 +461,7 @@ impl Replica {
         ];
         let (_, stdout) = self.run(&args, &[0]);
         let report = json_report(&stdout);
-        report["intents"].as_array().cloned().unwrap_or_default()
+        attempts(&report, "intents")
     }
 
     /// Syncs once, expecting an intent to park, and returns its `intents`.
@@ -479,7 +479,7 @@ impl Replica {
         for row in parked {
             PimdirStore::cancel_action(self.store(), row.id).expect("cancel the parked row");
         }
-        report["intents"].as_array().cloned().unwrap_or_default()
+        attempts(&report, "intents")
     }
 
     /// The pending or parked queue rows, their kind and error.
@@ -815,4 +815,29 @@ pub fn none(stdout: &str, key: &str) -> bool {
     json_report(stdout)[key]
         .as_array()
         .is_some_and(Vec::is_empty)
+}
+
+/// The rows of a report's `errors` tagged `kind`, the list a failure was
+/// reported under before the failures were one list.
+pub fn errors_of(report: &serde_json::Value, kind: &str) -> Vec<serde_json::Value> {
+    let errors = report["errors"].as_array().cloned().unwrap_or_default();
+    errors
+        .into_iter()
+        .filter(|row| row["kind"] == kind)
+        .collect()
+}
+
+/// Every queued row of the list `list` (`submitted`, `intents`) a run
+/// tried: those it performed, `error` `null` and `parked` `false`, then
+/// those that failed, from the report's `errors`.
+pub fn attempts(report: &serde_json::Value, list: &str) -> Vec<serde_json::Value> {
+    let mut rows = report[list].as_array().cloned().unwrap_or_default();
+    for row in &mut rows {
+        row["code"] = serde_json::Value::Null;
+        row["error"] = serde_json::Value::Null;
+        row["parked"] = serde_json::Value::Bool(false);
+    }
+
+    rows.extend(errors_of(report, list));
+    rows
 }

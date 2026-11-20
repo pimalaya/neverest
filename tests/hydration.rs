@@ -131,7 +131,7 @@ fn a_body_is_kept_as_it_arrives() {
         .as_array()
         .expect("item patch")
         .iter()
-        .filter(|entry| entry["hunk"]["kind"] == "fetch")
+        .filter(|entry| entry["kind"] == "fetch")
         .count();
     assert_eq!(
         fetched,
@@ -527,8 +527,8 @@ fn a_primed_run_reports_each_fetch_once() {
             .as_array()
             .expect("item patch")
             .iter()
-            .filter(|entry| entry["hunk"]["kind"] == "fetch")
-            .map(|entry| entry["hunk"]["id"].as_str().expect("an id"))
+            .filter(|entry| entry["kind"] == "fetch")
+            .map(|entry| entry["id"].as_str().expect("an id"))
             .collect();
         let distinct: std::collections::BTreeSet<&str> = fetched.iter().copied().collect();
         assert_eq!(
@@ -736,7 +736,7 @@ fn a_body_gone_mid_run_is_owed_nothing() {
         .as_array()
         .expect("item patch")
         .iter()
-        .filter(|entry| entry["hunk"]["kind"] == "fetch")
+        .filter(|entry| entry["kind"] == "fetch")
         .count();
     assert_eq!(fetched, 0, "nothing asked again: {report}");
     let held = items(&store, "gone", &folder);

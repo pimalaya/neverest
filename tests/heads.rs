@@ -266,7 +266,7 @@ fn fetches(report: &serde_json::Value) -> usize {
         .as_array()
         .expect("item patch")
         .iter()
-        .filter(|entry| entry["hunk"]["kind"] == "fetch")
+        .filter(|entry| entry["kind"] == "fetch")
         .count()
 }
 
@@ -276,7 +276,7 @@ fn deletes(report: &serde_json::Value) -> usize {
         .as_array()
         .expect("item patch")
         .iter()
-        .filter(|entry| entry["hunk"]["kind"] == "delete")
+        .filter(|entry| entry["kind"] == "delete")
         .count()
 }
 

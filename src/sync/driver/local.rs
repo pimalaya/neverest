@@ -478,17 +478,13 @@ pub(super) fn note_source_failure(source_name: &str, err: anyhow::Error, report:
     warn!("source {source_name} sync error: {err:#}");
     if let Some(unreached) = err.downcast_ref::<Unreached>() {
         let endpoint = unreached.endpoint.clone();
-        report
-            .unreached
-            .push(UnreachedEndpoint::new(endpoint, Failure::of(&err)));
+        report.note_unreached(endpoint, Failure::of(&err));
     }
-    report.collection_patch.push(PatchEntry::new(
-        CollectionHunk::Scan {
-            side: source_name.to_owned(),
-            collection: String::from("*"),
-        },
-        Some(err),
-    ));
+    let scan = CollectionHunk::Scan {
+        side: source_name.to_owned(),
+        collection: String::from("*"),
+    };
+    report.note_collection_hunk(scan, Some(err));
 }
 
 /// Opens `count` single-connection [`SourceCtx`]s with overlapping handshakes.

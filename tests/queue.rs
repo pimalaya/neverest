@@ -272,6 +272,44 @@ fn a_drain_that_parks_a_row_exits_3() {
     let drained = &fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 3)["queue"][0];
 
     assert_eq!(drained["parked"][0]["row"], id, "{drained}");
+    assert_eq!(drained["parked"][0]["itemId"], "424242", "{drained}");
+    let handle = drained["parked"][0]["handle"].as_str().unwrap();
+    assert!(handle.ends_with(&format!(".{id}")), "{drained}");
+
+    let again = &fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 3)["queue"][0];
+    assert_eq!(
+        again["parked"][0]["row"], id,
+        "held parked, reported again: {again}"
+    );
+}
+
+/// A row whose payload does not decode fails the drain of its store's
+/// accounts, coded as a sync codes it, never the command.
+#[test]
+fn a_malformed_row_fails_the_drain_coded() {
+    let _serial = serialized();
+    let fixture = Fixture::new(CLOSED, "user", "pass");
+    fixture.offline_store();
+    let flags = PimdirAction::SetFlags {
+        seq: 1,
+        flags: PimdirFlags::default(),
+        base: None,
+    };
+    let id = PimdirProducer::open(fixture.store(), "neverest-tests")
+        .unwrap()
+        .enqueue(COLLECTION, &flags, None)
+        .unwrap()
+        .handle
+        .id;
+    let db = rusqlite::Connection::open(fixture.store().join("pimdir.db")).unwrap();
+    db.execute("UPDATE queue SET payload = '{' WHERE id = ?1", [id])
+        .unwrap();
+    drop(db);
+
+    let drained = &fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 4)["queue"][0];
+
+    assert_eq!(drained["account"], ACCOUNT, "{drained}");
+    assert_eq!(drained["code"], "action-malformed", "{drained}");
 }
 
 /// A sync that cannot reach its server still applies the queue first.
@@ -458,7 +496,12 @@ fn an_unreachable_endpoint_is_named_in_the_report() {
 
     let report = fixture.report(&["--json", "sync", "-a", ACCOUNT], 4);
 
-    let unreached = report["unreached"].as_array().expect("unreached endpoints");
+    let unreached: Vec<&Value> = report["errors"]
+        .as_array()
+        .expect("the errors")
+        .iter()
+        .filter(|error| error["kind"] == "unreached")
+        .collect();
     assert_eq!(unreached.len(), 1, "{report}");
     assert_eq!(unreached[0]["endpoint"], "caldav", "{report}");
     assert!(

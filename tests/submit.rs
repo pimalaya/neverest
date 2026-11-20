@@ -125,7 +125,8 @@ fn a_queued_submit_intent_leaves_through_smtp_and_comes_back_through_imap() {
     let report = neverest(&["sync", "-a", "submit", "--json"], &config, &state);
     let submitted = &json_report(&report)["submitted"];
     assert!(
-        submitted.as_array().is_some_and(|s| s.len() == 1) && submitted[0]["error"].is_null(),
+        submitted.as_array().is_some_and(|s| s.len() == 1)
+            && json_report(&report)["errors"] == serde_json::json!([]),
         "the run reported the submission; report was:\n{report}",
     );
     assert!(
@@ -187,7 +188,7 @@ fn check_opens_the_smtp_channel_a_source_declares() {
     write(SMTP);
     let checked = neverest(&["--json", "check", "-a", "submit"], &config, &state);
     assert_eq!(
-        json_result(&checked)["accounts"][0]["sources"][0]["smtp"]["ok"],
+        json_result(&checked)["accounts"][0]["backends"][0]["smtp"]["ok"],
         true,
         "{checked}"
     );
@@ -233,7 +234,7 @@ fn check_lists_collections_with_the_roles_the_server_states() {
     let checked = neverest(&["--json", "check", "-a", "roles"], &config, &state);
     let checked_all: serde_json::Value = serde_json::from_str(&checked).expect("one JSON document");
     let report = &checked_all["accounts"][0];
-    let collections = report["sources"][0]["collections"]
+    let collections = report["backends"][0]["collections"]
         .as_array()
         .unwrap_or_else(|| panic!("collections listed: {checked}"));
     let role_of = |role: &str| {
@@ -322,8 +323,7 @@ fn intents_only_sends_and_the_next_sync_files_the_copy() {
     let report = json_report(&report);
     let submitted = &report["submitted"][0];
     assert_eq!(submitted["row"], id, "{report}");
-    assert_eq!(submitted["error"], serde_json::Value::Null, "{report}");
-    assert_eq!(submitted["unconfirmed"], false, "{report}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
     assert_eq!(report["collectionPatch"], serde_json::json!([]), "{report}");
     assert_eq!(report["itemPatch"], serde_json::json!([]), "{report}");
     assert_eq!(report["drained"][0]["collection"], sent, "{report}");

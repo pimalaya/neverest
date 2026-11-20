@@ -228,14 +228,16 @@ fn a_run_covers_every_account_and_reports_each_apart() {
     assert_eq!(home["report"], Value::Null, "{result}");
     let error = home["error"].as_str().expect("an error");
     assert!(error.contains("neverest init -a home"), "{result}");
+    assert_eq!(home["code"], "account-uninitialized", "{result}");
 
     let work = &result["accounts"][1];
     assert_eq!(work["account"], "work", "{result}");
     assert_eq!(work["error"], Value::Null, "{result}");
     assert_eq!(
-        work["report"]["unreached"][0]["endpoint"], "caldav",
+        work["report"]["errors"][0]["endpoint"], "caldav",
         "{result}"
     );
+    assert_eq!(work["report"]["errors"][0]["kind"], "unreached", "{result}");
 
     let started: Vec<&Value> = lines
         .iter()

@@ -166,7 +166,7 @@ fn a_merger_exiting_non_zero_settles_nothing_whatever_it_wrote() {
     .unwrap();
 
     let parked = park(root, REFUSE_BOOK, &format!("\"sh {}\"", script.display()));
-    let aborted = resolve(&parked);
+    let aborted = resolve_aborted(&parked);
 
     assert!(
         aborted.contains(&format!("conflict {} is exactly as it was", parked.id)),
@@ -188,7 +188,7 @@ fn a_merger_exiting_zero_without_writing_settles_nothing_either() {
     fs::write(&script, "#!/bin/sh\ncat \"$1\" \"$2\" \"$3\" > /dev/null\n").unwrap();
 
     let parked = park(root, QUIT_BOOK, &format!("\"sh {}\"", script.display()));
-    let aborted = resolve(&parked);
+    let aborted = resolve_aborted(&parked);
 
     assert!(
         aborted.contains(&format!("conflict {} is exactly as it was", parked.id)),
@@ -342,13 +342,23 @@ fn park(root: &Path, book: &str, merger: &str) -> Parked {
 /// Settles the parked divergence through the account's merger, and returns
 /// what the command said about it.
 fn resolve(parked: &Parked) -> String {
+    resolve_ending(parked, 0)
+}
+
+/// Resolves `parked` interactively, the merger deciding nothing: exit 3.
+fn resolve_aborted(parked: &Parked) -> String {
+    resolve_ending(parked, 3)
+}
+
+/// Resolves `parked` interactively, ending on `code`.
+fn resolve_ending(parked: &Parked, code: i32) -> String {
     let id = &parked.id;
 
     neverest(
         &["conflict", "resolve", "-a", ACCOUNT, id, "-i"],
         &parked.config,
         &parked.state,
-        0,
+        code,
     )
 }
 

@@ -231,7 +231,7 @@ impl Landing<'_> {
                 Err(err) => {
                     warn!("{place} write error: {err:#}");
                     let collection = display_name(&ctx.namespace, &place).to_string();
-                    ctx.noted.failures.push(StepFailure::new(
+                    ctx.noted.failures.push(SyncError::step(
                         FailedStep::Bodies,
                         Some(collection),
                         &err,

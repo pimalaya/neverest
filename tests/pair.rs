@@ -98,11 +98,11 @@ fn a_pair_collection_that_fails_is_reported_and_the_run_is_incomplete() {
     let (code, report) = sync(home.path(), &config, &[]);
     assert_eq!(code, 4, "{report}");
 
-    let failed: Vec<&Value> = report["collectionPatch"]
+    let failed: Vec<&Value> = report["errors"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|entry| entry["hunk"]["kind"] == "sync")
+        .filter(|entry| entry["kind"] == "collection-patch" && entry["hunk"]["kind"] == "sync")
         .collect();
     assert_eq!(failed.len(), 1, "{report}");
     assert_eq!(failed[0]["hunk"]["source"], "src", "{report}");
@@ -146,7 +146,12 @@ fn a_listing_the_server_cuts_short_is_reported_on_every_run() {
         for run in [&["--init"][..], &[]] {
             let (code, report) = sync(home.path(), &config, run);
             assert_eq!(code, 4, "no_sync {no_sync}, {run:?}: {report}");
-            let failures = report["failures"].as_array().unwrap();
+            let failures: Vec<&Value> = report["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["kind"] == "failures")
+                .collect();
             assert_eq!(failures.len(), 1, "{report}");
             assert_eq!(failures[0]["step"], "listing", "{report}");
             assert_eq!(failures[0]["collection"], "book", "{report}");
@@ -179,10 +184,7 @@ fn writes_a_target_s_rights_forbid_are_reported_held_never_applied() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|entry| {
-                let hunk = &entry["hunk"];
-                hunk["side"] == "dst" || hunk["targetSide"] == "dst"
-            })
+            .filter(|hunk| hunk["side"] == "dst" || hunk["targetSide"] == "dst")
             .collect();
         assert!(on_dst.is_empty(), "{report}");
 

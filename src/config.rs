@@ -112,6 +112,7 @@ use crate::{
         smtp::SmtpConfig,
         source::{SourceBackendConfig, SourceConfig},
         store::StoreConfig,
+        tls::TlsConfig,
     },
     error::ErrorCode,
 };
@@ -332,6 +333,10 @@ pub struct AccountConfig {
     /// table names one, the environment's when neither does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<ProxyConfig>,
+    /// The TLS of every endpoint and send channel of the account, each
+    /// field their own `tls` table leaves unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls: Option<TlsConfig>,
     /// The local pimdir store this account syncs through.
     ///
     /// Optional: the store is implicit, the one every account naming no
@@ -391,6 +396,12 @@ impl AccountConfig {
         }
 
         self.attach_send_channel(&mut sources)?;
+
+        if let Some(tls) = &self.tls {
+            for source in sources.values_mut() {
+                source.inherit_tls(tls);
+            }
+        }
 
         Ok(sources)
     }
@@ -474,8 +485,15 @@ impl AccountConfig {
     /// bindings and is written to. Only direction separates the two, which
     /// is [`AccountMode`] and not the seam that opens them.
     pub fn endpoints(&self) -> Result<HashMap<String, SourceConfig>> {
+        let mut targets = self.targets.clone();
+        if let Some(tls) = &self.tls {
+            for target in targets.values_mut() {
+                target.inherit_tls(tls);
+            }
+        }
+
         let mut endpoints = self.sources()?;
-        endpoints.extend(self.targets.clone());
+        endpoints.extend(targets);
         Ok(endpoints)
     }
 
@@ -1234,6 +1252,44 @@ mod tests {
         assert_eq!(client.cert, home.join("me.pem"));
         assert_eq!(client.key, home.join("me.key.pem"));
         assert!(toml::from_str::<TlsConfig>(r#"client.cert = "~/me.pem""#).is_err());
+    }
+
+    /// The account `tls` table reaches every endpoint field by field, its
+    /// own field winning, and a check row names it.
+    ///
+    /// A send channel inherits it too; a cleartext URL connects with none.
+    #[test]
+    fn the_account_tls_is_inherited_field_by_field() {
+        let account: AccountConfig = toml::from_str(
+            r#"
+            tls.provider = "native-tls"
+            tls.cert = "/etc/ca.pem"
+            imap.server = "imaps://imap.example.org:993"
+            imap.tls.provider = "rustls"
+            smtp.server = "smtp://smtp.example.org:587"
+            smtp.starttls = true
+            targets.copy.carddav.server = "http://dav.example.org/"
+            "#,
+        )
+        .unwrap();
+        let endpoints = account.endpoints().unwrap();
+
+        let imap = endpoints["imap"].secured().unwrap().checked();
+        assert_eq!(imap.provider.as_deref(), Some("rustls"), "its own wins");
+        assert_eq!(imap.cert.as_deref(), Some("/etc/ca.pem"), "inherited");
+        assert_eq!(imap.crypto, None);
+
+        let smtp = endpoints["imap"].smtp.as_ref().unwrap();
+        let smtp = smtp.secured().unwrap().checked();
+        assert_eq!(smtp.provider.as_deref(), Some("native-tls"));
+        assert_eq!(smtp.cert.as_deref(), Some("/etc/ca.pem"));
+
+        assert!(endpoints["copy"].secured().is_none(), "a cleartext URL");
+
+        let namespaced = account.namespaced("work").unwrap();
+        let endpoints = namespaced.endpoints().unwrap();
+        let imap = endpoints["work/imap"].secured().unwrap().checked();
+        assert_eq!(imap.cert.as_deref(), Some("/etc/ca.pem"));
     }
 
     /// A path key expands environment variables too, as every other

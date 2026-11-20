@@ -363,7 +363,7 @@ fn two_endpoints_already_holding_one_card_bind_it_to_a_single_item() {
         "the second holder is bound, not minted a key of its own; report was:\n{report}",
     );
     assert!(
-        none(&report, "duplicates") && none(&report, "rejected"),
+        none(&report, "errors"),
         "neither endpoint is asked to take a card it already holds; report was:\n{report}",
     );
 
@@ -494,7 +494,7 @@ fn conflict_id(listing: &str, handle: &str) -> String {
         .as_array()
         .expect("a conflict array")
         .iter()
-        .find(|conflict| conflict["handle"] == handle)
+        .find(|conflict| conflict["remoteId"] == handle)
         .unwrap_or_else(|| panic!("no conflict for {handle} in:\n{listing}"))["id"]
         .as_str()
         .expect("a conflict id")

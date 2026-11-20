@@ -27,13 +27,13 @@ use pimalaya_cli::printer::Printer;
 use crate::{
     cli::{exit::Exit, init, queue},
     config::{AccountConfig, Config, filter::CollectionFilter},
-    error::{Failure, pimdir_error},
+    error::{Failure, chain, pimdir_error},
     sync::{
         driver::{self, Bodies, DownloadOrder, Pacing},
         event::SyncEvent,
         local,
         progress::Progress,
-        report::{AccountSync, FailedStep, StepFailure, SyncOutput, SyncRunOutput},
+        report::{AccountSync, FailedStep, SyncOutput, SyncRunOutput},
         state::StoreState,
     },
 };
@@ -71,7 +71,7 @@ const SYNC_ONLY: [&str; 16] = [
     "bodies",
 ];
 
-/// Synchronizes the collections and items of every account, or of those `-a`
+/// Synchronize the collections and items of every account, or of those `-a`
 /// names, through the pimdir store they share.
 ///
 /// Each source is reconciled against the store, then against every target the
@@ -110,8 +110,11 @@ const SYNC_ONLY: [&str; 16] = [
 /// could not do all its work and a rerun picks it up: a source it could not
 /// reach (offline) or an SMTP channel it could not open, a hunk, a send or an
 /// intent that failed without parking, a collection still moving when the
-/// run stopped, an account that failed, or a store another run held past
-/// the wait. It wins over 3.
+/// run stopped, a run a termination signal stopped (SIGINT or SIGTERM), an
+/// account that failed, or a store another run held past the wait. It wins
+/// over 3. Under `--json` each account's report lists what failed under
+/// `errors`, one item error each tagged by `kind`, and the queue rows the
+/// store holds parked under `parked`.
 #[derive(Debug, Parser)]
 pub struct SyncCommand {
     /// Initialize each account the run covers that is not yet, as `init`
@@ -131,7 +134,9 @@ pub struct SyncCommand {
     /// works offline; the next sync pushes them. The queue is the store's:
     /// every account's is applied, each reported the rows of its own
     /// collections. Intents (a send, an invitation reply) need their server
-    /// and stay queued. A sync holding the store answers `busy`, exit 4.
+    /// and stay queued. A sync holding the store answers `busy`, exit 4; a
+    /// row the store holds parked, this drain's or an earlier one's, is
+    /// reported as a sync reports it, exit 3.
     #[arg(long, conflicts_with_all = SYNC_ONLY)]
     pub queue_only: bool,
     /// Build the search index of the accounts' stores until it is current,
@@ -280,6 +285,17 @@ pub struct SyncCommand {
 }
 
 impl SyncCommand {
+    /// Whether the run is a full sync, which streams, rather than a bounded
+    /// step run alone: `--queue-only`, `--index-only`.
+    pub fn streams(&self) -> bool {
+        #[cfg(feature = "search")]
+        if self.index_only {
+            return false;
+        }
+
+        !self.queue_only
+    }
+
     /// Reconciles every account the run covers, or plans them under
     /// `--dry-run`.
     ///
@@ -299,6 +315,8 @@ impl SyncCommand {
         if self.index_only {
             return crate::cli::index::run(printer, config_paths, accounts);
         }
+
+        crate::sync::install_shutdown()?;
 
         let config = Config::load(config_paths)?;
         let mut selected = match self.reset {
@@ -353,6 +371,12 @@ impl SyncCommand {
                     driver::check_store(&dir)?;
                     runnable.push((dir, accounts));
                 }
+                None if crate::sync::stopping() => {
+                    for (name, _) in accounts {
+                        let err = anyhow!("Interrupted before the account ran");
+                        outcomes.push(failed(name, err));
+                    }
+                }
                 None => {
                     for (name, _) in accounts {
                         outcomes.push(busy(name));
@@ -373,8 +397,6 @@ impl SyncCommand {
         let printer = Mutex::new(printer);
         let json = printer.lock().unwrap().is_json();
         let total = order.len();
-
-        crate::sync::install_shutdown()?;
 
         for (dir, accounts) in runnable {
             if crate::sync::stopping() {
@@ -414,12 +436,12 @@ impl SyncCommand {
                 outcomes.push(match outcome {
                     Ok(mut report) => {
                         report.interrupted = crate::sync::stopping();
-                        for refused in &report.refusals {
+                        for (failure, refused) in report.refusals() {
                             progress.emit(|| SyncEvent::ChangeRefused {
                                 source: refused.side.clone(),
                                 collection: refused.collection.clone(),
-                                id: refused.id.clone(),
-                                reason: refused.reason.clone(),
+                                id: failure.id.clone().unwrap_or_default(),
+                                reason: chain(&failure.error, &failure.sources),
                             });
                         }
                         ran(name, report)
@@ -495,10 +517,11 @@ impl SyncCommand {
             .map(|(name, config)| {
                 let mine = match &mut drained {
                     Ok(drained) => drained.remove(&name).unwrap_or_default(),
-                    Err(err) => SyncOutput {
-                        failures: vec![StepFailure::new(FailedStep::Queue, None, err)],
-                        ..SyncOutput::default()
-                    },
+                    Err(err) => {
+                        let mut report = SyncOutput::default();
+                        report.note_step_failure(FailedStep::Queue, None, err);
+                        report
+                    }
                 };
                 (name, config, Some(mine))
             })
@@ -585,7 +608,8 @@ pub fn acquire_store_lock(store_dir: &Path, timeout: Duration) -> Result<File> {
 }
 
 /// Takes the store's sync.lock, waiting up to `timeout`: `None` while
-/// another run still holds it then.
+/// another run still holds it then, or once a termination signal asked the
+/// run to stop.
 pub fn wait_store_lock(store_dir: &Path, timeout: Duration) -> Result<Option<File>> {
     let (lock_path, file) = open_store_lock(store_dir)?;
 
@@ -596,6 +620,9 @@ pub fn wait_store_lock(store_dir: &Path, timeout: Duration) -> Result<Option<Fil
             Ok(()) => return Ok(Some(file)),
             Err(TryLockError::WouldBlock) => {
                 if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                if crate::sync::stopping() {
                     return Ok(None);
                 }
                 if !waiting {
@@ -1249,33 +1276,47 @@ mod tests {
     /// A queue row is keyed `row` wherever the report names one, as
     /// himalaya's `pimdir queue list` does.
     ///
-    /// A parked row carries its kebab-case `kind`, when it was queued and
-    /// how often it was tried.
+    /// A parked row reads as `pimdir queue list` prints one: its handle
+    /// under the store's identity, its kebab-case `kind`, the item it
+    /// addresses read from its payload, and whether its outcome is unknown.
     #[test]
-    fn a_queue_row_is_keyed_row_and_a_parked_one_names_its_kind() {
+    fn a_queue_row_is_keyed_row_and_a_parked_one_reads_as_a_queue_row() {
+        use io_pimdir::{
+            client::producer::PimdirParkedAction,
+            codec::{PimdirAction, PimdirStoreIdentity, action_to_payload},
+            placement::PimdirFlags,
+        };
+
         use crate::sync::report::{IntentEntry, ParkedQueueAction, SubmitEntry};
 
-        let mut report = SyncOutput::default();
-        report.parked.push(ParkedQueueAction {
+        let action = PimdirAction::SetFlags {
+            seq: 9,
+            flags: PimdirFlags::from_iter(["\\Seen"]),
+            base: None,
+        };
+        let parked = PimdirParkedAction {
             id: 3,
-            collection: String::from("work/imap/INBOX"),
-            kind: String::from("set-flags"),
+            created_at: String::from("2026-11-15T08:00:00.000Z"),
             producer: String::from("himalaya"),
-            queued_at: String::from("2026-11-15T08:00:00.000Z"),
+            collection: String::from("work/imap/INBOX"),
+            action: String::from("set-flags"),
+            payload: action_to_payload(&action),
             attempts: 2,
-            code: None,
             error: String::from("unknown seq 9"),
-            sources: Vec::new(),
-        });
+        };
+        let identity = PimdirStoreIdentity {
+            store_id: String::from("s1"),
+            incarnation: 1,
+        };
+
+        let mut report = SyncOutput::default();
+        report
+            .parked
+            .push(ParkedQueueAction::new(&identity, parked));
         report.submitted.push(SubmitEntry {
             id: 4,
             collection: String::from("work/imap/Sent"),
             subject: None,
-            code: None,
-            error: None,
-            sources: Vec::new(),
-            parked: false,
-            unconfirmed: false,
         });
         report.intents.push(IntentEntry {
             id: 5,
@@ -1283,10 +1324,6 @@ mod tests {
             kind: String::from("calendar-reply"),
             source: String::from("caldav"),
             seq: None,
-            code: None,
-            error: None,
-            sources: Vec::new(),
-            parked: false,
         });
         let json = serde_json::to_value(&report).unwrap();
 
@@ -1294,14 +1331,16 @@ mod tests {
             json["parked"][0],
             serde_json::json!({
                 "row": 3,
-                "collection": "work/imap/INBOX",
+                "handle": "s1.1.3",
                 "kind": "set-flags",
+                "collection": "work/imap/INBOX",
+                "linkId": null,
+                "itemId": "9",
                 "producer": "himalaya",
                 "queuedAt": "2026-11-15T08:00:00.000Z",
                 "attempts": 2,
-                "code": null,
+                "unconfirmed": false,
                 "error": "unknown seq 9",
-                "sources": [],
             })
         );
         assert_eq!(json["submitted"][0]["row"], 4, "{json}");

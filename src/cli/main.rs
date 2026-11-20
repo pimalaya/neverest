@@ -18,14 +18,12 @@ use pimalaya_cli::{
     printer::Printer,
     welcome::Welcome,
 };
-use pimalaya_config::toml::ConfigMissingError;
 
 use crate::{
     cli::{
         account::AccountCommand, check::CheckCommand, conflict::ConflictCommand, exit::Exit,
         init::InitCommand, sync::SyncCommand,
     },
-    config::Config,
     json_schema,
 };
 
@@ -86,6 +84,12 @@ pub enum Command {
 }
 
 impl Command {
+    /// Whether the command runs long and streams its events and progress
+    /// lines, piped too: a full sync alone.
+    pub fn streams(&self) -> bool {
+        matches!(self, Self::Sync(cmd) if cmd.streams())
+    }
+
     /// Runs the subcommand over the accounts `-a` names, or every one.
     ///
     /// `-a` is global, declared once on [`Cli`]: the accounts are a property
@@ -110,22 +114,6 @@ impl Command {
 
         done.map(|()| Exit::Success)
     }
-}
-
-/// Meets a bare `neverest`: the help when a configuration exists, the
-/// missing configuration otherwise, which a person meets as the welcome.
-///
-/// A broken file counts as a configuration, its error left to the first
-/// command reading it.
-pub fn meet_bare_invocation(config_paths: &[PathBuf]) -> Result<()> {
-    if let Err(err) = Config::load(config_paths)
-        && err.is::<ConfigMissingError>()
-    {
-        return Err(err);
-    }
-
-    Cli::command().print_help()?;
-    Ok(())
 }
 
 /// The welcome a person meets when no configuration exists at `path`.

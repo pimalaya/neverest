@@ -19,11 +19,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use log::warn;
 use serde::{Deserialize, Serialize};
 
-use crate::{config::mode::AccountMode, error::layout_error, sync::local};
+use crate::{
+    config::mode::AccountMode,
+    error::layout_error,
+    sync::{driver::not_initialized, local},
+};
 
 /// The current layout: source ids `<account>/<source>`, collection ids
 /// `<account>/<source>/<name>`, kind on the row, one entry per account.
@@ -165,12 +169,10 @@ impl StoreState {
 
     /// The entry of `account`, refused when `init` never wrote one.
     pub fn account(&self, account: &str) -> Result<AccountState> {
-        self.accounts.get(account).cloned().ok_or_else(|| {
-            anyhow!(
-                "Account {account} not initialized, run `neverest init -a {account}` or \
-                 `neverest sync --init -a {account}` first"
-            )
-        })
+        self.accounts
+            .get(account)
+            .cloned()
+            .ok_or_else(|| not_initialized(account))
     }
 
     /// Stamps `account` a fresh entry under `mode`, the store's other entries

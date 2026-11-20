@@ -228,7 +228,7 @@ A sync source SHALL be a remote backend: IMAP, Microsoft Graph and Gmail for `me
 ### Requirement: A first run meets the family's welcome
 A command finding no configuration file, a bare `neverest` included, SHALL fail with pimalaya-config's missing-configuration error, exit 1: "No configuration found at <path>, start from the sample: <url>", the path being the first `-c` path when given, else the default one, and the URL config.sample.toml's. When the output is text and stderr is a terminal, a person SHALL meet pimalaya-cli's first-run welcome on stderr in its place, still exiting 1: the commands creating the file from the sample a package ships, or downloading it when none ships, then `neverest account check`. A script or a `--json` caller SHALL get the error.
 
-With a configuration, a bare `neverest` SHALL print the help and exit 0, a configuration that fails to parse counting as one, its error left to the first command reading it. A command reading a configuration that fails to parse SHALL fail with that error rather than read it as absent. Neverest writes no configuration.
+With a configuration, a bare `neverest` SHALL print the help and exit 0, a configuration that fails to parse counting as one, its error left to the first command reading it. Under `--json` a bare `neverest` SHALL be a refused command line, through pimalaya-cli's `clap::meet_bare_invocation`: the failure object coded `usage-invalid`, exit 2, the configuration left unread, so a JSON reader never gets text. A command reading a configuration that fails to parse SHALL fail with that error rather than read it as absent. Neverest writes no configuration.
 
 A configuration holding no account SHALL fail pointing at the sample the same way.
 
@@ -245,7 +245,7 @@ A configuration holding no account SHALL fail pointing at the sample the same wa
 ### Requirement: The command line is the family's
 `-c/--config` SHALL be pimalaya-cli's shared flag: one path per flag, never split, repeatable, the first file the base and the next ones deep-merged on top in order. No environment variable SHALL name the configuration (`NEVEREST_CONFIG` is not read). `-a/--account` SHALL stay repeatable, unlike the other Pimalaya CLIs, where it names the one account a command runs on: a neverest run covers several accounts.
 
-`completion`, `manual` and `json-schema` SHALL come in that order, with pimalaya-cli's abouts, and SHALL run like any other command when given no argument: what is ambiguous to write on the standard output fails with the failure object on stdout, exit 1. The help SHALL end with pimalaya-cli's footer. clap SHALL be built with the feature set the family uses (`derive`, `error-context`, `help`, `std`, `suggestions`, `usage`), so the help and errors are plain text read from no environment.
+`completion`, `manual` and `json-schema` SHALL come in that order, with pimalaya-cli's abouts, and SHALL require their names or `--dir`, as pimalaya-cli declares them: clap refuses a run with neither as a command line, exit 2, coded `usage-invalid` under `--json`. The help SHALL end with pimalaya-cli's footer. clap SHALL be built with the feature set the family uses (`derive`, `error-context`, `help`, `std`, `suggestions`, `usage`), so the help and errors are plain text read from no environment.
 
 Neverest SHALL have no `repl` and no `mcp`: its commands are batch operations over every account and its store (sync, drain, check, init, index), which a session or an agent gains nothing from composing; reading and writing items is the frontends' job (himalaya, cardamum, calendula), each with its own `repl` and `mcp` over the store neverest keeps.
 
@@ -262,7 +262,7 @@ Neverest SHALL have no `repl` and no `mcp`: its commands are batch operations ov
 ### Requirement: The account group is the family's
 Neverest SHALL carry pimalaya-cli's `account` group (pimalaya-cli cairn/spec/commands.md), over the accounts `-a` names, every one when it names none, as every neverest command:
 
-- `account check` SHALL be the check the *A check …* requirements describe, and `check`, its name before the group, SHALL run it too, hidden from the help, its JSON schema kept under `neverest-check` beside `neverest-account-check`. It SHALL keep its own report rather than pimalaya-cli's one-account `AccountCheckOutput`: a run covers several accounts, each with its mode, every endpoint's collections and capabilities and the orphans a store holds; its rows carry the shared backend check keys (`backend`, `ok`, `code`, `error`), the send channel's being pimalaya-cli's `BackendCheck`. A row's `backend` SHALL be the backend table the source writes, `msgraph` for every Graph domain.
+- `account check` SHALL be the check the *A check …* requirements describe, and `check`, its name before the group, SHALL run it too, hidden from the help, its JSON schema kept under `neverest-check` beside `neverest-account-check`. It SHALL print pimalaya-cli's account check (pimalaya-cli cairn/spec/terminal.md, *The accounts and their checks print alike*), a list of accounts, each with its keys of its own after the shared ones (pimalaya-cli cairn/spec/output.md, *Shared nouns keep one shape*): `{accounts: [{account, backends, mode}], orphans}`, each row of `backends` `{backend, ok, code, error, tls, source, collections, capabilities, smtp}`, its shared keys pimalaya-cli's `BackendCheck`, the send channel's row being one. pimalaya-cli's `AccountCheckOutput` holds no key of a binary's own, so neverest prints its own types in its shape. A row's `backend` SHALL be the backend table the source writes, `msgraph` for every Graph domain, `source` the endpoint as the account names it. Its text SHALL print one block of fields per account, a blank line apart: `Account`, `Mode` (the mode's sentence), then one field per endpoint named as the account names it, `OK` or `FAIL (<error>)`, `, TLS` and the parts its table sets when it connects over TLS, then its collection count and its SMTP channel's outcome; the orphans after the blocks.
 - `account list`, `ls` its visible alias as in every family binary, SHALL print pimalaya-cli's `AccountListOutput`, one `{name, default, backends, notBuilt}` row an account, sorted by name, reaching nothing. `backends` SHALL hold the backend tables the account writes, its sources' and its targets', sugar and named alike, each once, in the order `imap`, `carddav`, `caldav`, `jmap`, `gmail`, `msgraph`, `gpeople`, `gcal`, `smtp` (a send channel), those this build serves; `notBuilt` those it leaves out, JMAP always (it parses and no build opens it). A source's own name is the account's, not a backend, and reads in `account check`. `default` SHALL be `true` on every account: a command naming no `-a` runs over them all, no account being the default.
 
 Neverest has no `account capability`: what each source can do reads in `account check`, from the configuration.
@@ -454,7 +454,7 @@ The two `-only` flags SHALL exclude each other, `--init` and every flag of a ful
 - THEN it exits 2 and touches nothing
 
 ### Requirement: A drain applies the queue without syncing
-`neverest sync --queue-only` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, the rows it parked, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 4, the queue untouched. A drain that parked a row SHALL exit 3, as a sync does; a store step failing SHALL fail every account of the store, which exits 4.
+`neverest sync --queue-only` SHALL apply the queued actions as a sync's drain does, after declaring the sources of every account it runs over as a sync does before its drain (the configuration and the sidecar), reading no credential and opening no endpoint. The drain is the store's: it applies every account's queue, once a store, and each account's entry SHALL report the rows of its own collections it applied, with the `seq` of the item an `add` created, every row the store holds parked on its collections, this drain's or an earlier one's, as a sync reports them, and how many it left for a sync. It SHALL NOT wait for the store: while a run holds `sync.lock` it SHALL report the accounts of that store `busy` and exit 4, the queue untouched. A drain reporting a parked row SHALL exit 3, as a sync does; a store step failing, a queue row whose payload does not decode among them, SHALL fail every account of the store alone, its code kept (`action-malformed`), which exits 4, never the command.
 
 ### Requirement: A run holds the store lock, waiting bounded
 A run SHALL hold an advisory sync.lock under local/ of the **actual** store directory (honouring `store.root`) for its whole length, whatever accounts it covers, taken once for each store it covers, in path order, before any account runs. A second run SHALL wait for the holder up to a bounded timeout (60 s) and then report every account of that store `busy` and exit 4, so cron ticks and connector-triggered scoped runs serialize instead of failing or corrupting.
@@ -533,17 +533,17 @@ The SMTP channel SHALL remove the body's `Bcc` field before `DATA` (RFC 5322 §3
 
 Submission is **at-most-once** on its own: a message that may have left is parked, never sent again by a run, and only a person, through the producer, sends it again.
 
-An SMTP channel that does not open SHALL be reported: a server that cannot be reached, or a session cut before its credentials were answered, under `unreached` as `<source>.smtp`, its intents pending and unattempted; credentials the server refused, by each queued `submit` failing in `submitted` with the reason, not parked, not attempted. Either makes the run incomplete.
+An SMTP channel that does not open SHALL be reported: a server that cannot be reached, or a session cut before its credentials were answered, as an `unreached` error naming `<source>.smtp`, its intents pending and unattempted; credentials the server refused, by each queued `submit` failing as a `submitted` error with the reason, not parked, not attempted. Either makes the run incomplete.
 
 ### Requirement: A quota refusal keeps the send queued
-An SMTP rejection SHALL be classified by its reply code and its reply text. A 5xx refusing for a sending rate or quota SHALL be transient: the row SHALL stay pending, reported under `submitted` with its error and `parked: false`, and the run's remaining sends SHALL stay pending, unattempted, each reported as not attempted. Such a refusal is a 5xx whose text opens with an enhanced status code (RFC 3463) meaning nothing else, `5.4.5` (congestion, which RFC 3463 calls a persistent transient error), `5.1.90`, `5.7.232`, `5.7.233` or `5.7.236` (codes outside the registry naming a daily sending limit), or one whose text says so under a code of other meanings, matched without case: `SubmissionQuotaExceeded`, `submission quota`, `sending limit exceeded`, `rate limited`, `daily limit for message recipients`. Any other 5xx SHALL stay permanent, a sender blocked until a person releases it (`5.1.8`, `5.7.501` to `5.7.503`, `5.7.70x`) and a sender's own full mailbox (`5.2.2` with `QuotaExceededException`) among them.
+An SMTP rejection SHALL be classified by its reply code and its reply text. A 5xx refusing for a sending rate or quota SHALL be transient: the row SHALL stay pending, reported as a `submitted` error, `parked: false`, and the run's remaining sends SHALL stay pending, unattempted, each reported as not attempted. Such a refusal is a 5xx whose text opens with an enhanced status code (RFC 3463) meaning nothing else, `5.4.5` (congestion, which RFC 3463 calls a persistent transient error), `5.1.90`, `5.7.232`, `5.7.233` or `5.7.236` (codes outside the registry naming a daily sending limit), or one whose text says so under a code of other meanings, matched without case: `SubmissionQuotaExceeded`, `submission quota`, `sending limit exceeded`, `rate limited`, `daily limit for message recipients`. Any other 5xx SHALL stay permanent, a sender blocked until a person releases it (`5.1.8`, `5.7.501` to `5.7.503`, `5.7.70x`) and a sender's own full mailbox (`5.2.2` with `QuotaExceededException`) among them.
 
 A provider refusing a send for its daily limit has not refused the message: the next day's run sends it, and parking it would leave it to a person for nothing. The set stays narrow because a misread refusal holds the whole queue, each run reporting it (exit 4) until a person acts.
 
 #### Scenario: A daily limit holds the send
 - **GIVEN** two queued `submit` intents and an SMTP server answering the first one's data with `550 5.4.5 Daily user sending limit exceeded`
 - **WHEN** the account syncs
-- **THEN** both rows stay queued, `submitted` names the first with its error and `parked: false` and the second as not attempted, and the second never reaches the server
+- **THEN** both rows stay queued, `errors` names the first as a `submitted` error, `parked: false`, and the second as not attempted, and the second never reaches the server
 
 #### Scenario: An unknown recipient still parks
 - **GIVEN** a queued `submit` intent and an SMTP server answering its `RCPT TO` with `550 5.1.1 User unknown`
@@ -571,7 +571,7 @@ A read-only source (`<protocol>.item.delete = false`, `collection.delete = false
 The backend-neutral enumeration seam SHALL carry the incremental-sync cursor as opaque checkpoint bytes and string member handles: the IMAP adapter encodes its `(UIDVALIDITY, HIGHESTMODSEQ)` pair, the Graph adapter its delta link, and the engine stores whichever bytes the source produced. (Supersedes the IMAP-shaped `(u32, u64)` cursor on the shared seam; the QRESYNC behaviour itself is unchanged and stays specified under "IMAP enumeration is incremental".)
 
 ### Requirement: Text mode prints plain lines
-In text mode a command SHALL print where it is as plain lines on stdout, one a step, never per item, each flushed as it comes, then its result: no colour, no `\r`, no cursor move, no spinner, and no dependency drawing one (D4 of the-v1-review). Text mode is read by a person, so the progress and the result share stdout, as pimalaya-cli's output spec asks of a long-lived command, and stderr stays the logs'; a script reads `--json`, whose last line is the result alone (owner, 2026-11-17, closing N6). Under `--json` no such line SHALL be printed, the events and the result saying the same. `check`, `init` and the credential resolution SHALL print one line per step (`Checked source imap (3 collections)`, `Source imap failed (…)`, `Initialized imap of account work`, `Created the store`, `Resolved credentials`).
+In text mode a command SHALL print where it is as plain lines on stdout, one a step, never per item, each flushed as it comes, then its result: no colour, no `\r`, no cursor move, no spinner, and no dependency drawing one (D4 of the-v1-review). Text mode is read by a person, so the progress and the result share stdout, and stderr stays the logs'; a script reads `--json`, whose last line is the result alone (owner, 2026-11-17, closing N6). A full `sync`, the one long-lived command, SHALL print its lines to a pipe too, as pimalaya-cli's output spec asks of a long-lived command; `account check`, `init`, `sync --queue-only` and `sync --index-only` end on their own once their step is done, and SHALL print theirs only when stdout is a terminal, so their redirected output holds their result alone (owner, 2026-11-20, narrowing N6). Under `--json` no such line SHALL be printed, the events and the result saying the same. `check`, `init` and the credential resolution SHALL print one line per step (`Checked source imap (3 collections)`, `Checked source imap (1 collection)`, `Source imap failed (…)`, `Initialized imap of account work`, `Created the store`, `Resolved credentials`).
 
 Every text a command prints, result, notice or failure, SHALL pass through pimalaya-cli's sanitizer line by line, its line breaks and tabs kept: it holds what servers and other clients wrote (collection names, ids, flags, bodies, refusal reasons), and a control or bidi character there could drive the terminal or reorder what a person reads. Under `--json` every string SHALL stay exact.
 
@@ -583,7 +583,7 @@ Every text a command prints, result, notice or failure, SHALL pass through pimal
 #### Scenario: A check with a source down, its output in a file
 - **GIVEN** an account whose IMAP source points at a closed port
 - **WHEN** `neverest check >file` runs
-- **THEN** the file reads `✗ Source imap failed (…)`, with no escape sequence
+- **THEN** the file holds the check's result alone, `imap:     FAIL (…)` under `Account:  <name>`, no progress line and no escape sequence
 
 ### Requirement: IMAP enumeration is incremental (QRESYNC)
 Enumeration SHALL carry a per-mailbox checkpoint `(UIDVALIDITY, HIGHESTMODSEQ)`. On a server that enabled QRESYNC on connect, its `ENABLED` naming it (RFC 5161; advertising it is not enough, iCloud answering `ENABLE` a bare `OK` and then reporting no change to a QRESYNC `SELECT`), with a checkpoint whose UIDVALIDITY still matches, a delta SHALL be a QRESYNC `SELECT (QRESYNC (uidvalidity highestmodseq))`: only the messages changed since the modseq, the meta read for the ones the store does not bind, plus the vanished UIDs, issuing **no FETCH when nothing changed**. Without a usable checkpoint (first sync, malformed bytes) or on a server that did not enable QRESYNC it SHALL answer a round, page by page, so an arrival, a flag change and an expunge are never stepped over. A checkpoint whose UIDVALIDITY moved SHALL fail the delta and name a rekey, never answer a round.
@@ -744,7 +744,7 @@ A command line the grammar refuses (an unknown flag or subcommand, a missing or 
 - THEN it prints one failure object coded `usage-invalid`, its `error` naming `--no-such-flag`, on stdout and exits 2
 
 ### Requirement: An unreached endpoint is named in the report
-A run SHALL list in its report, under `unreached`, every endpoint whose connections it could not open, with its failure as a failing row carries it ("A failing row carries its code and its causes"): a server it could not reach, or one refusing the connection or its credentials. The failure SHALL still read as a failed `*` scan in the collection patch and make the run incomplete (exit 4). A collection that failed to read on an endpoint that opened SHALL NOT be listed: that is a server answering, not an endpoint unreached.
+A run SHALL list in its report, as an `unreached` error ("A run's failures are one list"), every endpoint whose connections it could not open, named under `endpoint`, its `id` `null`: a server it could not reach, or one refusing the connection or its credentials. The failure SHALL still read as a `collection-patch` error of a `*` scan and make the run incomplete (exit 4). A collection that failed to read on an endpoint that opened SHALL NOT be listed: that is a server answering, not an endpoint unreached.
 
 A source's SMTP channel SHALL be listed as `<source>.smtp` when its server could not be reached, with no `*` scan, a send channel holding no collection; it SHALL still make the run incomplete. Credentials it refused SHALL NOT list it: the sends report the refusal.
 
@@ -753,12 +753,12 @@ An exit 4 says the run did not do everything, and the patch says which collectio
 #### Scenario: A closed port
 - **GIVEN** an account whose CalDAV source points at a port nothing listens on
 - **WHEN** it is synced
-- **THEN** the run exits 4 and `unreached` names `caldav` with an error beginning `Open connection`
+- **THEN** the run exits 4 and an `unreached` error names `caldav` with an error beginning `Open connection`
 
 #### Scenario: A closed submission port
 - **GIVEN** an IMAP account whose `smtp` table points at a port nothing listens on, and a queued `submit`
 - **WHEN** it runs `sync --intents-only`
-- **THEN** the run exits 4, `unreached` names `imap.smtp`, and the row reads pending with no attempt
+- **THEN** the run exits 4, an `unreached` error names `imap.smtp`, and the row reads pending with no attempt
 
 ### Requirement: A Graph mail is dated by its `Date`
 The Graph mail source SHALL fill a message's summary `date` from `sentDateTime`, Graph's reading of the `Date` header, which pimdir's mail `date` column and sort key hold (STORAGE Annex A.1). A message without one SHALL have no date, never its `receivedDateTime`.
@@ -859,7 +859,7 @@ caller announces one item rather than four
 ### Requirement: Deciding is a command, never a run
 Neverest SHALL NOT decide a content collision during a sync, and SHALL NOT open an editor or any interactive program from one, whatever is attached to its terminal. Deciding SHALL be `neverest conflict resolve` and nothing else. A resolution SHALL be judged by the queue row it staged alone: another producer's row parking in the same drain SHALL NOT fail it.
 
-`--prefer-local` and `--prefer-remote` discard a side, which is what a person may ask for by name and what a background run may never do on its own. `--interactive` SHALL hand the bodies to the merger the conflict's kind names, `contact.merger` for a card and `calendar.merger` for an event, as filesystem paths, base first, then the divergent sides, then the path to write, and SHALL take the result only on a zero exit with that path modified. A non-zero exit, or an untouched output, SHALL leave the conflict exactly as it was: an editor exits zero on a bare quit, and reading that as a choice would discard a side by accident.
+`--prefer-local` and `--prefer-remote` discard a side, which is what a person may ask for by name and what a background run may never do on its own. `--interactive` SHALL hand the bodies to the merger the conflict's kind names, `contact.merger` for a card and `calendar.merger` for an event, as filesystem paths, base first, then the divergent sides, then the path to write, and SHALL take the result only on a zero exit with that path modified. A non-zero exit, or an untouched output, SHALL leave the conflict exactly as it was: an editor exits zero on a bare quit, and reading that as a choice would discard a side by accident. The command SHALL then print its `aborted` outcome and exit 3, a decision a person still has to make, never 0.
 
 No merger SHALL be handed another kind's bodies: a tool reading cards cannot read events, so one command for every kind fails on half of them. A kind naming no merger SHALL be refused naming its key, and a mail conflict SHALL be refused outright, mail bodies being immutable.
 
@@ -875,7 +875,7 @@ A tty is not consent. A run has one when it is driven by a wrapper script, when 
 #### Scenario: An aborted merger changes nothing
 - GIVEN an interactive resolution whose merger exits non-zero, or leaves its output untouched
 - WHEN it returns
-- THEN the conflict is unchanged and nothing is pushed
+- THEN the conflict is unchanged and nothing is pushed, the command printing `aborted` and exiting 3
 
 #### Scenario: A card never reaches the calendar's merger
 - GIVEN an account naming `calendar.merger` and no `contact.merger`, and a parked card
@@ -986,7 +986,7 @@ The repetition is the point: the run wrote nothing, the state is unresolved, and
 - THEN the report names the refusal, the `UID` and the collection, and the run reports having written nothing
 
 ### Requirement: A refused write is reported, never counted as applied
-A write a remote would not take, and did not refuse as it stands ("A change refused as it stands is held and reported"), SHALL be answered `Rejected` and reported under `rejected`, naming the source, the collection, the item, what was attempted and why it failed, coded where the server's refusal says so ("A server's refusal carries its code"), in the text and `--json` reports alike. It SHALL NOT be counted among the hunks the run applied: the hunk the run derived for that item SHALL be taken back, the item patch being the plan and not the outcome. It SHALL keep appearing on every run until the write lands or the reason is removed.
+A write a remote would not take, and did not refuse as it stands ("A change refused as it stands is held and reported"), SHALL be answered `Rejected` and reported as a `rejected` error ("A run's failures are one list"), naming the source, the collection, the item, what was attempted and why it failed, coded where the server's refusal says so ("A server's refusal carries its code"), in the text and `--json` reports alike. It SHALL NOT be counted among the hunks the run applied: the hunk the run derived for that item SHALL be taken back, the item patch being the plan and not the outcome. It SHALL keep appearing on every run until the write lands or the reason is removed.
 
 A body that never reached the wire, because the blob tree no longer holds it, SHALL be reported the same way and for the same reason: the change is still in the store and the next run will try again.
 
@@ -995,22 +995,22 @@ A create refused with the no-uid-conflict precondition SHALL keep its own entry 
 #### Scenario: A server refuses a body
 - GIVEN a source that answers an update with a 412
 - WHEN the run reports
-- THEN the refusal is named under `rejected` with its error, its causes and its code, the update is not among the hunks applied, and a run with no other work does not read as having written anything
+- THEN the refusal is a `rejected` error with its message, its causes and its code, the update is not among the hunks applied, and a run with no other work does not read as having written anything
 
 ### Requirement: A change refused as it stands is held and reported
 A connector SHALL answer `Refused { reason }` (pimdir SYNC §4) for a change the remote refuses as it stands, whatever its base: an HTTP status from 400 to 499 naming the request (on DAV, Graph mail, contacts and calendars, Google Calendar, People and Gmail), all but 401 and 407 (the credentials), 408, 423, 425 and 429 (a state that passes) and 409 and 412 (a stale base); an IMAP `NO` naming `CANNOT`, `PARSE`, `TOOBIG` or `NOPERM`; and a rule the change breaks that neverest states before any request, coded `unsupported` (Graph's append outside Drafts, an override Google Calendar or Graph takes through no instance). `reason` SHALL be the failure's messages joined by `: `. A failure naming a quota exceeded or a rate limit, whatever its status, SHALL NOT be a refusal: the account's state, not the change's, which the same change outlives once the state passes, where a refusal holds it for good. Every other failure (a bare IMAP `NO`, a `BAD`, a `5xx`, a transport failure) cannot tell, and SHALL stay `Rejected` as before.
 
-The engine records a refusal on the item's binding and holds the change while it is derived under the same key, pushing nothing, and reports it every run (pimdir SYNC §5). The report SHALL list each under `refusals` (`side`, `collection`, `id`, `reason`), the `id` of a create being its key with no control character, once a run however many passes meet it, counted as a warning, the run exiting 3, and SHALL take back the hunk the run derived for that item, as for a rejected write. A refusal SHALL NOT also be reported under `rejected`. The text output SHALL print each among the warnings. Under `--json`, `sync` SHALL print a `change-refused` event for each, once the account's run ends. The change leaves the hold when the item changes (an edit, a flag, a move into a collection the source takes), which pushes it anew, or when it is removed, which withdraws a create whatever the source's rights (pimdir STORAGE §15.6).
+The engine records a refusal on the item's binding and holds the change while it is derived under the same key, pushing nothing, and reports it every run (pimdir SYNC §5). The report SHALL list each as a `refusals` error (`side`, `collection`, the item's `id`, the reason as its `error`), the `id` of a create being its key with no control character, once a run however many passes meet it, counted as a warning, the run exiting 3, and SHALL take back the hunk the run derived for that item, as for a rejected write. A refusal SHALL NOT also be a `rejected` error. The text output SHALL print each among the warnings. Under `--json`, `sync` SHALL print a `change-refused` event for each, once the account's run ends. The change leaves the hold when the item changes (an edit, a flag, a move into a collection the source takes), which pushes it anew, or when it is removed, which withdraws a create whatever the source's rights (pimdir STORAGE §15.6).
 
 #### Scenario: A message appended to a Graph folder other than Drafts
 - **GIVEN** a message staged into a Graph `Archive` folder by another source of the account
 - **WHEN** the account syncs twice
-- **THEN** the first run answers the append `Refused` with "appends to Drafts only", sending nothing, the second pushes nothing, and both report it under `refusals` and exit 3
+- **THEN** the first run answers the append `Refused` with "appends to Drafts only", sending nothing, the second pushes nothing, and both report it as a `refusals` error and exit 3
 
 #### Scenario: An IMAP append refused as it stands, and one refused for a quota
 - **GIVEN** a pending create the server answers `NO [CANNOT]`, and another it answers `NO [OVERQUOTA]`
 - **WHEN** the account syncs twice
-- **THEN** the first is appended once, held and reported under `refusals` by both runs, and the second is appended by both runs and reported under `rejected`
+- **THEN** the first is appended once, held and reported as a `refusals` error by both runs, and the second is appended by both runs and reported as a `rejected` error
 
 ### Requirement: A duplicated identity is mirrored, not reported
 One collection holding two resources under one identity SHALL be mirrored as two items, and SHALL produce no report entry of its own. The store holds what the source holds, and a report entry is for work a run could not do.
@@ -1201,20 +1201,20 @@ A run that failed to scan a collection SHALL NOT report itself in sync. "In sync
 An error crossing an engine boundary SHALL be rendered with its full chain, not with its outermost context alone. A backend keeps a server's status and response body so a caller can read them, and a wrapper that renders only the top drops exactly the part naming what the server said.
 
 ### Requirement: A failed pair collection is reported
-A pair collection whose sync fails SHALL be recorded under `collectionPatch` as a `sync` hunk naming `source`, `target` and `collection`, with its failure, and the run SHALL exit 4. It SHALL NOT be a `scan` hunk: the failure may come from either endpoint, the store or the merge, and what the collection reported before failing stands.
+A pair collection whose sync fails SHALL be recorded as a `collection-patch` error whose `hunk` is a `sync` hunk naming `source`, `target` and `collection`, and the run SHALL exit 4. It SHALL NOT be a `scan` hunk: the failure may come from either endpoint, the store or the merge, and what the collection reported before failing stands.
 
 #### Scenario: A pair whose target fails its listing
 - GIVEN a CardDAV pair whose target answers 500 to its REPORT
 - WHEN it is synced
-- THEN the report holds a `sync` hunk with the error, the text does not say the account is in sync, and the run exits 4
+- THEN the report's `errors` hold that `sync` hunk with its error, the text does not say the account is in sync, and the run exits 4
 
 ### Requirement: A store step that fails is reported
-A step of a run that fails outside any hunk SHALL be recorded under `failures`, one entry a failure: `step`, one of `queue` (the queue could not be read or drained), `bodies` (downloaded bodies could not land in the store, or a pair's full hydration failed) and `conflicts` (the waiting conflicts could not be counted) and `listing` (the server cut a listing short); `collection`, `null` for a store-wide step; and `code`, `error` and `sources`. A `failures` entry SHALL make the run incomplete (exit 4) and SHALL be printed among the errors. A step that fails SHALL NOT read as having done nothing: rows a failed read could not classify SHALL NOT be counted as drained.
+A step of a run that fails outside any hunk SHALL be recorded as a `failures` error, one a failure: `step`, one of `queue` (the queue could not be read or drained), `bodies` (downloaded bodies could not land in the store, or a pair's full hydration failed) and `conflicts` (the waiting conflicts could not be counted) and `listing` (the server cut a listing short); `collection`, `null` for a store-wide step; beside the item error's `code`, `error` and `sources`, its `id` `null`. A `failures` error SHALL make the run incomplete (exit 4) and SHALL be printed among the errors. A step that fails SHALL NOT read as having done nothing: rows a failed read could not classify SHALL NOT be counted as drained.
 
 #### Scenario: A drain that fails
 - GIVEN a store whose queue cannot be drained
 - WHEN a sync runs
-- THEN `failures` holds a `queue` entry with the error and the run exits 4
+- THEN `errors` holds a `failures` row of the `queue` step with the error and the run exits 4
 
 ### Requirement: A body fetch answers for every handle it was asked about
 A batched body fetch SHALL be treated as complete only when it answers for every handle it carried, a handle the server answered gone being answered (see "A body gone from the server is owed nothing more"). A batch answering for fewer SHALL fall back to a per-item fetch for the remainder, exactly as a batch that errors already does, and SHALL report the shortfall; a per-item fetch the server answers gone SHALL be answered gone, never fail the batch.
@@ -1295,7 +1295,7 @@ An absent optional key SHALL stay absent rather than expanding an empty path, wh
 ### Requirement: A data command describes what it prints
 A command returning data SHALL hand the printer one named `*Output` type deriving `Display` for the terminal, `Serialize` for `--json` and `JsonSchema` for the registry, and SHALL print it once. It SHALL NOT report data as a message: a message serialises as one prose string, so `--json` over one yields nothing a consumer can read, and several messages in one run yield several documents where a consumer expects one value.
 
-Every such output type SHALL be registered in the schema registry under its invocation path, the command path joined with hyphens and prefixed `neverest-`, as printed (the serialize contract, so a key always printed is required, `null` or not), and `neverest json-schema` SHALL print one schema to the standard output or write one file per command into a directory. A test SHALL run pimalaya-cli's registry check over the command tree: every runnable command described, bare `neverest` aside (it shows the help), and every key naming a command, `neverest-error` aside, so a renamed subcommand cannot leave a schema nobody can ask for.
+Every such output type SHALL be registered in the schema registry under its invocation path, the command path joined with hyphens and prefixed `neverest-`, as printed (the serialize contract, so a key always printed is required, `null` or not), and `neverest json-schema` SHALL print one schema to the standard output or write one file per command into a directory. A test SHALL run pimalaya-cli's registry check over the command tree: every runnable command described, bare `neverest` aside (it shows the help, or fails `usage-invalid` under `--json`), and every key naming a command, `neverest-error` aside, so a renamed subcommand cannot leave a schema nobody can ask for.
 
 #### Scenario: A notifier reads the sync payload from its schema
 - GIVEN a build of neverest
@@ -1336,15 +1336,20 @@ Text mode SHALL print the same events, each as one plain line on stdout before t
 - THEN the last line is the result, listing each account's report, without an `event` key, and every line before it carries one
 
 ### Requirement: A signal stops a sync cleanly
-`neverest sync` SHALL install pimalaya-cli's `signal::Shutdown` once its stores are locked. On a first SIGINT or SIGTERM the run SHALL start no new account, collection, spine or body batch, let what is in flight finish, and print its result: an account it did not reach as failed with "Interrupted before the account ran", an account it stopped in with its report marked `interrupted`. An interrupted report is incomplete, so the run exits 4. A second signal ends the process with 130. A wait for a throttled provider SHALL be cut short by the signal: the request is given up as the provider left it, never sent again, and the run stops within a fraction of a second rather than sitting out minutes.
+`neverest sync` SHALL install pimalaya-cli's `signal::Shutdown` before anything else it does, before `--init` initializes and before it waits for a store's lock. A first signal during the lock wait SHALL end the wait, the accounts of that store reported "Interrupted before the account ran", and the result printed. On a first SIGINT or SIGTERM the run SHALL start no new account, collection, spine or body batch, let what is in flight finish, and print its result: an account it did not reach as failed with "Interrupted before the account ran", an account it stopped in with its report marked `interrupted`. An interrupted report is incomplete, so the run exits 4. A second signal ends the process with 130. A wait for a throttled provider SHALL be cut short by the signal: the request is given up as the provider left it, never sent again, and the run stops within a fraction of a second rather than sitting out minutes.
 
 #### Scenario: Ctrl-C during a long download
 - GIVEN a sync downloading the bodies of a large mailbox
 - WHEN the person presses Ctrl-C
 - THEN the batches in flight land, no other starts, the result prints with `interrupted` true, and the exit code is 4
 
+#### Scenario: SIGTERM while another run holds the store
+- GIVEN a sync waiting for the lock of a store another run holds
+- WHEN a service manager sends SIGTERM
+- THEN the wait ends, the result prints the account failed "Interrupted before the account ran", and the exit code is 4 (tests/exit.rs `a_signal_during_the_lock_wait_prints_the_interrupted_result`)
+
 ### Requirement: A check opens the send channel too
-`neverest check` SHALL open the SMTP channel an endpoint declares, upgrade it and authenticate, then quit without sending. Each endpoint's row SHALL carry the channel's own check row as `smtp`, `{backend: "smtp", ok, code, error}`, `null` when the endpoint declares no channel, when its credentials did not resolve, or in a build without SMTP. A channel that does not open SHALL fail its row and make the check exit 3, the other endpoints still checked.
+`neverest check` SHALL open the SMTP channel an endpoint declares, upgrade it and authenticate, then quit without sending. Each endpoint's row SHALL carry the channel's own check row as `smtp`, pimalaya-cli's `{backend: "smtp", ok, code, error, tls}`, `null` when the endpoint declares no channel, when its credentials did not resolve, or in a build without SMTP. A channel that does not open SHALL fail its row and make the check exit 3, the other endpoints still checked.
 
 A send channel holds its own server and often its own credential. Checking the sources alone left a wrong SMTP password to surface at the first send, a queued submission parked for a reason the check had said nothing about.
 
@@ -1387,14 +1392,14 @@ A caller choosing one calendar and one address book for an account takes the mar
 - **THEN** `events` is listed with `takesTasks: false`, and the source's capabilities hold `calendar.component.vtodo` at level `none` naming the target
 
 ### Requirement: A check reports every endpoint
-`neverest check` SHALL check every endpoint of every account it runs over whatever the others answer, and SHALL print, under each account, one row per endpoint, sorted by name: `source`, `backend` (its protocol table), `ok`, `code` and `error` (`null` when it answered), then `collections` (empty when it did not answer), `capabilities` and `smtp`. A credential that does not resolve SHALL fail its endpoint's row alone. When an endpoint or its send channel did not answer, the command SHALL print the report and exit 3, never the failure object.
+`neverest check` SHALL check every endpoint of every account it runs over whatever the others answer, and SHALL print, under each account's `backends`, one row per endpoint, sorted by name: `backend` (its protocol table), `ok`, `code` and `error` (`null` when it answered) and `tls`, then `source`, `collections` (empty when it did not answer), `capabilities` and `smtp`. `tls` SHALL be what the endpoint's `tls` table, its account's inherited, configures (`{provider, crypto, cert, clientCert}`, each `null` where the build's default answers), `null` for a cleartext `imap://`, `smtp://` or `http://` URL that does not upgrade. A credential that does not resolve SHALL fail its endpoint's row alone. When an endpoint or its send channel did not answer, the command SHALL print the report and exit 3, never the failure object.
 
 A frontend adding an account shows what works and what does not in one run, rather than one failure per attempt.
 
 #### Scenario: Two endpoints that do not answer
 - GIVEN an account whose source and target both point at a closed port
 - WHEN `neverest check --json` runs
-- THEN it prints both rows under the account, each with `ok: false`, its `error` and no collection, and exits 3
+- THEN it prints both rows under the account's `backends`, each with `ok: false`, its `error`, `tls: null` over `http://` and no collection, and exits 3
 
 ### Requirement: JSON keys are camelCase
 Every output type neverest prints SHALL serialize its keys as camelCase, matching the wire formats the endpoints speak (JMAP per RFC 8620, Microsoft Graph, the Google APIs) and keeping every key reachable by dot access in jq and JavaScript, which is how the README's notifier reads a report.
@@ -1414,15 +1419,15 @@ Every output type neverest prints SHALL print every key it declares: a list as `
 #### Scenario: A quiet run still names its lists
 - GIVEN a sync that parked, refused and conflicted nothing
 - WHEN `neverest sync --json` runs
-- THEN the report holds `conflicts`, `parked`, `duplicates` and `unreached`, each `[]`, and `purged` as `null` when no sweep ran
+- THEN the report holds `conflicts`, `parked` and `errors`, each `[]`, and `purged` as `null` when no sweep ran
 
 ### Requirement: A conflict body is printed as stored
-`conflict show` SHALL print each of `base`, `local` and `remote` as a string when its stored bytes are valid UTF-8, else as the family's bytes object `{data, size, mime}`, `data` in base64 and `mime` the collection's media type, `null` when the store holds none. It SHALL NOT decode a body lossily under `--json`: the bytes printed are the ones a decision picks between. The text form MAY show such a body with its invalid sequences replaced, saying so.
+`conflict show` SHALL print each of `base`, `local` and `remote` as the family prints a vCard or an iCalendar body (pimalaya-cli cairn/spec/output.md, *Bytes are never raw under JSON*), as cardamum's card read does: `{contents, encoding}`, `contents` the text and `encoding` `utf-8` when its stored bytes are valid UTF-8, else their base64 (RFC 4648 standard alphabet, padded) and `encoding` `base64`, `null` when the store holds none. One field SHALL keep one shape whatever the bytes. It SHALL NOT decode a body lossily under `--json`: the bytes printed are the ones a decision picks between. The text form MAY show such a body with its invalid sequences replaced, saying so. The conflict itself SHALL print as `conflict list` prints its row, the item's handle on the source under `remoteId`.
 
 #### Scenario: A Latin-1 card in conflict
 - GIVEN a conflicted card whose local body is a vCard 2.1 in Latin-1
 - WHEN `neverest conflict show <id> --json` runs
-- THEN `local` is `{data, size, mime}` holding the exact bytes, `mime` `text/vcard`
+- THEN `local` is `{contents, encoding: "base64"}`, `contents` the exact bytes in base64, and a UTF-8 side reads `{contents, encoding: "utf-8"}`
 
 ### Requirement: The mode is data
 `check` and `init` SHALL print the account's mode as an object, `{sources, targets, oneWay, retain}`: the source and target names sorted, whether the sources are authoritative, and whether the store keeps bodies. The sentence describing it SHALL be its text form only.
@@ -2087,7 +2092,7 @@ A `Remove` relocating a CalDAV member into another calendar SHALL move it with W
 ### Requirement: A truncated `sync-collection` listing is incomplete
 A `sync-collection` answer the server truncates (RFC 6578 §3.6, a `507` row) SHALL be followed from the sync token it carries until an answer is not truncated, a bounded number of times. A listing whose last answer was still truncated, the bound reached or the answer carrying no token, SHALL be returned incomplete, read as a delta: what it lists lands and no member is inferred removed from its absence. A truncated answer without a token SHALL end the listing, never restart it from its start, and the checkpoint SHALL stay the one the listing started from.
 
-A listing returned incomplete for a truncation, a `sync-collection` or a `PROPFIND` one, SHALL be reported under `failures` as a `listing` step naming the collection, and the run SHALL exit 4, every run the server cuts it again: the members past the cut never reached the store, and a run saying it is in sync hides them.
+A listing returned incomplete for a truncation, a `sync-collection` or a `PROPFIND` one, SHALL be reported as a `failures` error of the `listing` step naming the collection, and the run SHALL exit 4, every run the server cuts it again: the members past the cut never reached the store, and a run saying it is in sync hides them.
 
 #### Scenario: A first listing the server keeps truncating
 - **GIVEN** a CardDAV server truncating every `sync-collection` answer of a new address book
@@ -2272,7 +2277,7 @@ A stated identity the store filed with a leading `esc:` (pimdir STORAGE §9), be
 A push the connector gave no outcome for SHALL stay pending (pimdir SYNC §5), and the run SHALL report the count the last pass of each collection left under `unanswered`, with the side and the collection, and SHALL exit 4: the next run pushes them again.
 
 ### Requirement: A rejected create is reported once
-A create the engine reports its server rejected (`rejected_creates`) SHALL be reported under `rejected`: with the reason the connector recorded, or under `duplicates` for a duplicate `UID`, else as a `create` whose server gave no reason. It SHALL be reported once whichever records it.
+A create the engine reports its server rejected (`rejected_creates`) SHALL be reported as a `rejected` error: with the reason the connector recorded, or as a `duplicates` error for a duplicate `UID`, else as a `create` whose server gave no reason. It SHALL be reported once whichever records it.
 
 ### Requirement: A resolution names what the push supports in part
 `conflict resolve` SHALL stage its body in one step with the gate (`enqueue_with_body_checked`) and SHALL print the capabilities a source supports in part that the next push relies on, under `partial` in its JSON, one row each, `{capability, source, detail}`: `capability` as the store names it, `source` as the account's configuration names it, `detail` what the source leaves out or `null`. The text SHALL print a row as a line naming the source and the capability, then its detail.
@@ -2442,7 +2447,7 @@ A `submit`, `calendar-reply`, `calendar-cancel`, `collection-create`, `collectio
 - **THEN** nothing is sent, the row reads pending with no attempt, and the report names no failed send
 
 ### Requirement: A server's refusal carries its code
-A failure a server refused SHALL carry a code of the vocabulary Himalaya shares, read from the typed error of the protocol that answered it, wherever a row or an account reports it, the failure object a failed command prints included, through pimalaya-cli's `with_code`:
+A failure a server refused SHALL carry a code of the vocabulary Himalaya shares, read from the typed error of the protocol that answered it, wherever an error row or an account reports it, the failure object a failed command prints included, through pimalaya-cli's `with_code`:
 
 | Code | When |
 |---|---|
@@ -2463,29 +2468,48 @@ The codes are read once a row is built, from the chain the client returned, so t
 #### Scenario: A full mailbox
 - GIVEN an IMAP server answering an `APPEND` with `NO [OVERQUOTA]`
 - WHEN a run reports the refused append
-- THEN its `rejected` row's `code` is `quota-exceeded`
+- THEN its `rejected` error's `code` is `quota-exceeded`
 
 #### Scenario: A refused recipient
 - GIVEN an SMTP server refusing the recipient of a queued send with `550 5.1.1`
 - WHEN `sync --intents-only` runs
-- THEN the send parks, its `submitted` row coded `recipient-refused` with the reply among its `sources`, and the run exits 3
+- THEN the send parks, its `submitted` error coded `recipient-refused` with the reply among its `sources`, and the run exits 3
 
 #### Scenario: A read-only address book
 - GIVEN a CardDAV server answering an update 403 with no precondition
 - WHEN a run reports the refused update
-- THEN its `rejected` row's `code` is `permission-denied`, where a 403 naming `valid-address-data` carries none
+- THEN its `rejected` error's `code` is `permission-denied`, where a 403 naming `valid-address-data` carries none
 
-### Requirement: A failing row carries its code and its causes
-A report row naming what a run could not do to one item or one endpoint SHALL carry, beside its own keys, those of pimalaya-cli's item error but its id: `code`, `null` when the failure carries none; `error`, the outermost message; and `sources`, the messages of its causes, outermost first. These rows are the `collectionPatch` and `itemPatch` entries, `failures`, `rejected`, `submitted`, `intents`, `parked` and `unreached` of a sync, and `parked` of a drain. A `rejected` row SHALL be pimalaya-cli's `ItemError` itself, its `id` the item's handle on the side that refused it, beside `side`, `collection` and `kind`. A row that succeeded SHALL carry `code` and `error` null and `sources` empty. The text output SHALL print a row's message and its causes as one chain, as `{err:#}` reads.
+### Requirement: A run's failures are one list
+A sync report SHALL list everything the run could not do in one `errors` list, pimalaya-cli's item error per failure (pimalaya-cli cairn/spec/error.md, *An item error is the failure object of one item*): `id` the item's handle on the side when the failure is one item's (a rejected write, a refused change), the public id of the item an intent addresses, `null` for a hunk, a store step, a send or an endpoint; `code`, `null` when the failure carries none; `error`, the outermost message; `sources`, the messages of its causes, outermost first. After those four keys each row SHALL carry `kind`, the list the report held that failure in before its failures were one list (owner, 2026-11-20, reversing the named failure lists of 2026-11-17), then the keys that kind needs:
 
-A parked queue row SHALL carry the error the store recorded, with no code and no causes, the store keeping its text alone. An unconfirmed send's `error` SHALL begin `unconfirmed: `, its causes under `sources`, so its message and causes joined read as its parked row does.
+| `kind` | Its own keys | Exit |
+|---|---|---|
+| `collection-patch` | `hunk`, the collection hunk that did not apply (a `*` scan of an endpoint that did not open, a pair's `sync`) | 4 |
+| `item-patch` | `hunk`, the item hunk that did not apply | 4 |
+| `failures` | `step` (`queue`, `bodies`, `conflicts`, `listing`) and `collection`, `null` for a store-wide step | 4 |
+| `rejected` | `side`, `collection`, `action` (`update`, `append`, `copy`, `delete`, `move`, `set-flags`) | 3 |
+| `duplicates` | `side`, `collection`, `uid`, coded `item-duplicate` | 3 |
+| `refusals` | `side`, `collection`, the reason the store keeps as `error` | 3 |
+| `submitted` | `row`, `collection`, `subject`, `parked`, `unconfirmed` | 3 parked, else 4 |
+| `intents` | `row`, `collection`, `intent`, `source`, `parked` | 3 parked, else 4 |
+| `unreached` | `endpoint` | 4 |
 
-An account's row of `sync`, `sync --queue-only` and `init` and the index refresh SHALL carry `code`, `error` and `sources` the same way, `error` the outermost message, `null` and `[]` when it ran. Their `code` SHALL be read as a row's is, a server's refusal included; the index refresh's is the store's (`index-version`, `index-fts5-missing`). An account's row of `init` SHALL list the endpoints it opened under `opened`, sorted, those it opened before a failure included, empty for an account initialized already.
+A row waiting for a person exits 3, any other 4, which wins. The lists reporting what the run did (`collectionPatch`, `itemPatch`, `submitted`, `intents`, `drained`) SHALL hold what it did alone; the lists reporting a state rather than a failure SHALL stay lists of their own: `conflicts`, `parked` (queue rows the store holds, as `pimdir queue list` prints them), `absences`, `unreadable`, `unanswered`, `throttled`, `unsettled`, `coverage`, `collisions`, `overruled`, `forbidden`, `waiting`, `disagreed`, `unlisted` and `clipped`. The text output SHALL print a row's message and its causes as one chain, as `{err:#}` reads, a `rejected`, `duplicates` or `refusals` row among the warnings and a failed hunk or step among the errors.
+
+An unconfirmed send's `error` SHALL begin `unconfirmed: `, its causes under `sources`, so its message and causes joined read as its parked row does.
+
+An account's row of `sync`, `sync --queue-only` and `init` and the index refresh SHALL carry `code`, `error` and `sources` the same way, `error` the outermost message, `null` and `[]` when it ran: an account that did not run is the account's own outcome, not one item's. Their `code` SHALL be read as a row's is, a server's refusal included; the index refresh's is the store's (`index-version`, `index-fts5-missing`). An account's row of `init` SHALL list the endpoints it opened under `opened`, sorted, those it opened before a failure included, empty for an account initialized already.
 
 #### Scenario: A refused update under `--json`
 - GIVEN a CardDAV source refusing an update 403
 - WHEN `neverest --json sync` reports it
-- THEN its `rejected` row reads `{side, collection, id, action: "update", code: "permission-denied", error: "Cannot update <id> in <collection>", sources: ["WebDAV server returned HTTP 403…"]}`, and the text prints `Cannot update <id> in <collection>: WebDAV server returned HTTP 403…`
+- THEN `errors` holds `{id, code: "permission-denied", error: "Cannot update <id> in <collection>", sources: ["WebDAV server returned HTTP 403…"], kind: "rejected", side, collection, action: "update"}`, `itemPatch` no update of it, and the text prints `Cannot update <id> in <collection>: WebDAV server returned HTTP 403…`
+
+#### Scenario: A sync failing two ways
+- GIVEN a sync whose CardDAV source refused one update and whose CalDAV source was not reached
+- WHEN its result prints with `--json`
+- THEN `errors` holds a `rejected` row, an `unreached` row naming `caldav` under `endpoint` and a `collection-patch` row of its `*` scan, and the run exits 4
 
 #### Scenario: An account that failed
 - GIVEN an account whose store cannot be opened
@@ -2498,12 +2522,12 @@ An account's row of `sync`, `sync --queue-only` and `init` and the index refresh
 - THEN its row reads `error: "Initialize imap"`, the refusal under `sources`, `opened: []`, and the run exits 4
 
 ### Requirement: A queue row is keyed `row`
-Every report row naming a row of the store's queue SHALL name it `row`, as himalaya's `pimdir queue list` does: `applied` and `parked` of a drain; `parked`, `submitted` and `intents` of a sync; and an overruled body a queued action settled (`id` naming the item a side's write settled stays `id`). A parked row, of a drain or of a sync, SHALL read `{row, collection, kind, producer, queuedAt, attempts, code, error, sources}`: `kind` the action as the store spells it, kebab-case (`add`, `update`, `set-flags`, `remove`, `move`, `copy`, `submit`, `calendar-reply`…), `queuedAt` the instant the store stamped the row with, `attempts` how many times it was tried before it was parked. A drained row SHALL read `{row, collection, kind, seq}`. A rejected write SHALL spell its `action` the same way (`set-flags`).
+Every report row naming a row of the store's queue SHALL name it `row`, as `pimdir queue list` does: `applied` and `parked` of a drain; `parked`, `submitted` and `intents` of a sync, and the `submitted` and `intents` errors; and an overruled body a queued action settled (`id` naming the item a side's write settled stays `id`). A parked row, of a drain or of a sync, SHALL be the queue row pimalaya-cli names (cairn/spec/output.md, *A queue row keeps one shape*), `{row, handle, kind, collection, linkId, itemId, producer, queuedAt, attempts, unconfirmed, error}`: `handle` the row under the store's identity, `<store-id>.<incarnation>.<row>` (pimdir STORAGE §4.5), which a frontend's `pimdir queue show` and `cancel` take; `kind` the action as the store spells it, kebab-case (`add`, `update`, `set-flags`, `remove`, `move`, `copy`, `submit`, `calendar-reply`…); `linkId` the link id of the item an `add` or an intent creates, `itemId` the public id of the stored item the row addresses, each `null` when the payload names none or does not decode; `queuedAt` the instant the store stamped the row with; `attempts` how many times it was tried before it was parked; `unconfirmed` whether its outcome is unknown, its `error` then beginning `unconfirmed: `; `error` the text the store recorded. Neverest syncs every domain, so no domain label follows. A drained row SHALL read `{row, collection, kind, seq}`. A rejected write SHALL spell its `action` the same way (`set-flags`).
 
 #### Scenario: A parked flag change
 - GIVEN a `set-flags` row himalaya queued, which the drain parks
 - WHEN `neverest --json sync --queue-only` reports it
-- THEN its `parked` row reads `{row, collection, kind: "set-flags", producer: "himalaya", queuedAt, attempts, code: null, error, sources: []}`
+- THEN its `parked` row reads `{row, handle: "<store-id>.<incarnation>.<row>", kind: "set-flags", collection, linkId: null, itemId: "<seq>", producer: "himalaya", queuedAt, attempts, unconfirmed: false, error}`, and the next `--queue-only` reports it again and exits 3
 
 ### Requirement: A DAV source may name its home set
 A `carddav` or `caldav` table SHALL take `home`, the address book or calendar home set as a full URL, as cardamum and calendula do: the session SHALL connect to it and list its collections there, discovering no principal and no home set, `server` then being ignored. Without `home`, `server` SHALL be required and the home set discovered from it as before. A table naming neither SHALL fail when the account resolves, naming both keys.
@@ -2534,15 +2558,20 @@ An account SHALL take `proxy.url`, `proxy.username` and `proxy.password` (a secr
 - THEN that source connects through the SOCKS proxy and every other through the HTTP one
 
 ### Requirement: A conflict's id prints as a string
-`conflict list`, `conflict show` and `conflict resolve` SHALL print the item's public id (the store's `seq`) under `id` as a string, as every Pimalaya binary prints a store id; `conflict show` and `conflict resolve` SHALL take it on the command line as `conflict list` prints it.
+`conflict list`, `conflict show` and `conflict resolve` SHALL print the item's public id (the store's `seq`) under `id` as a string, as every Pimalaya binary prints a store id, and the item's handle on the source under `remoteId` (`handle` is the queue row's key, pimalaya-cli cairn/spec/output.md); `conflict show` and `conflict resolve` SHALL take the `id` on the command line as `conflict list` prints it. A sync report's conflict row SHALL print the same `id`, `null` while the store names the item by none, the same `collection` as `conflict list` spells it, the store's `<account>/<namespace>/<name>`, the `side` and the handle as `remoteId`, so a script resolves the conflict a run reported. An id no conflict of the account has SHALL fail coded `conflict-not-found`, exiting 1.
 
 #### Scenario: A script settles the conflict it listed
 - GIVEN a store holding one divergence on item 42
 - WHEN `neverest conflict list --json` lists it
 - THEN its row reads `id: "42"`, and `neverest conflict resolve "42" --prefer-local` settles it
 
+#### Scenario: A script settles the conflict a run reported
+- GIVEN a run that parked a divergence on a card, item 42 of `work/carddav/contacts`
+- WHEN `neverest sync --json` reports it
+- THEN its `conflicts` row reads `{id: "42", collection: "work/carddav/contacts", side: "carddav", remoteId: "<href>"}`, and `neverest conflict show 42` shows it
+
 ### Requirement: A report lists its patches as arrays
-A sync report SHALL list the hunks it applied under `collectionPatch` and `itemPatch`, each an array of entries `{hunk, code, error, sources}`, in the order the run applied them; the schema SHALL name their entries `CollectionHunkEntry` and `ItemHunkEntry`. The report SHALL NOT repeat `account`, which the account row around it names.
+A sync report SHALL list the hunks it applied under `collectionPatch` and `itemPatch`, each an array of the hunks, in the order the run applied them; a hunk that did not apply SHALL be a `collection-patch` or `item-patch` error instead ("A run's failures are one list"). The report SHALL NOT repeat `account`, which the account row around it names.
 
 #### Scenario: A quiescent account
 - GIVEN an account whose collections are in sync
@@ -2572,3 +2601,19 @@ The rules below were kept in inline comments until the-v1-review removed every `
 
 ### Requirement: A connection presents a client certificate when configured
 Every `tls` table (a backend's, `smtp`'s) SHALL read an optional `client` table naming a PEM certificate (`cert`, optionally followed by its intermediates) and its PEM private key (`key`, PKCS#8 under native-tls), both shell-expanded, and the connection SHALL present them when the server asks for one, as himalaya does. A `client` table missing either key SHALL be refused at load.
+
+### Requirement: An account's TLS reaches every endpoint field by field
+An account SHALL take a `tls` table, as himalaya does and with its keys (`provider`, `rustls.crypto`, `cert`, `client.cert`, `client.key`; pimalaya-config cairn/spec/toml.md, *Every binary spells its TLS table alike*), and every `tls` table of its endpoints (sugar, `sources.<name>`, `targets.<name>`) and of their `smtp` channels SHALL take each field it leaves unset from the account's: the provider, the rustls crypto, the trusted certificate, and the client certificate and its key as one unit. A field an endpoint sets SHALL win. The inheritance SHALL hold wherever an endpoint is opened or checked, the namespaced account a run builds included. The type SHALL stay neverest's own, a copy of himalaya's: a shared type would be rewritten whole by a binary extending one field.
+
+#### Scenario: One CA for every endpoint, one provider overridden
+- GIVEN an account naming `tls.provider = "native-tls"` and `tls.cert = "/etc/ca.pem"`, an `imap` source naming `tls.provider = "rustls"` and an `smtp` channel naming no `tls`
+- WHEN `neverest --json account check` runs
+- THEN the `imap` row's `tls` reads `{provider: "rustls", crypto: null, cert: "/etc/ca.pem", clientCert: null}` and its `smtp` row's `{provider: "native-tls", crypto: null, cert: "/etc/ca.pem", clientCert: null}` (src/config.rs `the_account_tls_is_inherited_field_by_field`)
+
+### Requirement: An unknown conflict and an uninitialized account are coded
+A `conflict show` or `conflict resolve` naming an id no conflict of the account has SHALL fail coded `conflict-not-found`, exit 1. An account a run reaches that no `init` initialized SHALL fail coded `account-uninitialized`, its message naming `neverest init -a <name>` and `neverest sync --init -a <name>`, in a sync's account row, a drain's and a conflict command's failure alike. A create a side refuses for a duplicate `UID` SHALL be coded `item-duplicate`, the code the domains share (pimalaya-cli cairn/spec/error.md).
+
+#### Scenario: A sync over an uninitialized account
+- GIVEN a configured account no `init` ran over
+- WHEN `neverest --json sync --queue-only` runs
+- THEN its row reads `code: "account-uninitialized"` and the run exits 4

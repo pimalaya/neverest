@@ -156,7 +156,7 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
     assert_eq!(intent_errors(&report), vec![Value::Null], "{report}");
 
     let checked = check(&config, &state);
-    let created = checked["sources"][0]["collections"]
+    let created = checked["backends"][0]["collections"]
         .as_array()
         .expect("collections")
         .iter()
@@ -183,7 +183,8 @@ fn a_queued_calendar_is_created_on_the_caldav_server() {
     let report = String::from_utf8_lossy(&output.stdout).into_owned();
     assert_eq!(output.status.code(), Some(3), "{report}");
     let intents = account_report(&report);
-    assert_eq!(intents["intents"][0]["parked"], true, "{report}");
+    assert_eq!(intents["errors"][0]["kind"], "intents", "{report}");
+    assert_eq!(intents["errors"][0]["parked"], true, "{report}");
 
     let _ = Command::new("curl")
         .args(["-sS", "-o", "/dev/null", "-X", "DELETE", "-u"])
@@ -261,15 +262,14 @@ fn account_report(stdout: &str) -> Value {
 /// The error of each intent the report names, `null` for one performed.
 fn intent_errors(report: &str) -> Vec<Value> {
     let report = account_report(report);
-    report["intents"]
-        .as_array()
-        .map(|intents| {
-            intents
-                .iter()
-                .map(|intent| intent.get("error").cloned().unwrap_or(Value::Null))
-                .collect()
-        })
-        .unwrap_or_default()
+    let performed = report["intents"].as_array().cloned().unwrap_or_default();
+    let failed = report["errors"].as_array().cloned().unwrap_or_default();
+    let failed = failed.into_iter().filter(|row| row["kind"] == "intents");
+
+    let performed = performed.iter().map(|_| Value::Null);
+    performed
+        .chain(failed.map(|row| row["error"].clone()))
+        .collect()
 }
 
 /// The account's entry of a check.
@@ -281,7 +281,7 @@ fn check(config: &Path, state: &Path) -> Value {
 
 /// The collection ids the server lists.
 fn listed(config: &Path, state: &Path) -> Vec<String> {
-    check(config, state)["sources"][0]["collections"]
+    check(config, state)["backends"][0]["collections"]
         .as_array()
         .expect("collections")
         .iter()
@@ -422,7 +422,8 @@ fn a_queued_folder_is_renamed_then_deleted_on_the_imap_server() {
     let report = String::from_utf8_lossy(&output.stdout).into_owned();
     assert_eq!(output.status.code(), Some(3), "{report}");
     let parsed = account_report(&report);
-    assert_eq!(parsed["intents"][0]["parked"], true, "{report}");
+    assert_eq!(parsed["errors"][0]["kind"], "intents", "{report}");
+    assert_eq!(parsed["errors"][0]["parked"], true, "{report}");
     assert!(listed(&config, &state).contains(&renamed));
     assert!(PimdirStore::cancel_action(&store, id).expect("cancel the parked delete"));
 

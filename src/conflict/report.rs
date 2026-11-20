@@ -5,8 +5,8 @@
 
 use std::fmt;
 
+use base64_codec::codec::Base64Codec;
 use io_pimdir::capability::PimdirPartial;
-use pimalaya_cli::output::Bytes;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -23,8 +23,6 @@ pub struct ConflictListOutput {
 
 impl fmt::Display for ConflictListOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f)?;
-
         if self.conflicts.is_empty() {
             return writeln!(f, "No item is waiting for a decision");
         }
@@ -39,7 +37,7 @@ impl fmt::Display for ConflictListOutput {
             writeln!(f, " - {conflict}")?;
         }
 
-        writeln!(f)
+        Ok(())
     }
 }
 
@@ -57,8 +55,8 @@ pub struct ConflictSummary {
     /// The source whose own sync is stuck on the divergence, as the
     /// account's configuration names it.
     pub source: String,
-    /// The item's handle on that source.
-    pub handle: String,
+    /// The item's handle on that source, its id on the remote side.
+    pub remote_id: String,
     /// The remote revision the divergence was recorded at.
     pub revision: Option<String>,
     /// Whether a decision can be made about it at all.
@@ -75,7 +73,7 @@ impl From<&Conflict> for ConflictSummary {
             account: conflict.account.clone(),
             collection: conflict.collection.clone(),
             source: conflict.endpoint().to_owned(),
-            handle: conflict.handle.clone(),
+            remote_id: conflict.handle.clone(),
             revision: conflict.revision.clone(),
             resolvable: conflict.resolvable(),
         }
@@ -88,12 +86,12 @@ impl fmt::Display for ConflictSummary {
             id,
             collection,
             source,
-            handle,
+            remote_id,
             resolvable,
             ..
         } = self;
 
-        write!(f, "{id} in {collection} on {source} ({handle})")?;
+        write!(f, "{id} in {collection} on {source} ({remote_id})")?;
 
         if !resolvable {
             write!(f, ", waiting for its diverging body")?;
@@ -120,13 +118,12 @@ pub struct ConflictShowOutput {
 }
 
 impl ConflictShowOutput {
-    /// Takes the three bodies as stored, typed by the collection's media type.
+    /// Takes the three bodies as stored.
     ///
-    /// Every kind reaching a conflict is text: mail alone is
+    /// Every kind reaching a conflict is vCard or iCalendar: mail alone is
     /// immutable-content, and it reaches none of this.
     pub fn new(conflict: &Conflict, sides: Sides) -> Self {
-        let body =
-            |body: Option<Vec<u8>>| body.map(|body| ConflictBody::new(body, &conflict.media_type));
+        let body = |body: Option<Vec<u8>>| body.map(ConflictBody::new);
 
         Self {
             conflict: conflict.into(),
@@ -137,25 +134,38 @@ impl ConflictShowOutput {
     }
 }
 
-/// One side of a divergence: its text when the stored bytes are UTF-8,
-/// else the bytes themselves, never decoded lossily.
+/// One side of a divergence as the family prints a vCard or an iCalendar
+/// body, its text, or its base64 when not UTF-8, beside its `encoding`.
 #[derive(Debug, Serialize, JsonSchema)]
-#[serde(untagged)]
-pub enum ConflictBody {
-    /// The body, valid UTF-8.
-    Text(String),
-    /// The body, not valid UTF-8 (a vCard 2.1 in Latin-1, for one).
-    Bytes(Bytes),
+#[serde(rename_all = "camelCase")]
+pub struct ConflictBody {
+    /// The body as text, or its bytes in base64 when `encoding` is
+    /// `base64`.
+    pub contents: String,
+    /// How `contents` spells the bytes.
+    pub encoding: ConflictEncoding,
+    /// The bytes, which the text form prints.
+    #[serde(skip)]
+    pub bytes: Vec<u8>,
 }
 
 impl ConflictBody {
-    fn new(body: Vec<u8>, media_type: &str) -> Self {
-        match String::from_utf8(body) {
-            Ok(text) => Self::Text(text),
-            Err(err) => Self::Bytes(Bytes {
-                data: err.into_bytes(),
-                mime: media_type.to_owned(),
-            }),
+    /// The body `bytes`, as text when they are UTF-8, else in base64.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        let (contents, encoding) = match String::from_utf8(bytes.clone()) {
+            Ok(text) => (text, ConflictEncoding::Utf8),
+            Err(_) => {
+                let mut encoded = Vec::new();
+                Base64Codec::default().encode_vec(&bytes, &mut encoded);
+                let encoded = String::from_utf8_lossy(&encoded).into_owned();
+                (encoded, ConflictEncoding::Base64)
+            }
+        };
+
+        Self {
+            contents,
+            encoding,
+            bytes,
         }
     }
 }
@@ -164,20 +174,29 @@ impl ConflictBody {
 /// store keep the bytes.
 impl fmt::Display for ConflictBody {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Text(text) => writeln!(f, "{}", text.trim_end()),
-            Self::Bytes(bytes) => {
-                writeln!(f, "(not UTF-8, invalid sequences shown as U+FFFD)")?;
-                let text = String::from_utf8_lossy(&bytes.data);
-                writeln!(f, "{}", text.trim_end())
-            }
+        if self.encoding == ConflictEncoding::Base64 {
+            writeln!(f, "(not UTF-8, invalid sequences shown as U+FFFD)")?;
         }
+
+        let text = String::from_utf8_lossy(&self.bytes);
+        writeln!(f, "{}", text.trim_end())
     }
+}
+
+/// How a conflict body's `contents` spells its bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
+pub enum ConflictEncoding {
+    /// The text itself, the bytes being valid UTF-8.
+    #[serde(rename = "utf-8")]
+    Utf8,
+    /// The standard base64 alphabet, padded (RFC 4648 §4), the bytes not
+    /// being valid UTF-8.
+    #[serde(rename = "base64")]
+    Base64,
 }
 
 impl fmt::Display for ConflictShowOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f)?;
         writeln!(f, "Conflict {conflict}", conflict = self.conflict)?;
 
         for (name, body) in [
@@ -196,7 +215,7 @@ impl fmt::Display for ConflictShowOutput {
             }
         }
 
-        writeln!(f)
+        Ok(())
     }
 }
 
@@ -317,23 +336,26 @@ mod tests {
 
     use super::ConflictBody;
 
-    /// A body that is not UTF-8 prints its exact bytes, where it was
-    /// decoded with U+FFFD replacements.
+    /// A body that is not UTF-8 prints its exact bytes in base64 beside
+    /// its encoding, one shape whatever the bytes, as a card read does.
     #[test]
-    fn a_latin1_body_prints_its_bytes() {
-        let body = ConflictBody::new(b"FN:Ren\xe9\r\n".to_vec(), "text/vcard");
+    fn a_latin1_body_prints_its_bytes_in_base64() {
+        let body = ConflictBody::new(b"FN:Ren\xe9\r\n".to_vec());
 
         assert_eq!(
             serde_json::to_value(&body).unwrap(),
-            json!({"data": "Rk46UmVu6Q0K", "size": 9, "mime": "text/vcard"}),
+            json!({"contents": "Rk46UmVu6Q0K", "encoding": "base64"}),
         );
     }
 
     #[test]
-    fn a_utf8_body_prints_as_text() {
-        let body = ConflictBody::new("FN:René\r\n".as_bytes().to_vec(), "text/vcard");
+    fn a_utf8_body_prints_as_text_beside_its_encoding() {
+        let body = ConflictBody::new("FN:René\r\n".as_bytes().to_vec());
 
-        assert_eq!(serde_json::to_value(&body).unwrap(), json!("FN:René\r\n"));
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            json!({"contents": "FN:René\r\n", "encoding": "utf-8"}),
+        );
     }
 
     /// A settled divergence names what a source supports in part as rows a

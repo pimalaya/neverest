@@ -26,7 +26,7 @@ const PASS: &str = "P!malaya-test-2026";
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :8080 and --ignored"]
 fn a_caldav_check_names_the_default_calendar_the_scheduling_inbox_states() {
     let report = check("caldav", &format!("{DAV}/cal/"));
-    let source = &report["sources"][0];
+    let source = &report["backends"][0];
     let collections = source["collections"].as_array().expect("collections");
 
     let defaults: Vec<&Value> = collections
@@ -43,7 +43,7 @@ fn a_caldav_check_names_the_default_calendar_the_scheduling_inbox_states() {
 #[ignore = "requires a Stalwart instance (./tests/stalwart2.sh) on :8080 and --ignored"]
 fn a_carddav_check_names_no_default_address_book() {
     let report = check("carddav", &format!("{DAV}/card/"));
-    let source = &report["sources"][0];
+    let source = &report["backends"][0];
     let collections = source["collections"].as_array().expect("collections");
 
     assert!(!collections.is_empty(), "{report}");
@@ -168,7 +168,7 @@ fn a_check_names_every_endpoint_that_did_not_answer() {
         "{report}"
     );
 
-    let sources = report["sources"].as_array().expect("sources");
+    let sources = report["backends"].as_array().expect("backends");
     let names: Vec<&str> = sources
         .iter()
         .filter_map(|s| s["source"].as_str())
@@ -180,6 +180,7 @@ fn a_check_names_every_endpoint_that_did_not_answer() {
         assert!(source["error"].is_string(), "{report}");
         assert_eq!(source["collections"], serde_json::json!([]), "{report}");
         assert!(source["smtp"].is_null(), "{report}");
+        assert!(source["tls"].is_null(), "a cleartext endpoint: {report}");
     }
     assert!(
         !sources[1]["capabilities"].as_array().unwrap().is_empty(),

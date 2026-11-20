@@ -133,7 +133,7 @@ fn account_check_is_the_check_and_check_its_hidden_name() {
 
         assert_eq!(output.status.code(), Some(3), "{command:?}: {stdout}");
         let json: Value = serde_json::from_str(&stdout).unwrap();
-        let source = &json["accounts"][0]["sources"][0];
+        let source = &json["accounts"][0]["backends"][0];
         assert_eq!(source["backend"], "imap", "{json}");
         assert_eq!(source["ok"], false, "{json}");
         assert_eq!(source["smtp"]["ok"], false, "{json}");

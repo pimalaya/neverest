@@ -287,7 +287,7 @@ fn a_page_s_bodies_land_before_its_round_closes() {
         .as_array()
         .expect("item patch")
         .iter()
-        .filter(|entry| entry["hunk"]["kind"] == "fetch")
+        .filter(|entry| entry["kind"] == "fetch")
         .count();
     assert_eq!(
         fetched,

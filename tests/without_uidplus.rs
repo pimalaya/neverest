@@ -434,9 +434,10 @@ fn a_move_into_a_mailbox_holding_its_identity_is_held() {
         let (code, report) = client.sync(args);
 
         assert_eq!(code, Some(3), "run {run}: {report}");
-        let rejected = report["rejected"].as_array().unwrap();
+        let rejected = report["errors"].as_array().unwrap();
         assert_eq!(rejected.len(), 1, "run {run}: {report}");
-        assert_eq!(rejected[0]["kind"], "delete", "run {run}: {report}");
+        assert_eq!(rejected[0]["kind"], "rejected", "run {run}: {report}");
+        assert_eq!(rejected[0]["action"], "delete", "run {run}: {report}");
         assert_eq!(rejected[0]["collection"], "Held", "run {run}: {report}");
         assert_eq!(
             other.uids("Held", ID),
@@ -494,10 +495,10 @@ fn an_append_without_appenduid_is_bound_by_its_message_id() {
 
     let (code, report) = client.sync(&[]);
     assert_eq!(code, Some(0), "{report}");
-    assert_eq!(report["rejected"], serde_json::json!([]), "{report}");
+    assert_eq!(report["errors"], serde_json::json!([]), "{report}");
     let added = report["itemPatch"].as_array().unwrap();
     assert_eq!(added.len(), 1, "{report}");
-    assert_eq!(added[0]["hunk"]["kind"], "add", "{report}");
+    assert_eq!(added[0]["kind"], "add", "{report}");
     let uids = other.uids("Box", ID);
     assert_eq!(uids.len(), 1, "appended once");
     assert_eq!(client.handles("Box", ID), [uids[0].to_string()]);

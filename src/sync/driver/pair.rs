@@ -366,16 +366,13 @@ impl OpenPair {
                     warn!("cannot drop {id} from the store: {err}");
                 }
             }
-            report.collection_patch.push(PatchEntry::new(hunk, error));
+            report.note_collection_hunk(hunk, error);
         }
 
         let mut present_left = left_filtered.clone();
         let mut present_right = right_filtered.clone();
-        for entry in &report.collection_patch {
-            if entry.error.is_some() {
-                continue;
-            }
-            if let CollectionHunk::Create { side, collection } = &entry.hunk {
+        for hunk in &report.collection_patch {
+            if let CollectionHunk::Create { side, collection } = hunk {
                 if *side == left_name {
                     present_left.insert(collection.clone());
                 } else if *side == right_name {
@@ -485,9 +482,7 @@ impl OpenPair {
                 target: right_name.clone(),
                 collection: name.to_owned(),
             };
-            report
-                .collection_patch
-                .push(PatchEntry::new(hunk, Some(err)));
+            report.note_collection_hunk(hunk, Some(err));
             return;
         }
 
@@ -506,11 +501,7 @@ impl OpenPair {
         {
             warn!("{name} full hydration error: {err:#}");
             error = Some(Failure::of(&err));
-            report.failures.push(StepFailure::new(
-                FailedStep::Bodies,
-                Some(name.to_owned()),
-                &err,
-            ));
+            report.note_step_failure(FailedStep::Bodies, Some(name.to_owned()), &err);
         }
         itemize_noted(&mut self.left, report);
         itemize_noted(&mut self.right, report);
@@ -749,7 +740,7 @@ fn reconcile_side(
             &ctx.name,
             report,
         )?,
-        None => itemize_conflicted(&side.events, store, collection, display, &ctx.name, report)?,
+        None => itemize_conflicted(&side.events, store, collection, &ctx.name, report)?,
     }
 
     Ok(side)

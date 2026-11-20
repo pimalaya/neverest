@@ -80,33 +80,29 @@ pub(super) fn drain_submits(
 
     #[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
     {
-        let entry =
-            |intent: &submit::SubmitIntent, failure: Option<Failure>, parked, unconfirmed| {
-                let (code, error, sources) = Failure::row(failure);
-                SubmitEntry {
-                    id: intent.id,
-                    collection: intent.collection.clone(),
-                    subject: intent.subject(),
-                    code,
-                    error,
-                    sources,
-                    parked,
-                    unconfirmed,
-                }
-            };
+        let entry = |intent: &submit::SubmitIntent| SubmitEntry {
+            id: intent.id,
+            collection: intent.collection.clone(),
+            subject: intent.subject(),
+        };
+        let failed = |failure, parked, unconfirmed| {
+            Some(SubmitFailure {
+                failure,
+                parked,
+                unconfirmed,
+            })
+        };
 
         let mut channel = match open_send_channel(account_config, account, sides, intents.len()) {
             Ok(channel) => channel,
             Err(Unopened::Pending) => return,
-            Err(Unopened::Unreached(unreached)) => {
-                report.unreached.push(unreached);
+            Err(Unopened::Unreached { endpoint, failure }) => {
+                report.note_unreached(endpoint, failure);
                 return;
             }
             Err(Unopened::Refused(failure)) => {
                 for intent in &intents {
-                    report
-                        .submitted
-                        .push(entry(intent, Some(failure.clone()), false, false));
+                    report.note_submitted(entry(intent), failed(failure.clone(), false, false));
                 }
                 return;
             }
@@ -118,9 +114,7 @@ pub(super) fn drain_submits(
         for intent in &intents {
             if let Some(why) = halted.as_deref().or(channel.stopped()) {
                 let failure = Failure::new(format!("Not attempted, {why}"));
-                report
-                    .submitted
-                    .push(entry(intent, Some(failure), false, false));
+                report.note_submitted(entry(intent), failed(failure, false, false));
                 continue;
             }
 
@@ -133,9 +127,8 @@ pub(super) fn drain_submits(
                     if let Err(err) = store.fail_action(intent.id, parked.then_some(&*reason)) {
                         warn!("cannot record submit intent #{} failure: {err}", intent.id);
                     }
-                    report
-                        .submitted
-                        .push(entry(intent, Some(failure.failure()), parked, false));
+                    let failure = failed(failure.failure(), parked, false);
+                    report.note_submitted(entry(intent), failure);
                     continue;
                 }
             };
@@ -150,12 +143,8 @@ pub(super) fn drain_submits(
                 });
             if let Err(why) = marked {
                 warn!("submit intent #{} not sent, {why}", intent.id);
-                report.submitted.push(entry(
-                    intent,
-                    Some(Failure::new(format!("Not attempted, {why}"))),
-                    false,
-                    false,
-                ));
+                let failure = Failure::new(format!("Not attempted, {why}"));
+                report.note_submitted(entry(intent), failed(failure, false, false));
                 continue;
             }
 
@@ -193,7 +182,7 @@ pub(super) fn drain_submits(
                             false
                         }
                     };
-                    (recorded, entry(intent, None, false, false))
+                    (recorded, None)
                 }
                 Err(failure) => {
                     let reason = failure.reason();
@@ -208,10 +197,10 @@ pub(super) fn drain_submits(
                             }
                         };
                     let failure = failure.failure();
-                    (recorded, entry(intent, Some(failure), parked, unconfirmed))
+                    (recorded, failed(failure, parked, unconfirmed))
                 }
             };
-            report.submitted.push(outcome);
+            report.note_submitted(entry(intent), outcome);
 
             if recorded {
                 if let Err(err) = in_flight.end() {
@@ -310,16 +299,17 @@ pub(super) fn park_targeted(
             warn!("cannot park submit intent #{}: {err}", intent.id);
             continue;
         }
-        report.submitted.push(SubmitEntry {
+        let entry = SubmitEntry {
             id: intent.id,
             collection: intent.collection.clone(),
             subject: intent.subject(),
-            code: None,
-            error: Some(error),
-            sources: Vec::new(),
+        };
+        let failure = SubmitFailure {
+            failure: Failure::new(error),
             parked: true,
             unconfirmed: false,
-        });
+        };
+        report.note_submitted(entry, Some(failure));
     }
     kept
 }
@@ -354,16 +344,17 @@ pub(super) fn park_interrupted(
             );
             return None;
         }
-        report.submitted.push(SubmitEntry {
+        let entry = SubmitEntry {
             id: intent.id,
             collection: intent.collection.clone(),
             subject: intent.subject(),
-            code: None,
-            error: Some(error),
-            sources: Vec::new(),
+        };
+        let failure = SubmitFailure {
+            failure: Failure::new(error),
             parked: true,
             unconfirmed: true,
-        });
+        };
+        report.note_submitted(entry, Some(failure));
     }
 
     if let Err(err) = in_flight.end() {
@@ -396,10 +387,15 @@ enum Unopened {
     /// None this build or this account offers: the intents stay pending,
     /// unreported, another build or run being able to send them.
     Pending,
-    /// The SMTP server or Gmail could not be reached: named under
-    /// `unreached`, the intents pending and unattempted.
+    /// The SMTP server or Gmail could not be reached: an `unreached` error,
+    /// the intents pending and unattempted.
     #[cfg_attr(not(any(feature = "smtp", feature = "gmail")), allow(dead_code))]
-    Unreached(UnreachedEndpoint),
+    Unreached {
+        /// The endpoint, `<source>.smtp` for a source's SMTP channel.
+        endpoint: String,
+        /// Why it could not be reached.
+        failure: Failure,
+    },
     /// The SMTP server refused the credentials: each intent fails with this
     /// error, pending and unattempted.
     #[cfg_attr(not(feature = "smtp"), allow(dead_code))]
@@ -446,9 +442,10 @@ fn open_send_channel<'a>(
                     warn!("cannot open the smtp channel, {queued} intent(s) stay pending: {err:#}");
                     let failure = Failure::of(&err);
                     match submit::open_failure(&err) {
-                        submit::OpenFailure::Unreached => Err(Unopened::Unreached(
-                            UnreachedEndpoint::new(format!("{name}.smtp"), failure),
-                        )),
+                        submit::OpenFailure::Unreached => Err(Unopened::Unreached {
+                            endpoint: format!("{name}.smtp"),
+                            failure,
+                        }),
                         submit::OpenFailure::Refused => Err(Unopened::Refused(failure)),
                     }
                 }
@@ -477,10 +474,10 @@ fn open_send_channel<'a>(
                         warn!(
                             "cannot open the gmail send channel, {queued} intent(s) stay pending: {err:#}"
                         );
-                        Err(Unopened::Unreached(UnreachedEndpoint::new(
-                            name,
-                            Failure::of(&err),
-                        )))
+                        Err(Unopened::Unreached {
+                            endpoint: name,
+                            failure: Failure::of(&err),
+                        })
                     }
                 },
                 #[allow(unreachable_patterns)]

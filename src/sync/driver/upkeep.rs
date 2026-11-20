@@ -55,33 +55,30 @@ pub(super) fn report_coverage(
 /// run re-reports them; another account's rows are its own run's to report.
 pub(super) fn report_parked(store: &PimdirStore, account: &str, report: &mut SyncOutput) {
     let owners = collection_accounts(store);
-    match store.parked_actions() {
-        Ok(parked) => {
+    let parked = store.change_cursor().and_then(|cursor| {
+        let identity = PimdirStoreIdentity {
+            store_id: cursor.store_id,
+            incarnation: cursor.incarnation,
+        };
+        Ok((identity, store.parked_actions()?))
+    });
+    match parked {
+        Ok((identity, parked)) => {
             let parked = parked.into_iter().filter(|action| {
                 owners
                     .get(&action.collection)
                     .is_some_and(|owner| owner == account)
             });
             for action in parked {
-                report.parked.push(ParkedQueueAction {
-                    id: action.id,
-                    collection: action.collection,
-                    kind: action.action,
-                    producer: action.producer,
-                    queued_at: action.created_at,
-                    attempts: action.attempts,
-                    code: None,
-                    error: action.error,
-                    sources: Vec::new(),
-                });
+                report
+                    .parked
+                    .push(ParkedQueueAction::new(&identity, action));
             }
         }
         Err(err) => {
             warn!("cannot list parked actions: {err}");
             let err = pimdir_error(err).context("List the parked actions");
-            report
-                .failures
-                .push(StepFailure::new(FailedStep::Queue, None, &err));
+            report.note_step_failure(FailedStep::Queue, None, &err);
         }
     }
 }
@@ -97,9 +94,7 @@ pub(super) fn count_conflicts(store: &PimdirStore, account: &str, report: &mut S
         Err(err) => {
             warn!("cannot count the conflicts waiting for a decision: {err}");
             let err = pimdir_error(err).context("Count the conflicts");
-            report
-                .failures
-                .push(StepFailure::new(FailedStep::Conflicts, None, &err));
+            report.note_step_failure(FailedStep::Conflicts, None, &err);
         }
     }
 }

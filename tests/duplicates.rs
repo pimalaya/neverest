@@ -94,7 +94,9 @@ fn a_duplicated_identity_syncs_both_copies_and_settles() {
         "nothing is ambiguous any more: {report}"
     );
     assert!(
-        report["duplicates"] == serde_json::json!([]),
+        !report["errors"]
+            .as_array()
+            .is_some_and(|errors| errors.iter().any(|error| error["kind"] == "duplicates")),
         "an IMAP server holds no UID to refuse: {report}"
     );
     assert_eq!(

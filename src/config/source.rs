@@ -18,6 +18,7 @@ use crate::config::{
     },
     proxy::ProxyConfig,
     smtp::SmtpConfig,
+    tls::{TlsConfig, secured},
 };
 
 /// Generates a [`SourceConfig`] accessor forwarding to the shared field on
@@ -320,6 +321,59 @@ impl SourceConfig {
             flag: self.flag(),
             item: self.item(),
         }
+    }
+
+    /// Hands the account `tls` table to the backend and the send channel,
+    /// each field their own `tls` leaves unset taking the account's.
+    pub fn inherit_tls(&mut self, account: &TlsConfig) {
+        let tls = match &mut self.backend {
+            SourceBackendConfig::Imap(c) => &mut c.tls,
+            SourceBackendConfig::Carddav(c) => &mut c.tls,
+            SourceBackendConfig::Caldav(c) => &mut c.tls,
+            SourceBackendConfig::Jmap(c) => &mut c.tls,
+            SourceBackendConfig::Gmail(c) => &mut c.tls,
+            SourceBackendConfig::Msgraph(c)
+            | SourceBackendConfig::MsgraphContacts(c)
+            | SourceBackendConfig::MsgraphCalendar(c) => &mut c.tls,
+            SourceBackendConfig::Gpeople(c) | SourceBackendConfig::Gcal(c) => &mut c.tls,
+        };
+        tls.inherit(account);
+
+        if let Some(smtp) = &mut self.smtp {
+            smtp.tls.inherit(account);
+        }
+    }
+
+    /// The `tls` table the backend connects with, `None` over a cleartext
+    /// `imap://` or `http://` URL that does not upgrade.
+    pub fn secured(&self) -> Option<&TlsConfig> {
+        let (tls, secured) = match &self.backend {
+            SourceBackendConfig::Imap(c) => (&c.tls, secured(&c.server, "imaps", c.starttls)),
+            SourceBackendConfig::Carddav(c) => {
+                let url = c
+                    .home
+                    .as_deref()
+                    .or(c.server.as_deref())
+                    .unwrap_or_default();
+                (&c.tls, secured(url, "https", false))
+            }
+            SourceBackendConfig::Caldav(c) => {
+                let url = c
+                    .home
+                    .as_deref()
+                    .or(c.server.as_deref())
+                    .unwrap_or_default();
+                (&c.tls, secured(url, "https", false))
+            }
+            SourceBackendConfig::Jmap(c) => (&c.tls, secured(&c.server, "https", false)),
+            SourceBackendConfig::Gmail(c) => (&c.tls, true),
+            SourceBackendConfig::Msgraph(c)
+            | SourceBackendConfig::MsgraphContacts(c)
+            | SourceBackendConfig::MsgraphCalendar(c) => (&c.tls, true),
+            SourceBackendConfig::Gpeople(c) | SourceBackendConfig::Gcal(c) => (&c.tls, true),
+        };
+
+        secured.then_some(tls)
     }
 }
 

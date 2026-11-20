@@ -218,6 +218,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed `sync --reset` without `--force` dropping retained items: it now reads them from the store's trash, which the sync seam never loads, and refuses while one is there.
+
 - Fixed the store's collector running beside a verb neverest drives: its paged drive loop now holds io-pimdir's in-flight guard, so a collection between two pages refuses rather than take a body a chunk streamed and the next attaches.
 
 - Fixed a Graph series with no end starting more than five years ago (a birthday Outlook stores from 1604) syncing without its older exceptions and saying nothing: the run lists it under `clipped` with the date its exceptions were read from, as a warning.

@@ -776,13 +776,32 @@ fn reset_account(dir: &Path, account: &str, config: &AccountConfig, force: bool)
 ///
 /// Its conflicts, retained items (bound to no server), pending deletes and
 /// items no binding's base holds; a delivered create, its handle still
-/// provisional (pimdir SYNC §2), counts as unpushed.
+/// provisional (pimdir SYNC §2), counts as unpushed. The hub holds live
+/// items only, so the retained ones are read from the trash.
 fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result<Vec<String>> {
+    const PAGE: usize = 512;
+
     let mut pending = Vec::new();
 
     for collection in collections {
         let hub = store.load_hub(&collection.id)?;
         let (mut conflicts, mut retained, mut deletes, mut unpushed) = (0, 0, 0, 0);
+
+        let mut after = None;
+        loop {
+            let page = store.list_retained(&collection.id, after, PAGE)?;
+            let full = page.len() == PAGE;
+            after = page.last().map(|item| item.seq);
+
+            retained += page
+                .iter()
+                .filter(|item| item.retention.as_ref().is_some_and(|r| r.at.is_some()))
+                .count();
+
+            if !full {
+                break;
+            }
+        }
 
         for item in hub.items.values() {
             let held = item.sources.values().any(|binding| {
@@ -794,8 +813,6 @@ fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result
             });
             if item.conflicted || item.sources.values().any(|binding| binding.conflicted) {
                 conflicts += 1;
-            } else if item.sources.is_empty() {
-                retained += 1;
             } else if item.deleted {
                 deletes += 1;
             } else if !held {
@@ -843,7 +860,7 @@ mod tests {
     use std::sync::PoisonError;
 
     use io_pimdir::{
-        change::PimdirWriteOp,
+        change::{PimdirDropReason, PimdirWriteOp},
         client::{producer::PimdirProducer, reader::PimdirReader},
         codec::PimdirAction,
         collection::PimdirCollectionId,
@@ -1118,6 +1135,38 @@ mod tests {
             .unwrap()
             .account("work")
             .unwrap();
+    }
+
+    /// A plain reset refuses over a retained item, which the hub never loads:
+    /// bound to no server, the store holds its body alone.
+    #[test]
+    fn a_reset_refuses_while_an_item_is_retained() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        land(dir.path(), "work", "w1@x", true);
+
+        let mut store = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_account("work")
+            .for_source("work/imap");
+        store
+            .write(vec![PimdirWriteOp::DropPlacement {
+                collection: PimdirCollectionId(inbox("work")),
+                handle: PimdirHandle("w1@x".into()),
+                reason: PimdirDropReason::Deleted,
+            }])
+            .unwrap();
+        drop(store);
+
+        let err = reset_account(dir.path(), "work", &namespaced("work"), false).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("1 retained item"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+
+        reset_account(dir.path(), "work", &namespaced("work"), true).unwrap();
+
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert!(reader.list_collections().unwrap().is_empty());
     }
 
     /// A plain reset refuses over a delivered create as over a pending one.

@@ -218,6 +218,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed a move between address books or calendars reporting only its delete: the create its relocation delivers is now listed beside it, as the dry run lists it.
+
 - Fixed a flag kept in the store only on a card or a calendar item being reported as a pushed hunk on every run: nothing pushes it, so the run no longer lists it.
 
 - Fixed `sync --reset` without `--force` dropping retained items: it now reads them from the store's trash, which the sync seam never loads, and refuses while one is there.

@@ -137,16 +137,19 @@ pub(super) fn itemize_conflicted(
 /// Itemizes one side's projection: the work a flag, move or compose staged.
 pub(super) fn itemize_single(
     collection: &str,
-    store: &PimdirStore,
+    store: &PimdirSourceStore,
     ctx: &SourceCtx,
     report: &mut SyncOutput,
 ) -> Result<()> {
     let display = display_name(&ctx.namespace, collection);
     let view = projection_view(store, collection, &ctx.name)
         .with_context(|| format!("Project {} {display}", ctx.name))?;
+    let mut relocated = relocated_creates(store, collection, ctx, &ctx.name)?;
     let mut forbidden = BTreeMap::new();
     for placement in view {
-        for hunk in placement_hunks(&ctx.name, &ctx.name, &ctx.namespace, display, &placement) {
+        let mut hunks = placement_hunks(&ctx.name, &ctx.name, &ctx.namespace, display, &placement);
+        hunks.extend(relocated.remove(&placement.handle).unwrap_or_default());
+        for hunk in hunks {
             if stays_local(ctx, &hunk) {
                 continue;
             }
@@ -158,6 +161,49 @@ pub(super) fn itemize_single(
     }
     report_forbidden(ctx, display, forbidden, report);
     Ok(())
+}
+
+/// The create hunks the relocations of `collection` deliver, by the handle
+/// of the tombstone whose remove carries each (pimdir SYNC §3, §5).
+///
+/// Collections push in turn, so a relocation an earlier one pushes delivers
+/// a later one's create before that one is itemized: its remove reports it.
+/// A dry run pushes nothing, each create reported by its own collection.
+fn relocated_creates(
+    store: &PimdirSourceStore,
+    collection: &str,
+    ctx: &SourceCtx,
+    other: &str,
+) -> Result<HashMap<PimdirHandle, Vec<ItemHunk>>> {
+    let mut relocated = HashMap::new();
+    if ctx.dry_run {
+        return Ok(relocated);
+    }
+
+    let loaded =
+        load_side(store, collection).with_context(|| format!("Load {} {collection}", ctx.name))?;
+    for placement in loaded {
+        let Some(destination) = placement
+            .origin
+            .filter(|_| placement.status == PimdirStatus::Tombstone)
+        else {
+            continue;
+        };
+        let target = &destination.collection.0;
+        let display = display_name(&ctx.namespace, target);
+        let created = projection_view(store, target, &ctx.name)
+            .with_context(|| format!("Project {} {display}", ctx.name))?
+            .into_iter()
+            .find(|create| {
+                create.handle == destination.handle && create.status == PimdirStatus::Created
+            });
+        if let Some(create) = created {
+            let hunks = placement_hunks(&ctx.name, other, &ctx.namespace, display, &create);
+            relocated.insert(placement.handle, hunks);
+        }
+    }
+
+    Ok(relocated)
 }
 
 /// Whether `hunk` is a flag change on a kind whose backend carries no flags,
@@ -491,22 +537,25 @@ pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
 /// Itemizes the pending cross-side work from each side's hub projection.
 ///
 /// A `Created` placement is a copy in, a `Dirty` one a flag change or an
-/// update, a `Tombstone` a delete.
+/// update, a `Tombstone` a delete, with the create its relocation delivers.
 pub(super) fn itemize(
     collection: &str,
-    store: &PimdirStore,
+    [left_store, right_store]: [&PimdirSourceStore; 2],
     left: &SourceCtx,
     right: &SourceCtx,
     report: &mut SyncOutput,
 ) -> Result<()> {
-    for (ctx, other) in [(left, right), (right, left)] {
+    for (ctx, other, store) in [(left, right, left_store), (right, left, right_store)] {
         let display = display_name(&ctx.namespace, collection);
         let view = projection_view(store, collection, &ctx.name)
             .with_context(|| format!("Project {} {display}", ctx.name))?;
+        let mut relocated = relocated_creates(store, collection, ctx, &other.name)?;
         let mut forbidden = BTreeMap::new();
         for placement in view {
-            for hunk in placement_hunks(&ctx.name, &other.name, &ctx.namespace, display, &placement)
-            {
+            let mut hunks =
+                placement_hunks(&ctx.name, &other.name, &ctx.namespace, display, &placement);
+            hunks.extend(relocated.remove(&placement.handle).unwrap_or_default());
+            for hunk in hunks {
                 if stays_local(ctx, &hunk) {
                     continue;
                 }

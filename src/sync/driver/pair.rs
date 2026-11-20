@@ -593,7 +593,7 @@ impl OpenPair {
 
         itemize(
             collection,
-            &self.left_store,
+            [&self.left_store, &self.right_store],
             &self.left,
             &self.right,
             report,

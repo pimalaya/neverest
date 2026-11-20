@@ -341,6 +341,11 @@ A sync SHALL report the remote-originated changes a pull applied to already-sync
 ### Requirement: A create is named by what delivers it
 A `Created` placement SHALL be itemized by how the push delivers it (pimdir SYNC §5): an `Add` hunk, `add item <link id> in <collection> on <side>`, for a create with no origin on a side syncing alone, which is a compose or an import a frontend queued and the store uploads; a `Copy` hunk carrying `origin`, `copy item <link id> from <origin> to <collection> on <side>`, for a create whose origin names the collection the server copies it from, a move or a copy a frontend staged; and the cross-side `Copy` hunk, `copy item <link id> in <collection> from <other> to <side>`, for a body the other side holds. Reading every create as a crossing named a single-source account's own compose "from imap to imap".
 
+A create a relocation delivers (a move whose remove carries its destination, pimdir SYNC §3, §5) SHALL be itemized beside that remove, in the collection the item leaves, while it is still pending there: collections push in turn, so the remove pushed first delivers the create before the collection it enters is itemized. A dry run pushes nothing, so there each half SHALL be itemized by its own collection. Either way a move reads as its two rows, once each.
+
+#### Scenario: A card moved between address books
+- src/sync/driver/tests.rs `a_moved_card_is_itemized_as_both_its_halves`: the address book it leaves itemizes the delete and the add of a real run, the delete alone in a dry run.
+
 ### Requirement: A dry run works on a replica that shares the bodies
 A dry run SHALL work on a throwaway replica of the pimdir store, so that no checkpoint advances and nothing reaches a server.
 

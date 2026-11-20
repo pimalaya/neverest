@@ -4716,12 +4716,6 @@ fn a_store_only_flag_on_a_card_stays_local() {
 #[cfg(feature = "carddav")]
 #[test]
 fn a_store_only_flag_on_a_card_is_not_itemized() {
-    use std::sync::{Arc, atomic::AtomicU64};
-
-    use pimalaya_stream::tls::Tls;
-
-    use crate::{account::SourceAccountBackend, throttle::Throttle};
-
     let dir = tempfile::tempdir().unwrap();
     let mut store = store_with_local_delete(dir.path());
     let contacts = PimdirCollectionId("contacts".into());
@@ -4735,6 +4729,70 @@ fn a_store_only_flag_on_a_card_is_not_itemized() {
     store
         .write(vec![PimdirWriteOp::UpsertPlacement(placement)])
         .unwrap();
+    let ctx = carddav_ctx(false);
+
+    let mut report = SyncOutput::default();
+    itemize_single("contacts", &store, &ctx, &mut report).unwrap();
+
+    assert!(report.item_patch.is_empty(), "{:?}", report.item_patch);
+    assert!(report.forbidden.is_empty(), "{:?}", report.forbidden);
+}
+
+/// A card moved between address books is itemized as both its halves, the
+/// remove and the create its relocation delivers.
+///
+/// The address book it leaves pushes first, delivering the create before
+/// the one it enters is itemized; a dry run pushes nothing, so there the
+/// create is the entered address book's to report.
+#[cfg(feature = "carddav")]
+#[test]
+fn a_moved_card_is_itemized_as_both_its_halves() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = store_with_local_delete(dir.path());
+    store.ensure_collection("other", "text/vcard").unwrap();
+    let contacts = PimdirCollectionId("contacts".into());
+    let mut placement = store
+        .load(&contacts, &PimdirLoadSelection::All)
+        .unwrap()
+        .placements
+        .remove(0);
+    placement.status = PimdirStatus::Clean;
+    store
+        .write(vec![PimdirWriteOp::UpsertPlacement(placement)])
+        .unwrap();
+    let moved = PimdirMutation::Move {
+        handle: PimdirHandle("card1".into()),
+        target: PimdirCollectionId("other".into()),
+    };
+    store.mutate("contacts", moved).unwrap();
+
+    let kinds = |dry_run: bool| {
+        let mut report = SyncOutput::default();
+        itemize_single("contacts", &store, &carddav_ctx(dry_run), &mut report).unwrap();
+        report
+            .item_patch
+            .into_iter()
+            .map(|entry| match entry.hunk {
+                ItemHunk::Delete { collection, .. } => format!("delete in {collection}"),
+                ItemHunk::Add { collection, .. } => format!("add in {collection}"),
+                ItemHunk::Copy { collection, .. } => format!("copy in {collection}"),
+                hunk => format!("{hunk:?}"),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(kinds(false), ["delete in contacts", "add in other"]);
+    assert_eq!(kinds(true), ["delete in contacts"]);
+}
+
+/// A CardDAV side named `left`, its connection scripted to answer nothing.
+#[cfg(feature = "carddav")]
+fn carddav_ctx(dry_run: bool) -> SourceCtx {
+    use std::sync::{Arc, atomic::AtomicU64};
+
+    use pimalaya_stream::tls::Tls;
+
+    use crate::{account::SourceAccountBackend, throttle::Throttle};
 
     let (client, _wire) = crate::dav::client::DavClient::scripted(
         crate::dav::client::DavKind::Card,
@@ -4756,7 +4814,7 @@ fn a_store_only_flag_on_a_card_is_not_itemized() {
         throttle: Arc::new(Throttle::new("carddav")),
         downloaded: Arc::new(AtomicU64::new(0)),
     };
-    let ctx = SourceCtx {
+    SourceCtx {
         name: String::from("left"),
         namespace: String::from("left"),
         pool: Pool::of(account, Client::Dav(Box::new(client))),
@@ -4769,17 +4827,11 @@ fn a_store_only_flag_on_a_card_is_not_itemized() {
         refused: Vec::new(),
         rejected: Vec::new(),
         scope: PimdirScope::unbounded(),
-        dry_run: false,
+        dry_run,
         accept_absences: false,
         capped: false,
         noted: Noted::default(),
-    };
-
-    let mut report = SyncOutput::default();
-    itemize_single("contacts", &store, &ctx, &mut report).unwrap();
-
-    assert!(report.item_patch.is_empty(), "{:?}", report.item_patch);
-    assert!(report.forbidden.is_empty(), "{:?}", report.forbidden);
+    }
 }
 
 #[test]

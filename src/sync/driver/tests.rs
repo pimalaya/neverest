@@ -4711,6 +4711,77 @@ fn a_store_only_flag_on_a_card_stays_local() {
     );
 }
 
+/// A store-only flag on a card is no hunk of the run's patch, nor a
+/// forbidden write: nothing would push it, so every run would report it.
+#[cfg(feature = "carddav")]
+#[test]
+fn a_store_only_flag_on_a_card_is_not_itemized() {
+    use std::sync::{Arc, atomic::AtomicU64};
+
+    use pimalaya_stream::tls::Tls;
+
+    use crate::{account::SourceAccountBackend, throttle::Throttle};
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = store_with_local_delete(dir.path());
+    let contacts = PimdirCollectionId("contacts".into());
+    let mut placement = store
+        .load(&contacts, &PimdirLoadSelection::All)
+        .unwrap()
+        .placements
+        .remove(0);
+    placement.status = PimdirStatus::Dirty;
+    placement.flags = PimdirFlags::from_iter(["starred"]);
+    store
+        .write(vec![PimdirWriteOp::UpsertPlacement(placement)])
+        .unwrap();
+
+    let (client, _wire) = crate::dav::client::DavClient::scripted(
+        crate::dav::client::DavKind::Card,
+        "/dav/alice/",
+        Vec::new(),
+    );
+    let account = SourceAccount {
+        backend: SourceAccountBackend::Dav(crate::account::DavAccount {
+            kind: crate::dav::client::DavKind::Card,
+            endpoint: crate::account::DavEndpoint::Server(
+                url::Url::parse("https://dav.example.org/").unwrap(),
+            ),
+            tls: Tls::default(),
+            auth: io_webdav::rfc4918::WebdavAuth::None,
+            proxy: pimalaya_stream::proxy::Proxy::None,
+        }),
+        #[cfg(feature = "smtp")]
+        smtp: None,
+        throttle: Arc::new(Throttle::new("carddav")),
+        downloaded: Arc::new(AtomicU64::new(0)),
+    };
+    let ctx = SourceCtx {
+        name: String::from("left"),
+        namespace: String::from("left"),
+        pool: Pool::of(account, Client::Dav(Box::new(client))),
+        perms: SourcePermissions {
+            collection: Default::default(),
+            flag: Default::default(),
+            item: Default::default(),
+        },
+        authority: Authority::Shared,
+        refused: Vec::new(),
+        rejected: Vec::new(),
+        scope: PimdirScope::unbounded(),
+        dry_run: false,
+        accept_absences: false,
+        capped: false,
+        noted: Noted::default(),
+    };
+
+    let mut report = SyncOutput::default();
+    itemize_single("contacts", &store, &ctx, &mut report).unwrap();
+
+    assert!(report.item_patch.is_empty(), "{:?}", report.item_patch);
+    assert!(report.forbidden.is_empty(), "{:?}", report.forbidden);
+}
+
 #[test]
 fn a_local_body_edit_is_pushed_conditionally_and_confirmed() {
     let dir = tempfile::tempdir().unwrap();

@@ -178,10 +178,11 @@ A source whose sync fails SHALL be reported and SHALL NOT stop the others: they 
 Every configured source SHALL be one source handle of the account's pimdir store, keyed by its name. Cross-source propagation of items, flags and deletions falls out of each source's project/absorb against the shared hub, with no hand-rolled cross-merge and no special case for the two-source shape.
 
 ### Requirement: A flag on a kind other than mail stays in the store
-A source syncing a kind other than `message/rfc822` SHALL be given no flag push right, whatever its `flag.update`: its backend carries no flags, so a flag the store alone holds on a card or a calendar item (`pimdir tag`, which reports it kept in the store only) is never pushed, never rejected, and kept local across runs. A mail source keeps `flag.update` as configured.
+A source syncing a kind other than `message/rfc822` SHALL be given no flag push right, whatever its `flag.update`: its backend carries no flags, so a flag the store alone holds on a card or a calendar item (`pimdir tag`, which reports it kept in the store only) is never pushed, never rejected, and kept local across runs. A run SHALL NOT report it, neither as a hunk of `itemPatch` nor as a forbidden write, nothing pushing it on any run. A mail source keeps `flag.update` as configured.
 
 #### Scenario: A store-only flag on a card
 - src/sync/driver/tests.rs `a_store_only_flag_on_a_card_stays_local`: two runs push nothing and the flag stays.
+- src/sync/driver/tests.rs `a_store_only_flag_on_a_card_is_not_itemized`: the run reports no hunk and no forbidden write for it.
 
 ### Requirement: A source retains every body when the store is a replica
 Where `retain` is true the sync SHALL hydrate every synced item to `Full`, the store being the app's offline copy. It SHALL pull before pushing so an edit the app staged locally stays pending and is reported rather than swallowed, and it SHALL open the store as the source it syncs so an app writing under the same id stages edits the sync pushes.

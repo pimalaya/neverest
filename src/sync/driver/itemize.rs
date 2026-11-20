@@ -147,6 +147,9 @@ pub(super) fn itemize_single(
     let mut forbidden = BTreeMap::new();
     for placement in view {
         for hunk in placement_hunks(&ctx.name, &ctx.name, &ctx.namespace, display, &placement) {
+            if stays_local(ctx, &hunk) {
+                continue;
+            }
             match forbidden_action(&ctx.perms, &hunk) {
                 Some(action) => *forbidden.entry(action).or_default() += 1,
                 None => report.item_patch.push(PatchEntry::new(hunk, None)),
@@ -155,6 +158,16 @@ pub(super) fn itemize_single(
     }
     report_forbidden(ctx, display, forbidden, report);
     Ok(())
+}
+
+/// Whether `hunk` is a flag change on a kind whose backend carries no flags,
+/// the store's alone: never pushed, so neither reported nor forbidden.
+fn stays_local(ctx: &SourceCtx, hunk: &ItemHunk) -> bool {
+    let flags = matches!(
+        hunk,
+        ItemHunk::AddFlags { .. } | ItemHunk::RemoveFlags { .. }
+    );
+    flags && ctx.pool.media_type() != "message/rfc822"
 }
 
 /// The action `hunk` names when the source's rights forbid it, the engine
@@ -494,6 +507,9 @@ pub(super) fn itemize(
         for placement in view {
             for hunk in placement_hunks(&ctx.name, &other.name, &ctx.namespace, display, &placement)
             {
+                if stays_local(ctx, &hunk) {
+                    continue;
+                }
                 match forbidden_action(&ctx.perms, &hunk) {
                     Some(action) => *forbidden.entry(action).or_default() += 1,
                     None => report.item_patch.push(PatchEntry::new(hunk, None)),

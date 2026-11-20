@@ -218,6 +218,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed a flag kept in the store only on a card or a calendar item being reported as a pushed hunk on every run: nothing pushes it, so the run no longer lists it.
+
 - Fixed `sync --reset` without `--force` dropping retained items: it now reads them from the store's trash, which the sync seam never loads, and refuses while one is there.
 
 - Fixed the store's collector running beside a verb neverest drives: its paged drive loop now holds io-pimdir's in-flight guard, so a collection between two pages refuses rather than take a body a chunk streamed and the next attaches.

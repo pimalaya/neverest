@@ -2370,12 +2370,17 @@ A `Remove` carrying a target SHALL relocate its member into the target and answe
 - **THEN** the inbox copy is expunged, no `MOVE` is sent, and the archive holds the message once
 
 ### Requirement: An add its server does not name is accepted with no handle
-An append the server takes without naming the member it made (an IMAP `APPEND` answering no `APPENDUID`, whose message a search by `Message-ID` does not name either, or states none) SHALL be answered accepted with no assigned handle (pimdir SYNC §4), never rejected: the engine records the create delivered, and the page naming the member lands it. It SHALL NOT be appended again by that run or a later one. The relay, which binds its copy around the engine, SHALL still fail on such an append, having no create a listing could land.
+An append the server takes without naming the member it made (an IMAP `APPEND` answering no `APPENDUID`, whose message a search by `Message-ID` does not name either, or states none) SHALL be answered accepted with no assigned handle (pimdir SYNC §4), never rejected: the engine records the create delivered, and the page naming the member lands it. The search SHALL name the whole `Message-ID` in its angle brackets, IMAP `HEADER` matching substrings, so a message whose `Message-ID` only holds it is never taken for the append, and SHALL take the highest UID it finds. It SHALL NOT be appended again by that run or a later one. The relay, which binds its copy around the engine, SHALL still fail on such an append, having no create a listing could land.
 
 #### Scenario: An append on a server without UIDPLUS
 - **GIVEN** a staged message stating no `Message-ID` and an IMAP server answering its `APPEND` with no `APPENDUID`
 - **WHEN** the account syncs twice
 - **THEN** the message is appended once, the run reports it waiting as `delivered`, and nothing is reported rejected
+
+#### Scenario: An append searched for beside a longer Message-ID
+- **GIVEN** an IMAP server without UIDPLUS answering the `APPEND` of the message `b@x` with no `APPENDUID`, then receiving `b@x.y` from another client
+- **WHEN** the search names the appended message
+- **THEN** it answers the UID of `<b@x>`, never that of `<b@x.y>`
 
 ### Requirement: A create left waiting is reported
 The report SHALL list under `waiting`, for every collection a run synced on an endpoint, the creates its last pass left waiting rather than pushing (pimdir SYNC §5), each with its `side`, its `collection`, its key as `id` (the link id, never the provisional handle) and its `reason`: `out-of-scope`, its date lying outside the run's scope; `delivered`, its server having taken it with no listing naming it yet; `undeliverable`, the store holding neither a body nor a member to copy it from; `other`, a reason a later io-pimdir states. The text output SHALL print them under `Waiting`. A waiting create SHALL NOT count as a warning nor change the exit code.

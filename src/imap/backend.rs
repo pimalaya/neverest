@@ -715,9 +715,9 @@ impl ImapClient {
 
     /// Appends `len` octets streamed from `source` to `mailbox` with `flags`.
     ///
-    /// Answers the UID from UIDPLUS `APPENDUID`, else a `UID SEARCH` on
-    /// `message_id`; `None` when neither names it, the append accepted all the
-    /// same (pimdir SYNC §4) and the next listing naming the member.
+    /// Answers the UID from UIDPLUS `APPENDUID`, else a `UID SEARCH` on the
+    /// bracketed `message_id`, `HEADER` matching substrings; `None` when
+    /// neither names it, the append accepted all the same (pimdir SYNC §4).
     pub fn add_message_stream(
         &mut self,
         mailbox: &str,
@@ -754,7 +754,7 @@ impl ImapClient {
 
         let field =
             AString::try_from("Message-ID").map_err(|_| anyhow!("Invalid IMAP search header"))?;
-        let value = AString::try_from(message_id.to_string())
+        let value = AString::try_from(format!("<{message_id}>"))
             .map_err(|_| anyhow!("Invalid IMAP search Message-ID value"))?;
         let criteria = Vec1::from(SearchKey::Header(field, value));
         let found = self.search(criteria, ImapMessageSearchOptions { uid: true })?;
@@ -1665,6 +1665,24 @@ mod tests {
                 assert!(reason.contains(&completion[completion.find(']').unwrap() + 2..]));
             }
         }
+    }
+
+    /// An append without UIDPLUS is named by its own `Message-ID` alone, never
+    /// by one holding it, which another client delivered after it.
+    #[test]
+    fn an_append_without_uidplus_is_named_by_its_whole_message_id() {
+        let server = renumbered(false);
+        server.keep_appends();
+        server.without_uidplus();
+        server.deliver_after_next_append("b@x.y");
+        let mut client = ImapClient::connect(&server.url, &Tls::default(), false, None).unwrap();
+        let message = b"Message-ID: <b@x>\r\n\r\nhi\r\n";
+
+        let uid = client
+            .add_message_stream("INBOX", &[], &message[..], message.len(), Some("b@x"))
+            .unwrap();
+
+        assert_eq!(uid.as_deref(), Some("8"));
     }
 
     /// A round cursor under `uid_validity`.

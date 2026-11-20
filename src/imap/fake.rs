@@ -84,6 +84,9 @@ pub struct FakeImap {
     /// Whether the greeting announces UIDPLUS (RFC 4315), else a kept
     /// `APPEND` names no `APPENDUID`.
     uidplus: Arc<AtomicBool>,
+    /// The `Message-ID` another client delivers right after the next kept
+    /// `APPEND`, once.
+    delivers: Arc<Mutex<Option<String>>>,
 }
 
 impl FakeImap {
@@ -102,6 +105,7 @@ impl FakeImap {
         let enables = Arc::new(AtomicBool::new(true));
         let keeps = Arc::new(AtomicBool::new(false));
         let uidplus = Arc::new(AtomicBool::new(true));
+        let delivers = Arc::new(Mutex::new(None));
 
         let logged = Arc::clone(&commands);
         let shared = Arc::clone(&served);
@@ -114,6 +118,7 @@ impl FakeImap {
         let enabling = Arc::clone(&enables);
         let keeping = Arc::clone(&keeps);
         let announcing = Arc::clone(&uidplus);
+        let delivering = Arc::clone(&delivers);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
@@ -128,6 +133,7 @@ impl FakeImap {
                 let enables = Arc::clone(&enabling);
                 let keeps = Arc::clone(&keeping);
                 let uidplus = Arc::clone(&announcing);
+                let delivers = Arc::clone(&delivering);
                 thread::spawn(move || {
                     let refusals = Refusals {
                         write: &refusal,
@@ -136,6 +142,7 @@ impl FakeImap {
                         enables: &enables,
                         keeps: &keeps,
                         uidplus: &uidplus,
+                        delivers: &delivers,
                     };
                     serve(
                         stream, qresync, &mailbox, &headers, &commands, &fault, refusals,
@@ -157,6 +164,7 @@ impl FakeImap {
             enables,
             keeps,
             uidplus,
+            delivers,
         }
     }
 
@@ -175,6 +183,12 @@ impl FakeImap {
     /// after.
     pub fn without_uidplus(&self) {
         self.uidplus.store(false, Ordering::SeqCst);
+    }
+
+    /// Has another client deliver a message stating `message_id` right after
+    /// the next kept `APPEND`, before any search, once.
+    pub fn deliver_after_next_append(&self, message_id: &str) {
+        *self.delivers.lock().unwrap() = Some(message_id.to_owned());
     }
 
     /// Has every search for the messages with no `Date` refused with the
@@ -250,6 +264,7 @@ struct Refusals<'a> {
     enables: &'a AtomicBool,
     keeps: &'a AtomicBool,
     uidplus: &'a AtomicBool,
+    delivers: &'a Mutex<Option<String>>,
 }
 
 /// Serves one connection until the client leaves.
@@ -384,6 +399,13 @@ fn serve(
                     flags: Vec::new(),
                     message_id: appended,
                 });
+                if let Some(delivered) = refusals.delivers.lock().unwrap().take() {
+                    mailbox.messages.push(FakeMessage {
+                        uid: uid + 1,
+                        flags: Vec::new(),
+                        message_id: delivered,
+                    });
+                }
                 let validity = mailbox.uid_validity;
                 match uidplus {
                     true => format!("{tag} OK [APPENDUID {validity} {uid}] done\r\n"),

@@ -778,6 +778,19 @@ An IMAP delete SHALL mark the UID `\Deleted` and expunge it by `UID EXPUNGE` on 
 - **WHEN** the store deletes the other one and the account is synced
 - **THEN** the deleted one is gone from the server and the one the other client marked is still there
 
+### Requirement: An IMAP move without MOVE copies, then expunges its own messages
+An IMAP move SHALL send `UID MOVE` only when the server advertises MOVE (RFC 6851) or IMAP4rev2 (RFC 9051). Otherwise it SHALL `UID COPY` the UIDs into the target, then mark them `\Deleted` and `UID EXPUNGE` them alone, never by a plain `EXPUNGE`. On a server advertising no `UID EXPUNGE` either, the move SHALL fail before any command, the push staying in the store as rejected. A move interrupted after its copy SHALL be finished by the next run without a second copy, through the target search a move makes for a searchable identity; a member under a minted key, which no search finds, MAY leave a second copy in the target, never none (owner, 2026-11-21).
+
+#### Scenario: A server without MOVE
+- **GIVEN** a server advertising IMAP4rev1 and UIDPLUS but no MOVE
+- **WHEN** the store moves a message from INBOX to Archive and the account is synced
+- **THEN** the message is in Archive alone and no `UID MOVE` was sent
+
+#### Scenario: A move interrupted after its copy
+- **GIVEN** a move whose copy landed in the target while its source was not expunged
+- **WHEN** the account is synced again
+- **THEN** the source is deleted and the target holds one copy
+
 ### Requirement: A throttled provider is waited out, then named
 A request Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV or CardDAV answers with 429, or with 502, 503 or 504 for a request that creates nothing, or Google with a 403 rate limit, SHALL be sent again after the wait the provider states, else after a bounded exponential back-off with jitter. Google's refusals SHALL be read by their reasons and wording: a burst (a concurrency 429, a per-second rate, a 502, 503 or 504) SHALL wait one to two seconds; a per-minute quota, whose answer names the minute (`Units per minute per user`) whatever its reason, two, three, four then five seconds, then the next minute; a daily quota SHALL give the source up until the next midnight in America/Los_Angeles. Past the bound, or on a single wait longer than `sync --max-wait <SECONDS>` (120 by default), the source SHALL give up: no connection opened from it sends anything until the wait is over, what the run already wrote stays, the report lists the source under `throttled` with `until` (RFC 3339 UTC), and the run is incomplete (exit 4). Graph's body batches and Gmail's batch pauses SHALL wait no longer than that bound.
 

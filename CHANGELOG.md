@@ -237,6 +237,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed IMAP moves on servers advertising no MOVE, such as OVH, which answered `UID MOVE` with `BAD` and then closed the connection: the move is a `UID COPY`, then the expunge of the source UIDs alone, and a server without UIDPLUS either refuses it before any command ([#35](https://github.com/pimalaya/neverest/issues/35)).
 - Fixed an edit made on a one-way target alone being pulled into the store, and from there into the other targets, rather than overwritten: a target syncs under io-pimdir's `KeepLocal`, its edit kept as a retained item and listed under `overruled`, and the store's body pushed back over it.
 - Fixed the messages a rebuild of a renumbered mailbox found new going unreported: the run reports them added.
 - Fixed a termination signal while a sync waits for another run's store lock, or while `sync --init` initializes, ending the process with no result: the shutdown is installed first, so the run prints its result, the accounts not reached interrupted, and exits 4.

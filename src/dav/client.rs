@@ -488,8 +488,8 @@ impl DavClient {
 
     /// One full `PROPFIND` listing, for a server with no `sync-collection`.
     ///
-    /// No token, so every run lists it whole, a truncated one incomplete lest
-    /// members left out read as deleted. Not the query report: its filter
+    /// No token, so every run lists it whole; truncated or naming a member
+    /// with an error, it is incomplete. Not the query report: its filter
     /// parses every resource, one unparsable failing all.
     fn list(&mut self, collection: &str) -> Result<Enumeration, WebdavClientStdError> {
         let opts = WebdavSyncCollectionOptions { fallback: true };
@@ -501,36 +501,53 @@ impl DavClient {
                 self.kind
             );
         }
+        let errored = errored(&delta);
+        self.warn_errored(collection, &errored);
 
         Ok(Enumeration {
             items: delta.changed.into_iter().map(entry).collect(),
             vanished: Vec::new(),
-            complete: !delta.truncated,
+            complete: !delta.truncated && errored.is_empty(),
             truncated: delta.truncated,
+            errored,
             checkpoint: Some(Vec::new()),
             ..Default::default()
         })
     }
 
+    /// Warns of the members `collection`'s listing named with an error.
+    fn warn_errored(&self, collection: &str, errored: &[(String, Option<u16>)]) {
+        for (id, status) in errored {
+            warn!(
+                "{} server listed {id} of {collection} with status {status:?}, \
+                 reconciling as a delta",
+                self.kind
+            );
+        }
+    }
+
     /// One enumeration, draining every truncated round into a single result.
     ///
-    /// A listing whose last answer was still truncated, the rounds spent or
-    /// no token to follow, is incomplete: read as a whole collection, every
-    /// member past the cut would read as deleted (RFC 6578 §3.6).
+    /// A listing still truncated, or naming a member with an error, is
+    /// incomplete, lest a member read as deleted (RFC 6578 §3.6); with an
+    /// error its checkpoint stays put, the token being past that change.
     fn sync(
         &mut self,
         collection: &str,
         token: Option<&str>,
     ) -> Result<Enumeration, WebdavClientStdError> {
         let first = token.is_none();
+        let start = token.unwrap_or_default().as_bytes().to_vec();
         let mut items = Vec::new();
         let mut vanished = Vec::new();
+        let mut errored = Vec::new();
         let mut token = token.map(String::from);
         let mut truncated = false;
 
         for _ in 0..MAX_SYNC_ROUNDS {
             let delta = self.sync_collection(collection, token.as_deref(), Default::default())?;
 
+            errored.extend(self::errored(&delta));
             items.extend(delta.changed.into_iter().map(entry));
             vanished.extend(delta.vanished.iter().map(|href| href_id(href)));
             truncated = delta.truncated;
@@ -550,13 +567,20 @@ impl DavClient {
                 self.kind
             );
         }
+        self.warn_errored(collection, &errored);
+
+        let checkpoint = match errored.is_empty() {
+            true => token.unwrap_or_default().into_bytes(),
+            false => start,
+        };
 
         Ok(Enumeration {
             items,
             vanished,
-            complete: first && !truncated,
+            complete: first && !truncated && errored.is_empty(),
             truncated,
-            checkpoint: Some(token.unwrap_or_default().into_bytes()),
+            errored,
+            checkpoint: Some(checkpoint),
             ..Default::default()
         })
     }
@@ -911,6 +935,16 @@ fn entry(change: WebdavSyncChange) -> EnumEntry {
         revision: change.etag,
         meta: None,
     }
+}
+
+/// The members `delta` listed with an error, each named by [`href_id`] as the
+/// enumeration names members, with its status.
+fn errored(delta: &WebdavSyncDelta) -> Vec<(String, Option<u16>)> {
+    delta
+        .unreadable
+        .iter()
+        .map(|row| (href_id(&row.href), row.status))
+        .collect()
 }
 
 /// The addressing id of a member href: its last non-empty path segment, in the
@@ -2003,6 +2037,62 @@ mod tests {
         assert_eq!(listed.items.len(), 2);
         assert!(listed.complete);
         assert_eq!(listed.checkpoint.as_deref(), Some(&b"t1"[..]));
+    }
+
+    /// A 207 answer listing `c0.vcf` and a `c1.vcf` row answered 403, through
+    /// the `sync-collection` report when `token` is given, else `PROPFIND`.
+    fn refused_answer(token: Option<&str>) -> Vec<u8> {
+        let token = token
+            .map(|token| format!("<d:sync-token>{token}</d:sync-token>"))
+            .unwrap_or_default();
+        let xml = format!(
+            "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\">\
+             <d:response><d:href>/dav/books/default/c0.vcf</d:href>\
+             <d:propstat><d:prop><d:getetag>\"e-c0\"</d:getetag></d:prop>\
+             <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\
+             <d:response><d:href>/dav/books/default/c1.vcf</d:href>\
+             <d:status>HTTP/1.1 403 Forbidden</d:status></d:response>\
+             {token}</d:multistatus>"
+        );
+        format!(
+            "HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\n\r\n{xml}",
+            xml.len()
+        )
+        .into_bytes()
+    }
+
+    /// A member listed with an error makes the listing incomplete.
+    ///
+    /// Read as a whole collection, the member would read as deleted. The
+    /// checkpoint stays the one the listing started from, so the next run asks
+    /// again rather than skipping past the member's change.
+    #[test]
+    fn a_member_listed_with_an_error_makes_the_listing_incomplete() {
+        let errored = vec![(String::from("c1.vcf"), Some(403))];
+
+        let listed = replayed(vec![refused_answer(Some("t1"))])
+            .enumerate("default", None)
+            .unwrap();
+        let ids: Vec<_> = listed.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, ["c0.vcf"]);
+        assert!(!listed.complete);
+        assert!(!listed.truncated);
+        assert_eq!(listed.errored, errored);
+        assert_eq!(listed.checkpoint.as_deref(), Some(&b""[..]));
+
+        let listed = replayed(vec![refused_answer(Some("t1"))])
+            .enumerate("default", Some(b"t0"))
+            .unwrap();
+        assert!(!listed.complete);
+        assert_eq!(listed.errored, errored);
+        assert_eq!(listed.checkpoint.as_deref(), Some(&b"t0"[..]));
+
+        let listed = replayed(vec![refused_answer(None)])
+            .list("default")
+            .unwrap();
+        assert_eq!(listed.items.len(), 1);
+        assert!(!listed.complete);
+        assert_eq!(listed.errored, errored);
     }
 
     /// An answer that is no whole multistatus fails the listing.

@@ -373,6 +373,7 @@ impl ImapClient {
             narrowed,
             enumerated,
             truncated: false,
+            errored: Vec::new(),
         }))
     }
 

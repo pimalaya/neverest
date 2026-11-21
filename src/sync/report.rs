@@ -1545,7 +1545,8 @@ pub enum FailedStep {
     Bodies,
     /// Counting the conflicts waiting for a decision.
     Conflicts,
-    /// Listing a collection, which the server cut short.
+    /// Listing a collection, which the server cut short or whose members it
+    /// listed with an error.
     Listing,
 }
 

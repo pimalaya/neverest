@@ -24,6 +24,9 @@ pub struct Faults {
     /// Whether the book refuses `sync-collection`, so it is listed by
     /// PROPFIND instead.
     pub no_sync: bool,
+    /// The cards a listing names with a 403 row instead of their ETag, every
+    /// `sync-collection` REPORT then listing every card.
+    pub refused: Vec<&'static str>,
 }
 
 #[derive(Default)]
@@ -205,7 +208,8 @@ fn answer(
             }
             let token = token(state);
             let asked = between(body, "sync-token>", "<").unwrap_or_default();
-            let mut rows = match asked == token && state.faults.truncate.is_none() {
+            let listed = state.faults.truncate.is_some() || !state.faults.refused.is_empty();
+            let mut rows = match asked == token && !listed {
                 true => String::new(),
                 false => members(state),
             };
@@ -290,14 +294,20 @@ fn members(state: &State) -> String {
         .cards
         .iter()
         .take(take)
-        .map(|(name, data)| {
-            format!(
-                "<d:response><d:href>/dav/book/{name}</d:href><d:propstat><d:prop>\
+        .map(
+            |(name, data)| match state.faults.refused.contains(&name.as_str()) {
+                true => format!(
+                    "<d:response><d:href>/dav/book/{name}</d:href>\
+                 <d:status>HTTP/1.1 403 Forbidden</d:status></d:response>"
+                ),
+                false => format!(
+                    "<d:response><d:href>/dav/book/{name}</d:href><d:propstat><d:prop>\
                  <d:getetag>\"{etag}\"</d:getetag></d:prop>\
                  <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
-                etag = etag(data),
-            )
-        })
+                    etag = etag(data),
+                ),
+            },
+        )
         .collect();
     if state.faults.truncate.is_some() {
         rows.push_str(

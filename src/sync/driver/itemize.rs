@@ -335,6 +335,9 @@ pub(super) struct Noted {
     pub(super) failures: Vec<SyncError>,
     /// The collections whose listing the server cut short, by wire name.
     pub(super) truncated: BTreeSet<String>,
+    /// The members each listing named with an error, with their status, by
+    /// wire name: the last pass's.
+    pub(super) errored: BTreeMap<String, Vec<(String, Option<u16>)>>,
     /// The account's rows a mid-run drain applied beside the run's merges.
     pub(super) drained: Vec<DrainedQueue>,
     /// The bodies that drain kept aside.
@@ -435,6 +438,7 @@ pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
         refusals,
         failures,
         truncated,
+        errored,
         drained,
         drained_overruled,
     } = mem::take(&mut ctx.noted);
@@ -444,6 +448,20 @@ pub(super) fn itemize_noted(ctx: &mut SourceCtx, report: &mut SyncOutput) {
     report.overruled.extend(drained_overruled);
     for collection in truncated {
         let err = anyhow!("The server cut the listing short, the members past the cut unseen");
+        report.note_step_failure(FailedStep::Listing, Some(collection), &err);
+    }
+    for (collection, members) in errored {
+        let named: Vec<String> = members
+            .iter()
+            .map(|(id, status)| match status {
+                Some(status) => format!("{id} ({status})"),
+                None => id.clone(),
+            })
+            .collect();
+        let err = anyhow!(
+            "The server listed members with an error, their state unknown: {}",
+            named.join(", ")
+        );
         report.note_step_failure(FailedStep::Listing, Some(collection), &err);
     }
 

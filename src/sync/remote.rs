@@ -120,6 +120,9 @@ pub struct PimRemote<'a> {
     capped: bool,
     /// The collections whose listing the server cut short.
     truncated: BTreeSet<String>,
+    /// The members each collection's listing named with an error, with their
+    /// status.
+    errored: BTreeMap<String, Vec<(String, Option<u16>)>>,
 }
 
 /// What the store binds of a collection for one source.
@@ -356,6 +359,7 @@ impl<'a> PimRemote<'a> {
             rekey: false,
             capped: false,
             truncated: BTreeSet::new(),
+            errored: BTreeMap::new(),
         }
     }
 
@@ -390,6 +394,7 @@ impl<'a> PimRemote<'a> {
             rekey: false,
             capped: false,
             truncated: BTreeSet::new(),
+            errored: BTreeMap::new(),
         }
     }
 
@@ -432,6 +437,12 @@ impl<'a> PimRemote<'a> {
     /// The collections whose listing was cut short, taken off for the report.
     pub fn take_truncated(&mut self) -> BTreeSet<String> {
         mem::take(&mut self.truncated)
+    }
+
+    /// The members listings named with an error, by collection, taken off for
+    /// the report.
+    pub fn take_errored(&mut self) -> BTreeMap<String, Vec<(String, Option<u16>)>> {
+        mem::take(&mut self.errored)
     }
 
     /// Whether a listing failed because the source renumbered every
@@ -625,6 +636,9 @@ impl PimdirRemote for PimRemote<'_> {
 
         if page.truncated {
             self.truncated.insert(collection.to_string());
+        }
+        if !page.errored.is_empty() {
+            self.errored.insert(collection.to_string(), page.errored);
         }
         let vanished: Vec<PimdirHandle> =
             page.vanished.into_iter().map(PimdirHandle::from).collect();

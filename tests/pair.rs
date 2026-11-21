@@ -159,6 +159,55 @@ fn a_listing_the_server_cuts_short_is_reported_on_every_run() {
     }
 }
 
+/// A card the source lists with a 403 row is not deleted on the target, and
+/// the listing is reported incomplete on every run.
+///
+/// Read as a whole collection, the `PROPFIND` listing lacking the card
+/// stated it removed, and the run pushed its delete.
+#[test]
+fn a_member_the_server_answers_with_an_error_is_not_deleted() {
+    for no_sync in [false, true] {
+        let home = tempfile::tempdir().unwrap();
+        let (src, dst, config) = synced_pair(&home, "");
+        src.put("b.vcf", &card("b"));
+        let (code, report) = sync(home.path(), &config, &[]);
+        assert_eq!(code, 0, "{report}");
+        assert_eq!(dst.names(), ["a.vcf", "b.vcf"], "{report}");
+
+        src.set_faults(Faults {
+            refused: vec!["b.vcf"],
+            no_sync,
+            ..Faults::default()
+        });
+
+        for _ in 0..2 {
+            let (code, report) = sync(home.path(), &config, &[]);
+            assert_eq!(
+                dst.names(),
+                ["a.vcf", "b.vcf"],
+                "no_sync {no_sync}: {report}"
+            );
+            assert_eq!(
+                src.names(),
+                ["a.vcf", "b.vcf"],
+                "no_sync {no_sync}: {report}"
+            );
+            assert_eq!(code, 4, "no_sync {no_sync}: {report}");
+            let failures: Vec<&Value> = report["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|entry| entry["kind"] == "failures")
+                .collect();
+            assert_eq!(failures.len(), 1, "{report}");
+            assert_eq!(failures[0]["step"], "listing", "{report}");
+            assert_eq!(failures[0]["collection"], "book", "{report}");
+            let error = failures[0]["error"].as_str().unwrap();
+            assert!(error.contains("b.vcf (403)"), "{report}");
+        }
+    }
+}
+
 #[test]
 fn writes_a_target_s_rights_forbid_are_reported_held_never_applied() {
     let home = tempfile::tempdir().unwrap();

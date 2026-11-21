@@ -1222,7 +1222,7 @@ A pair collection whose sync fails SHALL be recorded as a `collection-patch` err
 - THEN the report's `errors` hold that `sync` hunk with its error, the text does not say the account is in sync, and the run exits 4
 
 ### Requirement: A store step that fails is reported
-A step of a run that fails outside any hunk SHALL be recorded as a `failures` error, one a failure: `step`, one of `queue` (the queue could not be read or drained), `bodies` (downloaded bodies could not land in the store, or a pair's full hydration failed) and `conflicts` (the waiting conflicts could not be counted) and `listing` (the server cut a listing short); `collection`, `null` for a store-wide step; beside the item error's `code`, `error` and `sources`, its `id` `null`. A `failures` error SHALL make the run incomplete (exit 4) and SHALL be printed among the errors. A step that fails SHALL NOT read as having done nothing: rows a failed read could not classify SHALL NOT be counted as drained.
+A step of a run that fails outside any hunk SHALL be recorded as a `failures` error, one a failure: `step`, one of `queue` (the queue could not be read or drained), `bodies` (downloaded bodies could not land in the store, or a pair's full hydration failed) and `conflicts` (the waiting conflicts could not be counted) and `listing` (the server cut a listing short, or listed a member with an error); `collection`, `null` for a store-wide step; beside the item error's `code`, `error` and `sources`, its `id` `null`. A `failures` error SHALL make the run incomplete (exit 4) and SHALL be printed among the errors. A step that fails SHALL NOT read as having done nothing: rows a failed read could not classify SHALL NOT be counted as drained.
 
 #### Scenario: A drain that fails
 - GIVEN a store whose queue cannot be drained
@@ -2111,6 +2111,16 @@ A listing returned incomplete for a truncation, a `sync-collection` or a `PROPFI
 - **GIVEN** a CardDAV server truncating every `sync-collection` answer of a new address book
 - **WHEN** the account is synced
 - **THEN** the cards it listed reach the store, and no card is inferred deleted on either endpoint
+
+### Requirement: A DAV member row answered with an error makes its listing incomplete
+A `sync-collection` or `PROPFIND` member row the server answered with a non-2xx status other than 404 (removed) and 507 (truncated), as io-webdav returns it under `WebdavSyncDelta::unreadable`, SHALL make the listing incomplete, read as a delta: a 403 or a 5xx member is not a deleted one, and no member is inferred removed from that listing's absences. The checkpoint SHALL stay the one the listing started from, the token the server returned being past that member's change, so the next run asks again.
+
+Such a listing SHALL be reported as a `failures` error of the `listing` step naming the collection, its error naming each member with its status, and the run SHALL exit 4, every run the server answers the member so.
+
+#### Scenario: A card the source refuses to list
+- **GIVEN** a CardDAV pair in sync over two cards, the source then listing one of them with a 403 row
+- **WHEN** it is synced, with `sync-collection` or by `PROPFIND`
+- **THEN** both cards stay on both endpoints, `errors` hold a `listing` failure of the address book naming the card and `403`, and the run exits 4, on every run
 
 ### Requirement: A DAV answer that is no whole multistatus fails
 A `207` answer whose body is not one whole `multistatus` document (a gateway's page, a document cut short or malformed, an empty body) SHALL fail the request reading it, as io-webdav refuses it: a `sync-collection` report, the `PROPFIND` listing standing in for it, a collection listing, a multiget. It SHALL NOT be read as a listing of what parsed, which a complete listing turns into the removal of every member left out. A failed listing is reported as "A collection that failed to scan is reported, never only logged" says, and a failed multiget falls back as "A body fetch answers for every handle it was asked about" says.

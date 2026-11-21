@@ -78,3 +78,6 @@ tempfile = "3"
 toml = "1.1"
 url = { version = "2.2", features = ["serde"] }
 vcard-rs = { version = "0.6.1", optional = true }
+
+[patch.crates-io]
+io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "6ff2e8b9fafc2f255bb37f219e242776dc0c955d" }

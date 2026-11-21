@@ -946,6 +946,7 @@ impl Listing {
             narrowed: self.narrowed,
             enumerated: self.enumerated,
             truncated: false,
+            errored: Vec::new(),
         }
     }
 }

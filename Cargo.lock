@@ -1067,8 +1067,7 @@ dependencies = [
 [[package]]
 name = "io-webdav"
 version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cf4e05eb97fb5c974f872beb03117c43a0dfc4519b4dc87f27ee86fa28ee876"
+source = "git+https://github.com/pimalaya/io-webdav?rev=6ff2e8b9fafc2f255bb37f219e242776dc0c955d#6ff2e8b9fafc2f255bb37f219e242776dc0c955d"
 dependencies = [
  "anyhow",
  "io-http",

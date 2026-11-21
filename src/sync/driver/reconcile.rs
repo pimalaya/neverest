@@ -78,6 +78,7 @@ fn rebuild_collection(
     let rebuilt =
         run_verb(store, &mut remote, rekey).with_context(|| format!("Rebuild {collection}"));
     ctx.noted.truncated.extend(remote.take_truncated());
+    ctx.noted.errored.extend(remote.take_errored());
     rebuilt
 }
 
@@ -154,6 +155,7 @@ pub(super) fn sync_side(
     ctx.refused.extend(refused);
     ctx.rejected.extend(rejected);
     ctx.noted.truncated.extend(remote.take_truncated());
+    ctx.noted.errored.extend(remote.take_errored());
 
     let report = match report {
         Err(err) if renumbered => Err(err.context(Renumbered)),

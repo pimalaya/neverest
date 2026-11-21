@@ -84,6 +84,9 @@ pub struct Enumeration {
     /// Whether the server cut the listing short, so the members past the
     /// cut were never seen.
     pub truncated: bool,
+    /// The members the server listed with an error (a DAV 403 or 5xx row),
+    /// each its handle and status: neither present nor removed.
+    pub errored: Vec<(String, Option<u16>)>,
 }
 
 /// The scope a connector filtering on another date than `Date` (Gmail,

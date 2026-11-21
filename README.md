@@ -58,6 +58,12 @@
   <summary>Cargo</summary>
 
   ```sh
+  cargo install --locked neverest
+  ```
+
+  For a build of `master`:
+
+  ```sh
   cargo install --locked --git https://github.com/pimalaya/neverest.git
   ```
 </details>

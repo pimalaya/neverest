@@ -1090,11 +1090,18 @@ impl Client {
         }
     }
 
-    /// Moves an item set from `from` to `to`.
-    pub fn move_items(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
+    /// Moves items, with a searchable, non-minted identity when available.
+    #[allow(unused_variables)]
+    pub fn move_items(
+        &mut self,
+        from: &str,
+        to: &str,
+        ids: &[&str],
+        identity: Option<&str>,
+    ) -> Result<()> {
         match self {
             #[cfg(feature = "imap")]
-            Client::Imap(c) => c.move_messages(from, to, ids),
+            Client::Imap(c) => c.move_messages(from, to, ids, identity),
             #[cfg(feature = "msgraph")]
             Client::Msgraph(c) => c.move_messages(to, ids),
             #[cfg(any(feature = "carddav", feature = "caldav"))]

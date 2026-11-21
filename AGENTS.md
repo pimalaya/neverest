@@ -9,6 +9,9 @@ by reading and following the rules. An optional bash port ships under
 [`impl/bash/`](./impl/bash) (`init`, `verify`); reading the rules is the primary
 path.
 
+The OVH move compatibility fix and validation limits are recorded in
+[cairn/log/2026-11-21-an-imap-move-needs-no-move-extension.md](./cairn/log/2026-11-21-an-imap-move-needs-no-move-extension.md).
+
 If you are an agent working in this repository, do the following **by default,
 without being asked**.
 

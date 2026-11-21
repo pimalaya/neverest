@@ -1279,6 +1279,58 @@ fn a_remove_relocating_its_member_says_so() {
     assert!(server.sent("UID EXPUNGE").is_empty());
 }
 
+/// A fallback receives the stated identity, never a minted or derived key.
+#[test]
+#[cfg(feature = "imap")]
+fn a_move_without_the_extension_requires_a_searchable_identity() {
+    use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+
+    for identity in [Some("b@x"), None, Some("alt:undated"), Some("dup:b@x#7")] {
+        let server = FakeImap::start(
+            FakeMailbox {
+                uid_validity: 1,
+                highest_mod_seq: 9,
+                messages: vec![FakeMessage {
+                    uid: 7,
+                    flags: Vec::new(),
+                    message_id: String::from("a@x"),
+                }],
+                states_exists: true,
+            },
+            true,
+        );
+        server.without_move();
+        let dir = tempfile::tempdir().unwrap();
+        let (mut ctx, store) = bound_imap_inbox(dir.path(), &server, true, None);
+        let collection = PimdirCollectionId("imap/INBOX".into());
+        let change = PimdirChange::new(
+            &collection,
+            PimdirChangeKind::Remove {
+                handle: PimdirHandle("7".into()),
+                to: Some(PimdirCollectionId("imap/Archive".into())),
+                link_id: identity.map(|id| PimdirLinkId(id.into())),
+                if_match: None,
+            },
+        );
+        let mut remote = PimRemote::new(&mut ctx.pool, store.blob_stage(), "imap");
+        let result = remote.push(&collection, vec![change]).unwrap().remove(0);
+
+        assert!(server.sent("UID MOVE").is_empty());
+        if identity == Some("b@x") {
+            assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+            assert!(result.relocated);
+            assert_eq!(server.sent("UID COPY"), ["UID COPY 7 Archive"]);
+            assert_eq!(server.sent("UID EXPUNGE"), ["UID EXPUNGE 7"]);
+        } else {
+            assert_ne!(result.outcome, PimdirPushOutcome::Accepted);
+            assert!(!result.relocated);
+            assert!(server.sent("UID COPY").is_empty());
+            assert!(server.sent("UID STORE").is_empty());
+            assert!(server.sent("UID EXPUNGE").is_empty());
+        }
+    }
+}
+
 /// A remove whose target already holds the identity deletes the member
 /// rather than filing it twice.
 ///

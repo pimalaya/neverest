@@ -713,7 +713,7 @@ impl PimdirRemote for PimRemote<'_> {
                 PimdirChangeKind::Remove {
                     handle,
                     to,
-                    link_id: _,
+                    link_id,
                     if_match,
                 } => match (to, holding.remove(&at)) {
                     (Some(_), Some(Err(reason))) => {
@@ -729,10 +729,17 @@ impl PimdirRemote for PimRemote<'_> {
                     }
                     (Some(target), None) => {
                         let dest = wire_name(&self.namespace, target.as_str()).to_string();
-                        let moved =
-                            self.pool
-                                .primary()
-                                .move_items(&collection, &dest, &[handle.as_str()]);
+                        let link = link_id
+                            .as_ref()
+                            .map(|link| self.kind.split_link_id(link))
+                            .unwrap_or_default();
+                        let identity = link.hint.filter(|_| link.mint.is_none());
+                        let moved = self.pool.primary().move_items(
+                            &collection,
+                            &dest,
+                            &[handle.as_str()],
+                            identity,
+                        );
 
                         match moved {
                             Ok(()) => relocated(handle),

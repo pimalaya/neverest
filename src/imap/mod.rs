@@ -8,3 +8,5 @@ pub mod backend;
 pub mod client;
 #[cfg(test)]
 pub mod fake;
+#[cfg(test)]
+mod move_tests;

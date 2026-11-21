@@ -163,6 +163,11 @@ impl ImapClient {
         supports_uid_expunge(&self.capabilities)
     }
 
+    /// Whether MOVE is advertised or built into IMAP4rev2 (RFC 9051).
+    pub fn supports_move(&self) -> bool {
+        supports_move(&self.capabilities)
+    }
+
     /// A QRESYNC `SELECT (QRESYNC (uid_validity highest_mod_seq))`: the server
     /// returns only what changed since `highest_mod_seq` plus vanished UIDs.
     pub fn select_delta(
@@ -202,6 +207,14 @@ impl ImapClient {
 fn supports_uid_expunge(capabilities: &[Capability<'_>]) -> bool {
     capabilities.iter().any(|capability| {
         *capability == Capability::UidPlus
+            || capability.to_string().eq_ignore_ascii_case("IMAP4rev2")
+    })
+}
+
+/// Whether `capabilities` carry MOVE (RFC 6851 or IMAP4rev2).
+fn supports_move(capabilities: &[Capability<'_>]) -> bool {
+    capabilities.iter().any(|capability| {
+        capability.to_string().eq_ignore_ascii_case("MOVE")
             || capability.to_string().eq_ignore_ascii_case("IMAP4rev2")
     })
 }
@@ -282,5 +295,14 @@ mod tests {
         assert!(supports_uid_expunge(&caps(&["IMAP4rev2"])));
         assert!(supports_uid_expunge(&caps(&["imap4rev2"])));
         assert!(!supports_uid_expunge(&caps(&["IMAP4rev1", "MOVE", "IDLE"])));
+    }
+
+    #[test]
+    fn native_move_needs_move_or_imap4rev2() {
+        assert!(supports_move(&caps(&["IMAP4rev1", "MOVE"])));
+        assert!(supports_move(&caps(&["IMAP4rev2"])));
+        assert!(supports_move(&caps(&["imap4rev2"])));
+        assert!(supports_move(&caps(&["move"])));
+        assert!(!supports_move(&caps(&["IMAP4rev1", "UIDPLUS"])));
     }
 }

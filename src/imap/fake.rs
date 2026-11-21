@@ -84,6 +84,8 @@ pub struct FakeImap {
     /// Whether the greeting announces UIDPLUS (RFC 4315), else a kept
     /// `APPEND` names no `APPENDUID`.
     uidplus: Arc<AtomicBool>,
+    /// Whether the greeting announces the MOVE extension.
+    moves: Arc<AtomicBool>,
     /// The `Message-ID` another client delivers right after the next kept
     /// `APPEND`, once.
     delivers: Arc<Mutex<Option<String>>>,
@@ -105,6 +107,7 @@ impl FakeImap {
         let enables = Arc::new(AtomicBool::new(true));
         let keeps = Arc::new(AtomicBool::new(false));
         let uidplus = Arc::new(AtomicBool::new(true));
+        let moves = Arc::new(AtomicBool::new(true));
         let delivers = Arc::new(Mutex::new(None));
 
         let logged = Arc::clone(&commands);
@@ -118,6 +121,7 @@ impl FakeImap {
         let enabling = Arc::clone(&enables);
         let keeping = Arc::clone(&keeps);
         let announcing = Arc::clone(&uidplus);
+        let moving = Arc::clone(&moves);
         let delivering = Arc::clone(&delivers);
         thread::spawn(move || {
             for stream in listener.incoming() {
@@ -133,6 +137,7 @@ impl FakeImap {
                 let enables = Arc::clone(&enabling);
                 let keeps = Arc::clone(&keeping);
                 let uidplus = Arc::clone(&announcing);
+                let moves = Arc::clone(&moving);
                 let delivers = Arc::clone(&delivering);
                 thread::spawn(move || {
                     let refusals = Refusals {
@@ -142,6 +147,7 @@ impl FakeImap {
                         enables: &enables,
                         keeps: &keeps,
                         uidplus: &uidplus,
+                        moves: &moves,
                         delivers: &delivers,
                     };
                     serve(
@@ -164,6 +170,7 @@ impl FakeImap {
             enables,
             keeps,
             uidplus,
+            moves,
             delivers,
         }
     }
@@ -183,6 +190,11 @@ impl FakeImap {
     /// after.
     pub fn without_uidplus(&self) {
         self.uidplus.store(false, Ordering::SeqCst);
+    }
+
+    /// Has the greeting announce no MOVE on connections opened afterwards.
+    pub fn without_move(&self) {
+        self.moves.store(false, Ordering::SeqCst);
     }
 
     /// Has another client deliver a message stating `message_id` right after
@@ -264,6 +276,7 @@ struct Refusals<'a> {
     enables: &'a AtomicBool,
     keeps: &'a AtomicBool,
     uidplus: &'a AtomicBool,
+    moves: &'a AtomicBool,
     delivers: &'a Mutex<Option<String>>,
 }
 
@@ -291,7 +304,13 @@ fn serve(
     };
     let uidplus = refusals.uidplus.load(Ordering::SeqCst);
     let announced = if uidplus { " UIDPLUS" } else { "" };
-    let greeting = format!("* PREAUTH [CAPABILITY IMAP4rev1{announced}{extensions}] fake\r\n");
+    let moves = if refusals.moves.load(Ordering::SeqCst) {
+        " MOVE"
+    } else {
+        ""
+    };
+    let greeting =
+        format!("* PREAUTH [CAPABILITY IMAP4rev1{moves}{announced}{extensions}] fake\r\n");
     if writer.write_all(greeting.as_bytes()).is_err() {
         return;
     }

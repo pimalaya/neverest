@@ -16,9 +16,9 @@ use chrono::DateTime;
 use io_imap::{
     client::{ImapClient as _, ImapClientError},
     rfc3501::{
-        append::ImapMessageAppendOptions, fetch::ImapMessageFetchOptions,
-        search::ImapMessageSearchOptions, select::ImapMailboxSelectOptions,
-        store::ImapMessageStoreOptions,
+        append::ImapMessageAppendOptions, copy::ImapMessageCopyOptions,
+        fetch::ImapMessageFetchOptions, search::ImapMessageSearchOptions,
+        select::ImapMailboxSelectOptions, store::ImapMessageStoreOptions,
     },
     rfc6851::r#move::ImapMessageMoveOptions,
     send::ImapOutput,
@@ -785,13 +785,55 @@ impl ImapClient {
         Ok(uids.into_iter().min().map(|uid| uid.to_string()))
     }
 
-    /// Moves a UID set from `from` to `to` (RFC 6851).
-    pub fn move_messages(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
+    /// Moves UIDs natively, or one searchable message by copy and UID expunge.
+    ///
+    /// Without MOVE, `message_id` must be a non-minted identity: searching the
+    /// target before copying makes an interrupted copy/delete retryable.
+    pub fn move_messages(
+        &mut self,
+        from: &str,
+        to: &str,
+        ids: &[&str],
+        message_id: Option<&str>,
+    ) -> Result<()> {
         let target = parse_mailbox(to)?;
         let sequence_set = parse_uids(ids)?;
 
+        if self.supports_move() {
+            self.select_cached(from)?;
+            self.r#move(sequence_set, target, ImapMessageMoveOptions { uid: true })?;
+            return Ok(());
+        }
+
+        if !self.supports_uid_expunge() {
+            bail!(
+                "The IMAP server offers neither MOVE nor UIDPLUS, so a move cannot \
+                 expunge only its source messages: move refused"
+            );
+        }
+        let message_id = message_id.filter(|id| !id.is_empty() && ids.len() == 1).context(
+            "An IMAP move without MOVE requires one message with a searchable, non-minted Message-ID",
+        )?;
+        if from == to {
+            bail!("An IMAP move without MOVE requires different source and target mailboxes");
+        }
+
+        let copied = self.find_message(to, message_id)?.is_some();
         self.select_cached(from)?;
-        self.r#move(sequence_set, target, ImapMessageMoveOptions { uid: true })?;
+        if !copied {
+            self.copy(
+                sequence_set.clone(),
+                target,
+                ImapMessageCopyOptions { uid: true },
+            )?;
+        }
+        self.store(
+            sequence_set.clone(),
+            StoreType::Add,
+            vec![ImapFlag::Deleted],
+            ImapMessageStoreOptions { uid: true },
+        )?;
+        self.uid_expunge(sequence_set)?;
 
         Ok(())
     }

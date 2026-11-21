@@ -226,6 +226,7 @@ pub(super) fn bind_relayed(
             object: None,
         }),
         origin: None,
+        server_object_id: None,
     };
 
     store

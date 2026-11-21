@@ -216,6 +216,7 @@ mod tests {
                 object: object.map(|h| PimdirHash(h.into())),
             }),
             origin: None,
+            server_object_id: None,
         }
     }
 

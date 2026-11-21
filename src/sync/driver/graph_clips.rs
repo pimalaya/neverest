@@ -179,6 +179,7 @@ impl PimdirRemote for Other {
             summary: None,
             sort_key: PimdirSortKey::default(),
             body: None,
+            server_object_id: None,
         };
         let meta = match item.body {
             Some(body) => meta.with_body(body),

@@ -1045,6 +1045,7 @@ mod tests {
                     conflict_object: None,
                     base,
                     origin: None,
+                    server_object_id: None,
                 }),
             ])
             .unwrap();
@@ -1227,6 +1228,7 @@ mod tests {
                     conflict_object: None,
                     base: None,
                     origin: None,
+                    server_object_id: None,
                 }),
                 PimdirWriteOp::DeliverPlacement {
                     collection: PimdirCollectionId(inbox("work")),

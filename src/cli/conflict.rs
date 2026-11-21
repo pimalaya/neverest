@@ -506,6 +506,7 @@ mod tests {
                         object: Some(blobs.hash(card("+1").as_bytes())),
                     }),
                     origin: None,
+                    server_object_id: None,
                 }),
             ])
             .unwrap();

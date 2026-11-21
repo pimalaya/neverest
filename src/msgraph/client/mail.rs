@@ -1659,6 +1659,7 @@ mod tests {
                                 summary: None,
                                 sort_key,
                                 body: None,
+                                server_object_id: None,
                             }
                         }
                     };

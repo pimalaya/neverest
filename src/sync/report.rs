@@ -1304,7 +1304,8 @@ impl ParkedQueueAction {
                 | PimdirAction::SetFlags { seq, .. }
                 | PimdirAction::Remove { seq, .. }
                 | PimdirAction::Move { seq, .. }
-                | PimdirAction::Copy { seq, .. },
+                | PimdirAction::Copy { seq, .. }
+                | PimdirAction::SetProperty { seq, .. },
             ) => (None, Some(seq.to_string())),
             Ok(PimdirAction::Unknown { kind, payload, .. }) => {
                 match PimdirInvitation::from_payload(&kind, &payload).map(|it| it.item) {

@@ -1094,14 +1094,22 @@ impl Client {
     }
 
     /// Moves an item set from `from` to `to`.
-    pub fn move_items(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
+    ///
+    /// Answers each moved id with its id in `to` where the backend states
+    /// it (an IMAP `COPYUID`, RFC 4315), none otherwise.
+    pub fn move_items(
+        &mut self,
+        from: &str,
+        to: &str,
+        ids: &[&str],
+    ) -> Result<Vec<(String, String)>> {
         match self {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c.move_messages(from, to, ids),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.move_messages(to, ids),
+            Client::Msgraph(c) => c.move_messages(to, ids).map(|()| Vec::new()),
             #[cfg(any(feature = "carddav", feature = "caldav"))]
-            Client::Dav(c) => c.move_items(from, to, ids),
+            Client::Dav(c) => c.move_items(from, to, ids).map(|()| Vec::new()),
             #[cfg(feature = "gpeople")]
             Client::Gpeople(_) => bail!("Google contacts cannot move (move not supported)"),
             #[cfg(feature = "gcal")]
@@ -1109,7 +1117,7 @@ impl Client {
                 bail!("Google events cannot move between calendars here (move not supported)")
             }
             #[cfg(feature = "gmail")]
-            Client::Gmail(c) => c.move_items(from, to, ids),
+            Client::Gmail(c) => c.move_items(from, to, ids).map(|()| Vec::new()),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",

@@ -190,6 +190,7 @@ impl BoundMeta {
             summary: None,
             sort_key: self.sort_key.clone(),
             body: None,
+            server_object_id: None,
         }
     }
 }
@@ -749,7 +750,7 @@ impl PimdirRemote for PimRemote<'_> {
                                 .move_items(&collection, &dest, &[handle.as_str()]);
 
                         match moved {
-                            Ok(()) => relocated(handle),
+                            Ok(moved) => relocated(handle, moved),
                             Err(err) => self.fail(&collection, handle, "move", &err),
                         }
                     }
@@ -891,6 +892,7 @@ impl PimRemote<'_> {
                         summary: None,
                         sort_key: PimdirSortKey::default(),
                         body: None,
+                        server_object_id: None,
                     },
                     handle: PimdirHandle::from(entry.id),
                     flags: to_offline_flags(&entry.flags),
@@ -927,6 +929,7 @@ impl PimRemote<'_> {
                     summary: item.summary,
                     sort_key: item.sort_key,
                     body: item.body,
+                    server_object_id: None,
                 },
             });
         }
@@ -1768,10 +1771,18 @@ fn accepted(handle: PimdirHandle, assigned: Option<PimdirHandle>) -> PimdirPushR
 
 /// An accepted remove that relocated its member into its target (pimdir
 /// SYNC §4): only this outcome delivers the create the target holds.
-fn relocated(handle: PimdirHandle) -> PimdirPushResult {
+///
+/// The handle the server states the member has there (an IMAP `COPYUID`)
+/// lands that create on it at once, so no later listing lands it on
+/// another member stating its `Message-ID`.
+fn relocated(handle: PimdirHandle, moved: Vec<(String, String)>) -> PimdirPushResult {
+    let assigned = moved
+        .into_iter()
+        .find(|(source, _)| *source == handle.0)
+        .map(|(_, destination)| PimdirHandle(destination));
     PimdirPushResult {
         relocated: true,
-        ..accepted(handle, None)
+        ..accepted(handle, assigned)
     }
 }
 
@@ -1923,6 +1934,7 @@ mod tests {
                 summary: None,
                 sort_key: PimdirSortKey::default(),
                 body: None,
+                server_object_id: None,
             },
         }
     }

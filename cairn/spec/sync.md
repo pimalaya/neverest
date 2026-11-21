@@ -2402,6 +2402,14 @@ A `Remove` carrying a target SHALL relocate its member into the target and answe
 - **WHEN** the message is moved to the archive and the account syncs
 - **THEN** the inbox copy is expunged, no `MOVE` is sent, and the archive holds the message once
 
+### Requirement: A relocation names the member it made
+An IMAP relocation SHALL answer the engine the UID its member now has in the target where the server states it, the destination half of the `COPYUID` code `UID MOVE` or `UID COPY` answers (RFC 4315), as the outcome's `assigned` handle (pimdir SYNC §4): the engine then lands the target's create on that UID at once, so a later listing never lands it on another message stating the same `Message-ID`. A code naming more UIDs than the move did answers none. Every other backend, and a server stating no code, answers none, and the target's listing lands the create as before. neverest states no server object id (pimdir SYNC §4): io-imap 0.12.0 can neither request nor parse `EMAILID`, so a message listed before another one stating its `Message-ID` and agreeing on every listed field is moved in still has the other's body linked (tests/moves.rs `a_move_into_a_message_stating_its_id_keeps_both`, its listed variant).
+
+#### Scenario: A move into a mailbox holding another message of its Message-ID
+- **GIVEN** a message in Left and, appended to Right after Right was last listed, another message stating the same `Message-ID`
+- **WHEN** the message is moved to Right and the account syncs
+- **THEN** the moved message's item is bound to its own UID in Right and the other message to its own, each holding its own body (tests/moves.rs, unlisted variant, Stalwart)
+
 ### Requirement: An add its server does not name is accepted with no handle
 An append the server takes without naming the member it made (an IMAP `APPEND` answering no `APPENDUID`, whose message a search by `Message-ID` does not name either, or states none) SHALL be answered accepted with no assigned handle (pimdir SYNC §4), never rejected: the engine records the create delivered, and the page naming the member lands it. The search SHALL name the whole `Message-ID` in its angle brackets, IMAP `HEADER` matching substrings, so a message whose `Message-ID` only holds it is never taken for the append, and SHALL take the highest UID it finds. It SHALL NOT be appended again by that run or a later one. The relay, which binds its copy around the engine, SHALL still fail on such an append, having no create a listing could land.
 

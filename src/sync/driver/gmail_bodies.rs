@@ -70,6 +70,7 @@ fn owed(collection: &str, handle: &str, size: u64) -> PimdirWriteOp {
             object: None,
         }),
         origin: None,
+        server_object_id: None,
     })
 }
 

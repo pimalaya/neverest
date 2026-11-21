@@ -29,7 +29,7 @@ gpeople = ["dep:io-gpeople", "dep:ical-rs", "dep:vcard-rs", "io-gpeople/std", "i
 gcal = ["dep:io-gcal", "dep:ical-rs", "dep:jiff", "jiff/tz-system", "dep:vcard-rs", "io-gcal/std", "io-gcal/ical"]
 gmail = ["dep:io-gmail", "io-gmail/std"]
 vendored = ["io-pimdir/vendored", "pimalaya-config/vendored", "pimalaya-stream/vendored", "io-webdav?/vendored", "io-imap?/vendored", "io-msgraph?/vendored", "io-smtp?/vendored", "io-gpeople?/vendored", "io-gcal?/vendored", "io-gmail?/vendored"]
-search = ["io-pimdir/search", "dep:jiff", "jiff/tz-system"]
+search = ["io-pimdir/search", "io-pimdir/indexer", "dep:jiff", "jiff/tz-system"]
 
 [profile.release]
 lto = "fat"
@@ -80,4 +80,5 @@ url = { version = "2.2", features = ["serde"] }
 vcard-rs = { version = "0.6.1", optional = true }
 
 [patch.crates-io]
+io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "b080e14beda9c226b6e1b1ae8b0823403d531b24" }
 io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "6ff2e8b9fafc2f255bb37f219e242776dc0c955d" }

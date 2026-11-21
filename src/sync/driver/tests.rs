@@ -34,6 +34,7 @@ fn named(link: &str) -> PimdirRemoteMeta {
         summary: None,
         sort_key: PimdirSortKey::default(),
         body: None,
+        server_object_id: None,
     }
 }
 
@@ -691,6 +692,7 @@ fn a_rekey_carries_state_by_link_id_and_bumps_the_generation_once() {
                     object: Some(io_pimdir::hash::hash(b"abc")),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
             PimdirWriteOp::SetCheckpoint {
                 collection: PimdirCollectionId("INBOX".into()),
@@ -782,6 +784,7 @@ fn a_renumbered_mailbox_is_rekeyed_before_it_is_listed() {
                     object: None,
                 }),
                 origin: None,
+                server_object_id: None,
             }),
             PimdirWriteOp::SetCheckpoint {
                 collection: PimdirCollectionId(INBOX.into()),
@@ -901,6 +904,7 @@ fn a_copy_the_target_holds_out_of_scope_is_bound_not_filed_again() {
             object: None,
         }),
         origin: None,
+        server_object_id: None,
     };
     let staged = PimdirPlacement {
         collection: PimdirCollectionId(INBOX.into()),
@@ -1030,6 +1034,7 @@ fn a_create_appended_without_a_uid_waits_and_is_not_appended_again() {
                 conflict_object: None,
                 base: None,
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -1114,6 +1119,7 @@ fn a_create_refused_as_it_stands_is_held_and_reported() {
                     conflict_object: None,
                     base: None,
                     origin: None,
+                    server_object_id: None,
                 }),
             ])
             .unwrap();
@@ -1528,6 +1534,7 @@ fn a_create_naming_no_member_is_owed_no_body_fetch() {
         conflict_object: None,
         base: None,
         origin: None,
+        server_object_id: None,
     };
     store
         .write(vec![
@@ -1603,6 +1610,7 @@ fn bound_imap_inbox(
                     object: None,
                 }),
                 origin: None,
+                server_object_id: None,
             })
         })
         .collect();
@@ -2144,6 +2152,7 @@ fn bound_calendar(store: &mut PimdirSourceStore, collection: &str) {
                 object: None,
             }),
             origin: None,
+            server_object_id: None,
         })])
         .unwrap();
 }
@@ -2343,6 +2352,7 @@ fn a_graph_source_takes_an_add_in_its_drafts_alone() {
                     object: None,
                 }),
                 origin: None,
+                server_object_id: None,
             })])
             .unwrap();
     }
@@ -2408,6 +2418,7 @@ fn a_gmail_source_refuses_any_keyword_but_important_at_the_gate() {
                 object: None,
             }),
             origin: None,
+            server_object_id: None,
         })])
         .unwrap();
     let config: AccountConfig = toml::from_str("gmail.auth.token.raw = \"token\"").unwrap();
@@ -2829,6 +2840,7 @@ fn the_sweep_collects_the_bodies_the_purge_released() {
                     object: Some(hash.clone()),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -2905,6 +2917,7 @@ fn retire(dir: &Path, account: &str, collection: &str, body: &[u8]) {
                     object: Some(hash),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -3166,6 +3179,7 @@ fn store_with_conflict(
                     object: Some(blobs.blobs().hash(base.as_bytes())),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -4070,6 +4084,7 @@ fn two_colliding_fields_park_the_item_and_the_count_reads_past_one() {
                 object: Some(blobs.blobs().hash(base.as_bytes())),
             }),
             origin: None,
+            server_object_id: None,
         })])
         .unwrap();
 
@@ -4433,6 +4448,7 @@ fn an_edit_over_an_unread_base_is_owed_its_base_body() {
                     object: None,
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -4495,6 +4511,7 @@ fn store_with_local_edit(dir: &std::path::Path, base_revision: &str) -> PimdirSo
                     object: Some(old_hash()),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -4547,6 +4564,7 @@ fn endpoint_with_local_edit(
                     object: Some(old_hash()),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -4685,6 +4703,7 @@ fn endpoint_holding(dir: &std::path::Path, source: &str, revision: &str) -> Pimd
                     object: Some(old_hash()),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -4824,6 +4843,7 @@ fn store_with_local_delete(dir: &std::path::Path) -> PimdirSourceStore {
                     object: Some(old_hash()),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -5166,6 +5186,7 @@ fn linked(handle: &str, link: &str, size: Option<u64>) -> PimdirPlacement {
             object: None,
         }),
         origin: None,
+        server_object_id: None,
     }
 }
 
@@ -5992,6 +6013,7 @@ fn the_pull_plan_names_an_item_its_listing_brought_with_its_body() {
                     object: Some(object),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ])
         .unwrap();
@@ -6057,6 +6079,7 @@ fn the_pull_plan_names_a_body_dropped_by_a_content_change() {
             conflict_object: None,
             base: None,
             origin: None,
+            server_object_id: None,
         })])
         .unwrap();
 
@@ -6315,6 +6338,7 @@ fn a_create_is_named_by_what_delivers_it() {
         conflict_object: None,
         base: None,
         origin,
+        server_object_id: None,
     };
 
     let add = placement_hunks("imap", "imap", "imap", "INBOX", &created(None));
@@ -6385,6 +6409,7 @@ fn probed(collection: &str, handle: &str) -> PimdirWriteOp {
         conflict_object: None,
         base: None,
         origin: None,
+        server_object_id: None,
     })
 }
 
@@ -6737,6 +6762,7 @@ fn mailbox_with_an_old_message(dir: &Path) -> PimdirSourceStore {
                 object: None,
             }),
             origin: None,
+            server_object_id: None,
         })])
         .unwrap();
     store
@@ -7515,6 +7541,7 @@ fn a_body_the_drain_kept_aside_is_reported() {
                     object: Some(hash),
                 }),
                 origin: None,
+                server_object_id: None,
             }),
         ]
     };

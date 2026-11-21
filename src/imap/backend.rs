@@ -16,9 +16,12 @@ use chrono::DateTime;
 use io_imap::{
     client::{ImapClient as _, ImapClientError},
     rfc3501::{
-        append::ImapMessageAppendOptions, copy::ImapMessageCopyOptions,
-        fetch::ImapMessageFetchOptions, search::ImapMessageSearchOptions,
-        select::ImapMailboxSelectOptions, store::ImapMessageStoreOptions,
+        append::ImapMessageAppendOptions,
+        copy::{ImapCopyUid, ImapMessageCopyOptions},
+        fetch::ImapMessageFetchOptions,
+        search::ImapMessageSearchOptions,
+        select::ImapMailboxSelectOptions,
+        store::ImapMessageStoreOptions,
     },
     rfc6851::r#move::ImapMessageMoveOptions,
     send::ImapOutput,
@@ -789,17 +792,23 @@ impl ImapClient {
     /// Moves a UID set from `from` to `to` by `UID MOVE` (RFC 6851), else by
     /// `UID COPY` and the expunge of the source UIDs alone (RFC 6851 §3.3).
     ///
-    /// Without `UID EXPUNGE` either, the move fails before any command. One
-    /// interrupted after its copy is finished by the next push, which finds
-    /// a searchable identity in the target.
-    pub fn move_messages(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
+    /// Answers each UID with the one `COPYUID` pairs it with (RFC 4315).
+    /// Without `UID EXPUNGE` either it fails before any command; one cut
+    /// after its copy is finished by the next push, which finds it there.
+    pub fn move_messages(
+        &mut self,
+        from: &str,
+        to: &str,
+        ids: &[&str],
+    ) -> Result<Vec<(String, String)>> {
         let target = parse_mailbox(to)?;
         let sequence_set = parse_uids(ids)?;
 
         if self.supports_move() {
             self.select_cached(from)?;
-            self.r#move(sequence_set, target, ImapMessageMoveOptions { uid: true })?;
-            return Ok(());
+            let copyuid =
+                self.r#move(sequence_set, target, ImapMessageMoveOptions { uid: true })?;
+            return Ok(moved_uids(copyuid.as_ref(), ids));
         }
 
         if !self.supports_uid_expunge() {
@@ -810,12 +819,13 @@ impl ImapClient {
         }
 
         self.select_cached(from)?;
-        self.copy(
+        let copyuid = self.copy(
             sequence_set.clone(),
             target,
             ImapMessageCopyOptions { uid: true },
         )?;
-        self.expunge_uids(sequence_set)
+        self.expunge_uids(sequence_set)?;
+        Ok(moved_uids(copyuid.as_ref(), ids))
     }
 
     /// The name a mailbox `name` takes under `parent`.
@@ -1475,6 +1485,24 @@ impl<W: Write> Write for Counted<W> {
     }
 }
 
+/// The `(source, destination)` pairs a `COPYUID` code states for the UIDs
+/// `ids` a move named (RFC 4315), as text.
+///
+/// Empty without a code, or for one naming more UIDs than the move did.
+fn moved_uids(copyuid: Option<&ImapCopyUid>, ids: &[&str]) -> Vec<(String, String)> {
+    let Some(copyuid) = copyuid else {
+        return Vec::new();
+    };
+    if copyuid.count() > ids.len() as u64 {
+        return Vec::new();
+    }
+    copyuid
+        .pairs()
+        .map(|(source, destination)| (source.to_string(), destination.to_string()))
+        .filter(|(source, _)| ids.contains(&source.as_str()))
+        .collect()
+}
+
 /// Parses stringified UIDs into an IMAP [`SequenceSet`].
 fn parse_uids(ids: &[&str]) -> Result<SequenceSet> {
     if ids.is_empty() {
@@ -1535,6 +1563,34 @@ mod tests {
     };
 
     use super::*;
+
+    /// A move answers each UID it named with the one `COPYUID` pairs it
+    /// with, none without a code or for one naming more than it moved.
+    #[test]
+    fn a_move_answers_the_uids_its_copyuid_states() {
+        let uid = |n: u32| NonZeroU32::new(n).unwrap();
+        let code = |source, destination| ImapCopyUid {
+            uid_validity: 7,
+            source: Vec::from([source]),
+            destination: Vec::from([destination]),
+        };
+
+        let one = code(uid(2)..=uid(2), uid(5)..=uid(5));
+        assert_eq!(
+            moved_uids(Some(&one), &["2"]),
+            [(String::from("2"), String::from("5"))]
+        );
+        let two = code(uid(2)..=uid(3), uid(8)..=uid(9));
+        assert_eq!(
+            moved_uids(Some(&two), &["2", "3"]),
+            [
+                (String::from("2"), String::from("8")),
+                (String::from("3"), String::from("9"))
+            ]
+        );
+        assert!(moved_uids(Some(&two), &["2"]).is_empty());
+        assert!(moved_uids(None, &["2"]).is_empty());
+    }
 
     /// An IANA keyword spelled with a backslash, which no atom holds, is
     /// pushed in its canonical form rather than aborting the push.

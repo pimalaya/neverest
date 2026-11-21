@@ -940,6 +940,22 @@ fn pushed_to_imap(
     uidplus: bool,
     kind: impl FnOnce(&PimdirBlobStage) -> PimdirChangeKind,
 ) -> (crate::imap::fake::FakeImap, PimdirPushResult) {
+    let lacking = |server: &crate::imap::fake::FakeImap| {
+        if !uidplus {
+            server.without_uidplus();
+            server.keep_appends();
+        }
+    };
+    pushed_to_fake_imap(lacking, kind)
+}
+
+/// The outcome of pushing `kind` to a fake inbox holding `a@x` under UID 7,
+/// the server set by `setup` before the push connects.
+#[cfg(feature = "imap")]
+fn pushed_to_fake_imap(
+    setup: impl FnOnce(&crate::imap::fake::FakeImap),
+    kind: impl FnOnce(&PimdirBlobStage) -> PimdirChangeKind,
+) -> (crate::imap::fake::FakeImap, PimdirPushResult) {
     use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
 
     let server = FakeImap::start(
@@ -955,10 +971,7 @@ fn pushed_to_imap(
         },
         true,
     );
-    if !uidplus {
-        server.without_uidplus();
-        server.keep_appends();
-    }
+    setup(&server);
     let dir = tempfile::tempdir().unwrap();
     let (mut ctx, store) = bound_imap_inbox(dir.path(), &server, true, None);
     let blobs = store.blob_stage();
@@ -1317,6 +1330,100 @@ fn a_remove_under_a_minted_key_relocates_unasked() {
     assert!(result.relocated);
     assert!(server.sent("UID SEARCH").is_empty());
     assert_eq!(server.sent("UID MOVE"), ["UID MOVE 7 Archive"]);
+}
+
+/// The source writes of a move, in the order the server read them.
+#[cfg(feature = "imap")]
+fn move_writes(server: &crate::imap::fake::FakeImap) -> Vec<String> {
+    let writes = ["UID MOVE", "UID COPY", "UID STORE", "UID EXPUNGE"];
+    let commands = server.commands.lock().unwrap();
+    commands
+        .iter()
+        .filter(|line| {
+            let upper = line.to_ascii_uppercase();
+            writes.iter().any(|verb| upper.starts_with(verb))
+        })
+        .cloned()
+        .collect()
+}
+
+/// A remove relocating its member on a server without MOVE copies it into
+/// the target, then expunges its own UID alone (RFC 6851 §3.3, RFC 4315).
+///
+/// OVH advertises UIDPLUS but no MOVE, and answers `UID MOVE` with `BAD`.
+#[test]
+#[cfg(feature = "imap")]
+fn a_remove_relocating_without_move_copies_then_expunges() {
+    let (server, result) = pushed_to_fake_imap(
+        |server| server.without_move(),
+        |_| PimdirChangeKind::Remove {
+            handle: PimdirHandle("7".into()),
+            to: Some(PimdirCollectionId("imap/Archive".into())),
+            link_id: Some(PimdirLinkId("b@x".into())),
+            if_match: None,
+        },
+    );
+
+    assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+    assert!(result.relocated, "the member went into the target");
+    assert_eq!(
+        move_writes(&server),
+        [
+            "UID COPY 7 Archive",
+            "UID STORE 7 +FLAGS (\\Deleted)",
+            "UID EXPUNGE 7",
+        ]
+    );
+}
+
+/// A remove under a minted key moves on a server without MOVE too, its
+/// target never asked (owner, 2026-11-21).
+///
+/// An interrupted move may leave a second copy in the target, never none.
+#[test]
+#[cfg(feature = "imap")]
+fn a_remove_under_a_minted_key_without_move_copies_unasked() {
+    let (server, result) = pushed_to_fake_imap(
+        |server| server.without_move(),
+        |_| PimdirChangeKind::Remove {
+            handle: PimdirHandle("7".into()),
+            to: Some(PimdirCollectionId("imap/Archive".into())),
+            link_id: Some(PimdirLinkId("dup:a@x#7".into())),
+            if_match: None,
+        },
+    );
+
+    assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+    assert!(result.relocated);
+    assert!(server.sent("UID SEARCH").is_empty());
+    assert_eq!(server.sent("UID COPY"), ["UID COPY 7 Archive"]);
+    assert_eq!(server.sent("UID EXPUNGE"), ["UID EXPUNGE 7"]);
+}
+
+/// A remove relocating its member on a server with neither MOVE nor
+/// UIDPLUS is held before any write.
+///
+/// A copy could not be followed by an expunge of its source alone, so
+/// nothing is copied, marked or moved (pimdir SYNC §4, §5).
+#[test]
+#[cfg(feature = "imap")]
+fn a_remove_relocating_without_move_nor_uidplus_is_held_unwritten() {
+    let (server, result) = pushed_to_fake_imap(
+        |server| {
+            server.without_move();
+            server.without_uidplus();
+        },
+        |_| PimdirChangeKind::Remove {
+            handle: PimdirHandle("7".into()),
+            to: Some(PimdirCollectionId("imap/Archive".into())),
+            link_id: Some(PimdirLinkId("b@x".into())),
+            if_match: None,
+        },
+    );
+
+    assert_ne!(result.outcome, PimdirPushOutcome::Accepted);
+    assert!(!result.relocated);
+    assert!(move_writes(&server).is_empty(), "nothing written");
 }
 
 /// An append taken without a UID, which no search finds either, is

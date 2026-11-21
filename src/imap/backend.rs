@@ -16,9 +16,9 @@ use chrono::DateTime;
 use io_imap::{
     client::{ImapClient as _, ImapClientError},
     rfc3501::{
-        append::ImapMessageAppendOptions, fetch::ImapMessageFetchOptions,
-        search::ImapMessageSearchOptions, select::ImapMailboxSelectOptions,
-        store::ImapMessageStoreOptions,
+        append::ImapMessageAppendOptions, copy::ImapMessageCopyOptions,
+        fetch::ImapMessageFetchOptions, search::ImapMessageSearchOptions,
+        select::ImapMailboxSelectOptions, store::ImapMessageStoreOptions,
     },
     rfc6851::r#move::ImapMessageMoveOptions,
     send::ImapOutput,
@@ -785,15 +785,36 @@ impl ImapClient {
         Ok(uids.into_iter().min().map(|uid| uid.to_string()))
     }
 
-    /// Moves a UID set from `from` to `to` (RFC 6851).
+    /// Moves a UID set from `from` to `to` by `UID MOVE` (RFC 6851), else by
+    /// `UID COPY` and the expunge of the source UIDs alone (RFC 6851 §3.3).
+    ///
+    /// Without `UID EXPUNGE` either, the move fails before any command. One
+    /// interrupted after its copy is finished by the next push, which finds
+    /// a searchable identity in the target.
     pub fn move_messages(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
         let target = parse_mailbox(to)?;
         let sequence_set = parse_uids(ids)?;
 
-        self.select_cached(from)?;
-        self.r#move(sequence_set, target, ImapMessageMoveOptions { uid: true })?;
+        if self.supports_move() {
+            self.select_cached(from)?;
+            self.r#move(sequence_set, target, ImapMessageMoveOptions { uid: true })?;
+            return Ok(());
+        }
 
-        Ok(())
+        if !self.supports_uid_expunge() {
+            bail!(
+                "The IMAP server offers neither MOVE, UIDPLUS nor IMAP4rev2, so a copy \
+                 cannot be followed by an expunge of its source alone: move refused"
+            );
+        }
+
+        self.select_cached(from)?;
+        self.copy(
+            sequence_set.clone(),
+            target,
+            ImapMessageCopyOptions { uid: true },
+        )?;
+        self.expunge_uids(sequence_set)
     }
 
     /// The name a mailbox `name` takes under `parent`.
@@ -947,6 +968,12 @@ impl ImapClient {
         let sequence_set = parse_uids(&[id])?;
 
         self.select_cached(mailbox)?;
+        self.expunge_uids(sequence_set)
+    }
+
+    /// Marks a UID set of the selected mailbox `\Deleted`, then `UID
+    /// EXPUNGE`s that set alone.
+    fn expunge_uids(&mut self, sequence_set: SequenceSet) -> Result<()> {
         self.store(
             sequence_set.clone(),
             StoreType::Add,

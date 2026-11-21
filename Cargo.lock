@@ -867,9 +867,9 @@ dependencies = [
 
 [[package]]
 name = "io-gcal"
-version = "0.5.2"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e20425de10be3034cbe5b9df7a390b58a1103be91ae34fcfab99709a0cbc3933"
+checksum = "30688344ee65594f121140f1ad8a7892c597c2fa5c3372f5c2a79443c7a5e83e"
 dependencies = [
  "anyhow",
  "ical-rs",
@@ -885,9 +885,9 @@ dependencies = [
 
 [[package]]
 name = "io-gmail"
-version = "0.9.0"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5992425f089d8eb98b68d71f8264b1177ac188a8ad7dddd6485dbd58b00f8fc2"
+checksum = "bd99f4990ab48e66b72baf82cf8eb3662b12281e24c6d87bbe90a9135fc6f552"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -902,9 +902,9 @@ dependencies = [
 
 [[package]]
 name = "io-gpeople"
-version = "0.8.1"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "980996a1bf71f18c42874b52cf3034751e6df840813a8286704e51d93f8382a2"
+checksum = "7f8a058c6978002a25f1a0d68fd17454a9bf2210e11238f5aca04c9d83a75683"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -920,9 +920,9 @@ dependencies = [
 
 [[package]]
 name = "io-http"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47ae262c265c95e13dc5dd88370d23b74f5e5b307d503ba208e0e6117ddfbd3e"
+checksum = "80214cd8fd62f9ce721483416c1f4cf1b924c2a11f6fd9151f0d3dfa627856ed"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -956,9 +956,9 @@ dependencies = [
 
 [[package]]
 name = "io-msgraph"
-version = "0.9.4"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c9606ebb1e069a6a6e21d4daf7218257d67f06236eab623767468b6f624cb0cf"
+checksum = "31c4cb2124dedfa3717f994b3db6770793c60cfa373c3ceed40c90f5c26defb7"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -975,9 +975,9 @@ dependencies = [
 
 [[package]]
 name = "io-oauth"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a1e90de37723f2e56f2e91aaf42e6bf5c6980ae018de265eb6ad4fb4d88af41"
+checksum = "4d011668b36e4e6380b4cc24edc82e1c683712e3aa0e7368f61fec8ec47e360f"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -997,9 +997,9 @@ dependencies = [
 
 [[package]]
 name = "io-pimdir"
-version = "0.19.0"
+version = "0.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "478fe68c04b2021b226818ca07ce43b1d875786a9e974ea77a0c142ecbf7c445"
+checksum = "e4f11c48d2a4482bda9e9c0ac7924af6b9b3791ba45d233618282b546a255557"
 dependencies = [
  "blake3",
  "encoding_rs",
@@ -1018,9 +1018,9 @@ dependencies = [
 
 [[package]]
 name = "io-proxy"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b8a1b3698a70ea041d11dea1532276cf270aa289388bce8c68b27d949eb3506"
+checksum = "08d43e8139aa88f8248928a607a60767b93fc4bebf1e1d36ce761554b7397b3c"
 dependencies = [
  "base64-codec",
  "log",
@@ -1066,9 +1066,9 @@ dependencies = [
 
 [[package]]
 name = "io-webdav"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de481e88fd54ae82f8c2a1fcd5b11539fec6a94b9609c7bb4a972bdd495c42d5"
+checksum = "4cf4e05eb97fb5c974f872beb03117c43a0dfc4519b4dc87f27ee86fa28ee876"
 dependencies = [
  "anyhow",
  "io-http",
@@ -1587,9 +1587,9 @@ dependencies = [
 
 [[package]]
 name = "pimalaya-stream"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "314599e9b99dbd22c67c45704fafa0010c38ad000bea4c6ce555bd9d7ca05aab"
+checksum = "696292f67a3d82d113a279435d4cf6088c5cf2632e166662f28b91268d959e4a"
 dependencies = [
  "anyhow",
  "io-proxy",

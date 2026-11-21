@@ -380,6 +380,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Fixed RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387 by bumping crypto-bigint, ctutils, rustls-webpki and webpki-root-certs.
 
+- Fixed an item listed with the summary and sort key of a body it does not hold: a rekey carrying a local edit in conflict took the server's body's, an upgrade under a local edit the base's, and a bodiless pull the unread body's (io-pimdir 0.19.1).
+
 ## [0.3.0] - 2026-10-02
 
 ### Added

@@ -22,12 +22,12 @@ rustls-aws = ["pimalaya-stream/rustls-aws", "io-webdav?/rustls-aws", "io-imap?/r
 rustls-ring = ["pimalaya-stream/rustls-ring", "io-webdav?/rustls-ring", "io-imap?/rustls-ring", "io-msgraph?/rustls-ring", "io-smtp?/rustls-ring", "io-gpeople?/rustls-ring", "io-gcal?/rustls-ring", "io-gmail?/rustls-ring"]
 imap = ["dep:io-imap", "io-imap/std", "io-imap/scram"]
 smtp = ["dep:io-smtp", "io-smtp/std", "io-smtp/scram"]
-carddav = ["dep:io-webdav", "dep:io-http", "dep:ical-rs", "dep:vcard-rs"]
-caldav = ["dep:io-webdav", "dep:io-http", "dep:ical-rs", "dep:vcard-rs"]
-msgraph = ["dep:io-msgraph", "dep:base64", "dep:ical-rs", "dep:jiff", "jiff/tz-system", "dep:vcard-rs", "io-msgraph/client", "io-msgraph/ical", "io-msgraph/vcard"]
-gpeople = ["dep:io-gpeople", "dep:ical-rs", "dep:vcard-rs", "io-gpeople/client", "io-gpeople/vcard"]
-gcal = ["dep:io-gcal", "dep:ical-rs", "dep:jiff", "jiff/tz-system", "dep:vcard-rs", "io-gcal/client", "io-gcal/ical"]
-gmail = ["dep:io-gmail", "io-gmail/client"]
+carddav = ["dep:io-webdav", "dep:io-http", "io-http/client", "dep:ical-rs", "dep:vcard-rs"]
+caldav = ["dep:io-webdav", "dep:io-http", "io-http/client", "dep:ical-rs", "dep:vcard-rs"]
+msgraph = ["dep:io-msgraph", "dep:base64", "dep:ical-rs", "dep:jiff", "jiff/tz-system", "dep:vcard-rs", "io-msgraph/std", "io-msgraph/ical", "io-msgraph/vcard"]
+gpeople = ["dep:io-gpeople", "dep:ical-rs", "dep:vcard-rs", "io-gpeople/std", "io-gpeople/vcard"]
+gcal = ["dep:io-gcal", "dep:ical-rs", "dep:jiff", "jiff/tz-system", "dep:vcard-rs", "io-gcal/std", "io-gcal/ical"]
+gmail = ["dep:io-gmail", "io-gmail/std"]
 vendored = ["io-pimdir/vendored", "pimalaya-config/vendored", "pimalaya-stream/vendored", "io-webdav?/vendored", "io-imap?/vendored", "io-msgraph?/vendored", "io-smtp?/vendored", "io-gpeople?/vendored", "io-gcal?/vendored", "io-gmail?/vendored"]
 search = ["io-pimdir/search", "dep:jiff", "jiff/tz-system"]
 
@@ -41,7 +41,7 @@ panic = "abort"
 pimalaya-cli = { version = "0.8.0", default-features = false, features = ["build"] }
 
 [dev-dependencies]
-io-oauth = { version = "0.7", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
+io-oauth = { version = "0.8", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
 
 [dependencies]
 anyhow = "1"
@@ -53,21 +53,21 @@ crossbeam-queue = "0.3"
 dirs = "7"
 idna_adapter = { version = "=1.0.0", default-features = false }
 ical-rs = { version = "0.7.3", optional = true }
-io-gcal = { version = "0.5.2", default-features = false, optional = true }
-io-gmail = { version = "0.9", default-features = false, optional = true }
-io-gpeople = { version = "0.8.1", default-features = false, optional = true }
-io-http = { version = "0.8", default-features = false, optional = true }
+io-gcal = { version = "0.6.0", default-features = false, optional = true }
+io-gmail = { version = "0.10", default-features = false, optional = true }
+io-gpeople = { version = "0.9.0", default-features = false, optional = true }
+io-http = { version = "0.9", default-features = false, optional = true }
 io-imap = { version = "0.12.0", default-features = false, optional = true }
-io-msgraph = { version = "0.9.4", default-features = false, optional = true }
-io-pimdir = { version = "0.19.0", default-features = false, features = ["client"] }
+io-msgraph = { version = "0.10.0", default-features = false, optional = true }
+io-pimdir = { version = "0.19.1", default-features = false, features = ["client"] }
 io-sasl = { version = "0.3", default-features = false, features = ["scram"] }
 io-smtp = { version = "0.10", default-features = false, optional = true }
-io-webdav = { version = "0.12.0", default-features = false, optional = true }
+io-webdav = { version = "0.13.0", default-features = false, optional = true }
 jiff = { version = "1", default-features = false, features = ["std"], optional = true }
 log = "0.4"
 pimalaya-cli = { version = "0.8.0", default-features = false, features = ["terminal", "signal"] }
 pimalaya-config = { version = "0.6.0", default-features = false, features = ["toml", "secret"] }
-pimalaya-stream = { version = "0.4", default-features = false }
+pimalaya-stream = { version = "0.4.1", default-features = false }
 rusqlite = { version = "0.43", default-features = false }
 schemars = "1"
 secrecy = { version = "0.10", features = ["serde"] }

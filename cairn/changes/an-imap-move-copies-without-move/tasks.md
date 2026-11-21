@@ -13,5 +13,5 @@ change: an-imap-move-copies-without-move
 - [x] Checks: `cargo test --all-features` (maddy suite included), the five builds of CONTRIBUTING.md, clippy with `-D warnings`, `cargo fmt --check`.
 - [x] Fold the delta into cairn/spec/sync.md after "An IMAP delete expunges its own message alone", write the log, CHANGELOG `[Unreleased]` Fixed entry naming #35, status `landed`.
 - [x] Commit: `fix(imap): copy then expunge a move when the server lacks MOVE`.
-- [ ] Push, owner's go first.
-- [ ] Owner posts the two comments of proposal.md: closes #36, asks the reporter on #35 to try master on OVH; #35 closes on their confirmation.
+- [x] Push, owner's go (2026-11-21).
+- [x] Owner answers #35 and #36 and closes both (2026-11-21).

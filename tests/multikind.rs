@@ -113,7 +113,7 @@ fn one_account_syncing_mail_and_contacts_carries_both_and_dispatches_each_by_kin
     );
     assert!(
         report.contains(&format!(
-            r#"{{"side":"carddav","collection":"{BOOK}","id":"{CARD}.vcf"}}"#
+            r#""collection":"{CARD_COLLECTION}","side":"carddav","remoteId":"{CARD}.vcf"}}"#
         )),
         "the contacts side is named as the one that parked; report was:\n{report}",
     );

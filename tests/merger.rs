@@ -373,8 +373,14 @@ fn assert_untouched(parked: &Parked, book: &str) {
         &parked.state,
         0,
     );
+    let conflicts: serde_json::Value = serde_json::from_str(&listed).expect("conflict listing");
+    let waiting = conflicts["conflicts"]
+        .as_array()
+        .expect("a conflict array")
+        .iter()
+        .any(|conflict| conflict["id"] == parked.id.as_str());
     assert!(
-        listed.contains(&format!("{CARD}.vcf")),
+        waiting,
         "the divergence is still waiting for a decision; listing was:\n{listed}",
     );
 

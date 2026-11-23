@@ -1964,6 +1964,238 @@ fn a_settled_pair_collection_is_listed_once_a_run() {
     assert_eq!(listed, (1, 1), "{:?} {:?}", left.sent(""), right.sent(""));
 }
 
+/// Queues the add of a message stating `Message-ID: <{id}>` into the inbox,
+/// its header block the fake server's, and drains it as the imap source.
+#[cfg(feature = "imap")]
+fn queued_add(dir: &Path, store: &mut PimdirSourceStore, id: &str) {
+    let body = format!(
+        "Message-ID: <{id}>\r\nDate: Thu, 29 Oct 2026 10:00:00 +0000\r\n\
+         Subject: fake\r\n\r\n"
+    );
+    PimdirProducer::open(dir, "tests")
+        .unwrap()
+        .enqueue_with_body("imap/INBOX", body.as_bytes(), |hash| PimdirAction::Add {
+            link_id: Some(PimdirLinkId(id.into())),
+            flags: PimdirFlags::default(),
+            object: Some(hash),
+            supersedes: None,
+        })
+        .unwrap();
+    let mut report = SyncOutput::default();
+    drain_queues(store, &mut report);
+    assert_eq!(report.drained[0].applied, 1, "{report:?}");
+}
+
+/// A renumbered mailbox binds an unpushed create to the message stating
+/// its `Message-ID`, as a page names it (pimdir SYNC §8).
+///
+/// One item, nothing appended, where the create was appended beside it.
+#[test]
+#[cfg(feature = "imap")]
+fn a_renumbered_mailbox_binds_a_pending_create_to_the_member_it_names() {
+    let server = one_message(2, 100);
+    server.keep_appends();
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoint = Some(crate::imap::backend::encode_checkpoint(1, 5));
+    let (mut ctx, mut store) = bound_imap_messages(dir.path(), &server, false, checkpoint, 0);
+    queued_add(dir.path(), &mut store, "m1@x");
+
+    let blobs = store.blob_stage();
+    sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+
+    assert!(server.sent("APPEND").is_empty(), "{:?}", server.sent(""));
+    let held: Vec<_> = load_side(&store, "imap/INBOX")
+        .unwrap()
+        .into_iter()
+        .filter(|placement| placement.status != PimdirStatus::Tombstone)
+        .map(|placement| placement.handle.0)
+        .collect();
+    assert_eq!(held, ["100"]);
+}
+
+/// A renumbered mailbox binds another source's item to the message
+/// stating its `Message-ID` (pimdir SYNC §8).
+///
+/// One item, nothing appended, where the rekey minted a second item apart.
+#[test]
+#[cfg(feature = "imap")]
+fn a_renumbered_mailbox_binds_an_offered_item_to_the_member_it_names() {
+    let server = one_message(2, 100);
+    server.keep_appends();
+    let dir = tempfile::tempdir().unwrap();
+    let checkpoint = Some(crate::imap::backend::encode_checkpoint(1, 5));
+    let (mut ctx, mut store) = bound_imap_messages(dir.path(), &server, false, checkpoint, 0);
+    let mut other = open_store(dir.path(), "other", "imap").unwrap();
+    let body = b"Message-ID: <m1@x>\r\nSubject: fake\r\n\r\nhello\r\n";
+    let object = other.blob_stage().stage_body(body).unwrap();
+    other
+        .write(vec![
+            PimdirWriteOp::StoreObject {
+                object: object.clone(),
+                body: None,
+            },
+            PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+                collection: PimdirCollectionId("imap/INBOX".into()),
+                handle: PimdirHandle("o1".into()),
+                link_id: Some(PimdirLinkId("m1@x".into())),
+                object: Some(object.hash.clone()),
+                level: PimdirLevel::Full,
+                summary: None,
+                sort_key: PimdirSortKey::default(),
+                flags: PimdirFlags::default(),
+                status: PimdirStatus::Clean,
+                conflict_revision: None,
+                conflict_object: None,
+                base: Some(PimdirBase {
+                    flags: PimdirFlags::default(),
+                    revision: None,
+                    object: Some(object.hash.clone()),
+                }),
+                origin: None,
+                server_object_id: None,
+            }),
+        ])
+        .unwrap();
+    drop(other);
+
+    let blobs = store.blob_stage();
+    sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+
+    assert!(server.sent("APPEND").is_empty(), "{:?}", server.sent(""));
+    let reader = PimdirReader::open(dir.path()).unwrap();
+    let items = reader.list_items("imap/INBOX", None, 10).unwrap();
+    assert_eq!(items.len(), 1, "{items:?}");
+}
+
+/// A create delivered with no member named lands as a page lands it once
+/// the rebuild of a renumbered mailbox names it (pimdir SYNC §8).
+///
+/// Its server has no UIDPLUS; it is reported created and appended once.
+#[test]
+#[cfg(feature = "imap")]
+fn a_delivered_create_a_rebuild_names_is_reported_created() {
+    use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+
+    let server = FakeImap::start(
+        FakeMailbox {
+            uid_validity: 1,
+            highest_mod_seq: 1,
+            messages: Vec::new(),
+            states_exists: true,
+        },
+        false,
+    );
+    server.without_uidplus();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ctx, mut store) = bound_imap_messages(dir.path(), &server, false, None, 0);
+    queued_add(dir.path(), &mut store, "m1@x");
+    let blobs = store.blob_stage();
+    sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+    assert_eq!(server.sent("APPEND").len(), 1);
+
+    server.renumber(
+        2,
+        vec![FakeMessage {
+            uid: 50,
+            flags: Vec::new(),
+            message_id: String::from("m1@x"),
+        }],
+    );
+    let (report, _) =
+        sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+
+    assert!(
+        report
+            .events
+            .iter()
+            .any(|event| matches!(event, PimdirSyncEvent::Created(h) if h.0 == "50")),
+        "{:?}",
+        report.events
+    );
+    assert_eq!(server.sent("APPEND").len(), 1, "{:?}", server.sent(""));
+    assert_eq!(live_inbox(&store), 1);
+}
+
+/// A queued move into a collection where the other endpoint binds the
+/// identity joins that item (pimdir SYNC §10), as `store.mutate` does.
+///
+/// One item there, where the drain minted a second one.
+#[test]
+fn a_queued_move_into_an_identity_the_other_endpoint_binds_joins_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let body = b"Message-ID: <m1@x>\r\nSubject: shared\r\n\r\nthe shared message\r\n";
+    let hash = io_pimdir::hash::hash(body);
+    let placement = |collection: &str, handle: &str| {
+        PimdirWriteOp::UpsertPlacement(PimdirPlacement {
+            collection: PimdirCollectionId(collection.into()),
+            handle: PimdirHandle(handle.into()),
+            link_id: Some(PimdirLinkId("m1@x".into())),
+            object: Some(hash.clone()),
+            level: PimdirLevel::Full,
+            summary: None,
+            sort_key: PimdirSortKey::default(),
+            flags: PimdirFlags::default(),
+            status: PimdirStatus::Clean,
+            conflict_revision: None,
+            conflict_object: None,
+            base: Some(PimdirBase {
+                flags: PimdirFlags::default(),
+                revision: None,
+                object: Some(hash.clone()),
+            }),
+            origin: None,
+            server_object_id: None,
+        })
+    };
+    let mut left = open_store(dir.path(), "left", "pair").unwrap();
+    for collection in ["left/INBOX", "left/Archive"] {
+        left.ensure_collection(collection, "message/rfc822")
+            .unwrap();
+    }
+    let mut right = open_store(dir.path(), "right", "pair").unwrap();
+    right
+        .write(vec![
+            PimdirWriteOp::StoreObject {
+                object: PimdirObject {
+                    hash: hash.clone(),
+                    size: body.len(),
+                },
+                body: Some(body.to_vec()),
+            },
+            placement("left/Archive", "9"),
+        ])
+        .unwrap();
+    drop(right);
+    left.write(vec![
+        placement("left/INBOX", "1"),
+        PimdirWriteOp::SetCheckpoint {
+            collection: PimdirCollectionId("left/Archive".into()),
+            checkpoint: PimdirCheckpoint(b"cp".to_vec()),
+        },
+    ])
+    .unwrap();
+
+    let reader = PimdirReader::open(dir.path()).unwrap();
+    let seq = reader.list_items("left/INBOX", None, 10).unwrap()[0].seq;
+    PimdirProducer::open(dir.path(), "tests")
+        .unwrap()
+        .enqueue(
+            "left/INBOX",
+            &PimdirAction::Move {
+                seq,
+                to: PimdirCollectionId("left/Archive".into()),
+            },
+            None,
+        )
+        .unwrap();
+    let mut report = SyncOutput::default();
+    drain_queues(&mut left, &mut report);
+    assert!(report.parked.is_empty(), "{report:?}");
+
+    let archived = reader.list_items("left/Archive", None, 10).unwrap();
+    assert_eq!(archived.len(), 1, "{archived:?}");
+}
+
 fn names(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|name| name.to_string()).collect()
 }

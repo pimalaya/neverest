@@ -234,6 +234,14 @@ impl FakeImap {
         self.headers.lock().unwrap().insert(uid, header.to_vec());
     }
 
+    /// Has the mailbox hold `messages` under `uid_validity`, as a server
+    /// rebuilding it renumbers every message.
+    pub fn renumber(&self, uid_validity: u32, messages: Vec<FakeMessage>) {
+        let mut mailbox = self.served.lock().unwrap();
+        mailbox.uid_validity = uid_validity;
+        mailbox.messages = messages;
+    }
+
     /// The flags the message `uid` holds now.
     pub fn flags(&self, uid: u32) -> Vec<String> {
         let mailbox = self.served.lock().unwrap();

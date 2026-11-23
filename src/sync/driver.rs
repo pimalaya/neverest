@@ -962,6 +962,9 @@ mod gmail_bodies;
 #[cfg(all(test, feature = "gmail"))]
 mod gmail_heads;
 
+#[cfg(all(test, feature = "gmail"))]
+mod gmail_quiet;
+
 #[cfg(all(test, feature = "msgraph"))]
 mod graph_heads;
 

@@ -314,7 +314,8 @@ fn a_side_nothing_writes_is_listed_once_a_run() {
     assert_eq!(src.names(), ["a.vcf"], "{report}");
 }
 
-/// A lone source no write can reach is listed once a run too.
+/// A lone source no write can reach is listed once a run too, a card removed
+/// moving its sync token so the run lists it.
 #[test]
 fn a_lone_source_nothing_writes_is_listed_once_a_run() {
     let home = tempfile::tempdir().unwrap();
@@ -332,6 +333,7 @@ fn a_lone_source_nothing_writes_is_listed_once_a_run() {
     let (code, report) = sync(home.path(), &config, &["--init"]);
     assert_eq!(code, 0, "{report}");
     let listed = dav.requests("REPORT").len();
+    dav.remove("a.vcf");
     let (code, report) = sync(home.path(), &config, &[]);
 
     assert_eq!(code, 0, "{report}");
@@ -356,4 +358,38 @@ fn a_target_s_filter_narrows_what_it_takes() {
     assert_eq!(code, 0, "{report}");
     assert!(dst.names().is_empty(), "{report}");
     assert!(dst.requests("PUT").is_empty(), "{report}");
+}
+
+/// A book whose sync token in the home-set listing equals its checkpoint
+/// sends no `REPORT` (RFC 6578 §4): nothing changed there. A card added
+/// moves the token, and the next run lists it.
+#[test]
+fn a_book_whose_sync_token_did_not_move_is_not_listed() {
+    let home = tempfile::tempdir().unwrap();
+    let dav = FakeDav::start();
+    dav.put("a.vcf", &card("a"));
+    let config = solo(home.path(), &dav);
+
+    let (code, report) = sync(home.path(), &config, &["--init"]);
+    assert_eq!(code, 0, "{report}");
+    let reports = dav.requests("REPORT").len();
+
+    let (code, report) = sync(home.path(), &config, &[]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(dav.requests("REPORT").len(), reports, "{report}");
+
+    dav.put("b.vcf", &card("b"));
+    let (code, report) = sync(home.path(), &config, &[]);
+    assert_eq!(code, 0, "{report}");
+    let synced = dav.requests("REPORT");
+    assert!(
+        synced[reports..]
+            .iter()
+            .any(|line| line.contains("/dav/book/")),
+        "{synced:?}"
+    );
+    assert!(
+        !report["itemPatch"].as_array().unwrap().is_empty(),
+        "{report}"
+    );
 }

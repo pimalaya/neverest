@@ -119,6 +119,9 @@ pub struct DavClient {
     proxy: Proxy,
     /// The source's back-off, shared by its connections.
     throttle: Arc<Throttle>,
+    /// The sync token each collection of the last listing stated (RFC 6578
+    /// §4), by key.
+    tokens: BTreeMap<String, String>,
 }
 
 impl DavClient {
@@ -147,6 +150,7 @@ impl DavClient {
             auth: auth.clone(),
             proxy: proxy.clone(),
             throttle,
+            tokens: BTreeMap::new(),
         };
 
         if let DavEndpoint::Home(home) = endpoint {
@@ -248,12 +252,19 @@ impl DavClient {
     /// still shows, falling back to the key (often a server's UUID).
     pub fn list_collections(&mut self, _with_counts: bool) -> Result<Vec<Collection>> {
         let kind = self.kind;
+        let mut tokens = BTreeMap::new();
+        let mut token = |key: &str, token: Option<String>| {
+            if let Some(token) = token {
+                tokens.insert(key.to_owned(), token);
+            }
+        };
         let collections: Result<BTreeMap<String, Listed>> = match kind {
             DavKind::Card => self.op(WebdavClientStd::list_addressbooks).map(|books| {
                 books
                     .into_iter()
                     .map(|book| {
                         let key = listed_key(book.id, &book.href);
+                        token(&key, book.sync_token);
                         (key, (book.display_name, None))
                     })
                     .collect()
@@ -264,12 +275,14 @@ impl DavClient {
                     .map(|calendar| {
                         let tasks = takes_tasks(&calendar.components);
                         let key = listed_key(calendar.id, &calendar.href);
+                        token(&key, calendar.sync_token);
                         (key, (calendar.display_name, tasks))
                     })
                     .collect()
             }),
         }
         .with_context(|| format!("Cannot list the {kind} collections"));
+        self.tokens = tokens;
         let collections = anonymous_hint(&self.auth, collections)?;
 
         Ok(collections
@@ -285,6 +298,20 @@ impl DavClient {
                 takes_tasks,
             })
             .collect())
+    }
+
+    /// The collections of `settled`, by name and checkpoint, whose sync
+    /// token in the last listing is that checkpoint (RFC 6578 §4).
+    ///
+    /// Nothing changed there since, so each stands at it still.
+    pub fn quiet_collections(&self, settled: &[(String, String)]) -> Vec<(String, String)> {
+        settled
+            .iter()
+            .filter(|(key, checkpoint)| {
+                !checkpoint.is_empty() && self.tokens.get(key) == Some(checkpoint)
+            })
+            .cloned()
+            .collect()
     }
 
     /// The collection a new item goes to when none is named, by id.
@@ -1240,6 +1267,7 @@ impl DavClient {
             auth,
             proxy: Proxy::None,
             throttle: Arc::new(Throttle::new("dav")),
+            tokens: BTreeMap::new(),
         };
         (client, wire)
     }
@@ -1985,6 +2013,7 @@ mod tests {
             auth: WebdavAuth::None,
             proxy: Proxy::None,
             throttle: Arc::new(Throttle::new("carddav")),
+            tokens: BTreeMap::new(),
         }
     }
 

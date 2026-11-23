@@ -3,6 +3,8 @@
 //! The one-source sync, its phases run account-wide, and the run that only
 //! performs what frontends queued, opening each endpoint's session.
 
+use io_pimdir::collection::PimdirCheckpoint;
+
 use crate::sync::driver::*;
 
 /// A side's permissions as io-pimdir's push rights for the kind it syncs.
@@ -202,9 +204,19 @@ pub(super) fn run_local(
     let shared = ctxs[0].pool.primary().global_handles();
     let gone = GoneBodies::default();
 
-    let spined = phase1_spine(
+    let quiet = quiet_collections(&mut ctxs[0], &mut stores[0], &filtered)?;
+    let spining: Vec<String> = filtered
+        .iter()
+        .filter(|collection| !quiet.contains(collection))
+        .cloned()
+        .collect();
+    for collection in &quiet {
+        report_coverage(&stores[0], collection, &ctxs[0], report);
+    }
+
+    let mut spined = phase1_spine(
         source_name,
-        &filtered,
+        &spining,
         &mut ctxs,
         &mut stores,
         &blobs,
@@ -217,6 +229,7 @@ pub(super) fn run_local(
         progress,
         report,
     )?;
+    spined.extend(quiet);
 
     if dry_run {
         return Ok(());
@@ -238,6 +251,83 @@ pub(super) fn run_local(
         itemize_noted(ctx, report);
     }
     hydrated
+}
+
+/// The collections of `filtered` phase 1 leaves out: settled under the
+/// run's scope, and named by no change the source states before listing.
+///
+/// A delta of such a collection would derive nothing but its checkpoint
+/// (pimdir SYNC §5), moved here where the source stands, all in one write.
+pub(super) fn quiet_collections(
+    ctx: &mut SourceCtx,
+    store: &mut PimdirSourceStore,
+    filtered: &[String],
+) -> Result<Vec<String>> {
+    if ctx.dry_run || !ctx.pool.primary().names_quiet_collections() {
+        return Ok(Vec::new());
+    }
+    let settled = store
+        .settled_collections()
+        .map_err(pimdir_error)
+        .context("Read the settled collections")?;
+
+    let mut named = Vec::new();
+    for (id, coverage) in settled {
+        if coverage.scope != ctx.scope || !filtered.contains(&id.0) {
+            continue;
+        }
+        let loaded = store
+            .load(&id, &PimdirLoadSelection::Handles(Vec::new()))
+            .map_err(pimdir_error)
+            .with_context(|| format!("Load the checkpoint of {}", id.0))?;
+        let Some(checkpoint) = loaded.checkpoint else {
+            continue;
+        };
+        let Ok(checkpoint) = String::from_utf8(checkpoint.0) else {
+            continue;
+        };
+        named.push((display_name(&ctx.namespace, &id.0).to_owned(), checkpoint));
+    }
+    if named.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let namespace = ctx.namespace.clone();
+    let reader: &PimdirSourceStore = store;
+    let held = |name: &str, handles: &[String]| -> Result<HashSet<String>> {
+        let collection = PimdirCollectionId(hub_id(&namespace, name));
+        let handles = handles.iter().map(|h| PimdirHandle(h.clone())).collect();
+        let loaded = reader
+            .load(&collection, &PimdirLoadSelection::Handles(handles))
+            .map_err(pimdir_error)
+            .with_context(|| format!("Load the bindings of {}", collection.0))?;
+        Ok(loaded.placements.into_iter().map(|p| p.handle.0).collect())
+    };
+    let quiet = ctx.pool.primary().quiet_collections(&named, held)?;
+    if quiet.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let writes: Vec<PimdirWriteOp> = quiet
+        .iter()
+        .filter(|quiet| !named.contains(quiet))
+        .map(|(name, next)| PimdirWriteOp::SetCheckpoint {
+            collection: PimdirCollectionId(hub_id(&namespace, name)),
+            checkpoint: PimdirCheckpoint(next.clone().into_bytes()),
+        })
+        .collect();
+    if !writes.is_empty() {
+        store
+            .write(writes)
+            .map_err(pimdir_error)
+            .context("Move the checkpoints of the quiet collections")?;
+    }
+    debug!("{} collection(s) named no change, left out", quiet.len());
+
+    Ok(quiet
+        .into_iter()
+        .map(|(name, _)| hub_id(&namespace, &name))
+        .collect())
 }
 
 /// What a declaration reads: the store, the account and its mode.

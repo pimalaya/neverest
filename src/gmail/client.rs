@@ -934,6 +934,67 @@ impl GmailClient {
         )
     }
 
+    /// The collections of `settled`, by name and checkpoint, whose labels
+    /// the history names no change for since, with the mailbox's history id.
+    ///
+    /// One read from the earliest checkpoint serves them all and the other
+    /// deltas ([`GmailRun::history`]); `held` answers which ids a collection
+    /// binds. A history unreadable or expired names none.
+    pub fn quiet_labels(
+        &mut self,
+        settled: &[(String, String)],
+        mut held: impl FnMut(&str, &[String]) -> Result<HashSet<String>>,
+    ) -> Result<Vec<(String, String)>> {
+        let Some(start) = settled
+            .iter()
+            .filter_map(|(_, start)| start.parse::<u64>().ok())
+            .min()
+        else {
+            return Ok(Vec::new());
+        };
+        let start = start.to_string();
+        let mut labels = Vec::with_capacity(settled.len());
+        for (collection, checkpoint) in settled {
+            labels.push((collection, self.label_id(collection)?, checkpoint));
+        }
+
+        let run = Arc::clone(&self.run);
+        let quiet = run.history(
+            &start,
+            || {
+                debug!("read the gmail history since {start}");
+                let at = Instant::now();
+                let (records, next) = self.history(None, &start, DELTA_HISTORY)?;
+                Ok::<_, GmailClientStdError>(History::new(&start, at, &records, next))
+            },
+            |history| -> Result<Vec<(String, String)>> {
+                let mut quiet = Vec::new();
+                for (collection, label, checkpoint) in labels {
+                    let (changed, deleted) = history.project(&label, checkpoint, |_| true);
+                    let named: Vec<String> = changed.into_iter().chain(deleted).collect();
+                    let unchanged = named.is_empty() || {
+                        let bound = held(collection, &named)?;
+                        let (changed, deleted) =
+                            history.project(&label, checkpoint, |id| bound.contains(id));
+                        changed.is_empty() && deleted.is_empty()
+                    };
+                    if unchanged {
+                        quiet.push((collection.clone(), history.next.clone()));
+                    }
+                }
+                Ok(quiet)
+            },
+        );
+
+        match quiet {
+            Ok(quiet) => quiet,
+            Err(err) => {
+                debug!("gmail history since {start} unread, every label listed: {err}");
+                Ok(Vec::new())
+            }
+        }
+    }
+
     /// Folds a label's changes into a delta.
     ///
     /// Records are increments, not state, so each changed message is read again

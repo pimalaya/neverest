@@ -167,6 +167,7 @@ fn answer(
 
     match (method, path, card) {
         ("PROPFIND", "/dav/", _) => {
+            let token = token(state);
             let reports = match state.faults.no_sync {
                 true => "",
                 false => {
@@ -179,7 +180,8 @@ fn answer(
                  <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\
                  <d:response><d:href>/dav/book/</d:href><d:propstat><d:prop>\
                  <d:resourcetype><d:collection/><c:addressbook/></d:resourcetype>\
-                 <d:displayname>Book</d:displayname><d:supported-report-set>\
+                 <d:displayname>Book</d:displayname>\
+                 <d:sync-token>{token}</d:sync-token><d:supported-report-set>\
                  <d:supported-report><d:report><c:addressbook-multiget/></d:report></d:supported-report>\
                  {reports}</d:supported-report-set></d:prop>\
                  <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"

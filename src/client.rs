@@ -768,6 +768,44 @@ impl Client {
         }
     }
 
+    /// Whether [`quiet_collections`](Self::quiet_collections) answers.
+    ///
+    /// Gmail states its changes by its history, DAV by the sync token its
+    /// listing states, both before any collection is listed.
+    pub fn names_quiet_collections(&self) -> bool {
+        match self {
+            #[cfg(feature = "gmail")]
+            Client::Gmail(_) => true,
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
+            Client::Dav(_) => true,
+            #[allow(unreachable_patterns)]
+            _ => false,
+        }
+    }
+
+    /// The collections of `settled`, by name and checkpoint, the source
+    /// states no change for since, with the checkpoint each stands at.
+    ///
+    /// `held` answers which of the handles named a collection binds. Any
+    /// other source answers none.
+    pub fn quiet_collections(
+        &mut self,
+        settled: &[(String, String)],
+        held: impl FnMut(&str, &[String]) -> Result<HashSet<String>>,
+    ) -> Result<Vec<(String, String)>> {
+        match self {
+            #[cfg(feature = "gmail")]
+            Client::Gmail(client) => client.quiet_labels(settled, held),
+            #[cfg(any(feature = "carddav", feature = "caldav"))]
+            Client::Dav(client) => Ok(client.quiet_collections(settled)),
+            #[allow(unreachable_patterns)]
+            _ => {
+                let _ = (settled, held);
+                Ok(Vec::new())
+            }
+        }
+    }
+
     /// The floor an open Graph series `id` of `collection` was read from
     /// this run, its exceptions before it unread.
     #[cfg(feature = "msgraph")]

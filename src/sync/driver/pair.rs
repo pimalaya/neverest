@@ -593,8 +593,12 @@ impl OpenPair {
             return Ok(());
         }
 
-        let mut settled = false;
+        let mut settled = owes_no_push(collection, &self.left, &self.left_store)?
+            && owes_no_push(collection, &self.right, &self.right_store)?;
         for _ in 0..=MAX_EXTRA_PASSES {
+            if settled {
+                break;
+            }
             let progressed = self.reconcile_pass(run, collection, true, report)?;
             let propagated = self.propagate(collection, progress, report)?;
             if !progressed && propagated == 0 {

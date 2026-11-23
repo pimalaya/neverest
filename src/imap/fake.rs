@@ -464,13 +464,16 @@ fn literal_of(command: &str) -> Option<usize> {
 
 /// The untagged lines answering `command`.
 ///
-/// A `UID SEARCH` matches everything unless its criterion is a `Message-ID`.
+/// A `LIST` names `INBOX` alone, whatever its pattern. A `UID SEARCH`
+/// matches everything unless its criterion is a `Message-ID`.
 fn answer(command: &str, mailbox: &mut FakeMailbox, headers: &BTreeMap<u32, Vec<u8>>) -> Vec<u8> {
     let upper = command.to_ascii_uppercase();
     let mut out = Vec::new();
 
     if upper.starts_with("ENABLE") {
         out.extend_from_slice(b"* ENABLED CONDSTORE QRESYNC\r\n");
+    } else if upper.starts_with("LIST") {
+        out.extend_from_slice(b"* LIST () \"/\" INBOX\r\n");
     } else if upper.starts_with("SELECT") || upper.starts_with("EXAMINE") {
         if mailbox.states_exists {
             let exists = mailbox.messages.len();

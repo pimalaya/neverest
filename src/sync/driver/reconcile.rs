@@ -202,6 +202,27 @@ pub(super) fn unnamed_creates(
         .collect()
 }
 
+/// Whether a side owes `collection` no push pass: it writes nothing back,
+/// or the store calls the collection settled for its source.
+///
+/// Read once the side's pull pass ended, where a push pass would start: a
+/// settled collection derives nothing from a listing naming nothing new
+/// (pimdir SYNC §5), so its push pass would only list it again.
+pub(super) fn owes_no_push(
+    collection: &str,
+    ctx: &SourceCtx,
+    store: &PimdirSourceStore,
+) -> Result<bool> {
+    if !ctx.writable() {
+        return Ok(true);
+    }
+    let settled = store
+        .settled_collections()
+        .map_err(pimdir_error)
+        .with_context(|| format!("Read whether {collection} is settled"))?;
+    Ok(settled.iter().any(|(id, _)| id.0 == collection))
+}
+
 /// One side's placements the engine left marked conflicted in `collection`.
 pub(super) fn conflicted_placements(
     store: &PimdirSourceStore,

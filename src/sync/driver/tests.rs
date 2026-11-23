@@ -1835,6 +1835,135 @@ fn a_capped_renumbered_mailbox_parks_on_one_absence() {
     assert!(report.absences.is_empty());
 }
 
+/// A writable QRESYNC mailbox holding two messages.
+#[cfg(feature = "imap")]
+fn two_messages_qresync() -> crate::imap::fake::FakeImap {
+    use crate::imap::fake::{FakeImap, FakeMailbox, FakeMessage};
+
+    let message = |uid: u32| FakeMessage {
+        uid,
+        flags: Vec::new(),
+        message_id: format!("m{uid}@x"),
+    };
+    FakeImap::start(
+        FakeMailbox {
+            uid_validity: 1,
+            highest_mod_seq: 9,
+            messages: vec![message(1), message(2)],
+            states_exists: true,
+        },
+        true,
+    )
+}
+
+/// The `SELECT` and `EXAMINE` lines `server` read so far.
+#[cfg(feature = "imap")]
+fn selects(server: &crate::imap::fake::FakeImap) -> usize {
+    server.sent("SELECT").len() + server.sent("EXAMINE").len()
+}
+
+/// A settled writable collection is listed once a run: its pull pass,
+/// no push pass after it, the store owing the server nothing.
+#[test]
+#[cfg(feature = "imap")]
+fn a_settled_collection_is_listed_once_a_run() {
+    let server = two_messages_qresync();
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store) = bound_imap_messages(dir.path(), &server, false, None, 0);
+    let (mut ctxs, mut stores) = (vec![ctx], vec![store]);
+    let blobs = stores[0].blob_stage();
+    let collections = vec![String::from("imap/INBOX")];
+    let pacing = Pacing::new(
+        DownloadOrder::Newest,
+        Some(0),
+        Bodies::All,
+        std::time::Duration::ZERO,
+    );
+    let run = |ctxs: &mut [SourceCtx], stores: &mut [PimdirSourceStore]| {
+        let mut report = SyncOutput::default();
+        let spined = phase1_spine(
+            "imap",
+            &collections,
+            ctxs,
+            stores,
+            &blobs,
+            dir.path(),
+            false,
+            &pacing,
+            None,
+            false,
+            &GoneBodies::default(),
+            Progress::default(),
+            &mut report,
+        )
+        .unwrap();
+        assert_eq!(spined, collections);
+        assert!(report.unsettled.is_empty());
+    };
+
+    run(&mut ctxs, &mut stores);
+    assert_eq!(live_inbox(&stores[0]), 2);
+    let before = selects(&server);
+    run(&mut ctxs, &mut stores);
+
+    assert_eq!(selects(&server) - before, 1, "{:?}", server.sent(""));
+}
+
+/// The pair twin: a source and a target holding the same two messages,
+/// each listed once a run once both sides settled.
+#[test]
+#[cfg(feature = "imap")]
+fn a_settled_pair_collection_is_listed_once_a_run() {
+    let left = two_messages_qresync();
+    let right = two_messages_qresync();
+    let dir = tempfile::tempdir().unwrap();
+    let config: AccountConfig = toml::from_str(&format!(
+        "store.root = {:?}\n\
+         sources.left.imap.server = {:?}\n\
+         targets.right.imap.server = {:?}\n",
+        dir.path().display().to_string(),
+        left.url.as_str(),
+        right.url.as_str(),
+    ))
+    .unwrap();
+    let config = config.namespaced("pair").unwrap();
+    StoreState::stamp(dir.path(), "pair", &config.mode().unwrap()).unwrap();
+    let sync = || {
+        let report = run(
+            "pair",
+            &config,
+            None,
+            &PimdirScope::unbounded(),
+            false,
+            1,
+            false,
+            &[],
+            false,
+            false,
+            Pacing::new(
+                DownloadOrder::Newest,
+                Some(0),
+                Bodies::All,
+                std::time::Duration::ZERO,
+            ),
+            false,
+            false,
+            Progress::default(),
+            None,
+        )
+        .unwrap();
+        assert!(report.unsettled.is_empty(), "{report:?}");
+        assert_eq!(Exit::from(&report), Exit::Success, "{report:?}");
+    };
+
+    sync();
+    let before = (selects(&left), selects(&right));
+    sync();
+
+    let listed = (selects(&left) - before.0, selects(&right) - before.1);
+    assert_eq!(listed, (1, 1), "{:?} {:?}", left.sent(""), right.sent(""));
+}
+
 fn names(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|name| name.to_string()).collect()
 }

@@ -706,7 +706,7 @@ fn collection_spine(
     }
 
     let push = pushing.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut settled = !ctx.writable();
+    let mut settled = owes_no_push(collection, ctx, store)?;
     for _ in 0..=MAX_EXTRA_PASSES {
         if settled {
             break;

@@ -1582,6 +1582,18 @@ fn bound_imap_inbox(
     accept: bool,
     checkpoint: Option<Vec<u8>>,
 ) -> (SourceCtx, PimdirSourceStore) {
+    bound_imap_messages(dir, server, accept, checkpoint, 25)
+}
+
+/// [`bound_imap_inbox`] binding `bound` messages, UIDs 1 to `bound`.
+#[cfg(feature = "imap")]
+fn bound_imap_messages(
+    dir: &Path,
+    server: &crate::imap::fake::FakeImap,
+    accept: bool,
+    checkpoint: Option<Vec<u8>>,
+    bound: u32,
+) -> (SourceCtx, PimdirSourceStore) {
     use std::sync::{Arc, atomic::AtomicU64};
 
     use pimalaya_stream::tls::Tls;
@@ -1595,7 +1607,7 @@ fn bound_imap_inbox(
     store
         .ensure_collection("imap/INBOX", "message/rfc822")
         .unwrap();
-    let mut writes: Vec<PimdirWriteOp> = (1..=25)
+    let mut writes: Vec<PimdirWriteOp> = (1..=bound)
         .map(|uid| {
             PimdirWriteOp::UpsertPlacement(PimdirPlacement {
                 collection: PimdirCollectionId("imap/INBOX".into()),
@@ -1770,6 +1782,57 @@ fn a_rebuild_missing_most_of_the_inbox_parks_until_accepted() {
 
     assert_eq!(live_inbox(&store), 1, "rebuilt onto the new UIDs");
     assert_eq!(store.generation("imap/INBOX").unwrap(), Some(2));
+}
+
+/// A capped source's renumbered mailbox parks its rebuild on a single
+/// absence (pimdir SYNC §8), a capped listing proving none.
+///
+/// Two bound and one listed: an uncapped rekey rebuilds, the absences being
+/// few; a capped one writes nothing, names the rebuild and exits 3.
+/// `--accept-absences` rebuilds it, the absent binding dropped.
+#[test]
+#[cfg(feature = "imap")]
+fn a_capped_renumbered_mailbox_parks_on_one_absence() {
+    let server = one_message(2, 100);
+    let checkpoint = || Some(crate::imap::backend::encode_checkpoint(1, 2));
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ctx, mut store) = bound_imap_messages(dir.path(), &server, false, checkpoint(), 2);
+    ctx.capped = true;
+    let blobs = store.blob_stage();
+    sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+
+    assert_eq!(live_inbox(&store), 2, "nothing dropped");
+    assert_eq!(store.generation("imap/INBOX").unwrap(), Some(1));
+    assert_eq!(
+        stored_checkpoint_uid_validity(&store, "imap/INBOX"),
+        Some(1)
+    );
+    let mut report = SyncOutput::default();
+    itemize_noted(&mut ctx, &mut report);
+    let absences: Vec<_> = report
+        .absences
+        .iter()
+        .map(|a| (a.absent, a.bound, a.rebuild))
+        .collect();
+    assert_eq!(absences, [(1, 2, true)]);
+    assert_eq!(Exit::from(&report), Exit::Conflicted);
+    assert_eq!(
+        std::process::ExitCode::from(Exit::from(&report)),
+        std::process::ExitCode::from(3)
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut ctx, mut store) = bound_imap_messages(dir.path(), &server, true, checkpoint(), 2);
+    ctx.capped = true;
+    let blobs = store.blob_stage();
+    sync_side_rebuilding("imap/INBOX", &mut ctx, &mut store, &blobs, true, None).unwrap();
+
+    assert_eq!(live_inbox(&store), 1, "the absent binding dropped");
+    assert_eq!(store.generation("imap/INBOX").unwrap(), Some(2));
+    let mut report = SyncOutput::default();
+    itemize_noted(&mut ctx, &mut report);
+    assert!(report.absences.is_empty());
 }
 
 fn names(names: &[&str]) -> BTreeSet<String> {

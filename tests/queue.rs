@@ -283,10 +283,12 @@ fn a_drain_that_parks_a_row_exits_3() {
     );
 }
 
-/// A row whose payload does not decode fails the drain of its store's
-/// accounts, coded as a sync codes it, never the command.
+/// A row whose payload does not decode is parked with its error, and the
+/// drain goes on with the next row: the run exits 3, a person deciding.
+///
+/// Every drain of the store failed on it before, the queue stuck.
 #[test]
-fn a_malformed_row_fails_the_drain_coded() {
+fn a_malformed_row_is_parked_and_the_drain_goes_on() {
     let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
@@ -305,11 +307,21 @@ fn a_malformed_row_fails_the_drain_coded() {
     db.execute("UPDATE queue SET payload = '{' WHERE id = ?1", [id])
         .unwrap();
     drop(db);
+    let next = fixture.queue_event("after-malformed");
 
-    let drained = &fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 4)["queue"][0];
+    let drained = &fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 3)["queue"][0];
 
     assert_eq!(drained["account"], ACCOUNT, "{drained}");
-    assert_eq!(drained["code"], "action-malformed", "{drained}");
+    assert_eq!(drained["code"], serde_json::Value::Null, "{drained}");
+    let parked = drained["parked"].as_array().unwrap();
+    assert_eq!(parked.len(), 1, "{drained}");
+    assert_eq!(parked[0]["row"], id, "{drained}");
+    assert_eq!(parked[0]["kind"], "set-flags", "{drained}");
+    assert!(
+        parked[0]["error"].as_str().is_some_and(|e| !e.is_empty()),
+        "{drained}"
+    );
+    assert_eq!(drained["applied"][0]["row"], next, "{drained}");
 }
 
 /// A sync that cannot reach its server still applies the queue first.

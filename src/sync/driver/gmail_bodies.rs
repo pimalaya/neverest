@@ -443,3 +443,51 @@ fn a_band_round_keeps_a_message_received_after_its_date() {
         .collect();
     assert_eq!(held, ["early", "late"], "{requests:?}");
 }
+
+/// Two messages stating one `Message-ID` under two labels land their own
+/// bodies.
+///
+/// Gmail's message id is the server object id (pimdir SYNC §4), so no
+/// upgrade links one's body to the other (SYNC §6).
+#[test]
+fn two_messages_of_one_message_id_keep_their_own_bodies() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = store_holding(dir.path(), Vec::new());
+    let (mut ctx, api, batch) = connection();
+    let blobs = store.blob_stage();
+    let twin = |id: &str, label: &str| {
+        serde_json::json!({
+            "id": id,
+            "labelIds": [label],
+            "sizeEstimate": 46,
+            "payload": {"headers": [
+                {"name": "Message-ID", "value": "<twin@example.org>"},
+                {"name": "Date", "value": "Mon, 6 Jul 2026 14:00:00 +0200"},
+            ]}
+        })
+    };
+    let body = |id: &str| {
+        let source = format!("Message-ID: <twin@example.org>\r\n\r\nBody of {id}\r\n");
+        serde_json::json!({ "id": id, "raw": encode_raw(source.as_bytes()) })
+    };
+    for (collection, id, label) in [(INBOX, "m1", "INBOX"), (WORK, "m2", "Label_1")] {
+        api.answer(ok(serde_json::json!({
+            "emailAddress": "user@example.org",
+            "historyId": "500"
+        })));
+        api.answer(ids(&[id]));
+        batch.answer(batch_answer(&[(0, "200 OK", twin(id, label))]));
+        sync_side(collection, &mut ctx, &mut store, &blobs, false, None).unwrap();
+        batch.answer(batch_answer(&[(0, "200 OK", body(id))]));
+        let collections = vec![collection.to_string()];
+        hydrate(&mut store, &mut ctx, &collections, &GoneBodies::default());
+    }
+
+    let (inbox, work) = (bodies(&store, INBOX), bodies(&store, WORK));
+    assert!(
+        inbox[0].1.is_some() && work[0].1.is_some(),
+        "{inbox:?} {work:?}"
+    );
+    assert_ne!(inbox[0].1, work[0].1, "each its own body");
+    assert_eq!(api.left() + batch.left(), 0, "{:?}", batch.lines());
+}

@@ -70,6 +70,7 @@ fn a_store_version_tells_an_earlier_neverest_from_a_newer_one() {
     let refused = |found: Option<&str>| PimdirError::Version {
         found: found.map(String::from),
     };
+    let own = io_pimdir::sql::FORMAT_VERSION;
 
     assert!(written_earlier(&refused(None)));
     assert!(written_earlier(&refused(Some("storage-draft-07"))));
@@ -79,7 +80,11 @@ fn a_store_version_tells_an_earlier_neverest_from_a_newer_one() {
     assert!(written_earlier(&refused(Some("storage-draft-11"))));
     assert!(written_earlier(&refused(Some("storage-draft-12"))));
     assert!(written_earlier(&refused(Some("storage-draft-13"))));
-    assert!(!written_earlier(&refused(Some("storage-draft-15"))));
+    assert!(written_earlier(&refused(Some("storage-draft-14"))));
+    assert!(written_earlier(&refused(Some("storage-draft-15"))));
+    assert!(written_earlier(&refused(Some("storage-draft-16"))));
+    assert!(!written_earlier(&refused(Some(own))));
+    assert!(!written_earlier(&refused(Some("storage-draft-18"))));
     assert!(!written_earlier(&refused(Some("storage-draft-x"))));
     assert!(!written_earlier(&refused(Some("storage-v1"))));
     assert!(!written_earlier(&PimdirError::Busy));

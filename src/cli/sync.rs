@@ -804,7 +804,9 @@ fn reset_account(dir: &Path, account: &str, config: &AccountConfig, force: bool)
 /// Its conflicts, retained items (bound to no server), pending deletes and
 /// items no binding's base holds; a delivered create, its handle still
 /// provisional (pimdir SYNC §2), counts as unpushed. The hub holds live
-/// items only, so the retained ones are read from the trash.
+/// items only, so the retained ones are read from the trash. Live items
+/// holding a local property count too: the store drops a property with the
+/// last row of its item.
 fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result<Vec<String>> {
     const PAGE: usize = 512;
 
@@ -824,6 +826,24 @@ fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result
                 .iter()
                 .filter(|item| item.retention.as_ref().is_some_and(|r| r.at.is_some()))
                 .count();
+
+            if !full {
+                break;
+            }
+        }
+
+        let mut holding = 0;
+        let mut after = None;
+        loop {
+            let page = store.list_items(&collection.id, after.as_deref(), PAGE)?;
+            let full = page.len() == PAGE;
+            after = page.last().map(|item| item.link_id.0.clone());
+
+            for item in &page {
+                if !store.list_item_properties(item.seq)?.is_empty() {
+                    holding += 1;
+                }
+            }
 
             if !full {
                 break;
@@ -852,6 +872,7 @@ fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result
             (retained, "retained item(s)"),
             (deletes, "pending delete(s)"),
             (unpushed, "unpushed change(s)"),
+            (holding, "item(s) holding local properties"),
         ];
         let named: Vec<String> = counts
             .into_iter()
@@ -1163,6 +1184,38 @@ mod tests {
             .unwrap()
             .account("work")
             .unwrap();
+    }
+
+    /// A plain reset refuses over an item holding a local property, which
+    /// no server has and the store drops with the item's last row; a forced
+    /// one drops it.
+    #[test]
+    fn a_reset_refuses_while_an_item_holds_a_property() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        land(dir.path(), "work", "w1@x", true);
+        let seq = PimdirReader::open(dir.path())
+            .unwrap()
+            .list_items(inbox("work"), None, 10)
+            .unwrap()[0]
+            .seq;
+        let mut store = PimdirStore::open(dir.path()).unwrap();
+        assert!(store.add_property(seq, "pimdir/label", "keep").unwrap());
+        drop(store);
+
+        let err = reset_account(dir.path(), "work", &namespaced("work"), false).unwrap_err();
+        let err = format!("{err:#}");
+        assert!(err.contains("1 item(s) holding local properties"), "{err}");
+        assert!(err.contains("--force"), "{err}");
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert_eq!(reader.list_item_properties(seq).unwrap().len(), 1);
+        drop(reader);
+
+        reset_account(dir.path(), "work", &namespaced("work"), true).unwrap();
+
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert!(reader.list_collections().unwrap().is_empty());
+        assert!(reader.list_item_properties(seq).unwrap().is_empty());
     }
 
     /// A plain reset refuses over a retained item, which the hub never loads:

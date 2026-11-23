@@ -2435,12 +2435,17 @@ An append the server takes without naming the member it made (an IMAP `APPEND` a
 The report SHALL list under `waiting`, for every collection a run synced on an endpoint, the creates its last pass left waiting rather than pushing (pimdir SYNC §5), each with its `side`, its `collection`, its key as `id` (the link id, never the provisional handle) and its `reason`: `out-of-scope`, its date lying outside the run's scope; `delivered`, its server having taken it with no listing naming it yet; `undeliverable`, the store holding neither a body nor a member to copy it from; `other`, a reason a later io-pimdir states. The text output SHALL print them under `Waiting`. A waiting create SHALL NOT count as a warning nor change the exit code.
 
 ### Requirement: A settled collection is listed once a run
-After a collection's pull pass, an endpoint SHALL push only where io-pimdir's `PimdirSourceStore::settled_collections` does not name the collection (pimdir SYNC §5): a settled one owes no push, holds no refusal, lacks no item and has no round open, so a push pass would only list it again. A server change made after the pull waits for the next run. In a pair, each endpoint's settledness is read after both pulls, and the pushing rounds run unless both are settled; a side nothing writes counts as settled.
+After a collection's pull pass, an endpoint SHALL leave out its push passes where io-pimdir's `PimdirSourceStore::settled_collections`, read when the run's collections begin and again only after a pull or a push of the run changed the store (which may unsettle another collection), named the collection and the pull left it as it found it (nothing pulled, pushed, refused, conflicted, resolved, parked or waiting, no event; in a pair both pulls so and nothing propagated): a settled collection owes no push, holds no refusal, lacks no item and has no round open (pimdir SYNC §5), so a push pass would only list it again. A server change made after the pull waits for the next run. A side nothing writes counts as settled. A run that changes nothing reads it once, where a read a collection grew with the square of the collections (0.8 ms a read at 3,313 collections); a run reads it again at most once a changed collection.
 
 #### Scenario: A quiet mailbox
 - **GIVEN** a writable IMAP source whose INBOX was synced and has not changed
 - **WHEN** the account syncs
 - **THEN** INBOX is selected once, and in a pair each side's once (src/sync/driver/tests.rs `a_settled_collection_is_listed_once_a_run`, `a_settled_pair_collection_is_listed_once_a_run`)
+
+#### Scenario: Three quiet mailboxes
+- **GIVEN** a writable IMAP source whose three mailboxes were synced and have not changed
+- **WHEN** the account syncs
+- **THEN** the settled collections are read once and each mailbox selected once (src/sync/driver/tests.rs `a_run_reads_the_settled_collections_once`)
 
 ### Requirement: A source that states no change leaves a settled collection unsynced
 Before phase 1 of a one-source run, a collection the store calls settled under the run's scope, whose source states no change since the checkpoint the store holds, SHALL NOT be listed (pimdir SYNC §5): a Gmail label the mailbox history, read once from the earliest such checkpoint, names no change for, its checkpoint moved in one write to the history id the mailbox stands at, as an empty delta moves it; a DAV collection whose `{DAV:}sync-token` in the home-set listing equals its checkpoint (RFC 6578 §4). Such a collection still reports its coverage and still has its owed bodies downloaded. A history unreadable or expired names none. Every other source, IMAP among them until io-imap sends `LIST-STATUS` (RFC 5819), and every pair, lists the collection as before.

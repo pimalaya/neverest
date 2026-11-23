@@ -34,6 +34,11 @@ pub(super) fn phase1_spine(
     let merged: Mutex<SyncOutput> = Mutex::new(SyncOutput::default());
     let scanned = AtomicUsize::new(0);
     let pushing: Mutex<()> = Mutex::new(());
+    let settled = match (dry_run, stores.first()) {
+        (false, Some(store)) => Settled::read(store, store_dir)?,
+        _ => Settled::default(),
+    };
+    let settled_ref = &settled;
     let scan_event = |done| SyncEvent::ScanProgressed {
         source: source.to_owned(),
         done,
@@ -127,6 +132,7 @@ pub(super) fn phase1_spine(
                         blobs,
                         store_dir,
                         pushing_ref,
+                        settled_ref,
                         dry_run,
                         &mut pager,
                         owed,
@@ -638,6 +644,7 @@ fn collection_spine(
     blobs: &PimdirBlobStage,
     store_dir: &Path,
     pushing: &Mutex<()>,
+    settled: &Settled,
     dry_run: bool,
     pager: &mut dyn Pager,
     owed: HashSet<String>,
@@ -662,7 +669,11 @@ fn collection_spine(
 
     let (pull, paused) = sync_side_rebuilding(collection, ctx, store, blobs, false, Some(pager))?;
     let display = display_name(&ctx.namespace, collection);
-    resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
+    let resolved = resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
+    let pulled_quiet = quiet(&pull) && resolved == 0;
+    if !pulled_quiet {
+        settled.changed();
+    }
     itemize_pulled(
         &pull.events,
         &before,
@@ -706,19 +717,22 @@ fn collection_spine(
     }
 
     let push = pushing.lock().unwrap_or_else(PoisonError::into_inner);
-    let mut settled = owes_no_push(collection, ctx, store)?;
+    let mut done = settled.owes_no_push(collection, ctx, store, store_dir, pulled_quiet)?;
     for _ in 0..=MAX_EXTRA_PASSES {
-        if settled {
+        if done {
             break;
         }
         let (pass, _) = sync_side_rebuilding(collection, ctx, store, blobs, ctx.writable(), None)?;
+        if !quiet(&pass) {
+            settled.changed();
+        }
         if !moved(&pass) {
-            settled = true;
+            done = true;
             break;
         }
     }
     drop(push);
-    if !settled {
+    if !done {
         report.unsettled.push(collection.to_owned());
     }
     report_coverage(store, collection, ctx, &mut report);

@@ -215,6 +215,9 @@ struct OpenPair {
     /// The media type both sides hold.
     media_type: &'static str,
     relay: bool,
+    /// The collections each side's store calls settled, read when the
+    /// pair's collections begin and again after a change.
+    settled: [Settled; 2],
 }
 
 impl OpenPair {
@@ -259,6 +262,7 @@ impl OpenPair {
             blobs,
             media_type,
             relay,
+            settled: Default::default(),
         })
     }
 
@@ -427,6 +431,14 @@ impl OpenPair {
         report: &mut SyncOutput,
     ) {
         let total = common.len();
+        if !run.dry_run {
+            let read = Settled::read(&self.left_store, run.work_dir)
+                .and_then(|left| Ok([left, Settled::read(&self.right_store, run.work_dir)?]));
+            match read {
+                Ok(settled) => self.settled = settled,
+                Err(err) => warn!("cannot read the settled collections, pushing each: {err:#}"),
+            }
+        }
         for (index, name) in common.iter().enumerate() {
             if crate::sync::stopping() {
                 break;
@@ -579,8 +591,8 @@ impl OpenPair {
         progress: &CollectionProgress,
         report: &mut SyncOutput,
     ) -> Result<()> {
-        self.reconcile_pass(run, collection, false, report)?;
-        self.propagate(collection, progress, report)?;
+        let (_, quiet) = self.reconcile_pass(run, collection, false, report)?;
+        let quiet = quiet && self.propagate(collection, progress, report)? == 0;
 
         itemize(
             collection,
@@ -593,20 +605,31 @@ impl OpenPair {
             return Ok(());
         }
 
-        let mut settled = owes_no_push(collection, &self.left, &self.left_store)?
-            && owes_no_push(collection, &self.right, &self.right_store)?;
+        let [left, right] = &self.settled;
+        if !quiet {
+            left.changed();
+            right.changed();
+        }
+        let dir = run.work_dir;
+        let mut done = left.owes_no_push(collection, &self.left, &self.left_store, dir, quiet)?
+            && right.owes_no_push(collection, &self.right, &self.right_store, dir, quiet)?;
         for _ in 0..=MAX_EXTRA_PASSES {
-            if settled {
+            if done {
                 break;
             }
-            let progressed = self.reconcile_pass(run, collection, true, report)?;
+            let (progressed, quiet) = self.reconcile_pass(run, collection, true, report)?;
             let propagated = self.propagate(collection, progress, report)?;
+            if !quiet || propagated > 0 {
+                let [left, right] = &self.settled;
+                left.changed();
+                right.changed();
+            }
             if !progressed && propagated == 0 {
-                settled = true;
+                done = true;
                 break;
             }
         }
-        if !settled {
+        if !done {
             report.unsettled.push(collection.to_owned());
         }
 
@@ -662,7 +685,8 @@ impl OpenPair {
         }
     }
 
-    /// One reconcile round over both sides, answering whether either moved.
+    /// One reconcile round over both sides, answering whether either moved
+    /// and whether both were quiet ([`quiet`]).
     ///
     /// A side's divergences are itemized right after its own merge. One
     /// between the endpoints is the store's: it keeps the agreed body and
@@ -673,7 +697,7 @@ impl OpenPair {
         collection: &str,
         push: bool,
         report: &mut SyncOutput,
-    ) -> Result<bool> {
+    ) -> Result<(bool, bool)> {
         let (store_dir, dry_run) = (run.work_dir, run.dry_run);
         let Self {
             left,
@@ -683,10 +707,10 @@ impl OpenPair {
             blobs,
             ..
         } = self;
-        let left_report = reconcile_side(
+        let (left_report, left_resolved) = reconcile_side(
             collection, left, left_store, blobs, store_dir, push, dry_run, report,
         )?;
-        let right_report = reconcile_side(
+        let (right_report, right_resolved) = reconcile_side(
             collection,
             right,
             right_store,
@@ -697,11 +721,15 @@ impl OpenPair {
             report,
         )?;
 
-        Ok(moved(&left_report) || moved(&right_report))
+        let moved = moved(&left_report) || moved(&right_report);
+        let quiet =
+            quiet(&left_report) && quiet(&right_report) && left_resolved + right_resolved == 0;
+        Ok((moved, quiet))
     }
 }
 
-/// One side of a reconcile round: its merge, its probes and its report.
+/// One side of a reconcile round: its merge, its probes and its report,
+/// with how many conflicts it resolved.
 ///
 /// Only a pulling round's events name what the remote did, a pushing round's
 /// echoing this run's own writes. A side nothing writes is listed by the
@@ -716,10 +744,10 @@ fn reconcile_side(
     push: bool,
     dry_run: bool,
     report: &mut SyncOutput,
-) -> Result<PimdirSyncReport> {
+) -> Result<(PimdirSyncReport, usize)> {
     if push && !dry_run && !ctx.writable() {
-        resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
-        return Ok(PimdirSyncReport::default());
+        let resolved = resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
+        return Ok((PimdirSyncReport::default(), resolved));
     }
 
     let push = push && !dry_run && ctx.writable();
@@ -730,7 +758,7 @@ fn reconcile_side(
     };
 
     let (side, _) = sync_side_rebuilding(collection, ctx, store, blobs, push, None)?;
-    resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
+    let resolved = resolve_conflicts(collection, ctx, store, blobs, store_dir, dry_run)?;
 
     let display = display_name(&ctx.namespace, collection);
 
@@ -747,7 +775,7 @@ fn reconcile_side(
         None => itemize_conflicted(&side.events, store, collection, &ctx.name, report)?,
     }
 
-    Ok(side)
+    Ok((side, resolved))
 }
 
 /// Whether a side's sync changed anything, used to detect convergence.

@@ -202,26 +202,97 @@ pub(super) fn unnamed_creates(
         .collect()
 }
 
-/// Whether a side owes `collection` no push pass: it writes nothing back,
-/// or the store calls the collection settled for its source.
-///
-/// Read once the side's pull pass ended, where a push pass would start: a
-/// settled collection derives nothing from a listing naming nothing new
-/// (pimdir SYNC §5), so its push pass would only list it again.
-pub(super) fn owes_no_push(
-    collection: &str,
-    ctx: &SourceCtx,
-    store: &PimdirSourceStore,
-) -> Result<bool> {
-    if !ctx.writable() {
-        return Ok(true);
+/// The collections the store calls settled for a source, read once a run
+/// and again only once a pull or a push of the run changed the store.
+#[derive(Default)]
+pub(super) struct Settled {
+    collections: Mutex<HashSet<String>>,
+    stale: AtomicBool,
+}
+
+impl Settled {
+    /// The set as the store at `dir` holds it now.
+    pub(super) fn read(store: &PimdirSourceStore, dir: &Path) -> Result<Self> {
+        Ok(Self {
+            collections: Mutex::new(settled_set(store, dir)?),
+            stale: AtomicBool::new(false),
+        })
     }
+
+    /// Notes a pull or a push that changed the store, which may unsettle
+    /// another collection than its own: the next answer reads the set again.
+    pub(super) fn changed(&self) {
+        self.stale.store(true, Ordering::SeqCst);
+    }
+
+    /// Whether a side owes `collection` no push pass: it writes nothing
+    /// back, or its pull was quiet and the store calls it settled.
+    ///
+    /// A settled collection derives nothing from a listing naming nothing
+    /// new (pimdir SYNC §5), so its push pass would only list it again.
+    pub(super) fn owes_no_push(
+        &self,
+        collection: &str,
+        ctx: &SourceCtx,
+        store: &PimdirSourceStore,
+        dir: &Path,
+        quiet: bool,
+    ) -> Result<bool> {
+        if !ctx.writable() {
+            return Ok(true);
+        }
+        if !quiet {
+            return Ok(false);
+        }
+        let mut collections = self
+            .collections
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.stale.swap(false, Ordering::SeqCst) {
+            *collections = settled_set(store, dir)?;
+        }
+        Ok(collections.contains(collection))
+    }
+}
+
+/// Whether a pull pass left its collection as it found it: nothing pulled,
+/// pushed, refused or conflicted, no event, nothing parked or waiting.
+pub(super) fn quiet(report: &PimdirSyncReport) -> bool {
+    report.pulled == 0
+        && report.pushed == 0
+        && report.conflicts == 0
+        && report.rejected == 0
+        && report.refused == 0
+        && report.refreshed == 0
+        && report.unanswered == 0
+        && report.parked.is_none()
+        && report.events.is_empty()
+        && report.waiting.is_empty()
+        && report.rejected_creates.is_empty()
+}
+
+/// The collections the store calls settled for its source (pimdir SYNC §5).
+///
+/// Read once a run, and again only after a change ([`Settled`]): a read a
+/// collection grew with their square.
+pub(super) fn settled_set(store: &PimdirSourceStore, dir: &Path) -> Result<HashSet<String>> {
+    #[cfg(test)]
+    {
+        let mut reads = SETTLED_READS.lock().unwrap_or_else(PoisonError::into_inner);
+        *reads.entry(dir.to_path_buf()).or_default() += 1;
+    }
+    #[cfg(not(test))]
+    let _ = dir;
     let settled = store
         .settled_collections()
         .map_err(pimdir_error)
-        .with_context(|| format!("Read whether {collection} is settled"))?;
-    Ok(settled.iter().any(|(id, _)| id.0 == collection))
+        .context("Read the settled collections")?;
+    Ok(settled.into_iter().map(|(id, _)| id.0).collect())
 }
+
+/// How many times each store directory's settled collections were read.
+#[cfg(test)]
+pub(super) static SETTLED_READS: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
 
 /// One side's placements the engine left marked conflicted in `collection`.
 pub(super) fn conflicted_placements(

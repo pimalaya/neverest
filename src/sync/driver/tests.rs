@@ -1909,6 +1909,70 @@ fn a_settled_collection_is_listed_once_a_run() {
     assert_eq!(selects(&server) - before, 1, "{:?}", server.sent(""));
 }
 
+/// A run reads the settled collections once, whatever the number of
+/// collections it spines, each still listed once.
+///
+/// Read once a collection, the read cost grew with their square.
+#[test]
+#[cfg(feature = "imap")]
+fn a_run_reads_the_settled_collections_once() {
+    let server = two_messages_qresync();
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, store) = bound_imap_messages(dir.path(), &server, false, None, 0);
+    let (mut ctxs, mut stores) = (vec![ctx], vec![store]);
+    let blobs = stores[0].blob_stage();
+    let collections: Vec<String> = ["imap/A", "imap/B", "imap/INBOX"]
+        .into_iter()
+        .map(String::from)
+        .collect();
+    for collection in &collections {
+        stores[0]
+            .ensure_collection(collection, "message/rfc822")
+            .unwrap();
+    }
+    let pacing = Pacing::new(
+        DownloadOrder::Newest,
+        Some(0),
+        Bodies::All,
+        std::time::Duration::ZERO,
+    );
+    let reads = || {
+        SETTLED_READS
+            .lock()
+            .unwrap()
+            .get(dir.path())
+            .copied()
+            .unwrap_or_default()
+    };
+    let run = |ctxs: &mut [SourceCtx], stores: &mut [PimdirSourceStore]| {
+        let mut report = SyncOutput::default();
+        phase1_spine(
+            "imap",
+            &collections,
+            ctxs,
+            stores,
+            &blobs,
+            dir.path(),
+            false,
+            &pacing,
+            None,
+            false,
+            &GoneBodies::default(),
+            Progress::default(),
+            &mut report,
+        )
+        .unwrap();
+        assert!(report.unsettled.is_empty());
+    };
+
+    run(&mut ctxs, &mut stores);
+    let (read, listed) = (reads(), selects(&server));
+    run(&mut ctxs, &mut stores);
+
+    assert_eq!(reads() - read, 1, "one read a run");
+    assert_eq!(selects(&server) - listed, 3, "{:?}", server.sent(""));
+}
+
 /// The pair twin: a source and a target holding the same two messages,
 /// each listed once a run once both sides settled.
 #[test]

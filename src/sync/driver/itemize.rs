@@ -147,11 +147,19 @@ pub(super) fn itemize_single(
     let display = display_name(&ctx.namespace, collection);
     let view = projection_view(store, collection, &ctx.name)
         .with_context(|| format!("Project {} {display}", ctx.name))?;
-    let mut relocated = relocated_creates(store, collection, ctx, &ctx.name)?;
+    let mut relocations = relocations(store, collection, ctx, &ctx.name)?;
     let mut forbidden = BTreeMap::new();
     for placement in view {
+        if relocations.carried.contains(&placement.handle) {
+            continue;
+        }
         let mut hunks = placement_hunks(&ctx.name, &ctx.name, &ctx.namespace, display, &placement);
-        hunks.extend(relocated.remove(&placement.handle).unwrap_or_default());
+        hunks.extend(
+            relocations
+                .delivered
+                .remove(&placement.handle)
+                .unwrap_or_default(),
+        );
         for hunk in hunks {
             if stays_local(ctx, &hunk) {
                 continue;
@@ -166,47 +174,81 @@ pub(super) fn itemize_single(
     Ok(())
 }
 
-/// The create hunks the relocations of `collection` deliver, by the handle
-/// of the tombstone whose remove carries each (pimdir SYNC §3, §5).
+/// What the relocations of a run report in `collection`.
+#[derive(Default)]
+struct Relocations {
+    /// The create hunks the relocations of `collection` deliver, by the
+    /// handle of the tombstone whose remove carries each (pimdir SYNC §3, §5).
+    delivered: HashMap<PimdirHandle, Vec<ItemHunk>>,
+    /// The creates of `collection` a relocation's tombstone carries, which
+    /// the remove of their source collection reports instead.
+    carried: HashSet<PimdirHandle>,
+}
+
+/// The relocations `collection` takes part in, read from one load of it.
 ///
-/// Collections push in turn, so a relocation an earlier one pushes delivers
-/// a later one's create before that one is itemized: its remove reports it.
-/// A dry run pushes nothing, each create reported by its own collection.
-fn relocated_creates(
+/// Each relocation's create is reported once, by its remove, whichever of
+/// the two collections is itemized first; a dry run pushes nothing, each
+/// create then reported by its own collection.
+fn relocations(
     store: &PimdirSourceStore,
     collection: &str,
     ctx: &SourceCtx,
     other: &str,
-) -> Result<HashMap<PimdirHandle, Vec<ItemHunk>>> {
-    let mut relocated = HashMap::new();
+) -> Result<Relocations> {
+    let mut relocations = Relocations::default();
     if ctx.dry_run {
-        return Ok(relocated);
+        return Ok(relocations);
     }
 
     let loaded =
         load_side(store, collection).with_context(|| format!("Load {} {collection}", ctx.name))?;
-    for placement in loaded {
-        let Some(destination) = placement
-            .origin
-            .filter(|_| placement.status == PimdirStatus::Tombstone)
-        else {
+    let mut sources: HashMap<String, Vec<PimdirPlacement>> = HashMap::new();
+    for placement in &loaded {
+        let Some(link) = &placement.origin else {
             continue;
         };
-        let target = &destination.collection.0;
-        let display = display_name(&ctx.namespace, target);
-        let created = projection_view(store, target, &ctx.name)
-            .with_context(|| format!("Project {} {display}", ctx.name))?
-            .into_iter()
-            .find(|create| {
-                create.handle == destination.handle && create.status == PimdirStatus::Created
-            });
-        if let Some(create) = created {
-            let hunks = placement_hunks(&ctx.name, other, &ctx.namespace, display, &create);
-            relocated.insert(placement.handle, hunks);
+        match placement.status {
+            PimdirStatus::Tombstone => {
+                let target = &link.collection.0;
+                let display = display_name(&ctx.namespace, target);
+                let created = projection_view(store, target, &ctx.name)
+                    .with_context(|| format!("Project {} {display}", ctx.name))?
+                    .into_iter()
+                    .find(|create| {
+                        create.handle == link.handle && create.status == PimdirStatus::Created
+                    });
+                if let Some(create) = created {
+                    let hunks = placement_hunks(&ctx.name, other, &ctx.namespace, display, &create);
+                    relocations
+                        .delivered
+                        .insert(placement.handle.clone(), hunks);
+                }
+            }
+            PimdirStatus::Created => {
+                let source = &link.collection.0;
+                if !sources.contains_key(source) {
+                    let loaded = load_side(store, source)
+                        .with_context(|| format!("Load {} {source}", ctx.name))?;
+                    sources.insert(source.clone(), loaded);
+                }
+                let relocates = sources[source].iter().any(|tombstone| {
+                    tombstone.handle == link.handle
+                        && tombstone.status == PimdirStatus::Tombstone
+                        && tombstone.origin.as_ref().is_some_and(|destination| {
+                            destination.collection.0 == collection
+                                && destination.handle == placement.handle
+                        })
+                });
+                if relocates {
+                    relocations.carried.insert(placement.handle.clone());
+                }
+            }
+            _ => {}
         }
     }
 
-    Ok(relocated)
+    Ok(relocations)
 }
 
 /// Whether `hunk` is a flag change on a kind whose backend carries no flags,
@@ -573,12 +615,20 @@ pub(super) fn itemize(
         let display = display_name(&ctx.namespace, collection);
         let view = projection_view(store, collection, &ctx.name)
             .with_context(|| format!("Project {} {display}", ctx.name))?;
-        let mut relocated = relocated_creates(store, collection, ctx, &other.name)?;
+        let mut relocations = relocations(store, collection, ctx, &other.name)?;
         let mut forbidden = BTreeMap::new();
         for placement in view {
+            if relocations.carried.contains(&placement.handle) {
+                continue;
+            }
             let mut hunks =
                 placement_hunks(&ctx.name, &other.name, &ctx.namespace, display, &placement);
-            hunks.extend(relocated.remove(&placement.handle).unwrap_or_default());
+            hunks.extend(
+                relocations
+                    .delivered
+                    .remove(&placement.handle)
+                    .unwrap_or_default(),
+            );
             for hunk in hunks {
                 if stays_local(ctx, &hunk) {
                     continue;

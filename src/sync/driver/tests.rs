@@ -2196,6 +2196,64 @@ fn a_queued_move_into_an_identity_the_other_endpoint_binds_joins_it() {
     assert_eq!(archived.len(), 1, "{archived:?}");
 }
 
+/// A queued move is reported once, its create in the target beside the
+/// delete in the source, whichever collection is itemized first.
+///
+/// Both read the create still staged before any push, each reported it.
+#[test]
+#[cfg(feature = "imap")]
+fn a_queued_move_reports_its_create_once() {
+    for target_first in [true, false] {
+        let server = one_message(1, 1);
+        let dir = tempfile::tempdir().unwrap();
+        let (ctx, mut store) = bound_imap_messages(dir.path(), &server, false, None, 1);
+        store
+            .ensure_collection("imap/Archive", "message/rfc822")
+            .unwrap();
+        let checkpoint = |collection: &str| PimdirWriteOp::SetCheckpoint {
+            collection: PimdirCollectionId(collection.into()),
+            checkpoint: PimdirCheckpoint(crate::imap::backend::encode_checkpoint(1, 2)),
+        };
+        store
+            .write(vec![checkpoint("imap/INBOX"), checkpoint("imap/Archive")])
+            .unwrap();
+        let seq = PimdirReader::open(dir.path())
+            .unwrap()
+            .list_items("imap/INBOX", None, 10)
+            .unwrap()[0]
+            .seq;
+        PimdirProducer::open(dir.path(), "tests")
+            .unwrap()
+            .enqueue(
+                "imap/INBOX",
+                &PimdirAction::Move {
+                    seq,
+                    to: PimdirCollectionId("imap/Archive".into()),
+                },
+                None,
+            )
+            .unwrap();
+        let mut report = SyncOutput::default();
+        let mut drainer = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+        drain_queues(&mut drainer, &mut report);
+
+        let order = match target_first {
+            true => ["imap/Archive", "imap/INBOX"],
+            false => ["imap/INBOX", "imap/Archive"],
+        };
+        for collection in order {
+            itemize_single(collection, &store, &ctx, &mut report).unwrap();
+        }
+
+        let adds: Vec<_> = report
+            .item_patch
+            .iter()
+            .filter(|hunk| matches!(hunk, ItemHunk::Add { .. } | ItemHunk::Copy { .. }))
+            .collect();
+        assert_eq!(adds.len(), 1, "target first {target_first}: {adds:?}");
+    }
+}
+
 fn names(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|name| name.to_string()).collect()
 }

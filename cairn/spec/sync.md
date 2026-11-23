@@ -8,7 +8,7 @@ status: current
 
 `neverest sync` reconciles the named sources of every account, or of those `-a` names, through the io-pimdir engine over the pimdir store the accounts share. It is sync-on-demand: one reconcile per invocation, no daemon.
 
-The store and the engine follow pimdir storage-draft-15, sync-draft-15 and search-draft-15 (io-pimdir 0.19, vendoring the pimdir working tree of 2026-11-20; a store or a sync state of draft-14 is refused, never migrated, and an index of draft-14 rebuilt): "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
+The store and the engine follow pimdir storage-draft-17, sync-draft-15 and search-draft-17 (io-pimdir cc3021b, then its release): a store of storage-draft-16 or earlier is refused, never migrated, and an index of search-draft-16 or earlier rebuilt. "pimdir STORAGE", "pimdir SYNC" and "pimdir SEARCH" below cite those drafts.
 
 ### Requirement: An account holds named sources
 An account SHALL hold a map of named sources (`sources.<name>`), each declaring exactly one remote backend, and SHALL require at least one. It MAY additionally hold a map of named targets (`targets.<name>`) on the same terms. Both map keys SHALL be the names its pimdir source ids are made from, so a name is what every binding it owns in the store is recorded against, and a rename SHALL be treated as a new source. One name SHALL NOT be both a source and a target.
@@ -1485,7 +1485,7 @@ The hunk the refused write was derived from SHALL be taken back whatever its kin
 - THEN the refusal names the event by its `UID`, never an empty `id`, and the add is not among the hunks applied
 
 ### Requirement: The summary is the format's typed row
-The summary written for an item SHALL be io-pimdir's `PimdirSummary`, the row of the kind's summary table with the addresses it names (pimdir STORAGE Annex A): `mail_summary` for `message/rfc822`, `contact_summary` for `text/vcard`, `event_summary`, `task_summary` or `journal_summary` for `text/calendar`, plus `item_address`. A reader renders a list from those rows and never parses a blob. Flags are not in the summary. Both the listed (`Meta`) and the streamed (`Full`) paths of mail SHALL emit the same row, the streamed path carrying the message's known octet length as `size` rather than the header prefix it read.
+The summary written for an item SHALL be io-pimdir's `PimdirSummary`, the item's one `summary` row, its `component` naming the kind, with its addresses, `In-Reply-To` and categories as `summary_value` rows (pimdir STORAGE Annex A, storage-draft-17). A reader renders a list from those rows and never parses a blob. Flags are not in the summary. Both the listed (`Meta`) and the streamed (`Full`) paths of mail SHALL emit the same row, the streamed path carrying the message's known octet length as `size` rather than the header prefix it read.
 
 ### Requirement: The derivations are the format's
 A link id, a summary and a sort key SHALL be what pimdir STORAGE Annex A gives, derived by io-pimdir, so the schema cannot drift from the format's by a field or a spelling: `summary::derive` at the `Full` tier from the streamed bytes, and at the `Meta` tier `summary::mail::derive_meta` over the header fields the source serves raw. This crate SHALL define no summary struct, and SHALL parse no `Message-ID`, `In-Reply-To`, `Subject`, `Date` or address field itself.
@@ -2138,9 +2138,14 @@ A source's collection listing SHALL name every collection it holds, whatever the
 ### Requirement: A reset never loses work no server holds
 `sync --reset` SHALL act on exactly one account and SHALL start it over inside the store it shares: it SHALL drop the account's collections (pimdir GUIDE "Removal": `delete_collection`, the refcounts recomputed in its transaction, then the collector), with what the store records under them (items, bindings, checkpoints, coverage, capability rows), the account's source-wide capability rows and its sidecar entry, stamp the entry again and sync the account anew. Every other account SHALL be left as it was.
 
-It SHALL read the account's collections before dropping any, and SHALL refuse while one holds a queued or parked action, which io-pimdir refuses to drop with its collection: the refusal SHALL name each row and the way out, the queued ones applied by `neverest sync --queue-only` or a sync, the parked ones cancelled from the frontend that queued them. Without `--force` it SHALL also refuse while they hold other work no server has: a conflict, an item whose flags or body no binding's base holds (a staged edit or create), a staged delete, or a retained item, bound to no server, listing that work per collection and naming `--force`, which drops that work with the collections.
+It SHALL read the account's collections before dropping any, and SHALL refuse while one holds a queued or parked action, which io-pimdir refuses to drop with its collection: the refusal SHALL name each row and the way out, the queued ones applied by `neverest sync --queue-only` or a sync, the parked ones cancelled from the frontend that queued them. Without `--force` it SHALL also refuse while they hold other work no server has: a conflict, an item whose flags or body no binding's base holds (a staged edit or create), a staged delete, a retained item, bound to no server, or an item holding a local property (pimdir STORAGE §4.3, a local label among them), which no source carries and the store drops with the last row of its public id, listing that work per collection and naming `--force`, which drops that work with the collections.
 
 `--reset` SHALL be refused beside `--dry-run`, which would drop the real collections before planning, and beside a collection or source filter, the reset being the whole account's.
+
+#### Scenario: A labelled message
+- **GIVEN** an account whose message carries the label `keep`
+- **WHEN** it is synced with `--reset`
+- **THEN** the run refuses, naming `--force`, and the label stays; with `--reset --force` it goes (src/cli/sync.rs `a_reset_refuses_while_an_item_holds_a_property`)
 
 #### Scenario: A queued send survives a reset
 - **GIVEN** an account whose collection holds a queued action
@@ -2184,7 +2189,7 @@ A relayed body SHALL be exactly the size its listing stated: the append is lengt
 - **THEN** nothing is relayed into that inbox until the round closes
 
 ### Requirement: A store error carries its code
-A store failure that ends a command SHALL carry, in its JSON failure object, the code io-pimdir gives it (`PimdirError::code`), spelled the same: `store-version`, `store-uncreated`, `store-foreign`, `store-corrupt`, `store-not-current`, `store-hash-algo`, `sync-version`, `store-busy`, `store-owned`, `store-staging`, `store-in-flight`, `store-exposed`, `lock-replaced`, `action-malformed`, `flag-invalid`, `unsupported`, `index-fts5-missing`, `index-version`. A store neverest's own layout refuses SHALL carry `store-layout`. A failure a caller cannot act on (an SQL or I/O error) SHALL carry none, nor SHALL a code neverest cannot meet (`index-busy`, which `index` answers as `busy`; `index-missing`, `index-outdated` and `index-query-only`, a query client's; `index-zone-unknown`, neverest stating only a zone its time zone database named; `cutoff-invalid`, neverest writing its cutoff as the store stamps; `scope-invalid`, neverest writing a scope bound in the one shape the store holds; `store-reset`, neverest naming a queue row by its bare id; `action-not-intent`, neverest parking unconfirmed a `submit` alone; `backup-occupied`, neverest taking no backup; `conflict-unread`, which the one-way overwrite answers by fetching the unread body). A failure folded into one account's outcome SHALL keep its code. No message SHALL advise deleting the store: the remedies are an upgrade, the reinstall of "A store the format outgrew is refused with its remedy", which moves the store directory away, and `sync --reset`, which drops one account's collections.
+A store failure that ends a command SHALL carry, in its JSON failure object, the code io-pimdir gives it (`PimdirError::code`), spelled the same: `store-version`, `store-uncreated`, `store-foreign`, `store-corrupt`, `store-not-current`, `store-hash-algo`, `sync-version`, `store-busy`, `store-owned`, `store-staging`, `store-in-flight`, `store-exposed`, `lock-replaced`, `action-malformed`, `flag-invalid`, `unsupported`, `index-fts5-missing`, `index-version`. A store neverest's own layout refuses SHALL carry `store-layout`. A failure a caller cannot act on (an SQL or I/O error) SHALL carry none, nor SHALL a code neverest cannot meet (`index-busy`, which `index` answers as `busy`; `index-missing`, `index-outdated` and `index-query-only`, a query client's; `index-zone-unknown`, neverest stating only a zone its time zone database named; `cutoff-invalid`, neverest writing its cutoff as the store stamps; `scope-invalid`, neverest writing a scope bound in the one shape the store holds; `store-reset`, neverest naming a queue row by its bare id; `action-not-intent`, neverest parking unconfirmed a `submit` alone; `backup-occupied`, neverest taking no backup; `conflict-unread`, which the one-way overwrite answers by fetching the unread body; `property-invalid`, neverest writing no property itself, the drain parking a `set-property` row it cannot apply). A failure folded into one account's outcome SHALL keep its code. No message SHALL advise deleting the store: the remedies are an upgrade, the reinstall of "A store the format outgrew is refused with its remedy", which moves the store directory away, and `sync --reset`, which drops one account's collections.
 
 #### Scenario: A downgrade under `--json`
 - **GIVEN** a store whose `store_meta.format_version` names a later draft
@@ -2426,6 +2431,27 @@ An append the server takes without naming the member it made (an IMAP `APPEND` a
 ### Requirement: A create left waiting is reported
 The report SHALL list under `waiting`, for every collection a run synced on an endpoint, the creates its last pass left waiting rather than pushing (pimdir SYNC §5), each with its `side`, its `collection`, its key as `id` (the link id, never the provisional handle) and its `reason`: `out-of-scope`, its date lying outside the run's scope; `delivered`, its server having taken it with no listing naming it yet; `undeliverable`, the store holding neither a body nor a member to copy it from; `other`, a reason a later io-pimdir states. The text output SHALL print them under `Waiting`. A waiting create SHALL NOT count as a warning nor change the exit code.
 
+### Requirement: A settled collection is listed once a run
+After a collection's pull pass, an endpoint SHALL push only where io-pimdir's `PimdirSourceStore::settled_collections` does not name the collection (pimdir SYNC §5): a settled one owes no push, holds no refusal, lacks no item and has no round open, so a push pass would only list it again. A server change made after the pull waits for the next run. In a pair, each endpoint's settledness is read after both pulls, and the pushing rounds run unless both are settled; a side nothing writes counts as settled.
+
+#### Scenario: A quiet mailbox
+- **GIVEN** a writable IMAP source whose INBOX was synced and has not changed
+- **WHEN** the account syncs
+- **THEN** INBOX is selected once, and in a pair each side's once (src/sync/driver/tests.rs `a_settled_collection_is_listed_once_a_run`, `a_settled_pair_collection_is_listed_once_a_run`)
+
+### Requirement: A source that states no change leaves a settled collection unsynced
+Before phase 1 of a one-source run, a collection the store calls settled under the run's scope, whose source states no change since the checkpoint the store holds, SHALL NOT be listed (pimdir SYNC §5): a Gmail label the mailbox history, read once from the earliest such checkpoint, names no change for, its checkpoint moved in one write to the history id the mailbox stands at, as an empty delta moves it; a DAV collection whose `{DAV:}sync-token` in the home-set listing equals its checkpoint (RFC 6578 §4). Such a collection still reports its coverage and still has its owed bodies downloaded. A history unreadable or expired names none. Every other source, IMAP among them until io-imap sends `LIST-STATUS` (RFC 5819), and every pair, lists the collection as before.
+
+#### Scenario: A quiet Gmail label
+- **GIVEN** a Gmail source whose INBOX and Work were synced at history id 500
+- **WHEN** the history since 500 names a star on a message of Work alone
+- **THEN** INBOX is left out with its checkpoint moved to the mailbox's history id, and Work is listed (src/sync/driver/gmail_quiet.rs)
+
+#### Scenario: A quiet address book
+- **GIVEN** a CardDAV book synced whose sync token has not moved
+- **WHEN** the account syncs
+- **THEN** no `REPORT` is sent; a card added moves the token and the next run lists it (tests/pair.rs `a_book_whose_sync_token_did_not_move_is_not_listed`)
+
 ### Requirement: A capped source says so, and keeps what it leaves unlisted
 A source whose server lists at most a number of the items a collection holds, whatever it holds (an IMAP folder size limit, as Gmail's "Limit IMAP folders to contain no more than this many messages"), SHALL be declared by `<backend>.collection.capped = true`, false by default, a key of every backend's `collection` table. Neverest cannot learn a cap from a server, none stating it, so the configuration is what the connector knows it by (pimdir SYNC §5).
 
@@ -2433,7 +2459,7 @@ Every page of every round of such a source's collections SHALL state `capped` (p
 
 The report SHALL list under `unlisted`, for each collection a capped round of the run closed on, the count of based bindings the round did not list (the engine's `unlisted`), with its `side` and its `collection`, the most one pass of the run counted. The engine counts there a narrowed round handing no enumeration too, which no narrowed round of neverest's connectors does. The text output SHALL print them under `Unlisted`. They SHALL NOT count as a warning nor change the exit code: a capped source leaves the same part of a collection out at every round.
 
-A rekey of a capped collection is guarded by its own park alone (pimdir SYNC §8, which states no rule for a cap): one whose listing leaves out half of at least 20 bindings is not written without `--accept-absences`, and one leaving out less drops them.
+A rekey from a capped listing SHALL NOT be written while any based binding resolves to no member, whatever their number (pimdir SYNC §8): the run names the rebuild under `absences` and exits 3, and `--accept-absences` drops each such binding (src/sync/driver/tests.rs `a_capped_renumbered_mailbox_parks_on_one_absence`).
 
 #### Scenario: Ten messages past the cap
 - **GIVEN** an IMAP source set `collection.capped = true`, 25 messages of its inbox bound, and a server listing the 15 newest
@@ -2633,7 +2659,7 @@ The rules below were kept in inline comments until the-v1-review removed every `
 - A short multiget batch SHALL NOT count as done: its missing members are fetched one by one.
 - A sync state row with no checkpoint SHALL read as no sync state, and reading then writing a checkpoint SHALL run in one transaction.
 - A dry run SHALL NOT upgrade a probe to `Full` to name what it would fetch (a DAV kind resolves its link id only at `Full`), nor key its plan on the hub level (a content change drops the stale object while the hub keeps the level).
-- The io-pimdir error codes neverest never meets are left out of its codes: `index-busy` (answered as busy), `index-missing`, `index-outdated` and `index-query-only` (a query client's), `index-zone-unknown` (neverest states only zones its database names), `cutoff-invalid` and `scope-invalid` (neverest writes the shapes the store holds), `store-reset` (a row is named by its bare id), `action-not-intent` (only a `submit` is parked unconfirmed), `backup-occupied` (no backup is taken) and `conflict-unread` (the one-way overwrite fetches the unread body, an item still unread staying parked).
+- The io-pimdir error codes neverest never meets are left out of its codes: `index-busy` (answered as busy), `index-missing`, `index-outdated` and `index-query-only` (a query client's), `index-zone-unknown` (neverest states only zones its database names), `cutoff-invalid` and `scope-invalid` (neverest writes the shapes the store holds), `store-reset` (a row is named by its bare id), `action-not-intent` (only a `submit` is parked unconfirmed), `backup-occupied` (no backup is taken), `conflict-unread` (the one-way overwrite fetches the unread body, an item still unread staying parked) and `property-invalid` (neverest writes no property, the drain parking a `set-property` row it cannot apply).
 
 ### Requirement: A connection presents a client certificate when configured
 Every `tls` table (a backend's, `smtp`'s) SHALL read an optional `client` table naming a PEM certificate (`cert`, optionally followed by its intermediates) and its PEM private key (`key`, PKCS#8 under native-tls), both shell-expanded, and the connection SHALL present them when the server asks for one, as himalaya does. A `client` table missing either key SHALL be refused at load.

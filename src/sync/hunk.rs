@@ -248,6 +248,30 @@ impl ItemHunk {
             | Self::Update { side, .. } => vec![side],
         }
     }
+
+    /// The create this hunk reports, its target side, collection and key,
+    /// `None` for any other hunk.
+    ///
+    /// A queued move's create is itemized by its remove and by the
+    /// collection it enters, which run concurrently: one that a push
+    /// carried in between is met twice, under this one key.
+    pub fn create_key(&self) -> Option<(&str, &str, &str)> {
+        match self {
+            Self::Add {
+                side,
+                collection,
+                id,
+                ..
+            } => Some((side, collection, id)),
+            Self::Copy {
+                target_side,
+                collection,
+                source_id,
+                ..
+            } => Some((target_side, collection, source_id)),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for ItemHunk {

@@ -3,7 +3,7 @@
 //! The end-of-run summary the sync engine returns: `Display` for the
 //! terminal, `Serialize` for `--json`, `JsonSchema` for `json-schema`.
 
-use std::{fmt, path::PathBuf};
+use std::{collections::HashSet, fmt, path::PathBuf};
 
 use io_pimdir::{
     client::producer::PimdirParkedAction,
@@ -265,7 +265,7 @@ impl SyncOutput {
         } = other;
 
         self.collection_patch.extend(collection_patch);
-        self.item_patch.extend(item_patch);
+        self.absorb_item_patch(item_patch);
         self.collisions.extend(collisions);
         self.drained.extend(drained);
         self.parked.extend(parked);
@@ -287,6 +287,31 @@ impl SyncOutput {
         self.clipped.extend(clipped);
         self.errors.extend(errors);
         self.interrupted |= interrupted;
+    }
+
+    /// Appends a collection's hunks, a create this report already holds
+    /// once (see [`ItemHunk::create_key`]).
+    fn absorb_item_patch(&mut self, item_patch: Vec<ItemHunk>) {
+        if !item_patch.iter().any(|hunk| hunk.create_key().is_some()) {
+            self.item_patch.extend(item_patch);
+            return;
+        }
+
+        let mut held: HashSet<(String, String, String)> = self
+            .item_patch
+            .iter()
+            .filter_map(ItemHunk::create_key)
+            .map(|(side, collection, id)| (side.into(), collection.into(), id.into()))
+            .collect();
+        for hunk in item_patch {
+            if let Some((side, collection, id)) = hunk.create_key() {
+                let key = (side.into(), collection.into(), id.into());
+                if !held.insert(key) {
+                    continue;
+                }
+            }
+            self.item_patch.push(hunk);
+        }
     }
 
     /// Names every endpoint as the configuration does rather than by its

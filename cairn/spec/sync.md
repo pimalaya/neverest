@@ -341,13 +341,16 @@ A sync SHALL report the remote-originated changes a pull applied to already-sync
 ### Requirement: A create is named by what delivers it
 A `Created` placement SHALL be itemized by how the push delivers it (pimdir SYNC §5): an `Add` hunk, `add item <link id> in <collection> on <side>`, for a create with no origin on a side syncing alone, which is a compose or an import a frontend queued and the store uploads; a `Copy` hunk carrying `origin`, `copy item <link id> from <origin> to <collection> on <side>`, for a create whose origin names the collection the server copies it from, a move or a copy a frontend staged; and the cross-side `Copy` hunk, `copy item <link id> in <collection> from <other> to <side>`, for a body the other side holds. Reading every create as a crossing named a single-source account's own compose "from imap to imap".
 
-A create a relocation delivers (a move whose remove carries its destination, pimdir SYNC §3, §5) SHALL be itemized beside that remove, in the collection the item leaves, while it is still pending there, and SHALL NOT be itemized by the collection it enters, whichever of the two is itemized first: phase 1 spines collections in parallel and a pair takes them in name order, so the collection it enters may be itemized before the remove is pushed. A dry run pushes nothing, so there each half SHALL be itemized by its own collection. Either way a move reads as its two rows, once each.
+A create a relocation delivers (a move whose remove carries its destination, pimdir SYNC §3, §5) SHALL be itemized beside that remove, in the collection the item leaves, while it is still pending there, and SHALL NOT be itemized by the collection it enters, whichever of the two is itemized first: phase 1 spines collections in parallel and a pair takes them in name order, so the collection it enters may be itemized before the remove is pushed, or after the push dropped the remove's tombstone, when nothing tells it the create was carried. The account's report SHALL therefore hold one create per side, collection and key: folding a collection's report into it drops a create it already holds. A dry run pushes nothing, so there each half SHALL be itemized by its own collection. Either way a move reads as its two rows, once each.
 
 #### Scenario: A card moved between address books
 - src/sync/driver/tests.rs `a_moved_card_is_itemized_as_both_its_halves`: the address book it leaves itemizes the delete and the add of a real run, the delete alone in a dry run.
 
 #### Scenario: A queued move itemized target first
 - src/sync/driver/tests.rs `a_queued_move_reports_its_create_once`: a move a frontend queued from INBOX to Archive reports one add, Archive itemized first or last; it reported two when Archive came first.
+
+#### Scenario: A queued move itemized across its push
+- src/sync/driver/tests.rs `a_queued_move_itemized_across_its_push_reports_its_create_once`: INBOX itemized, its tombstone dropped as the push drops it, then Archive itemized, the two reports folded: one add; it reported two (live night 2026-11-23, a message moved to the trash on Graph and Stalwart).
 
 ### Requirement: A dry run works on a replica that shares the bodies
 A dry run SHALL work on a throwaway replica of the pimdir store, so that no checkpoint advances and nothing reaches a server.

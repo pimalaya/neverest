@@ -2318,6 +2318,75 @@ fn a_queued_move_reports_its_create_once() {
     }
 }
 
+/// A queued move whose remove was pushed before its target was itemized is
+/// reported once.
+///
+/// The source reports the create beside its remove and drops its tombstone
+/// on push; the target, itemized after, no longer saw the create carried
+/// and reported it again (live night 2026-11-23, Graph and Stalwart).
+#[test]
+#[cfg(feature = "imap")]
+fn a_queued_move_itemized_across_its_push_reports_its_create_once() {
+    let server = one_message(1, 1);
+    let dir = tempfile::tempdir().unwrap();
+    let (ctx, mut store) = bound_imap_messages(dir.path(), &server, false, None, 1);
+    store
+        .ensure_collection("imap/Archive", "message/rfc822")
+        .unwrap();
+    let checkpoint = |collection: &str| PimdirWriteOp::SetCheckpoint {
+        collection: PimdirCollectionId(collection.into()),
+        checkpoint: PimdirCheckpoint(crate::imap::backend::encode_checkpoint(1, 2)),
+    };
+    store
+        .write(vec![checkpoint("imap/INBOX"), checkpoint("imap/Archive")])
+        .unwrap();
+    let seq = PimdirReader::open(dir.path())
+        .unwrap()
+        .list_items("imap/INBOX", None, 10)
+        .unwrap()[0]
+        .seq;
+    PimdirProducer::open(dir.path(), "tests")
+        .unwrap()
+        .enqueue(
+            "imap/INBOX",
+            &PimdirAction::Move {
+                seq,
+                to: PimdirCollectionId("imap/Archive".into()),
+            },
+            None,
+        )
+        .unwrap();
+    let mut report = SyncOutput::default();
+    let mut drainer = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+    drain_queues(&mut drainer, &mut report);
+
+    let mut inbox = SyncOutput::default();
+    itemize_single("imap/INBOX", &store, &ctx, &mut inbox).unwrap();
+    let tombstone = load_side(&store, "imap/INBOX")
+        .unwrap()
+        .into_iter()
+        .find(|placement| placement.status == PimdirStatus::Tombstone)
+        .unwrap();
+    store
+        .write(vec![PimdirWriteOp::DropPlacement {
+            collection: tombstone.collection,
+            handle: tombstone.handle,
+            reason: PimdirDropReason::Deleted,
+        }])
+        .unwrap();
+    let mut archive = SyncOutput::default();
+    itemize_single("imap/Archive", &store, &ctx, &mut archive).unwrap();
+    report.absorb(inbox);
+    report.absorb(archive);
+
+    let adds: Vec<_> = report
+        .item_patch
+        .iter()
+        .filter(|hunk| matches!(hunk, ItemHunk::Add { .. } | ItemHunk::Copy { .. }))
+        .collect();
+    assert_eq!(adds.len(), 1, "{adds:?}");
+}
+
 fn names(names: &[&str]) -> BTreeSet<String> {
     names.iter().map(|name| name.to_string()).collect()
 }

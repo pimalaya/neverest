@@ -57,6 +57,15 @@ pub enum CollectionHunk {
         /// The collection, by the name its server answers to.
         collection: String,
     },
+    /// A collection `side`'s server no longer lists, retired from the store.
+    ///
+    /// As an error, kept while a queued or parked row anchors on it.
+    Retire {
+        /// The endpoint whose server deleted it.
+        side: String,
+        /// The collection, by the name its server answered to.
+        collection: String,
+    },
     /// The collection could not be reconciled at all, so nothing about its
     /// items is known this run.
     ///
@@ -88,6 +97,7 @@ impl CollectionHunk {
             | Self::Fetch { side, .. }
             | Self::Rename { side, .. }
             | Self::Delete { side, .. }
+            | Self::Retire { side, .. }
             | Self::Scan { side, .. } => vec![side],
             Self::Sync { source, target, .. } => vec![source, target],
         }
@@ -110,6 +120,9 @@ impl fmt::Display for CollectionHunk {
             } => write!(f, "rename collection {collection} to {to} on {side}"),
             Self::Delete { side, collection } => {
                 write!(f, "delete collection {collection} on {side}")
+            }
+            Self::Retire { side, collection } => {
+                write!(f, "retire collection {collection}, deleted on {side}")
             }
             Self::Scan { side, collection } => {
                 write!(f, "scan collection {collection} on {side}")
@@ -241,6 +254,19 @@ pub enum ItemHunk {
         #[serde(skip)]
         content_key: u64,
     },
+    /// A delete queued on `side`'s copy of the item that an edit on `side`'s
+    /// server overruled (pimdir SYNC §5): the item stays.
+    DeleteOverruled {
+        /// The endpoint whose server edited the item.
+        side: String,
+        /// The collection, by the name its server answers to.
+        collection: String,
+        /// The item's handle on that endpoint.
+        id: String,
+        /// The cross-side alignment key, never serialized.
+        #[serde(skip)]
+        content_key: u64,
+    },
     /// Replace `side`'s copy of the item's body in place.
     ///
     /// Never emitted for mail, whose bodies are immutable.
@@ -271,6 +297,7 @@ impl ItemHunk {
             | Self::RemoveFlags { side, .. }
             | Self::Delete { side, .. }
             | Self::Fetch { side, .. }
+            | Self::DeleteOverruled { side, .. }
             | Self::Update { side, .. } => vec![side],
         }
     }
@@ -402,6 +429,17 @@ impl fmt::Display for ItemHunk {
                 ..
             } => {
                 write!(f, "fetch item {id} in {collection} from {side}")
+            }
+            Self::DeleteOverruled {
+                side,
+                collection,
+                id,
+                ..
+            } => {
+                write!(
+                    f,
+                    "delete of item {id} in {collection} overruled by a server edit on {side}"
+                )
             }
             Self::Update {
                 side,

@@ -55,6 +55,11 @@ const REWRITTEN: Duration = Duration::from_secs(8);
 /// it (src/sync/capability.rs).
 const GRAPH_DRAFTS_ONLY: &str = "Drafts only: Graph creates every MIME message as a draft";
 
+/// Why a Graph source files a sent copy nowhere but in Sent Items, as
+/// neverest declares it (src/sync/capability.rs).
+const GRAPH_SENT_ONLY: &str =
+    "Sent Items only: Graph files every sent message there and adds outside Drafts nothing";
+
 /// The messages of the folder `folder` (an id or a well-known name)
 /// whose `Message-ID` is `<tag@pimalaya.org>`, as `message` writes it.
 ///
@@ -443,6 +448,54 @@ fn a_graph_add_lands_in_drafts_only() {
             delete_tagged(&token, &["drafts"], &draft);
             if let Err(err) = connect(&token).mail_folder_permanent_delete(&folder_id) {
                 eprintln!("WARNING: leftover folder {draft}: {err:?}");
+            }
+        },
+    );
+}
+
+/// A send whose copy is asked outside Sent Items is refused at enqueue,
+/// `mail.submit.copy` declared `partial` and `none` on any other folder:
+/// `sendMail` files in Sent Items alone and Graph adds nothing elsewhere.
+///
+/// It was taken before, and the copy dropped once the message went out
+/// (the live night of 2026-11-23). Nothing is sent here.
+#[test]
+#[ignore = "live: needs the app registration's client secret"]
+fn a_graph_send_copied_outside_sent_items_is_refused_at_enqueue() {
+    let token = msgraph_token();
+    let folder = tag();
+    let folder_id = connect(&token)
+        .mail_folder_create(&MsgraphMailFolder {
+            display_name: folder.clone(),
+            ..Default::default()
+        })
+        .expect("create the folder")
+        .response
+        .id;
+
+    with_cleanup(
+        || {
+            let a = Replica::open("msgraph-mail", &user_line(), &token);
+            a.sync_keys(&[&folder], &[0]);
+
+            let declared = a.check()["backends"][0]["capabilities"].to_string();
+            assert!(declared.contains(GRAPH_SENT_ONLY), "{declared}");
+
+            let user = msgraph_user();
+            let body = message(&folder, &user);
+            let refused = a.try_send(&folder, &body, &user, Some(&folder));
+            match refused {
+                Err(PimdirError::Unsupported(refusal)) => {
+                    assert_eq!(refusal.capability, "mail.submit.copy");
+                    assert_eq!(refusal.source, a.source());
+                }
+                other => panic!("a copy outside Sent Items is refused: {other:?}"),
+            }
+            assert_eq!(a.queue(), (0, Vec::new()), "nothing is queued");
+        },
+        || {
+            if let Err(err) = connect(&token).mail_folder_permanent_delete(&folder_id) {
+                eprintln!("WARNING: leftover folder {folder}: {err:?}");
             }
         },
     );

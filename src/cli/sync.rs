@@ -155,8 +155,8 @@ pub struct SyncCommand {
     /// Print the patch that would be applied, without applying it.
     #[arg(long, short = 'd')]
     pub dry_run: bool,
-    /// Synchronize only the given collection names (repeatable, ASCII
-    /// case-insensitive).
+    /// Synchronize only the given collections (repeatable, ASCII
+    /// case-insensitive), by id, else by display name.
     #[arg(long, short = 'm', alias = "include-mailbox")]
     #[arg(value_name = "COLLECTION", action = ArgAction::Append)]
     #[arg(
@@ -164,7 +164,8 @@ pub struct SyncCommand {
         conflicts_with = "all_collections"
     )]
     pub include_collection: Vec<String>,
-    /// Skip the given collection names (repeatable, ASCII case-insensitive).
+    /// Skip the given collections (repeatable, ASCII case-insensitive), by
+    /// id, else by display name.
     #[arg(long, short = 'x', alias = "exclude-mailbox")]
     #[arg(value_name = "COLLECTION", action = ArgAction::Append)]
     #[arg(

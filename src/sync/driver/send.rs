@@ -73,13 +73,13 @@ pub(super) fn drain_submits(
         return;
     }
     info!("performing {} queued submit intent(s)", intents.len());
-    let files_copy = sender.as_ref().is_some_and(|sender| {
-        account_config
-            .sources()
-            .ok()
-            .and_then(|sources| sources.get(sender).map(capability::files_sent_copy))
-            .unwrap_or(false)
-    });
+    let filing = sender
+        .as_ref()
+        .and_then(|sender| {
+            let sources = account_config.sources().ok()?;
+            sources.get(sender).map(capability::sent_filing)
+        })
+        .unwrap_or(capability::SentFiling::Nothing);
 
     #[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
     {
@@ -121,6 +121,19 @@ pub(super) fn drain_submits(
                 continue;
             }
 
+            let step = copy_step(store, intent, filing, renames);
+            if let CopyStep::Refused(collection) = &step {
+                let reason = format!(
+                    "Not sent, its copy cannot go to {collection}: {}",
+                    capability::GRAPH_SENT_ONLY
+                );
+                warn!("submit intent #{} parked: {reason}", intent.id);
+                let parked = store.fail_action(intent.id, Some(&reason)).is_ok();
+                let failure = failed(Failure::new(reason), parked, false);
+                report.note_submitted(entry(intent), failure);
+                continue;
+            }
+
             let outgoing = match submit::prepare(blobs.blobs(), intent) {
                 Ok(outgoing) => outgoing,
                 Err(failure) => {
@@ -152,9 +165,9 @@ pub(super) fn drain_submits(
             }
 
             let (recorded, outcome) = match submit::deliver(&mut channel, outgoing) {
-                Ok(()) => {
-                    let (acknowledged, copied) =
-                        acknowledge_sent(store, intent, files_copy, renames);
+                Ok(sent_id) => {
+                    let step = label_copy(&mut channel, sender.as_deref(), sent_id, step);
+                    let (acknowledged, copied) = acknowledge_sent(store, intent, step);
                     copies += usize::from(copied);
                     sent += 1;
                     let recorded = match acknowledged {
@@ -227,7 +240,7 @@ pub(super) fn drain_submits(
             blobs,
             store,
             report,
-            files_copy,
+            filing,
             renames,
         );
         warn!(
@@ -237,38 +250,108 @@ pub(super) fn drain_submits(
     }
 }
 
-/// Acknowledges the sent `intent`, replaced by the add filing its copy unless
-/// the sender files it itself (`files_copy`), and says whether it was.
-///
-/// The copy goes where the collection it names is now: a rename the run
-/// performed before the send gave it a new id (`renames`), under which the
-/// old one is gone from the store.
+/// What becomes of the copy a sent message asks for.
 #[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
-pub(super) fn acknowledge_sent(
-    store: &mut PimdirSourceStore,
-    intent: &submit::SubmitIntent,
-    files_copy: bool,
-    renames: &Renames,
-) -> (Result<bool, PimdirError>, bool) {
-    let copy = intent.copy().filter(|_| !files_copy);
-    let Some(copy) = copy else {
-        return (store.acknowledge_action(intent.id, None), false);
-    };
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum CopyStep {
+    /// None asked, or the provider files it, in Sent.
+    Filed,
+    /// The sent message labelled with this collection, by its provider.
+    Label(String),
+    /// An `add` of the message into this collection, queued by neverest.
+    Add(String),
+    /// Refused before the send: the provider files in Sent alone and adds
+    /// nothing elsewhere, so the copy into this collection is not made.
+    Refused(String),
+}
 
-    let collection = renames.follow(&copy);
+/// What becomes of the copy `intent` asks for, sent through a provider
+/// filing as `filing` says.
+///
+/// A provider files natively only into the store's `sent`; elsewhere it
+/// labels, refuses or leaves an `add`. The copy follows the `renames` the
+/// run performed, the old id gone from the store.
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
+pub(super) fn copy_step(
+    store: &PimdirSourceStore,
+    intent: &submit::SubmitIntent,
+    filing: capability::SentFiling,
+    renames: &Renames,
+) -> CopyStep {
+    use capability::SentFiling;
+
+    let Some(copy) = intent.copy() else {
+        return CopyStep::Filed;
+    };
+    let collection = renames.follow(&copy).to_owned();
     if collection != copy {
         debug!(
             "submit intent #{} files its copy in {collection}, renamed from {copy}",
             intent.id
         );
     }
+
+    let into_sent = || match store.list_collections() {
+        Ok(collections) => collections
+            .iter()
+            .any(|held| held.id == collection && held.role.as_deref() == Some("sent")),
+        Err(err) => {
+            warn!("cannot read the role of {collection}, its copy is not the provider's: {err}");
+            false
+        }
+    };
+    match filing {
+        SentFiling::Nothing => CopyStep::Add(collection),
+        _ if into_sent() => CopyStep::Filed,
+        SentFiling::Sent => CopyStep::Add(collection),
+        SentFiling::SentOnly => CopyStep::Refused(collection),
+        SentFiling::Labels => CopyStep::Label(collection),
+    }
+}
+
+/// Labels the sent message `sent_id` where `step` says, then
+/// [`Filed`](CopyStep::Filed); a failed label leaves the copy to an `add`.
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
+fn label_copy(
+    channel: &mut submit::SendChannel<'_>,
+    sender: Option<&str>,
+    sent_id: Option<String>,
+    step: CopyStep,
+) -> CopyStep {
+    let CopyStep::Label(collection) = step else {
+        return step;
+    };
+    let (Some(id), Some(sender)) = (sent_id, sender) else {
+        return CopyStep::Add(collection);
+    };
+    match channel.label(&id, wire_name(sender, &collection)) {
+        Ok(()) => CopyStep::Filed,
+        Err(err) => {
+            warn!("cannot label the sent message {id}, its copy is added instead: {err:#}");
+            CopyStep::Add(collection)
+        }
+    }
+}
+
+/// Acknowledges the sent `intent`, replaced by the add filing its copy
+/// where `step` asks one, and says whether it was.
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
+pub(super) fn acknowledge_sent(
+    store: &mut PimdirSourceStore,
+    intent: &submit::SubmitIntent,
+    step: CopyStep,
+) -> (Result<bool, PimdirError>, bool) {
+    let CopyStep::Add(collection) = step else {
+        return (store.acknowledge_action(intent.id, None), false);
+    };
+
     let action = PimdirAction::Add {
         link_id: None,
         flags: PimdirFlags::from_iter(["\\Seen"]),
         object: intent.object.clone(),
         supersedes: None,
     };
-    let replaced = store.replace_action(intent.id, "neverest", collection, &action);
+    let replaced = store.replace_action(intent.id, "neverest", &collection, &action);
     (replaced, true)
 }
 

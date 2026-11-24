@@ -15,6 +15,9 @@ use std::{
     thread,
 };
 
+/// The sync token of the spare book, which never changes.
+const SPARE_TOKEN: &str = "http://fake/spare/1";
+
 /// What the fake answers differently from a sound server.
 #[derive(Clone, Debug, Default)]
 pub struct Faults {
@@ -39,6 +42,10 @@ struct State {
     removed: Vec<String>,
     faults: Faults,
     requests: Vec<String>,
+    /// Whether another client deleted the book, which is listed no more.
+    deleted: bool,
+    /// Whether the home set also lists an empty book at `/dav/spare/`.
+    spare: bool,
 }
 
 /// A fake server running in the background, for as long as the test.
@@ -86,6 +93,23 @@ impl FakeDav {
     /// The names of the cards the book holds.
     pub fn names(&self) -> Vec<String> {
         self.state.lock().unwrap().cards.keys().cloned().collect()
+    }
+
+    /// Sets the book's `DAV:displayname`, as another client would.
+    pub fn set_name(&self, name: &str) {
+        self.state.lock().unwrap().name = Some(name.to_string());
+    }
+
+    /// Lists an empty book at `/dav/spare/` beside the book.
+    pub fn add_spare(&self) {
+        self.state.lock().unwrap().spare = true;
+    }
+
+    /// Deletes the book with its cards, as another client would.
+    pub fn delete_book(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.deleted = true;
+        state.cards.clear();
     }
 
     /// Replaces the faults the server answers with.
@@ -179,18 +203,38 @@ fn answer(
                 }
             };
             let name = state.name.as_deref().unwrap_or("Book");
-            let rows = format!(
+            let book = |href: &str, name: &str, token: &str| {
+                format!(
+                    "<d:response><d:href>{href}</d:href><d:propstat><d:prop>\
+                     <d:resourcetype><d:collection/><c:addressbook/></d:resourcetype>\
+                     <d:displayname>{name}</d:displayname>\
+                     <d:sync-token>{token}</d:sync-token><d:supported-report-set>\
+                     <d:supported-report><d:report><c:addressbook-multiget/></d:report></d:supported-report>\
+                     {reports}</d:supported-report-set></d:prop>\
+                     <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+                )
+            };
+            let mut rows = String::from(
                 "<d:response><d:href>/dav/</d:href><d:propstat><d:prop>\
                  <d:resourcetype><d:collection/></d:resourcetype></d:prop>\
-                 <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\
-                 <d:response><d:href>/dav/book/</d:href><d:propstat><d:prop>\
-                 <d:resourcetype><d:collection/><c:addressbook/></d:resourcetype>\
-                 <d:displayname>{name}</d:displayname>\
-                 <d:sync-token>{token}</d:sync-token><d:supported-report-set>\
-                 <d:supported-report><d:report><c:addressbook-multiget/></d:report></d:supported-report>\
-                 {reports}</d:supported-report-set></d:prop>\
-                 <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
+                 <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>",
             );
+            if !state.deleted {
+                rows.push_str(&book("/dav/book/", name, &token));
+            }
+            if state.spare {
+                rows.push_str(&book("/dav/spare/", "Spare", SPARE_TOKEN));
+            }
+            ("207 Multi-Status".into(), xml, multistatus(&rows))
+        }
+        ("PROPFIND", "/dav/spare/", _) if state.spare => {
+            let rows = "<d:response><d:href>/dav/spare/</d:href><d:propstat><d:prop>\
+                        <d:resourcetype><d:collection/><c:addressbook/></d:resourcetype></d:prop>\
+                        <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>";
+            ("207 Multi-Status".into(), xml, multistatus(rows))
+        }
+        ("REPORT", "/dav/spare/", _) if state.spare => {
+            let rows = format!("<d:sync-token>{SPARE_TOKEN}</d:sync-token>");
             ("207 Multi-Status".into(), xml, multistatus(&rows))
         }
         ("PROPFIND", "/dav/book/", _) => {

@@ -144,6 +144,42 @@ pub(super) fn filter_collections(
         .collect()
 }
 
+/// The command line's `filter`, each entry no listed id matches replaced by
+/// the ids `listings` name it as display name, ASCII case aside.
+///
+/// Over every listing at once, so both sides of a pair keep the same ids.
+/// A configured filter is never read so, a name being mutable and free to
+/// collide. An entry matching neither stays as it is.
+pub(super) fn resolve_names(
+    filter: CollectionFilter,
+    listings: &[&BTreeMap<String, String>],
+) -> CollectionFilter {
+    let resolve = |list: Vec<String>| -> Vec<String> {
+        list.into_iter()
+            .flat_map(|entry| {
+                let listed = || listings.iter().flat_map(|listing| listing.iter());
+                if listed().any(|(id, _)| id.eq_ignore_ascii_case(&entry)) {
+                    return vec![entry];
+                }
+                let named: BTreeSet<String> = listed()
+                    .filter(|(_, name)| name.eq_ignore_ascii_case(&entry))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                match named.is_empty() {
+                    true => vec![entry],
+                    false => named.into_iter().collect(),
+                }
+            })
+            .collect()
+    };
+
+    match filter {
+        CollectionFilter::All => CollectionFilter::All,
+        CollectionFilter::Include(list) => CollectionFilter::Include(resolve(list)),
+        CollectionFilter::Exclude(list) => CollectionFilter::Exclude(resolve(list)),
+    }
+}
+
 /// One endpoint as the collection diff reads it: its name and what it lets
 /// a run do to its collection set.
 type DiffSide<'a> = (&'a str, &'a CollectionPermissions);
@@ -238,8 +274,10 @@ pub(super) fn apply_collection_hunk(
         CollectionHunk::Scan { .. } | CollectionHunk::Sync { .. } => {
             unreachable!("a failure hunk is reported and never applied")
         }
-        CollectionHunk::Fetch { .. } | CollectionHunk::Rename { .. } => {
-            unreachable!("a fetch or a performed rename is reported, never a pair's to apply")
+        CollectionHunk::Fetch { .. }
+        | CollectionHunk::Rename { .. }
+        | CollectionHunk::Retire { .. } => {
+            unreachable!("a fetch, a performed rename or a retire is reported, never applied")
         }
         CollectionHunk::Delete { side, collection } => {
             source_ctx(side, left, right)

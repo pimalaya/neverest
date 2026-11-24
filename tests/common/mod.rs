@@ -394,6 +394,19 @@ impl Replica {
     /// Queues a send of `body` from and to `user`, its copy filed in the
     /// collection `copy` when given, as a frontend does.
     pub fn send(&self, key: &str, body: &str, user: &str, copy: Option<&str>) {
+        self.try_send(key, body, user, copy)
+            .expect("enqueue the action");
+    }
+
+    /// Queues a send as [`send`](Self::send) does, answering the store's
+    /// refusal of it.
+    pub fn try_send(
+        &self,
+        key: &str,
+        body: &str,
+        user: &str,
+        copy: Option<&str>,
+    ) -> Result<(), PimdirError> {
         let submit = PimdirSubmit {
             source: self.source(),
             from: user.to_owned(),
@@ -401,7 +414,7 @@ impl Replica {
             subject: None,
             copy: copy.map(|key| PimdirCollectionId(self.collection(key))),
         };
-        self.enqueue_body(key, body, |hash| submit.to_action(hash).unwrap());
+        self.try_enqueue_body(key, body, |hash| submit.to_action(hash).unwrap())
     }
 
     /// Stages a new body for an item.

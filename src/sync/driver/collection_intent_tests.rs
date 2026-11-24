@@ -5,6 +5,8 @@
 use io_pimdir::client::reader::PimdirReader;
 
 use super::*;
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
+use crate::sync::capability::SentFiling;
 
 /// A rename the server performed under a new id carries the collection
 /// and every one under it in the store; one keeping its id is renamed.
@@ -103,7 +105,8 @@ fn a_send_files_its_copy_in_the_collection_renamed_beside_it() {
     renames.extend(follow_rename(&mut store, "imap", "imap/sep", &renamed));
     let intents = submit::pending(&store).unwrap();
 
-    let (acknowledged, copied) = acknowledge_sent(&mut store, &intents[0], false, &renames);
+    let step = copy_step(&store, &intents[0], SentFiling::Nothing, &renames);
+    let (acknowledged, copied) = acknowledge_sent(&mut store, &intents[0], step);
 
     assert!(acknowledged.unwrap(), "the send is acknowledged");
     assert!(copied);
@@ -114,4 +117,105 @@ fn a_send_files_its_copy_in_the_collection_renamed_beside_it() {
     assert_eq!(pending.len(), 1, "{pending:?}");
     assert_eq!(pending[0].collection, "imap/sep2");
     assert!(matches!(pending[0].action, PimdirAction::Add { .. }));
+}
+
+/// Queues a `submit` from `imap/INBOX` whose copy goes to `copy`, with
+/// `imap/Sent` stated `sent` beside it.
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
+fn queued_send(dir: &Path, copy: &str) -> (PimdirSourceStore, submit::SubmitIntent) {
+    use io_pimdir::client::producer::PimdirProducer;
+
+    let store = open_store(dir, "imap", "live").unwrap();
+    for collection in ["imap/INBOX", "imap/Sent", "imap/Archive"] {
+        store
+            .ensure_collection(collection, "message/rfc822")
+            .unwrap();
+    }
+    declare_role(&store, "imap/Sent", Some("sent"));
+    let object = store
+        .blob_stage()
+        .stage_body(b"Subject: hi\r\n\r\nhello")
+        .unwrap();
+    let payload = format!(
+        r#"{{"v":1,"source":"imap","from":"a@x.org","rcpts":["b@y.org"],"copy":"{copy}"}}"#
+    );
+    PimdirProducer::open(dir, "test-frontend")
+        .unwrap()
+        .enqueue(
+            "imap/INBOX",
+            &PimdirAction::Unknown {
+                kind: submit::SUBMIT.into(),
+                payload,
+                object_hash: Some(object.hash.clone()),
+            },
+            Some(&object),
+        )
+        .unwrap();
+    let intent = submit::pending(&store).unwrap().remove(0);
+    (store, intent)
+}
+
+/// A provider filing what it sends files in Sent alone: a copy elsewhere
+/// is an `add` neverest queues.
+///
+/// Every copy was dropped where the provider files, the copy never filed.
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
+#[test]
+fn a_copy_outside_sent_is_filed_where_the_provider_files_in_sent() {
+    let none = Renames::default();
+    let dir = tempfile::tempdir().unwrap();
+    let (mut store, intent) = queued_send(dir.path(), "imap/Archive");
+
+    let step = copy_step(&store, &intent, SentFiling::Sent, &none);
+    let (acknowledged, copied) = acknowledge_sent(&mut store, &intent, step);
+
+    assert!(acknowledged.unwrap(), "the send is acknowledged");
+    assert!(copied, "the copy outside Sent is filed");
+    let pending = PimdirReader::open(dir.path())
+        .unwrap()
+        .list_pending_actions()
+        .unwrap();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0].collection, "imap/Archive");
+    assert!(matches!(pending[0].action, PimdirAction::Add { .. }));
+
+    let dir = tempfile::tempdir().unwrap();
+    let (mut store, intent) = queued_send(dir.path(), "imap/Sent");
+    let step = copy_step(&store, &intent, SentFiling::Sent, &none);
+    let (acknowledged, copied) = acknowledge_sent(&mut store, &intent, step);
+    assert!(acknowledged.unwrap());
+    assert!(!copied, "the provider files the copy in Sent");
+}
+
+/// Per provider: Gmail labels a copy outside SENT, Graph refuses one
+/// outside Sent Items before the send, a server filing nothing adds all.
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
+#[test]
+fn a_copy_outside_sent_is_labelled_on_gmail_and_refused_on_graph() {
+    let none = Renames::default();
+    let cases = [
+        (
+            SentFiling::Labels,
+            "imap/Archive",
+            CopyStep::Label("imap/Archive".into()),
+        ),
+        (SentFiling::Labels, "imap/Sent", CopyStep::Filed),
+        (
+            SentFiling::SentOnly,
+            "imap/Archive",
+            CopyStep::Refused("imap/Archive".into()),
+        ),
+        (SentFiling::SentOnly, "imap/Sent", CopyStep::Filed),
+        (
+            SentFiling::Nothing,
+            "imap/Sent",
+            CopyStep::Add("imap/Sent".into()),
+        ),
+    ];
+    for (filing, copy, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, intent) = queued_send(dir.path(), copy);
+        let step = copy_step(&store, &intent, filing, &none);
+        assert_eq!(step, expected, "{filing:?} into {copy}");
+    }
 }

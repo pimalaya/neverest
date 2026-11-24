@@ -55,6 +55,10 @@ const FIXED: &str = "the provider's own collection, stating a role, stays as it 
 /// Why a Graph source adds a message nowhere but in its Drafts folder.
 const GRAPH_DRAFTS_ONLY: &str = "Drafts only: Graph creates every MIME message as a draft";
 
+/// Why a Graph source files a sent copy nowhere but in Sent Items.
+pub const GRAPH_SENT_ONLY: &str =
+    "Sent Items only: Graph files every sent message there and adds outside Drafts nothing";
+
 /// Why a one-way account renames no collection unless asked to.
 const ONE_WAY_RENAME: &str =
     "one-way copy: collection.rename is off unless set to true on the source";
@@ -145,6 +149,39 @@ pub fn drafts_only(
         name: MAIL_MESSAGE_ADD.to_owned(),
         support: PimdirSupport::Full,
         detail: None,
+    }));
+}
+
+/// A Graph mail source's `mail.submit.copy` by collection (pimdir STORAGE
+/// §15.6): `sendMail` files in Sent Items alone.
+///
+/// Where the source-wide row allows the copy, each of `held` but `sent`
+/// takes a `none` row, so a `submit` anchored there is refused at enqueue.
+/// Any other source is left as it is.
+pub fn sent_only(
+    source: &SourceConfig,
+    capabilities: &mut Vec<PimdirCapability>,
+    held: &[String],
+    sent: &BTreeSet<String>,
+) {
+    if !matches!(source.backend, SourceBackendConfig::Msgraph(_)) {
+        return;
+    }
+    let allowed = capabilities.iter().any(|row| {
+        row.name == MAIL_SUBMIT_COPY
+            && row.collection.is_none()
+            && row.support != PimdirSupport::None
+    });
+    if !allowed {
+        return;
+    }
+
+    let elsewhere = held.iter().filter(|collection| !sent.contains(*collection));
+    capabilities.extend(elsewhere.map(|collection| PimdirCapability {
+        collection: Some(collection.clone()),
+        name: MAIL_SUBMIT_COPY.to_owned(),
+        support: PimdirSupport::None,
+        detail: Some(GRAPH_SENT_ONLY.to_owned()),
     }));
 }
 
@@ -298,17 +335,35 @@ const FILING_HOSTS: &[(&[&str], &[&str])] = &[(
     &["smtp.gmail.com", "smtp.googlemail.com"],
 )];
 
-/// Whether the provider a source sends through files the sent message
-/// itself, so the copy a `submit` asks for needs no `add` of its own.
-pub fn files_sent_copy(source: &SourceConfig) -> bool {
+/// What the provider a source sends through files of the sent message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SentFiling {
+    /// Nothing: every copy is an `add` neverest queues.
+    Nothing,
+    /// Every sent message in Sent, a copy asked elsewhere being an `add`
+    /// neverest queues (an IMAP filing pair, Gmail's SMTP server).
+    Sent,
+    /// Every sent message in Sent, and nothing it can file elsewhere: an
+    /// `add` outside Drafts is refused (Graph's `sendMail`).
+    SentOnly,
+    /// Every sent message in SENT, another label added to it on request
+    /// (Gmail's `messages.send`).
+    Labels,
+}
+
+/// What the provider `source` sends through files of the sent message, so
+/// a copy into Sent needs no `add` of its own (pimdir STORAGE Annex B.2).
+pub fn sent_filing(source: &SourceConfig) -> SentFiling {
     let host = |server: &str, scheme: &str| {
         let url = server_url(server, scheme).ok()?;
         url.host_str().map(str::to_ascii_lowercase)
     };
 
     match &source.backend {
-        SourceBackendConfig::Gmail(_) | SourceBackendConfig::Msgraph(_) => true,
-        SourceBackendConfig::Imap(imap) => source.smtp.as_ref().is_some_and(|smtp| {
+        SourceBackendConfig::Gmail(_) if source.smtp.is_some() => SentFiling::Sent,
+        SourceBackendConfig::Gmail(_) => SentFiling::Labels,
+        SourceBackendConfig::Msgraph(_) => SentFiling::SentOnly,
+        SourceBackendConfig::Imap(imap) => match source.smtp.as_ref().is_some_and(|smtp| {
             let (Some(imap), Some(smtp)) =
                 (host(&imap.server, "imaps"), host(&smtp.server, "smtps"))
             else {
@@ -317,8 +372,11 @@ pub fn files_sent_copy(source: &SourceConfig) -> bool {
             FILING_HOSTS.iter().any(|(imaps, smtps)| {
                 imaps.contains(&imap.as_str()) && smtps.contains(&smtp.as_str())
             })
-        }),
-        _ => false,
+        }) {
+            true => SentFiling::Sent,
+            false => SentFiling::Nothing,
+        },
+        _ => SentFiling::Nothing,
     }
 }
 
@@ -368,7 +426,14 @@ fn gmail(name: &str, smtp: bool) -> Support {
                  message in SENT, asked or not",
             ),
         ),
-        MAIL_SUBMIT_COPY => (PimdirSupport::Full, Some("Gmail files it in SENT itself")),
+        MAIL_SUBMIT_COPY if smtp => (
+            PimdirSupport::Full,
+            Some("Gmail files it in SENT itself, an import into any other label"),
+        ),
+        MAIL_SUBMIT_COPY => (
+            PimdirSupport::Full,
+            Some("Gmail files it in SENT itself, the label added to the sent message elsewhere"),
+        ),
         COLLECTION_CREATE => (PimdirSupport::Full, Some("a label, nested by `/`")),
         COLLECTION_RENAME => (
             PimdirSupport::Full,
@@ -402,10 +467,7 @@ fn msgraph(name: &str, _smtp: bool) -> Support {
             PimdirSupport::Full,
             Some("Graph files every sent message in Sent Items, asked or not"),
         ),
-        MAIL_SUBMIT_COPY => (
-            PimdirSupport::Full,
-            Some("Graph files it in Sent Items itself"),
-        ),
+        MAIL_SUBMIT_COPY => (PimdirSupport::Partial, Some(GRAPH_SENT_ONLY)),
         COLLECTION_CREATE => (
             PimdirSupport::None,
             Some("Graph mail folders are not created yet"),
@@ -1033,14 +1095,61 @@ mod tests {
         };
 
         let filing = imap("imap.gmail.com", Some("smtps://SMTP.gmail.com:465"));
-        assert!(files_sent_copy(&filing));
+        assert_eq!(sent_filing(&filing), SentFiling::Sent);
         let filing = imap("imaps://imap.googlemail.com:993", Some("smtp.gmail.com"));
-        assert!(files_sent_copy(&filing));
+        assert_eq!(sent_filing(&filing), SentFiling::Sent);
 
-        assert!(!files_sent_copy(&imap("imap.gmail.com", None)));
+        let alone = imap("imap.gmail.com", None);
+        assert_eq!(sent_filing(&alone), SentFiling::Nothing);
         let relayed = imap("imap.gmail.com", Some("smtp.example.org"));
-        assert!(!files_sent_copy(&relayed), "another server files nothing");
+        assert_eq!(sent_filing(&relayed), SentFiling::Nothing, "files nothing");
         let elsewhere = imap("imap.example.org", Some("smtp.gmail.com"));
-        assert!(!files_sent_copy(&elsewhere), "filed in another mailbox");
+        assert_eq!(sent_filing(&elsewhere), SentFiling::Nothing, "elsewhere");
+    }
+
+    /// Gmail's `messages.send` labels a sent copy; Graph files it in Sent
+    /// Items alone, so declares its copy `partial`.
+    #[test]
+    fn gmail_labels_a_sent_copy_and_graph_files_it_in_sent_items_alone() {
+        let gmail = source("gmail.auth.token.raw = \"x\"", "gmail");
+        assert_eq!(sent_filing(&gmail), SentFiling::Labels);
+        let declared = declaration_of(&gmail);
+        let copy = row(&declared, MAIL_SUBMIT_COPY, None);
+        assert_eq!(copy.support, PimdirSupport::Full);
+        assert!(
+            copy.detail.as_deref().unwrap().contains("label"),
+            "{copy:?}"
+        );
+        let relayed = source(
+            "gmail.auth.token.raw = \"x\"\nsmtp.server = \"smtp.gmail.com\"",
+            "gmail",
+        );
+        assert_eq!(sent_filing(&relayed), SentFiling::Sent);
+
+        let account: AccountConfig =
+            toml::from_str("msgraph.auth.token.raw = \"token\"\nmsgraph.mail = true").unwrap();
+        let graph = account.sources().unwrap().remove("msgraph-mail").unwrap();
+        assert_eq!(sent_filing(&graph), SentFiling::SentOnly);
+        let declared = declaration_of(&graph);
+        let copy = row(&declared, MAIL_SUBMIT_COPY, None);
+        assert_eq!(copy.support, PimdirSupport::Partial);
+        assert_eq!(copy.detail.as_deref(), Some(GRAPH_SENT_ONLY));
+
+        let mut declared = declaration_of(&graph);
+        let held = [String::from("m/Sent Items"), String::from("m/Archive")];
+        let sent = BTreeSet::from([held[0].clone()]);
+        sent_only(&graph, &mut declared, &held, &sent);
+        let scoped: Vec<&PimdirCapability> = declared
+            .iter()
+            .filter(|row| row.name == MAIL_SUBMIT_COPY && row.collection.is_some())
+            .collect();
+        assert_eq!(scoped.len(), 1, "{scoped:?}");
+        assert_eq!(scoped[0].collection.as_deref(), Some("m/Archive"));
+        assert_eq!(scoped[0].support, PimdirSupport::None);
+
+        let mut declared = declaration_of(&gmail);
+        let before = declared.len();
+        sent_only(&gmail, &mut declared, &held, &sent);
+        assert_eq!(declared.len(), before, "Gmail labels a copy anywhere");
     }
 }

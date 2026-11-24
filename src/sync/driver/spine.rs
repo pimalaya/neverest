@@ -662,6 +662,7 @@ fn collection_spine(
             })
             .map(|placement| placement.handle.0.clone()),
     );
+    let tombstoned = tombstoned(&loaded);
     let before: HashMap<String, PimdirFlags> = loaded
         .into_iter()
         .map(|placement| (placement.handle.0, placement.flags))
@@ -677,6 +678,15 @@ fn collection_spine(
     itemize_pulled(
         &pull.events,
         &before,
+        store,
+        collection,
+        display,
+        &ctx.name,
+        &mut report,
+    )?;
+    itemize_overruled_deletes(
+        &pull.events,
+        &tombstoned,
         store,
         collection,
         display,

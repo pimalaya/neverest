@@ -130,6 +130,17 @@ struct Pairing {
     relay: bool,
 }
 
+/// The collection filters of one pair.
+struct PairFilters {
+    /// The run's, else the source's.
+    run_or_source: CollectionFilter,
+    /// Whether `run_or_source` is the run's, whose entries also name a
+    /// collection by its display name when no id matches.
+    by_name: bool,
+    /// The target's, which narrows what the target takes.
+    target: CollectionFilter,
+}
+
 /// What the pairs of one source stated of tasks this run, as hub ids.
 ///
 /// The record before the run is kept while a target is still to list.
@@ -186,9 +197,9 @@ fn run_pair(
     taskless: &mut PairTaskless,
     report: &mut SyncOutput,
 ) -> Result<()> {
-    let filter = match pairing.filter.clone() {
-        Some(filter) => filter,
-        None => pairing.left.1.collection().filter.clone(),
+    let (filter, by_name) = match pairing.filter.clone() {
+        Some(filter) => (filter, true),
+        None => (pairing.left.1.collection().filter.clone(), false),
     };
     let narrowing = pairing.right.1.collection().filter.clone();
     let mut pair = OpenPair::open(run, pairing)?;
@@ -196,7 +207,11 @@ fn run_pair(
     if !run.dry_run {
         pair.drain_queues(run, report);
     }
-    let filters = [&filter, &narrowing];
+    let filters = PairFilters {
+        run_or_source: filter,
+        by_name,
+        target: narrowing,
+    };
     let common = pair.plan_collections(run, filters, state, taskless, report)?;
     pair.sync_collections(run, &common, report);
 
@@ -300,7 +315,7 @@ impl OpenPair {
     fn plan_collections(
         &mut self,
         run: AccountRun<'_>,
-        filters: [&CollectionFilter; 2],
+        filters: PairFilters,
         state: &mut AccountState,
         taskless: &mut PairTaskless,
         report: &mut SyncOutput,
@@ -332,9 +347,16 @@ impl OpenPair {
             });
         }
 
+        let run_or_source = match filters.by_name {
+            true => resolve_names(
+                filters.run_or_source,
+                &[&left_collections, &right_collections],
+            ),
+            false => filters.run_or_source,
+        };
         let filtered = |collections: &BTreeMap<String, String>| {
-            let [run_or_source, target] =
-                filters.map(|filter| filter_collections(collections, filter));
+            let [run_or_source, target] = [&run_or_source, &filters.target]
+                .map(|filter| filter_collections(collections, filter));
             run_or_source
                 .intersection(&target)
                 .cloned()
@@ -756,7 +778,14 @@ fn reconcile_side(
     let before = if push {
         None
     } else {
-        Some(flag_snapshot(store, collection, &ctx.name)?)
+        let loaded = load_side(store, collection)
+            .with_context(|| format!("Load {} {collection}", ctx.name))?;
+        let tombstoned = tombstoned(&loaded);
+        let flags: HashMap<String, PimdirFlags> = loaded
+            .into_iter()
+            .map(|placement| (placement.handle.0, placement.flags))
+            .collect();
+        Some((flags, tombstoned))
     };
 
     let (side, _) = sync_side_rebuilding(collection, ctx, store, blobs, push, None)?;
@@ -765,15 +794,26 @@ fn reconcile_side(
     let display = display_name(&ctx.namespace, collection);
 
     match &before {
-        Some(before) => itemize_pulled(
-            &side.events,
-            before,
-            store,
-            collection,
-            display,
-            &ctx.name,
-            report,
-        )?,
+        Some((flags, tombstoned)) => {
+            itemize_pulled(
+                &side.events,
+                flags,
+                store,
+                collection,
+                display,
+                &ctx.name,
+                report,
+            )?;
+            itemize_overruled_deletes(
+                &side.events,
+                tombstoned,
+                store,
+                collection,
+                display,
+                &ctx.name,
+                report,
+            )?;
+        }
         None => itemize_conflicted(&side.events, store, collection, &ctx.name, report)?,
     }
 

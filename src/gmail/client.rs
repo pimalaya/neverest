@@ -1172,12 +1172,12 @@ impl GmailClient {
     }
 
     /// Sends raw MIME through `messages.send`, which files the message in
-    /// SENT itself.
+    /// SENT itself, and returns the id Gmail gave it.
     ///
     /// Sent again on a refusal alone ([`create`](Self::create)). Gmail reads
     /// the recipients from the headers, `Bcc` included and stripped: other
     /// envelope ones are lost.
-    pub fn send_raw(&mut self, raw: &[u8]) -> Result<(), GmailClientStdError> {
+    pub fn send_raw(&mut self, raw: &[u8]) -> Result<String, GmailClientStdError> {
         let message = GmailMessage {
             raw: Some(encode_raw(raw)),
             ..Default::default()
@@ -1186,7 +1186,15 @@ impl GmailClient {
             let coroutine = GmailMessageSend::new(&client.auth, &client.user_id, &message)?;
             client.run(coroutine)
         })
-        .map(|_| ())
+        .map(|sent| sent.id)
+    }
+
+    /// Adds the label of `collection` to the message `id`, the one way a
+    /// sent message is filed outside SENT, with no second message.
+    pub fn label_message(&mut self, id: &str, collection: &str) -> Result<()> {
+        let label = self.label_id(collection)?;
+        self.modify_one(id, &[label], &[])
+            .with_context(|| format!("Label message {id} with {collection} error"))
     }
 
     /// Imports a message into a label with its flags, keeping its own date

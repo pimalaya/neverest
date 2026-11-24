@@ -338,6 +338,14 @@ A store opens under its own format version alone (pimdir STORAGE §4.2, §6): on
 ### Requirement: The report shows remote-originated changes a pull applied
 A sync SHALL report the remote-originated changes a pull applied to already-synced items (flag changes and removals), not only the local→remote pushes and the download plan. Because the pull applies them silently (the item reads `Clean` afterwards), they SHALL be recovered from the sync's per-item `events`: a `FlagsChanged` diffed against a pre-pull `handle → flags` snapshot into precise add/remove flag hunks, and a `Vanished` into a delete hunk. Each such hunk SHALL carry `direction: "pull"` and read `pull <flags> added to item <id> in <collection> from <side>`, `pull <flags> removed from ...` or `pull the deletion of item <id> in <collection> from <side>`, so it is not read as a change pushed to `side`; the `add-flags`, `remove-flags` and `delete` hunks a run pushes carry `direction: "push"`. A newly-pulled message (`Added`) is already reported by the pull plan (a `Fetch` hunk) and is not re-itemized.
 
+### Requirement: A delete a server edit overruled is reported
+A queued delete whose item the server edited before the delete was pushed loses to the edit (pimdir SYNC §5): the engine revives the tombstone and pulls the edit, and the queue's row reads applied. The run SHALL report it as a `delete-overruled` item hunk naming the side, the collection and the item as a person knows it (its link id, else its handle), text `delete of item <id> in <collection> overruled by a server edit on <side>`, so the user knows the item stays and the delete is theirs to queue again. It is a report line, not a conflict: the run exits as it would without it. It SHALL be found from the tombstones the side held before its pull and the sync's events naming one of them added, changed or flagged, the placement live after it; one left conflicted is reported as its conflict. Graph rewrites an event a moment after a body write, so a delete queued right after the run that created or edited a described event meets such an edit: no run waits for it, the overruled delete is reported (owner ruling of 2026-11-24, the-live-night-findings N2 and N3).
+
+#### Scenario: A delete beaten by a server edit
+- **GIVEN** a card synced once, a delete of it queued, and the card edited on the server since
+- **WHEN** the account syncs
+- **THEN** the card stays on the server and in the store, the run reports `delete-overruled` for it once and exits 0
+
 ### Requirement: A create is named by what delivers it
 A `Created` placement SHALL be itemized by how the push delivers it (pimdir SYNC §5): an `Add` hunk, `add item <link id> in <collection> on <side>`, for a create with no origin on a side syncing alone, which is a compose or an import a frontend queued and the store uploads; a `Copy` hunk carrying `origin`, `copy item <link id> from <origin> to <collection> on <side>`, for a create whose origin names the collection the server copies it from, a move or a copy a frontend staged; and the cross-side `Copy` hunk, `copy item <link id> in <collection> from <other> to <side>`, for a body the other side holds. Reading every create as a crossing named a single-source account's own compose "from imap to imap".
 
@@ -1085,6 +1093,19 @@ Without a base, a collection deleted on one endpoint was created again from the 
 - **WHEN** the account is synced
 - **THEN** it is created on the other
 
+### Requirement: A collection deleted on a lone source's server is retired
+An account with no target SHALL retire from the store each collection of its source the store holds and the source's listing no longer names, with what it holds, and report it as a `retire` collection hunk (text `retire collection <name>, deleted on <source>`): the store mirrors the server, and `collection.delete` gates pushing a delete to another endpoint, not forgetting one the server made. A collection a queued or parked row anchors on SHALL be kept instead, the store refusing to drop a row with no receipt (io-pimdir `delete_collection`, `Queued`), and reported as a `collection-patch` error holding that hunk, which waits for a person (exit 3) until the row is applied or cancelled. A listing naming no collection SHALL retire nothing, a failing server and an emptied account answering alike; a collection another source binds is the pair's to read ("A collection deleted on one endpoint is deleted on the other"). `--declare-only` retires nothing, moving no item. A dry run retires on its replica and reports alike. It stayed in the store with its items, the report empty, before (live night of 2026-11-23, owner ruling R3 of 2026-11-24).
+
+#### Scenario: A folder deleted on the server
+- **GIVEN** a one-source IMAP account whose store holds a folder with one message
+- **WHEN** the folder is deleted on the server (IMAP `DELETE`) and the account syncs twice
+- **THEN** the first run reports `retire collection <folder>, deleted on imap` and the store holds the folder no more; the second reports nothing
+
+#### Scenario: A deleted book a parked row anchors on
+- **GIVEN** a book whose store holds a parked row, deleted on the server
+- **WHEN** the account syncs
+- **THEN** the book stays in the store, the run reports the `retire` hunk among its errors and exits 3
+
 ### Requirement: A divergence with no common ancestor parks rather than resolving itself
 Two endpoints of one account holding one identity under two different bodies, with no body they ever agreed on behind them, SHALL park the divergence and SHALL NOT write either body over the other. A three-way merge SHALL NOT be attempted: with no base it could only ever park, and merging against the target's own body as the base would read the target as having changed nothing and settle on the source's, which is the overwrite parking exists to refuse.
 
@@ -1556,6 +1577,13 @@ The `text/calendar` sort key SHALL be the item's start resolved to RFC 3339 in U
 ### Requirement: A collection is keyed by its backend id and named by its display name
 Every hub collection id, every wire call and the account's collection filter SHALL be built from the backend's own id: the mailbox name on IMAP and on Graph, the label name on Gmail, on DAV the path segment of a collection directly under the home set, as the server served it (A DAV key keeps the segment the server served), and the href's path, starting with a slash, of one outside it (io-webdav's id; Google lists every calendar as `/caldav/v2/<calendar>/events/`, hub id `caldav//caldav/v2/<calendar>/events`). A display name SHALL NOT address a collection, being optional, mutable and free to collide. The default calendar a scheduling inbox names SHALL be keyed as the listing keys it.
 
+The one exception is the command line: an entry of `sync -m` or `sync -x` that no listed id matches (ASCII case aside) SHALL also match the collections whose display name it is, resolved into their ids before the filter applies, over both listings of a pair at once so both sides keep the same ids. An entry matching neither keeps nothing. A configured `collection.filter` SHALL match ids alone: it outlives the listing it was written against, and a name matched in an exclude would drop a collection a server renamed into it. iCloud and Google calendars are listed under opaque ids, which a person running one sync does not know.
+
+#### Scenario: A calendar named on the command line
+- **GIVEN** a source whose book `book` is named `Friends`, synced with a target listing it as `Book`
+- **WHEN** the account syncs with `-m friends`, then from scratch with `-x Friends`
+- **THEN** the first run carries the book's cards to the target and the second carries none, where a configured `include = ["Friends"]` keeps nothing
+
 The store SHALL still carry what the collection is called: `set_collection_name` runs beside every `ensure_collection` with the name without the namespace the hub id carries. A DAV source SHALL take it from `DAV:displayname`, falling back to the id when it is blank or absent; every other source's id is already its name. Where two sources meet, the first in declared order with a non-blank name wins. Naming SHALL NOT fail a run: nothing keys on the column, so a refused write is logged and the sync continues.
 
 ### Requirement: Google contacts and calendars are native sources
@@ -1656,7 +1684,14 @@ At every run, before it drains an action, neverest SHALL declare each source it 
 A `submit` SHALL be sent by the source its payload names, and left pending for another run when it names a source this run does not perform.
 
 ### Requirement: A sent copy is filed once sent
-A `submit` asking for `copy` SHALL file the message in that collection only after the send succeeds: natively where the provider files sent mail itself (the Gmail and Graph backends, and an IMAP source whose IMAP and SMTP hosts are a pair neverest knows to file what the SMTP server sends in that mailbox's Sent), otherwise by replacing the intent with an `add` of the message, `\Seen` set, drained in the same run (pimdir STORAGE §15.5, Annex B.2).
+A `submit` asking for `copy` SHALL file the message in that collection only after the send succeeds: natively where the provider files sent mail itself (the Gmail and Graph backends, and an IMAP source whose IMAP and SMTP hosts are a pair neverest knows to file what the SMTP server sends in that mailbox's Sent) and `copy` is the collection the store states `sent`, otherwise by replacing the intent with an `add` of the message, `\Seen` set, drained in the same run (pimdir STORAGE §15.5, Annex B.2).
+
+A provider files natively in Sent alone, so a copy asked elsewhere is never left to it. Gmail's `messages.send` SHALL add the copy's label to the message it sent (`messages.modify` on the id the send answers: one message, in SENT and the label), a label that cannot be added falling back to the `add`; Gmail sending through an `smtp` table, and an IMAP filing pair, take the `add`. Graph's `sendMail` files in Sent Items alone and Graph adds nothing outside Drafts, so a Graph mail source SHALL declare `mail.submit.copy` `partial` ("Sent Items only") source-wide and `none` on each of its other folders, a `submit` being anchored on the collection its copy goes to: such a `submit` is refused at enqueue, and one queued before the declaration SHALL be parked before anything is sent, naming why. Every copy was once left to the provider, a copy outside Sent dropped while the row read `applied` (live night of 2026-11-23).
+
+#### Scenario: A Gmail send copied into a label
+- **GIVEN** a Gmail source and a queued `submit` whose `copy` is the label `Work`
+- **WHEN** the account syncs
+- **THEN** the message is sent once, carries the `SENT` and `Work` labels, and nothing is imported
 
 The `add` SHALL go where the `copy` collection is when the send is performed: a `collection-rename` the same run performed before it gives the collection a new id in the store, the old one gone, and the copy follows it there. Named by its old id, the `add` was refused, the sent message left in flight, and the next run parked it unconfirmed with its copy never filed. A rename performed by an earlier run is not followed: the payload's `copy` is what io-pimdir's `rename_collection` would have to carry, as it carries a queued move's target.
 

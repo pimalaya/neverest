@@ -239,6 +239,10 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed a collection deleted on the server staying in the store with its items, the report empty: an account with no target retires it and reports a `retire` collection hunk. One a queued or parked row anchors on is kept, reported waiting for a person (exit 3).
+- Fixed a queued delete the server's edit overruled reading as applied, the item back with no word: the run reports a `delete-overruled` item hunk naming it.
+- Fixed the copy of a message sent through Gmail or Graph being dropped when asked outside Sent, the row read `applied`: Gmail adds the copy's label to the sent message; Graph declares `mail.submit.copy` `partial` (Sent Items only), so such a send is refused when queued, and parked unsent when queued before; an IMAP pair filing in Sent and Gmail over SMTP file a copy elsewhere as an `add`.
+- Fixed `sync -m` and `sync -x` unable to name an iCloud or Google calendar, listed under an opaque id: an entry no id matches also matches the collections it is the display name of. A configured `collection.filter` still matches ids alone.
 - Fixed an event deleted on a Graph calendar right after the run that created it coming back: the create sent an empty body, which Exchange rewrites a moment later, so the delete met a server edit and lost. An event without a description is created with no body. One with a description is still rewritten.
 - Fixed a message sent in the run that renamed the folder its copy goes to being left unconfirmed, its copy never filed: the copy is filed in the renamed folder.
 - Fixed a bare `conflict list` failing on the first account not initialized: it lists the others and names the skipped ones under `uninitialized`. Naming one with `-a` still fails.

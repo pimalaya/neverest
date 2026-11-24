@@ -20,6 +20,73 @@ pub(super) fn flag_snapshot(
         .collect())
 }
 
+/// The handles `placements` hold as tombstones: deletes staged on the side
+/// and not pushed yet, which a server edit may overrule.
+pub(super) fn tombstoned(placements: &[PimdirPlacement]) -> HashSet<String> {
+    placements
+        .iter()
+        .filter(|placement| placement.status == PimdirStatus::Tombstone)
+        .map(|placement| placement.handle.0.clone())
+        .collect()
+}
+
+/// Itemizes each delete of `tombstoned` a server edit overruled (pimdir
+/// SYNC §5), its queue row reading applied while the item stays.
+///
+/// A tombstone the sync's `events` name added (a revived DAV member) or
+/// changed, live after it; one left conflicted is its conflict's.
+pub(super) fn itemize_overruled_deletes(
+    events: &[PimdirSyncEvent],
+    tombstoned: &HashSet<String>,
+    store: &PimdirSourceStore,
+    collection: &str,
+    display: &str,
+    source: &str,
+    report: &mut SyncOutput,
+) -> Result<()> {
+    let changed: HashSet<&str> = events
+        .iter()
+        .filter_map(|event| match event {
+            PimdirSyncEvent::Added(handle)
+            | PimdirSyncEvent::ContentChanged(handle)
+            | PimdirSyncEvent::FlagsChanged(handle) => Some(handle.as_str()),
+            _ => None,
+        })
+        .filter(|handle| tombstoned.contains(*handle))
+        .collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+
+    let after =
+        load_side(store, collection).with_context(|| format!("Load {source} {collection}"))?;
+    for placement in after {
+        let revived = !matches!(
+            placement.status,
+            PimdirStatus::Tombstone | PimdirStatus::Conflict
+        );
+        if !revived || !changed.contains(placement.handle.as_str()) {
+            continue;
+        }
+        let id = placement
+            .link_id
+            .as_ref()
+            .map(|link| link.0.clone())
+            .unwrap_or_else(|| placement.handle.0.clone());
+        info!("the delete of {id} in {display} was overruled by a server edit on {source}");
+        report.note_item_hunk(
+            ItemHunk::DeleteOverruled {
+                side: source.to_string(),
+                collection: display.to_string(),
+                id,
+                content_key: 0,
+            },
+            None,
+        );
+    }
+    Ok(())
+}
+
 /// Itemizes the remote-originated flag changes and removals a pull applied.
 ///
 /// The pull applies them silently, the item reading `Clean` afterwards, so they
@@ -872,7 +939,8 @@ fn names(hunk: &ItemHunk, side: &str, collection: &str, handle: &str) -> bool {
         ItemHunk::AddFlags { .. }
         | ItemHunk::RemoveFlags { .. }
         | ItemHunk::Delete { .. }
-        | ItemHunk::Fetch { .. } => false,
+        | ItemHunk::Fetch { .. }
+        | ItemHunk::DeleteOverruled { .. } => false,
     }
 }
 

@@ -340,6 +340,228 @@ fn a_lone_source_nothing_writes_is_listed_once_a_run() {
     assert_eq!(dav.requests("REPORT").len() - listed, 1, "{report}");
 }
 
+/// `-m` and `-x` also name a collection by its display name when no id
+/// matches, on both sides of a pair alike, the target's book listed under
+/// another name; a configured filter still names ids alone.
+///
+/// Matched on ids alone before, `-m Friends` kept nothing and `-x Friends`
+/// dropped nothing.
+#[test]
+fn a_command_line_filter_names_a_collection_by_its_display_name() {
+    let runs: [(&[&str], &str, bool); 4] = [
+        (&["-m", "friends"], "", true),
+        (&["-x", "Friends"], "", false),
+        (&["-m", "book"], "", true),
+        (
+            &[],
+            "sources.src.carddav.collection.filter.include = [\"Friends\"]\n",
+            false,
+        ),
+    ];
+    for (args, extra, crosses) in runs {
+        let home = tempfile::tempdir().unwrap();
+        let src = FakeDav::start();
+        let dst = FakeDav::start();
+        src.set_name("Friends");
+        src.put("a.vcf", &card("a"));
+        let config = pair(home.path(), &src, &dst, extra);
+
+        let args = [&["--init"], args].concat();
+        let (code, report) = sync(home.path(), &config, &args);
+
+        assert_eq!(code, 0, "{args:?}: {report}");
+        let expected: &[&str] = if crosses { &["a.vcf"] } else { &[] };
+        assert_eq!(dst.names(), expected, "{args:?} {extra}: {report}");
+    }
+}
+
+/// A delete queued while the server edits the card is overruled by the
+/// edit (pimdir SYNC §5): the card stays, and the run says so in its JSON
+/// and its text, the queue's row applied.
+///
+/// The run read "applied 1 queued action(s)" before, the card back with no
+/// word (the live night of 2026-11-23).
+#[test]
+fn a_delete_a_server_edit_overrules_is_reported() {
+    let (home, dav, config) = delete_beside_a_server_edit();
+    let (code, report) = sync(home.path(), &config, &[]);
+
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(dav.names(), ["a.vcf"], "the edit wins: {report}");
+    let overruled: Vec<&Value> = report["itemPatch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == "delete-overruled")
+        .collect();
+    assert_eq!(overruled.len(), 1, "{report}");
+    assert_eq!(overruled[0]["side"], "carddav", "{report}");
+    assert_eq!(overruled[0]["collection"], "book", "{report}");
+    assert_eq!(overruled[0]["id"], "a", "named by its UID: {report}");
+    let (code, report) = sync(home.path(), &config, &[]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["itemPatch"], serde_json::json!([]), "said once");
+
+    let (home, _dav, config) = delete_beside_a_server_edit();
+    let text = sync_text(home.path(), &config);
+    let line = "delete of item a in book overruled by a server edit on carddav";
+    assert!(text.contains(line), "{text}");
+}
+
+/// A book deleted on the server is retired from the store and reported, a
+/// `retire` collection hunk, once; one a parked row anchors on stays,
+/// reported waiting for a person (exit 3), until the row goes.
+///
+/// It stayed in the store with its cards, the report empty, before (the
+/// live night of 2026-11-23).
+#[test]
+fn a_book_deleted_on_the_server_is_retired_and_reported() {
+    use io_pimdir::{
+        client::{producer::PimdirProducer, reader::PimdirReader},
+        codec::PimdirAction,
+        object::PimdirHash,
+    };
+
+    let held = |home: &Path| {
+        PimdirReader::open(home.join("store"))
+            .unwrap()
+            .list_collections()
+            .unwrap()
+            .into_iter()
+            .any(|collection| collection.id == "pair/carddav/book")
+    };
+    let retired = |report: &Value| {
+        report["collectionPatch"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|hunk| hunk["kind"] == "retire")
+            .count()
+    };
+    let synced = || {
+        let home = tempfile::tempdir().unwrap();
+        let dav = FakeDav::start();
+        dav.add_spare();
+        dav.put("a.vcf", &card("a"));
+        let config = solo(home.path(), &dav);
+        let (code, report) = sync(home.path(), &config, &["--init"]);
+        assert_eq!(code, 0, "{report}");
+        assert!(held(home.path()), "{report}");
+        (home, dav, config)
+    };
+
+    let (home, dav, config) = synced();
+    dav.delete_book();
+    let (code, report) = sync(home.path(), &config, &[]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(retired(&report), 1, "{report}");
+    let hunk = &report["collectionPatch"][0];
+    assert_eq!(hunk["side"], "carddav", "{report}");
+    assert_eq!(hunk["collection"], "book", "{report}");
+    assert!(!held(home.path()), "the book is retired: {report}");
+    let (code, report) = sync(home.path(), &config, &[]);
+    assert_eq!(code, 0, "{report}");
+    assert_eq!(report["collectionPatch"], serde_json::json!([]), "once");
+
+    let (home, dav, config) = synced();
+    let store = home.path().join("store");
+    let seq = PimdirReader::open(&store)
+        .unwrap()
+        .list_items("pair/carddav/book", None, 10)
+        .unwrap()[0]
+        .seq;
+    let stale = PimdirAction::Remove {
+        seq,
+        if_match: Some(PimdirHash("a".repeat(52))),
+        resolves: None,
+    };
+    PimdirProducer::open(&store, "test-frontend")
+        .unwrap()
+        .enqueue("pair/carddav/book", &stale, None)
+        .unwrap();
+    dav.delete_book();
+    let (code, report) = sync(home.path(), &config, &[]);
+    assert_eq!(code, 3, "{report}");
+    assert!(held(home.path()), "kept while the row anchors: {report}");
+    let kept: Vec<&Value> = report["errors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == "collection-patch" && entry["hunk"]["kind"] == "retire")
+        .collect();
+    assert_eq!(kept.len(), 1, "{report}");
+}
+
+/// A one-source CardDAV account synced once, a delete of its one card
+/// queued, and the card edited on the server since.
+fn delete_beside_a_server_edit() -> (TempDir, FakeDav, String) {
+    use io_pimdir::{
+        client::{producer::PimdirProducer, reader::PimdirReader},
+        codec::PimdirAction,
+    };
+
+    let home = tempfile::tempdir().unwrap();
+    let dav = FakeDav::start();
+    dav.put("a.vcf", &card("a"));
+    let config = solo(home.path(), &dav);
+    let (code, report) = sync(home.path(), &config, &["--init"]);
+    assert_eq!(code, 0, "{report}");
+
+    let store = home.path().join("store");
+    let items = PimdirReader::open(&store)
+        .unwrap()
+        .list_items("pair/carddav/book", None, 10)
+        .unwrap();
+    let remove = PimdirAction::Remove {
+        seq: items[0].seq,
+        if_match: None,
+        resolves: None,
+    };
+    PimdirProducer::open(&store, "test-frontend")
+        .unwrap()
+        .enqueue("pair/carddav/book", &remove, None)
+        .unwrap();
+    dav.put("a.vcf", &card("a").replace("FN:a", "FN:a edited"));
+
+    (home, dav, config)
+}
+
+/// Runs `neverest -c <config> sync` in text mode, answering its output.
+fn sync_text(home: &Path, config: &str) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_neverest"))
+        .args(["-c", config, "sync"])
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home)
+        .env("XDG_STATE_HOME", home)
+        .env_remove("XDG_CONFIG_DIRS")
+        .env_remove("RUST_LOG")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A lone source's `-m` names its collection by its display name too.
+#[test]
+fn a_lone_source_s_command_line_filter_names_a_collection_by_its_display_name() {
+    let home = tempfile::tempdir().unwrap();
+    let dav = FakeDav::start();
+    dav.set_name("Friends");
+    dav.put("a.vcf", &card("a"));
+    let config = solo(home.path(), &dav);
+
+    let (code, report) = sync(home.path(), &config, &["--init", "-m", "FRIENDS"]);
+
+    assert_eq!(code, 0, "{report}");
+    let fetched: Vec<&Value> = report["itemPatch"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["kind"] == "fetch")
+        .collect();
+    assert_eq!(fetched.len(), 1, "{report}");
+}
+
 /// A target's `collection.filter` narrows what that target takes: a
 /// collection it leaves out is neither created on it nor synced.
 ///

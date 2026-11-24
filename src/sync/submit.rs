@@ -507,6 +507,18 @@ impl<'a> SendChannel<'a> {
         self.lost.as_deref().or(self.held.as_deref())
     }
 
+    /// Files the sent message `id` in `collection` by labelling it, which
+    /// Gmail's `messages.send` alone can; any other link answers an error.
+    #[cfg_attr(not(feature = "gmail"), allow(unused_variables))]
+    pub fn label(&mut self, id: &str, collection: &str) -> Result<()> {
+        match &mut self.link {
+            #[cfg(feature = "gmail")]
+            Link::Gmail(client) => client.label_message(id, collection),
+            #[allow(unreachable_patterns)]
+            _ => Err(anyhow!("This channel labels no sent message")),
+        }
+    }
+
     /// Closes the channel once the run's intents are attempted.
     ///
     /// The SMTP session is ours; a Graph session belongs to its side. A
@@ -621,13 +633,17 @@ pub fn prepare(blobs: &PimdirBlobs, intent: &SubmitIntent) -> Result<Outgoing, S
     Ok(Outgoing { submit, bytes })
 }
 
-/// Hands one message over through `channel`, never logging its content.
+/// Hands one message over through `channel`, never logging its content,
+/// answering the id Gmail gives it (no other provider says one).
 ///
 /// A failure leaving the session unusable (no reply, or a 421 closing it,
 /// RFC 5321 §4.2.2) or a sending-limit refusal
 /// [`stops`](SendChannel::stopped) the channel, which then attempts nothing.
 #[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
-pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), SubmitFailure> {
+pub fn deliver(
+    channel: &mut SendChannel<'_>,
+    outgoing: Outgoing,
+) -> Result<Option<String>, SubmitFailure> {
     if let Some(why) = channel.stopped() {
         return Err(SubmitFailure::Transient(anyhow!("Not attempted, {why}")));
     }
@@ -646,7 +662,7 @@ pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), 
                 .map_err(SubmitFailure::permanent)?;
 
             let Err(failed) = hand_over_smtp(&mut client.stream, reverse, forwards, bytes) else {
-                return Ok(());
+                return Ok(None);
             };
             let reply = reply_of(&failed.error);
             let usable = reply.is_some_and(|(code, _)| code != 421);
@@ -664,7 +680,7 @@ pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), 
         #[cfg(feature = "msgraph")]
         Link::Graph(client) => {
             let Err(SendMimeFailure { error, unanswered }) = client.send_mime(&bytes) else {
-                return Ok(());
+                return Ok(None);
             };
             let status = match &error {
                 io_msgraph::v1::client::MsgraphClientStdError::Send(send) => send.status(),
@@ -679,8 +695,9 @@ pub fn deliver(channel: &mut SendChannel<'_>, outgoing: Outgoing) -> Result<(), 
         }
         #[cfg(feature = "gmail")]
         Link::Gmail(client) => {
-            let Err(error) = client.send_raw(&bytes) else {
-                return Ok(());
+            let error = match client.send_raw(&bytes) {
+                Ok(id) => return Ok(Some(id)),
+                Err(error) => error,
             };
             let (status, taken) = match &error {
                 GmailClientStdError::Send(GmailSendError::Api(api)) => (Some(api.status), false),
@@ -1121,7 +1138,7 @@ mod tests {
         blobs: &PimdirBlobs,
         intent: &SubmitIntent,
     ) -> Result<(), SubmitFailure> {
-        deliver(channel, prepare(blobs, intent)?)
+        deliver(channel, prepare(blobs, intent)?).map(|_| ())
     }
 
     #[test]

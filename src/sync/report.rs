@@ -1126,6 +1126,9 @@ impl SyncErrorRow {
             Self::Rejected(_) | Self::Duplicates(_) | Self::Refusals(_) => true,
             Self::Submitted(SubmitError { parked, .. }) => *parked,
             Self::Intents(IntentError { parked, .. }) => *parked,
+            Self::CollectionPatch {
+                hunk: CollectionHunk::Retire { .. },
+            } => true,
             Self::CollectionPatch { .. }
             | Self::ItemPatch { .. }
             | Self::Failures(_)

@@ -2410,6 +2410,9 @@ fn hunk_list(hunks: &[CollectionHunk]) -> Vec<(&'static str, String, String)> {
             CollectionHunk::Rename {
                 side, collection, ..
             } => ("rename", side.clone(), collection.clone()),
+            CollectionHunk::Retire { side, collection } => {
+                ("retire", side.clone(), collection.clone())
+            }
             CollectionHunk::Scan { .. } => ("scan", String::new(), String::new()),
             CollectionHunk::Sync { .. } => ("sync", String::new(), String::new()),
         })

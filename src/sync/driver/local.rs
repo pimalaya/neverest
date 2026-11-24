@@ -149,10 +149,10 @@ pub(super) fn run_local(
         collections: collections.len(),
     });
 
-    let filter = if declare_only {
-        CollectionFilter::All
-    } else {
-        collection_filter.unwrap_or(source_filter)
+    let filter = match collection_filter {
+        _ if declare_only => CollectionFilter::All,
+        Some(filter) => resolve_names(filter, &[&collections]),
+        None => source_filter,
     };
     let kept = filter_collections(&collections, &filter);
 
@@ -203,6 +203,7 @@ pub(super) fn run_local(
     if declare_only {
         return Ok(());
     }
+    retire_gone(&mut stores[0], source_name, &collections, report)?;
 
     let pacing = Pacing {
         prime: if dry_run { 0 } else { pacing.prime },
@@ -425,6 +426,74 @@ pub(super) fn record_listing(
         declaring.again(state);
     }
     Ok(fresh)
+}
+
+/// Retires each collection of `source` the store holds and its server no
+/// longer lists, reporting it (a `retire` collection hunk).
+///
+/// One a queued or parked row anchors on stays, waiting for a person
+/// (io-pimdir `delete_collection`). An empty listing retires nothing, nor
+/// is a collection another source binds retired: the pair's to read.
+pub(super) fn retire_gone(
+    store: &mut PimdirSourceStore,
+    source: &str,
+    listed: &BTreeMap<String, String>,
+    report: &mut SyncOutput,
+) -> Result<()> {
+    let namespace = format!("{source}/");
+    let held: Vec<String> = store
+        .list_collections()
+        .context("List the store's collections")?
+        .into_iter()
+        .map(|collection| collection.id)
+        .filter(|id| id.starts_with(&namespace))
+        .collect();
+    let gone: Vec<String> = held
+        .into_iter()
+        .filter(|id| !listed.contains_key(wire_name(source, id)))
+        .collect();
+    if gone.is_empty() {
+        return Ok(());
+    }
+    if listed.is_empty() {
+        warn!(
+            "{source} listed no collection, the {} the store holds are kept",
+            gone.len()
+        );
+        return Ok(());
+    }
+
+    for collection in gone {
+        let sources = store
+            .collection_sources(&collection)
+            .with_context(|| format!("List the sources of {collection}"))?;
+        if sources.iter().any(|other| other != source) {
+            continue;
+        }
+        let hunk = CollectionHunk::Retire {
+            side: source.to_owned(),
+            collection: wire_name(source, &collection).to_owned(),
+        };
+        match store.delete_collection(&collection) {
+            Ok(_) => {
+                info!("{collection} was deleted on the server, retired from the store");
+                report.note_collection_hunk(hunk, None);
+            }
+            Err(PimdirError::Queued { .. }) => {
+                let err = anyhow!(
+                    "The server deleted the collection, kept while a queued or parked row \
+                     anchors on it: apply or cancel the row"
+                );
+                warn!("{collection} was deleted on the server: {err}");
+                report.note_collection_hunk(hunk, Some(err));
+            }
+            Err(err) => {
+                let err = anyhow!(err).context(format!("Retire {collection}"));
+                report.note_step_failure(FailedStep::Listing, Some(collection), &err);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Performs what frontends queued for one source and its targets, syncing

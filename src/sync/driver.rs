@@ -812,6 +812,7 @@ pub(crate) fn declare(
         let mut held = Vec::new();
         let mut fixed = BTreeSet::new();
         let mut drafts = BTreeSet::new();
+        let mut sent = BTreeSet::new();
         for collection in &collections {
             let syncing = store
                 .collection_sources(&collection.id)
@@ -821,14 +822,17 @@ pub(crate) fn declare(
                 if collection.role.is_some() {
                     fixed.insert(collection.id.clone());
                 }
-                if collection.role.as_deref() == Some("drafts") {
-                    drafts.insert(collection.id.clone());
-                }
+                match collection.role.as_deref() {
+                    Some("drafts") => drafts.insert(collection.id.clone()),
+                    Some("sent") => sent.insert(collection.id.clone()),
+                    _ => false,
+                };
             }
         }
         let paired = !mode.targets.is_empty();
         let mut capabilities = capability::declaration(source, mode.one_way, paired, &held, &fixed);
         capability::drafts_only(source, &mut capabilities, &drafts);
+        capability::sent_only(source, &mut capabilities, &held, &sent);
         match capability::vtodo_wide(source, &targets) {
             Some(wide) => capabilities.push(wide),
             None if capabilities.is_empty() => {}

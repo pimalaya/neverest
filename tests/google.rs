@@ -273,6 +273,114 @@ fn a_message_sent_to_oneself_over_gmail_smtp_stays_unread() {
     );
 }
 
+/// A message sent through `messages.send` with its copy asked in a label
+/// other than SENT carries that label: one message, in SENT and the label,
+/// and no second one imported.
+///
+/// The copy was dropped before, the row acknowledged with the label never
+/// added (the live night of 2026-11-23).
+#[test]
+#[ignore = "live: needs a Google service account key"]
+#[cfg(feature = "gmail")]
+fn a_gmail_send_files_its_copy_in_another_label() {
+    use io_gmail::v1::rest::messages::GmailMessageFormat;
+
+    let token = google_token(GMAIL_SCOPES);
+    let label = tag();
+    let user = GOOGLE_SUBJECT;
+    let connect = || {
+        GmailClientStd::connect(&token, GmailClientStdConnectOptions::default())
+            .expect("connect to Gmail")
+    };
+    let label_id = connect()
+        .label_create(&GmailLabel {
+            name: label.clone(),
+            ..Default::default()
+        })
+        .expect("create the label")
+        .response
+        .id;
+    let body = format!(
+        "From: Neverest <{user}>\r\n\
+         To: {user}\r\n\
+         Subject: {label}\r\n\
+         Date: {}\r\n\
+         Message-ID: <{label}@pimalaya.org>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         Sent by the neverest live tests.\r\n",
+        chrono::Utc::now().to_rfc2822(),
+    );
+    let messages = || {
+        let query = format!("subject:{label}");
+        let params = GmailMessagesListParams {
+            q: Some(&query),
+            include_spam_trash: true,
+            ..Default::default()
+        };
+        let mut client = connect();
+        let found = client
+            .messages_list(&params)
+            .expect("list the run's messages");
+        found
+            .response
+            .messages
+            .iter()
+            .map(|message| {
+                client
+                    .message_get(&message.id, GmailMessageFormat::Minimal, &[])
+                    .expect("get the message")
+                    .response
+            })
+            .collect::<Vec<_>>()
+    };
+
+    with_cleanup(
+        || {
+            let a = Replica::open("gmail", "", &token);
+            a.sync(&label);
+
+            a.send(&label, &body, user, Some(&label));
+            let report = a.sync(&label);
+            assert_eq!(a.queue(), (0, Vec::new()), "no add queued: {report}");
+
+            let found = messages();
+            let sent: Vec<_> = found
+                .iter()
+                .filter(|message| message.label_ids.iter().any(|id| id == "SENT"))
+                .collect();
+            assert_eq!(sent.len(), 1, "Gmail files it once: {found:?}");
+            assert!(
+                sent[0].label_ids.contains(&label_id),
+                "the sent message carries the label: {:?}",
+                sent[0].label_ids,
+            );
+            let labelled = found
+                .iter()
+                .filter(|message| message.label_ids.contains(&label_id))
+                .count();
+            assert_eq!(labelled, 1, "no second message: {found:?}");
+
+            a.sync_until(&label, "the labelled copy is listed", |a| {
+                !a.items(&label, "").is_empty()
+            });
+            assert_eq!(a.items(&label, "").len(), 1, "the store binds one copy");
+        },
+        || {
+            let mut client = connect();
+            for message in messages() {
+                if let Err(err) = client.message_delete(&message.id) {
+                    eprintln!("WARNING: leftover message {}: {err:?}", message.id);
+                }
+            }
+            if let Err(err) = client.label_delete(&label_id) {
+                eprintln!("WARNING: leftover label {label}: {err:?}");
+            }
+        },
+    );
+}
+
 /// A card crosses both ways through the one People address book.
 ///
 /// Only a failed run leaves a card behind, and the search index the cleanup

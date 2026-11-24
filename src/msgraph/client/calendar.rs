@@ -308,6 +308,9 @@ impl GraphClient {
         let occurrences = Occurrences::read(&ical)?;
         occurrences.refuse_ranges("Microsoft Graph")?;
         let mut event = MsgraphEvent::create_from_ical(&ical)?;
+        if is_empty_body(&event) {
+            event.body = MsgraphField::Unset;
+        }
         let attendees = match occurrences.is_empty() {
             true => MsgraphField::Unset,
             false => mem::take(&mut event.attendees),
@@ -716,6 +719,19 @@ fn asks_meeting(event: &MsgraphEvent) -> bool {
     event.is_online_meeting.as_option() == Some(&true)
 }
 
+/// Whether the event's body says nothing, as an event without a
+/// `DESCRIPTION` projects.
+///
+/// A create leaves it out: Exchange rewrites an event a moment after a write
+/// setting its body, and a delete queued then met that move as a server
+/// edit, which won (pimdir SYNC §5).
+fn is_empty_body(event: &MsgraphEvent) -> bool {
+    event
+        .body
+        .as_option()
+        .is_some_and(|body| body.content.as_deref().is_none_or(str::is_empty))
+}
+
 /// The patch taking `instance` to the occurrence `document` holds, `None`
 /// when it holds nothing new.
 ///
@@ -1045,6 +1061,48 @@ mod tests {
             assert!(create.contains("2026-11-26T10:00:00"), "{create}");
             let stated = format!("\"timeZone\":\"{zone}\"");
             assert!(create.contains(&stated), "{create}");
+        }
+    }
+
+    /// An event without a `DESCRIPTION` is created with no body, which
+    /// Exchange would rewrite a moment later.
+    ///
+    /// One with a description keeps it.
+    #[test]
+    fn an_event_without_description_is_created_with_no_body() {
+        let plain = "BEGIN:VCALENDAR\r\n\
+            VERSION:2.0\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:plain\r\n\
+            DTSTART:20261126T100000Z\r\n\
+            DTEND:20261126T110000Z\r\n\
+            SUMMARY:Plain\r\n\
+            END:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let described = plain.replace(
+            "SUMMARY:Plain\r\n",
+            "SUMMARY:Plain\r\nDESCRIPTION:Notes\r\n",
+        );
+
+        for (ical, body) in [(plain.to_owned(), false), (described, true)] {
+            let (mut client, server) = session(vec![
+                Step::json(201, &json!({ "id": "P", "changeKey": "c0" })),
+                Step::ok(json!({
+                    "id": "P",
+                    "changeKey": "c0",
+                    "singleValueExtendedProperties": [{
+                        "id": "String {c8e5e5cf-3f6c-4f0a-9d4e-52f1e7b2a9d3} Name pimalaya-ical",
+                        "value": "UID:plain",
+                    }],
+                })),
+            ]);
+
+            let written = client.add_event("cal", ical.as_bytes()).unwrap();
+
+            assert_eq!(written.revision.as_deref(), Some("c0"));
+            let written = server.written(0);
+            let create = &written[..written.find("GET ").unwrap()];
+            assert_eq!(create.contains("\"body\""), body, "{create}");
         }
     }
 

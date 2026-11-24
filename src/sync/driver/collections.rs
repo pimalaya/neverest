@@ -238,6 +238,9 @@ pub(super) fn apply_collection_hunk(
         CollectionHunk::Scan { .. } | CollectionHunk::Sync { .. } => {
             unreachable!("a failure hunk is reported and never applied")
         }
+        CollectionHunk::Fetch { .. } | CollectionHunk::Rename { .. } => {
+            unreachable!("a fetch or a performed rename is reported, never a pair's to apply")
+        }
         CollectionHunk::Delete { side, collection } => {
             source_ctx(side, left, right)
                 .pool

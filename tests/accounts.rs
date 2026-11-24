@@ -452,6 +452,70 @@ fn sync_init_initializes_what_is_not_then_syncs() {
     assert!(sidecar["accounts"]["home"].is_object(), "{sidecar}");
 }
 
+/// `sync --init --dry-run` initializes nothing: it names the accounts it
+/// would initialize and plans their sync on its replica, the store left as
+/// it was.
+///
+/// It once initialized them, creating the store, as `--init` alone does.
+#[test]
+fn sync_init_dry_run_initializes_nothing() {
+    let _serial = serialized();
+    let fixture = Fixture::new(&["work", "home"], home_set_server());
+    fixture.initialized(&["work"]);
+    let before = fs::read_to_string(fixture.sidecar()).unwrap();
+
+    let output = fixture.run(&[
+        "--json",
+        "--log-level",
+        "off",
+        "sync",
+        "--init",
+        "--dry-run",
+    ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: Value = serde_json::from_str(stdout.lines().last().unwrap()).unwrap();
+    assert_eq!(
+        result["initialized"],
+        serde_json::json!(["home"]),
+        "{result}"
+    );
+    for account in result["accounts"].as_array().unwrap() {
+        let error = account["error"].as_str().unwrap_or_default();
+        assert!(!error.contains("not initialized"), "{result}");
+    }
+    let after = fs::read_to_string(fixture.sidecar()).unwrap();
+    assert_eq!(after, before, "the dry run initialized an account");
+
+    let fresh = Fixture::new(&["home"], home_set_server());
+    fresh.run(&["--json", "sync", "--init", "--dry-run"]);
+    assert!(
+        !fresh.store().join("pimdir.db").exists(),
+        "the dry run created the store"
+    );
+}
+
+/// A bare `conflict list` names the accounts not initialized and lists
+/// the others; naming one with `-a` still fails.
+///
+/// It once failed on the first account not initialized, reading no other.
+#[test]
+fn a_bare_conflict_list_skips_the_accounts_not_initialized() {
+    let _serial = serialized();
+    let fixture = Fixture::new(&["work", "home"], closed_port());
+    fixture.initialized(&["work"]);
+
+    let listed = fixture.json(&["--json", "conflict", "list"], 0);
+    assert_eq!(listed["conflicts"], serde_json::json!([]), "{listed}");
+    assert_eq!(
+        listed["uninitialized"],
+        serde_json::json!(["home"]),
+        "{listed}"
+    );
+
+    let failed = fixture.json(&["--json", "conflict", "list", "-a", "home"], 1);
+    assert_eq!(failed["code"], "account-uninitialized", "{failed}");
+}
+
 /// `--queue-only` and `--index-only` exclude each other, `--init` and the
 /// flags of a full sync, refused as a command line (exit 2).
 #[test]

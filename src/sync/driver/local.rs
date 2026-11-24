@@ -119,7 +119,7 @@ pub(super) fn run_local(
 
     if !dry_run {
         let (first, _) = ctxs.split_first_mut().expect("at least one connection");
-        drain_collection_intents(&mut [&mut *first], &mut stores[0], false, report);
+        let renames = drain_collection_intents(&mut [&mut *first], &mut stores[0], false, report);
         if !declare_only {
             drain_submits(
                 account_config,
@@ -128,6 +128,7 @@ pub(super) fn run_local(
                 &mut stores[0],
                 &blobs,
                 work_dir,
+                &renames,
                 report,
             );
             drain_invitations(&mut [first], &mut stores[0], work_dir, report);
@@ -182,7 +183,7 @@ pub(super) fn run_local(
         config: account_config,
         mode,
     };
-    record_listing(
+    let fresh = record_listing(
         &stores[0],
         &declaring,
         state,
@@ -191,6 +192,13 @@ pub(super) fn run_local(
         &listing,
         dry_run,
     )?;
+    for collection in fresh {
+        let hunk = CollectionHunk::Fetch {
+            side: source_name.to_owned(),
+            collection,
+        };
+        report.note_collection_hunk(hunk, None);
+    }
 
     if declare_only {
         return Ok(());
@@ -373,7 +381,8 @@ pub(super) struct Listing<'a> {
     pub(super) roles: Option<&'a BTreeMap<String, String>>,
 }
 
-/// Records what a local listing discovered before any item of it moves.
+/// Records what a local listing discovered before any item of it moves,
+/// answering the kept collections the store did not hold yet.
 ///
 /// Each kept collection's kind, name and role and the taskless calendars,
 /// then the source registered and declared again, so a calendar met first is
@@ -386,11 +395,21 @@ pub(super) fn record_listing(
     media_type: &str,
     listing: &Listing<'_>,
     dry_run: bool,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     record_taskless(state, source, &taskless_ids(source, listing.listed));
 
+    let held: HashSet<String> = store
+        .list_collections()
+        .context("List the store's collections")?
+        .into_iter()
+        .map(|collection| collection.id)
+        .collect();
+    let mut fresh = Vec::new();
     for id in listing.kept {
         let collection = &hub_id(source, id);
+        if !held.contains(collection) {
+            fresh.push(id.clone());
+        }
         store
             .ensure_collection(collection, media_type)
             .with_context(|| format!("Declare kind for {collection}"))?;
@@ -405,7 +424,7 @@ pub(super) fn record_listing(
         declaring.register(source, &kept);
         declaring.again(state);
     }
-    Ok(())
+    Ok(fresh)
 }
 
 /// Performs what frontends queued for one source and its targets, syncing
@@ -459,7 +478,7 @@ pub(super) fn run_intents(
         }
     }
 
-    drain_collection_intents(
+    let renames = drain_collection_intents(
         &mut opened.iter_mut().collect::<Vec<_>>(),
         &mut store,
         !mode.targets.is_empty(),
@@ -481,6 +500,7 @@ pub(super) fn run_intents(
         &mut store,
         &blobs,
         work_dir,
+        &renames,
         report,
     );
     drop(sides);

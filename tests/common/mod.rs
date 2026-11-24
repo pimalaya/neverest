@@ -374,6 +374,23 @@ impl Replica {
         })
     }
 
+    /// Stages a creation as [`add`](Self::add), keeping the `X-PIMDIR-`
+    /// properties the user asked for (an online meeting, pimdir STORAGE
+    /// §18), which `add` strips as from a resource the user did not write.
+    pub fn add_asking(&self, key: &str, body: &str) {
+        PimdirProducer::open(self.store(), "neverest-live")
+            .expect("open producer")
+            .enqueue_user_body(&self.collection(key), body.as_bytes(), |hash| {
+                PimdirAction::Add {
+                    link_id: None,
+                    flags: known(&[]),
+                    object: Some(hash),
+                    supersedes: None,
+                }
+            })
+            .expect("enqueue the action");
+    }
+
     /// Queues a send of `body` from and to `user`, its copy filed in the
     /// collection `copy` when given, as a frontend does.
     pub fn send(&self, key: &str, body: &str, user: &str, copy: Option<&str>) {

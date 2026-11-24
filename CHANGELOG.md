@@ -239,6 +239,15 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 ### Fixed
 
+- Fixed an event deleted on a Graph calendar right after the run that created it coming back: the create sent an empty body, which Exchange rewrites a moment later, so the delete met a server edit and lost. An event without a description is created with no body. One with a description is still rewritten.
+- Fixed a message sent in the run that renamed the folder its copy goes to being left unconfirmed, its copy never filed: the copy is filed in the renamed folder.
+- Fixed a bare `conflict list` failing on the first account not initialized: it lists the others and names the skipped ones under `uninitialized`. Naming one with `-a` still fails.
+- Fixed a collection rename a sync performed for a frontend leaving the run "already in sync": it is a `rename` collection hunk.
+- Fixed a collection new on the server landing in the store unreported ("already in sync", `collectionPatch` empty): it is a `fetch` collection hunk.
+- Fixed a dry run printing `applied N queued action(s)`: it prints `would apply N queued action(s)`, the queue left as it was.
+- Fixed the text report printing `Errors (1):` over an empty list when the error was a failed send or intent: the list names it.
+- Fixed `sync --init --dry-run` initializing the accounts and creating the store: it initializes nothing, names the accounts it would initialize under `initialized`, and plans their sync on its replica.
+- Fixed an event asking a Google Meet with no attendee getting no Meet: it was imported, and Google leaves an imported event's Meet request pending for ever. It is inserted, telling nobody.
 - Fixed `sync --reset` without `--force` dropping the local properties of the account's items, a label among them, which no server holds: it refuses, naming the items holding one and `--force`.
 - Fixed RUSTSEC-2026-0592 by bumping url to 2.5.9.
 - Fixed a queued move reporting its create twice, once beside its remove and once by the collection it enters, when that collection was itemized first: it is reported beside its remove alone.

@@ -582,10 +582,12 @@ fn a_google_meeting_is_invited_to_and_cancelled() {
     });
 }
 
-/// An event asking `X-PIMDIR-ONLINE-MEETING:TRUE` gets a Google Meet.
+/// An event asking `X-PIMDIR-ONLINE-MEETING:TRUE` gets a Google Meet, a
+/// meeting with attendees and an event with none alike.
 ///
 /// The store reads it back as a `CONFERENCE`, the request property gone
-/// (pimdir STORAGE Annex B.1).
+/// (pimdir STORAGE Annex B.1). The event with no attendee was imported,
+/// and an import leaves Meet's create request pending for ever.
 #[test]
 #[ignore = "live: needs a Google service account key"]
 #[cfg(feature = "gcal")]
@@ -593,46 +595,58 @@ fn a_google_meet_is_created_with_its_event() {
     use io_gcal::v3::rest::events::list::GcalEventsListParams;
 
     let token = google_token(CALENDAR_SCOPES);
-    let uid = tag();
+    let base = tag();
+    let uid = format!("{base}-meet");
+    let lone = format!("{base}-lone");
     let subject = google_subject();
 
     with_google_calendar(&token, "meet", &uid, |calendar| {
         let a = Replica::open("gcal", "", &token);
         a.sync(calendar);
 
-        let event = meeting(&uid, "meet", &subject, &subject)
-            .replace("END:VEVENT", "X-PIMDIR-ONLINE-MEETING:TRUE\r\nEND:VEVENT");
-        a.add(calendar, &event, &[]);
+        let asking = "X-PIMDIR-ONLINE-MEETING:TRUE\r\nEND:VEVENT";
+        let scheduled = meeting(&uid, "meet", &subject, &subject).replace("END:VEVENT", asking);
+        a.add_asking(calendar, &scheduled);
+        a.add_asking(
+            calendar,
+            &event(&lone, "lone meet").replace("END:VEVENT", asking),
+        );
         a.sync(calendar);
 
         let mut client = GcalClientStd::connect(&token, GcalClientStdConnectOptions::default())
             .expect("connect to Calendar");
-        let params = GcalEventsListParams {
-            ical_uid: Some(&uid),
-            ..Default::default()
-        };
-        let created = client
-            .events_list(calendar, &params)
-            .expect("list the meeting")
-            .response
-            .items;
-        assert_eq!(created.len(), 1, "one event holds the UID");
-        let conference = created[0]
-            .conference_data
-            .as_ref()
-            .expect("Google attached a conference");
-        assert!(
-            conference.create_request.is_some() || !conference.entry_points.is_empty(),
-            "{conference:?}"
-        );
+        for uid in [&uid, &lone] {
+            let params = GcalEventsListParams {
+                ical_uid: Some(uid),
+                ..Default::default()
+            };
+            let created = client
+                .events_list(calendar, &params)
+                .expect("list the meeting")
+                .response
+                .items;
+            assert_eq!(created.len(), 1, "one event holds the UID {uid}");
+            let conference = created[0]
+                .conference_data
+                .as_ref()
+                .unwrap_or_else(|| panic!("Google attached a conference to {uid}"));
+            assert!(
+                conference.create_request.is_some() || !conference.entry_points.is_empty(),
+                "{conference:?}"
+            );
+        }
 
-        a.sync_until(calendar, "the Meet link reaches the store", |a| {
-            a.item(calendar, &uid)
-                .map(|item| a.body(&item).replace("\r\n ", ""))
-                .is_some_and(|body| body.contains("CONFERENCE;VALUE=URI;FEATURE=AUDIO,VIDEO"))
+        a.sync_until(calendar, "the Meet links reach the store", |a| {
+            [&uid, &lone].iter().all(|uid| {
+                a.item(calendar, uid)
+                    .map(|item| a.body(&item).replace("\r\n ", ""))
+                    .is_some_and(|body| body.contains("CONFERENCE;VALUE=URI;FEATURE=AUDIO,VIDEO"))
+            })
         });
-        let body = a.body(&a.item(calendar, &uid).unwrap());
-        assert!(!body.contains("X-PIMDIR-ONLINE-MEETING"), "{body}");
+        for uid in [&uid, &lone] {
+            let body = a.body(&a.item(calendar, uid).unwrap());
+            assert!(!body.contains("X-PIMDIR-ONLINE-MEETING"), "{body}");
+        }
     });
 }
 

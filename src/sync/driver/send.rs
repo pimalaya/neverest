@@ -31,11 +31,13 @@ impl<'a> SendSide<'a> {
     }
 }
 
-/// Performs the queue's `submit` intents, which the store's drain leaves alone.
+/// Performs the queue's `submit` intents, which the store's drain leaves
+/// alone, a copy filed through the run's `renames`.
 ///
 /// Sent is acknowledged, a permanent failure or an unknown outcome parked
 /// (pimdir STORAGE §15.2), a transient one left pending. The attempt is marked
 /// in flight first ([`submit::InFlight`]), so a killed run never resends it.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn drain_submits(
     account_config: &AccountConfig,
     account: &Account,
@@ -43,6 +45,7 @@ pub(super) fn drain_submits(
     store: &mut PimdirSourceStore,
     blobs: &PimdirBlobStage,
     dir: &Path,
+    renames: &Renames,
     report: &mut SyncOutput,
 ) {
     let intents = match submit::pending(store) {
@@ -150,20 +153,9 @@ pub(super) fn drain_submits(
 
             let (recorded, outcome) = match submit::deliver(&mut channel, outgoing) {
                 Ok(()) => {
-                    let copy = intent.copy().filter(|_| !files_copy);
-                    let acknowledged = match &copy {
-                        Some(collection) => {
-                            let action = PimdirAction::Add {
-                                link_id: None,
-                                flags: PimdirFlags::from_iter(["\\Seen"]),
-                                object: intent.object.clone(),
-                                supersedes: None,
-                            };
-                            store.replace_action(intent.id, "neverest", collection, &action)
-                        }
-                        None => store.acknowledge_action(intent.id, None),
-                    };
-                    copies += usize::from(copy.is_some());
+                    let (acknowledged, copied) =
+                        acknowledge_sent(store, intent, files_copy, renames);
+                    copies += usize::from(copied);
                     sent += 1;
                     let recorded = match acknowledged {
                         Ok(true) => true,
@@ -236,12 +228,48 @@ pub(super) fn drain_submits(
             store,
             report,
             files_copy,
+            renames,
         );
         warn!(
             "this build has no send channel (needs the `smtp`, `msgraph` or `gmail` cargo feature), {} submit intent(s) stay pending",
             intents.len()
         );
     }
+}
+
+/// Acknowledges the sent `intent`, replaced by the add filing its copy unless
+/// the sender files it itself (`files_copy`), and says whether it was.
+///
+/// The copy goes where the collection it names is now: a rename the run
+/// performed before the send gave it a new id (`renames`), under which the
+/// old one is gone from the store.
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
+pub(super) fn acknowledge_sent(
+    store: &mut PimdirSourceStore,
+    intent: &submit::SubmitIntent,
+    files_copy: bool,
+    renames: &Renames,
+) -> (Result<bool, PimdirError>, bool) {
+    let copy = intent.copy().filter(|_| !files_copy);
+    let Some(copy) = copy else {
+        return (store.acknowledge_action(intent.id, None), false);
+    };
+
+    let collection = renames.follow(&copy);
+    if collection != copy {
+        debug!(
+            "submit intent #{} files its copy in {collection}, renamed from {copy}",
+            intent.id
+        );
+    }
+    let action = PimdirAction::Add {
+        link_id: None,
+        flags: PimdirFlags::from_iter(["\\Seen"]),
+        object: intent.object.clone(),
+        supersedes: None,
+    };
+    let replaced = store.replace_action(intent.id, "neverest", collection, &action);
+    (replaced, true)
 }
 
 /// Parks the `submit` intent `id` for `failure`, with its error.

@@ -496,7 +496,8 @@ impl SourceCtx {
     }
 }
 
-/// Runs the whole account sync and returns the report.
+/// Runs the whole account sync and returns the report, `initializing` first
+/// adding the account to a dry run's replica alone (`sync --init -d`).
 ///
 /// Sources sync against the store, or each target ([`AccountConfig::mode`]).
 /// `declare_only` records collections and moves no item, `intents_only` does
@@ -518,6 +519,7 @@ pub fn run(
     intents_only: bool,
     progress: Progress<'_>,
     drained: Option<SyncOutput>,
+    initializing: bool,
 ) -> Result<SyncOutput> {
     let account_name = account_name.into();
     let endpoints = account_config.endpoints()?;
@@ -541,6 +543,17 @@ pub fn run(
     };
     fs::create_dir_all(&work_dir)
         .with_context(|| format!("Create replica dir {} error", work_dir.display()))?;
+
+    if initializing {
+        if !dry_run {
+            bail!("Only a dry run initializes an account in its replica");
+        }
+        if !work_dir.join("pimdir.db").exists() {
+            create_store(&work_dir)?;
+        }
+        StoreState::stamp(&work_dir, &account_name, &mode)
+            .with_context(|| format!("Stamp dry-run replica state {}", work_dir.display()))?;
+    }
 
     let mut sidecar = StoreState::load(&work_dir)?;
     let mut state = sidecar.account(&account_name)?;

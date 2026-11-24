@@ -47,6 +47,10 @@ use crate::common::*;
 /// How long Graph may take to list what a run wrote.
 const LISTED: Duration = Duration::from_secs(60);
 
+/// How long Exchange may take to rewrite an event after a write setting its
+/// body (0.5 to 4 seconds seen on 2026-11-24).
+const REWRITTEN: Duration = Duration::from_secs(8);
+
 /// Why a Graph source refuses an add outside Drafts, as neverest declares
 /// it (src/sync/capability.rs).
 const GRAPH_DRAFTS_ONLY: &str = "Drafts only: Graph creates every MIME message as a draft";
@@ -498,6 +502,57 @@ fn a_graph_calendar_syncs_both_ways() {
     );
 }
 
+/// A series deleted right after the run that created it leaves Graph.
+///
+/// Graph rewrites a series a moment after its create, moving its change key:
+/// the delete then met a server edit, which won (pimdir SYNC §5), and the
+/// series came back.
+#[test]
+#[ignore = "live: needs the app registration's client secret"]
+fn a_graph_series_deleted_right_after_its_create_is_deleted() {
+    let token = msgraph_token();
+    let uid = tag();
+    let calendar = connect(&token)
+        .calendar_create(&MsgraphCalendar {
+            name: MsgraphField::Set(tag()),
+            ..Default::default()
+        })
+        .expect("create the calendar")
+        .response
+        .id;
+
+    with_cleanup(
+        || {
+            let extra = user_line();
+            let a = Replica::open("msgraph-calendar", &extra, &token);
+            a.sync(&calendar);
+
+            let series = event(&uid, "series")
+                .replace("END:VEVENT", "RRULE:FREQ=WEEKLY;COUNT=4\r\nEND:VEVENT");
+            a.add(&calendar, &series, &[]);
+            a.sync(&calendar);
+            let item = a.item(&calendar, &uid).expect("the series is bound");
+            thread::sleep(REWRITTEN);
+
+            a.remove(&calendar, item.seq);
+            a.sync(&calendar);
+
+            let path = format!("calendars/{calendar}/events?$select=id,subject");
+            let left = graph(&token, "GET", &path, None)["value"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            assert!(left.is_empty(), "the series came back: {left:?}");
+            assert!(a.item(&calendar, &uid).is_none(), "the store keeps it");
+        },
+        || {
+            if let Err(err) = connect(&token).calendar_permanent_delete(&calendar) {
+                eprintln!("WARNING: leftover calendar {calendar}: {err:?}");
+            }
+        },
+    );
+}
+
 /// Every calendar of the mailbox syncs, Graph's own (Birthdays, holidays) too.
 ///
 /// Their series have no end, which Graph writes as `0001-01-01`, and a window
@@ -628,7 +683,7 @@ fn a_graph_online_meeting_is_created_with_its_event() {
             let user = msgraph_user();
             let event = meeting(&uid, "online", &user, &user)
                 .replace("END:VEVENT", "X-PIMDIR-ONLINE-MEETING:TRUE\r\nEND:VEVENT");
-            a.add(&calendar, &event, &[]);
+            a.add_asking(&calendar, &event);
             a.sync_until(&calendar, "the event is read back", |a| {
                 a.item(&calendar, &uid)
                     .is_some_and(|item| !a.body(&item).contains("X-PIMDIR-ONLINE-MEETING"))

@@ -90,17 +90,29 @@ impl ConflictListCommand {
     ) -> Result<()> {
         let config = Config::load(config_paths)?;
         let mut conflicts = Vec::new();
+        let mut uninitialized = Vec::new();
 
         for (name, account_config) in config.select(accounts)? {
             account_config
                 .validate()
                 .with_context(|| format!("Validate account {name}"))?;
-            let store = read(&name, &store_dir(&name, &account_config)?)?;
+            let dir = match initialized_store_dir(&name, &account_config)? {
+                Some(dir) => dir,
+                None if accounts.is_empty() => {
+                    uninitialized.push(name);
+                    continue;
+                }
+                None => return Err(driver::not_initialized(&name)),
+            };
+            let store = read(&name, &dir)?;
             let listed = conflict::list(&store, &name)?;
             conflicts.extend(listed.iter().map(ConflictSummary::from));
         }
 
-        printer.out(ConflictListOutput { conflicts })
+        printer.out(ConflictListOutput {
+            conflicts,
+            uninitialized,
+        })
     }
 }
 
@@ -366,14 +378,20 @@ fn account(
 /// The account's store directory, refusing a store no account of this
 /// neverest can read, and an account no `init` has initialized.
 fn store_dir(name: &str, account_config: &AccountConfig) -> Result<PathBuf> {
+    initialized_store_dir(name, account_config)?.ok_or_else(|| driver::not_initialized(name))
+}
+
+/// The account's store directory as [`store_dir`] reads it, `None` for an
+/// account no `init` has initialized.
+fn initialized_store_dir(name: &str, account_config: &AccountConfig) -> Result<Option<PathBuf>> {
     let dir = driver::store_dir(account_config)?;
     driver::check_store(&dir)?;
 
     if !dir.join("pimdir.db").exists() || !StoreState::load(&dir)?.initialized(name) {
-        return Err(driver::not_initialized(name));
+        return Ok(None);
     }
 
-    Ok(dir)
+    Ok(Some(dir))
 }
 
 /// Opens the account's store for reading only.

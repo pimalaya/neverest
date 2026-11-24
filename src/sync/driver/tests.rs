@@ -2014,6 +2014,7 @@ fn a_settled_pair_collection_is_listed_once_a_run() {
             false,
             Progress::default(),
             None,
+            false,
         )
         .unwrap();
         assert!(report.unsettled.is_empty(), "{report:?}");
@@ -2403,6 +2404,12 @@ fn hunk_list(hunks: &[CollectionHunk]) -> Vec<(&'static str, String, String)> {
             CollectionHunk::Delete { side, collection } => {
                 ("delete", side.clone(), collection.clone())
             }
+            CollectionHunk::Fetch { side, collection } => {
+                ("fetch", side.clone(), collection.clone())
+            }
+            CollectionHunk::Rename {
+                side, collection, ..
+            } => ("rename", side.clone(), collection.clone()),
             CollectionHunk::Scan { .. } => ("scan", String::new(), String::new()),
             CollectionHunk::Sync { .. } => ("sync", String::new(), String::new()),
         })
@@ -3202,6 +3209,82 @@ fn a_calendar_met_mid_run_is_gated_from_its_first_item_sync() {
     assert_eq!(
         refusal.capability,
         io_pimdir::capability::CALENDAR_COMPONENT_VTODO
+    );
+}
+
+/// A listing names the collections new to the store, which the run reports
+/// as fetched; one the store holds already is not new.
+///
+/// A collection new on the server once landed unreported: `collectionPatch`
+/// empty, the text "already in sync".
+#[test]
+fn a_listing_names_the_collections_new_to_the_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = AccountState::default();
+    let config: AccountConfig = toml::from_str(CALDAV).unwrap();
+    let mode = config.mode().unwrap();
+    declare(dir.path(), "live", &config, &mode, &state).unwrap();
+    let store = open_store(dir.path(), "caldav", "live").unwrap();
+    store
+        .ensure_collection("caldav/events", "text/calendar")
+        .unwrap();
+    let declaring = Declaring {
+        dir: dir.path(),
+        account: "live",
+        config: &config,
+        mode: &mode,
+    };
+    let listed = [calendar("events", None), calendar("work", None)];
+    let names = names_by_id(&listed);
+    let kept = [String::from("events"), String::from("work")];
+    let listing = Listing {
+        listed: &listed,
+        names: &names,
+        kept: &kept,
+        roles: None,
+    };
+
+    let fresh = record_listing(
+        &store,
+        &declaring,
+        &mut state,
+        "caldav",
+        "text/calendar",
+        &listing,
+        false,
+    )
+    .unwrap();
+
+    assert_eq!(fresh, ["work"]);
+    let again = record_listing(
+        &store,
+        &declaring,
+        &mut state,
+        "caldav",
+        "text/calendar",
+        &listing,
+        false,
+    )
+    .unwrap();
+    assert!(again.is_empty(), "{again:?}");
+
+    let mut report = SyncOutput {
+        account: String::from("live"),
+        ..SyncOutput::default()
+    };
+    let hunk = CollectionHunk::Fetch {
+        side: String::from("caldav"),
+        collection: String::from("work"),
+    };
+    report.note_collection_hunk(hunk, None);
+    let text = report.to_string();
+    assert!(
+        text.contains(" - fetch collection work from caldav"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Account live synchronized: 1 hunks"),
+        "{text}"
     );
 }
 

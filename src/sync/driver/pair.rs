@@ -276,7 +276,8 @@ impl OpenPair {
             blobs,
             ..
         } = self;
-        drain_collection_intents(&mut [&mut *left, &mut *right], left_store, true, report);
+        let renames =
+            drain_collection_intents(&mut [&mut *left, &mut *right], left_store, true, report);
         drain_submits(
             run.config,
             run.account,
@@ -284,6 +285,7 @@ impl OpenPair {
             left_store,
             blobs,
             run.work_dir,
+            &renames,
             report,
         );
         drain_invitations(&mut [left, right], left_store, run.work_dir, report);

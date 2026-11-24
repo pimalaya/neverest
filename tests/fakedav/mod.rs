@@ -4,6 +4,8 @@
 //! that run the binary: enough of RFC 6352 and RFC 6578 for a sync, with
 //! faults a test switches on. Every request line it reads is recorded.
 
+#![allow(dead_code)]
+
 use std::{
     collections::{BTreeMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
@@ -31,6 +33,8 @@ pub struct Faults {
 
 #[derive(Default)]
 struct State {
+    /// The book's `DAV:displayname` a `PROPPATCH` set, `Book` until then.
+    name: Option<String>,
     cards: BTreeMap<String, String>,
     removed: Vec<String>,
     faults: Faults,
@@ -174,13 +178,14 @@ fn answer(
                     "<d:supported-report><d:report><d:sync-collection/></d:report></d:supported-report>"
                 }
             };
+            let name = state.name.as_deref().unwrap_or("Book");
             let rows = format!(
                 "<d:response><d:href>/dav/</d:href><d:propstat><d:prop>\
                  <d:resourcetype><d:collection/></d:resourcetype></d:prop>\
                  <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\
                  <d:response><d:href>/dav/book/</d:href><d:propstat><d:prop>\
                  <d:resourcetype><d:collection/><c:addressbook/></d:resourcetype>\
-                 <d:displayname>Book</d:displayname>\
+                 <d:displayname>{name}</d:displayname>\
                  <d:sync-token>{token}</d:sync-token><d:supported-report-set>\
                  <d:supported-report><d:report><c:addressbook-multiget/></d:report></d:supported-report>\
                  {reports}</d:supported-report-set></d:prop>\
@@ -277,6 +282,13 @@ fn answer(
                 vec![format!("ETag: \"{}\"", etag(body))],
                 String::new(),
             )
+        }
+        ("PROPPATCH", "/dav/book/", None) => {
+            state.name = between(body, "displayname>", "<").map(str::to_owned);
+            let rows = "<d:response><d:href>/dav/book/</d:href><d:propstat><d:prop>\
+                        <d:displayname/></d:prop>\
+                        <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>";
+            ("207 Multi-Status".into(), xml, multistatus(rows))
         }
         ("DELETE", "/dav/book/", None) => {
             state.cards.clear();

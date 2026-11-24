@@ -34,6 +34,22 @@ pub enum CollectionHunk {
         /// The collection, by the name its server answers to.
         collection: String,
     },
+    /// A collection new on `side`, which the store took in from its listing.
+    Fetch {
+        /// The endpoint that listed it.
+        side: String,
+        /// The collection, by the name its server answers to.
+        collection: String,
+    },
+    /// A collection a queued `collection-rename` renamed on `side`.
+    Rename {
+        /// The endpoint the change was applied on.
+        side: String,
+        /// The collection, by the name its server answered to.
+        collection: String,
+        /// The name it answers to now.
+        to: String,
+    },
     /// Delete `side`'s copy of the collection.
     Delete {
         /// The endpoint the change is applied on.
@@ -68,9 +84,11 @@ impl CollectionHunk {
     /// The endpoints the hunk names, to name them otherwise.
     pub fn endpoints_mut(&mut self) -> Vec<&mut String> {
         match self {
-            Self::Create { side, .. } | Self::Delete { side, .. } | Self::Scan { side, .. } => {
-                vec![side]
-            }
+            Self::Create { side, .. }
+            | Self::Fetch { side, .. }
+            | Self::Rename { side, .. }
+            | Self::Delete { side, .. }
+            | Self::Scan { side, .. } => vec![side],
             Self::Sync { source, target, .. } => vec![source, target],
         }
     }
@@ -82,6 +100,14 @@ impl fmt::Display for CollectionHunk {
             Self::Create { side, collection } => {
                 write!(f, "create collection {collection} on {side}")
             }
+            Self::Fetch { side, collection } => {
+                write!(f, "fetch collection {collection} from {side}")
+            }
+            Self::Rename {
+                side,
+                collection,
+                to,
+            } => write!(f, "rename collection {collection} to {to} on {side}"),
             Self::Delete { side, collection } => {
                 write!(f, "delete collection {collection} on {side}")
             }

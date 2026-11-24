@@ -122,7 +122,8 @@ pub struct SyncCommand {
     ///
     /// Initializing opens every endpoint and adds the account to the store,
     /// creating the store when there is none; the first sync then copies
-    /// whole collections. Check what it would do with `--dry-run` first.
+    /// whole collections. Check what it would do with `--dry-run` first,
+    /// which plans the sync as if initialized and initializes nothing.
     #[arg(long)]
     pub init: bool,
     /// Apply what frontends queued in the store, and nothing else.
@@ -326,7 +327,9 @@ impl SyncCommand {
         let mut outcomes: Vec<AccountSync> = Vec::new();
         let mut initialized = Vec::new();
 
-        if self.init {
+        if self.init && self.dry_run {
+            initialized = init::uninitialized(&selected)?;
+        } else if self.init {
             for output in init::initialize(selected.clone())? {
                 if let Some(error) = output.error {
                     selected.retain(|(name, _)| *name != output.account);
@@ -355,6 +358,11 @@ impl SyncCommand {
         let mut locks = Vec::new();
         let mut runnable = Vec::new();
         for (dir, accounts) in stores {
+            let planned = |(name, _): &(String, AccountConfig)| initialized.contains(name);
+            if !dir.join("pimdir.db").exists() && self.dry_run && accounts.iter().all(planned) {
+                runnable.push((dir, accounts));
+                continue;
+            }
             if !dir.join("pimdir.db").exists() {
                 for (name, _) in accounts {
                     let err = driver::not_initialized(&name);
@@ -432,7 +440,9 @@ impl SyncCommand {
                     total,
                 });
 
-                let outcome = self.run_account(&name, &account_config, drained, progress);
+                let initializing = self.dry_run && initialized.contains(&name);
+                let outcome =
+                    self.run_account(&name, &account_config, drained, initializing, progress);
                 outcomes.push(match outcome {
                     Ok(mut report) => {
                         report.interrupted = crate::sync::stopping();
@@ -534,6 +544,7 @@ impl SyncCommand {
         name: &str,
         account_config: &AccountConfig,
         drained: Option<SyncOutput>,
+        initializing: bool,
         progress: Progress<'_>,
     ) -> Result<SyncOutput> {
         let mode = account_config.mode()?;
@@ -584,6 +595,7 @@ impl SyncCommand {
             self.intents_only,
             progress,
             drained,
+            initializing,
         )?;
 
         report.name_endpoints();

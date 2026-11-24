@@ -23,10 +23,10 @@
 //! else the user's ([`crate::zone`]), before the write, which then reports
 //! no revision, so the next sync reads the event back.
 //!
-//! A new event the account organises with attendees to tell is inserted
-//! with its UID as `iCalUID`, which Google keeps and announces; any other is
-//! imported, keeping the UID and notifying nobody. Invitation intents patch
-//! the account's attendee or delete its meeting, with `sendUpdates=all`.
+//! A new event the account organises with attendees to tell, or asking a
+//! Google Meet, is inserted with its UID as `iCalUID`, which Google keeps;
+//! any other is imported, notifying nobody. Invitation intents patch the
+//! account's attendee or delete its meeting, with `sendUpdates=all`.
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -452,9 +452,9 @@ impl GcalClient {
     /// Creates an event from an iCalendar object, then the overrides of a
     /// series, deleting it again when they do not all land.
     ///
-    /// A UID stays the `iCalUID`: a scheduled event the account organises is
-    /// inserted, Google inviting (a series with overrides tells its attendees
-    /// once all landed), any other imported, telling nobody. No UID: inserted.
+    /// A UID stays the `iCalUID`: one the account organises is inserted,
+    /// inviting if scheduled, telling nobody if it only asks a Meet (an import
+    /// leaves that pending); any other is imported. No UID: inserted.
     pub fn add_item_stream(&mut self, calendar: &str, source: impl Read) -> Result<WrittenItem> {
         self.listed().remove(calendar);
         let (ical, anchored) = self.anchor(calendar, read_ical(source)?)?;
@@ -465,15 +465,16 @@ impl GcalClient {
 
         let has_uid = event.ical_uid.as_deref().is_some_and(|uid| !uid.is_empty());
         let invites = has_uid && calendar::scheduled(&ical) && self.organises(calendar, &event)?;
+        let meets = !invites && meeting && has_uid && self.organises(calendar, &event)?;
         let quiet = invites && !occurrences.overrides.is_empty();
         let attendees = match quiet {
             true => mem::take(&mut event.attendees),
             false => Vec::new(),
         };
-        let created = if invites {
+        let created = if invites || meets {
             event.organizer = None;
             let params = GcalEventInsertParams {
-                send_updates: Some(match quiet {
+                send_updates: Some(match quiet || meets {
                     true => GcalSendUpdates::None,
                     false => GcalSendUpdates::All,
                 }),
@@ -1748,6 +1749,40 @@ mod tests {
         let import = &written[written.find("POST ").unwrap()..];
         assert!(import.contains("2026-11-26T10:00:00"), "{import}");
         assert!(import.contains("Europe/Paris"), "{import}");
+    }
+
+    /// An event asking a Google Meet with no attendee to tell is inserted
+    /// telling nobody.
+    ///
+    /// It was imported, and an import leaves the Meet's request pending.
+    #[test]
+    fn an_event_asking_a_meet_is_inserted_quietly() {
+        let asking = "BEGIN:VCALENDAR\r\n\
+            VERSION:2.0\r\n\
+            BEGIN:VEVENT\r\n\
+            UID:meet\r\n\
+            DTSTAMP:20260101T000000Z\r\n\
+            DTSTART:20261126T100000Z\r\n\
+            DTEND:20261126T110000Z\r\n\
+            SUMMARY:Meet\r\n\
+            X-PIMDIR-ONLINE-MEETING:TRUE\r\n\
+            END:VEVENT\r\n\
+            END:VCALENDAR\r\n";
+        let (mut client, server) = answering(&[("200 OK", r#"{"id":"M","etag":"\"1\""}"#)]);
+
+        let created = client.add_item_stream("c1", asking.as_bytes()).unwrap();
+
+        assert_eq!(created.revision, None);
+        let written = server.written(0);
+        let line = written.lines().next().unwrap();
+        assert!(
+            line.starts_with("POST /calendar/v3/calendars/c1/events?"),
+            "{line}"
+        );
+        assert!(line.contains("sendUpdates=none"), "{line}");
+        assert!(line.contains("conferenceDataVersion=1"), "{line}");
+        assert!(written.contains("\"iCalUID\":\"meet\""), "{written}");
+        assert!(written.contains("hangoutsMeet"), "{written}");
     }
 
     /// A calendar stating no zone anchors a floating time in the user's.

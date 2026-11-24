@@ -81,7 +81,10 @@ mod tests {
         error::Failure,
         sync::{
             hunk::CollectionHunk,
-            report::{IntentEntry, ParkedQueueAction, SubmitEntry, SubmitFailure, ThrottledSource},
+            report::{
+                DrainedQueue, IntentEntry, ParkedQueueAction, SubmitEntry, SubmitFailure,
+                ThrottledSource,
+            },
         },
     };
 
@@ -165,6 +168,52 @@ mod tests {
 
         let report = failed_send(1, "550 rejected", false, false);
         assert_eq!(Exit::from(&report), Exit::Incomplete);
+    }
+
+    /// The errors a text report counts are the ones it lists: a send left
+    /// pending once printed `Errors (1):` over an empty list.
+    #[test]
+    fn the_errors_counted_are_listed() {
+        let mut report = failed_send(7, "452 4.4.5 rate limit", false, false);
+        report.account = String::from("stalwart");
+        let text = report.to_string();
+
+        let listed = text
+            .split("Errors (1):\n")
+            .nth(1)
+            .unwrap_or_else(|| panic!("no error section: {text}"));
+        let first = listed.lines().next().unwrap_or_default();
+        assert!(first.starts_with(" - "), "{text}");
+        assert!(first.contains("452 4.4.5 rate limit"), "{text}");
+    }
+
+    /// A dry run says what it would apply of the queue: its drain runs on the
+    /// replica, and the real queue keeps every row.
+    #[test]
+    fn a_dry_run_would_apply_the_queue() {
+        let mut report = SyncOutput {
+            account: String::from("stalwart"),
+            dry_run: true,
+            ..SyncOutput::default()
+        };
+        report.drained.push(DrainedQueue {
+            collection: String::from("stalwart/imap/INBOX"),
+            applied: 2,
+        });
+
+        let text = report.to_string();
+        assert!(
+            text.contains(" - would apply 2 queued action(s) in stalwart/imap/INBOX"),
+            "{text}"
+        );
+        assert!(!text.contains("applied 2"), "{text}");
+
+        report.dry_run = false;
+        let text = report.to_string();
+        assert!(
+            text.contains(" - applied 2 queued action(s) in stalwart/imap/INBOX"),
+            "{text}"
+        );
     }
 
     /// A parked intent and a parked queue action wait for a person too.

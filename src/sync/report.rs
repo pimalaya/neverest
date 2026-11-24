@@ -25,7 +25,8 @@ use crate::{
 #[derive(Debug, Default, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncRunOutput {
-    /// The accounts `--init` initialized before the run, empty without it.
+    /// The accounts `--init` initialized before the run, empty without it;
+    /// under `--dry-run`, those it would initialize, initializing nothing.
     pub initialized: Vec<String>,
     /// One entry per account the run covered, empty under `--queue-only`
     /// and `--index-only`.
@@ -1624,18 +1625,11 @@ impl fmt::Display for SyncOutput {
             )
         });
         let unreached = of(|row| matches!(row, SyncErrorRow::Unreached(_)));
-        let failed_steps = of(|row| {
-            matches!(
-                row,
-                SyncErrorRow::CollectionPatch { .. }
-                    | SyncErrorRow::ItemPatch { .. }
-                    | SyncErrorRow::Failures(_)
-            )
-        });
+        let failed_steps = of(SyncErrorRow::is_error);
 
         let hunk_errors = failed_collections.len() + failed_items.len();
         let total = self.collection_patch.len() + self.item_patch.len() + hunk_errors;
-        let errors = of(SyncErrorRow::is_error).len();
+        let errors = failed_steps.len();
         let warnings = self.collisions.len()
             + self.parked.len()
             + self.conflicts.len()
@@ -1654,7 +1648,14 @@ impl fmt::Display for SyncOutput {
         if !self.drained.is_empty() {
             writeln!(f, "Queue ({n}):", n = self.drained.len())?;
             for entry in &self.drained {
-                writeln!(f, " - {entry}")?;
+                match self.dry_run {
+                    true => writeln!(
+                        f,
+                        " - would apply {} queued action(s) in {}",
+                        entry.applied, entry.collection
+                    )?,
+                    false => writeln!(f, " - {entry}")?,
+                }
             }
             writeln!(f)?;
         }

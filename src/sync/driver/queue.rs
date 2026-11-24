@@ -94,9 +94,9 @@ pub(super) fn drain_queues_into(
 }
 
 /// Performs the queued collection intents (pimdir STORAGE Annex B.2), each
-/// by the side it names, and settles their rows.
+/// by the side it names, answering the ids its renames moved.
 ///
-/// It runs before the listing, so the same run lists the result. Under
+/// It runs before the listing and the sends ([`drain_submits`]). Under
 /// `paired` a rename parks and the store follows nothing (pimdir SYNC §5). An
 /// intent naming no source goes to its namespace's side, which parks it.
 pub(super) fn drain_collection_intents(
@@ -104,12 +104,13 @@ pub(super) fn drain_collection_intents(
     store: &mut PimdirSourceStore,
     paired: bool,
     report: &mut SyncOutput,
-) {
+) -> Renames {
+    let mut renames = Renames::default();
     let intents = match collection::pending(store) {
         Ok(intents) => intents,
         Err(err) => {
             warn!("cannot read the queued collection intents: {err:#}");
-            return;
+            return renames;
         }
     };
 
@@ -149,7 +150,18 @@ pub(super) fn drain_collection_intents(
         }
         match follow {
             Some(Performed::Renamed(renamed)) => {
-                follow_rename(store, &namespace, &intent.collection, &renamed)
+                let hunk = CollectionHunk::Rename {
+                    side: performer,
+                    collection: display_name(&namespace, &intent.collection).to_owned(),
+                    to: renamed.name.clone(),
+                };
+                report.note_collection_hunk(hunk, None);
+                renames.extend(follow_rename(
+                    store,
+                    &namespace,
+                    &intent.collection,
+                    &renamed,
+                ));
             }
             Some(Performed::Deleted) => match store.delete_collection(&intent.collection) {
                 Ok(_) => info!("collection {} dropped from the store", intent.collection),
@@ -160,6 +172,34 @@ pub(super) fn drain_collection_intents(
             },
             Some(Performed::Created) | None => {}
         }
+    }
+
+    renames
+}
+
+/// The store collections a run's renames gave a new id, old id to new.
+#[derive(Debug, Default)]
+pub(crate) struct Renames(BTreeMap<String, String>);
+
+impl Renames {
+    /// The id the collection `id` holds now, through every rename the run
+    /// performed (`A` renamed `B`, then `B` renamed `C`, is `C`).
+    #[cfg_attr(
+        not(any(feature = "smtp", feature = "msgraph", feature = "gmail")),
+        allow(dead_code)
+    )]
+    pub(crate) fn follow<'a>(&'a self, mut id: &'a str) -> &'a str {
+        for _ in 0..=self.0.len() {
+            match self.0.get(id) {
+                Some(to) => id = to,
+                None => break,
+            }
+        }
+        id
+    }
+
+    pub(super) fn extend(&mut self, renamed: Vec<(String, String)>) {
+        self.0.extend(renamed);
     }
 }
 
@@ -234,7 +274,8 @@ fn perform_collection_intent(
     }
 }
 
-/// Follows a server rename in the store (pimdir STORAGE Annex B.2).
+/// Follows a server rename in the store (pimdir STORAGE Annex B.2),
+/// answering each collection given a new id, old id to new.
 ///
 /// Where the id derives from the name (IMAP, Gmail), the collection and those
 /// under it take their new id, so their items keep their bindings rather than
@@ -244,18 +285,22 @@ pub(super) fn follow_rename(
     namespace: &str,
     anchor: &str,
     renamed: &Renamed,
-) {
+) -> Vec<(String, String)> {
+    let mut moved = Vec::new();
     let to = hub_id(namespace, &renamed.id);
     if anchor == to {
         if let Err(err) = store.set_collection_name(anchor, &renamed.name) {
             warn!("cannot name {anchor} `{}`: {err}", renamed.name);
         }
-        return;
+        return moved;
     }
 
     let collections = match store.list_collections() {
         Ok(collections) => collections,
-        Err(err) => return warn!("cannot follow the rename of {anchor} in the store: {err}"),
+        Err(err) => {
+            warn!("cannot follow the rename of {anchor} in the store: {err}");
+            return moved;
+        }
     };
     let under = renamed
         .delimiter
@@ -284,7 +329,9 @@ pub(super) fn follow_rename(
             warn!("cannot name {id} `{name}`: {err}");
         }
         info!("collection {} renamed {id} in the store", collection.id);
+        moved.push((collection.id, id));
     }
+    moved
 }
 
 /// Creates the collection a collection-create asks for on `side`'s server.

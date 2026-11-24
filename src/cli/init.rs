@@ -124,6 +124,24 @@ pub fn initialize(selected: Vec<(String, AccountConfig)>) -> Result<Vec<InitOutp
     Ok(outputs)
 }
 
+/// The accounts of `selected` not initialized yet, which `sync --init
+/// --dry-run` plans as if `init` had run, initializing nothing.
+pub fn uninitialized(selected: &[(String, AccountConfig)]) -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    for (name, account_config) in selected {
+        account_config
+            .validate()
+            .with_context(|| format!("Validate account {name}"))?;
+        let dir = driver::store_dir(account_config)?;
+        let initialized =
+            dir.join("pimdir.db").exists() && StoreState::load(&dir)?.initialized(name);
+        if !initialized {
+            names.push(name.clone());
+        }
+    }
+    Ok(names)
+}
+
 /// Opens every endpoint of `account`, then adds it to the store at `dir`,
 /// creating the store when there is none.
 ///

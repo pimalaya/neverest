@@ -19,22 +19,35 @@ use crate::conflict::{Conflict, Sides};
 pub struct ConflictListOutput {
     /// The divergences, by account then collection then item then source.
     pub conflicts: Vec<ConflictSummary>,
+    /// The accounts a listing naming none skipped, no `init` having
+    /// initialized them; naming one with `-a` fails instead.
+    pub uninitialized: Vec<String>,
 }
 
 impl fmt::Display for ConflictListOutput {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.conflicts.is_empty() {
-            return writeln!(f, "No item is waiting for a decision");
+            writeln!(f, "No item is waiting for a decision")?;
+        } else {
+            writeln!(
+                f,
+                "Conflicts ({n} item(s) waiting for a decision):",
+                n = self.conflicts.len()
+            )?;
+            for conflict in &self.conflicts {
+                writeln!(f, " - {conflict}")?;
+            }
         }
 
-        writeln!(
-            f,
-            "Conflicts ({n} item(s) waiting for a decision):",
-            n = self.conflicts.len()
-        )?;
-
-        for conflict in &self.conflicts {
-            writeln!(f, " - {conflict}")?;
+        if !self.uninitialized.is_empty() {
+            writeln!(
+                f,
+                "\nNot initialized ({n}), not read:",
+                n = self.uninitialized.len()
+            )?;
+            for name in &self.uninitialized {
+                writeln!(f, " - {name}, run `neverest init -a {name}` first")?;
+            }
         }
 
         Ok(())

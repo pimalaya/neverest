@@ -128,7 +128,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
 - Changed the io-pimdir dependency to 0.18 (pimdir draft-14 still, a store io-pimdir 0.17 wrote opens as is): the retention sweep (`store.purge-after`) purges an account's expired items in one transaction instead of one per item.
 
-- **BREAKING**: Changed the io-pimdir dependency to its git revision cc3021b (pimdir storage-draft-17, sync-draft-15, search-draft-17): a store of storage-draft-16 or earlier is refused (`store-version`), never migrated, and an index of search-draft-16 or earlier is rebuilt by the first refresh. To start over, sync with the neverest that wrote the store until nothing is queued (rows still queued when it moves are lost to the servers), move the store directory away, then `neverest init` and `neverest sync`.
+- **BREAKING**: Changed the io-pimdir dependency to 0.20 (pimdir storage-draft-17, sync-draft-15, search-draft-17): a store of storage-draft-16 or earlier is refused (`store-version`), never migrated, and an index of search-draft-16 or earlier is rebuilt by the first refresh. To start over, sync with the neverest that wrote the store until nothing is queued (rows still queued when it moves are lost to the servers), move the store directory away, then `neverest init` and `neverest sync`.
 - Changed a writable collection the store calls settled after its pull pass to be listed once a run, where its push pass listed it again for nothing; in a pair, when both sides are settled.
 - Changed a Gmail label the mailbox history names no change for, and a CalDAV or CardDAV collection whose sync token in the home-set listing has not moved, to be left unlisted when the store calls it settled: one history read serves every label of a run, a quiet label's checkpoint moving to the mailbox's history id.
 - **BREAKING**: Changed the conflicts to include the item's own conflict, which io-pimdir 0.19 records when two endpoints of an account disagree (pimdir SYNC §9): `conflict list`, `show` and `resolve` name it with `source` and `remoteId` `null`, a run merges it against the body the endpoints last agreed on, and `outstandingConflicts` counts it.
@@ -140,6 +140,8 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 - Changed the io-sasl dependency to 0.3.
 
 - Changed the pimalaya-cli dependency to 0.8.
+
+- Changed io-pimdir to 0.20.0, io-gpeople to 0.9.1 and pimalaya-cli to 0.8.1: a send still pending after the run that renamed its copy's folder files the copy in the renamed folder (it failed `FOREIGN KEY constraint failed` and was left in flight), a Google contacts listing by sync token answering a negative `totalItems` no longer fails to parse, and `--log-file` refuses a symbolic link to an existing file.
 
 - Changed the ical-rs dependency to 0.7.2: a recurrence rule's `UNTIL` is shifted between UTC and the series zone through the time zone database, zones only the database knows included.
 
@@ -256,7 +258,7 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 - Fixed RUSTSEC-2026-0592 by bumping url to 2.5.9.
 - Fixed a queued move reporting its create twice, once beside its remove and once by the collection it enters, when that collection was itemized first: it is reported beside its remove alone.
 - Fixed a queued move reporting its create twice when the collection it enters was itemized after the remove was pushed, as a message moved to the trash on Graph or IMAP could be: the report holds each create once.
-- Fixed a flag change queued before a move of the same message being undone on the server and in the store when the move states its member (IMAP `UID MOVE` answering `COPYUID`): io-pimdir 65a5026 lands the moved message on the flags it carries, so the queued set is pushed (pimdir sync-draft-15, vector 214).
+- Fixed a flag change queued before a move of the same message being undone on the server and in the store when the move states its member (IMAP `UID MOVE` answering `COPYUID`): io-pimdir 0.20 lands the moved message on the flags it carries, so the queued set is pushed (pimdir sync-draft-15, vector 214).
 - Fixed a message moved into an IMAP mailbox holding another message with the same `Message-ID` being bound to that other message, its own body then filed under the wrong UID: the move hands io-pimdir the UID the server's `COPYUID` names, and the store binds the moved message there at once. A move into a mailbox whose other message the store listed before still shows that message with the moved one's body, until io-imap can ask for `EMAILID`.
 - Fixed IMAP moves on servers advertising no MOVE, such as OVH, which answered `UID MOVE` with `BAD` and then closed the connection: the move is a `UID COPY`, then the expunge of the source UIDs alone, and a server without UIDPLUS either refuses it before any command ([#35](https://github.com/pimalaya/neverest/issues/35)).
 - Fixed a CalDAV or CardDAV member the server lists with an error (a 403, a 5xx) reading as deleted in a full listing, and its delete pushed to the other endpoints: the listing is incomplete, its checkpoint kept, and it is reported under `failures` as a `listing` step naming each such member, the run exiting 4.

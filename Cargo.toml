@@ -38,7 +38,7 @@ strip = "symbols"
 panic = "abort"
 
 [build-dependencies]
-pimalaya-cli = { version = "0.8.0", default-features = false, features = ["build"] }
+pimalaya-cli = { version = "0.8.1", default-features = false, features = ["build"] }
 
 [dev-dependencies]
 io-oauth = { version = "0.8", default-features = false, features = ["jwt-bearer", "rustls-ring"] }
@@ -55,17 +55,17 @@ idna_adapter = { version = "=1.0.0", default-features = false }
 ical-rs = { version = "0.7.3", optional = true }
 io-gcal = { version = "0.6.0", default-features = false, optional = true }
 io-gmail = { version = "0.10", default-features = false, optional = true }
-io-gpeople = { version = "0.9.0", default-features = false, optional = true }
+io-gpeople = { version = "0.9.1", default-features = false, optional = true }
 io-http = { version = "0.9", default-features = false, optional = true }
 io-imap = { version = "0.12.0", default-features = false, optional = true }
-io-msgraph = { version = "0.10.0", default-features = false, optional = true }
+io-msgraph = { version = "0.11.0", default-features = false, optional = true }
 io-pimdir = { version = "0.20.0", default-features = false, features = ["client"] }
 io-sasl = { version = "0.3", default-features = false, features = ["scram"] }
 io-smtp = { version = "0.10", default-features = false, optional = true }
-io-webdav = { version = "0.13.0", default-features = false, optional = true }
+io-webdav = { version = "0.14.0", default-features = false, optional = true }
 jiff = { version = "1", default-features = false, features = ["std"], optional = true }
 log = "0.4"
-pimalaya-cli = { version = "0.8.0", default-features = false, features = ["terminal", "signal"] }
+pimalaya-cli = { version = "0.8.1", default-features = false, features = ["terminal", "signal"] }
 pimalaya-config = { version = "0.6.0", default-features = false, features = ["toml", "secret"] }
 pimalaya-stream = { version = "0.4.1", default-features = false }
 rusqlite = { version = "0.43", default-features = false }
@@ -78,7 +78,3 @@ tempfile = "3"
 toml = "1.1"
 url = { version = "2.2", features = ["serde"] }
 vcard-rs = { version = "0.6.1", optional = true }
-
-[patch.crates-io]
-io-pimdir = { git = "https://github.com/pimalaya/io-pimdir", rev = "65a5026d9e8499ec7e24b401e9b689d3eebeea4e" }
-io-webdav = { git = "https://github.com/pimalaya/io-webdav", rev = "6ff2e8b9fafc2f255bb37f219e242776dc0c955d" }

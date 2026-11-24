@@ -308,9 +308,6 @@ impl GraphClient {
         let occurrences = Occurrences::read(&ical)?;
         occurrences.refuse_ranges("Microsoft Graph")?;
         let mut event = MsgraphEvent::create_from_ical(&ical)?;
-        if is_empty_body(&event) {
-            event.body = MsgraphField::Unset;
-        }
         let attendees = match occurrences.is_empty() {
             true => MsgraphField::Unset,
             false => mem::take(&mut event.attendees),
@@ -717,19 +714,6 @@ fn check_revision(id: &str, current: &MsgraphEvent, if_match: Option<&str>) -> R
 /// the meeting's `CONFERENCE` in and the request property out.
 fn asks_meeting(event: &MsgraphEvent) -> bool {
     event.is_online_meeting.as_option() == Some(&true)
-}
-
-/// Whether the event's body says nothing, as an event without a
-/// `DESCRIPTION` projects.
-///
-/// A create leaves it out: Exchange rewrites an event a moment after a write
-/// setting its body, and a delete queued then met that move as a server
-/// edit, which won (pimdir SYNC §5).
-fn is_empty_body(event: &MsgraphEvent) -> bool {
-    event
-        .body
-        .as_option()
-        .is_some_and(|body| body.content.as_deref().is_none_or(str::is_empty))
 }
 
 /// The patch taking `instance` to the occurrence `document` holds, `None`

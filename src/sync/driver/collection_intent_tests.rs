@@ -119,6 +119,44 @@ fn a_send_files_its_copy_in_the_collection_renamed_beside_it() {
     assert!(matches!(pending[0].action, PimdirAction::Add { .. }));
 }
 
+/// A send still pending after the run that renamed its copy's collection
+/// files the copy under the new id on a later run, the store carrying it.
+///
+/// The copy once named the old id, gone from the store: the later run's
+/// `add` failed its foreign key, the send left in flight.
+#[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]
+#[test]
+fn a_send_pending_across_a_rename_files_its_copy_on_a_later_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut store, _) = queued_send(dir.path(), "imap/Archive");
+
+    let renamed = Renamed {
+        id: "Archive2".into(),
+        name: "Archive2".into(),
+        delimiter: Some('/'),
+    };
+    follow_rename(&mut store, "imap", "imap/Archive", &renamed);
+    drop(store);
+
+    let mut store = open_store(dir.path(), "imap", "live").unwrap();
+    let intents = submit::pending(&store).unwrap();
+    assert_eq!(intents.len(), 1, "the send is still pending");
+
+    let none = Renames::default();
+    let step = copy_step(&store, &intents[0], SentFiling::Nothing, &none);
+    let (acknowledged, copied) = acknowledge_sent(&mut store, &intents[0], step);
+
+    assert!(acknowledged.unwrap(), "the send is acknowledged");
+    assert!(copied);
+    let pending = PimdirReader::open(dir.path())
+        .unwrap()
+        .list_pending_actions()
+        .unwrap();
+    assert_eq!(pending.len(), 1, "{pending:?}");
+    assert_eq!(pending[0].collection, "imap/Archive2");
+    assert!(matches!(pending[0].action, PimdirAction::Add { .. }));
+}
+
 /// Queues a `submit` from `imap/INBOX` whose copy goes to `copy`, with
 /// `imap/Sent` stated `sent` beside it.
 #[cfg(any(feature = "smtp", feature = "msgraph", feature = "gmail"))]

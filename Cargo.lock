@@ -902,9 +902,9 @@ dependencies = [
 
 [[package]]
 name = "io-gpeople"
-version = "0.9.0"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f8a058c6978002a25f1a0d68fd17454a9bf2210e11238f5aca04c9d83a75683"
+checksum = "b61914d69297a5e7d85bcb9e326d2aeed9d681de0ddd83342ea4c84cebfb6142"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -956,9 +956,9 @@ dependencies = [
 
 [[package]]
 name = "io-msgraph"
-version = "0.10.0"
+version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31c4cb2124dedfa3717f994b3db6770793c60cfa373c3ceed40c90f5c26defb7"
+checksum = "86a37b9a68d8d65069fe85dda21ec6d3d478504efbb110022150acabe615fdeb"
 dependencies = [
  "anyhow",
  "base64-codec",
@@ -998,7 +998,8 @@ dependencies = [
 [[package]]
 name = "io-pimdir"
 version = "0.20.0"
-source = "git+https://github.com/pimalaya/io-pimdir?rev=65a5026d9e8499ec7e24b401e9b689d3eebeea4e#65a5026d9e8499ec7e24b401e9b689d3eebeea4e"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "87fcb83227ca3e856dbea7512e5575d610d89e14d14559647c094193a3bf099d"
 dependencies = [
  "blake3",
  "encoding_rs",
@@ -1066,8 +1067,9 @@ dependencies = [
 
 [[package]]
 name = "io-webdav"
-version = "0.13.0"
-source = "git+https://github.com/pimalaya/io-webdav?rev=6ff2e8b9fafc2f255bb37f219e242776dc0c955d#6ff2e8b9fafc2f255bb37f219e242776dc0c955d"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0d22a84654879a8d8f7dea688fd08a42bb85251f88d2f0f44089981e7869e30a"
 dependencies = [
  "anyhow",
  "io-http",
@@ -1545,9 +1547,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pimalaya-cli"
-version = "0.8.0"
+version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8451b5a986c8e4e222440ee378344568805eaee4265450d02caedd07cd89e251"
+checksum = "63165905335de3f0bfaa3d47e9101bcd562e55722a51c5a4bfff0a560f7d135a"
 dependencies = [
  "anyhow",
  "base64-codec",

@@ -1693,12 +1693,17 @@ A provider files natively in Sent alone, so a copy asked elsewhere is never left
 - **WHEN** the account syncs
 - **THEN** the message is sent once, carries the `SENT` and `Work` labels, and nothing is imported
 
-The `add` SHALL go where the `copy` collection is when the send is performed: a `collection-rename` the same run performed before it gives the collection a new id in the store, the old one gone, and the copy follows it there. Named by its old id, the `add` was refused, the sent message left in flight, and the next run parked it unconfirmed with its copy never filed. A rename performed by an earlier run is not followed: the payload's `copy` is what io-pimdir's `rename_collection` would have to carry, as it carries a queued move's target.
+The `add` SHALL go where the `copy` collection is when the send is performed: a `collection-rename` the same run performed before it gives the collection a new id in the store, the old one gone, and the copy follows it there. Named by its old id, the `add` was refused, the sent message left in flight, and the next run parked it unconfirmed with its copy never filed. A rename performed by an earlier run, the send still pending (an unreached SMTP server, say), is followed by the store: io-pimdir's `rename_collection` carries a pending `submit`'s `copy` to the new id, as it carries a queued move's target (io-pimdir 0.20.0).
 
 #### Scenario: A send queued beside a rename of its copy folder
 - **GIVEN** a `submit` whose `copy` is `imap/sep` and a `collection-rename` of `imap/sep` to `sep2`, queued for one run
 - **WHEN** the run renames the folder, then sends the message
 - **THEN** the send is acknowledged and its copy is an `add` queued in `imap/sep2`
+
+#### Scenario: A send pending across a rename an earlier run made
+- **GIVEN** a pending `submit` whose `copy` is `imap/Archive`, and a run that renamed `imap/Archive` to `Archive2` without sending it
+- **WHEN** a later run sends the message
+- **THEN** the send is acknowledged and its copy is an `add` queued in `imap/Archive2`
 
 A copy staged where the server files its own lands on that copy (pimdir SYNC §6) and pushes its staged `\Seen` onto it, which marks a message sent to oneself read where the provider keeps one message for both mailboxes; the provider's copy, listed by the next round, is the one the store binds.
 

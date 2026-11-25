@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-25
+
 Neverest 1 is rebuilt around the pimdir store: every account syncs into one shared store, which the Pimalaya frontends read, search and queue their writes into. It syncs mail, contacts and calendars over IMAP, Gmail, Microsoft Graph, Google Calendar, Google People, CalDAV and CardDAV. The wizard is gone, unknown keys are refused, and `--json` follows the Pimalaya output contract.
 
 A 0.x configuration and state are not carried over: start over from config.sample.toml, move the 0.x stores out of neverest/ under the state directory, then run `neverest sync --init`.
@@ -627,7 +629,8 @@ This version has been yanked. Use [0.2.0] instead.
 
 - Initiated the project from [Himalaya CLI](https://github.com/pimalaya/himalaya).
 
-[Unreleased]: https://github.com/pimalaya/neverest/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/pimalaya/neverest/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/pimalaya/neverest/compare/v0.3.0...v1.0.0
 [0.3.0]: https://github.com/pimalaya/neverest/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/pimalaya/neverest/compare/v0.1.0...v0.2.0
 [1.0.0-beta]: https://github.com/pimalaya/neverest/compare/v0.1.0...v1.0.0-beta

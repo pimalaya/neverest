@@ -41,7 +41,7 @@ rustPlatform.buildRustPackage (finalAttrs: {
   inherit buildNoDefaultFeatures buildFeatures;
 
   pname = "neverest";
-  version = "0.3.0";
+  version = "1.0.0";
   cargoHash = "";
 
   src = fetchFromGitHub {

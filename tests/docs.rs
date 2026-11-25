@@ -1,12 +1,23 @@
+//! # Documentation tests
+//!
 //! The documentation ceilings of the guidelines, checked over src/ and the
 //! README: a `//!` paragraph of four lines at most (inline-001), a `///`
 //! block of one line plus three after a blank (inline-002, src/cli/ aside
-//! for clap's help), and the README's Features and section order.
+//! for clap's help), the README's Features and section order, and its
+//! terminal block printing what it shows (readme-006).
 
+#[cfg(feature = "carddav")]
+mod fakedav;
+
+#[cfg(feature = "carddav")]
+use std::process::{Command, Stdio};
 use std::{
     fs,
     path::{Path, PathBuf},
 };
+
+#[cfg(feature = "carddav")]
+use crate::fakedav::FakeDav;
 
 /// Every Rust file under `dir`, in path order.
 fn sources(dir: &Path) -> Vec<PathBuf> {
@@ -167,9 +178,80 @@ fn the_readme_sections_follow_the_cli_order() {
             "Installation",
             "Configuration",
             "Usage",
+            "Alternatives",
             "License",
             "Social",
             "Sponsoring",
         ]
     );
+}
+
+/// The content of the first fenced block of `lang` in `text`, and the
+/// rest of `text` after it.
+#[cfg(feature = "carddav")]
+fn fenced<'a>(text: &'a str, lang: &str) -> (&'a str, &'a str) {
+    let open = format!("```{lang}\n");
+    let start = text.find(&open).expect("a fenced block") + open.len();
+    let end = start + text[start..].find("\n```").expect("a closing fence");
+    (&text[start..end], &text[end + 4..])
+}
+
+/// The command line under the header, run as the first sync of an account
+/// holding one book of two cards on a fake CardDAV server, prints the text
+/// shown after it.
+#[cfg(feature = "carddav")]
+#[test]
+fn the_readme_header_block_prints_what_it_shows() {
+    let readme = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap();
+    let (command, rest) = fenced(&readme, "sh");
+    let (shown, _) = fenced(rest, "text");
+    let args: Vec<&str> = command
+        .strip_prefix("$ neverest ")
+        .expect("a neverest command line")
+        .split_whitespace()
+        .collect();
+
+    let home = tempfile::tempdir().unwrap();
+    let dav = FakeDav::start();
+    dav.put(
+        "ada.vcf",
+        "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:ada\r\nFN:Ada\r\nEND:VCARD\r\n",
+    );
+    dav.put(
+        "alan.vcf",
+        "BEGIN:VCARD\r\nVERSION:4.0\r\nUID:alan\r\nFN:Alan\r\nEND:VCARD\r\n",
+    );
+
+    let store = home.path().join("store").display().to_string();
+    let toml = format!(
+        "[accounts.personal]\n\
+         store.root = {store:?}\n\
+         carddav.home = {dav:?}\n\
+         carddav.auth.basic.username = \"u\"\n\
+         carddav.auth.basic.password.raw = \"p\"\n",
+        dav = dav.home,
+    );
+    let config = home.path().join("config.toml");
+    fs::write(&config, toml).unwrap();
+
+    let neverest = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_neverest"))
+            .arg("-c")
+            .arg(&config)
+            .args(args)
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("XDG_STATE_HOME", home.path())
+            .env_remove("XDG_CONFIG_DIRS")
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+
+    assert!(neverest(&["init"]).status.success());
+    let out = neverest(&args);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert_eq!(stdout.trim_end(), shown);
 }

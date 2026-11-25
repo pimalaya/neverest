@@ -5,9 +5,9 @@ Thank you for investing your time in contributing to Neverest.
 Whether you are a human or an AI agent, read these in order before touching the code:
 
 1. the [Pimalaya README](https://github.com/pimalaya) for what the project is and how its repositories stack;
-2. the [Pimalaya CONTRIBUTING](https://github.com/pimalaya/.github/blob/master/CONTRIBUTING.md) guide (Nix environment, build and check commands, dependency overrides, commit style), which chains to the shared architecture and guidelines;
-3. the inline header documentation in src/main.rs: it is the architecture document of this crate, covering the topology mismatch the engine resolves, the kind seam and the module layout;
-4. the cairn/ folder for the development history and living plans (the Cairn convention: spec/, changes/, log/).
+2. the [Pimalaya CONTRIBUTING](https://github.com/pimalaya/.github/blob/master/CONTRIBUTING.md) guide, which chains to the shared architecture and guidelines;
+3. the inline header documentation, starting with src/main.rs: it is the architecture document of this crate;
+4. the cairn/ folder, which follows [Cairn](https://github.com/pimalaya/cairn): spec/ is current truth, changes/ holds in-flight proposals (landed ones move to changes/archive/), and log/ is the dated history; `sh cairn/verify.sh` checks the structure.
 
 Everything below documents only what differs from the Pimalaya standards.
 

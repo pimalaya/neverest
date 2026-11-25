@@ -6,7 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
-v1 reads no 0.x configuration or store: write a new configuration from config.sample.toml, move the 0.x stores out of neverest/ under the state directory, then sync again with `neverest sync --init`.
+Neverest 1 is rebuilt around the pimdir store: every account syncs into one shared store, which the Pimalaya frontends read, search and queue their writes into. It syncs mail, contacts and calendars over IMAP, Gmail, Microsoft Graph, Google Calendar, Google People, CalDAV and CardDAV. The wizard is gone, unknown keys are refused, and `--json` follows the Pimalaya output contract.
+
+A 0.x configuration and state are not carried over: start over from config.sample.toml, move the 0.x stores out of neverest/ under the state directory, then run `neverest sync --init`.
 
 ### Added
 
@@ -14,398 +16,318 @@ v1 reads no 0.x configuration or store: write a new configuration from config.sa
 
   The result names them under `initialized`. A sync over an uninitialized account is refused, naming `neverest init -a <name>` and `neverest sync --init -a <name>`.
 
-- Added `sync --queue-only`, which applies what frontends queued in the store without reading a credential or opening an endpoint, so a queued create gets its id at once, offline included.
+- Added `sync --queue-only`, which applies what frontends queued in the store without reading a credential or opening an endpoint.
 
-  Its rows land in the sync result under `queue`. A store a sync holds answers `busy` (exit 4).
+  A queued create gets its id at once, offline included, its rows under the result's `queue`. A store a sync holds answers `busy` (exit 4).
 
-- Added the `search` cargo feature, on by default: neverest builds the store's search index (index.db), which frontends query.
-
-  A sync refreshes it last for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off) and reports under `index`. `sync --index-only` builds it whole, opening no endpoint, its rows under the sync result's `index`.
-
+- Added `sync --intents-only`, which performs what frontends queued (sends, collection changes, invitation replies and cancellations) and nothing else.
 - Added `sync --declare-only`, which records every collection the sources hold with its kind, name and role, syncing no item.
+- Added the `search` cargo feature, on by default, which builds the store's search index (index.db) that frontends query.
 
-- Added `sync --intents-only`, which performs what frontends queued (sends, collection changes, invitation replies and cancellations) and nothing else, opening an endpoint only when an intent needs it.
+  A sync refreshes it last for at most `store.index-timeout` (60 seconds by default, `"0"` turning it off), reported under `index`. `sync --index-only` builds it whole, opening no endpoint.
 
-- Added scoped mail syncs: `mail.filter.since` in the account and `sync --since <WHEN>` (`30d`, `6mo`, a date or an RFC 3339 instant) bound mail by its `Date` header.
+- Added `mail.filter.since` and `sync --since <WHEN>` (`30d`, `6mo`, a date or an RFC 3339 instant), which bound mail by its `Date` header.
 
   Mail older than the floor is neither listed nor deleted. A wider scope later lists only the band it lacks on IMAP, Gmail and Graph.
 
-- Added paged rounds: a mail listing lands page by page, newest first, its bodies downloading as each page lands, so mail is readable before its mailbox is listed and an interrupted run resumes where it stopped.
+- Added paged mail listings, newest first, each page's bodies downloading as it lands.
+
+  Mail is readable before its mailbox is listed, and an interrupted run resumes where it stopped.
 
 - Added `sync --prime <N>`, `sync --bodies <all|listed>` and `sync --download-order <largest|newest>`, which make recent mail readable early on a large account.
-
-- Added a back-off on throttling for Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV and CardDAV, waiting as the provider states, else exponentially.
+- Added a back-off on throttling for Microsoft Graph, Gmail, Google Calendar, Google People, CalDAV and CardDAV.
 
   A source throttled past `sync --max-wait` (120 seconds by default) gives up for the run and is reported under `throttled`.
 
-- Added Gmail pacing and batched reads: `gmail.units-per-minute` (6000 by default), `gmail.batch-size` (10, at most 100) and `gmail.batches-in-flight` (1).
+- Added `gmail.units-per-minute` (6000 by default), `gmail.batch-size` (10, at most 100) and `gmail.batches-in-flight` (1).
+- Added a guard on mass absences, reported under `absences` (exit 3).
 
-- Added a guard on mass absences: a listing leaving out more than half of at least 20 items a collection held, or naming none while it held some, drops nothing and is reported under `absences` (exit 3).
+  A listing leaving out more than half of at least 20 items, or naming none while the collection held some, drops nothing. `sync --accept-absences` confirms such absences for one run.
 
-  `sync --accept-absences` confirms such absences for one run.
+- Added the holding of a change a server refuses for good, reported by every run as a `refusals` error (exit 3).
 
-- Added the refusal of a change as it stands: a change a server refuses for good (an HTTP 4xx naming the request, an IMAP `NO [CANNOT]` or `[TOOBIG]`) is held in the store and reported by every run as a `refusals` error (exit 3).
+  An HTTP 4xx naming the request or an IMAP `NO [CANNOT]` or `[TOOBIG]` holds it in the store, pushed again only once the item changes.
 
-  It is pushed again only once the item changes: change it, or remove it.
-
-- Added a clean stop on SIGINT and SIGTERM: `sync` starts no new work, lets what is in flight land, prints its result with `interrupted` set and exits 4.
+- Added a clean stop on SIGINT and SIGTERM: `sync` lets what is in flight land, prints its result with `interrupted` set and exits 4.
 
   A second signal ends it at once (130).
 
-- Added collection roles and capability declarations to the store: each source records the role a server states for a collection (`inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`, `default` and others) and what it can push, so a frontend refuses an unsupported action before queueing it.
+- Added collection roles and capabilities to the store.
 
-- Added the `collection-create`, `collection-rename` and `collection-delete` intents on IMAP, Gmail, CalDAV and CardDAV, and `calendar-reply` and `calendar-cancel` on Microsoft Graph and Google Calendar.
+  Each source records the role a server states for a collection (`inbox`, `sent`, `drafts`, `trash`, `junk`, `archive`, `default` and others) and what it can push, so a frontend refuses an unsupported action before queueing it.
+
+- Added the `collection-create`, `collection-rename` and `collection-delete` intents on IMAP, Gmail, CalDAV and CardDAV.
 
   Each intent neverest performs leaves a receipt the frontend that queued it reads.
 
-- Added the sent copy: a queued `submit` asking for `copy` files the message there once sent, unless the provider files sent mail itself (Gmail, Graph).
+- Added the `calendar-reply` and `calendar-cancel` intents on Microsoft Graph and Google Calendar.
+- Added the sent copy: a queued `submit` asking for `copy` files the message there once sent.
 
-- Added native sending on Gmail through `messages.send`, so a Gmail account needs no `smtp` table to send. An `smtp` table, under the account or the source, still sends in its place. The token needs the `gmail.send` or the `https://mail.google.com/` scope.
+  Gmail labels the sent message instead. Graph files sent mail in Sent Items alone, so a copy asked elsewhere is refused when queued.
 
-- Added Microsoft Graph mail moves, copies and adds into Drafts, the one folder Graph creates a message in.
+- Added native sending on Gmail through `messages.send`, so a Gmail account needs no `smtp` table.
 
-  The source declares the add on Drafts alone, so a frontend refuses an add elsewhere up front.
+  An `smtp` table, under the account or the source, still sends in its place. The token needs the `gmail.send` or the `https://mail.google.com/` scope.
 
-- Added the push of a recurring event's overrides and cancelled occurrences to Microsoft Graph and Google Calendar, each reaching its instance after the series.
+- Added Microsoft Graph mail moves, copies and adds into Drafts.
+
+  Graph creates a message in Drafts alone, so a frontend refuses an add elsewhere up front.
+
+- Added the push of a recurring event's overrides and cancelled occurrences to Microsoft Graph and Google Calendar.
 
   An override neither provider can take is refused, coded `unsupported`.
 
 - Added online meetings on push: an event carrying `X-PIMDIR-ONLINE-MEETING:TRUE` gets a Google Meet or a Graph online meeting.
-
-- Added attachment stand-ins: a message body the store lands records one bodiless file per attachment in the account's attachments collection.
-
-- Added CalDAV moves through WebDAV `MOVE`, so the server never holds a `UID` twice; a server without `MOVE` gets a create then a delete.
-
+- Added attachment stand-ins: a landed message body records one bodiless file per attachment in the account's attachments collection.
+- Added CalDAV moves through WebDAV `MOVE`, a server without it getting a create then a delete.
 - Added `collection.rename` and `collection.capped` to every backend table.
 
-  `collection.rename` says whether a frontend may rename a collection (false on a `one-way` account by default); `collection.capped` marks a server listing at most a number of items (Gmail over IMAP with a folder size limit), so what it leaves out is kept.
+  `collection.rename` says whether a frontend may rename a collection (false on a `one-way` account by default). `collection.capped` marks a server listing at most a number of items, so what it leaves out is kept.
 
-- Added `proxy.url`, `proxy.username` and `proxy.password` at the account, under every backend table and under `smtp`; with none, the `all_proxy` and `https_proxy` environment variables apply.
+- Added `proxy.url`, `proxy.username` and `proxy.password` at the account, under every backend table and under `smtp`.
 
-- Added `tls.client.cert` and `tls.client.key` under every backend table and `smtp`, a client certificate presented for mutual TLS, as himalaya reads them.
+  Without them, the `all_proxy` and `https_proxy` environment variables apply.
 
-- Added an account-level `tls` table, inherited field by field by every backend's and every `smtp`'s `tls` table, as himalaya reads it.
+- Added an account-level `tls` table, inherited field by field by every backend's and every `smtp`'s `tls` table.
+- Added `tls.client.cert` and `tls.client.key` under every backend table and `smtp`, a client certificate for mutual TLS.
+- Added `imap.sasl-ir`, `imap.id.auto` and `imap.id.fields`.
+- Added `carddav.home` and `caldav.home`, the home set as a URL with nothing discovered.
+- Added `auth = "none"` to CardDAV and CalDAV, the default of a table with no `auth`.
 
-- Added `imap.sasl-ir`, `imap.id.auto` and `imap.id.fields`, as himalaya reads them.
+  A 401 then says no `auth` is configured.
 
-- Added `carddav.home` and `caldav.home`, the home set as a URL with nothing discovered, and `auth = "none"` for a DAV server asking for no credential.
-
-- Added progress events to `sync --json`, one line each before the result, described by `neverest json-schema neverest-sync.events`.
+- Added progress events to `sync --json`, one line each before the result, described by the `neverest-sync.events` schema.
 
   Read the last line, or skip the lines carrying `event`.
 
-- Added a stable `code` to the JSON failure object and to every failing row (`store-version`, `store-layout`, `store-exposed`, `backend-not-built`, `account-missing`, `account-uninitialized`, `conflict-not-found`, `item-duplicate`, `permission-denied`, `quota-exceeded`, `rate-limited`, `recipient-refused`, `usage-invalid` and others), described by the `neverest-error` schema.
+- Added a stable `code` to the JSON failure object and to every failing row, described by the `neverest-error` schema.
+
+  Codes include `store-version`, `store-layout`, `store-exposed`, `backend-not-built`, `account-missing`, `account-uninitialized`, `conflict-not-found`, `item-duplicate`, `permission-denied`, `quota-exceeded`, `rate-limited`, `recipient-refused` and `usage-invalid`.
 
 - Added `account list` (alias `ls`), listing the accounts with the backend tables each writes, those this build leaves out under `notBuilt`.
+- Added `coverage`, `downloaded`, `unsettled`, `unreadable`, `overruled`, `unanswered`, `waiting`, `disagreed`, `unlisted`, `forbidden`, `clipped` and `intents` to the sync report.
+- Added `direction` to the `add-flags`, `remove-flags` and `delete` hunks.
 
-- Added `coverage`, `downloaded`, `unsettled`, `unreadable`, `overruled`, `unanswered`, `waiting`, `disagreed`, `unlisted`, `intents` and `errors` to the sync report.
-
-  `errors` lists what a run could not do, an endpoint it could not reach included, one item error each tagged by `kind`.
-
-- Added `direction` to the `add-flags`, `remove-flags` and `delete` hunks: `pull` for a change a server made that the store took in, `push` for one the run applied on that server. The text reads a pulled one as `pull the deletion of item <id> in <collection> from <side>`.
+  `pull` is a server change the store took in, `push` one the run applied on that server.
 
 ### Changed
 
-- Changed `contact.merger` and `calendar.merger` to be written once for the whole configuration, above the accounts: an account naming its own overrides it, and config.sample.toml shows the document-level form.
+- **BREAKING**: Changed every account naming no `store.root` to share one store, neverest/ under the state directory.
 
-- Changed Google People to read contacts through `people:batchGet`, 200 a request, instead of one `people.get` a contact, which drew the per-minute read quota down on a first sync.
+  Collection ids carry the account (`work/imap/INBOX`), so a frontend reads every account from one store. An account name holding `/` is refused.
 
-- **BREAKING**: Changed text-mode progress lines to print on stdout before the result, as pimalaya-cli asks of a long-lived command, stderr staying the logs'. A full `sync` prints them to a pipe too; `account check`, `init`, `sync --queue-only` and `sync --index-only` print them on a terminal alone, so their redirected output holds the result alone. Scripts read `--json`, whose last line is the result.
+- **BREAKING**: Changed `-a` into a repeatable filter, every command running over every account without it.
 
-- Changed a CardDAV or CalDAV table with no `auth` to load as `auth = "none"`, a 401 then saying no `auth` is configured.
+  `conflict show`, `conflict resolve` and `sync --reset` need exactly one account. An account that fails is reported and the next one runs (exit 4); a bare `conflict list` names those it skipped as uninitialized under `uninitialized`.
 
-- **BREAKING**: Changed a configured host that is not ASCII into a load error naming its Punycode form (`xn--...`), as in every Pimalaya binary; the Unicode IDNA crates left the build.
-
-- **BREAKING**: Changed a target's `smtp` table into a configuration error: an account sends through a source, and the target's channel was never used. A queued send naming a target parks.
-
-- Changed a target's `collection.filter`, which was ignored, to narrow what that target takes.
-
-- **BREAKING**: Renamed in the sync report and its events: `refused` to `duplicates`, the events `opened`, `listed` and `refused` to `endpoint-opened`, `endpoint-listed` and `change-refused`, a coverage row's `at` to `closedAt`, and the `action` of a `forbidden` row to `kind`.
-
-- **BREAKING**: Changed `pool-size` into a key of the Graph domain tables alone: on IMAP, Gmail and the other backends nothing read it, and it now fails to load as unknown. IMAP connections are bounded by `connections`.
-
-- Changed io-pimdir to 0.17 (pimdir draft-14): a store neverest wrote on io-pimdir 0.16 is refused (`store-version`) and asks to be synced by that neverest until nothing is queued, then set aside; a settled conflict body and a body a run merges are queued with their `X-PIMDIR-` properties removed (pimdir STORAGE §18), so no instruction to a performer enters the queue unasked; a refused offered create is held as that source's pending create rather than pushed and refused every run; a recurrence rule filling every period no longer stalls the indexer.
-
-- Changed the io-pimdir dependency to 0.18 (pimdir draft-14 still, a store io-pimdir 0.17 wrote opens as is): the retention sweep (`store.purge-after`) purges an account's expired items in one transaction instead of one per item.
-
-- **BREAKING**: Changed the io-pimdir dependency to 0.20 (pimdir storage-draft-17, sync-draft-15, search-draft-17): a store of storage-draft-16 or earlier is refused (`store-version`), never migrated, and an index of search-draft-16 or earlier is rebuilt by the first refresh. To start over, sync with the neverest that wrote the store until nothing is queued (rows still queued when it moves are lost to the servers), move the store directory away, then `neverest init` and `neverest sync`.
-- Changed a writable collection the store calls settled after its pull pass to be listed once a run, where its push pass listed it again for nothing; in a pair, when both sides are settled.
-- Changed a Gmail label the mailbox history names no change for, and a CalDAV or CardDAV collection whose sync token in the home-set listing has not moved, to be left unlisted when the store calls it settled: one history read serves every label of a run, a quiet label's checkpoint moving to the mailbox's history id.
-- **BREAKING**: Changed the conflicts to include the item's own conflict, which io-pimdir 0.19 records when two endpoints of an account disagree (pimdir SYNC §9): `conflict list`, `show` and `resolve` name it with `source` and `remoteId` `null`, a run merges it against the body the endpoints last agreed on, and `outstandingConflicts` counts it.
-
-- Changed the io-imap dependency to 0.12.
-
-- Changed the io-smtp dependency to 0.10.
-
-- Changed the io-sasl dependency to 0.3.
-
-- Changed the pimalaya-cli dependency to 0.8.
-
-- Changed io-pimdir to 0.20.0, io-gpeople to 0.9.1 and pimalaya-cli to 0.8.1: a send still pending after the run that renamed its copy's folder files the copy in the renamed folder (it failed `FOREIGN KEY constraint failed` and was left in flight), a Google contacts listing by sync token answering a negative `totalItems` no longer fails to parse, and `--log-file` refuses a symbolic link to an existing file.
-
-- Changed the ical-rs dependency to 0.7.2: a recurrence rule's `UNTIL` is shifted between UTC and the series zone through the time zone database, zones only the database knows included.
-
-- Changed pimalaya-config to 0.6 and pimalaya-cli to 0.6.1: a failing secret command ends its message with ", run `<command>` yourself to see why", a TOML parse error no longer prints the source line, a refused `Secret` never echoes its value, a text error report sanitizes its chain line by line, and `--log-file` creates its file at 0600, refusing a symbolic link.
-
-- Changed io-pimdir to 0.16: a hostile time zone rule no longer aborts a calendar pull, a second rekey or a delivered copy no longer makes another source remove a message from its server, a joined mail binding pushes its flags, a queued move into its own collection parks rather than deletes, a locally edited contact or event keeps its summary, store backups and restores never leave part of a file, and every search index is extracted again once.
-
-- **BREAKING**: Changed every account naming no `store.root` to share one store, neverest/ under the state directory, its collection ids carrying the account (`work/imap/INBOX`).
-
-  A frontend reads every account from one store. An account name holding `/` is refused.
-
-- **BREAKING**: Changed `-a` into a repeatable filter: without it, every command runs over every account, one after the other.
-
-  `conflict show`, `conflict resolve` and `sync --reset` need exactly one account. An account that fails is reported and the next one runs (exit 4).
-
-- **BREAKING**: Changed the `--json` results of `sync`, `init` and `account check` to list every account under `accounts`, a sync's report under `.accounts[].report`.
-
-- **BREAKING**: Changed every `--json` output to print every key it declares (an empty list as `[]`, an absent value as `null`), one value per line when piped.
-
-- **BREAKING**: Changed the rows of a sync report: a queue row is keyed `row` (was `id`), and the patches are the `collectionPatch` and `itemPatch` arrays of the hunks applied.
-
-- **BREAKING**: Changed every failure of a sync report into one row of `errors`, pimalaya-cli's item error `{id, code, error, sources}` tagged `kind`, then the keys the kind needs: `collection-patch` and `item-patch` (a hunk that did not apply, under `hunk`), `failures` (a store step), `rejected` (its `action`), `duplicates`, `refusals` (the reason as `error`), `submitted` and `intents` (a send or an intent that failed, parked or not) and `unreached` (its `endpoint`).
-
-  `failures`, `rejected`, `duplicates`, `refusals` and `unreached` are no lists of their own, and `collectionPatch`, `itemPatch`, `submitted` and `intents` list what the run did alone. A `rejected`, `duplicates` or `refusals` row and a parked send or intent exit 3, any other row 4.
-
-- **BREAKING**: Changed a parked queue row, of a sync and of `sync --queue-only`, to read as `pimdir queue list` prints a row: `row`, `handle`, `kind`, `collection`, `linkId`, `itemId`, `producer`, `queuedAt`, `attempts`, `unconfirmed` and `error`.
-
-- **BREAKING**: Changed the `conflict` commands to print an item's `id` as a string and its handle on the source as `remoteId`, and `conflict show --json` to print each body as `{contents, encoding}`, the text when it is valid UTF-8 and its base64 otherwise, `null` when absent.
-
-- **BREAKING**: Changed a sync report's conflict row to print the `id` `conflict show` and `conflict resolve` take and the store `collection` as `conflict list` spells it, the handle on the side as `remoteId`.
-
-- **BREAKING**: Changed the exit statuses to the Pimalaya contract: 2 is a command line neverest refused, 3 a run that left something for a person (where 0.3.0 exited 2), 4 a run that could not do all its work.
+- **BREAKING**: Changed the exit statuses to the Pimalaya contract: 2 a refused command line, 3 a run that left something for a person (2 in 0.3.0), 4 a run that could not do all its work.
 
   Under `--json`, a refused command line prints the failure object coded `usage-invalid`.
 
-- **BREAKING**: Changed `check` into `account check`, `check` staying a hidden alias: it checks every endpoint and exits 3 when one does not answer, where it failed on the first.
+- **BREAKING**: Changed the `--json` results of `sync`, `init` and `account check` to list every account under `accounts`, a sync's report under `.accounts[].report`.
+- **BREAKING**: Changed every `--json` output to print every key it declares (an empty list as `[]`, an absent value as `null`), one value per line when piped.
+- **BREAKING**: Changed a sync report's patches into the `collectionPatch` and `itemPatch` arrays of the hunks applied.
+- **BREAKING**: Changed every failure of a sync report into one row of `errors`, tagged by `kind`.
 
-  Each row lists the source's collections with their roles, its capabilities and its SMTP channel (opened without sending), and `orphans` lists the accounts the store holds that the configuration no longer names.
+  A row is pimalaya-cli's item error `{id, code, error, sources}` then the keys its kind needs. The kinds are `collection-patch`, `item-patch`, `failures`, `rejected`, `duplicates` (0.3.0's `refused`), `refusals`, `submitted`, `intents` and `unreached`.
 
-- **BREAKING**: Changed `account check` to print pimalaya-cli's account check: each account's endpoints under `backends` (was `sources`), each row the shared `{backend, ok, code, error, tls}` then `source`, `collections`, `capabilities` and `smtp`, the account's `mode` after them, and the text one block of fields per account.
+  A `rejected`, `duplicates` or `refusals` row and a parked send or intent exit 3, any other row 4.
 
-- **BREAKING**: Changed `collection.delete` to default to false: set it on each endpoint whose collection deletions should reach the other.
+- **BREAKING**: Changed a parked queue row, of a sync and of `sync --queue-only`, to read as `pimdir queue list` prints a row.
 
-- **BREAKING**: Changed the configuration to refuse every key neverest does not read, at every level, as an unknown field: a source table naming an unknown key or two backend tables is refused, and so is every key an earlier neverest read.
+  Its keys are `row` (was `id`), `handle`, `kind`, `collection`, `linkId`, `itemId`, `producer`, `queuedAt`, `attempts`, `unconfirmed` and `error`.
 
-- **BREAKING**: Changed Microsoft Graph to one `msgraph` table, its session once and its domains under `msgraph.mail`, `msgraph.contact` and `msgraph.calendar`, where `msgraph-contacts` and `msgraph-calendar` were tables of their own.
+- **BREAKING**: Changed the `conflict` commands to print an item's `id` as a string and its handle on the source as `remoteId`.
 
-  Each domain is a source of its own, named `msgraph-mail`, `msgraph-contact` or `msgraph-calendar`. An `msgraph` table naming no domain is refused: add `msgraph.mail = true` to sync mail.
+  `conflict show --json` prints each body as `{contents, encoding}`: the text when it is valid UTF-8, its base64 otherwise, `null` when absent. A sync report's conflict row prints the `id` `conflict resolve` takes and the `collection` as `conflict list` spells it.
 
-- **BREAKING**: Changed `conflict.merger` into `contact.merger` and `calendar.merger`, one merger a kind, where one command was handed cards and events alike.
+- **BREAKING**: Changed the conflicts to include an item's own conflict, when two endpoints of an account disagree.
 
-  `conflict resolve --interactive` runs the merger of the conflict's kind, and refuses naming the key when that kind has none.
+  `conflict list`, `show` and `resolve` name it with `source` and `remoteId` `null`, a run merges it against the body the endpoints last agreed on, and `outstandingConflicts` counts it.
 
-- **BREAKING**: Changed the `dav` cargo feature into `carddav` and `caldav`, each named after its configuration table.
+- **BREAKING**: Changed `check` into `account check`, `check` staying a hidden alias.
 
+  It checks every endpoint and exits 3 when one does not answer, where it failed on the first. `orphans` lists the accounts the store holds that the configuration no longer names.
+
+  Each account lists its endpoints under `backends` (was `sources`), each row `{backend, ok, code, error, tls}` then `source`, `collections` with their roles, `capabilities` and `smtp` (opened without sending), then the account's `mode`.
+
+- **BREAKING**: Changed the configuration to refuse every key neverest does not read, at every level, every key an earlier neverest read included.
+- **BREAKING**: Changed Microsoft Graph to one `msgraph` table, its domains under `msgraph.mail`, `msgraph.contact` and `msgraph.calendar`.
+
+  The `msgraph-contacts` and `msgraph-calendar` tables are gone. Each domain is a source named `msgraph-mail`, `msgraph-contact` or `msgraph-calendar`; an `msgraph` table naming no domain is refused, so add `msgraph.mail = true` to sync mail.
+
+- **BREAKING**: Changed `pool-size` into a key of the Graph domain tables alone; IMAP connections are bounded by `connections`.
+- **BREAKING**: Changed `conflict.merger` into `contact.merger` and `calendar.merger`, written once above the accounts.
+
+  An account naming its own overrides it. `conflict resolve --interactive` runs the merger of the conflict's kind, and refuses naming the key when that kind has none.
+
+- **BREAKING**: Changed the `dav` cargo feature into `carddav` and `caldav`.
 - **BREAKING**: Changed `-c` to take one path, repeated to merge several files in order, where it split one value on `:`.
+- **BREAKING**: Changed `collection.delete` to default to false.
 
-- **BREAKING**: Changed submission to at-most-once: a send that may have been delivered despite failing is parked as unconfirmed and never sent again, a run killed mid-send included.
+  Set it on each endpoint whose collection deletions should reach the other.
 
-  A `submit` naming its sending source is sent by that source alone, and one without a recipient parks.
+- **BREAKING**: Changed a target's `smtp` table into a configuration error.
 
-- **BREAKING**: Changed a store another user can read to be refused (`store-exposed`): `chmod 700` its directory and `chmod 600` its pimdir.db.
+  An account sends through a source, and a queued send naming a target parks.
 
-- Changed the text output to plain lines: no spinner and no colour.
+- **BREAKING**: Changed a configured host that is not ASCII into a load error naming its Punycode form (`xn--...`).
+- **BREAKING**: Changed a store another user can read to be refused (`store-exposed`).
 
-- Changed `completion`, `manual` and `json-schema` without their names or `--dir` into a refused command line, exit 2, coded `usage-invalid` under `--json`, where they failed with exit 1.
+  `chmod 700` its directory and `chmod 600` its pimdir.db.
 
-- Changed a bare `neverest` without a configuration to fail (exit 1), showing a person at a terminal the commands creating one from the shipped sample, where it offered the wizard.
+- **BREAKING**: Changed submission to at-most-once.
 
+  A send that may have been delivered despite failing parks as unconfirmed and is never sent again, a run killed mid-send included. A `submit` naming its sending source is sent by that source alone, and one without a recipient parks.
+
+- **BREAKING**: Changed `sync --reset` to refuse while the account holds work no server has.
+
+  A queued or parked action always refuses it. Conflicts, unpushed changes, retained items and items holding local properties (a label) refuse it unless `--force` drops them.
+
+- **BREAKING**: Changed the text output to plain lines on stdout before the result, with no spinner and no colour.
+
+  A full `sync` prints its progress to a pipe too, a download once per percent; `account check`, `init`, `sync --queue-only` and `sync --index-only` print it on a terminal alone. Scripts read `--json`, whose last line is the result.
+
+- Changed `init` to add an account to the shared store, creating it when there is none, and to leave an initialized account as it is.
+- Changed a run over a store another run holds to report its accounts `busy` and exit 4 after the bounded wait.
+- Changed `completion`, `manual` and `json-schema` without their names or `--dir` into a refused command line (exit 2, coded `usage-invalid`).
+- Changed a bare `neverest` without a configuration to fail (exit 1), showing a person at a terminal the commands creating one from the shipped sample.
 - Changed config.sample.toml, rewritten and shipped as share/doc/neverest/config.sample.toml.
-
-- Changed `init` to add an account to the shared store, creating it when there is none, and to leave an initialized account as it is, where it refused.
-
-- Changed a run over a store another run holds to report its accounts `busy` and exit 4 after the bounded wait, where it failed.
-
-- Changed a frontend's edit or move queued over an unsettled conflict to park, naming the conflict, where the edit dropped the server's body and the move hid the conflict.
-
+- Changed a frontend's edit or move queued over an unsettled conflict to park, naming the conflict.
 - Changed a Gmail source to refuse a keyword other than `$Important` before it is queued, where Gmail dropped it.
+- Changed Google Calendar writes to notify the attendees (`sendUpdates`).
+- Changed Google and Graph conference links into standard `CONFERENCE` properties (RFC 7986).
+- Changed syncs to read less from Microsoft Graph, Gmail, Google People, Google Calendar, CalDAV and CardDAV.
 
-- Changed Google Calendar writes to notify the attendees (`sendUpdates`), and Graph and Google conference links to standard `CONFERENCE` properties (RFC 7986).
-
-- Changed Microsoft Graph and Gmail mail syncs to read less: Graph opens three connections (or `pool-size`), fetches bodies in JSON batches and reads its delta page by page, and Gmail reads each message once a run whatever its labels.
+  Graph opens three connections (or `pool-size`), Gmail reads a message once a run whatever its labels, and Google People reads 200 contacts a request. A settled collection, a quiet Gmail label or a DAV collection whose sync token has not moved is listed once a run, or not at all.
 
 - Changed `store.root` and `tls.cert` to expand `$VAR` as well as `~`.
+- Changed a failing secret command's error to end with ", run `<command>` yourself to see why".
 
 ### Removed
 
 - **BREAKING**: Removed the configuration wizard: the `configure` command (alias `cfg`) and the offer a bare `neverest` made without a configuration.
-
 - **BREAKING**: Removed the `default` account key, now refused as unknown: `-a` names the accounts a command runs over.
-
 - **BREAKING**: Removed the `mailbox`, `message` and `filters` aliases of `collection`, `item` and `collection.filter`.
-
 - **BREAKING**: Removed the `NEVEREST_CONFIG` environment variable: pass `-c`.
-
 - Removed the `NEVEREST_PROFILE` profiler.
 
 ### Fixed
 
-- Fixed a collection deleted on the server staying in the store with its items, the report empty: an account with no target retires it and reports a `retire` collection hunk. One a queued or parked row anchors on is kept, reported waiting for a person (exit 3).
-- Fixed a queued delete the server's edit overruled reading as applied, the item back with no word: the run reports a `delete-overruled` item hunk naming it.
-- Fixed the copy of a message sent through Gmail or Graph being dropped when asked outside Sent, the row read `applied`: Gmail adds the copy's label to the sent message; Graph declares `mail.submit.copy` `partial` (Sent Items only), so such a send is refused when queued, and parked unsent when queued before; an IMAP pair filing in Sent and Gmail over SMTP file a copy elsewhere as an `add`.
-- Fixed `sync -m` and `sync -x` unable to name an iCloud or Google calendar, listed under an opaque id: an entry no id matches also matches the collections it is the display name of. A configured `collection.filter` still matches ids alone.
-- Fixed an event deleted on a Graph calendar right after the run that created it coming back: the create sent an empty body, which Exchange rewrites a moment later, so the delete met a server edit and lost. An event without a description is created with no body. One with a description is still rewritten.
-- Fixed a message sent in the run that renamed the folder its copy goes to being left unconfirmed, its copy never filed: the copy is filed in the renamed folder.
-- Fixed a bare `conflict list` failing on the first account not initialized: it lists the others and names the skipped ones under `uninitialized`. Naming one with `-a` still fails.
-- Fixed a collection rename a sync performed for a frontend leaving the run "already in sync": it is a `rename` collection hunk.
-- Fixed a collection new on the server landing in the store unreported ("already in sync", `collectionPatch` empty): it is a `fetch` collection hunk.
-- Fixed a dry run printing `applied N queued action(s)`: it prints `would apply N queued action(s)`, the queue left as it was.
-- Fixed the text report printing `Errors (1):` over an empty list when the error was a failed send or intent: the list names it.
-- Fixed `sync --init --dry-run` initializing the accounts and creating the store: it initializes nothing, names the accounts it would initialize under `initialized`, and plans their sync on its replica.
-- Fixed an event asking a Google Meet with no attendee getting no Meet: it was imported, and Google leaves an imported event's Meet request pending for ever. It is inserted, telling nobody.
-- Fixed `sync --reset` without `--force` dropping the local properties of the account's items, a label among them, which no server holds: it refuses, naming the items holding one and `--force`.
-- Fixed RUSTSEC-2026-0592 by bumping url to 2.5.9.
-- Fixed a queued move reporting its create twice, once beside its remove and once by the collection it enters, when that collection was itemized first: it is reported beside its remove alone.
-- Fixed a queued move reporting its create twice when the collection it enters was itemized after the remove was pushed, as a message moved to the trash on Graph or IMAP could be: the report holds each create once.
-- Fixed a flag change queued before a move of the same message being undone on the server and in the store when the move states its member (IMAP `UID MOVE` answering `COPYUID`): io-pimdir 0.20 lands the moved message on the flags it carries, so the queued set is pushed (pimdir sync-draft-15, vector 214).
-- Fixed a message moved into an IMAP mailbox holding another message with the same `Message-ID` being bound to that other message, its own body then filed under the wrong UID: the move hands io-pimdir the UID the server's `COPYUID` names, and the store binds the moved message there at once. A move into a mailbox whose other message the store listed before still shows that message with the moved one's body, until io-imap can ask for `EMAILID`.
-- Fixed IMAP moves on servers advertising no MOVE, such as OVH, which answered `UID MOVE` with `BAD` and then closed the connection: the move is a `UID COPY`, then the expunge of the source UIDs alone, and a server without UIDPLUS either refuses it before any command ([#35](https://github.com/pimalaya/neverest/issues/35)).
-- Fixed a CalDAV or CardDAV member the server lists with an error (a 403, a 5xx) reading as deleted in a full listing, and its delete pushed to the other endpoints: the listing is incomplete, its checkpoint kept, and it is reported under `failures` as a `listing` step naming each such member, the run exiting 4.
-- Fixed an edit made on a one-way target alone being pulled into the store, and from there into the other targets, rather than overwritten: a target syncs under io-pimdir's `KeepLocal`, its edit kept as a retained item and listed under `overruled`, and the store's body pushed back over it.
-- Fixed the messages a rebuild of a renumbered mailbox found new going unreported: the run reports them added.
-- Fixed a termination signal while a sync waits for another run's store lock, or while `sync --init` initializes, ending the process with no result: the shutdown is installed first, so the run prints its result, the accounts not reached interrupted, and exits 4.
+- Fixed an IMAP delete expunging every message marked `\Deleted` in its mailbox.
 
-- Fixed `sync --queue-only` failing the whole command, uncoded, over a malformed queue row: the drain of that store's accounts fails coded `action-malformed` (exit 4), as a sync reports it.
-
-- Fixed `sync --queue-only` reporting only the rows its own drain parked and exiting 0 over a row the store already held parked: it reports every parked row of the account's collections and exits 3, as a sync does.
-
-- Fixed `conflict resolve --interactive` exiting 0 when the merger decided nothing: it prints `aborted` and exits 3.
-
-- Fixed a bare `neverest --json` printing the text help: it fails coded `usage-invalid` and exits 2, through pimalaya-cli.
-
-- Fixed the account mode's sentence for one or several sources (`imap syncs both ways`, `caldav and carddav each sync both ways`) and the plural of `1 collection` in `account check`.
-
-- Fixed an IMAP append on a server without UIDPLUS being bound to another message whose `Message-ID` holds its own (`a@x` in `<a@x.y>`) when that one arrived right after: the search now names the whole bracketed `Message-ID`.
-
-- Fixed a move between address books or calendars reporting only its delete: the create its relocation delivers is now listed beside it, as the dry run lists it.
-
-- Fixed a flag kept in the store only on a card or a calendar item being reported as a pushed hunk on every run: nothing pushes it, so the run no longer lists it.
-
-- Fixed `sync --reset` without `--force` dropping retained items: it now reads them from the store's trash, which the sync seam never loads, and refuses while one is there.
-
-- Fixed the store's collector running beside a verb neverest drives: its paged drive loop now holds io-pimdir's in-flight guard, so a collection between two pages refuses rather than take a body a chunk streamed and the next attaches.
-
-- Fixed a Graph series with no end starting more than five years ago (a birthday Outlook stores from 1604) syncing without its older exceptions and saying nothing: the run lists it under `clipped` with the date its exceptions were read from, as a warning.
-
-  Its body is still synced; an exception older than that date stays unread.
-
-- Fixed the exceptions of such a series older than that date being deleted on the other endpoints: Graph leaves them unread, so they are kept from the last synced body rather than taken as deleted, while an exception inside the window Graph no longer holds is still a deletion.
-
-- Fixed a Gmail source given up on its quota printing `code: null` on the rows of the collections it was reading: a daily quota, a refusal repeated past the waits or a minute's wait over `--max-wait` reads `rate-limited`, and a read refused for rights `permission-denied`.
-
-- Fixed `sync --dry-run` copying the store database and its WAL as files while a frontend may write them: the replica takes it as one snapshot (`VACUUM INTO`) under the shared staging lock, and copies no lock file.
-
-- Fixed install.sh saving an HTTP error page as the archive and letting `tar` fail on it: it downloads with `curl -fsSLo` and stops on the error.
-- Fixed a first sync over several connections going quiet after its scan: the bodies still downloading once the last collection is listed print their `Downloading` count.
-
-- Fixed a long download reading as stuck in text mode, which printed its first and last count alone: it prints once per percent, as `--json` does, its line naming the percent.
-
-- Fixed `sync --declare-only` performing a queued collection create, rename or delete the source's rights no longer allow: it parks.
-
-- Fixed a calendar reply or cancel with a misspelled member acting on the whole series: it parks.
-
-- Fixed a stop signal waiting out a throttled provider for minutes: the wait is cut short.
-
-- Fixed `conflict resolve` failing a resolution it applied when another app's queued row parked in the same drain.
-
-- Fixed text output printing what servers wrote raw (bodies, names, ids, refusal reasons): every line goes through the sanitizer, JSON unchanged.
-
-- Fixed Google Calendar and Graph contacts and calendars declaring item moves they refuse: frontends are refused at the gate rather than every push failing and duplicating the item.
-
-- Fixed a merged event holding an alarm getting its `SEQUENCE` twice, once inside the `VALARM`.
-
-- Fixed a write a source's rights forbid (`item.create`, `item.update`, `item.delete`, `flag.update` false) being listed as applied on every run: it is counted under `forbidden` and the patch lists only what was written.
-
-- Fixed a CalDAV or CardDAV listing the server cut short ending the run as in sync: it is reported under `failures` as a `listing` step and the run exits 4.
-
-- Fixed the text output of an incomplete run (interrupted, an endpoint unreached, a source throttled) saying the account was already in sync: it says it is incomplete and lists what it did not reach.
-
-- Fixed an IMAP push aborting on every run over a message flagged `\Junk`, `\Important` or `\Forwarded`: such a keyword is written in its `$` form.
-
-- Fixed an IMAP relay that met a refused message failing its whole mailbox on every run, and one appending a body longer than listed cut: the message is reported rejected and the relay goes on, and a body of another size never completes its append.
-
-- Fixed a pair collection whose sync failed exiting 0 as "already in sync": it is reported as a `sync` hunk with its error and the run exits 4.
-
-- Fixed store steps that failed (reading or draining the queue, landing downloaded bodies, counting conflicts) leaving the result clean: each is reported under `failures` and the run exits 4.
-
-- Fixed `sync --queue-only` exiting 0 when it parked a row: it exits 3, as a sync does.
-
-- Fixed an IMAP delete expunging every message marked `\Deleted` in its mailbox: it sends `UID EXPUNGE` on its UID, and a server without UIDPLUS gets no delete.
+  It sends `UID EXPUNGE` on its UID, and a server without UIDPLUS gets no delete.
 
 - Fixed an IMAP `SELECT` answer without `EXISTS` being read as an empty mailbox, which deleted every message.
+- Fixed a listing cut short being read as complete, which deleted what it left out.
 
-- Fixed a renumbered IMAP mailbox (a moved `UIDVALIDITY`) pushing flags to the wrong messages and dropping every message as deleted: it is rekeyed by link id first.
+  This covers an IMAP row that does not decode, and a CalDAV or CardDAV answer truncated, cut short or listing a member with an error. It is reported as a `failures` error and the run exits 4.
 
-- Fixed an IMAP server advertising QRESYNC and enabling nothing (iCloud) never bringing new mail, flag changes or expunges: QRESYNC is used only when `ENABLED` names it.
+- Fixed a renumbered IMAP mailbox (a moved `UIDVALIDITY`) pushing flags to the wrong messages and dropping every message as deleted.
 
-- Fixed an IMAP body download after a failed batch storing a message under another's handle: the connection is opened again first.
+  It is rekeyed by link id, and the messages the rebuild finds new are reported added.
+
+- Fixed an IMAP server advertising QRESYNC and enabling nothing (iCloud) never bringing new mail, flag changes or expunges.
+- Fixed IMAP moves on servers advertising no MOVE, such as OVH ([#35](https://github.com/pimalaya/neverest/issues/35)).
+
+  The move is a `UID COPY` then the expunge of the source UIDs alone; a server without UIDPLUS refuses it before any command.
+
+- Fixed an IMAP body download after a failed batch storing a message under another's handle.
 
   A message over 100 MiB is fetched alone, and an HTTP response over 256 MiB fails rather than being buffered.
 
-- Fixed a listing cut short being read as complete, which deleted what it left out: an IMAP row that does not decode, or a CalDAV or CardDAV answer truncated or no whole multistatus.
+- Fixed an IMAP push aborting on every run over a message flagged `\Junk`, `\Important` or `\Forwarded`.
+- Fixed an IMAP append on a server without UIDPLUS being bound to another message whose `Message-ID` holds its own.
+- Fixed a message moved into an IMAP mailbox holding another with the same `Message-ID` being bound to that other message.
 
-- Fixed a body deleted between its listing and its download failing the run: a read answered 404 or 410 is gone.
+  A twin the store listed before the move still shows the moved message's body.
 
-- Fixed a flag another client changed between a run's listing and its push being overwritten: a push names only the flags it adds and removes.
+- Fixed an IMAP relay that met a refused message failing its whole mailbox on every run.
 
-- Fixed `sync --accept-mode` being refused like the run it answers: it lets that run through and records the new mode.
+  The message is reported rejected and the relay goes on. A body of another size than listed never completes its append.
 
-- Fixed a one-way account parking a divergence on its target: the store's body is pushed, the target's edit kept as a retained item under `overruled`.
+- Fixed CalDAV and CardDAV writes retried or misread every run: a delete of a member already gone, a 207 with a failed member, a `UID` holding `:`.
+- Fixed a body deleted between its listing and its download failing the run.
+- Fixed a write on an item already gone failing every run on Microsoft Graph, Gmail, Google Calendar and Google People.
+- Fixed a flag another client changed between a run's listing and its push being overwritten.
+- Fixed a collection deleted on the server staying in the store with its items.
 
-- Fixed two endpoints holding one `UID` under two bodies before their first sync ending with the source's body on both: the divergence parks ([#31](https://github.com/pimalaya/neverest/issues/31)).
+  An account with no target retires it, reported as a `retire` collection hunk. One a queued or parked row anchors on is kept, reported waiting for a person (exit 3).
 
-- Fixed a CalDAV or CardDAV write retried or misread every run: a delete of a member already gone is done, a 207 with a failed member is a failure, and a `UID` holding `:` is one resource.
+- Fixed a collection new on the server landing in the store unreported: it is a `fetch` collection hunk.
+- Fixed a queued delete the server's edit overruled reading as applied: it is a `delete-overruled` item hunk.
+- Fixed a queued move reporting its create twice.
+- Fixed a move between address books or calendars reporting only its delete.
+- Fixed a flag kept in the store alone, on a card or a calendar item, reported as pushed on every run.
+- Fixed a write a source's rights forbid being listed as applied on every run: it is counted under `forbidden`.
+- Fixed a pair collection whose sync failed exiting 0 as "already in sync": it is a `sync` hunk with its error (exit 4).
+- Fixed failed store steps (reading or draining the queue, landing bodies, counting conflicts) leaving the result clean: each is a `failures` error (exit 4).
+- Fixed a text run whose every change failed reading as partially synchronized: it prints "not synchronized: 3 errors".
+- Fixed a dry run printing `applied N queued action(s)`: it prints `would apply N queued action(s)`.
+- Fixed `sync --dry-run` copying a store a frontend may be writing as files: its replica is one snapshot.
+- Fixed an edit made on a one-way target alone being pulled into the store, or parked as a divergence.
 
-- Fixed Microsoft Graph recurring series failing to read over more than five years or with a `numbered` or `noEnd` range (the Birthdays calendar), or doubling their cancelled occurrences.
+  The store's body is pushed back over it, the target's edit kept as a retained item under `overruled`.
+
+- Fixed two endpoints holding one `UID` under two bodies before their first sync ending with the source's body on both: it parks ([#31](https://github.com/pimalaya/neverest/issues/31)).
+- Fixed `sync --accept-mode` being refused like the run it answers.
+- Fixed `sync -m` and `sync -x` unable to name an iCloud or Google calendar listed under an opaque id.
+
+  An entry no id matches also matches the collections it is the display name of. A configured `collection.filter` still matches ids alone.
+
+- Fixed a target's `collection.filter` being ignored.
+- Fixed `conflict resolve --interactive` exiting 0 when the merger decided nothing: it prints `aborted` and exits 3.
+- Fixed `conflict resolve` and the conflict auto-merge misjudging their own result when another app's queued row parked in the same drain.
+- Fixed a merged event holding an alarm getting its `SEQUENCE` twice, once inside the `VALARM`.
+- Fixed a card or an event whose `UID` follows a blank line or a large inline photo being copied each way between two endpoints.
+- Fixed a message stored twice when its listing and its body key it differently (a commented or folded `Message-ID`, a field Graph decodes otherwise).
+- Fixed a second rekey or a delivered copy making another source remove a message from its server.
+- Fixed a queued move into its own collection deleting the item: it parks.
+- Fixed a joined mail binding not pushing its flags.
+- Fixed a locally edited contact or event losing its summary, and an item listed with the summary of a body it does not hold.
+- Fixed a refused offered create being pushed and refused every run: it is held as that source's pending create.
+- Fixed a hostile time zone rule aborting a calendar pull.
+- Fixed a recurrence rule's `UNTIL` shifted wrongly between UTC and a series zone only the time zone database knows.
+- Fixed Microsoft Graph recurring series failing to read over more than five years or with a `numbered` or `noEnd` range, or doubling their cancelled occurrences.
+
+  An endless series starting earlier (a birthday Outlook stores from 1604) is listed under `clipped` with the date its exceptions are read from. Older exceptions keep their last synced body.
 
 - Fixed the date of a Microsoft Graph message, which was its arrival time: it is its `Date` header.
+- Fixed Microsoft Graph contact folders past the first page of 100 or below the second level going unread.
+- Fixed Microsoft Graph mail folders below the second level never syncing, and a top-level `A/B` colliding with the child `B` of `A`.
 
-  Graph contact folders are also read past the first page of 100 and past two levels.
+  A `/` in a folder name is escaped as `%2F` in its id.
 
-- Fixed a write on a Microsoft Graph or Gmail item already gone failing every run: it is done.
+- Fixed an event deleted on a Graph calendar right after its creation coming back.
 
-- Fixed a Google Calendar or Google People request written to a stream that failed during the one before: the stream is opened again, as Gmail did.
+  An event without a description is created with no body. Exchange still rewrites one with a description a moment later.
+
+- Fixed an event at a floating time queued on a Google or Graph calendar being refused by every sync.
+
+  It is anchored in the calendar's zone, else the user's, and a recurrence bound is written in UTC.
 
 - Fixed hidden Google calendars missing from the listing, so hiding one in the Google UI read as deleting it.
-
 - Fixed a Google contact update erasing what a vCard cannot show: an organization after the first, a relation other than spouse or child, a custom type.
+- Fixed a Google Calendar or Google People request written to a stream that failed during the one before.
+- Fixed a Google contacts listing answering a negative `totalItems` failing to parse.
+- Fixed a Google calendar that refuses every sync token, a public holiday one, warning at each run.
+- Fixed a delete or a move out of Gmail's Drafts or Sent being refused by Gmail on every run.
 
-- Fixed an event at a floating time queued on a Google or Graph calendar being refused by every sync: it is anchored in the calendar's zone, else the user's.
-
-- Fixed a message keyed otherwise by its listing than by its body, so stored twice: a `Message-ID` wrapped in comments, a header Gmail serves folded, a field Graph decodes otherwise.
+  A delete trashes the message, and a move other than to the trash is refused at once.
 
 - Fixed a send the SMTP server refused for a sending rate or quota being parked: it stays queued for a later run.
+- Fixed a credential command prompting for a password (`systemd-ask-password`) hanging the run.
+- Fixed a bare `neverest --json` printing the text help: it fails coded `usage-invalid` (exit 2).
+- Fixed install.sh saving an HTTP error page as the archive.
 
-- Fixed a credential command prompting for a password (`systemd-ask-password`) hanging the run: it reads the terminal.
+### Security
 
-- Fixed a Google Calendar or People delete of an item gone already being held as refused for good: it counts as done, as on the other sources.
-
-- Fixed a calendar reply or cancellation a killed run left half done being sent again: it parks unconfirmed.
-
-- Fixed the conflict auto-merge counting another app's parked row as its own and leaving the account's other applied rows unreported.
-
-- Fixed a floating recurring event queued on Google or Graph keeping a floating `UNTIL` beside its anchored start: the bound is written in UTC.
-
-- Fixed Google Calendar reading every event again after a listing that returned it, and a source no write can reach being listed twice a run.
-
-- Fixed a recurring meeting created on Google or Graph mailing its attendees an invitation and a cancellation on every run when one of its modified occurrences did not land: the attendees are added last, once the series landed whole.
-
-- Fixed `sync --index-only` over an uninitialized account failing the command (exit 1): the account is reported failed and the run exits 4, as a sync does.
-
-- Fixed a delete or a move out of Gmail's Drafts or Sent being refused by Gmail on every run: a delete trashes the message, a move other than to the trash is refused at once.
-
-- Fixed a contact whose `UID` follows a blank line or a large inline photo being keyed by a hash of its first bytes, so the same contact on both endpoints of a pair was copied each way: cards and events are named from their whole body.
-
-- Fixed Graph mail folders below the second level never syncing, and a top-level folder named `A/B` colliding with the child `B` of `A`: every level is listed, a `/` in a folder name escaped as `%2F` in its id.
-
-- Fixed a text run whose every change failed, offline say, printing "partially synchronized: 3 hunks, 3 errors": it prints "not synchronized: 3 errors", and a partial run counts the changes it applied alone.
-
-- Fixed a Google calendar that refuses every sync token, a public holiday one, warning at each run: an expired token is logged at debug, the calendar listed whole as before.
-
+- Fixed text output printing what servers wrote raw (bodies, names, ids, refusal reasons): every text line and error report goes through the sanitizer.
+- Changed `--log-file` to create its file at 0600 and refuse a symbolic link.
+- Changed a TOML parse error to no longer print the source line, and a refused `Secret` to never echo its value.
+- Fixed RUSTSEC-2026-0346 to RUSTSEC-2026-0349 by bumping rustls to 0.23.46.
 - Fixed RUSTSEC-2026-0382, RUSTSEC-2026-0383, RUSTSEC-2026-0385 and RUSTSEC-2026-0387 by bumping crypto-bigint, ctutils, rustls-webpki and webpki-root-certs.
-
-- Fixed an item listed with the summary and sort key of a body it does not hold: a rekey carrying a local edit in conflict took the server's body's, an upgrade under a local edit the base's, and a bodiless pull the unread body's (io-pimdir 0.19.1).
+- Fixed RUSTSEC-2026-0592 by bumping url to 2.5.9.
 
 ## [0.3.0] - 2026-10-02
 

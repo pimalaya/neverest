@@ -9,12 +9,38 @@
   </p>
 </div>
 
+```sh
+$ neverest sync
+```
+
+```text
+[1/1] Syncing account personal
+Resolved credentials
+Opened carddav
+Listed 1 collection(s) on carddav
+Scanning carddav (0/1)
+Scanning carddav (1/1)
+
+Collection patches (1):
+ - fetch collection book from carddav
+
+Item patches (2):
+ - fetch item ada in book from carddav
+ - fetch item alan in book from carddav
+
+Search index:
+ - folded 2 change(s), 2 new body(ies), current
+
+Account personal synchronized: 3 hunks
+```
+
 ## Table of contents
 
 - [Features](#features)
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
+- [Alternatives](#alternatives)
 - [AI policy](https://github.com/pimalaya/.github/blob/master/AI_POLICY.md)
 - [License](#license)
 - [Social](#social)
@@ -35,9 +61,55 @@
 ## Installation
 
 <details>
+  <summary>Debian, Ubuntu</summary>
+
+  Neverest is not in the official repositories yet, but the signed APT repository of [pkg.pimalaya.org](https://pkg.pimalaya.org) ships the latest release with its man pages and shell completions. Add the repository once:
+
+  ```sh
+  sudo install -d -m 0755 /etc/apt/keyrings
+  curl -fsSL https://pkg.pimalaya.org/pimalaya.asc | sudo tee /etc/apt/keyrings/pimalaya.asc >/dev/null
+  sudo tee /etc/apt/sources.list.d/pimalaya.sources >/dev/null <<EOF
+  Types: deb
+  URIs: https://pkg.pimalaya.org/apt
+  Suites: stable
+  Components: main
+  Signed-By: /etc/apt/keyrings/pimalaya.asc
+  EOF
+  sudo apt update
+  ```
+
+  Then install Neverest:
+
+  ```sh
+  sudo apt install neverest
+  ```
+</details>
+
+<details>
+  <summary>Fedora, RHEL, Rocky Linux, AlmaLinux</summary>
+
+  Neverest is not in the official repositories yet, but the signed DNF repository of [pkg.pimalaya.org](https://pkg.pimalaya.org) ships the latest release with its man pages and shell completions:
+
+  ```sh
+  sudo curl -fsSL -o /etc/yum.repos.d/pimalaya.repo https://pkg.pimalaya.org/pimalaya.repo
+  sudo dnf install neverest
+  ```
+</details>
+
+<details>
+  <summary>Homebrew (macOS, Linux)</summary>
+
+  Neverest is not in homebrew-core yet, but the [pimalaya/tap](https://github.com/pimalaya/homebrew-tap) formula installs the latest release with its man pages and shell completions:
+
+  ```sh
+  brew install pimalaya/tap/neverest
+  ```
+</details>
+
+<details>
   <summary>Pre-built binary</summary>
 
-  Neverest can be installed with the installer:
+  For other systems, Neverest can be installed with the installer:
 
   *As root:*
 
@@ -51,7 +123,7 @@
   curl -sSL https://raw.githubusercontent.com/pimalaya/neverest/master/install.sh | PREFIX=~/.local sh
   ```
 
-  Neverest v1 is not released yet, so the installer has nothing to fetch. Until then, check out the [releases](https://github.com/pimalaya/neverest/actions/workflows/releases.yml) GitHub workflow and look for the *Artifacts* section.
+  These commands install the latest [release](https://github.com/pimalaya/neverest/releases), built with the default cargo features. For a build of `master`, check out the [releases](https://github.com/pimalaya/neverest/actions/workflows/releases.yml) GitHub workflow and look for the *Artifacts* section.
 </details>
 
 <details>
@@ -132,18 +204,26 @@ neverest sync
 Every command covers every account unless `-a` names some, and its `--help` details its flags, exit codes and JSON output. More use cases:
 
 ```sh
-# Apply what any other client queued, offline
+# Sync the inbox of the work account only
+neverest sync -a work -m inbox
+
+# Apply what himalaya, cardamum or calendula queued, offline
 neverest sync --queue-only
 
 # Build the store's search index whole, for a large first sync
 neverest sync --index-only
 
-# Settle what both sides changed differently
+# Settle what both sides changed differently, through the configured merger
 neverest conflict list
 neverest conflict resolve <id> -a work --interactive
 ```
 
-`--interactive` runs the merger the configuration names once for every account, `contact.merger` for a card and `calendar.merger` for an event, an account naming its own overriding it (see [config.sample.toml](config.sample.toml)).
+## Alternatives
+
+- [mbsync](https://isync.sourceforge.io/): syncs IMAP mailboxes with a Maildir, mail only
+- [OfflineIMAP](https://github.com/OfflineIMAP/offlineimap3): syncs IMAP mailboxes with a Maildir, in Python
+- [vdirsyncer](https://github.com/pimutils/vdirsyncer): syncs CardDAV and CalDAV collections with a vdir, contacts and calendars only
+- [pimsync](https://pimsync.whynothugo.nl/): the Rust successor of vdirsyncer, contacts and calendars only
 
 ## License
 

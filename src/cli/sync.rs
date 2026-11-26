@@ -819,13 +819,19 @@ fn reset_account(dir: &Path, account: &str, config: &AccountConfig, force: bool)
 /// provisional (pimdir SYNC §2), counts as unpushed. The hub holds live
 /// items only, so the retained ones are read from the trash. Live items
 /// holding a local property count too: the store drops a property with the
-/// last row of its item.
+/// last row of its item. The attachments collection is passed over: its
+/// stand-ins derive from the bodies the resync fetches again (pimdir STORAGE
+/// §14.3).
 fn pending_work(store: &PimdirStore, collections: &[PimdirCollection]) -> Result<Vec<String>> {
     const PAGE: usize = 512;
 
     let mut pending = Vec::new();
 
     for collection in collections {
+        if collection.role.as_deref() == Some("attachments") {
+            continue;
+        }
+
         let hub = store.load_hub(&collection.id)?;
         let (mut conflicts, mut retained, mut deletes, mut unpushed) = (0, 0, 0, 0);
 
@@ -1036,12 +1042,17 @@ mod tests {
     /// Bound to its source with the body as its base, so it is no work a
     /// server lacks, unless `based` is false: a create staged, never pushed.
     fn land(dir: &Path, account: &str, id: &str, based: bool) {
+        let body = format!("Message-ID: <{id}>\r\nSubject: {id}\r\n\r\nHello\r\n").into_bytes();
+        land_body(dir, account, id, based, body);
+    }
+
+    /// As [`land`], the message being `body`.
+    fn land_body(dir: &Path, account: &str, id: &str, based: bool, body: Vec<u8>) {
         let config = namespaced(account);
         if !StoreState::load(dir).unwrap().initialized(account) {
             StoreState::stamp(dir, account, &config.mode().unwrap()).unwrap();
         }
 
-        let body = format!("Message-ID: <{id}>\r\nSubject: {id}\r\n\r\nHello\r\n").into_bytes();
         let mut store = PimdirStore::open(dir)
             .unwrap()
             .for_account(account)
@@ -1135,6 +1146,35 @@ mod tests {
         let sidecar = StoreState::load(dir.path()).unwrap();
         assert!(!sidecar.account("work").unwrap().mode_accepted);
         assert!(sidecar.account("home").unwrap().mode_accepted);
+    }
+
+    /// The stand-ins a message's attachments leave in the account's
+    /// attachments collection are no work a server lacks: a plain reset
+    /// drops them with the message, and the resync files them again.
+    #[test]
+    fn a_reset_passes_over_the_attachment_stand_ins() {
+        let _owning = SPAWNS.read().unwrap_or_else(PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let body = b"Message-ID: <a1@x>\r\nSubject: a1\r\nMIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n\
+            Content-Type: text/plain\r\n\r\nHello\r\n--b\r\n\
+            Content-Type: application/pdf\r\n\
+            Content-Disposition: attachment; filename=a.pdf\r\n\r\n%PDF\r\n--b--\r\n";
+        land_body(dir.path(), "work", "a1@x", true, body.to_vec());
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        let collections = reader.list_collections_by_account(Some("work")).unwrap();
+        assert_eq!(collections.len(), 2);
+        drop(reader);
+
+        reset_account(dir.path(), "work", &namespaced("work"), false).unwrap();
+
+        let reader = PimdirReader::open(dir.path()).unwrap();
+        assert!(
+            reader
+                .list_collections_by_account(Some("work"))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A queued or parked action refuses the reset, forced or not, naming

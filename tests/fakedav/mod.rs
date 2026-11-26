@@ -32,6 +32,12 @@ pub struct Faults {
     /// The cards a listing names with a 403 row instead of their ETag, every
     /// `sync-collection` REPORT then listing every card.
     pub refused: Vec<&'static str>,
+    /// The cards of another book, `/dav/other/`, a `sync-collection` delta
+    /// lists as removed, as Stalwart leaks a sibling book's tombstones.
+    pub foreign_removed: Vec<&'static str>,
+    /// The cards of `/dav/other/` a `sync-collection` delta lists as
+    /// changed.
+    pub foreign_changed: Vec<&'static str>,
 }
 
 #[derive(Default)]
@@ -269,6 +275,19 @@ fn answer(
                     rows.push_str(&format!(
                         "<d:response><d:href>/dav/book/{name}</d:href>\
                          <d:status>HTTP/1.1 404 Not Found</d:status></d:response>"
+                    ));
+                }
+                for name in &state.faults.foreign_removed {
+                    rows.push_str(&format!(
+                        "<d:response><d:href>/dav/other/{name}</d:href>\
+                         <d:status>HTTP/1.1 404 Not Found</d:status></d:response>"
+                    ));
+                }
+                for name in &state.faults.foreign_changed {
+                    rows.push_str(&format!(
+                        "<d:response><d:href>/dav/other/{name}</d:href><d:propstat><d:prop>\
+                         <d:getetag>\"other\"</d:getetag></d:prop>\
+                         <d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"
                     ));
                 }
             }

@@ -615,3 +615,51 @@ fn a_book_whose_sync_token_did_not_move_is_not_listed() {
         "{report}"
     );
 }
+
+/// The UIDs of the live cards a lone source's store holds.
+fn store_names(home: &Path) -> Vec<String> {
+    use io_pimdir::client::reader::PimdirReader;
+
+    let reader = PimdirReader::open(home.join("store")).unwrap();
+    let mut names = Vec::new();
+    for collection in reader.list_collections().unwrap() {
+        if collection.kind != "text/vcard" {
+            continue;
+        }
+        for item in reader.list_items(&collection.id, None, 100).unwrap() {
+            if item.retention.is_none() {
+                names.push(item.link_id.0);
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+/// A delta naming members of another book keeps them out of this one's.
+///
+/// Stalwart lists a sibling book's tombstone in a book's `sync-collection`:
+/// keyed by its last segment, it pulled the deletion of the same-named card
+/// this book holds, and the token moved past it.
+#[test]
+fn a_delta_naming_another_book_s_members_leaves_this_book_as_it_is() {
+    let home = tempfile::tempdir().unwrap();
+    let dav = FakeDav::start();
+    dav.put("a.vcf", &card("a"));
+    let config = solo(home.path(), &dav);
+    let (code, report) = sync(home.path(), &config, &["--init"]);
+    assert_eq!(code, 0, "{report}");
+
+    dav.put("b.vcf", &card("b"));
+    dav.set_faults(Faults {
+        foreign_removed: vec!["a.vcf"],
+        foreign_changed: vec!["z.vcf"],
+        ..Faults::default()
+    });
+
+    for _ in 0..2 {
+        let (code, report) = sync(home.path(), &config, &[]);
+        assert_eq!(code, 0, "{report}");
+        assert_eq!(store_names(home.path()), ["a", "b"], "{report}");
+    }
+}

@@ -35,8 +35,9 @@ use io_webdav::{
     client::{WebdavClientStd, WebdavClientStdConnectOptions, WebdavClientStdError},
     rfc4791::calendar::{CALDAV, CaldavCalendar, CaldavCalendarPatch},
     rfc4918::{
-        WebdavAuth, WebdavProperty, collection_id, follow_redirects::WebdavFollowRedirectsError,
-        propfind::WebdavPropfind, resolve_href, send::WebdavSendError,
+        WebdavAuth, WebdavProperty, collection_id, collection_path,
+        follow_redirects::WebdavFollowRedirectsError, propfind::WebdavPropfind, resolve_href,
+        send::WebdavSendError,
     },
     rfc6352::addressbook::{CarddavAddressbook, CarddavAddressbookPatch},
     rfc6578::sync_collection::{
@@ -520,7 +521,8 @@ impl DavClient {
     /// parses every resource, one unparsable failing all.
     fn list(&mut self, collection: &str) -> Result<Enumeration, WebdavClientStdError> {
         let opts = WebdavSyncCollectionOptions { fallback: true };
-        let delta = self.sync_collection(collection, None, opts)?;
+        let mut delta = self.sync_collection(collection, None, opts)?;
+        self.keep_members(collection, &mut delta);
 
         if delta.truncated {
             warn!(
@@ -540,6 +542,41 @@ impl DavClient {
             checkpoint: Some(Vec::new()),
             ..Default::default()
         })
+    }
+
+    /// The URL `collection` is requested at, its members' hrefs checked
+    /// against it; `None` while the home set is unknown.
+    fn collection_url(&self, collection: &str) -> Option<Url> {
+        let home = match self.kind {
+            DavKind::Card => self.inner.addressbook_home_set.as_ref(),
+            DavKind::Cal => self.inner.calendar_home_set.as_ref(),
+        }?;
+        match collection.contains("://") {
+            true => Url::parse(collection).ok(),
+            false => resolve_href(home, &collection_path(home.path(), collection)),
+        }
+    }
+
+    /// Keeps the rows of `delta` naming a member of `collection`, warning
+    /// of every other one.
+    ///
+    /// Stalwart lists a sibling book's tombstone in a book's delta: keyed by
+    /// its last segment, it removed the same-named member of this book.
+    fn keep_members(&self, collection: &str, delta: &mut WebdavSyncDelta) {
+        let Some(url) = self.collection_url(collection) else {
+            return;
+        };
+        let kind = self.kind;
+        let member = |href: &str| {
+            let member = is_member(&url, href);
+            if !member {
+                warn!("{kind} server listed {href} outside {collection} in its listing, skipped");
+            }
+            member
+        };
+        delta.changed.retain(|change| member(&change.href));
+        delta.vanished.retain(|href| member(href));
+        delta.unreadable.retain(|row| member(&row.href));
     }
 
     /// Warns of the members `collection`'s listing named with an error.
@@ -572,7 +609,9 @@ impl DavClient {
         let mut truncated = false;
 
         for _ in 0..MAX_SYNC_ROUNDS {
-            let delta = self.sync_collection(collection, token.as_deref(), Default::default())?;
+            let mut delta =
+                self.sync_collection(collection, token.as_deref(), Default::default())?;
+            self.keep_members(collection, &mut delta);
 
             errored.extend(self::errored(&delta));
             items.extend(delta.changed.into_iter().map(entry));
@@ -989,6 +1028,50 @@ fn href_id(href: &str) -> String {
     canonical_segment(segment)
 }
 
+/// Whether `href` names a member of the collection at `collection`: its
+/// parent path is the collection's, segment by segment, every escape decoded.
+///
+/// An href no URL parses is kept, as the listing named it.
+fn is_member(collection: &Url, href: &str) -> bool {
+    let Some(href) = resolve_href(collection, href) else {
+        return true;
+    };
+    let segments = |url: &Url| -> Vec<Vec<u8>> {
+        url.path()
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(decoded_segment)
+            .collect()
+    };
+    let mut parent = segments(&href);
+    parent.pop();
+    parent == segments(collection)
+}
+
+/// The bytes a path segment spells, every escape decoded.
+fn decoded_segment(segment: &str) -> Vec<u8> {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let escaped = (bytes[i] == b'%')
+            .then(|| segment.get(i + 1..i + 3))
+            .flatten()
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok());
+        match escaped {
+            Some(byte) => {
+                decoded.push(byte);
+                i += 3;
+            }
+            None => {
+                decoded.push(bytes[i]);
+                i += 1;
+            }
+        }
+    }
+    decoded
+}
+
 /// One spelling for a segment: an encoded unreserved octet decoded (RFC 3986
 /// §6.2.2.2), a literal `:` encoded, every escape upper case.
 ///
@@ -1277,6 +1360,28 @@ impl DavClient {
 mod tests {
     use super::*;
     use crate::error::Failure;
+
+    /// A member is told by its parent path, whatever the server escapes; a
+    /// sibling book's member, the leak Stalwart lists, is not one.
+    #[test]
+    fn a_member_is_told_by_its_parent_path() {
+        let book = Url::parse("http://localhost/dav/card/live@pimalaya.org/a/").unwrap();
+
+        for href in [
+            "/dav/card/live%40pimalaya.org/a/x.vcf",
+            "/dav/card/live@pimalaya.org/a/x.vcf",
+            "http://localhost/dav/card/live%40pimalaya.org/%61/urn%3Auuid%3Ax.vcf",
+        ] {
+            assert!(is_member(&book, href), "{href}");
+        }
+        for href in [
+            "/dav/card/live%40pimalaya.org/b/x.vcf",
+            "/dav/card/live%40pimalaya.org/a/sub/x.vcf",
+            "/dav/card/live%40pimalaya.org/x.vcf",
+        ] {
+            assert!(!is_member(&book, href), "{href}");
+        }
+    }
 
     /// A server asking for credentials of a session configuring no `auth`
     /// says the account configures none, so a forgotten table reads as one.

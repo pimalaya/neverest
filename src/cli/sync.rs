@@ -1045,7 +1045,8 @@ mod tests {
         let mut store = PimdirStore::open(dir)
             .unwrap()
             .for_account(account)
-            .for_source(format!("{account}/imap"));
+            .for_source(format!("{account}/imap"))
+            .unwrap();
         store
             .ensure_collection(inbox(account), "message/rfc822")
             .unwrap();
@@ -1242,7 +1243,8 @@ mod tests {
         let mut store = PimdirStore::open(dir.path())
             .unwrap()
             .for_account("work")
-            .for_source("work/imap");
+            .for_source("work/imap")
+            .unwrap();
         store
             .write(vec![PimdirWriteOp::DropPlacement {
                 collection: PimdirCollectionId(inbox("work")),
@@ -1277,7 +1279,8 @@ mod tests {
         let mut store = PimdirStore::open(dir.path())
             .unwrap()
             .for_account("work")
-            .for_source("work/imap");
+            .for_source("work/imap")
+            .unwrap();
         store
             .write(vec![
                 PimdirWriteOp::UpsertPlacement(PimdirPlacement {

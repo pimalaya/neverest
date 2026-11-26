@@ -46,10 +46,7 @@ fn a_store_a_newer_neverest_wrote_asks_for_an_upgrade() {
     drop(PimdirStore::open(dir.path()).unwrap());
     rusqlite::Connection::open(dir.path().join("pimdir.db"))
         .unwrap()
-        .execute(
-            "UPDATE store_meta SET format_version = 'storage-draft-99'",
-            [],
-        )
+        .execute("UPDATE store_meta SET format_version = 'storage-v2'", [])
         .unwrap();
 
     let Err(err) = open_store(dir.path(), "imap", "imap") else {
@@ -61,8 +58,8 @@ fn a_store_a_newer_neverest_wrote_asks_for_an_upgrade() {
     assert!(!err.contains("--reset"), "{err}");
 }
 
-/// A refused store with no version or an earlier draft is an earlier
-/// neverest's; a later draft or a release is a newer one's.
+/// A refused store with no version, a draft or an earlier release is an
+/// earlier neverest's; a later release or an unknown marker a newer one's.
 ///
 /// Every draft before storage-draft-08 wrote no version.
 #[test]
@@ -83,10 +80,12 @@ fn a_store_version_tells_an_earlier_neverest_from_a_newer_one() {
     assert!(written_earlier(&refused(Some("storage-draft-14"))));
     assert!(written_earlier(&refused(Some("storage-draft-15"))));
     assert!(written_earlier(&refused(Some("storage-draft-16"))));
+    assert!(written_earlier(&refused(Some("storage-draft-17"))));
+    assert!(written_earlier(&refused(Some("storage-draft-18"))));
     assert!(!written_earlier(&refused(Some(own))));
-    assert!(!written_earlier(&refused(Some("storage-draft-18"))));
+    assert!(!written_earlier(&refused(Some("storage-v2"))));
     assert!(!written_earlier(&refused(Some("storage-draft-x"))));
-    assert!(!written_earlier(&refused(Some("storage-v1"))));
+    assert!(!written_earlier(&refused(Some("storage-v01"))));
     assert!(!written_earlier(&PimdirError::Busy));
 }
 
@@ -374,7 +373,10 @@ fn a_side_pair_must_agree_on_its_kind() {
 #[test]
 fn a_drain_applies_an_action_as_the_source_of_its_collection() {
     let dir = tempfile::tempdir().unwrap();
-    let mut imap = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+    let mut imap = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("imap")
+        .unwrap();
     imap.ensure_collection("imap/INBOX", "message/rfc822")
         .unwrap();
 
@@ -400,7 +402,10 @@ fn a_drain_applies_an_action_as_the_source_of_its_collection() {
     assert_eq!(report.drained[0].applied, 1);
 
     queue(&mut producer, "mid:second@x");
-    let mut caldav = PimdirStore::open(dir.path()).unwrap().for_source("caldav");
+    let mut caldav = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("caldav")
+        .unwrap();
     let mut report = SyncOutput::default();
     drain_queues(&mut caldav, &mut report);
     assert_eq!(report.drained.len(), 1);
@@ -424,7 +429,8 @@ fn a_parked_action_is_reported_once_however_many_drains_ran() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account("a")
-        .for_source("imap");
+        .for_source("imap")
+        .unwrap();
     store
         .ensure_collection("imap/INBOX", "message/rfc822")
         .unwrap();
@@ -465,7 +471,8 @@ fn the_pre_sync_drain_applies_queued_actions_and_reports_parked_ones() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account("a")
-        .for_source("left");
+        .for_source("left")
+        .unwrap();
     store
         .ensure_collection("left/INBOX", "message/rfc822")
         .unwrap();
@@ -549,7 +556,8 @@ fn a_drain_that_fails_is_reported_and_the_run_is_incomplete() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account("a")
-        .for_source("imap");
+        .for_source("imap")
+        .unwrap();
     store
         .ensure_collection("imap/INBOX", "message/rfc822")
         .unwrap();
@@ -667,7 +675,10 @@ impl PimdirRemote for ScriptedRemote {
 #[cfg(feature = "imap")]
 fn a_rekey_carries_state_by_link_id_and_bumps_the_generation_once() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("left")
+        .unwrap();
     store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
     store
@@ -2299,7 +2310,10 @@ fn a_queued_move_reports_its_create_once() {
             )
             .unwrap();
         let mut report = SyncOutput::default();
-        let mut drainer = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+        let mut drainer = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_source("imap")
+            .unwrap();
         drain_queues(&mut drainer, &mut report);
 
         let order = match target_first {
@@ -2358,7 +2372,10 @@ fn a_queued_move_itemized_across_its_push_reports_its_create_once() {
         )
         .unwrap();
     let mut report = SyncOutput::default();
-    let mut drainer = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+    let mut drainer = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("imap")
+        .unwrap();
     drain_queues(&mut drainer, &mut report);
 
     let mut inbox = SyncOutput::default();
@@ -2505,7 +2522,10 @@ fn no_collection_name_is_reserved() {
 #[test]
 fn a_collection_is_named_without_the_namespace_that_addresses_it() {
     let dir = tempfile::tempdir().unwrap();
-    let store = PimdirStore::open(dir.path()).unwrap().for_source("caldav");
+    let store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("caldav")
+        .unwrap();
     let read = || {
         PimdirReader::open(dir.path())
             .unwrap()
@@ -2536,7 +2556,10 @@ fn a_collection_is_named_without_the_namespace_that_addresses_it() {
 #[test]
 fn a_submit_intent_survives_the_drain_and_is_read_back() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("left")
+        .unwrap();
     store
         .ensure_collection("left/Sent", "message/rfc822")
         .unwrap();
@@ -2585,7 +2608,10 @@ fn a_submit_intent_survives_the_drain_and_is_read_back() {
 #[test]
 fn a_send_naming_a_target_parks() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("left")
+        .unwrap();
     store
         .ensure_collection("left/Sent", "message/rfc822")
         .unwrap();
@@ -2635,7 +2661,8 @@ fn queued_reply(dir: &Path, target: &str) -> PimdirSourceStore {
     let mut store = PimdirStore::open(dir)
         .unwrap()
         .for_account("live")
-        .for_source("gcal");
+        .for_source("gcal")
+        .unwrap();
     store
         .ensure_collection("gcal/primary", "text/calendar")
         .unwrap();
@@ -2810,7 +2837,8 @@ fn an_events_only_calendar_refuses_a_task_before_it_is_queued() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account("live")
-        .for_source("caldav");
+        .for_source("caldav")
+        .unwrap();
     bound_calendar(&mut store, "caldav/events");
     bound_calendar(&mut store, "caldav/work");
     bound_calendar(&mut store, "caldav/any");
@@ -2897,7 +2925,8 @@ fn synced(dir: &Path, source: &str, collections: &[&str]) {
     let mut store = PimdirStore::open(dir)
         .unwrap()
         .for_account("live")
-        .for_source(source);
+        .for_source(source)
+        .unwrap();
     for collection in collections {
         bound_calendar(&mut store, collection);
     }
@@ -2958,7 +2987,8 @@ fn a_graph_source_takes_an_add_in_its_drafts_alone() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account("live")
-        .for_source("msgraph-mail");
+        .for_source("msgraph-mail")
+        .unwrap();
     for collection in ["msgraph-mail/Drafts", "msgraph-mail/Archive"] {
         store
             .ensure_collection(collection, "message/rfc822")
@@ -3025,7 +3055,8 @@ fn a_gmail_source_refuses_any_keyword_but_important_at_the_gate() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account("live")
-        .for_source("gmail");
+        .for_source("gmail")
+        .unwrap();
     store
         .ensure_collection("gmail/INBOX", "message/rfc822")
         .unwrap();
@@ -3491,7 +3522,10 @@ fn a_filter_names_a_calendar_by_its_path() {
 #[test]
 fn the_retention_sweep_runs_only_when_a_delay_is_configured() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("left")
+        .unwrap();
     let mut config: AccountConfig =
         toml::from_str(r#"imap.server = "imaps://imap.example.org:993""#).unwrap();
 
@@ -3516,7 +3550,10 @@ fn the_retention_sweep_runs_only_when_a_delay_is_configured() {
 #[test]
 fn the_sweep_collects_the_bodies_the_purge_released() {
     let dir = tempfile::tempdir().unwrap();
-    let mut source = PimdirStore::open(dir.path()).unwrap().for_source("left");
+    let mut source = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("left")
+        .unwrap();
     let hash = io_pimdir::hash::hash(b"abc");
 
     source
@@ -3591,7 +3628,8 @@ fn retire(dir: &Path, account: &str, collection: &str, body: &[u8]) {
     let mut source = PimdirStore::open(dir)
         .unwrap()
         .for_account(account)
-        .for_source(format!("{account}/imap"));
+        .for_source(format!("{account}/imap"))
+        .unwrap();
     source
         .ensure_collection(collection, "message/rfc822")
         .unwrap();
@@ -3850,7 +3888,8 @@ fn store_with_conflict(
     let mut store = PimdirStore::open(dir)
         .unwrap()
         .for_account(CONFLICT_ACCOUNT)
-        .for_source("dav");
+        .for_source("dav")
+        .unwrap();
     store.ensure_collection("contacts", "text/vcard").unwrap();
 
     let blobs = store.blob_stage();
@@ -4136,6 +4175,7 @@ fn two_endpoints(dir: &Path) -> (PimdirSourceStore, PimdirSourceStore) {
             .unwrap()
             .for_account(CONFLICT_ACCOUNT)
             .for_source(source)
+            .unwrap()
     };
     let left = open("left");
     left.ensure_collection("contacts", "text/vcard").unwrap();
@@ -5079,7 +5119,8 @@ fn a_queued_create_reads_back_as_a_create() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account(CONFLICT_ACCOUNT)
-        .for_source("dav");
+        .for_source("dav")
+        .unwrap();
     store
         .ensure_collection("dav/contacts", "text/vcard")
         .unwrap();
@@ -5122,7 +5163,8 @@ fn an_edit_over_an_unread_base_is_owed_its_base_body() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account(CONFLICT_ACCOUNT)
-        .for_source("dav");
+        .for_source("dav")
+        .unwrap();
     store
         .ensure_collection("dav/contacts", "text/vcard")
         .unwrap();
@@ -5181,7 +5223,7 @@ fn new_hash() -> PimdirHash {
 /// Its body points at `edited`, its base at `original` and
 /// `base_revision`: what a frontend leaves after staging an edit offline.
 fn store_with_local_edit(dir: &std::path::Path, base_revision: &str) -> PimdirSourceStore {
-    let mut store = PimdirStore::open(dir).unwrap().for_source("left");
+    let mut store = PimdirStore::open(dir).unwrap().for_source("left").unwrap();
     store.ensure_collection("contacts", "text/vcard").unwrap();
     store
         .write(vec![
@@ -5234,7 +5276,7 @@ fn endpoint_with_local_edit(
     source: &str,
     base_revision: &str,
 ) -> PimdirSourceStore {
-    let mut store = PimdirStore::open(dir).unwrap().for_source(source);
+    let mut store = PimdirStore::open(dir).unwrap().for_source(source).unwrap();
     store.ensure_collection("contacts", "text/vcard").unwrap();
     store
         .write(vec![
@@ -5380,7 +5422,7 @@ fn a_conflict_on_each_endpoint_is_named_once_across_a_convergence_loop() {
 /// Clean against its own server at `revision`, so what a pull round finds
 /// is the server's own doing and nothing this run staged.
 fn endpoint_holding(dir: &std::path::Path, source: &str, revision: &str) -> PimdirSourceStore {
-    let mut store = PimdirStore::open(dir).unwrap().for_source(source);
+    let mut store = PimdirStore::open(dir).unwrap().for_source(source).unwrap();
     store.ensure_collection("contacts", "text/vcard").unwrap();
     store
         .write(vec![
@@ -5520,7 +5562,7 @@ fn a_server_delete_is_named_once_on_each_endpoint() {
 
 /// A store holding the tombstone a frontend leaves after an offline delete.
 fn store_with_local_delete(dir: &std::path::Path) -> PimdirSourceStore {
-    let mut store = PimdirStore::open(dir).unwrap().for_source("left");
+    let mut store = PimdirStore::open(dir).unwrap().for_source("left").unwrap();
     store.ensure_collection("contacts", "text/vcard").unwrap();
     store
         .write(vec![
@@ -5696,6 +5738,7 @@ fn a_moved_card_is_itemized_as_both_its_halves() {
     let dir = tempfile::tempdir().unwrap();
     let mut store = store_with_local_delete(dir.path());
     store.ensure_collection("other", "text/vcard").unwrap();
+    store.register(["other"]).unwrap();
     let contacts = PimdirCollectionId("contacts".into());
     let mut placement = store
         .load(&contacts, &PimdirLoadSelection::All)
@@ -5904,7 +5947,10 @@ fn linked(handle: &str, link: &str, size: Option<u64>) -> PimdirPlacement {
 #[test]
 fn a_duplicated_identity_is_two_items_and_no_warning() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("left")
+        .unwrap();
     store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
     store
@@ -6032,7 +6078,10 @@ fn a_write_refused_on_every_pass_is_still_one_line() {
 #[test]
 fn a_relayed_copy_is_itemized_so_the_run_never_reads_as_already_in_sync() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("left");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("left")
+        .unwrap();
     store.ensure_collection("INBOX", "message/rfc822").unwrap();
 
     store
@@ -6042,7 +6091,10 @@ fn a_relayed_copy_is_itemized_so_the_run_never_reads_as_already_in_sync() {
             Some(42),
         ))])
         .unwrap();
-    let mut right = PimdirStore::open(dir.path()).unwrap().for_source("right");
+    let mut right = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("right")
+        .unwrap();
     right.write(covered(None)).unwrap();
 
     let targets = relay_targets(
@@ -6118,11 +6170,11 @@ fn relay_store(dir: &Path, date: Option<&str>, right: Vec<PimdirWriteOp>) -> Pim
         date: date.map(String::from),
         ..Default::default()
     }));
-    let mut left = PimdirStore::open(dir).unwrap().for_source("left");
+    let mut left = PimdirStore::open(dir).unwrap().for_source("left").unwrap();
     left.ensure_collection("INBOX", "message/rfc822").unwrap();
     left.write(vec![PimdirWriteOp::UpsertPlacement(placement)])
         .unwrap();
-    let mut target = PimdirStore::open(dir).unwrap().for_source("right");
+    let mut target = PimdirStore::open(dir).unwrap().for_source("right").unwrap();
     target.write(right).unwrap();
     PimdirStore::open(dir).unwrap()
 }
@@ -6207,7 +6259,10 @@ fn a_relay_keeps_to_the_target_s_scope() {
 #[test]
 fn a_relayed_copy_is_bound_to_its_target_and_never_relayed_twice() {
     let dir = tempfile::tempdir().unwrap();
-    let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
+    let mut left = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("left")
+        .unwrap();
     left.ensure_collection("INBOX", "message/rfc822").unwrap();
 
     left.write(vec![PimdirWriteOp::UpsertPlacement(linked(
@@ -6219,6 +6274,7 @@ fn a_relayed_copy_is_bound_to_its_target_and_never_relayed_twice() {
     PimdirStore::open(dir.path())
         .unwrap()
         .for_source("right")
+        .unwrap()
         .write(covered(None))
         .unwrap();
 
@@ -6228,7 +6284,10 @@ fn a_relayed_copy_is_bound_to_its_target_and_never_relayed_twice() {
     let targets = sides(&left);
     assert_eq!(targets.len(), 1);
 
-    let mut right = PimdirStore::open(dir.path()).unwrap().for_source("right");
+    let mut right = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("right")
+        .unwrap();
     let written = WrittenItem {
         id: String::from("77"),
         revision: None,
@@ -6282,12 +6341,12 @@ fn imap_relay(
             PimdirWriteOp::UpsertPlacement(linked(uid, link, Some(*size as u64)))
         })
         .collect();
-    let mut left_store = PimdirStore::open(dir).unwrap().for_source("left");
+    let mut left_store = PimdirStore::open(dir).unwrap().for_source("left").unwrap();
     left_store
         .ensure_collection("INBOX", "message/rfc822")
         .unwrap();
     left_store.write(placements).unwrap();
-    let mut right_store = PimdirStore::open(dir).unwrap().for_source("right");
+    let mut right_store = PimdirStore::open(dir).unwrap().for_source("right").unwrap();
     right_store.write(covered(None)).unwrap();
 
     (left, right, left_store, right_store)
@@ -6526,7 +6585,10 @@ fn queue_submit(dir: &Path, collection: &str, source: &str) {
 #[test]
 fn an_intent_of_an_unknown_version_stays_pending() {
     let dir = tempfile::tempdir().unwrap();
-    let store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+    let store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("imap")
+        .unwrap();
     store
         .ensure_collection("imap/Sent", "message/rfc822")
         .unwrap();
@@ -6573,7 +6635,10 @@ fn an_interrupted_send_is_parked_unconfirmed() {
     use io_pimdir::client::producer::PimdirActionStatus;
 
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("imap")
+        .unwrap();
     store
         .ensure_collection("imap/Sent", "message/rfc822")
         .unwrap();
@@ -6624,7 +6689,10 @@ fn a_send_needs_its_source_opened_only_when_it_sends_natively() {
     .unwrap();
 
     let dir = tempfile::tempdir().unwrap();
-    let store = PimdirStore::open(dir.path()).unwrap().for_source("imap");
+    let store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("imap")
+        .unwrap();
     store
         .ensure_collection("imap/Sent", "message/rfc822")
         .unwrap();
@@ -6634,7 +6702,8 @@ fn a_send_needs_its_source_opened_only_when_it_sends_natively() {
     let dir = tempfile::tempdir().unwrap();
     let store = PimdirStore::open(dir.path())
         .unwrap()
-        .for_source("msgraph-mail");
+        .for_source("msgraph-mail")
+        .unwrap();
     store
         .ensure_collection("msgraph-mail/Sent Items", "message/rfc822")
         .unwrap();
@@ -6686,7 +6755,10 @@ fn the_authority_decides_the_conflict_and_the_push() {
 #[test]
 fn the_pull_plan_names_an_item_its_listing_brought_with_its_body() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("dav");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("dav")
+        .unwrap();
     store
         .ensure_collection("dav/contacts", "text/vcard")
         .unwrap();
@@ -6765,7 +6837,10 @@ fn the_pull_plan_names_an_item_its_listing_brought_with_its_body() {
 #[test]
 fn the_pull_plan_names_a_body_dropped_by_a_content_change() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("dav");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("dav")
+        .unwrap();
     store
         .ensure_collection("dav/contacts", "text/vcard")
         .unwrap();
@@ -6948,7 +7023,10 @@ fn spine(
 #[test]
 fn one_identity_under_two_hrefs_mirrors_as_two_items_and_settles() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = PimdirStore::open(dir.path()).unwrap().for_source("caldav");
+    let mut store = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("caldav")
+        .unwrap();
     store
         .ensure_collection("caldav/agenda", "text/calendar")
         .unwrap();
@@ -7130,7 +7208,8 @@ fn an_interrupted_hydration_keeps_the_batches_it_applied() {
     let mut store = PimdirStore::open(dir.path())
         .unwrap()
         .for_account("mail")
-        .for_source("imap");
+        .for_source("imap")
+        .unwrap();
     let handles = ["1", "2", "3", "4", "5", "6"];
     for collection in ["imap/INBOX", "imap/Archive"] {
         store
@@ -7445,7 +7524,7 @@ fn mailbox_with_an_old_message(dir: &Path) -> PimdirSourceStore {
         None,
         None,
     );
-    let mut store = PimdirStore::open(dir).unwrap().for_source("imap");
+    let mut store = PimdirStore::open(dir).unwrap().for_source("imap").unwrap();
     store
         .ensure_collection("imap/INBOX", "message/rfc822")
         .unwrap();
@@ -8259,9 +8338,13 @@ fn a_body_the_drain_kept_aside_is_reported() {
         .unwrap();
     store
         .for_source("a")
+        .unwrap()
         .write(bound("a1", &card("Ann")))
         .unwrap();
-    let mut b = PimdirStore::open(dir.path()).unwrap().for_source("b");
+    let mut b = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("b")
+        .unwrap();
     b.write(bound("b1", &card("Ann B"))).unwrap();
     let seq = b.list_items("contacts", None, 10).unwrap()[0].seq;
     drop(b);
@@ -8279,7 +8362,10 @@ fn a_body_the_drain_kept_aside_is_reported() {
         .unwrap();
     drop(producer);
 
-    let mut owner = PimdirStore::open(dir.path()).unwrap().for_source("a");
+    let mut owner = PimdirStore::open(dir.path())
+        .unwrap()
+        .for_source("a")
+        .unwrap();
     let mut report = SyncOutput::default();
     drain_queues(&mut owner, &mut report);
 

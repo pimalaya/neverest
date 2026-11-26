@@ -12,6 +12,8 @@ Neverest 1 is rebuilt around the pimdir store: every account syncs into one shar
 
 A 0.x configuration and state are not carried over: start over from config.sample.toml, move the 0.x stores out of neverest/ under the state directory, then run `neverest sync --init`.
 
+The store follows pimdir storage-v1.0.0, sync-v1.0.0 and search-v1.0.0 through io-pimdir 1.0.0. A store a beta wrote is refused `store-version`, never migrated: sync it with that beta until nothing is queued, move it aside, then run `neverest sync --init`.
+
 ### Added
 
 - Added `sync --init`, which initializes the accounts the run covers that are not yet initialized, then syncs.

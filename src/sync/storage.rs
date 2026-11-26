@@ -223,7 +223,10 @@ mod tests {
     #[test]
     fn a_one_sided_body_projects_as_a_copy_and_is_a_hydration_target() {
         let dir = tempfile::tempdir().unwrap();
-        let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
+        let mut left = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_source("left")
+            .unwrap();
         let hash = io_pimdir::hash::hash(b"abc");
 
         left.write(vec![
@@ -247,7 +250,10 @@ mod tests {
     #[test]
     fn hydration_targets_pick_one_sided_bodiless_items_when_the_far_side_creates() {
         let dir = tempfile::tempdir().unwrap();
-        let mut left = PimdirStore::open(dir.path()).unwrap().for_source("left");
+        let mut left = PimdirStore::open(dir.path())
+            .unwrap()
+            .for_source("left")
+            .unwrap();
 
         left.write(vec![PimdirWriteOp::UpsertPlacement(linked(
             "INBOX", "1", "mid:a", None,

@@ -210,7 +210,10 @@ impl Conflict {
                 .map(|source| source.0)
                 .with_context(|| format!("Conflict {} has no binding to settle", self.id))?,
         };
-        let mut store = store.for_source(source);
+        let mut store = store
+            .for_source(source)
+            .map_err(pimdir_error)
+            .with_context(|| format!("Open the store to settle conflict {}", self.id))?;
 
         let kind = self.kind()?;
 
@@ -455,7 +458,8 @@ mod tests {
         let mut store = PimdirStore::open(dir)
             .unwrap()
             .for_account(ACCOUNT)
-            .for_source("dav");
+            .for_source("dav")
+            .unwrap();
         store.ensure_collection("contacts", "text/vcard").unwrap();
 
         let blobs = store.blobs();

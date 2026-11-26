@@ -126,7 +126,7 @@ mod tests {
              Date: Sat, 01 Aug 2026 12:00:00 +0000\r\n\r\nHello\r\n"
         )
         .into_bytes();
-        let mut store = PimdirStore::open(dir).unwrap().for_source("imap");
+        let mut store = PimdirStore::open(dir).unwrap().for_source("imap").unwrap();
         store
             .ensure_collection("imap/INBOX", "message/rfc822")
             .unwrap();
@@ -231,14 +231,14 @@ mod tests {
             .unwrap();
     }
 
-    /// An index of a later search draft is refused with its code and left as
+    /// An index of a later search release is refused with its code and left as
     /// it is (pimdir SEARCH §2), the run standing, for a later neverest.
     #[test]
-    fn an_index_of_a_later_draft_is_refused_and_left() {
+    fn an_index_of_a_later_release_is_refused_and_left() {
         let dir = tempfile::tempdir().unwrap();
         land(dir.path(), "m1@x", "Quarterly report");
         after_run(dir.path(), &StoreConfig::default(), false, &mut None);
-        restamp_index(dir.path(), "search-draft-99");
+        restamp_index(dir.path(), "search-v2");
         let before = fs::read(dir.path().join("index.db")).unwrap();
 
         let mut refreshed = None;
@@ -247,7 +247,7 @@ mod tests {
         let refreshed = refreshed.unwrap();
         assert!(refreshed.error.is_some(), "{refreshed:?}");
         let Err(err) = PimdirIndex::open(dir.path()) else {
-            panic!("an index of a later draft opens");
+            panic!("an index of a later release opens");
         };
         assert_eq!(err.code(), "index-version");
         assert_eq!(fs::read(dir.path().join("index.db")).unwrap(), before);

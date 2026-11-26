@@ -489,7 +489,8 @@ mod tests {
         let mut store = PimdirStore::open(dir)
             .unwrap()
             .for_account(ACCOUNT)
-            .for_source("dav");
+            .for_source("dav")
+            .unwrap();
         store.ensure_collection("contacts", "text/vcard").unwrap();
 
         let blobs = store.blobs();
@@ -593,7 +594,8 @@ mod tests {
                 let mut store = PimdirStore::open(&dir)
                     .expect("a store the merger does not own")
                     .for_account(ACCOUNT)
-                    .for_source("dav");
+                    .for_source("dav")
+                    .unwrap();
                 let mut placement = load_side(&store, "contacts").unwrap().remove(0);
                 placement.conflict_revision = Some(String::from("etag-3"));
                 store
@@ -630,7 +632,8 @@ mod tests {
         let store = PimdirStore::open(dir.path())
             .unwrap()
             .for_account(ACCOUNT)
-            .for_source("dav");
+            .for_source("dav")
+            .unwrap();
         let placement = load_side(&store, "contacts").unwrap().remove(0);
         assert_ne!(placement.status, PimdirStatus::Conflict);
         assert_eq!(
@@ -677,7 +680,8 @@ mod tests {
         let store = PimdirStore::open(dir.path())
             .unwrap()
             .for_account(ACCOUNT)
-            .for_source("dav");
+            .for_source("dav")
+            .unwrap();
         let placement = load_side(&store, "contacts").unwrap().remove(0);
         assert_eq!(placement.status, PimdirStatus::Conflict);
     }

@@ -203,6 +203,7 @@ impl Fixture {
             .unwrap()
             .for_account(ACCOUNT)
             .for_source(SOURCE)
+            .unwrap()
             .ensure_collection(SENT, "message/rfc822")
             .unwrap();
 

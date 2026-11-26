@@ -156,7 +156,8 @@ fn drop_checkpoint(state: &Path, source: &str) {
     let mut store = PimdirStore::open(&dir)
         .expect("open the store")
         .for_account(ACCOUNT)
-        .for_source(format!("{ACCOUNT}/{source}"));
+        .for_source(format!("{ACCOUNT}/{source}"))
+        .unwrap();
     store
         .write(vec![PimdirWriteOp::SetCheckpoint {
             collection: PimdirCollectionId(format!("{ACCOUNT}/left/INBOX")),

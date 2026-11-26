@@ -59,7 +59,7 @@ io-gpeople = { version = "0.9.1", default-features = false, optional = true }
 io-http = { version = "0.9", default-features = false, optional = true }
 io-imap = { version = "0.12.0", default-features = false, optional = true }
 io-msgraph = { version = "0.11.1", default-features = false, optional = true }
-io-pimdir = { version = "0.20.4", default-features = false, features = ["client"] }
+io-pimdir = { version = "1.0.0", default-features = false, features = ["client"] }
 io-sasl = { version = "0.3", default-features = false, features = ["scram"] }
 io-smtp = { version = "0.10", default-features = false, optional = true }
 io-webdav = { version = "0.14.0", default-features = false, optional = true }

@@ -1722,7 +1722,10 @@ mod tests {
     }
 
     fn store(dir: &std::path::Path) -> PimdirSourceStore {
-        let store = PimdirStore::open(dir).unwrap().for_source("msgraph");
+        let store = PimdirStore::open(dir)
+            .unwrap()
+            .for_source("msgraph")
+            .unwrap();
         store
             .ensure_collection(COLLECTION, "message/rfc822")
             .unwrap();

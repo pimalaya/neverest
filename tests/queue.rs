@@ -137,7 +137,8 @@ impl Fixture {
         let store = PimdirStore::open(self.store())
             .unwrap()
             .for_account(ACCOUNT)
-            .for_source(SOURCE);
+            .for_source(SOURCE)
+            .unwrap();
         store
             .ensure_collection(COLLECTION, "text/calendar")
             .unwrap();
@@ -374,7 +375,7 @@ fn a_drain_leaves_a_busy_store_alone() {
     ));
 }
 
-/// Rewrites the store's `store_meta.format_version`, as another draft of
+/// Rewrites the store's `store_meta.format_version`, as another version of
 /// the format would have written it.
 fn restamp_store(fixture: &Fixture, version: &str) {
     rusqlite::Connection::open(fixture.store().join("pimdir.db"))
@@ -392,7 +393,7 @@ fn a_store_a_newer_neverest_wrote_fails_with_its_code() {
     let _serial = serialized();
     let fixture = Fixture::new(CLOSED, "user", "pass");
     fixture.offline_store();
-    restamp_store(&fixture, "storage-draft-99");
+    restamp_store(&fixture, "storage-v2");
 
     let failure = fixture.json(&["--json", "sync", "--queue-only", "-a", ACCOUNT], 1);
 

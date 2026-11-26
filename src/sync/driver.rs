@@ -53,11 +53,12 @@ use crossbeam_queue::SegQueue;
 use io_pimdir::{
     change::PimdirWriteOp,
     client::{
-        PimdirError, PimdirRunError, PimdirSourceStore, PimdirStore,
+        PimdirError, PimdirSourceStore, PimdirStore,
         blobs::PimdirBlobStage,
         modes,
         producer::{PimdirActionStatus, PimdirProducer},
         reader::{PimdirItemConflict, PimdirReader},
+        run::PimdirRunError,
     },
     codec::{PimdirAction, PimdirStoreIdentity},
     collection::{PimdirCollectionId, PimdirScope},
@@ -308,7 +309,10 @@ fn state_base() -> Result<PathBuf> {
 /// §9.2), so a store shared by several accounts tells whose is whose.
 pub(crate) fn open_store(dir: &Path, source: &str, account: &str) -> Result<PimdirSourceStore> {
     match PimdirStore::open(dir) {
-        Ok(store) => Ok(store.for_account(account).for_source(source)),
+        Ok(store) => store
+            .for_account(account)
+            .for_source(source)
+            .map_err(|err| pimdir_error(err).context(format!("Open {source} store"))),
         Err(err @ PimdirError::Version { .. }) => Err(store_refusal(dir, err)),
         Err(err) => Err(pimdir_error(err).context(format!("Open {source} store"))),
     }
@@ -339,10 +343,11 @@ fn store_refusal(dir: &Path, err: PimdirError) -> anyhow::Error {
 }
 
 /// Whether a store refused for its format version was written by an earlier
-/// draft than this neverest's.
+/// neverest.
 ///
-/// One naming no version or an earlier draft, by io-pimdir's order of
-/// pimdir STORAGE §4.2; a later draft or a release is a newer neverest's.
+/// One naming no version, a draft or an earlier release, by io-pimdir's
+/// order of pimdir STORAGE §4.2; a later release or a marker that order
+/// does not read is a newer neverest's.
 fn written_earlier(err: &PimdirError) -> bool {
     let PimdirError::Version { found } = err else {
         return false;

@@ -1,11 +1,13 @@
 ---
 cairn: change
 id: gpeople-batch-get
-status: active
+status: landed
 created: 2026-10-18
 ---
 
 # Google People bodies read in batches
+
+Landed on 2026-11-19 (log 2026-11-19-gpeople-batch-get); closed on 2026-11-26, the live check run by the live night of 2026-11-25, the cleanup by resource name not planned.
 
 ## Why
 

@@ -1,11 +1,13 @@
 ---
 cairn: change
 id: tests-inspect-with-the-linked-pimdir
-status: active
+status: landed
 created: 2026-10-18
 ---
 
 # Tests inspect the store with the pimdir neverest links
+
+Landed on 2026-11-19 (log 2026-11-19-tests-inspect-with-the-linked-pimdir); closed on 2026-11-26, its last check met.
 
 ## Why
 

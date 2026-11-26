@@ -323,6 +323,10 @@ The store follows pimdir storage-v1.0.0, sync-v1.0.0 and search-v1.0.0 through i
 - Fixed a credential command prompting for a password (`systemd-ask-password`) hanging the run.
 - Fixed a bare `neverest --json` printing the text help: it fails coded `usage-invalid` (exit 2).
 - Fixed install.sh saving an HTTP error page as the archive.
+- Fixed `sync --reset` refusing a mail account holding an attachment: the stand-ins of its attachments collection read as unpushed changes.
+- Fixed a CardDAV or CalDAV listing naming a member of another collection, as Stalwart lists a sibling address book's tombstone: it removed or changed the same-named member of the listed one. Such a row is now skipped with a warning.
+- Fixed a Graph mail move of a second message stating the same `Message-ID` into another folder, the trash included: the moved message was fetched as a second item while its create was uploaded again as MIME and refused on every run.
+- Fixed a Gmail move into another label waiting for the next listing: a message moved away on the server before it stayed listed in the label for good. A move now lands at once, Gmail keeping the message's id.
 
 ### Security
 

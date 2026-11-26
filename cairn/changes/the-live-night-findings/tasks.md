@@ -39,5 +39,5 @@ Each task lands with a test failing first, the gate, and a spec fold.
 
 ## Housekeeping
 
-- [ ] Drop the parked row #19 of the shared store (anchored on `stalwart/<U+FFFD>attachments` by the pre-fix himalaya).
-- [ ] Next live run: add JMAP and Graph contacts/calendars sources to the live rc; run `--reset`, `--accept-mode` and conflicts on real accounts.
+- [x] Drop the parked row #19 of the shared store (anchored on `stalwart/<U+FFFD>attachments` by the pre-fix himalaya). Moot (2026-11-26): that store is a draft's, which io-pimdir 1.0.0 refuses; the live night of 2026-11-25 synced a new one (n3-shared).
+- [ ] Next live run: add JMAP and Graph contacts/calendars sources to the live rc; run `--reset`, `--accept-mode` and conflicts on real accounts. The live night of 2026-11-25 (.lanes/live/report-3.md §2, journal-3.md) ran Graph calendar and contacts cells, `--reset` on Fastmail and iCloud, and conflicts both ways on Fastmail, iCloud, Google Calendar and Graph. Left: `--accept-mode` on a real account; JMAP waits on jmap-sources (neverest has no JMAP source).

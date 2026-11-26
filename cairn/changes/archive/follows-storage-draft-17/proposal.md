@@ -1,11 +1,13 @@
 ---
 cairn: change
 id: follows-storage-draft-17
-status: active
+status: landed
 created: 2026-11-23
 ---
 
 # neverest follows storage-draft-17
+
+Landed on 2026-11-23 (log 2026-11-23-follows-storage-draft-17); closed on 2026-11-26, its pin and release steps superseded by io-pimdir 1.0.0 (log 2026-11-26-io-pimdir-1-0). needs-io-pimdir.md 2, the source registration, is now cairn/changes/sources-register-through-io-pimdir.
 
 The shared frame (target, who edits what, git, CPUs 0,1,16,17, locks, accounts, how a lane decides, what a plan holds) is /home/soywod/code/pimalaya/pimdir/cairn/changes/the-consumers-follow-draft-17/frame.md. This file keeps what is neverest's; the evidence is inventory.md, the steps tasks.md.
 

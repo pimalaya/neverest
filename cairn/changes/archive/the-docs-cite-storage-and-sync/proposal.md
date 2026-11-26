@@ -1,11 +1,13 @@
 ---
 cairn: change
 id: the-docs-cite-storage-and-sync
-status: active
+status: landed
 created: 2026-10-30
 ---
 
 # The docs cite STORAGE and SYNC
+
+Landed (citations and stale statements fixed by 2026-11-19); closed on 2026-11-26, its CHANGELOG step moot since the 1.0.0 section was rewritten (log 2026-11-25-docs-aligned-for-the-major). Log 2026-11-26-the-docs-cite-storage-and-sync.
 
 ## Why
 

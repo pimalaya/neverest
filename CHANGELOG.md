@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
-## [1.0.0] - 2026-11-25
+## [1.0.0] - 2026-11-26
 
 Neverest 1 is rebuilt around the pimdir store: every account syncs into one shared store, which the Pimalaya frontends read, search and queue their writes into. It syncs mail, contacts and calendars over IMAP, Gmail, Microsoft Graph, Google Calendar, Google People, CalDAV and CardDAV. The wizard is gone, unknown keys are refused, and `--json` follows the Pimalaya output contract.
 

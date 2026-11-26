@@ -1194,6 +1194,7 @@ impl GmailClient {
     pub fn label_message(&mut self, id: &str, collection: &str) -> Result<()> {
         let label = self.label_id(collection)?;
         self.modify_one(id, &[label], &[])
+            .map(drop)
             .with_context(|| format!("Label message {id} with {collection} error"))
     }
 
@@ -1322,43 +1323,53 @@ impl GmailClient {
             }
         } else if FIXED_LABELS.contains(&label.as_str()) {
             self.modify(&[id], &[TRASH.to_owned()], &[])
+                .map(drop)
                 .with_context(|| format!("Trash message {id} of {collection} error"))?;
         } else {
             self.modify(&[id], &[], &[label])
+                .map(drop)
                 .with_context(|| format!("Remove {collection} from message {id} error"))?;
         }
 
         Ok(())
     }
 
-    /// Moves messages from one label to another in one modify each batch.
+    /// Moves messages from one label to another in one modify each batch,
+    /// each moved message paired with its id, which a label change keeps.
     ///
     /// Out of `DRAFT` or `SENT` only to `TRASH`, which trashes them, and never
     /// into them: Gmail refuses either label in a change, coded `unsupported`.
-    pub fn move_items(&mut self, from: &str, to: &str, ids: &[&str]) -> Result<()> {
+    /// A message gone already counts as moved, paired with nothing.
+    pub fn move_items(
+        &mut self,
+        from: &str,
+        to: &str,
+        ids: &[&str],
+    ) -> Result<Vec<(String, String)>> {
         let from_label = self.label_id(from)?;
         let to_label = self.label_id(to)?;
         if from_label == to_label {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        if FIXED_LABELS.contains(&from_label.as_str()) && to_label == TRASH {
-            return self
-                .modify(ids, &[to_label], &[])
-                .with_context(|| format!("Trash messages of {from} error"));
-        }
-        if let Some(fixed) = [&from_label, &to_label]
-            .into_iter()
-            .find(|label| FIXED_LABELS.contains(&label.as_str()))
-        {
-            let message = format!(
-                "Gmail moves no message into or out of {fixed}, only imports into it \
-                 or trashes from it"
-            );
-            return Err(CodedError::new(ErrorCode::Unsupported, message).into());
-        }
+        let moved = if FIXED_LABELS.contains(&from_label.as_str()) && to_label == TRASH {
+            self.modify(ids, &[to_label], &[])
+                .with_context(|| format!("Trash messages of {from} error"))?
+        } else {
+            if let Some(fixed) = [&from_label, &to_label]
+                .into_iter()
+                .find(|label| FIXED_LABELS.contains(&label.as_str()))
+            {
+                let message = format!(
+                    "Gmail moves no message into or out of {fixed}, only imports into it \
+                     or trashes from it"
+                );
+                return Err(CodedError::new(ErrorCode::Unsupported, message).into());
+            }
+            self.modify(ids, &[to_label], &[from_label])
+                .with_context(|| format!("Move messages from {from} to {to} error"))?
+        };
 
-        self.modify(ids, &[to_label], &[from_label])
-            .with_context(|| format!("Move messages from {from} to {to} error"))
+        Ok(moved.into_iter().map(|id| (id.clone(), id)).collect())
     }
 
     /// Adds `add` and removes `remove` as `UNREAD`, `STARRED` and `IMPORTANT`
@@ -1375,18 +1386,23 @@ impl GmailClient {
         }
 
         self.modify(ids, &labels_add, &labels_remove)
+            .map(drop)
             .context("Update message flags error")
     }
 
     /// Adds and removes labels on an id set: one `modify` for one message,
-    /// `batchModify` by chunks otherwise.
+    /// `batchModify` by chunks otherwise, answering the ids it modified.
     ///
     /// A message gone already has nothing left to change, which counts as
     /// done: a single modify answered 404 succeeds, and a chunk answered
     /// 404 is modified again one message at a time, each gone one skipped.
-    fn modify(&mut self, ids: &[&str], add: &[String], remove: &[String]) -> Result<()> {
+    fn modify(&mut self, ids: &[&str], add: &[String], remove: &[String]) -> Result<Vec<String>> {
+        let mut done = Vec::with_capacity(ids.len());
         if let [id] = ids {
-            return self.modify_one(id, add, remove);
+            if self.modify_one(id, add, remove)? {
+                done.push(id.to_string());
+            }
+            return Ok(done);
         }
 
         for chunk in ids.chunks(BATCH_SIZE) {
@@ -1402,30 +1418,32 @@ impl GmailClient {
                 client.run(coroutine)
             });
             match modified {
-                Ok(_) => {}
+                Ok(_) => done.extend(owned),
                 Err(err) if is_not_found(&err) => {
                     debug!("batch modify answered 404, modifying its messages one by one");
                     for id in chunk {
-                        self.modify_one(id, add, remove)?;
+                        if self.modify_one(id, add, remove)? {
+                            done.push(id.to_string());
+                        }
                     }
                 }
                 Err(err) => return Err(err.into()),
             }
         }
 
-        Ok(())
+        Ok(done)
     }
 
-    /// Adds and removes labels on one message, gone already counting as
-    /// done.
-    fn modify_one(&mut self, id: &str, add: &[String], remove: &[String]) -> Result<()> {
+    /// Adds and removes labels on one message, whether it was there; gone
+    /// already counts as done.
+    fn modify_one(&mut self, id: &str, add: &[String], remove: &[String]) -> Result<bool> {
         match self.op(units::MESSAGE_MODIFY, |client| {
             client.message_modify(id, add, remove)
         }) {
-            Ok(_) => Ok(()),
+            Ok(_) => Ok(true),
             Err(err) if is_not_found(&err) => {
                 debug!("message {id} already gone, nothing to modify");
-                Ok(())
+                Ok(false)
             }
             Err(err) => Err(err.into()),
         }

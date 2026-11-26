@@ -1145,7 +1145,7 @@ impl Client {
             #[cfg(feature = "imap")]
             Client::Imap(c) => c.move_messages(from, to, ids),
             #[cfg(feature = "msgraph")]
-            Client::Msgraph(c) => c.move_messages(to, ids).map(|()| Vec::new()),
+            Client::Msgraph(c) => c.move_messages(to, ids),
             #[cfg(any(feature = "carddav", feature = "caldav"))]
             Client::Dav(c) => c.move_items(from, to, ids).map(|()| Vec::new()),
             #[cfg(feature = "gpeople")]
@@ -1155,7 +1155,7 @@ impl Client {
                 bail!("Google events cannot move between calendars here (move not supported)")
             }
             #[cfg(feature = "gmail")]
-            Client::Gmail(c) => c.move_items(from, to, ids).map(|()| Vec::new()),
+            Client::Gmail(c) => c.move_items(from, to, ids),
             #[cfg(not(any(
                 feature = "imap",
                 feature = "msgraph",
@@ -1445,5 +1445,33 @@ mod tests {
         );
         assert_eq!(free_segment("../", &listed(&[])), "collection");
         assert_eq!(free_segment("Work", &listed(&["Work", "Work-2"])), "Work-3");
+    }
+
+    /// A Gmail label move answers each moved message with its own id.
+    ///
+    /// Answered with none, the create waited for a listing, and a message
+    /// moved away on the server before it left a ghost in the label.
+    #[cfg(feature = "gmail")]
+    #[test]
+    fn a_gmail_label_move_answers_each_moved_message_with_its_own_id() {
+        use crate::{
+            gmail::client::scripted::scripted,
+            scripted::{json, ok},
+        };
+
+        let gone = r#"{"error":{"code":404,"message":"Requested entity was not found.","status":"NOT_FOUND"}}"#;
+        let (gmail, api, _) = scripted();
+        let mut client = Client::Gmail(Box::new(gmail));
+        api.answer(ok(
+            serde_json::json!({ "id": "m1", "labelIds": ["Label_1"] }),
+        ));
+        let moved = client.move_items("INBOX", "Work", &["m1"]).unwrap();
+        assert_eq!(moved, [(String::from("m1"), String::from("m1"))]);
+
+        api.answer(json("404 Not Found", gone));
+        api.answer(ok(serde_json::json!({ "id": "m2", "labelIds": ["TRASH"] })));
+        api.answer(json("404 Not Found", gone));
+        let moved = client.move_items("Work", "TRASH", &["m2", "m3"]).unwrap();
+        assert_eq!(moved, [(String::from("m2"), String::from("m2"))]);
     }
 }

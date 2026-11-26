@@ -961,12 +961,12 @@ impl GraphClient {
         Ok(id)
     }
 
-    /// Moves messages into the folder `to`.
+    /// Moves messages into the folder `to`, each paired with its new id.
     ///
-    /// The new id is only logged: the target's next listing lands the pending
-    /// create (pimdir SYNC §5, §6), as after an IMAP `MOVE`. A message gone
-    /// counts as moved, a 404 told from an unknown destination by a read.
-    pub fn move_messages(&mut self, to: &str, ids: &[&str]) -> Result<()> {
+    /// The new id lands the pending create at once (pimdir SYNC §5), even
+    /// one keyed by a minted key. A message gone counts as moved, with no
+    /// new id, a 404 told from an unknown destination by a read.
+    pub fn move_messages(&mut self, to: &str, ids: &[&str]) -> Result<Vec<(String, String)>> {
         if self.kind != GraphKind::Mail {
             bail!(
                 "Graph {} cannot move between folders here (move not supported)",
@@ -975,9 +975,13 @@ impl GraphClient {
         }
 
         let folder = self.folder_id(to)?;
+        let mut moved = Vec::with_capacity(ids.len());
         for id in ids {
             match self.op(|client| client.message_move(id, &folder)) {
-                Ok(moved) => debug!("moved message {id} to {to}, now {}", moved.id),
+                Ok(message) => {
+                    debug!("moved message {id} to {to}, now {}", message.id);
+                    moved.push((id.to_string(), message.id));
+                }
                 Err(err) if is_not_found(&err) && self.message_gone(id)? => {
                     debug!("message {id} gone from the server, its move counts as done");
                 }
@@ -986,7 +990,7 @@ impl GraphClient {
                 }
             }
         }
-        Ok(())
+        Ok(moved)
     }
 
     /// Whether Graph answers that message `id` is gone (404), read by its

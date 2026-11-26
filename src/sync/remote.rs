@@ -2754,3 +2754,68 @@ mod imap_hydrate_tests {
         assert_eq!(refusing.sent("UID FETCH").len(), 3);
     }
 }
+
+#[cfg(all(test, feature = "msgraph"))]
+mod graph_push_tests {
+    use std::sync::{Arc, atomic::AtomicU64};
+
+    use io_pimdir::client::PimdirStore;
+    use pimalaya_stream::tls::Tls;
+    use secrecy::SecretString;
+
+    use super::*;
+    use crate::{
+        account::{MsgraphAccount, SourceAccount, SourceAccountBackend},
+        msgraph::client::{GraphClient, GraphKind, SeriesClips, SizeHints},
+        scripted::Step,
+        throttle::Throttle,
+    };
+
+    /// A move keyed by a minted key is one Graph move stating its new id.
+    ///
+    /// Stating none, its create waited for a listing no minted key lands
+    /// on, and the next push uploaded it as MIME, refused outside Drafts.
+    #[test]
+    fn a_graph_move_states_the_handle_it_gave_its_member() {
+        let (client, server) = GraphClient::scripted(
+            vec![vec![Step::ok(serde_json::json!({ "id": "m1-moved" }))]],
+            &[("live", "id-live"), ("Deleted Items", "id-trash")],
+        );
+        let account = SourceAccount {
+            backend: SourceAccountBackend::Msgraph(MsgraphAccount {
+                kind: GraphKind::Mail,
+                token: SecretString::from(String::from("token")),
+                user_id: String::from("me"),
+                tls: Tls::default(),
+                sizes: SizeHints::default(),
+                clips: SeriesClips::default(),
+                proxy: pimalaya_stream::proxy::Proxy::None,
+            }),
+            #[cfg(feature = "smtp")]
+            smtp: None,
+            throttle: Arc::new(Throttle::new("msgraph")),
+            downloaded: Arc::new(AtomicU64::new(0)),
+        };
+        let mut pool = Pool::of(account, Client::Msgraph(Box::new(client)));
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = PimdirStore::open(dir.path()).unwrap().blob_stage();
+        let collection = PimdirCollectionId::from("msgraph-mail/live");
+        let change = PimdirChange::new(
+            &collection,
+            PimdirChangeKind::Remove {
+                handle: PimdirHandle("m1".into()),
+                to: Some(PimdirCollectionId::from("msgraph-mail/Deleted Items")),
+                link_id: None,
+                if_match: None,
+            },
+        );
+
+        let mut remote = PimRemote::new(&mut pool, blobs, "msgraph-mail");
+        let result = remote.push(&collection, vec![change]).unwrap().remove(0);
+
+        assert_eq!(result.outcome, PimdirPushOutcome::Accepted);
+        assert!(result.relocated);
+        assert_eq!(result.assigned, Some(PimdirHandle("m1-moved".into())));
+        assert_eq!(server.lines(), ["POST /v1.0/me/messages/m1/move"]);
+    }
+}

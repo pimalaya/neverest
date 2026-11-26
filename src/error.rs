@@ -16,7 +16,7 @@
 //! failing carries it as a [`Failure`].
 
 use anyhow::Error;
-use io_pimdir::client::PimdirError;
+use io_pimdir::{client::PimdirError, mutate::PimdirMutateError};
 use pimalaya_cli::error::{CodedError, code_of, with_code};
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -109,6 +109,12 @@ pub enum ErrorCode {
     /// A source of the store does not support the write: nothing was
     /// staged.
     Unsupported,
+    /// The store refused an empty source id, which no row names: nothing
+    /// was written.
+    SourceEmpty,
+    /// A copy or a move names a collection no source syncs, where no create
+    /// can be staged (pimdir SYNC §7): nothing was staged.
+    TargetUnsynced,
     /// The SQLite neverest was built with has no full-text search: a
     /// `vendored` build bundles one that has.
     IndexFts5Missing,
@@ -132,8 +138,8 @@ pub enum ErrorCode {
     BackendNotBuilt,
 }
 
-/// The store codes neverest relays, by io-pimdir's spelling, which
-/// serialises each.
+/// The store codes neverest relays, by io-pimdir's spelling
+/// (`PimdirError::code`, `PimdirMutateError::code`), which serialises each.
 const PIMDIR_CODES: &[(&str, ErrorCode)] = &[
     ("store-version", ErrorCode::StoreVersion),
     ("store-uncreated", ErrorCode::StoreUncreated),
@@ -151,6 +157,8 @@ const PIMDIR_CODES: &[(&str, ErrorCode)] = &[
     ("action-malformed", ErrorCode::ActionMalformed),
     ("flag-invalid", ErrorCode::FlagInvalid),
     ("unsupported", ErrorCode::Unsupported),
+    ("source-empty", ErrorCode::SourceEmpty),
+    ("target-unsynced", ErrorCode::TargetUnsynced),
     ("index-fts5-missing", ErrorCode::IndexFts5Missing),
     ("index-version", ErrorCode::IndexVersion),
 ];
@@ -159,7 +167,17 @@ impl ErrorCode {
     /// The code of a store failure, `None` for one the caller cannot act
     /// on (an SQL or I/O failure).
     pub fn of_pimdir(err: &PimdirError) -> Option<Self> {
-        let code = err.code();
+        Self::relayed(err.code())
+    }
+
+    /// The code of a local edit the store refused, `None` for one the
+    /// caller cannot act on.
+    pub fn of_mutate(err: &PimdirMutateError) -> Option<Self> {
+        Self::relayed(err.code())
+    }
+
+    /// The code neverest relays for io-pimdir's `code`.
+    fn relayed(code: &str) -> Option<Self> {
         PIMDIR_CODES
             .iter()
             .find(|(pimdir, _)| *pimdir == code)
@@ -177,6 +195,15 @@ pub fn layout_error(message: impl Into<String>) -> anyhow::Error {
 /// The message stays io-pimdir's: the caller adds its own context.
 pub fn pimdir_error(err: PimdirError) -> anyhow::Error {
     match ErrorCode::of_pimdir(&err) {
+        Some(code) => CodedError::new(code, err.to_string()).into(),
+        None => err.into(),
+    }
+}
+
+/// A local edit the store refused as an error carrying its code, when it
+/// has one.
+pub fn mutate_error(err: PimdirMutateError) -> anyhow::Error {
+    match ErrorCode::of_mutate(&err) {
         Some(code) => CodedError::new(code, err.to_string()).into(),
         None => err.into(),
     }
@@ -432,6 +459,23 @@ mod tests {
         assert_eq!(
             pimalaya_cli::error::code_of::<ErrorCode>(&err),
             Some(ErrorCode::LockReplaced)
+        );
+    }
+
+    /// A copy or a move into a collection no source syncs carries
+    /// io-pimdir's code, and so does an empty source id.
+    #[test]
+    fn an_unsynced_target_and_an_empty_source_carry_their_codes() {
+        let unsynced = mutate_error(PimdirMutateError::Unsynced("work/Archive".into()));
+        let empty = pimdir_error(PimdirError::SourceEmpty);
+
+        assert_eq!(
+            pimalaya_cli::error::code_of::<ErrorCode>(&unsynced),
+            Some(ErrorCode::TargetUnsynced)
+        );
+        assert_eq!(
+            pimalaya_cli::error::code_of::<ErrorCode>(&empty),
+            Some(ErrorCode::SourceEmpty)
         );
     }
 }

@@ -98,7 +98,7 @@ use crate::{
         source::{SourceBackendConfig, SourceConfig},
     },
     conflict::merge::Merged,
-    error::{ErrorCode, Failure, layout_error, pimdir_error},
+    error::{ErrorCode, Failure, layout_error, mutate_error, pimdir_error},
     flag::Flag,
     kind::{Kind, LinkId},
     sync::{

@@ -502,7 +502,11 @@ pub(super) fn keep_store_bodies<R: PimdirRemote<Error = anyhow::Error>>(
                 let context = format!("Keep the store's body of {name} in {collection}");
                 return Err(pimdir_error(err).context(context));
             }
-            Err(err) => bail!("Keep the store's body of {name} in {collection}: {err}"),
+            Err(PimdirRunError::Coroutine(err)) => {
+                let context = format!("Keep the store's body of {name} in {collection}");
+                return Err(mutate_error(err).context(context));
+            }
+            Err(PimdirRunError::Remote(never)) => match never {},
         };
 
         note_overruled(overruled, collection, mutated.events);
